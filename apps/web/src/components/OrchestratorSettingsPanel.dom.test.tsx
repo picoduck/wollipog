@@ -464,7 +464,7 @@ test("Child Harness precedes and scopes model and effort while clearing incompat
     assert.ok(titles.indexOf("Child Harness") < titles.indexOf("Child Model"));
     assert.ok(titles.indexOf("Child Model") < titles.indexOf("Child Effort"));
 
-    await choose(container, "Child Harness", /Pi · Pi · Native/);
+    await choose(container, "Child Harness", /Pi · Native/);
     assert.match(container.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
     assert.match(container.querySelector('[aria-label^="Child Effort:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
 
@@ -480,6 +480,75 @@ test("Child Harness precedes and scopes model and effort while clearing incompat
     assert.equal(writes[0]?.defaults.behavior.childHarness?.driver, "pi");
     assert.equal(writes[0]?.defaults.behavior.childModel, null);
     assert.equal(writes[0]?.defaults.behavior.childEffort, null);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("each Child Harness option names the harness once and says how many machines provide it (#3247)", async () => {
+  const current = settings();
+  current.capabilities.harnesses![0]!.machines = 2;
+  current.capabilities.harnesses![0]!.installations = 2;
+  const { transport } = server(current);
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]')!;
+    await act(async () => trigger.click());
+    const options = [...container.querySelectorAll('[role="option"]')].map((node) => node.textContent ?? "");
+    assert.equal(options.filter((text) => text.startsWith("Codex App Server")).length, 1);
+    assert.ok(options.some((text) => /^Codex App Server · Native.*Available on 2 connected machines\./.test(text)), options.join(" | "));
+    assert.ok(options.some((text) => /^Pi · Native.*Available on 1 connected machine\./.test(text)), options.join(" | "));
+    await act(async () => trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never));
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("the saved combination names the machines that can't run it, and a model that differs between machines offers a pinned one (#3248)", async () => {
+  const current = settings();
+  current.defaults.behavior.childModel = "sol";
+  current.capabilities.machineSupport = { supported: 1, total: 2, unsupportedMachines: ["Desktop"] };
+  current.capabilities.childModelDrift = {
+    modelId: "sol",
+    machines: [{ machineName: "Desktop", displayName: "Sol" }, { machineName: "Laptop", displayName: "Sol 2" }],
+    pinned: [{ modelId: "sol-1", displayName: "Sol" }, { modelId: "sol-2", displayName: "Sol 2" }],
+  };
+  // The pinned id is a real choice on these machines.
+  for (const catalog of [current.capabilities, ...current.capabilities.harnesses!]) {
+    catalog.models = [...catalog.models, { id: "sol-1", displayName: "Sol", efforts: ["high"] }];
+    catalog.supportedPairs = [...catalog.supportedPairs!, { modelId: "sol-1", effortLevels: ["high"] }];
+  }
+  const { transport, writes } = server(current);
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    const notices = [...container.querySelectorAll(".notice")].map((node) => node.textContent ?? "");
+    const support = notices.find((text) => text.includes("Not Every Machine Can Run These Children"));
+    assert.ok(support, notices.join(" | "));
+    assert.match(support, /1 of 2 connected machines support the saved Child Harness, Child Model and Child Effort together\. Children can't start on Desktop\./);
+    const drift = notices.find((text) => text.includes("Child Model Differs Between Machines"));
+    assert.ok(drift, notices.join(" | "));
+    assert.match(drift, /“sol” is Sol on Desktop and Sol 2 on Laptop\. Choose a specific model so every child runs the same one\./);
+    assert.doesNotMatch(`${support} ${drift}`, /runner|installation|advertises/i);
+
+    await act(async () => button(container, "Use Sol")!.click());
+    assert.equal(button(container, "Use Sol"), undefined, "the warning describes the saved model, so it leaves with the change");
+    await act(async () => button(container.querySelector(".save-bar")!, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes[0]?.defaults.behavior.childModel, "sol-1", "the action saves the pinned id");
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("with every machine supporting the saved combination and one resolution, neither notice shows (#3248)", async () => {
+  const current = settings();
+  current.defaults.behavior.childModel = "sol";
+  current.capabilities.machineSupport = { supported: 2, total: 2, unsupportedMachines: [] };
+  const view = await mount(panel(server(current).transport));
+  try {
+    assert.doesNotMatch(view.container.textContent ?? "", /Not Every Machine Can Run These Children|Child Model Differs Between Machines/);
   } finally {
     await view.cleanup();
   }
@@ -714,7 +783,7 @@ test("a leave waiting on a save is dropped if the editor goes away first", async
         container.querySelector('nav.settings-nav a[href="/settings/appearance"]')!
           .dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as never);
       });
-      // Browser Back is not held, so it can take the editor away while the save is in flight.
+      // A Back that cannot be held (history-position.ts) can take the editor away mid-save.
       await view.cleanup();
       unmounted = true;
       await act(async () => release());
@@ -728,7 +797,7 @@ test("a leave waiting on a save is dropped if the editor goes away first", async
   }
 });
 
-test("a Discard Changes prompt answered after browser Back took the editor away does not navigate", async () => {
+test("a Discard Changes prompt answered after an unheld browser Back took the editor away does not navigate", async () => {
   let setView: (view: View) => void = () => undefined;
   const store = new Store({ name: "settings", section: "orchestrator" }, (view) => setView(view));
   const { transport } = server(settings());
@@ -745,8 +814,8 @@ test("a Discard Changes prompt answered after browser Back took the editor away 
     const dialog = document.querySelector('[role="dialog"]');
     assert.ok(dialog, "the prompt is open");
 
-    // Browser Back to Behavior: the store follows history and the shell shows that section, which
-    // unmounts the editor while the app-level prompt stays open.
+    // A Back to Behavior that cannot be held (no traversal): the store follows history and the shell
+    // shows that section, which unmounts the editor while the app-level prompt stays open.
     const behavior: View = { name: "settings", section: "behavior" };
     await act(async () => { store.navigateFromHistory(behavior); setView(behavior); });
     await settle();

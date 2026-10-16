@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { runContextCommand, type ContextCommandResult } from "./context-command.js";
+import { claudeTaskStopReceipts } from "./claude-task-stop-receipts.js";
 
 export interface ClaudeTaskArtifact {
   id: string;
@@ -21,6 +22,8 @@ export interface ClaudeBackgroundWorkInspection {
   incompleteArtifacts: ClaudeTaskArtifact[];
   terminalTaskIds: Set<string>;
   terminalTaskStatuses?: Map<string, "completed" | "failed" | "killed">;
+  /** The model already received these exact stop results; never submit another continuation. */
+  modelStoppedTaskIds?: Set<string>;
 }
 
 const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
@@ -74,18 +77,20 @@ export function inspectClaudeBackgroundWork(
     // inference. The lifecycle policy's fixed tie-break is therefore to keep/recover it.
   }
 
+  const stops = transcript == null ? new Map<string, number>() : claudeTaskStopReceipts(transcript);
   const incompleteArtifacts = files
     .map((name) => ({ id: name.slice(0, -".output".length), outputFile: join(tasksDir, name) }))
-    .filter(({ id }) => transcript == null || !providerTranscriptProvesTaskTerminal(transcript, id));
+    .filter(({ id }) => transcript == null || !providerTranscriptTaskTerminalStatus(transcript, id, stops));
   const terminalTaskIds = new Set<string>();
   const terminalTaskStatuses = new Map<string, "completed" | "failed" | "killed">();
   if (transcript != null) {
     for (const id of knownIds) {
-      const status = providerTranscriptTaskTerminalStatus(transcript, id);
+      const status = providerTranscriptTaskTerminalStatus(transcript, id, stops);
       if (status) { terminalTaskIds.add(id); terminalTaskStatuses.set(id, status); }
     }
   }
-  return { incompleteArtifacts, terminalTaskIds, terminalTaskStatuses };
+  return { incompleteArtifacts, terminalTaskIds, terminalTaskStatuses,
+    modelStoppedTaskIds: new Set([...terminalTaskIds].filter((id) => stops.has(id))) };
 }
 
 type ContextCommandRunner = (
@@ -169,18 +174,20 @@ export async function inspectClaudeBackgroundWorkInContext(
   const key = claudeProjectPathKey(cwd);
   const tempRoot = (env.TMPDIR || "/tmp").replace(/\/+$/, "") || "/";
   const tasksDir = `${tempRoot === "/" ? "" : tempRoot}/claude/${key}/${sessionId}/tasks`;
+  const stops = transcript == null ? new Map<string, number>() : claudeTaskStopReceipts(transcript);
   const incompleteArtifacts = names
     .map((name) => ({ id: name.slice(0, -".output".length), outputFile: `${tasksDir}/${name}` }))
-    .filter(({ id }) => transcript == null || !providerTranscriptProvesTaskTerminal(transcript, id));
+    .filter(({ id }) => transcript == null || !providerTranscriptTaskTerminalStatus(transcript, id, stops));
   const terminalTaskIds = new Set<string>();
   const terminalTaskStatuses = new Map<string, "completed" | "failed" | "killed">();
   if (transcript != null) {
     for (const id of knownIds) {
-      const status = providerTranscriptTaskTerminalStatus(transcript, id);
+      const status = providerTranscriptTaskTerminalStatus(transcript, id, stops);
       if (status) { terminalTaskIds.add(id); terminalTaskStatuses.set(id, status); }
     }
   }
-  return { incompleteArtifacts, terminalTaskIds, terminalTaskStatuses };
+  return { incompleteArtifacts, terminalTaskIds, terminalTaskStatuses,
+    modelStoppedTaskIds: new Set([...terminalTaskIds].filter((id) => stops.has(id))) };
 }
 
 /** Read only the provider ledger when reconciling an already-known task. Output text is never
@@ -209,16 +216,17 @@ function providerTranscriptProvesTaskTerminal(transcript: string, taskId: string
 
 function providerTranscriptTaskTerminalStatus(
   transcript: string, taskId: string,
+  stops = claudeTaskStopReceipts(transcript),
 ): "completed" | "failed" | "killed" | undefined {
-  let latestTerminal = -1;
-  let status: "completed" | "failed" | "killed" | undefined;
+  let latestTerminal = stops.get(taskId) ?? -1;
+  let status: "completed" | "failed" | "killed" | undefined = latestTerminal < 0 ? undefined : "killed";
   const marker = `<task-id>${taskId}</task-id>`;
   for (let cursor = transcript.indexOf(marker); cursor >= 0; cursor = transcript.indexOf(marker, cursor + marker.length)) {
     const end = transcript.indexOf("</task-notification>", cursor);
     if (end < 0) break;
     const notification = transcript.slice(cursor, end);
     const match = /<status>(completed|failed|killed)<\/status>/i.exec(notification);
-    if (match) {
+    if (match && cursor > latestTerminal) {
       latestTerminal = cursor;
       status = match[1]!.toLowerCase() as typeof status;
     }

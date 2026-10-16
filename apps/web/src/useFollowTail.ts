@@ -94,6 +94,8 @@ export interface FollowTailApi {
    * it lifts or is cancelled. A drag the floating tail control hands over (#2425) arrives only as
    * these. */
   onTouchPointerDown: (event: Pick<PointerEvent, "pointerId">) => void;
+  /** A held touch claimed earlier history even though the viewport could not scroll. */
+  onTouchHistoryGesture: () => void;
   /** Returns true when the caller should consume the key event. */
   onKeyDown: (event: FollowTailKey) => boolean;
 }
@@ -241,9 +243,9 @@ export function useFollowTail({
   const layoutScrollPredictionRef = useRef<number | null>(null);
   /** Each held finger, keyed by its touch or pointer identity, with the listeners awaiting its end. */
   const heldTouchesRef = useRef(new Map<string, () => void>());
-  /** The press the held fingers belong to: whether it began while following, and whether anything
-   * in the reader (the reader itself or a nested scroller such as a tool output) has scrolled since. */
-  const pressRef = useRef<{ startedFollowing: boolean; scrolled: boolean } | null>(null);
+  /** The press the held fingers belong to: whether it began following and expressed reading intent,
+   * through native/nested scrolling or an earlier-history gesture with no scroll range (#3188). */
+  const pressRef = useRef<{ startedFollowing: boolean; reading: boolean } | null>(null);
   const programmaticScrollRef = useRef<{
     direction: "next" | "previous";
     settleTimer: number | null;
@@ -491,8 +493,8 @@ export function useFollowTail({
     heldTouchesRef.current.delete(key);
     detach();
   }, []);
-  /** A held finger lifted. A press that began while following and scrolled nothing before its last
-   * finger lifted was a tap, not reading: following resumes, so tapping a control in the transcript
+  /** A held finger lifted. A press that began while following and expressed no reading intent before
+   * its last finger lifted was a tap, not reading: following resumes, so tapping a control in the transcript
    * never leaves the reader paused at the latest message (#2526). A pan, including one inside a
    * nested scroller that leaves the reader itself at the tail, keeps the pause it began with. */
   const endTouch = useCallback((key: string) => {
@@ -502,7 +504,7 @@ export function useFollowTail({
     const press = pressRef.current;
     pressRef.current = null;
     const element = scrollRef.current;
-    if (press?.startedFollowing && !press.scrolled && element && stateRef.current === "paused" &&
+    if (press?.startedFollowing && !press.reading && element && stateRef.current === "paused" &&
         programmaticScrollRef.current == null && isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
       transition("resume");
     }
@@ -510,7 +512,7 @@ export function useFollowTail({
   /** The first finger of a press records whether the reader was following before the press paused it. */
   const beginPress = useCallback(() => {
     if (heldTouchesRef.current.size > 0 && pressRef.current) return;
-    pressRef.current = { startedFollowing: stateRef.current === "following", scrolled: false };
+    pressRef.current = { startedFollowing: stateRef.current === "following", reading: false };
   }, []);
   /** Holds one finger until `target` hears the end that `ends` recognises as that finger's own. */
   const holdTouch = useCallback((
@@ -553,13 +555,19 @@ export function useFollowTail({
       (end as PointerEvent).pointerId === pointerId);
   }, [beginPress, holdTouch, pause]);
 
+  const onTouchHistoryGesture = useCallback(() => {
+    if (!pressRef.current) return;
+    pressRef.current.reading = true;
+    pause();
+  }, [pause]);
+
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
     const previousScrollTop = viewportGeometryRef.current?.scrollTop;
     observeViewportGeometry(element);
     const layoutOwned = consumeLayoutScrollPrediction(element);
-    if (!layoutOwned && pressRef.current) pressRef.current.scrolled = true;
+    if (!layoutOwned && pressRef.current) pressRef.current.reading = true;
     const ownership = programmaticScrollRef.current;
     if (ownership) {
       const atBottom = isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX);
@@ -704,7 +712,7 @@ export function useFollowTail({
     // A nested scroller's own scroll never reaches the reader's onScroll, but it is still the reader
     // reading under a held finger: such a press is not a tap.
     const onNestedScroll = (event: Event) => {
-      if (event.target !== element && pressRef.current) pressRef.current.scrolled = true;
+      if (event.target !== element && pressRef.current) pressRef.current.reading = true;
     };
     element.addEventListener("scroll", onNestedScroll, true);
     scheduleFollow({ converge: true });
@@ -771,6 +779,7 @@ export function useFollowTail({
     onPointerMove,
     onTouchStart,
     onTouchPointerDown,
+    onTouchHistoryGesture,
     onKeyDown,
   };
 }

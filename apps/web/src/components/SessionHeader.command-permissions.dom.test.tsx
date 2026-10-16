@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionCommandPermissions, SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type SessionCommandPermissions, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
@@ -58,6 +58,7 @@ async function renderHeader(
   calls: string[],
   unarchiveAndRestartSupported = false,
   extra: Partial<React.ComponentProps<typeof SessionHeader>> = {},
+  confirmResult = true,
 ) {
   const client = {
     ...api,
@@ -70,11 +71,12 @@ async function renderHeader(
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
+  const confirmations: string[] = [];
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
         <FeedbackContext.Provider value={{
-          confirm: async () => { calls.push("confirm"); return true; },
+          confirm: async (options) => { confirmations.push(String(options.message)); calls.push("confirm"); return confirmResult; },
           showToast: () => 1,
           showUndo: () => 1,
           dismissToast: () => undefined,
@@ -99,6 +101,7 @@ async function renderHeader(
   await act(async () => { moreActions.click(); await tick(); });
   return {
     container,
+    confirmations,
     unmount: async () => { await act(async () => root.unmount()); container.remove(); },
   };
 }
@@ -360,6 +363,37 @@ test("a running turn keeps Fork Conversation… disabled with its reason; a sess
   } finally {
     await noWorktree.unmount();
   }
+});
+
+test("historical idle-result recovery offers a confirmed restart and preserves command permissions", async () => {
+  const session = { id: "historical", runnerId: "runner-1", title: "Historical", status: "idle",
+    driver: "claude-code", backgroundDeliveries: [{ parentTurnId: "unknown", jobCount: 2,
+      terminalCount: 1, watchdogState: "continuation_blocked" }] } as SessionView;
+  const cases = [session, ...["unknown", "known-parent"].map((parentTurnId) => ({
+    ...session, backgroundDeliveries: [{ parentTurnId, jobCount: 2, terminalCount: 2,
+      watchdogState: "terminal_without_continuation" as const }],
+  }))];
+  for (const recovered of cases) for (const accepted of [false, true]) for (const protocol of [190, PROTOCOL_VERSION]) {
+    const calls: string[] = [];
+    const header = await renderHeader(recovered, calls, false, { runnerProtocolVersion: protocol }, accepted);
+    try {
+      await act(async () => { menuItem(page(), "Restart Session").click(); await tick(); });
+      assert.deepEqual(calls, accepted ? ["confirm", "restart:historical"] : ["confirm"]);
+      assert.match(header.confirmations[0]!, /ends every background job/);
+      assert.match(header.confirmations[0]!, /The original job commands are not rerun/);
+      assert.match(header.confirmations[0]!, protocol === 190
+        ? /held results are discarded/ : /finished results are reported to the new conversation/);
+      assert.doesNotMatch(header.confirmations[0]!, protocol === 190
+        ? /finished results are reported/ : /held results are discarded/);
+    } finally { await header.unmount(); }
+  }
+  const calls: string[] = [];
+  const header = await renderHeader({ ...session, commandPermissions: readOnly }, calls);
+  try {
+    assert.equal(menuItem(page(), "Restart Session").disabled, true);
+    assert.match(description(menuItem(page(), "Restart Session")), /Viewer role is read-only/);
+    assert.deepEqual(calls, []);
+  } finally { await header.unmount(); }
 });
 
 test("Restart Session restarts with or without the page's callbacks, telling them in order (#2169)", async () => {

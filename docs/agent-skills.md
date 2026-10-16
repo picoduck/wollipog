@@ -948,8 +948,13 @@ Git backs the library as an **upstream source**, not as the distribution transpo
   cloud targets says in one sentence on its Deployment row that its skills don't reach them. Mounting the skills root into containers is a deliberate later
   decision.
 - **Provider-home concurrency.** Content is verified and materialized in the runner-local store
-  before the reconciler requests the process-lifetime `ProviderHomeLeaseRegistry` lease. Every
+  before the reconciler requests a `ProviderHomeLeaseRegistry` reference. Every
   canonical or harness link mutation, including removal, happens only after that lease is held.
+  Each reconcile pass, adoption and recovery restore holds its own references and releases exactly
+  those when its filesystem work finishes, so an idle runner does not keep its HOMEs leased against
+  other runners. Sessions and probes keep their own references. An adoption or restore that ends in
+  `recovery_required`, or throws, keeps its references until runner shutdown because its journaled
+  mutation is unfinished.
   Diagnostic scans never follow symlink targets; foreign symlinks are always reported by entry
   name only.
   During contention the runner mutates no shared-HOME path: it reports desired managed links as

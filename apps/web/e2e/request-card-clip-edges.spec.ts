@@ -68,7 +68,7 @@ for (const { kind, url } of KINDS) {
 }
 
 test("a question card scrolling whole draws its edge lines across the card too (#2698)", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 640 });
+  await page.setViewportSize({ width: 932, height: 500 });
   const { card } = await dockedBody(page, "/agent-questions-e2e.html?set=paragraph&more=1");
   await expect(card).toHaveAttribute("data-card-scrolls", "");
   await card.evaluate((element) => { element.scrollTop = 60; });

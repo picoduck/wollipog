@@ -26,7 +26,8 @@ import { absoluteViewUrl, backLabel } from "../navigation.js";
 import { reminderMenuActionLabel } from "../session-reminders.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
 import { DEVELOPMENT_BUILD } from "../config.js";
-import { shortcutDisplay } from "../shortcuts.js";
+import { outstandingSessionResult } from "../session-follow-up.js";
+import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
 import { backgroundWorkAccessibleName } from "./common.js";
 import {
@@ -36,7 +37,7 @@ import {
 import { MenuItem, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { TranscriptShareDialog } from "./TranscriptShareDialog.js";
-import { SessionRoleDialog } from "./SessionRoleDialog.js";
+import { SESSION_ROLE_UPDATE_REQUIRED, SessionRoleDialog } from "./SessionRoleDialog.js";
 import { ChevronLeftIcon, DownloadIcon, LinkIcon, MoreVerticalIcon, RefreshIcon, ShareIcon } from "./Icons.js";
 import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
@@ -49,6 +50,7 @@ import { writeClipboardText } from "../clipboard.js";
 import { sessionStatusSummary } from "../status-meta.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
 import { useBackgroundDeliveryStep } from "./useBackgroundDeliveryStep.js";
+import { historicalBackgroundResultRecovery } from "../background-delivery-status.js";
 
 /** The second line of an item that waits on another session action already running. */
 const BUSY_REASON = "Available when the current action finishes.";
@@ -79,6 +81,7 @@ export function SessionHeader({
   exportReady,
   onArchive,
   onSnooze,
+  onMarkReviewed,
   reminder,
   onDismissReminder,
   forkAvailability,
@@ -129,6 +132,8 @@ export function SessionHeader({
   exportReady: boolean;
   onArchive?: () => void;
   onSnooze?: () => void;
+  /** Acknowledge the exact result captured when More Actions opened. */
+  onMarkReviewed?: (revision: string) => void;
   reminder?: SessionReminderView;
   onDismissReminder?: () => void;
   forkAvailability?: ConversationForkAvailability;
@@ -176,6 +181,7 @@ export function SessionHeader({
   const { confirm, showToast, showUndo } = useFeedback();
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuResultRevision, setMenuResultRevision] = useState<string | null>(null);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [statusPopoverOpen, setStatusPopoverOpen] = useState(false);
   const [moveProjectOpen, setMoveProjectOpen] = useState(false);
@@ -201,7 +207,8 @@ export function SessionHeader({
   );
   const terminal = isTerminal(session.status);
   const showRetryStop = session.stopOperation?.status === "stop_failed" && !session.archiveStatus;
-  const showRestart = terminal && runnerOnline && session.stopOperation?.status !== "stop_failed" &&
+  const historicalResultRecovery = historicalBackgroundResultRecovery(session);
+  const showRestart = (terminal || historicalResultRecovery) && runnerOnline && session.stopOperation?.status !== "stop_failed" &&
     !sessionUnarchiveRestarts(session, unarchiveAndRestartSupported);
   // A command the server would refuse this person stays listed but disabled, with the reason (#1843).
   const stopRefusal = sessionCommandRefusal(session, "stop");
@@ -404,8 +411,21 @@ export function SessionHeader({
         >
           Rename…
         </MenuItem>,
+        onMarkReviewed && menuResultRevision && outstandingSessionResult(session) && (
+          <MenuItem
+            key="mark-reviewed"
+            trail={forkShortcutRef && !coarsePointer ? <kbd>{shortcutDisplay("session-reading-mark-reviewed")}</kbd> : undefined}
+            aria-keyshortcuts={forkShortcutRef && !coarsePointer ? shortcutAriaKeys("session-reading-mark-reviewed") : undefined}
+            onClick={() => {
+              closeMenu(true);
+              onMarkReviewed(menuResultRevision);
+            }}
+          >
+            Mark Reviewed
+          </MenuItem>
+        ),
         <MenuItem key="role" disabled={!sessionRoleConversionSupported}
-          description={!sessionRoleConversionSupported ? "Update the control plane before changing an existing session's role." : undefined}
+          description={!sessionRoleConversionSupported ? SESSION_ROLE_UPDATE_REQUIRED : undefined}
           onClick={() => { closeMenu(false); setRoleOpen(true); }}>
           Change Session Role…
         </MenuItem>,
@@ -571,6 +591,16 @@ export function SessionHeader({
               if (restartReason !== null) return;
               closeMenu(true);
               void run(async () => {
+                if (historicalResultRecovery && !await confirm({
+                  title: "Restart Session",
+                  message: "This starts a new conversation and ends every background job; " +
+                    (runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork")
+                      ? "finished results are reported to the new conversation."
+                      : "held results are discarded.") +
+                    " The original job commands are not rerun; review the conversation before continuing.",
+                  confirmLabel: "Restart Session",
+                  tone: "danger",
+                })) return;
                 onRestartPendingChange?.(true);
                 try {
                   const restarted = await api.restart(session.id);
@@ -820,6 +850,7 @@ export function SessionHeader({
                   closeShareMenu(false);
                   closeStatusPopover(false);
                   setProjectInMenu(projectFolded());
+                  setMenuResultRevision(outstandingSessionResult(session)?.revision ?? null);
                 }
                 menu.toggle();
               }}
@@ -828,7 +859,10 @@ export function SessionHeader({
                   closeShareMenu(false);
                   closeStatusPopover(false);
                 }
-                if (!menuOpen) setProjectInMenu(projectFolded());
+                if (!menuOpen) {
+                  setProjectInMenu(projectFolded());
+                  setMenuResultRevision(outstandingSessionResult(session)?.revision ?? null);
+                }
                 menu.onTriggerKeyDown(event);
               }}
               disabled={busy}

@@ -52,6 +52,7 @@ import {
   BACKGROUND_JOB_STALL_MS,
   BACKGROUND_HANDOFF_WAIT_MAX_MS,
   normalizeAgentHarnessIdentity,
+  canonicalAgentHarnessIdentity,
   agentContextKey,
   runnerSupportsProtocol,
   scopeAudienceContained,
@@ -1454,6 +1455,8 @@ CREATE TABLE IF NOT EXISTS session_events (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_session_events_user_message ON session_events(session_id, seq)
+  WHERE kind='user_message';
 CREATE INDEX IF NOT EXISTS idx_session_events_turn_start ON session_events(session_id, seq)
   WHERE kind='user_message' AND COALESCE(json_extract(payload, '$.deliveryIntent'), '')!='steer'
     AND json_type(payload, '$.commandInvocation') IS NULL;
@@ -1475,6 +1478,38 @@ CREATE INDEX IF NOT EXISTS idx_session_events_tool_update_id
 CREATE INDEX IF NOT EXISTS idx_session_events_parent_tool_use_id
   ON session_events(session_id, json_extract(payload,'$.parentToolUseId'), seq)
   WHERE json_type(payload,'$.parentToolUseId')='text';
+-- Transcript search rows whose row id is not their event's (#2777): rows indexed before keyed
+-- search rows, by an older build, or after a row id collision. Retention deletes through it.
+-- Distinct tool calls whose events archived-history retention removed (#2777). A campaign allowance
+-- granted later records them as its own, so a replayed history never counts them twice and a lost
+-- one never drops them. A replacement history brings them back, so it clears them.
+CREATE TABLE IF NOT EXISTS session_pruned_tool_calls (
+  session_id   TEXT NOT NULL,
+  tool_call_id TEXT NOT NULL,
+  PRIMARY KEY (session_id, tool_call_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS session_events_fts_legacy_rowids (
+  event_id  INTEGER PRIMARY KEY REFERENCES session_events(id) ON DELETE CASCADE,
+  fts_rowid INTEGER NOT NULL
+);
+
+-- Archived-history retention (#2777). A NULL threshold is a saved "off", which overrides the
+-- environment default. Pruning waits until prunes_from after the policy is turned on or shortened.
+CREATE TABLE IF NOT EXISTS archived_history_retention_policy (
+  organization_id TEXT PRIMARY KEY,
+  retention_days  INTEGER CHECK (retention_days IS NULL OR retention_days BETWEEN 7 AND 3650),
+  prunes_from     INTEGER,
+  updated_at      INTEGER NOT NULL,
+  updated_by      TEXT
+);
+CREATE TABLE IF NOT EXISTS archived_history_retention_runs (
+  organization_id TEXT PRIMARY KEY,
+  finished_at     INTEGER NOT NULL,
+  sessions        INTEGER NOT NULL,
+  events          INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS review_findings (
   finding_id  TEXT PRIMARY KEY,
@@ -2844,6 +2879,65 @@ export function searchTextForEvent(payload: SessionEventPayload): string | null 
   }
 }
 
+function isSqliteConstraintError(error: unknown): boolean {
+  const code = (error as { errcode?: unknown } | null)?.errcode;
+  return typeof code === "number" && (code & 0xff) === 19;
+}
+
+type PrepareStatement = (sql: string) => ReturnType<DatabaseSync["prepare"]>;
+
+/** Index one event under its own row id, so retention can delete it by key: the search table's
+ * session_id is UNINDEXED, and deleting by it scans the whole index (#2777). A row id an older build
+ * already assigned falls back to a fresh one, recorded where retention looks first. */
+function insertSearchRow(prepare: PrepareStatement, eventId: number, text: string, sessionId: string, seq: number): void {
+  try {
+    prepare("INSERT INTO session_events_fts(rowid, text, session_id, seq) VALUES (?, ?, ?, ?)")
+      .run(eventId, text, sessionId, seq);
+  } catch (error) {
+    if (!isSqliteConstraintError(error)) throw error;
+    const inserted = prepare("INSERT INTO session_events_fts(text, session_id, seq) VALUES (?, ?, ?)")
+      .run(text, sessionId, seq);
+    prepare("INSERT OR REPLACE INTO session_events_fts_legacy_rowids (event_id, fts_rowid) VALUES (?, ?)")
+      .run(eventId, Number(inserted.lastInsertRowid));
+  }
+}
+
+const LEGACY_SEARCH_SCAN_KEY = "session_events_fts_legacy_scan";
+
+/** Search rows indexed before keyed rows (or by an older build since) carry arbitrary row ids.
+ * Record the row id range retention must map before it prunes, and keep new event ids above every
+ * existing search row id so a keyed insert never collides with one. An older build numbers its rows
+ * from the highest row id left, which a prune or a session deletion may have lowered below a scan
+ * already done, so its rows can sit anywhere: the scan starts again from the first row. Mapping is
+ * idempotent, so rows it already covered are only read again. */
+function prepareKeyedSearchRows(db: DatabaseSync): void {
+  const state = db.prepare("SELECT last_rowid, keyed_through FROM fts_state WHERE id=1").get() as
+    { last_rowid: number; keyed_through: number | null };
+  const top = (db.prepare("SELECT rowid FROM session_events_fts ORDER BY rowid DESC LIMIT 1").get() as
+    { rowid: number } | undefined)?.rowid ?? 0;
+  if (state.keyed_through === null || state.last_rowid > state.keyed_through) {
+    db.prepare("INSERT OR REPLACE INTO control_plane_metadata (key, value) VALUES (?, ?)")
+      .run(LEGACY_SEARCH_SCAN_KEY, JSON.stringify({ cursor: 0, end: top }));
+    db.prepare("UPDATE fts_state SET keyed_through=last_rowid WHERE id=1").run();
+  }
+  const sequence = db.prepare("SELECT seq FROM sqlite_sequence WHERE name='session_events'").get() as
+    { seq: number } | undefined;
+  if (top > (sequence?.seq ?? 0)) {
+    if (sequence) db.prepare("UPDATE sqlite_sequence SET seq=? WHERE name='session_events'").run(top);
+    else db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('session_events', ?)").run(top);
+  }
+}
+
+function readLegacySearchScan(prepare: PrepareStatement): { cursor: number; end: number } | null {
+  const row = prepare("SELECT value FROM control_plane_metadata WHERE key=?").get(LEGACY_SEARCH_SCAN_KEY) as
+    { value: string } | undefined;
+  if (!row) return null;
+  const parsed = JSON.parse(row.value) as { cursor?: unknown; end?: unknown };
+  return Number.isSafeInteger(parsed.cursor) && Number.isSafeInteger(parsed.end)
+    ? { cursor: parsed.cursor as number, end: parsed.end as number }
+    : null;
+}
+
 interface RunnerRow {
   runner_id: string;
   hostname: string;
@@ -2912,6 +3006,10 @@ interface SessionRow {
   execution_handoff_request: string | null;
   execution_handoff: string | null;
   archived: number;
+  archived_at?: number | null;
+  history_pruned_at?: number | null;
+  history_pruned_retention_days?: number | null;
+  history_pruned_events?: number;
   preview: string | null;
   pending_approval: string | null;
   creation_actor: "human" | "agent" | "system" | null;
@@ -4654,9 +4752,36 @@ type ConfirmedSessionNamingHarnessTargetWrite = SessionNamingHarnessTargetWrite 
 // subtracts a deleted child's last charge, so deleting history cannot replenish an allowance, and a
 // restart re-reserves the child's unspent limits.
 const TERMINAL_STATUS_SQL = "('completed','failed','stopped')";
-// A session's distinct tool calls, read from the counter that TOOL_CALL_COUNT_TRIGGERS_SQL keeps.
+
+/** Rows one prune batch tests against HISTORY_PRUNE_KEEP_SQL at most: about 1 ms of JSON reads. */
+const HISTORY_PRUNE_SCAN_ROWS = 1024;
+
+/** Rows a prune keeps (#2777), never NULL: a row it cannot classify is pruned, not silently kept by a
+ * NULL comparison under NOT. Prompts, turn completions and final-flagged reports are exactly the
+ * rows campaign report proofs and assignment checks read; token_usage rows are cost-correction
+ * evidence; control-plane attachment rows cannot be rebuilt from a runner. The session's final
+ * response is every part of its last top-level agent message, bound as its provider message id
+ * (twice), or else as the seq range of its untagged run (historyPruneFinalResponse). */
+const HISTORY_PRUNE_KEEP_SQL = `COALESCE(e.kind IN ('user_message','agent_response_completed','token_usage','artifact_attached')
+  OR (e.kind='agent_message' AND json_type(e.payload, '$.parentToolUseId') IS NULL AND (
+    (json_extract(e.payload, '$.final')=1 AND trim(json_extract(e.payload, '$.text'))!='')
+    OR (? IS NOT NULL AND json_extract(e.payload, '$.messageId') IS ?)
+    OR (e.seq>? AND e.seq<=? AND json_type(e.payload, '$.messageId') IS NULL))), 0)`;
+
+/** Archived, settled sessions of one organization archived at or before a cutoff (bound in that
+ * order) that hold rows no completed prune has covered. */
+const ARCHIVED_HISTORY_PRUNE_CANDIDATES_SQL = `FROM sessions s
+  JOIN session_ownership ownership ON ownership.session_id=s.id
+  WHERE ownership.organization_id=? AND s.archived=1 AND s.archived_at IS NOT NULL AND s.archived_at<=?
+    AND s.status IN ${TERMINAL_STATUS_SQL}
+    AND NOT EXISTS (SELECT 1 FROM session_stop_intents intent WHERE intent.session_id=s.id)
+    AND (s.history_prune_run_events IS NOT NULL OR s.history_prune_through_seq IS NULL
+      OR EXISTS (SELECT 1 FROM session_events e WHERE e.session_id=s.id AND e.seq>s.history_prune_through_seq))`;
+// A session's distinct tool calls, read from the counter that TOOL_CALL_COUNT_TRIGGERS_SQL keeps,
+// plus those whose events retention pruned (#2777). The counter itself always matches the events.
 const toolCallCountSql = (sessionId: string) =>
-  `(COALESCE((SELECT tool_calls FROM session_tool_call_counts WHERE session_id=${sessionId}), 0))`;
+  `(COALESCE((SELECT tool_calls FROM session_tool_call_counts WHERE session_id=${sessionId}), 0)
+    + COALESCE((SELECT history_pruned_tool_calls FROM sessions WHERE id=${sessionId}), 0))`;
 
 // Distinct tool calls per session (#2761): COUNT(DISTINCT json_extract(payload,'$.toolCallId')) over
 // the session's tool_call events, maintained by triggers on every insert, delete and update of
@@ -5049,6 +5174,28 @@ function preserveCampaignFollowUpOrigins(db: DatabaseSync): void {
 const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN COALESCE(message_count,0)=0
   THEN (SELECT MAX(ts) FROM session_events WHERE session_id=sessions.id)
   ELSE MAX(COALESCE(last_event_at, ?), ?) END`;
+
+/** A replacement history comes from the runner's full log, so it is no longer pruned (#2777). Its
+ * tool calls return with it, so the pruned ones stop counting separately. */
+const CLEAR_HISTORY_PRUNE_SQL = `history_pruned_at=NULL, history_pruned_retention_days=NULL,
+  history_pruned_events=0, history_pruned_tool_calls=0, history_prune_through_seq=NULL, history_prune_removed_seq=NULL,
+  history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL,
+  history_prune_run_response_seq=NULL`;
+
+function sessionHistoryRetentionView(
+  row: Pick<SessionRow, "archived" | "archived_at" | "history_pruned_at" | "history_pruned_retention_days" | "history_pruned_events">,
+): Pick<SessionView, "archivedAt" | "historyPruned"> {
+  return {
+    ...(row.archived === 1 && row.archived_at != null ? { archivedAt: row.archived_at } : {}),
+    ...(row.history_pruned_at != null ? {
+      historyPruned: {
+        prunedAt: row.history_pruned_at,
+        eventCount: row.history_pruned_events ?? 0,
+        retentionDays: row.history_pruned_retention_days ?? 0,
+      },
+    } : {}),
+  };
+}
 
 export class ControlPlaneDb {
   readonly campaignBudgets: CampaignBudgetLedger;
@@ -6301,6 +6448,23 @@ export class ControlPlaneDb {
         db.exec("PRAGMA foreign_keys = ON;");
       }
     }
+    // #3247: a built-in harness default applies to that harness on every Machine, not to one
+    // Machine-local agent id. Keep the newest row per harness (then one already canonical, then the
+    // lowest id) and rename it to the canonical id. ACP rows keep their exact id.
+    db.exec(`
+      BEGIN IMMEDIATE;
+      DELETE FROM agent_harness_defaults WHERE rowid IN (
+        SELECT d.rowid FROM agent_harness_defaults d
+        WHERE d.driver <> 'acp' AND EXISTS (
+          SELECT 1 FROM agent_harness_defaults o
+          WHERE o.rowid <> d.rowid AND o.user_id = d.user_id AND o.driver = d.driver
+            AND o.context_kind = d.context_kind AND o.context_distro = d.context_distro
+            AND (o.updated_at > d.updated_at OR (o.updated_at = d.updated_at AND (
+              (o.agent_id = o.driver) > (d.agent_id = d.driver) OR
+              ((o.agent_id = o.driver) = (d.agent_id = d.driver) AND o.agent_id < d.agent_id))))));
+      UPDATE agent_harness_defaults SET agent_id = driver WHERE driver <> 'acp' AND agent_id <> driver;
+      COMMIT;
+    `);
     const sessionColumnsBeforeMigration = db.prepare("PRAGMA table_info(sessions)")
       .all() as unknown as Array<{ name: string }>;
     const needsCreationActorBackfill = !sessionColumnsBeforeMigration.some((column) =>
@@ -6477,6 +6641,25 @@ export class ControlPlaneDb {
       "parent_control_policy_revision INTEGER NOT NULL DEFAULT 0",
       "orchestrator_policy TEXT",
       "session_role TEXT CHECK (session_role IS NULL OR session_role IN ('normal','orchestrator'))",
+      // Archived-history retention (#2777). When the session was archived; NULL while it is not.
+      "archived_at INTEGER",
+      // The latest completed prune: when it ran and under which threshold, plus the events and the
+      // distinct tool calls every prune of this session removed. The tool calls still count.
+      "history_pruned_at INTEGER",
+      "history_pruned_retention_days INTEGER",
+      "history_pruned_events INTEGER NOT NULL DEFAULT 0",
+      "history_pruned_tool_calls INTEGER NOT NULL DEFAULT 0",
+      // Highest seq a prune has covered. New events are numbered above it, so no seq is reused.
+      "history_prune_through_seq INTEGER",
+      // Highest seq a prune has removed: an agent response ended there, even once the row is gone.
+      "history_prune_removed_seq INTEGER",
+      // Events removed so far by a prune still in progress, its threshold, the seq it has read
+      // through (every row at or below it is kept), and the seq of the final response it keeps.
+      // NULL when no prune is in progress.
+      "history_prune_run_events INTEGER",
+      "history_prune_run_days INTEGER",
+      "history_prune_run_seq INTEGER",
+      "history_prune_run_response_seq INTEGER",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -6657,7 +6840,10 @@ export class ControlPlaneDb {
       installToolCallCounter(db);
       db.exec("COMMIT");
     } catch (error) {
-      db.exec("ROLLBACK");
+      // No ControlPlaneDb owns this connection yet. Release it even if rollback fails,
+      // and keep the counter-installation error as the caller's startup diagnostic.
+      try { db.exec("ROLLBACK"); } catch { /* preserve the installation error */ }
+      try { db.close(); } catch { /* preserve the installation error */ }
       throw error;
     }
     // Per-child allowance charges. Add the columns, settle pre-existing children, and install the
@@ -6684,7 +6870,10 @@ export class ControlPlaneDb {
       db.exec(CHILD_CHARGE_TRIGGERS_SQL);
       db.exec("COMMIT");
     } catch (error) {
-      db.exec("ROLLBACK");
+      // No ControlPlaneDb owns this connection yet. Attempt both cleanup steps without
+      // replacing the child-charge installation error if either cleanup operation fails.
+      try { db.exec("ROLLBACK"); } catch { /* preserve the installation error */ }
+      try { db.close(); } catch { /* preserve the installation error */ }
       throw error;
     }
     db.exec("UPDATE sessions SET title_source='user' WHERE title_source IS NULL");
@@ -6760,6 +6949,12 @@ export class ControlPlaneDb {
          (SELECT COUNT(*) FROM session_events e WHERE e.session_id = sessions.id)
        WHERE message_count IS NULL`,
     );
+    // Sessions archived before archived_at existed. Archiving set updated_at, and later writes only
+    // move it forward, so this is never earlier than the real archive time (#2777).
+    db.exec(
+      `UPDATE sessions SET archived_at=MAX(updated_at, COALESCE(last_event_at, 0))
+       WHERE archived=1 AND archived_at IS NULL`,
+    );
     // Full-text transcript search (Cmd+K). A regular FTS5 table (not contentless — those can't
     // delete rows, and session deletion must drop its hits). appendEvent maintains it live;
     // fts_state.last_rowid is the IDEMPOTENT catch-up cursor: any events written past it (an
@@ -6769,6 +6964,12 @@ export class ControlPlaneDb {
       "CREATE VIRTUAL TABLE IF NOT EXISTS session_events_fts USING fts5(text, session_id UNINDEXED, seq UNINDEXED)",
     );
     db.exec("CREATE TABLE IF NOT EXISTS fts_state (id INTEGER PRIMARY KEY CHECK (id = 1), last_rowid INTEGER NOT NULL)");
+    if (!(db.prepare("PRAGMA table_info(fts_state)").all() as unknown as Array<{ name: string }>)
+      .some((column) => column.name === "keyed_through")) {
+      // The highest event this build indexed. last_rowid ahead of it means an older build wrote
+      // search rows without their event's row id (see prepareKeyedSearchRows).
+      db.exec("ALTER TABLE fts_state ADD COLUMN keyed_through INTEGER");
+    }
     {
       // First run WITH the cursor: if the FTS table already has rows (populated by a build
       // that predates fts_state), a cursor starting at 0 would re-insert every one of them as
@@ -6776,6 +6977,10 @@ export class ControlPlaneDb {
       const init = db.prepare("INSERT OR IGNORE INTO fts_state (id, last_rowid) VALUES (1, 0)").run();
       if (Number(init.changes) > 0) db.exec("DELETE FROM session_events_fts");
     }
+    // Retention removes search rows of pruned events, and their terms must leave the index too,
+    // not only their stored text (#2777). The option is persistent; setting it again is a no-op.
+    db.exec("INSERT INTO session_events_fts(session_events_fts, rank) VALUES('secure-delete', 1)");
+    prepareKeyedSearchRows(db);
     {
       const lastRowid =
         (db.prepare("SELECT last_rowid AS v FROM fts_state WHERE id=1").get() as unknown as { v: number }).v;
@@ -6783,7 +6988,12 @@ export class ControlPlaneDb {
         .prepare("SELECT id, session_id, seq, payload FROM session_events WHERE id > ? ORDER BY id")
         .all(lastRowid) as unknown as { id: number; session_id: string; seq: number; payload: string }[];
       if (rows.length) {
-        const ins = db.prepare("INSERT INTO session_events_fts(text, session_id, seq) VALUES (?, ?, ?)");
+        const statements = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
+        const prepare: PrepareStatement = (sql) => {
+          let statement = statements.get(sql);
+          if (!statement) statements.set(sql, statement = db.prepare(sql));
+          return statement;
+        };
         let max = lastRowid;
         db.exec("BEGIN");
         try {
@@ -6791,12 +7001,12 @@ export class ControlPlaneDb {
             max = Math.max(max, r.id);
             try {
               const text = searchTextForEvent(JSON.parse(r.payload) as SessionEventPayload);
-              if (text) ins.run(text, r.session_id, r.seq);
+              if (text) insertSearchRow(prepare, r.id, text, r.session_id, r.seq);
             } catch {
               /* unparseable payload — skip */
             }
           }
-          db.prepare("UPDATE fts_state SET last_rowid=? WHERE id=1").run(max);
+          db.prepare("UPDATE fts_state SET last_rowid=?, keyed_through=? WHERE id=1").run(max, max);
           db.exec("COMMIT");
         } catch (err) {
           db.exec("ROLLBACK");
@@ -8356,8 +8566,8 @@ export class ControlPlaneDb {
         "SELECT id FROM sessions WHERE project_id=? AND archived<>? ORDER BY id",
       ).all(projectId, value) as unknown as Array<{ id: string }>).map((row) => row.id);
       if (ids.length === 0) return [];
-      this.stmt("UPDATE sessions SET archived=?, updated_at=? WHERE project_id=? AND archived<>?")
-        .run(value, now, projectId, value);
+      this.stmt("UPDATE sessions SET archived=?, archived_at=?, updated_at=? WHERE project_id=? AND archived<>?")
+        .run(value, archived ? now : null, now, projectId, value);
       return ids.map((id) => this.getSession(id)!);
     });
   }
@@ -10326,7 +10536,8 @@ export class ControlPlaneDb {
     ).run(organizationId, mode, now);
   }
 
-  getAgentHarnessDefault(userId: string, identity: AgentHarnessIdentity): AgentHarnessDefaultRecord | null {
+  getAgentHarnessDefault(userId: string, requested: AgentHarnessIdentity): AgentHarnessDefaultRecord | null {
+    const identity = canonicalAgentHarnessIdentity(requested);
     const contextKind = identity.context.kind;
     const contextDistro = identity.context.kind === "wsl" ? identity.context.distro : "";
     const row = this.stmt(
@@ -10416,7 +10627,8 @@ export class ControlPlaneDb {
     return {
       defaults: {
         behavior: {
-          childHarness: normalizeAgentHarnessIdentity(parseJson<unknown>(row.child_harness)),
+          // Saved before #3247 under a Machine-local agent id; read as the harness it names.
+          childHarness: canonicalChildHarness(parseJson<unknown>(row.child_harness)),
           childModel: row.child_model,
           childEffort: row.child_effort,
           maximumConcurrentChildren: row.maximum_concurrent_children,
@@ -10465,10 +10677,11 @@ export class ControlPlaneDb {
 
   setAgentHarnessDefault(
     userId: string,
-    identity: AgentHarnessIdentity,
+    requested: AgentHarnessIdentity,
     config: AgentHarnessDefaultConfig,
     now = Date.now(),
   ): void {
+    const identity = canonicalAgentHarnessIdentity(requested);
     const contextKind = identity.context.kind;
     const contextDistro = identity.context.kind === "wsl" ? identity.context.distro : "";
     this.stmt(
@@ -10491,7 +10704,8 @@ export class ControlPlaneDb {
     );
   }
 
-  deleteAgentHarnessDefault(userId: string, identity: AgentHarnessIdentity): boolean {
+  deleteAgentHarnessDefault(userId: string, requested: AgentHarnessIdentity): boolean {
+    const identity = canonicalAgentHarnessIdentity(requested);
     const contextDistro = identity.context.kind === "wsl" ? identity.context.distro : "";
     return Number(this.stmt(
       `DELETE FROM agent_harness_defaults
@@ -10951,7 +11165,8 @@ export class ControlPlaneDb {
       adopted cost_budget_usd parent_session_id
       max_child_sessions cost_budget_step_usd cost_checkpoints_usd cost_checkpoint_approved_usd
       cost_unpriced_ack max_tool_calls max_tool_calls_step workspace_path message_count
-      created_at updated_at last_event_at event_epoch`.split(/\s+/).filter(Boolean);
+      created_at updated_at last_event_at event_epoch
+      archived_at history_pruned_at history_pruned_retention_days history_pruned_events`.split(/\s+/).filter(Boolean);
     const rowSql = `SELECT ${columns.map((name) => `session.${name}`).join(",")},
       COALESCE(workspace_override.display_name, workspace.name, extra.name, session.workspace_id) AS summary_workspace_name,
       COALESCE(agent.name, session.agent_id) AS summary_agent_name, project.name AS summary_project_name,
@@ -10965,7 +11180,7 @@ export class ControlPlaneDb {
       ) THEN 1 ELSE 0 END AS summary_owns,
       COALESCE(children.occupied,0) AS summary_children,
       EXISTS(SELECT 1 FROM managed_background_jobs job WHERE job.session_id=session.id) AS summary_jobs,
-      COALESCE(tool.tool_calls,0) AS summary_tool_calls,
+      COALESCE(tool.tool_calls,0)+session.history_pruned_tool_calls AS summary_tool_calls,
       CASE WHEN conversion.state!='applied' THEN json_object('targetRole', json_extract(conversion.command,'$.targetRole'), 'phase',conversion.state) END AS summary_conversion,
       CASE WHEN session.worktree_path IS NOT NULL THEN (SELECT json_object(
         'id',json_extract(tree.value,'$.id'),'path',json_extract(tree.value,'$.path'),
@@ -14585,8 +14800,9 @@ export class ControlPlaneDb {
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived, creation_actor,
              driver, model, effort, service_tier, permission_mode, parent_control, parent_control_policy,
-             parent_control_policy_revision, orchestrator_policy, session_role, workspace_path, acp_session_context, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             parent_control_policy_revision, orchestrator_policy, session_role, workspace_path, acp_session_context, created_at, updated_at,
+             archived_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -14617,6 +14833,7 @@ export class ControlPlaneDb {
         input.acpSessionContext ? JSON.stringify(input.acpSessionContext) : null,
         input.now,
         input.now,
+        input.archived ? input.now : null,
       );
       if (input.providerAccountId) {
         this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
@@ -15924,12 +16141,13 @@ export class ControlPlaneDb {
         `UPDATE sessions
             SET runner_history_epoch=?, runner_history_tail_seq=?, hydrated_seq=0,
                 message_count=?, last_event_at=?, preview=NULL, event_epoch=event_epoch+1,
-                retained_attachment_through_seq=?
+                retained_attachment_through_seq=?, ${CLEAR_HISTORY_PRUNE_SQL}
           WHERE id=?`,
       ).run(historyEpoch, settledTail, attachments.length,
         attachments.length ? attachments.reduce((latest, attachment) => Math.max(latest, attachment.ts), 0) : null,
         attachments.length,
         id);
+      this.stmt("DELETE FROM session_pruned_tool_calls WHERE session_id=?").run(id);
     } else if (historyEpoch !== undefined) {
       this.stmt(
         "UPDATE sessions SET runner_history_epoch=?, runner_history_tail_seq=? WHERE id=?",
@@ -16110,8 +16328,9 @@ export class ControlPlaneDb {
         `UPDATE sessions SET hydrated_seq=0, message_count=0, last_event_at=NULL, preview=NULL,
             runner_history_epoch=NULL, runner_history_tail_seq=0, runner_snapshot_fingerprint=NULL,
             runner_registration_snapshot_fingerprint=NULL,
-            event_epoch=event_epoch+1, retained_attachment_through_seq=0 WHERE id=?`,
+            event_epoch=event_epoch+1, retained_attachment_through_seq=0, ${CLEAR_HISTORY_PRUNE_SQL} WHERE id=?`,
       ).run(id);
+      this.stmt("DELETE FROM session_pruned_tool_calls WHERE session_id=?").run(id);
       this.db.exec("COMMIT");
       this.settleIngestRollback(id);
       this.collectWorkflowArtifactBlobs();
@@ -16119,6 +16338,335 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw err;
     }
+  }
+
+  // Archived-history retention (#2777). See docs/archived-history-retention.md.
+
+  getArchivedHistoryRetentionPolicy(organizationId: string): {
+    retentionDays: number | null; prunesFrom: number | null;
+  } | null {
+    const row = this.stmt(
+      "SELECT retention_days, prunes_from FROM archived_history_retention_policy WHERE organization_id=?",
+    ).get(organizationId) as { retention_days: number | null; prunes_from: number | null } | undefined;
+    return row ? { retentionDays: row.retention_days, prunesFrom: row.prunes_from } : null;
+  }
+
+  saveArchivedHistoryRetentionPolicy(
+    organizationId: string,
+    policy: { retentionDays: number | null; prunesFrom: number | null },
+    updatedBy: string | null,
+    now: number,
+  ): void {
+    this.stmt(
+      `INSERT INTO archived_history_retention_policy (organization_id, retention_days, prunes_from, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(organization_id) DO UPDATE SET retention_days=excluded.retention_days,
+         prunes_from=excluded.prunes_from, updated_at=excluded.updated_at, updated_by=excluded.updated_by`,
+    ).run(organizationId, policy.retentionDays, policy.prunesFrom, now, updatedBy);
+  }
+
+  /** The environment default's own arming state, kept across restarts. */
+  getArchivedHistoryEnvironmentPolicy(): { retentionDays: number | null; prunesFrom: number | null } | null {
+    const row = this.stmt("SELECT value FROM control_plane_metadata WHERE key='archived_history_environment_policy'")
+      .get() as { value: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.value) as { retentionDays?: unknown; prunesFrom?: unknown };
+    return {
+      retentionDays: Number.isSafeInteger(parsed.retentionDays) ? parsed.retentionDays as number : null,
+      prunesFrom: Number.isSafeInteger(parsed.prunesFrom) ? parsed.prunesFrom as number : null,
+    };
+  }
+
+  saveArchivedHistoryEnvironmentPolicy(policy: { retentionDays: number | null; prunesFrom: number | null }): void {
+    this.stmt(
+      "INSERT OR REPLACE INTO control_plane_metadata (key, value) VALUES ('archived_history_environment_policy', ?)",
+    ).run(JSON.stringify(policy));
+  }
+
+  listOrganizationIds(): string[] {
+    return (this.stmt("SELECT organization_id FROM identity_organizations ORDER BY organization_id").all() as
+      unknown as Array<{ organization_id: string }>).map((row) => row.organization_id);
+  }
+
+  archivedHistoryRetentionLastRun(organizationId: string): { finishedAt: number; sessions: number; events: number } | null {
+    const row = this.stmt(
+      "SELECT finished_at, sessions, events FROM archived_history_retention_runs WHERE organization_id=?",
+    ).get(organizationId) as { finished_at: number; sessions: number; events: number } | undefined;
+    return row ? { finishedAt: row.finished_at, sessions: row.sessions, events: row.events } : null;
+  }
+
+  recordArchivedHistoryRetentionRun(organizationId: string, finishedAt: number, sessions: number, events: number): void {
+    this.stmt(
+      `INSERT OR REPLACE INTO archived_history_retention_runs (organization_id, finished_at, sessions, events)
+       VALUES (?, ?, ?, ?)`,
+    ).run(organizationId, finishedAt, sessions, events);
+  }
+
+  /** Archived sessions of the organization archived at or before `cutoff` that a prune would visit. */
+  archivedHistoryRetentionCounts(organizationId: string, cutoff: number): { sessions: number; events: number } {
+    const row = this.stmt(
+      `SELECT COUNT(*) AS sessions, COALESCE(SUM(s.message_count), 0) AS events ${ARCHIVED_HISTORY_PRUNE_CANDIDATES_SQL}`,
+    ).get(organizationId, cutoff) as { sessions: number; events: number };
+    return { sessions: row.sessions, events: row.events };
+  }
+
+  /** Sessions of the organization with a prune run still open, eligible or not. */
+  archivedHistoryOpenPrunes(organizationId: string): string[] {
+    return (this.stmt(
+      `SELECT s.id FROM sessions s JOIN session_ownership ownership ON ownership.session_id=s.id
+        WHERE ownership.organization_id=? AND s.history_prune_run_events IS NOT NULL ORDER BY s.id`,
+    ).all(organizationId) as unknown as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /** Oldest archive first, so a long backlog prunes in the order its sessions became eligible. */
+  archivedHistoryPruneCandidates(organizationId: string, cutoff: number, limit: number): string[] {
+    return (this.stmt(
+      `SELECT s.id ${ARCHIVED_HISTORY_PRUNE_CANDIDATES_SQL} ORDER BY s.archived_at, s.id LIMIT ?`,
+    ).all(organizationId, cutoff, limit) as unknown as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /** Whether search rows without their event's row id remain to be mapped before any prune. */
+  legacySearchRowsPending(): boolean {
+    const scan = readLegacySearchScan((sql) => this.stmt(sql));
+    return scan !== null && scan.cursor < scan.end;
+  }
+
+  /** Map up to `limit` legacy search rows to their events, in row id order. A row whose event is
+   * gone is deleted: nothing could otherwise ever remove it. Returns whether rows remain. */
+  mapLegacySearchRows(limit: number): { scanned: number; pending: boolean } {
+    return this.atomic(() => {
+      const scan = readLegacySearchScan((sql) => this.stmt(sql));
+      if (!scan || scan.cursor >= scan.end) return { scanned: 0, pending: false };
+      const rows = this.stmt(
+        `SELECT rowid, session_id, seq FROM session_events_fts
+          WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?`,
+      ).all(scan.cursor, scan.end, limit) as unknown as Array<{ rowid: number; session_id: string; seq: number }>;
+      const deleteRow = this.stmt("DELETE FROM session_events_fts WHERE rowid=?");
+      for (const row of rows) {
+        const event = this.stmt("SELECT id FROM session_events WHERE session_id=? AND seq=? ORDER BY id LIMIT 1")
+          .get(row.session_id, row.seq) as { id: number } | undefined;
+        // An orphan: its event is gone, so nothing else would ever remove it.
+        if (!event) {
+          deleteRow.run(row.rowid);
+          continue;
+        }
+        if (event.id === row.rowid) continue;
+        const recorded = this.stmt("SELECT fts_rowid FROM session_events_fts_legacy_rowids WHERE event_id=?")
+          .get(event.id) as { fts_rowid: number } | undefined;
+        if (recorded?.fts_rowid === row.rowid) continue;
+        // A second row for an event already indexed under its own id or a recorded one.
+        if (recorded || this.searchRowForEvent(row.session_id, event.id, row.seq)) {
+          deleteRow.run(row.rowid);
+          continue;
+        }
+        this.stmt("INSERT INTO session_events_fts_legacy_rowids (event_id, fts_rowid) VALUES (?, ?)")
+          .run(event.id, row.rowid);
+      }
+      const cursor = rows.length < limit ? scan.end : rows.at(-1)!.rowid;
+      this.stmt("INSERT OR REPLACE INTO control_plane_metadata (key, value) VALUES (?, ?)")
+        .run(LEGACY_SEARCH_SCAN_KEY, JSON.stringify({ cursor, end: scan.end }));
+      return { scanned: rows.length, pending: cursor < scan.end };
+    });
+  }
+
+  /** The search row of one cached event, only when it really is that event's row. */
+  private searchRowForEvent(sessionId: string, eventId: number, seq: number): { rowid: number; length: number } | null {
+    const mapped = this.stmt("SELECT fts_rowid FROM session_events_fts_legacy_rowids WHERE event_id=?")
+      .get(eventId) as { fts_rowid: number } | undefined;
+    const rowid = mapped?.fts_rowid ?? eventId;
+    const row = this.stmt("SELECT session_id, seq, length(text) AS length FROM session_events_fts WHERE rowid=?")
+      .get(rowid) as { session_id: string; seq: number; length: number } | undefined;
+    return row && row.session_id === sessionId && Number(row.seq) === seq ? { rowid, length: row.length } : null;
+  }
+
+  /** Locate the session's final response: its last top-level agent message, grouped as the
+   * transcript groups it — by provider message id, or else as the contiguous untagged run. */
+  private historyPruneFinalResponse(sessionId: string): {
+    messageId: string | null; afterSeq: number; lastSeq: number; seq: number;
+  } {
+    const last = this.stmt(
+      `SELECT seq, json_extract(payload, '$.messageId') AS message_id,
+              json_type(payload, '$.messageId') AS message_id_type
+         FROM session_events
+        WHERE session_id=? AND kind='agent_message' AND json_type(payload, '$.parentToolUseId') IS NULL
+        ORDER BY seq DESC LIMIT 1`,
+    ).get(sessionId) as { seq: number; message_id: string | null; message_id_type: string | null } | undefined;
+    if (!last) return { messageId: null, afterSeq: 0, lastSeq: 0, seq: 0 };
+    if (last.message_id_type === "text") return { messageId: last.message_id, afterSeq: 0, lastSeq: 0, seq: last.seq };
+    const boundary = this.stmt(
+      `SELECT seq FROM session_events
+        WHERE session_id=? AND seq<? AND kind!='token_usage' AND NOT (
+          kind='agent_message' AND json_type(payload, '$.parentToolUseId') IS NULL
+          AND json_type(payload, '$.messageId') IS NULL AND COALESCE(json_extract(payload, '$.final'), 0)=0)
+        ORDER BY seq DESC LIMIT 1`,
+    ).get(sessionId, last.seq) as { seq: number } | undefined;
+    // A removed row below the response separated it from whatever came before, so an earlier
+    // response kept while it was final never joins this one. No row of the final response itself
+    // is ever removed, so the boundary never rises past the real one.
+    const removed = (this.stmt("SELECT history_prune_removed_seq AS seq FROM sessions WHERE id=?").get(sessionId) as
+      { seq: number | null } | undefined)?.seq ?? 0;
+    const afterSeq = Math.max(boundary?.seq ?? 0, removed < last.seq ? removed : 0);
+    return { messageId: null, afterSeq, lastSeq: last.seq, seq: last.seq };
+  }
+
+  /**
+   * Remove one bounded batch of an archived session's transcript, in one short transaction. The
+   * first batch of a run opens it, and the call that finds nothing left to remove (or finds the
+   * session no longer eligible) closes it: it records the prune and advances the event epoch, as
+   * crash recovery does, so open dashboards reload, campaign and work-item proofs rebind to their
+   * kept report events, and accounting keeps its epoch. The hydration cursor never moves, so no
+   * runner is asked to send the removed events again.
+   *
+   * A removal commits without its own WAL flush, like runner ingest: it is idempotent, so a batch an
+   * OS crash rolls back is removed again by the next pass, and a flush per batch would block the
+   * event loop longer than the batch itself. Closing a run flushes, as does every later
+   * control-plane write. Payload blobs are deleted only after that durable close, so no artifact
+   * row a crash restores can point at a missing blob.
+   */
+  pruneArchivedHistoryBatch(sessionId: string, input: {
+    cutoff: number;
+    retentionDays: number;
+    now: number;
+    maxEvents: number;
+    maxPayloadBytes: number;
+    maxSearchLength: number;
+  }): { removed: number; searchLength: number; finished: boolean; prunedEvents: number } {
+    const batch = this.relaxedCommit(() => this.atomic(() => this.removeArchivedHistoryBatch(sessionId, input)));
+    if ("removed" in batch) return { ...batch, finished: false, prunedEvents: 0 };
+    const closed = this.atomic(() => this.finishArchivedHistoryPrune(sessionId, input.now, batch.complete));
+    if (closed.removedArtifacts) this.collectWorkflowArtifactBlobs();
+    if (closed.prunedEvents > 0) this.eventEpochAdvancedListener?.(sessionId);
+    return { removed: 0, searchLength: 0, finished: true, prunedEvents: closed.prunedEvents };
+  }
+
+  /** One removal, or whether the run is complete (nothing left) or cut short (no longer eligible). */
+  private removeArchivedHistoryBatch(sessionId: string, input: {
+    cutoff: number; retentionDays: number; maxEvents: number; maxPayloadBytes: number; maxSearchLength: number;
+  }): { removed: number; searchLength: number } | { complete: boolean } {
+    const session = this.stmt(
+      `SELECT s.archived, s.archived_at, s.status, s.history_prune_run_events, s.history_prune_run_seq,
+              s.history_prune_run_response_seq,
+              EXISTS (SELECT 1 FROM session_stop_intents intent WHERE intent.session_id=s.id) AS stopping
+         FROM sessions s WHERE s.id=?`,
+    ).get(sessionId) as {
+      archived: number; archived_at: number | null; status: string; history_prune_run_events: number | null;
+      history_prune_run_seq: number | null; history_prune_run_response_seq: number | null; stopping: number;
+    } | undefined;
+    const eligible = session !== undefined && session.archived === 1 && session.archived_at !== null &&
+      session.archived_at <= input.cutoff && TERMINAL_STATUSES.includes(session.status as SessionStatus) &&
+      session.stopping === 0;
+    if (!eligible) return { complete: false };
+    // Each batch tests the keep rule on at most one window of rows past where its run has read
+    // through, so a long kept stretch costs one window per batch instead of being read again by
+    // every batch. A final response that moved since (delayed history can add a later one) sends
+    // the run back to the first row, so the response it replaced, already read past, goes too.
+    const response = this.historyPruneFinalResponse(sessionId);
+    const restart = session.history_prune_run_events === null || session.history_prune_run_response_seq !== response.seq;
+    if (session.history_prune_run_events === null) {
+      this.stmt("UPDATE sessions SET history_prune_run_events=0, history_prune_run_days=? WHERE id=?")
+        .run(input.retentionDays, sessionId);
+    }
+    if (restart) {
+      this.stmt("UPDATE sessions SET history_prune_run_seq=0, history_prune_run_response_seq=? WHERE id=?")
+        .run(response.seq, sessionId);
+    }
+    const after = restart ? 0 : session.history_prune_run_seq ?? 0;
+    const windowEnd = (this.stmt(
+      "SELECT seq FROM session_events WHERE session_id=? AND seq>? ORDER BY seq LIMIT 1 OFFSET ?",
+    ).get(sessionId, after, HISTORY_PRUNE_SCAN_ROWS - 1) as { seq: number } | undefined)?.seq ?? null;
+    const candidates = this.stmt(
+      `SELECT e.id, e.seq, length(e.payload) AS bytes FROM session_events e
+        WHERE e.session_id=? AND e.seq>? AND e.seq<=? AND NOT ${HISTORY_PRUNE_KEEP_SQL}
+        ORDER BY e.seq LIMIT ?`,
+    ).all(sessionId, after, windowEnd ?? Number.MAX_SAFE_INTEGER, response.messageId, response.messageId,
+      response.afterSeq, response.lastSeq, input.maxEvents) as unknown as Array<{ id: number; seq: number; bytes: number }>;
+    if (!candidates.length) {
+      // Fewer than a window of rows remained, and all are kept: nothing is left to remove.
+      if (windowEnd === null) return { complete: true };
+      this.stmt("UPDATE sessions SET history_prune_run_seq=? WHERE id=?").run(windowEnd, sessionId);
+      return { removed: 0, searchLength: 0 };
+    }
+    const events: number[] = [];
+    const searchRows: number[] = [];
+    let payloadBytes = 0;
+    let searchLength = 0;
+    let throughSeq = 0;
+    for (const candidate of candidates) {
+      const search = this.searchRowForEvent(sessionId, candidate.id, candidate.seq);
+      const nextSearch = searchLength + (search?.length ?? 0);
+      const nextPayload = payloadBytes + candidate.bytes;
+      if (events.length && (nextSearch > input.maxSearchLength || nextPayload > input.maxPayloadBytes)) break;
+      events.push(candidate.id);
+      if (search) searchRows.push(search.rowid);
+      searchLength = nextSearch;
+      payloadBytes = nextPayload;
+      throughSeq = candidate.seq;
+    }
+    // Every row through `throughSeq` is now kept, and through the window's end when the batch took
+    // all of the window's removable rows.
+    const readThrough = windowEnd !== null && events.length === candidates.length && candidates.length < input.maxEvents
+      ? windowEnd : throughSeq;
+    const toolCallsBefore = this.storedToolCalls(sessionId);
+    this.stmt(
+      `INSERT OR IGNORE INTO session_pruned_tool_calls (session_id, tool_call_id)
+       SELECT session_id, json_extract(payload, '$.toolCallId') FROM session_events
+        WHERE id IN (${events.map(() => "?").join(",")}) AND kind='tool_call'
+          AND json_extract(payload, '$.toolCallId') IS NOT NULL`,
+    ).run(...events);
+    for (const rowid of searchRows) this.stmt("DELETE FROM session_events_fts WHERE rowid=?").run(rowid);
+    this.stmt(`DELETE FROM session_events WHERE id IN (${events.map(() => "?").join(",")})`).run(...events);
+    this.stmt(
+      `UPDATE sessions SET message_count=MAX(0, COALESCE(message_count, 0)-?),
+          history_prune_run_events=history_prune_run_events+?,
+          history_pruned_tool_calls=history_pruned_tool_calls+?,
+          history_prune_through_seq=MAX(COALESCE(history_prune_through_seq, 0), ?),
+          history_prune_removed_seq=MAX(COALESCE(history_prune_removed_seq, 0), ?),
+          history_prune_run_seq=?
+        WHERE id=?`,
+    ).run(events.length, events.length, toolCallsBefore - this.storedToolCalls(sessionId), throughSeq, throughSeq,
+      readThrough, sessionId);
+    return { removed: events.length, searchLength };
+  }
+
+  /** Close an open prune run, in the caller's transaction. A complete run covers every row through
+   * the current high water, so the session is done until it gains newer events. A run cut short
+   * because the session stopped being eligible keeps its partial coverage, so a later run resumes. */
+  private finishArchivedHistoryPrune(sessionId: string, now: number, complete: boolean): {
+    prunedEvents: number; removedArtifacts: number;
+  } {
+    const run = this.stmt("SELECT history_prune_run_events FROM sessions WHERE id=?").get(sessionId) as
+      { history_prune_run_events: number | null } | undefined;
+    if (!run || run.history_prune_run_events === null) return { prunedEvents: 0, removedArtifacts: 0 };
+    const runEvents = run.history_prune_run_events;
+    if (complete) {
+      this.stmt("UPDATE sessions SET history_prune_through_seq=? WHERE id=?")
+        .run(this.sessionSeqHighWater(sessionId), sessionId);
+    }
+    // Large payloads of the removed events. User prompts, the only events with prompt images, stay.
+    const removedArtifacts = Number(this.stmt(
+      `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
+         AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'
+         AND NOT EXISTS (SELECT 1 FROM session_event_artifacts ref WHERE ref.artifact_id=artifacts.id)`,
+    ).run(sessionId).changes);
+    if (runEvents > 0) {
+      this.stmt(
+        `UPDATE sessions SET history_pruned_at=?, history_pruned_retention_days=history_prune_run_days,
+            history_pruned_events=history_pruned_events+?, history_prune_run_events=NULL, history_prune_run_days=NULL,
+            history_prune_run_seq=NULL, history_prune_run_response_seq=NULL
+          WHERE id=?`,
+      ).run(now, runEvents, sessionId);
+      this.advanceEventEpochInTransaction(sessionId);
+    } else {
+      this.stmt(`UPDATE sessions SET history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL,
+          history_prune_run_response_seq=NULL WHERE id=?`).run(sessionId);
+    }
+    return { prunedEvents: runEvents, removedArtifacts };
+  }
+
+  /** The tool-call counter alone, which always equals the cached events' distinct tool calls. */
+  private storedToolCalls(sessionId: string): number {
+    return (this.stmt("SELECT tool_calls FROM session_tool_call_counts WHERE session_id=?").get(sessionId) as
+      { tool_calls: number } | undefined)?.tool_calls ?? 0;
   }
 
   /** Every write that can land on `stopped` must say which path wrote it and whether the runner
@@ -16573,8 +17121,11 @@ export class ControlPlaneDb {
   }
 
   setSessionArchived(id: string, archived: boolean, now: number): void {
-    this.stmt("UPDATE sessions SET archived=?, updated_at=? WHERE id=?")
-      .run(archived ? 1 : 0, now, id);
+    // Re-archiving an archived session keeps its archive time, so retention's clock never restarts.
+    this.stmt(`UPDATE sessions SET archived=?, updated_at=?,
+        archived_at=CASE WHEN ?=0 THEN NULL WHEN archived=1 THEN COALESCE(archived_at, ?) ELSE ? END
+      WHERE id=?`)
+      .run(archived ? 1 : 0, now, archived ? 1 : 0, now, now, id);
     if (!archived) this.stmt("DELETE FROM orchestrator_campaign_worktree_cleanup WHERE child_session_id=?").run(id);
   }
 
@@ -19040,9 +19591,8 @@ export class ControlPlaneDb {
    * the session_events triggers maintain (#2761), so a view never recounts history.
    */
   countToolCalls(id: string): number {
-    const row = this.stmt("SELECT tool_calls FROM session_tool_call_counts WHERE session_id=?")
-      .get(id) as { tool_calls: number } | undefined;
-    return row?.tool_calls ?? 0;
+    const row = this.stmt(`SELECT ${toolCallCountSql("?")} AS tool_calls`).get(id, id) as { tool_calls: number };
+    return row.tool_calls;
   }
 
   /** Tool calls that reach a terminal child after its settlement (late hydration or a history
@@ -20737,7 +21287,9 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM session_stop_intents WHERE session_id=?").run(sessionId);
       this.confirmSessionStopInTransaction(sessionId, confirmation, now);
       if (row.archive_after_stop === 1) {
-        this.stmt("UPDATE sessions SET archived=1, updated_at=? WHERE id=?").run(now, sessionId);
+        this.stmt(`UPDATE sessions SET archived=1, updated_at=?,
+            archived_at=CASE WHEN archived=1 THEN COALESCE(archived_at, ?) ELSE ? END WHERE id=?`)
+          .run(now, now, now, sessionId);
         return { archived: true };
       }
       return { archived: false };
@@ -22526,7 +23078,7 @@ export class ControlPlaneDb {
       campaignRequests: context.campaignRequests.get(row.id),
       useWorktree: row.use_worktree === 1, worktreePath: row.worktree_path,
       worktrees: row.summary_worktree ? [JSON.parse(row.summary_worktree) as SessionWorktreeView] : undefined,
-      archived: row.archived === 1,
+      archived: row.archived === 1, ...sessionHistoryRetentionView(row),
       archiveStatus: stopIntent?.archiveAfterStop ? stopIntent.operation.status : undefined,
       archiveOperation: stopIntent?.archiveAfterStop ? stopIntent.operation : undefined, stopOperation: stopIntent?.operation,
       createdAt: row.created_at, updatedAt: row.updated_at, lastEventAt: row.last_event_at,
@@ -22760,6 +23312,7 @@ export class ControlPlaneDb {
         }
       })(),
       archived: row.archived === 1,
+      ...sessionHistoryRetentionView(row),
       archiveStatus: stopIntent?.archiveAfterStop ? stopIntent.operation.status : undefined,
       archiveOperation: stopIntent?.archiveAfterStop ? stopIntent.operation : undefined,
       stopOperation: stopIntent?.operation,
@@ -23186,6 +23739,15 @@ export class ControlPlaneDb {
     }
   }
 
+  /** The seq the next cached event follows: the session's highest row, or a pruned range above it,
+   * whose numbers stay retired so reminders and attempt boundaries keep comparing upward (#2777). */
+  private sessionSeqHighWater(sessionId: string): number {
+    return (this.stmt(
+      `SELECT MAX(COALESCE((SELECT MAX(seq) FROM session_events WHERE session_id=?), 0),
+                  COALESCE((SELECT history_prune_through_seq FROM sessions WHERE id=?), 0)) AS m`,
+    ).get(sessionId, sessionId) as { m: number }).m;
+  }
+
   appendEvent(...args: Parameters<ControlPlaneDb["appendEventTransaction"]>): SessionEvent {
     const appended = args[3]?.runnerSeq === undefined
       ? this.appendEventTransaction(...args)
@@ -23224,11 +23786,7 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN");
     try {
       if (advanceEpoch) this.advanceEventEpochInTransaction(sessionId);
-      const seq =
-        ((
-          this.stmt("SELECT MAX(seq) AS m FROM session_events WHERE session_id=?")
-            .get(sessionId) as unknown as { m: number | null }
-        ).m ?? 0) + 1;
+      const seq = this.sessionSeqHighWater(sessionId) + 1;
 
       const info = this.stmt(
           `INSERT INTO session_events (session_id, seq, runner_seq, ts, kind, payload)
@@ -23267,14 +23825,9 @@ export class ControlPlaneDb {
       // write can't desync the index. fts_state.last_rowid advances for EVERY event (indexed
       // or not) so the catch-up cursor never re-processes rows this build already handled.
       const ftsText = searchTextForEvent(options?.searchPayload ?? payload);
-      if (ftsText) {
-        this.stmt("INSERT INTO session_events_fts(text, session_id, seq) VALUES (?, ?, ?)").run(
-          ftsText,
-          sessionId,
-          seq,
-        );
-      }
-      this.stmt("UPDATE fts_state SET last_rowid=? WHERE id=1 AND last_rowid<?").run(
+      if (ftsText) insertSearchRow((sql) => this.stmt(sql), Number(info.lastInsertRowid), ftsText, sessionId, seq);
+      this.stmt("UPDATE fts_state SET last_rowid=?, keyed_through=? WHERE id=1 AND last_rowid<?").run(
+        Number(info.lastInsertRowid),
         Number(info.lastInsertRowid),
         Number(info.lastInsertRowid),
       );
@@ -23415,17 +23968,13 @@ export class ControlPlaneDb {
         this.clearLiveUsageInTransaction(sessionId);
       }
 
-      let cpSeq = ((this.stmt("SELECT MAX(seq) AS m FROM session_events WHERE session_id=?")
-        .get(sessionId) as { m: number | null }).m ?? 0);
+      let cpSeq = this.sessionSeqHighWater(sessionId);
       let preview = state.preview;
       let maxRowId = 0;
       const inserted: SessionEvent[] = [];
       const insertEvent = this.stmt(
         `INSERT INTO session_events (session_id, seq, runner_seq, ts, kind, payload)
          VALUES (?, ?, ?, ?, ?, ?)`,
-      );
-      const insertFts = this.stmt(
-        "INSERT INTO session_events_fts(text, session_id, seq) VALUES (?, ?, ?)",
       );
       for (const event of events) {
         cpSeq += 1;
@@ -23450,7 +23999,7 @@ export class ControlPlaneDb {
         );
         maxRowId = Math.max(maxRowId, rowId);
         const ftsText = searchTextForEvent(event.searchPayload ?? event.payload);
-        if (ftsText) insertFts.run(ftsText, sessionId, cpSeq);
+        if (ftsText) insertSearchRow((sql) => this.stmt(sql), rowId, ftsText, sessionId, cpSeq);
         if (event.payload.kind === "user_message") {
           preview = "";
         } else if (event.payload.kind === "agent_message" && event.payload.text) {
@@ -23479,8 +24028,8 @@ export class ControlPlaneDb {
           rowId,
         );
       }
-      this.stmt("UPDATE fts_state SET last_rowid=? WHERE id=1 AND last_rowid<?")
-        .run(maxRowId, maxRowId);
+      this.stmt("UPDATE fts_state SET last_rowid=?, keyed_through=? WHERE id=1 AND last_rowid<?")
+        .run(maxRowId, maxRowId, maxRowId);
       const finalRunnerSeq = events[events.length - 1]!.seq;
       // Runner timestamps need not ascend with seq, so fold the page's latest, not its final, time.
       const latestTs = events.reduce((latest, event) => Math.max(latest, event.ts), events[0]!.ts);
@@ -23500,6 +24049,32 @@ export class ControlPlaneDb {
       throw error;
     }
     return appliedResult;
+  }
+
+  /** Only user text/identity crosses this boundary; images and agent/tool payloads stay in SQLite. */
+  listPromptHistoryPage(sessionId: string, before: number | undefined, limit: number): {
+    prompts: import("@wollipog/protocol").SessionPromptHistoryEntry[];
+    nextBefore?: number;
+    hasMore: boolean;
+  } {
+    if ((before !== undefined && (!Number.isSafeInteger(before) || before < 1)) ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("invalid prompt history page");
+    }
+    const rows = this.stmt(
+      `SELECT seq, json_extract(payload,'$.text') AS text,
+              json_extract(payload,'$.turnId') AS turnId,
+              json_extract(payload,'$.submissionId') AS submissionId
+         FROM session_events INDEXED BY idx_session_events_user_message
+        WHERE session_id=? AND kind='user_message' AND seq<?
+        ORDER BY seq DESC LIMIT ?`,
+    ).all(sessionId, before ?? Number.MAX_SAFE_INTEGER, limit + 1) as unknown as Array<{
+      seq: number; text: string; turnId: string | null; submissionId: string | null;
+    }>;
+    const prompts = rows.slice(0, limit).reverse().map(({ seq, text, turnId, submissionId }) => ({
+      seq, text, ...(turnId ? { turnId } : {}), ...(submissionId ? { submissionId } : {}),
+    }));
+    return { prompts, nextBefore: prompts[0]?.seq, hasMore: rows.length > limit };
   }
 
   listEvents(sessionId: string, afterSeq = 0): SessionEvent[] {
@@ -28699,6 +29274,11 @@ function parentControlDecisionPolicyFromJson(raw: string | null): ParentControlD
   return candidate as ParentControlDecisionPolicy;
 }
 
+function canonicalChildHarness(value: unknown): AgentHarnessIdentity | null {
+  const identity = normalizeAgentHarnessIdentity(value);
+  return identity && canonicalAgentHarnessIdentity(identity);
+}
+
 function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {
   const value = parseJson<OrchestratorCampaignPolicy>(raw);
   if (!value || value.version !== 1 ||
@@ -28708,6 +29288,8 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       typeof value.sources.behavior !== "object" || value.sources.behavior === null ||
       Array.isArray(value.sources.behavior)) return null;
   if (value.control !== undefined && !validCampaignControl(value.control)) return null;
+  // Anything but the known marker keeps the narrower exact-agent match a pre-#3247 campaign had.
+  if (value.childHarnessMatch !== undefined && value.childHarnessMatch !== "harness") delete value.childHarnessMatch;
   // Pre-v157 policies had no harness bind. Preserve their automatic-harness semantics and mark
   // the source as legacy rather than silently making a fixed choice during migration.
   if (value.behavior.childHarness === undefined) value.behavior.childHarness = null;

@@ -51,12 +51,12 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
     await page.screenshot({ path: testInfo.outputPath(`orchestrator-settings-${viewport.width}.png`), fullPage: true });
 
     await childHarness.click();
-    await page.getByRole("option", { name: /Codex App Server · Codex App Server · Native/ }).click();
+    await page.getByRole("option", { name: /Codex App Server · Native/ }).click();
     await page.getByRole("button", { name: /Child Model: Automatic/ }).click();
     await page.getByRole("option", { name: /GPT-5.6 Sol/ }).click();
     await page.getByRole("button", { name: /Child Effort: Automatic/ }).click();
     await page.getByRole("option", { name: /High/ }).click();
-    await expect(page.getByRole("button", { name: /Child Harness: Codex App Server · Codex App Server · Native/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Child Harness: Codex App Server · Native/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Child Model: GPT-5.6 Sol/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Child Effort: High/ })).toBeVisible();
 
@@ -166,6 +166,19 @@ test("with no machine reporting models and efforts, the warning leads Children",
   await expect(page.locator(".form-error")).toHaveCount(0);
 });
 
+test("the saved combination names the machine that can't run it, and Use Opus 5 replaces a drifting alias (#3248)", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.goto("/settings-rows-e2e.html?theme=light&section=orchestrator&orchestrator=machines");
+  const support = page.locator(".notice.t-warning", { hasText: "Not Every Machine Can Run These Children" });
+  await expect(support).toContainText("1 of 2 connected machines support the saved Child Harness, Child Model and Child Effort together. Children can't start on Desktop.");
+  const drift = page.locator(".notice.t-warning", { hasText: "Child Model Differs Between Machines" });
+  await expect(drift).toContainText("“opus” is Opus 5 on Desktop and Opus 5.5 on Laptop.");
+  await page.screenshot({ path: testInfo.outputPath("orchestrator-machine-support.png"), fullPage: true });
+  await drift.getByRole("button", { name: "Use Opus 5" }).click();
+  await expect(page.getByRole("button", { name: /^Child Model: Opus 5/ })).toBeVisible();
+  await expect(drift).toHaveCount(0);
+});
+
 test("Orchestrator settings retain a retired model and mark it at Child Model", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/settings-rows-e2e.html?theme=light&section=orchestrator&defaults=agent-repair");
@@ -192,6 +205,70 @@ test("leaving with unsaved changes asks first, and Keep Editing keeps the draft"
   await page.locator(".settings-nav").getByRole("link", { name: "Appearance" }).click();
   await page.getByRole("dialog", { name: "Discard Changes" }).getByRole("button", { name: "Discard Changes" }).click();
   await expect(page.locator("#settings-panel-heading")).toHaveText("Appearance");
+});
+
+test("browser Back and Forward with unsaved changes ask first, and Keep Editing loses no entry (#3218)", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/settings-rows-e2e.html?theme=dark&route=/settings/appearance");
+  const nav = page.locator(".settings-nav");
+  const heading = page.locator("#settings-panel-heading");
+  const limit = page.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
+  const dialog = page.getByRole("dialog", { name: "Discard Changes" });
+  const route = () => new URL(page.url()).searchParams.get("route");
+  const entries = () => page.evaluate(() => window.history.length);
+  // Same-document moves: wait for the address, not for a load that never comes.
+  const back = () => page.goBack({ waitUntil: "commit" });
+  const forward = () => page.goForward({ waitUntil: "commit" });
+
+  // Appearance, Orchestrator, Behavior; then Back to Orchestrator, so it has an entry on each side.
+  await nav.getByRole("link", { name: "Orchestrator" }).click();
+  await expect(heading).toHaveText("Orchestrator");
+  await nav.getByRole("link", { name: "Behavior" }).click();
+  await expect(heading).toHaveText("Behavior");
+  await back();
+  await expect(heading).toHaveText("Orchestrator", { timeout: 5_000 });
+  await expect(limit).toHaveValue("4");
+  const length = await entries();
+  await makeDirty(page);
+
+  for (const [direction, move] of [["back", back], ["forward", forward]] as const) {
+    await move();
+    await expect(dialog, `${direction} asks first`).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Keep Editing" })).toBeFocused();
+    await expect.poll(route, { message: "the editor's entry is current while it asks" }).toBe("/settings/orchestrator");
+    await page.screenshot({ path: testInfo.outputPath(`orchestrator-${direction}-asks.png`) });
+    await dialog.getByRole("button", { name: "Keep Editing" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(heading).toHaveText("Orchestrator");
+    await expect(limit, "the draft is kept").toHaveValue("8");
+    expect(route()).toBe("/settings/orchestrator");
+    expect(await entries(), "no entry is added or dropped").toBe(length);
+  }
+
+  // Discard Changes completes Back, exactly once.
+  await back();
+  await dialog.getByRole("button", { name: "Discard Changes" }).click();
+  await expect(heading).toHaveText("Appearance");
+  await expect.poll(route).toBe("/settings/appearance");
+  // Every forward entry is still there: Orchestrator with its saved defaults, then Behavior.
+  await forward();
+  await expect(heading).toHaveText("Orchestrator");
+  await expect(limit).toHaveValue("4");
+  await forward();
+  await expect(heading).toHaveText("Behavior");
+  expect(await entries()).toBe(length);
+
+  // Discard Changes completes Forward, exactly once: one Back from Behavior reaches the editor again.
+  await back();
+  await expect(heading).toHaveText("Orchestrator");
+  await makeDirty(page);
+  await forward();
+  await dialog.getByRole("button", { name: "Discard Changes" }).click();
+  await expect(heading).toHaveText("Behavior");
+  await back();
+  await expect(heading).toHaveText("Orchestrator");
+  await expect(limit).toHaveValue("4");
+  await expect(dialog).toBeHidden();
 });
 
 // #2413: as three equal pills in the panel's 260px value column, "Questions and Approvals" drew over

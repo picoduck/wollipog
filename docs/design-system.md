@@ -142,7 +142,8 @@ correct in every scheme and theme without regeneration.
 | `--on-accent` | `#06231f` | `#ffffff` | Text on primary and accent fills (7.06:1 / 5.72:1). |
 | `--green` / `--amber` / `--red` / `--blue` | `#3fb950` / `#e3b341` / `#f85149` / `#58a6ff` | `#1a7f37` / `#9a6700` / `#cf222e` / `#0969da` | Status hues. Fills and dots only; text uses `*-on-tint`. |
 | `--accent-2` | `#ef8f3f` | `#bc4c00` | Brand orange. **No UI role** (logo, usage chart series only). |
-| `--purple`, `--agent-claude` | | | Retired from UI chrome. Agent identity uses the agent's brand icon, not a tinted tag. |
+| `--purple` | | | Ready for Review status hue. Text uses `--purple-on-tint`. |
+| `--agent-claude` | | | Retired from UI chrome. Agent identity uses the agent's brand icon, not a tinted tag. |
 
 ### 2.2 Color: Derived and Per-Theme Tokens
 
@@ -194,6 +195,7 @@ tinted component reads those:
 | `.t-success` | `--green` | `--green-on-tint` |
 | `.t-warning` | `--amber` | `--amber-on-tint` |
 | `.t-danger` | `--red` | `--red-on-tint` |
+| `.t-review` | `--purple` | `--purple-on-tint` |
 
 Tinted surfaces are always `color-mix(in srgb, var(--tone) var(--tint), transparent)` with text in
 `--tone-text`; the existing `--*-on-tint` tokens are already calibrated for 12–16% washes in every
@@ -1286,7 +1288,8 @@ Rules
   name and tooltip keep the full rollup. On narrow lists, dots give up space before the working
   count so a large family cannot hide ongoing work. List rollups count nested descendants; Board
   chips count direct children because Board cards remain flat. The list count remains visible
-  when collapsed. Available human-owned results use a neutral **Ready for Review** badge; questions
+  when collapsed. Available human-owned results use a purple **Ready for Review** badge and family
+  rollup; questions
   retain the amber **Answer Required** badge. A result is available for assessment independently of
   lifecycle and does not imply that the session or its campaign has finished.
   Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or
@@ -1422,7 +1425,8 @@ variant by default and offers side by side as a user preference (§6.3).
   `.surface` groups, each with its one-line description and a chevron), and a section opens under a
   `DetailBar` with "Back to Settings". `/settings` keeps no section, so wider layouts open the first
   one (§6.1 rule 2). The panel's head is the section title, its description and, when every setting
-  in it is kept in one place, "This Device" or "Your Account" as §11.3 meta; the title is hidden
+  in it is kept in one place, "This Device", "Your Account" or "Your Organization" (Storage, whose
+  policy an organization's owners and admins set) as §11.3 meta; the title is hidden
   where the current tab or the detail bar already names the section. A section with more to say in
   its head than an index row holds gives the head its own sentence (`panelDescription`, #3022); the
   head hides its description on phones, so the index line stays the one a phone reads.
@@ -1842,8 +1846,8 @@ alike.
 
 **Group.** `SettingsGroup` (also in `ui/SettingsRows.tsx`, exported for any screen) is a §5.1
 section: an optional head (the title in `--type-section`, written in Title Case with no
-`text-transform`; an optional scope label as §11.3 meta, such as "This Device", "Your Account", "This
-Window" or "This Machine"; at most one head action), an optional one-sentence description in
+`text-transform`; an optional scope label as §11.3 meta, such as "This Device", "Your Account", "Your
+Organization", "This Window" or "This Machine"; at most one head action), an optional one-sentence description in
 `--type-small` `--text-dim`, one `.surface` (`.settings-group-surface`) with hairlines between its
 rows, and an optional foot line, or a §5.5 disclosure where the group needs more than one line
 (Behavior's About Artifact Uploads, #3023). The surface is the size container for the 560px rule. A
@@ -1905,7 +1909,7 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | Radio | 16px circle; checked = accent ring plus dot. Used inside ChoiceRows. The marker (`.radio-mark`, `.checkbox-mark`) is the restyled native input itself, so focus, `:checked` and `:disabled` belong to what the user sees. |
 | Switch | 32×18 track (40×24 on touch), `--radius-pill`, `--control-outline` edge; on = `--accent` track. **For settings that apply instantly.** Label is the row title, and `aria-label` matches it. Never a button that says "On"/"Off". Built by `Switch` (`.ui-switch-control`, `SettingsRows.tsx`): `SwitchRow` renders it with the row's title and description inside, so the whole row is the target, named by its title and described by its description; standalone, beside other controls in a row, it is the bare track, named by its `label` or `aria-labelledby`, with the 44px coarse-pointer hit area. |
 | ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. **Selection follows the checked input**: the row's selected look and its `aria-checked` (or `:checked`) come from one value, so the look never disagrees with what is announced. Built by `ChoiceRows` (`.choice-rows`; `multiple` for checkboxes) over `ChoiceRow` (`.choice-row`, a `<label>` around a native radio or checkbox): the marker sits on the title's first line, the description is one ellipsized line on desktop and at most two on phones (full text in the tooltip and the accessible description), and rows are `--row-h` tall at least (40px, 48px coarse). A refused choice passes `error`: a §8.5 field error (`.field-error`) in the second line's place, the input `aria-invalid` and described by it. A row with one control of its own (Choose Another Account's Sign In) passes `action`: the row becomes a `div` holding its `<label>` (`.choice-row-main`) and the control (`.choice-row-action`) beside it, because a label may hold no second control, so pressing it never checks the row. An unavailable row keeps its size, reads faint, shows its reason in place of the description, and is `aria-disabled` rather than `disabled`, so arrows still reach it and announce the reason while selection is refused. `ChoiceList` (`.choice-list`) is the compact form: radio rows with a trailing value and no description, for pickers inside sheets. A list beside a detail (Import from Git's skills beside their files) passes `show`: the marker becomes a target of its own, the rest of the row is a button that shows the row without changing its marker, the fill follows the row shown (`aria-current`), and the meta moves onto the title's line so the description has the row's width. |
-| ChoiceTiles | Equal tiles for a few short presets whose second line is the reason to pick one: Snooze's presets, each with the time it resolves to (#2181). A `radiogroup` of `radio` buttons, three across and two on a phone, each at least `--row-h` (48px on a phone); the label (`--type-body-strong`) is the tile's name and its detail (`--type-small`, `--text-dim`) its description. Selected is the choice row's `--surface-selected` with a trailing 16px accent check; arrows move and select. An unavailable tile stays reachable, reads faint and says why in its detail. `onChange` reports whether a pointer chose the tile, so a tile that reveals a field (Custom…) moves focus there only for a pointer. Built by `ChoiceTiles` (`.choice-tiles`, `.choice-tile`). |
+| ChoiceTiles | Equal tiles for a few short presets whose second line is the reason to pick one: Snooze's presets, each with the time it resolves to (#2181). A `radiogroup` of `radio` buttons, three across and two on a phone, each at least `--row-h` (48px on a phone); the label (`--type-body-strong`) is the tile's name and its detail (`--type-small`, `--text-dim`) its description. Selected is the choice row's `--surface-selected` with a trailing 16px accent check; arrows move and select. An unavailable tile stays reachable, reads faint and says why in its detail. `onChange` reports whether a pointer chose the tile, so a tile that reveals a field (Custom…) moves focus there only for a pointer. In a form, `onEnter` makes Enter on a tile answer as on a native radio, and `onType` takes a typed character to the free-text choice: Snooze submits a preset on Enter, and typing on any tile chooses Custom… with the character in its field. Built by `ChoiceTiles` (`.choice-tiles`, `.choice-tile`). |
 | Search field | An `.input-affix` text field with a 14px `Search` prefix, always open and one width: focusing or typing never resizes it or moves what sits beside it. Its placeholder names what it searches and its tooltip what it matches. Sessions' (#2200, `SessionsSearchField`) ends the tab row's tools: 240px, 200px in the compact tier, and on a phone the app bar's Search mode, the bar's whole width beside Cancel (#2211); placeholder "Search sessions", tooltip "Searches titles, agents, projects and the latest message.", a `/` keycap suffix on fine pointers (§11.5, §16.2). Escape clears it; Enter moves focus to the first result. While it holds a query the tab counts follow the results (§10.1), the preview follows the first result when the selected session leaves them, and a query with none shows No Matches (§12.2). Files' Go to File (#2852, `FilesPanel.tsx`) is the Files tool's toolbar (§4.9): placeholder "Go to file", the Ctrl/⌘+P keycap suffix on fine pointers and a Clear button once it has text. It is a `combobox` over a `listbox` of the runner's bounded search, files only: dense rows (§5.2) with the name, its folder in `--type-small` `--text-dim` and the matched text underlined, git-changed and recently opened files first, then name matches before path matches, under a count line ("4 matches in wollipog", or "Showing the first matches only. Type more to narrow them." when the runner truncated). Up and Down move the active row, Enter opens it, Escape clears the field and then follows the panel's ladder. Ctrl/⌘+P opens the panel on Files when needed, never closes it, and focuses the field. An open file adds one more `.toolbar` row under it that never wraps (#2853): Go to Symbol, an `.input-affix` with a 14px `Locate` prefix that takes the row's remaining width (source only, never on rendered Markdown, whose Preview and Source `.seg.sm` leads the row; in a panel narrower than its 400px default those options show only their `Eye` and `Code` icons, keeping their names, and the placeholder shortens to "Symbol", so the field still shows it whole, #2913), then Attach to Prompt, Copy Link and the ⋯ File Actions menu as `.icon-btn.sm`. Enter submits; once a target is set, Clear Target is an `.icon-btn.sm` inside the field, so nothing moves. A symbol the file lacks is the field's `FieldError` under the row ("No symbol named “calculateTax” in this file."). File Actions lists Open in each editor found (or Open in Editor…, unavailable with its reason, "No editor found on Studio Mac."), Copy Path and, for a changed file, Show Changes in Review. Under the path a §11.3 meta line gives the language, line count, size and git state, and source renders as lines through the diff's highlighter in `.codeview`, which scrolls sideways only, with sticky line numbers. |
 | File picker | A dropzone row: icon, "Drop files here or", `.btn.sm` "Choose Folder…". Never the native "Choose Files / No file chosen". |
 | Number with unit | `.w-xs` input with the unit as a suffix inside the field ("30 s"). The field's end padding is the 12px inset, the unit as drawn and a 4px gap: `affixSuffixRef` on the unit measures it into `--affix-suffix-w` (2em until measured, #3185), because the unit is set in the row's type and the system face, not the field's. A number input with a unit has no spin buttons, whose room would cost a digit; the arrow keys still step it. |
@@ -1979,7 +1983,9 @@ above the bottom of the settings panel; on a phone its two actions share the bar
 the message. Settings › Orchestrator is its first screen (#3026): the editor's groups are the
 settings panel's own children so the bar is too, a field error at a setting (`NumberRow`'s or
 `SelectRow`'s `error`) blocks Save with "Fix N settings to save", and leaving the section or the
-page with a dirty draft asks **Keep Editing** or **Discard Changes** first (`useLeaveGuard`).
+page with a dirty draft asks **Keep Editing** or **Discard Changes** first (`useLeaveGuard`). Browser
+Back and Forward ask too (#3218): the editor's entry is put back while it asks, so Keep Editing loses
+no forward entry, and Discard Changes completes the move.
 
 An editor names its actions and states with four props, and changes nothing in `SaveBar` itself:
 
@@ -2187,6 +2193,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Session lifecycle | Stalled, Failed, Stop Failed | danger |
 | Session lifecycle | Stopped, Archived, Snoozed | neutral |
 | Session lifecycle | Completed | success |
+| Session result | Ready for Review | review (purple, no pulse) |
 | Machine / instance | Online | success |
 | Machine / instance | Connecting | info |
 | Machine / instance | Offline | neutral (hollow dot) |
@@ -2199,7 +2206,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Skill deployment | Error | danger |
 | Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger |
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
-| Session family rollup chip | "N Awaiting Input" when a child waits on the user: warning. Otherwise neutral. The settled design's "tints orange" is implemented as the warning tone; `--accent-2` keeps no UI role. |
+| Session family rollup chip | Needs Your Input (or "N Awaiting Input") when a child waits on the user: warning. Ready for Review: review (purple). Otherwise neutral. Input takes priority over review. |
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
 | Background Work turn group (`jobGroup`, the group's inline badge, #2858) | Waiting for 1 Job, Waiting for N Jobs: info · N of M Finished: neutral · Returning Result: info · Result Returned: success (inline) · Result Missing: warning · Missing Result Acknowledged: neutral · Unverified: neutral, hollow dot |
 | Session header, background work | "Background Work Lost": danger (was "Background Work Orphaned") |
@@ -2910,21 +2917,28 @@ action row.
   partial failure keeps what the server did not record and says "Could not dismiss {names}. Try
   again." in `--danger-text` with `role="alert"`. No confirmation: Show Recommendation in Skills undoes
   a dismissal.
-- **New order** is not a notice: when live activity would reorder the list, a neutral line above the
-  rows reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
-  It follows the notice slot on desktop/tablet; on phones the notice stays below the scroll area.
-  Nothing in the header or the tab row moves for it.
-- **Budget.** The slot, the order line and Reconnecting… are the list head. Stacked, the head takes
+- **Ordering.** Idle lists apply follow-up priorities automatically. Pointer movement, scrolling
+  and keyboard navigation defer ordering for 500 ms after the last interaction; a press, native
+  touch gesture or row menu holds until it ends, followed by the same settle interval. Focus and
+  a resting pointer do not renew it. No transient order line or Apply button shifts the rows.
+- **Budget.** The slot and Reconnecting… are the list head. Stacked, the head takes
   whole rows of the list's height (§6.3): the divider keeps its stored position, the rows start right
   under the head at the list's 8px pad, none is cut, and what the head leaves of its last row is space
-  under the last whole row, just above the divider. Nothing is reserved for the order line while it
-  is hidden: the rows move down when it appears, and no header or tab-row control does.
+  under the last whole row, just above the divider.
 
 **Request dock.** Pending permission requests and questions dock directly above the composer, in the
 notice slot, in attention priority order. The dock is the only amber surface for a request, and it
 follows these rules so it never crowds out the conversation it asks about:
 
-- **The transcript keeps at least half.** The dock caps at 40% of the chat column (the space between
+- **Mobile questions have two states** (#3308). In a full session, a question starts as the single
+  44px strip, including at the live tail. Expand Request opens full reading mode in one action;
+  Collapse Question returns directly to the strip and restores the transcript's reading position.
+  Returning to the tail does not reopen it. Draft answers and the current step survive both
+  transitions. This applies below 760px and in a coarse-pointer viewport below 1100px wide and at
+  most 760px tall, so
+  rotating a phone keeps the same interaction. Desktop compact cards and Sessions previews retain
+  their existing presentation.
+- **Other compact cards leave room for the transcript.** The dock caps at 40% of the chat column (the space between
   the session bar and the composer) on desktop and 50% on phones, and at 40% while the software
   keyboard is open. The card's head, title and footer stay fixed; only its body scrolls (a question
   card may scroll as a whole under its footer instead, below). The one exception is a question the
@@ -3122,7 +3136,7 @@ follows these rules so it never crowds out the conversation it asks about:
 - **Reading back shrinks it to a strip.** While the reader scrolls up away from the live tail (the
   follow-tail state is paused), the dock becomes one 44px `.dock-strip` on the card's warning
   surface: kind icon, the expanded request's title, its position ("1 of 3") and Expand, icon-only
-  below 760px with the name "Expand Request". Returning to the tail restores the card without moving
+  below 760px with the name "Expand Request". Except for mobile questions, returning to the tail restores the card without moving
   focus; activating the strip or Expand restores it and moves focus to the card's heading, and it stays
   expanded until the reader is back at the tail. A and D do nothing while the strip shows. A new
   request updates the strip's title and count and is announced once. The request never disappears,
@@ -3154,7 +3168,9 @@ follows these rules so it never crowds out the conversation it asks about:
   composer card's edge is its focus, and an invalid answer turns that edge `--red` with one field
   error under the field (§8.5); a failed submission is a compact danger notice above it. The footer
   is Back from question 2 and Next or **Submit Answers** as a BusyButton. Escape exits; no sentence
-  names a key.
+  names a key. A question taller than the available session pane scrolls with the composer as
+  a whole (#3256), so focusing the answer field never makes the beginning unreachable. The answer
+  panel is keyboard focusable for reading with the scrolling keys.
 - **Answer Mode has Show Context.** Show Context shrinks the panel to its head: the question on one
   line, a summary of the answer so far ("Nothing chosen yet" when empty, a polite live line) and
   Show Answer (`ChevronsUp`). Nothing resets: selections, draft and step are kept in the
@@ -3224,7 +3240,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name; and the 44px `+` New Session. In Board mode, Filters follows Search (see Board below). While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active. A confirmation opened from a sheet replaces it with Back (§7.5). |
 | Board | One column at a time (#2216). Under the app bar, the column tabs (§10.1) in the order Needs Input, Running, Review, Done, Queued, each with its plain count, Needs Input's a warning count badge while above zero; each tab is named "Running, 13" and is at least 44px wide. The row scrolls with the edge fade when the tabs do not fit. Below it, the chosen column's cards run the width inside the gutter and scroll on their own; an empty column says "No sessions are in Done." The Board opens on the first column with a card in that order and keeps its column, the opening one or the one chosen, while it stays open: a live update never moves it. Each tab is also a drop target for a card dragged with a mouse. The app bar's **Filters** (`FilterIcon`, `.icon-btn`) follows Search: named "Filters" or "Filters, 1 Active", `aria-pressed` and showing the plain number applied while any filter is set. It opens the Filters sheet: the result count ("Showing 10 of 29", which also describes the sheet), the Machine group and the Agent group of §10.1's rows (44px on touch), then Clear Filters after a separator while any is set. A choice applies at once and the sheet stays open, so the count answers it; the scrim, Escape or Tab closes it. While a filter is set, a strip under the Snoozed strip says what is filtered and how many remain ("Machine: Studio Mac. Agent: Codex. Showing 3 of 29.", a long name ending in an ellipsis, the count never) with **Clear Filters**, which hands focus to Filters. |
 | Toasts | Bottom center above the tab bar or composer, inside the safe area; one visible (§13.1). |
-| Request dock | Caps at 50% of the chat column (60% in a landscape column under 480px, #2828), 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). An explicitly expanded question or workflow decision takes the whole column instead, keyboard or not, with Collapse Question or Collapse Decision in its head line (#2786, #2874). A press on a docked card's button, row or label while a text field has focus (the card's own, or the composer) keeps that field focused until the click lands (`holdFieldFocus`, #2205, #2675), so the cap never changes between press and click and the tap lands where it was aimed. |
+| Request dock | Mobile session questions start as a 44px strip. Expand Request opens full reading mode directly; Collapse Question returns to the strip (#3308). Other compact cards cap at 50% of the chat column (60% in a landscape column under 480px, #2828), 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). An explicitly expanded question or workflow decision takes the whole column instead, keyboard or not, with Collapse Question or Collapse Decision in its head line (#2786, #2874). A press on a docked card's button, row or label while a text field has focus (the card's own, or the composer) keeps that field focused until the click lands (`holdFieldFocus`, #2205, #2675), so the cap never changes between press and click and the tap lands where it was aimed. |
 | Keyboard hints | Hidden (`pointer: coarse`). |
 | Live usage | The composer bar seats the context ring and the session cost before the mic as two borderless ghost `ComposerButton` triggers (§3.1, #2174), `--composer-ctl` tall, in `--type-small` and `--text-dim`, each opening its popover. Below 760px, or in a composer column narrower than 40rem (640px at the default text size) at any width, they leave the bar so it never wraps, and Model Settings opens with a Session Usage group at the top: Context Window (ring, percentage and "72K of 200K") and Session Cost. Each is a row named by its label that opens its trigger's breakdown in Model Settings' place, as a dialog pushes onto a sheet (§7.5): the title row names the breakdown and gains Back, Escape returns to the choices with focus on the row, and the next Escape closes Model Settings (#2447). Where Model Settings cannot open (an agent with nothing to configure, or a person who may not change it), they take their own right-aligned row above the bar instead, hidden while a phone composer is collapsed. Answer Mode, which replaces the bar, carries the two triggers beside Submit, or on their own row above its buttons in a narrow column. A session with no usage yet shows neither (#2166). |
 | Dictation | The mic is a ghost square `ComposerButton`, named "Dictate", with a 44px hit area on touch like every bar control. A tap starts dictation and the next tap stops it; a press held 400ms or longer is push-to-talk and stops on release; Enter or Space on the focused mic toggles it, and Escape in the composer or Send ends it. While it listens the mic wears the pressed toggle (§3.1) and is named "Stop Dictating", and the bar's left group becomes a `role="status"` strip: an 8px `--red` dot (still under reduced motion), "Listening…", an mm:ss timer, words not yet final in `--text-faint`, and "Tap the mic to stop" ("Release to stop" while held). The hint outranks the unsettled words: in a strip narrower than 20rem (a phone) the words stay out, and below 15rem the hint does too. The mic is disabled with the composer (#2154), and a composer that becomes blocked stops listening (#2193). |

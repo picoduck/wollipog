@@ -147,16 +147,22 @@ export class CampaignBudgetLedger {
       }
       const members = this.sql.prepare(`WITH RECURSIVE members(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN members m ON s.parent_session_id=m.id)
         SELECT s.id, s.status, MAX(s.cost_usd,s.usage_peak_cost_usd) AS cost,
-          MAX(s.usage_peak_tool_calls,COALESCE((SELECT tool_calls FROM session_tool_call_counts WHERE session_id=s.id),0)) AS tools,
+          MAX(s.usage_peak_tool_calls,COALESCE((SELECT tool_calls FROM session_tool_call_counts WHERE session_id=s.id),0)
+            +s.history_pruned_tool_calls) AS tools, s.history_pruned_tool_calls AS pruned_tools,
           s.cost_budget_usd AS cost_limit, s.max_tool_calls AS tool_limit FROM sessions s JOIN members m ON s.id=m.id`).all(rootId) as unknown as
-          Array<{ id: string; status: string; cost: number; tools: number; cost_limit: number | null; tool_limit: number | null }>;
+          Array<{ id: string; status: string; cost: number; tools: number; pruned_tools: number; cost_limit: number | null; tool_limit: number | null }>;
       for (const m of members) {
-        const count = (this.sql.prepare("SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) AS n FROM session_events WHERE session_id=? AND kind='tool_call'").get(m.id) as { n: number }).n;
+        // Tool calls whose events retention pruned are recorded, not missing history (#2777).
+        const count = (this.sql.prepare("SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) AS n FROM session_events WHERE session_id=? AND kind='tool_call'").get(m.id) as { n: number }).n
+          + m.pruned_tools;
         if (!old && authority.toolCalls !== undefined && m.tools > count) throw new Error("Campaign tool accounting is unavailable because preauthorization history is incomplete; protected admission is refused.");
         this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_members(session_id,root_id,cost,tools,cost_limit,tool_limit,user_cost_limit,user_tool_limit,active)
           VALUES (?,?,?,?,?,?,?,?,?)`).run(m.id,rootId,m.cost,m.tools,m.cost_limit,m.tool_limit,m.cost_limit,m.tool_limit,["completed","failed","stopped"].includes(m.status)?0:1);
         this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_tool_calls(session_id,tool_call_id)
           SELECT session_id,json_extract(payload,'$.toolCallId') FROM session_events WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId') IS NOT NULL`).run(m.id);
+        // Calls retention pruned are recorded by id, so they count once however their history returns.
+        this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_tool_calls(session_id,tool_call_id)
+          SELECT session_id,tool_call_id FROM session_pruned_tool_calls WHERE session_id=?`).run(m.id);
       }
       // All live members need finite reservations before authority is usable. Preserve tighter
       // existing session ceilings; otherwise divide free capacity, including a root share.

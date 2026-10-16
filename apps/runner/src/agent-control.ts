@@ -24,6 +24,7 @@ import {
   type AcpMcpStdioServer,
   type AgentContext,
   type AgentDefinition,
+  type RunnerProtocolCapability,
   type SessionLaunchSpec,
 } from "@wollipog/protocol";
 import { deriveControlPlaneHttpUrl } from "./control-plane-transport.js";
@@ -77,6 +78,11 @@ import {
   type AgentControlRelayRequest,
   type AgentControlRelayResponse,
 } from "./agent-control-relay.js";
+import {
+  AGENT_CONTROL_RELAY_FIFO_ENV,
+  agentControlFifoRelayBase,
+  sweepAgentControlFifoRelays,
+} from "./agent-control-fifo-relay.js";
 
 const TOKEN_PREFIX = "wollipoga_";
 const TOKEN_PATTERN = /^wollipoga_[A-Za-z0-9_-]{43}$/u;
@@ -89,6 +95,7 @@ const AGENT_CONTROL_ENV_KEYS = [
   "WOLLIPOG_SESSION_CREDENTIAL_READY_FILE",
   AGENT_CONTROL_RELAY_ENDPOINT_ENV,
   AGENT_CONTROL_RELAY_KEY_ENV,
+  AGENT_CONTROL_RELAY_FIFO_ENV,
   "WOLLIPOG_CLI",
   "WOLLIPOG_CLI_ARGS",
   ...PI_AGENT_CONTROL_ENV_KEYS,
@@ -454,6 +461,26 @@ function runnerOwnedClaudeSettings(value: string): boolean {
   return describeManagedSettings(value) != null;
 }
 
+/* Launch refusals when Wollipog (the control plane) is older than this runner. The sentence names what
+ * to update; the versions go to the runner log, never into the sentence (#3254). */
+export const ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG =
+  "An Orchestrator with independent provider permissions on this harness needs a newer version of Wollipog. " +
+  "Update Wollipog and try again.";
+export const INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG =
+  "Integration Isolation needs a newer version of Wollipog. Update Wollipog and try again.";
+
+function controlPlaneUpdateRequired(
+  sessionId: string,
+  controlPlaneProtocolVersion: number | null,
+  capability: RunnerProtocolCapability,
+  sentence: string,
+  log: (line: string) => void,
+): Error {
+  log(`agent control ${sessionId}: refused ${capability}; control plane protocol ${
+    controlPlaneProtocolVersion ?? "unknown"}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL[capability]}`);
+  return new Error(sentence);
+}
+
 /** Mutates only ephemeral runner-side launch state. The credential bytes never cross the runner
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
@@ -478,6 +505,9 @@ export function provisionAgentControl(
     executionIsolationMode?: "provider" | "bwrap" | "seatbelt" | "windows-job";
     /** Session-bound runner listener used when `provider` isolation cannot protect a bearer file. */
     providerRelayEndpoint?: string;
+    /** The same relay's FIFO channel directory, for a CLI inside a provider sandbox that refuses
+     * every socket (#3270). Absent where the runner did not establish one. */
+    providerRelayFifo?: string;
     /** Operator-configured Project Locations exposed read-only to an Orchestrator. */
     orchestratorProjectPaths?: string[];
   },
@@ -511,8 +541,8 @@ export function provisionAgentControl(
       throw new Error("independent provider permissions are supported only for the native Claude Code, Codex, and Pi Orchestrators on the host");
     }
     if (!runnerSupportsProtocol(config.controlPlaneProtocolVersion, additiveCapability)) {
-      throw new Error(`an Orchestrator with independent provider permissions requires a protocol-v${
-        RUNNER_CAPABILITY_MIN_PROTOCOL[additiveCapability]} control plane for this harness`);
+      throw controlPlaneUpdateRequired(spec.sessionId, config.controlPlaneProtocolVersion, additiveCapability,
+        ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG, log);
     }
     if (strictProjectIsolation) {
       throw new Error("Strict Project Isolation requires the Orchestrator preset permission mode");
@@ -525,8 +555,8 @@ export function provisionAgentControl(
   }
   if (integrationIsolation &&
       !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "orchestratorIntegrationIsolation")) {
-    throw new Error(`Integration Isolation requires a protocol-v${
-      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation} control plane`);
+    throw controlPlaneUpdateRequired(spec.sessionId, config.controlPlaneProtocolVersion, "orchestratorIntegrationIsolation",
+      INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG, log);
   }
   const orchestratorProjectPaths = [...new Set([
     ...(config.orchestratorProjectPaths ?? []),
@@ -731,6 +761,9 @@ export function provisionAgentControl(
   spec.env = {
     ...spec.env,
     ...transportEnv,
+    // Only the CLI reads it: the MCP adapter runs outside any provider sandbox and keeps the
+    // loopback relay, so its environment stays exactly `transportEnv`.
+    ...(memory && config.providerRelayFifo ? { [AGENT_CONTROL_RELAY_FIFO_ENV]: config.providerRelayFifo } : {}),
     WOLLIPOG_CLI: nativeWindows ? cli.command : cliPath,
     WOLLIPOG_CLI_ARGS: nativeWindows ? JSON.stringify(cli.args) : "[]",
   };
@@ -902,7 +935,7 @@ export function removeAgentControlFiles(sessionId: string, configDir: string): v
  * must not survive runner restarts as live-looking credential material. */
 export function sweepAgentControlFiles(configDir: string): number {
   if (!existsSync(configDir)) return 0;
-  let removed = 0;
+  let removed = sweepAgentControlFifoRelays(agentControlFifoRelayBase(configDir));
   for (const entry of readdirSync(configDir, { withFileTypes: true })) {
     if (!entry.isFile() ||
         !([".token", ".mcp.json", ".ready", ".cli", PI_AGENT_CONTROL_EXTENSION_SUFFIX].some((suffix) => entry.name.endsWith(suffix)) ||

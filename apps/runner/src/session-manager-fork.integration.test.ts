@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { PROTOCOL_VERSION, type AgentDefinition, type AgentDriverKind, type RunnerToControlPlane } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
@@ -236,6 +236,8 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     let racedPrompts = 0;
     let constructions = 0;
     let preparationWait: (() => Promise<void>) | undefined;
+    const claudeForkBoundaries: Array<{ sourceSessionId: string; cwd: string; protectedPath?: string }> = [];
+    const claudeIsolationState: Array<{ sessionId: string; cwd: string; protectedPath?: string }> = [];
     let manager!: SessionManager;
     const factory = (kind: AgentDriverKind, options: DriverOptions, _callbacks: DriverCallbacks): Driver => {
       constructions++;
@@ -248,9 +250,21 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       },
       newSession: async () => options.resumeId ?? "",
       agentSessionId: () => options.resumeId ?? null,
-      forkSession: async (_turn, cwd) => {
+      forkSession: async (_turn, cwd, forkOptions) => {
         forkCwd = cwd;
         forkSources.push(_turn);
+        if (kind === "claude-code") {
+          assert.equal(forkOptions?.isolation?.backend, "bwrap");
+          if (forkOptions?.isolation?.backend === "bwrap") {
+            assert.equal(forkOptions.isolation.protectedWorktree?.path,
+              process.platform === "linux" ? cwd : undefined);
+            claudeForkBoundaries.push({
+              sourceSessionId: options.resumeId ?? "",
+              cwd,
+              protectedPath: forkOptions.isolation.protectedWorktree?.path,
+            });
+          }
+        }
         manager.prompt(options.resumeId === "pi-source-session" ? "s_pi_source" : "s_source", "must not race the fork");
         return "thread-forked";
       },
@@ -270,7 +284,23 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     manager = new SessionManager(
       (message) => sent.push(message), () => {}, store, "runner", undefined, factory,
       undefined, 4, undefined, undefined, { agentLimits: {}, agentWeights: {} },
-      { mode: "bwrap", network: "inherit" }, async () => undefined,
+      { mode: "bwrap", network: "inherit" }, async (_policy, _context, _deps, state) => {
+        if (state?.driver !== "claude-code") return undefined;
+        claudeIsolationState.push({
+          sessionId: state.sessionId,
+          cwd: state.cwd,
+          protectedPath: state.protectedWorktree?.path,
+        });
+        return {
+          backend: "bwrap" as const,
+          command: "/usr/bin/bwrap", args: [], network: "inherit" as const,
+          ...(state.protectedWorktree ? { protectedWorktree: {
+            parent: dirname(state.protectedWorktree.path),
+            path: state.protectedWorktree.path,
+            gitWritableRoots: state.protectedWorktree.gitWritableRoots,
+          } } : {}),
+        };
+      },
       async (_policy, _context, _driver, _dataDir, source, target) => {
         stateTransfers.push({ source, target });
         if (target === "s_target") {
@@ -465,6 +495,16 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     assert.equal(claudeTarget.providerAuthBlock, undefined);
     assert.equal(claudeTarget.providerAuthRetryAttemptedRecoveryId, undefined);
     assert.equal(forkSources.at(-1), "claude-source-uuid");
+    assert.deepEqual(claudeForkBoundaries, [{
+      sourceSessionId: "claude-source-uuid",
+      cwd: claudeTarget.worktreePath,
+      protectedPath: process.platform === "linux" ? claudeTarget.worktreePath : undefined,
+    }]);
+    assert.deepEqual(claudeIsolationState.at(-1), {
+      sessionId: "s_claude_source",
+      cwd: claudeTarget.worktreePath,
+      protectedPath: process.platform === "linux" ? claudeTarget.worktreePath : undefined,
+    }, "Claude's target cwd uses the source partition until the fork transcript is cloned");
     assert.deepEqual(claudeFork.events?.map((event) => event.payload.kind), [
       "user_message",
       "user_message",
@@ -659,6 +699,96 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     await manager.delete("s_claude_target");
     await manager.delete("s_pi_target");
     assert.deepEqual(stateRemovals, ["s_clone_fail", "s_post_anchor_fail", "s_target", "s_claude_target", "s_pi_target"]);
+    const leaseInternals = manager as unknown as {
+      providerHomeLeases?: {
+        acquire(request: unknown, cancellation?: { isCurrent?: () => boolean }): Promise<void>;
+        acquireReference(request: unknown, cancellation?: { isCurrent?: () => boolean }): Promise<null>;
+      };
+    };
+    const originalLeases = leaseInternals.providerHomeLeases;
+    const forksBeforeLeaseFailure = forkSources.length;
+    const protectedLeasePath = (request: unknown) =>
+      (request as { isolation?: { protectedWorktree?: { path: string } } }).isolation?.protectedWorktree?.path;
+    // The temporary source driver takes a per-instance handle; the Claude target fork still takes a
+    // plain reference. Both draw from one acquisition sequence.
+    type LeaseStub = (request: unknown, cancellation?: { isCurrent?: () => boolean }) => Promise<void>;
+    const leaseStub = (acquire: LeaseStub) => ({
+      acquire,
+      acquireReference: async (request: unknown, cancellation?: { isCurrent?: () => boolean }) => {
+        await acquire(request, cancellation);
+        return null;
+      },
+    });
+    try {
+      const rejectedLeasePaths: Array<string | undefined> = [];
+      leaseInternals.providerHomeLeases = leaseStub(async (request, cancellation) => {
+          assert.equal(cancellation?.isCurrent?.(), true);
+          const path = protectedLeasePath(request);
+          if (process.platform === "linux") assert.ok(path);
+          else assert.equal(path, undefined, "protected worktree boundaries are Linux-only");
+          rejectedLeasePaths.push(path);
+          if (rejectedLeasePaths.length === 1) {
+            if (process.platform === "linux") {
+              assert.equal(path, sourceWorktree.path, "the temporary source driver acquires first");
+            }
+            return;
+          }
+          if (process.platform === "linux") {
+            assert.notEqual(path, sourceWorktree.path, "the regression must reach the target fork lease");
+          }
+          throw new Error("lease refused");
+      });
+      const refusedLease = await manager.forkConversation(
+        "s_claude_source", "s_claude_lease_refused", 2, "Lease Refused",
+      );
+      assert.equal(refusedLease.ok, false);
+      assert.match(refusedLease.error ?? "", /lease refused/);
+      assert.equal(rejectedLeasePaths.length, 2);
+      assert.equal(store.has("s_claude_lease_refused"), false);
+      assert.equal(forkSources.length, forksBeforeLeaseFailure,
+        "a rejected provider-home lease must stop before Claude forks its transcript");
+
+      let entered!: () => void;
+      let release!: () => void;
+      const enteredLease = new Promise<void>((resolve) => { entered = resolve; });
+      const leaseGate = new Promise<void>((resolve) => { release = resolve; });
+      const delayedLeasePaths: Array<string | undefined> = [];
+      leaseInternals.providerHomeLeases = leaseStub(async (request, cancellation) => {
+          assert.equal(cancellation?.isCurrent?.(), true);
+          const path = protectedLeasePath(request);
+          if (process.platform === "linux") assert.ok(path);
+          else assert.equal(path, undefined, "protected worktree boundaries are Linux-only");
+          delayedLeasePaths.push(path);
+          if (delayedLeasePaths.length === 1) {
+            return;
+          }
+          if (process.platform === "linux") {
+            assert.notEqual(path, sourceWorktree.path, "the delay must hold the target fork lease");
+          }
+          entered();
+          await leaseGate;
+      });
+      const cancelledTarget = "s_claude_lease_cancelled";
+      const pendingFork = manager.forkConversation("s_claude_source", cancelledTarget, 2, "Lease Cancelled");
+      await enteredLease;
+      assert.equal(delayedLeasePaths.length, 2);
+      assert.equal(forkSources.length, forksBeforeLeaseFailure,
+        "Claude must wait for the target lease before calling forkSession");
+      internals.deleted.add(cancelledTarget);
+      release();
+      try {
+        const cancelledLease = await pendingFork;
+        assert.equal(cancelledLease.ok, false);
+        assert.match(cancelledLease.error ?? "", /source session changed during provider-home acquisition/);
+        assert.equal(store.has(cancelledTarget), false);
+        assert.equal(forkSources.length, forksBeforeLeaseFailure,
+          "a cancelled lease wait must stop before Claude forks its transcript");
+      } finally {
+        internals.deleted.delete(cancelledTarget);
+      }
+    } finally {
+      leaseInternals.providerHomeLeases = originalLeases;
+    }
     manager.shutdownAll();
     git(repo, ["worktree", "remove", "--force", sourceWorktree.path]);
   } finally {

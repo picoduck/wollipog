@@ -17,6 +17,30 @@ import {
 const provider = { mode: "provider" as const, network: "inherit" as const };
 const bwrap = { mode: "bwrap" as const, network: "deny" as const };
 
+test("a protected worktree cannot silently use provider isolation", async () => {
+  await assert.rejects(() => resolveExecutionIsolation(provider, { kind: "native" }, { platform: "linux" }, {
+    driver: "acp", dataDir: "/state", env: {}, sessionId: "s1", cwd: "/work/trees/s1",
+    protectedWorktree: { path: "/work/trees/s1", gitWritableRoots: [], requiredReadOnlyPaths: [] },
+  }), /requires native Linux bubblewrap isolation/);
+});
+
+test("a missing managed Git registration mount fails isolation construction", async () => {
+  await assert.rejects(() => resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    platform: "linux", uid: () => 1000,
+    realpathNative: async (path) => path,
+    isRunnerOwnedEntryNative: async () => false,
+    resolveNative: async () => ({
+      path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+    }),
+  }, {
+    driver: "acp", dataDir: "/state", env: {}, sessionId: "s1", cwd: "/work/trees/s1",
+    readOnlyPaths: ["/work/trees/s1/.git"],
+    protectedWorktree: {
+      path: "/work/trees/s1", gitWritableRoots: [], requiredReadOnlyPaths: ["/work/trees/s1/.git"],
+    },
+  }), /writable Git administration roots are incomplete/);
+});
+
 test("native macOS and Windows policies resolve only their audited platform adapters", async () => {
   const state = {
     driver: "claude-code" as const,
@@ -387,6 +411,7 @@ test("strict sessions virtualize native harness transcript roots under runner da
     source: `/var/lib/wollipog/provider-state/pi/${providerStateKey("s-pi")}/sessions`,
     target: "/home/me/.pi/agent/sessions",
   });
+  assert.equal(pi?.backend === "bwrap" ? pi.claudePipeHelperDataDir : undefined, "/var/lib/wollipog");
 });
 
 test("provider state requires a non-empty session identity", () => {

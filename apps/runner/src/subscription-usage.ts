@@ -491,6 +491,9 @@ export interface CodexSubscriptionProbeResult {
 export interface SubscriptionUsageProbeAuthorization {
   cwd: string;
   isolation?: SpawnIsolation;
+  /** Called once the probe is over, with every process it started (none when it returned early).
+   * Releases the probe's provider-HOME reference only if each process tree is proven gone. */
+  settle?(children: readonly AgentProcess[]): Promise<void>;
 }
 
 interface CodexProbeDeps {
@@ -971,6 +974,8 @@ export class SubscriptionUsageManager {
     const lastProbeAt = this.lastProbeAt.get(source.sourceId) ?? 0;
     if (now - lastProbeAt < SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS) return;
     this.lastProbeAt.set(source.sourceId, now);
+    let authorization: SubscriptionUsageProbeAuthorization | undefined;
+    const probeChildren: AgentProcess[] = [];
     try {
       const env = this.options.resolveEnv(
         source.agent.id,
@@ -989,7 +994,7 @@ export class SubscriptionUsageManager {
         this.options.publish(notApplicable);
         return;
       }
-      const authorization = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
+      authorization = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
       if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
       if (this.shuttingDown || selectionGeneration !== this.selectionGeneration || !this.isCurrentSource(source)) return;
       const target = source.agent.installation?.targetIdentity;
@@ -1016,6 +1021,7 @@ export class SubscriptionUsageManager {
         {
           kill: this.options.killProbe ?? killTree,
           onSpawn: (child) => {
+            probeChildren.push(child);
             this.activeProbeChildren.add(child);
             if (this.shuttingDown) (this.options.killProbe ?? killTree)(child);
           },
@@ -1081,6 +1087,12 @@ export class SubscriptionUsageManager {
           };
       this.snapshots.set(source.sourceId, failed);
       this.options.publish(failed);
+    } finally {
+      try {
+        await authorization?.settle?.(probeChildren);
+      } catch (error) {
+        this.options.log?.(`subscription usage probe ownership settlement failed: ${errorText(error)}`);
+      }
     }
   }
 

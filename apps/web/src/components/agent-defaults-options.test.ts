@@ -64,3 +64,18 @@ test("repair drops a model the agent no longer offers along with its effort", ()
     { permissionMode: "approve-for-me" });
   assert.deepEqual(repairDraft(option(), { model: "luna", effort: "high" }), { model: "luna" });
 });
+
+test("a saved model that resolves differently on two machines says what it is on each (#3248)", () => {
+  const installation = (machineName: string, displayName: string) => ({
+    runnerId: machineName, machineName, online: true, effortLevels: [], permissionModes: [],
+    models: [{ id: "opus", displayName }],
+  });
+  const option = {
+    agentId: "claude-code", driver: "claude-code" as const, context: { kind: "native" as const }, name: "Claude Code",
+    installations: [installation("Laptop", "Opus 5.5"), installation("Desktop", "Opus 5")],
+    preference: { model: "opus" }, compatibleInstallations: 2,
+  };
+  assert.equal(agentDefaultsDescription(option), "Opus 5.5. “opus” is Opus 5 on Desktop and Opus 5.5 on Laptop.");
+  option.installations[1] = installation("Desktop", "Opus 5.5");
+  assert.equal(agentDefaultsDescription(option), "Opus 5.5", "one resolution adds nothing");
+});

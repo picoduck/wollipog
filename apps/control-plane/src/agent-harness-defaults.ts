@@ -9,7 +9,13 @@ import type {
   AgentModel,
   UpdateAgentHarnessDefaultRequest,
 } from "@wollipog/protocol";
-import { agentHarnessIdentityKey, installationSupportsDefault, normalizeAgentHarnessIdentity } from "@wollipog/protocol";
+import {
+  agentHarnessIdentityKey,
+  builtInAgentHarnessName,
+  canonicalAgentHarnessIdentity,
+  installationSupportsDefault,
+  normalizeAgentHarnessIdentity,
+} from "@wollipog/protocol";
 export { agentHarnessIdentityKey, installationSupportsDefault } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -67,8 +73,11 @@ export class AgentHarnessDefaultsSettings {
     for (const runner of this.db.listRunnersForPrincipal(principal)) {
       for (const agent of runner.agents) {
         if (agent.available !== true) continue;
-        const identity = agentHarnessIdentityFor(agent);
+        // One row per harness, not per Machine-local agent id, so one saved default applies on
+        // every Machine (#3247).
+        const identity = canonicalAgentHarnessIdentity(agentHarnessIdentityFor(agent));
         const key = agentHarnessIdentityKey(identity);
+        const builtInName = builtInAgentHarnessName(identity.driver);
         const installation: AgentHarnessDefaultInstallation = {
           runnerId: runner.runnerId,
           machineName: runner.displayName || runner.hostname || runner.runnerId,
@@ -80,12 +89,12 @@ export class AgentHarnessDefaultsSettings {
         const current = options.get(key);
         if (current) {
           current.installations.push(installation);
-          if (agent.name.localeCompare(current.name) < 0) current.name = agent.name;
+          if (!builtInName && agent.name.localeCompare(current.name) < 0) current.name = agent.name;
         } else {
           const preference = saved.get(key)?.config;
           options.set(key, {
             ...identity,
-            name: agent.name,
+            name: builtInName ?? agent.name,
             installations: [installation],
             ...(preference ? { preference } : {}),
             compatibleInstallations: 0,
@@ -100,7 +109,7 @@ export class AgentHarnessDefaultsSettings {
         agentId: preference.agentId,
         driver: preference.driver,
         context: preference.context,
-        name: preference.agentId,
+        name: builtInAgentHarnessName(preference.driver) ?? preference.agentId,
         installations: [],
         preference: preference.config,
         compatibleInstallations: 0,
@@ -134,14 +143,14 @@ export class AgentHarnessDefaultsSettings {
         "That model, effort, and permission combination is not supported by a current Agent Harness installation.",
       );
     }
-    this.db.setAgentHarnessDefault(principal.userId, identity, config, now);
+    this.db.setAgentHarnessDefault(principal.userId, canonicalAgentHarnessIdentity(identity), config, now);
     return this.view(principal);
   }
 
   delete(principal: HumanPrincipal, request: unknown): AgentHarnessDefaultsView {
     const identity = parseAgentHarnessIdentity(request);
     if (!identity) throw new AgentHarnessDefaultInputError("a valid Agent Harness identity is required");
-    this.db.deleteAgentHarnessDefault(principal.userId, identity);
+    this.db.deleteAgentHarnessDefault(principal.userId, canonicalAgentHarnessIdentity(identity));
     return this.view(principal);
   }
 }

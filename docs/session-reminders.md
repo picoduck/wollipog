@@ -8,7 +8,9 @@ pause, restart, archive, or otherwise change the runtime or lifecycle state of a
   to. Custom… reveals one **Snooze Until** field that takes phrases ("in 2 hours", "tomorrow 3pm")
   and named dates ("dec 10 9am", or the ISO "2026-12-10 09:00"); a numeric date such as "12/10/26"
   is refused at the field with both of its readings, because its day and month order is a locale's
-  guess. One line under the form says when the session returns.
+  guess. One line under the form says when the session returns. The keyboard alone is enough: Enter
+  on a preset tile snoozes, Enter on Custom… goes to its field, typing on any tile chooses Custom…
+  with what was typed, and Enter in the field snoozes.
 - **Return Early If It Needs Me** is the wake policy. Checked (the default) is `until_activity`:
   the session wakes at its scheduled instant or sooner for a qualifying agent response, approval,
   question, failure, or managed background result. Unchecked is `regardless`: it wakes only on

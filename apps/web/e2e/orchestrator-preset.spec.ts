@@ -104,12 +104,12 @@ for (const theme of ["light", "dark"] as const) {
       await expect(liveChildLimit).toHaveValue("4");
       await liveChildLimit.fill("7");
       await dialog.getByRole("button", { name: /Child Harness: Automatic/ }).click();
-      await dialog.getByRole("option", { name: /Codex · Codex App Server · Native/ }).click();
+      await dialog.getByRole("option", { name: /Codex App Server · Native/ }).click();
       await dialog.getByRole("button", { name: /Child Model: Automatic/ }).click();
       await dialog.getByRole("option", { name: /GPT-5.6 Sol/ }).click();
       await dialog.getByRole("button", { name: /Child Effort: Automatic/ }).click();
       await dialog.getByRole("option", { name: /High/ }).click();
-      await dialog.getByRole("button", { name: /Child Harness: Codex · Codex App Server · Native/ }).scrollIntoViewIfNeeded();
+      await dialog.getByRole("button", { name: /Child Harness: Codex App Server · Native/ }).scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath("preset-harness-selected.png") });
       const delegatedControl = dialog.getByRole("button", { name: /Descendant Requests: Questions and Approvals/ });
       await expect(delegatedControl).toBeVisible();

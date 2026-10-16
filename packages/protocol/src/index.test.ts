@@ -49,6 +49,9 @@ import {
   runnerCapabilityRequirement,
   runnerCapabilityRequirementDetails,
   runnerCapabilityRequirementError,
+  orchestratorChildHarnessRequirement,
+  orchestratorExecutionPolicyRequirement,
+  orchestratorIntegrationIsolationRequirement,
   runnerSupportsProtocol,
   BOARD_COLUMNS,
   archiveRequiresStop,
@@ -1118,6 +1121,22 @@ test("runner capability requirements read as user copy and keep versions out of 
     requiredRunnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.directoryListing,
     runnerProtocolVersion: null,
   });
+});
+
+test("Orchestrator start refusals add the setting that starts the session now (#3219)", () => {
+  const cases = [
+    [orchestratorChildHarnessRequirement, "orchestratorChildHarnessPolicy",
+      "This machine needs a newer runner for a fixed child harness. Update and restart the runner. To start now, choose Automatic for Child Harness."],
+    [orchestratorExecutionPolicyRequirement, "orchestratorExecutionPolicy",
+      "This machine needs a newer runner for an Orchestrator without strict project isolation. Update and restart the runner. To start now, turn on Strict Project Isolation."],
+    [orchestratorIntegrationIsolationRequirement, "orchestratorIntegrationIsolation",
+      "This machine needs a newer runner for integration isolation. Update and restart the runner. To start now, turn off Integration Isolation."],
+  ] as const;
+  for (const [requirement, capability, error] of cases) {
+    const floor = RUNNER_CAPABILITY_MIN_PROTOCOL[capability];
+    assert.deepEqual(requirement(floor - 1), { error, requiredRunnerProtocolVersion: floor, runnerProtocolVersion: floor - 1 });
+    assert.deepEqual(requirement(undefined), { error, requiredRunnerProtocolVersion: floor, runnerProtocolVersion: null });
+  }
 });
 
 test("provider-authentication receipts are projected for the peer only at send time", () => {

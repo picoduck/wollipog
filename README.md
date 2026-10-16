@@ -281,6 +281,7 @@ skills/           Built-in agent skills shipped with releases
 - [Agent Skills](docs/agent-skills.md)
 - [Automations](docs/automations.md)
 - [Transcript Exports](docs/transcript-exports.md)
+- [Archived-History Retention](docs/archived-history-retention.md)
 - [Releasing](docs/RELEASING.md)
 
 ## Contributing

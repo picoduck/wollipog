@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { cpus, release, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
+import { runFocusedValidation, combineFailures } from "./successor-load-lifecycle.mjs";
 
 // Opt-in #2378 validation: two owned CPU + 16 KiB write/delete workers remain active
 // during five consecutive executions of the exact real-process election fixture.
@@ -12,7 +12,6 @@ const root = mkdtempSync(join(tmpdir(), "wollipog-successor-election-load-"));
 const repo = fileURLToPath(new URL("../../..", import.meta.url));
 const counters = new Int32Array(new SharedArrayBuffer(12));
 const workers = [];
-let child;
 let workerFailure;
 let terminating = false;
 const controller = new AbortController();
@@ -30,49 +29,17 @@ async function bounded(promise, ms, label) {
     ]);
   } finally { clearTimeout(timer); }
 }
-async function killOwnedTree(current) {
-  if (current.exitCode !== null || current.signalCode !== null || !current.pid) return;
-  if (process.platform === "win32") {
-    await new Promise((resolve, reject) => execFile("taskkill", ["/PID", String(current.pid), "/T", "/F"], { timeout: 5_000 }, (error) => {
-      if (!error || error.code === 128) resolve(); else reject(new Error("owned validation tree termination failed"));
-    }));
-  } else {
-    try { process.kill(-current.pid, "SIGKILL"); } catch { current.kill("SIGKILL"); }
-  }
-}
 async function run() {
   healthy();
-  let output = "";
-  const current = spawn(process.execPath, [
-    "--import", "tsx", "--test", "--test-reporter=tap", "--test-timeout=35000",
-    "--test-name-pattern=^the exclusive successor elects one winner across real runner processes$",
-    "apps/runner/src/provider-home-lease.test.ts",
-  ], { cwd: repo, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "inherit"] });
-  child = current;
-  const closed = new Promise((resolve, reject) => {
-    current.once("error", reject);
-    current.once("close", (code, signal) => {
-      child = undefined;
-      if (code === 0) resolve(); else reject(new Error(`focused validation exit=${code} signal=${signal}`));
-    });
+  await runFocusedValidation({
+    cwd: repo,
+    args: [
+      "--import", "tsx", "--test", "--test-reporter=tap", "--test-timeout=35000",
+      "--test-name-pattern=^the exclusive successor elects one winner across real runner processes$",
+      "apps/runner/src/provider-home-lease.test.ts",
+    ],
+    onOutput: (chunk) => process.stdout.write(chunk),
   });
-  // Attach rejection handling before cancellation can initiate cleanup.
-  void closed.catch(() => {});
-  current.stdout.on("data", (chunk) => { output += chunk; process.stdout.write(chunk); });
-  // Let the current bounded fixture finish its owned-tree cleanup on cancellation.
-  // Killing its test runner immediately would strand detached contenders.
-  try { await bounded(closed, 45_000, "focused validation exceeded its outer deadline"); }
-  finally {
-    if (child === current) {
-      await killOwnedTree(current);
-      await bounded(closed.catch(() => {}), 5_000, "owned validation tree did not close");
-    }
-  }
-  const lines = output.split(/\r?\n/);
-  assert.ok(lines.some((line) => /^ok \d+ - the exclusive successor elects one winner across real runner processes$/.test(line)), "the exact focused test must run");
-  for (const expected of ["# tests 1", "# pass 1", "# fail 0", "# cancelled 0", "# skipped 0"]) {
-    assert.ok(lines.includes(expected), `unexpected focused result: ${expected}`);
-  }
 }
 const workerSource = `
   const { workerData, parentPort } = require("node:worker_threads");
@@ -87,6 +54,7 @@ const workerSource = `
     if (Atomics.add(counters, workerData.index + 1, 1) === 0) parentPort.postMessage("ready");
   }
 `;
+let failure;
 try {
   console.log(`Successor election load: ${process.platform} ${release()} ${process.arch}; Node ${process.version}; ${cpus().length} CPUs; two CPU + 16 KiB write/delete workers; five runs`);
   for (let index = 0; index < 2; index++) {
@@ -109,10 +77,18 @@ try {
     for (let index = 1; index <= 2; index++) assert.ok(counters[index] > before[index], `load worker ${index - 1} made no progress`);
     console.log(`Load iterations: ${[...counters].slice(1).join(", ")}`);
   }
-} finally {
-  terminating = true;
-  Atomics.store(counters, 0, 1);
-  if (child) await killOwnedTree(child);
+} catch (error) { failure = error; }
+terminating = true;
+Atomics.store(counters, 0, 1);
+let workersClosed = false;
+try {
   await bounded(Promise.all(workers.map((worker) => worker.terminate())), 5_000, "load worker cleanup timed out");
-  rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  workersClosed = true;
+} catch (error) { failure = combineFailures(failure, error); }
+if (workersClosed) {
+  try { rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); }
+  catch (error) { failure = combineFailures(failure, error); }
+} else {
+  failure = combineFailures(failure, new Error(`load worker state retained at ${root}`));
 }
+if (failure) throw failure;

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, matchesGlob, normalize, parse as parsePath, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
@@ -7,6 +7,10 @@ const MAX_COMMAND_LENGTH = 32_768;
 const MAX_GLOB_METACHARACTERS = 64;
 const MAX_GLOB_BRACE_GROUPS = 8;
 const MAX_ENV_SPLIT_STRING_EXPANSIONS = 8;
+const MAX_ENV_ASSIGNMENT_READINGS = 32;
+const MAX_CLASSIFICATION_TOKEN_VISITS = 262_144;
+const MAX_DESTRUCTIVE_OPERAND_VISITS = 4_096;
+const MAX_CWD_READINGS = 8;
 const MAX_EMPTY_COMMAND_EXPANSIONS = 16;
 export const MANAGED_WORKTREE_REFUSAL =
   "Wollipog protects this runner-owned worktree. Use discard_worktree so retirement can wait for the provider to exit and then apply the managed safety checks.";
@@ -217,9 +221,10 @@ function expansionFields(
   value: string,
   cwd: string,
   environment: ReadonlyMap<string, string>,
+  separatorsOverride?: Set<string>,
 ): string[] | null {
   if (!text.includes("\0")) return [value];
-  const separators = fieldSeparators(cwd, environment);
+  const separators = separatorsOverride ?? fieldSeparators(cwd, environment);
   if (separators === null) return null;
   const fields: string[] = [];
   let current = "";
@@ -558,7 +563,13 @@ function powershellMoveParameter(
 }
 
 function executableName(value: string): string {
-  return value.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase().replace(/\.exe$/u, "") ?? "";
+  // zsh resolves a command-position `=name` to that command's executable path. Other shells may
+  // treat it literally, so judging the named command is the protective reading.
+  const expanded = /^=([^/=]+)$/u.exec(value)?.[1];
+  // `cd` and `pushd` are shell builtins: zsh cannot resolve them with `=`, and treating them as
+  // successful directory changes would make later relative operands resolve from the wrong cwd.
+  const command = expanded && !["cd", "pushd"].includes(expanded.toLowerCase()) ? expanded : value;
+  return command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase().replace(/\.exe$/u, "") ?? "";
 }
 
 /**
@@ -591,6 +602,15 @@ function commandWordAt(
 interface ParsedCommand {
   words: ShellToken[];
   executable: string;
+  /** A child-only directory change from `env -C`; shell-expanded words still use the outer cwd. */
+  executionCwd: string | null;
+  /** External wrappers cannot run a `cd` builtin in the provider's parent shell. */
+  parentShellBuiltin: boolean;
+  /** Nested sh and `builtin --` may disagree across shell dialects about a directory change. */
+  builtinWrapper: boolean;
+  builtinOptionTerminator: boolean;
+  /** The command an unquoted `env` assignment expansion could instead introduce. */
+  alternateReadings: Array<{ command: ParsedCommand; environment: Map<string, string> }>;
   /**
    * The environment the command RUNS in: its prefix and `env` assignments, which its own words were
    * expanded before and which do not outlive it. A nested shell (`sh -c`, `eval`) inherits it.
@@ -598,13 +618,45 @@ interface ParsedCommand {
   childEnvironment: Map<string, string>;
 }
 
+interface EnvSplitBudget { remaining: number; remainingTokens: number; remainingDestructive: number }
+
+function spendTokenVisits(budget: EnvSplitBudget, count: number): void {
+  budget.remainingTokens -= count;
+  if (budget.remainingTokens < 0) {
+    throw new UnclassifiableCommandError("command classification token-work bound exceeded");
+  }
+}
+
+function spendDestructiveVisits(budget: EnvSplitBudget, count: number): void {
+  budget.remainingDestructive -= count;
+  if (budget.remainingDestructive < 0) {
+    throw new UnclassifiableCommandError("destructive operand-work bound exceeded");
+  }
+}
+
+/** Include commands introduced by an unquoted env assignment expansion. */
+function parsedExecutables(command: ParsedCommand | null): string[] {
+  return command === null ? [] : [command.executable,
+    ...command.alternateReadings.flatMap(({ command: alternative }) => parsedExecutables(alternative))];
+}
+
 function commandWords(
   tokens: ShellToken[],
   cwd: string,
   environment: Map<string, string>,
+  envSplitBudget: EnvSplitBudget = {
+    remaining: MAX_ENV_ASSIGNMENT_READINGS, remainingTokens: MAX_CLASSIFICATION_TOKEN_VISITS,
+    remainingDestructive: MAX_DESTRUCTIVE_OPERAND_VISITS,
+  },
 ): ParsedCommand | null {
+  spendTokenVisits(envSplitBudget, tokens.length);
   let index = 0;
   let splitStringExpansions = 0;
+  let executionCwd: string | null = null;
+  let parentShellBuiltin = true;
+  let builtinWrapper = false;
+  let builtinOptionTerminator = false;
+  const alternateReadings: ParsedCommand["alternateReadings"] = [];
   // Each `env --split-string` value is re-parsed in place, so a chain of them re-reads its own
   // payload once per level. The command-length cap alone leaves that quadratic; bound the chain
   // explicitly and fail closed past it rather than parsing on.
@@ -639,7 +691,9 @@ function commandWords(
   const childEnvironment = new Map(environment);
   const assigned: string[] = [];
   for (;;) {
-    const assignment = plainWordText(tokens[index]);
+    // shell-quote represents `A=*` and `A=?` as glob tokens, but shell assignment words do not
+    // perform pathname expansion. They still precede the command being run.
+    const assignment = wordText(tokens[index]);
     if (assignment === null || !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(assignment)) break;
     const equals = assignment.indexOf("=");
     const name = assignment.slice(0, equals);
@@ -662,7 +716,26 @@ function commandWords(
   }
   while (executable) {
     const name = executableName(executable);
+    // A path-qualified executable runs in a child process, even when its basename is `cd` or
+    // `command`. Only a shell builtin can change the provider shell's directory for later segments.
+    if (executable.includes("/") || executable.includes("\\")) parentShellBuiltin = false;
+    if (name === "builtin") {
+      // `builtin cd` runs in the current shell. An equals-expanded or path-qualified command
+      // instead names an external executable, so it cannot change the parent's directory.
+      if (executable.startsWith("=")) parentShellBuiltin = false;
+      builtinWrapper = true;
+      index += 1;
+      // Bash accepts `builtin -- cd`, while zsh rejects `--` as a builtin name. Preserve the
+      // Bash reading, then leave the later cwd unplaceable when those shell readings disagree.
+      if (word(tokens[index], cwd, environment) === "--") {
+        builtinOptionTerminator = true;
+        index += 1;
+      }
+      executable = commandWordAt(tokens, index, cwd, environment);
+      continue;
+    }
     if (name === "sudo") {
+      parentShellBuiltin = false;
       index += 1;
       while (true) {
         const option = word(tokens[index], cwd, environment);
@@ -678,30 +751,87 @@ function commandWords(
       continue;
     }
     if (["command", "nohup", "setsid"].includes(name)) {
+      // `command cd` can run the shell builtin, but zsh's `=command` resolves only an external
+      // executable (or fails), so it cannot change the provider shell's directory.
+      if (name !== "command" || executable.startsWith("=")) parentShellBuiltin = false;
       index += 1;
       while (typeof word(tokens[index], cwd, environment) === "string" &&
-          word(tokens[index], cwd, environment)!.startsWith("-")) index += 1;
+          word(tokens[index], cwd, environment)!.startsWith("-")) {
+        const option = word(tokens[index], cwd, environment)!;
+        // `command -v` and `-V` only describe names; they never run `cd` in this shell.
+        if (name === "command" && /^-[^-]*[vV]/u.test(option)) parentShellBuiltin = false;
+        index += 1;
+      }
       executable = commandWordAt(tokens, index, cwd, environment);
       continue;
     }
     if (name === "env") {
+      parentShellBuiltin = false;
       index += 1;
-      while (plainWordText(tokens[index]) !== null) {
+      while (wordText(tokens[index]) !== null) {
         // `env` reads its ARGV, so an assignment that arrived through an expansion
         // (`env "$ASSIGNMENT" sh -c ...`) is an assignment to it like any other.
-        const raw = plainWordText(tokens[index])!;
+        const raw = wordText(tokens[index])!;
         const resolved = word(tokens[index], cwd, environment);
         const value = resolved ?? raw;
+        // An unquoted option-looking expansion can supply both an `env` option and the
+        // command after it. Keep that split reading alongside the whole-word one.
+        if (raw.includes("\0") && value.startsWith("-")) {
+          const fields = expansionFields(raw, value, cwd, environment);
+          if (fields === null) throw new UnclassifiableCommandError("env option has unknown field splitting");
+          if (fields.length > 1) {
+            if (envSplitBudget.remaining-- <= 0) {
+              throw new UnclassifiableCommandError("env option readings exceeded their bound");
+            }
+            const splitTokens = tokens.slice();
+            splitTokens.splice(index, 1, ...fields);
+            const splitEnvironment = new Map(environment);
+            const splitCommand = commandWords(splitTokens, cwd, splitEnvironment, envSplitBudget);
+            if (splitCommand) alternateReadings.push({ command: splitCommand, environment: splitEnvironment });
+          }
+        }
         // A variable may be quoted (one argv word) or unquoted (several fields), and
-        // shell-quote does not preserve which. The new, broader assignment rule could
-        // swallow a command in the split reading. Existing shell-identifier assignments
-        // and ordinary env arguments keep their previous classification.
-        const newlyRecognizedAssignment = !value.startsWith("-") && /^[^=\0]*=/u.test(value) &&
-          !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
-        if (newlyRecognizedAssignment && raw.includes("\0")) {
-          const fields = resolved === null ? null : expansionFields(raw, resolved, cwd, environment);
-          if (fields === null || fields.length !== 1 || fields[0] !== resolved) {
-            throw new UnclassifiableCommandError("env argument has ambiguous field splitting");
+        // shell-quote does not preserve which. A split assignment can put a command after its
+        // first field even when the assignment name is a valid shell identifier. Keep both
+        // readings, so ordinary quoted assignments remain available unless their split reading
+        // would actually reach a protected target.
+        const envAssignment = !value.startsWith("-") && /^[^=\0]*=/u.test(value);
+        if (envAssignment && raw.includes("\0") && resolved === null &&
+            !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)) {
+          // Preserve the existing fail-closed reading for unresolved non-identifier assignments.
+          throw new UnclassifiableCommandError("env assignment has unresolved field splitting");
+        }
+        if (envAssignment && raw.includes("\0")) {
+          // An unresolved suffix can disappear in the real shell. Retain the fields made by
+          // known parts rather than letting an unknown reference hide a known command.
+          const partial = resolved ?? (raw.includes("`") ? null
+            : expandReferences(raw, cwd, environment).replaceAll(UNRESOLVED_REFERENCE, ""));
+          if (partial !== null) {
+            const fields = expansionFields(raw, partial, cwd, environment);
+            if (fields === null) throw new UnclassifiableCommandError("env argument has unknown field splitting");
+            const ifs = lookup("IFS", cwd, environment);
+            // For operands, treating a custom IFS as additional separators is conservative. A
+            // command word needs the exact IFS reading too: an extra whitespace split can move
+            // the command behind a harmless field and hide its real role.
+            const exactFields = ifs == null || ifs.includes("\0") || ifs.includes("`")
+              ? null : expansionFields(raw, partial, cwd, environment, new Set(ifs));
+            const seen = new Set<string>();
+            for (const reading of [fields, exactFields]) {
+              if (reading === null || (reading.length === 1 && reading[0] === partial)) continue;
+              const key = JSON.stringify(reading);
+              if (seen.has(key)) continue;
+              seen.add(key);
+              // Re-parsing the entire segment for each candidate can branch in different orders.
+              // Share one budget across every branch, rather than limiting only recursive depth.
+              if (envSplitBudget.remaining-- <= 0) {
+                throw new UnclassifiableCommandError("env assignment readings exceeded their bound");
+              }
+              const splitTokens = tokens.slice();
+              splitTokens.splice(index, 1, ...reading);
+              const splitEnvironment = new Map(environment);
+              const splitCommand = commandWords(splitTokens, cwd, splitEnvironment, envSplitBudget);
+              if (splitCommand) alternateReadings.push({ command: splitCommand, environment: splitEnvironment });
+            }
           }
         }
         // Like a prefix assignment, this builds the environment of the command `env` runs; it is
@@ -709,7 +839,7 @@ function commandWords(
         // `env` accepts even an empty name, and otherwise any name without `=` or NUL;
         // the shell prefix above has the stricter identifier rule.
         // Keep option-looking words out: long options can carry their own `=` values.
-        if (!value.startsWith("-") && /^[^=\0]*=/u.test(value)) {
+        if (envAssignment) {
           const equals = value.indexOf("=");
           childEnvironment.set(value.slice(0, equals), value.slice(equals + 1));
           index += 1;
@@ -732,8 +862,33 @@ function commandWords(
           tokens.splice(index, 2, ...(script == null ? [] : expandSplitString(script)));
           continue;
         }
-        const valued = cluster ?? longOption(value, "--unset", 3) ?? longOption(value, "--chdir", 3);
+        const chdir = cluster?.option === "C" ? cluster : longOption(value, "--chdir", 3);
+        const valued = cluster ?? longOption(value, "--unset", 3) ?? chdir;
         if (valued) {
+          if (chdir) {
+            const directoryToken = tokens[index + 1];
+            const rawDirectory = chdir.attached == null ? wordText(directoryToken) : null;
+            const directory = chdir.attached ?? word(directoryToken, cwd, environment);
+            if (rawDirectory?.includes("\0") && directory != null) {
+              const fields = expansionFields(rawDirectory, directory, cwd, environment);
+              if (fields === null) throw new UnclassifiableCommandError("env chdir has unknown field splitting");
+              if (fields.length > 1) {
+                if (envSplitBudget.remaining-- <= 0) {
+                  throw new UnclassifiableCommandError("env chdir readings exceeded their bound");
+                }
+                const splitTokens = tokens.slice();
+                splitTokens.splice(index + 1, 1, ...fields);
+                const splitEnvironment = new Map(environment);
+                const splitCommand = commandWords(splitTokens, cwd, splitEnvironment, envSplitBudget);
+                if (splitCommand) alternateReadings.push({ command: splitCommand, environment: splitEnvironment });
+              }
+            }
+            const expandedDirectory = directory != null && chdir.attached == null &&
+                expandsLeadingTilde(directoryToken) && directory.startsWith("~")
+              ? expandOperandHome(directory, cwd, environment) : directory;
+            executionCwd = expandedDirectory == null ? UNKNOWN_CWD
+              : resolvedPath(expandedDirectory, executionCwd ?? cwd) ?? UNKNOWN_CWD;
+          }
           index += valued.attached == null ? 2 : 1;
           continue;
         }
@@ -744,6 +899,7 @@ function commandWords(
       continue;
     }
     if (name === "nice") {
+      parentShellBuiltin = false;
       index += 1;
       const option = word(tokens[index], cwd, environment);
       if (option === "-n" || option === "--adjustment") index += 2;
@@ -752,6 +908,7 @@ function commandWords(
       continue;
     }
     if (name === "timeout") {
+      parentShellBuiltin = false;
       index += 1;
       while (true) {
         const option = word(tokens[index], cwd, environment);
@@ -765,8 +922,9 @@ function commandWords(
     }
     break;
   }
-  if (!executable) return null;
-  return { words: tokens.slice(index + 1), executable: executableName(executable), childEnvironment };
+  if (!executable && alternateReadings.length === 0) return null;
+  return { words: tokens.slice(index + 1), executable: executableName(executable ?? ""), childEnvironment,
+    alternateReadings, executionCwd, parentShellBuiltin, builtinWrapper, builtinOptionTerminator };
 }
 
 /** The most severe of several verdicts: a protected target outranks one that cannot be placed. */
@@ -805,6 +963,43 @@ function removerVerdicts(
     if (word(token, cwd, environment) === "--") optionsEnded = true;
     return verdict;
   });
+}
+
+/** `Remove-Item` binds Path/LiteralPath to String[]; commas can hide a later protected item. */
+function powershellRemoverVerdict(
+  words: readonly ShellToken[],
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+  protections: readonly ManagedWorktreeProtection[],
+  executable: string,
+  budget: EnvSplitBudget,
+): Verdict {
+  const sources: ShellToken[] = [];
+  let optionsEnded = false;
+  for (let index = 0; index < words.length; index += 1) {
+    const token = words[index]!;
+    const value = word(token, cwd, environment);
+    if (!optionsEnded && value === "--") { optionsEnded = true; continue; }
+    if (!optionsEnded && value?.startsWith("-")) {
+      const parameter = powershellMoveParameter(value, executable);
+      if (parameter?.role === "source") {
+        const source = parameter.attached == null || parameter.attached === ""
+          ? words[++index] : parameter.attached;
+        if (source !== undefined) sources.push(source);
+      } else if (parameter?.role === "other" && parameter.attached == null) {
+        index += 1;
+      }
+      continue;
+    }
+    sources.push(token);
+  }
+  return strongest(sources.flatMap((source) => {
+    const value = word(source, cwd, environment);
+    // Preserve the whole spelling too: a native command, or a literal filename, can contain a comma.
+    const elements: ShellToken[] = value?.includes(",") ? [source, ...value.split(",")] : [source];
+    spendDestructiveVisits(budget, elements.length - 1);
+    return elements.map((element) => operandVerdict(element, cwd, environment, protections, false, true));
+  }));
 }
 
 function gitWorktreeVerdict(
@@ -930,6 +1125,16 @@ function isFile(path: string): boolean {
 function isDirectory(path: string): boolean {
   try {
     return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function canEnterDirectory(path: string): boolean {
+  if (!isDirectory(path)) return false;
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
   } catch {
     return false;
   }
@@ -1284,7 +1489,9 @@ function wordReadings(
   words: readonly ShellToken[],
   cwd: string,
   environment: ReadonlyMap<string, string>,
+  budget: EnvSplitBudget,
 ): ShellToken[][] {
+  spendTokenVisits(budget, words.length);
   const split: ShellToken[] = [];
   const whole: ShellToken[] = [];
   let divided = false;
@@ -1317,13 +1524,23 @@ function segmentVerdict(
   environment: Map<string, string>,
   protections: readonly ManagedWorktreeProtection[],
   depth: number,
+  envSplitBudget: EnvSplitBudget,
   // Parsing splits command expansions in place and applies assignments, so a caller that has
   // already parsed this segment passes its result rather than parsing it a second time.
-  command: ParsedCommand | null = commandWords(tokens, cwd, environment),
+  command: ParsedCommand | null = commandWords(tokens, cwd, environment, envSplitBudget),
 ): Verdict {
   if (!command) return null;
-  return strongest(wordReadings(command.words, cwd, environment).map((words) =>
-    commandVerdict(words, command, cwd, environment, protections, depth)));
+  // `env -C` changes only the child command's directory. The outer shell expanded its
+  // arguments before `env` ran, so judge both directory readings rather than replacing one.
+  const directories = command.executionCwd === null ? [cwd] : [cwd, command.executionCwd];
+  const readings = wordReadings(command.words, cwd, environment, envSplitBudget);
+  spendTokenVisits(envSplitBudget, command.words.length * (directories.length - 1));
+  return strongest([
+    ...directories.flatMap((directory) => readings.map((words) =>
+      commandVerdict(words, command, directory, environment, protections, depth, envSplitBudget))),
+    ...command.alternateReadings.map(({ command: alternative, environment: splitEnvironment }) =>
+      segmentVerdict([], cwd, splitEnvironment, protections, depth, envSplitBudget, alternative)),
+  ]);
 }
 
 /** One command, judged in one reading of its words. */
@@ -1334,8 +1551,15 @@ function commandVerdict(
   environment: Map<string, string>,
   protections: readonly ManagedWorktreeProtection[],
   depth: number,
+  envSplitBudget: EnvSplitBudget,
 ): Verdict {
   const { executable, childEnvironment } = command;
+  // Every destructive interpretation shares one operand budget, including split/whole readings,
+  // nested scripts and `env -C` directory readings. Spend it before doing filesystem resolution.
+  if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd", "ri", "erase",
+    "mv", "move", "mi", "move-item", "ren", "rni", "rename-item"].includes(executable)) {
+    spendDestructiveVisits(envSplitBudget, words.length);
+  }
   if (["sh", "bash", "zsh", "dash", "fish", "cmd"].includes(executable) && depth < 3) {
     // A `-c` script is consumed WHOLE by the shell it is handed to, so the unsplit words are read
     // here whichever reading this is. Where the expansion really was unquoted the shell would keep
@@ -1348,11 +1572,11 @@ function commandVerdict(
     const script = flag >= 0 ? scriptText(words[flag + 1], cwd, environment) : null;
     // The nested shell runs in the child environment, so `W=<root> sh -c \'rm -rf "$W"\'` resolves
     // there even though the outer command's own words never saw that assignment.
-    return script ? classify(script, cwd, protections, childEnvironment, depth + 1) : null;
+    return script ? classify(script, cwd, protections, childEnvironment, depth + 1, envSplitBudget) : null;
   }
   if (executable === "eval" && depth < 3) {
     const script = command.words.map((token) => scriptText(token, cwd, environment) ?? "").join(" ");
-    return classify(script, cwd, protections, childEnvironment, depth + 1);
+    return classify(script, cwd, protections, childEnvironment, depth + 1, envSplitBudget);
   }
   if (executable === "xargs" && depth < 3) {
     let commandIndex = 0;
@@ -1370,10 +1594,10 @@ function commandVerdict(
     const nested = words.slice(commandIndex);
     // These words are ARGV: the outer shell expanded them before the prefix assignment applied, so
     // they are read in the outer environment. Where the two disagree this over-refuses, never less.
-    const nestedCommand = commandWords(nested, cwd, new Map(environment));
-    const verdict = segmentVerdict(nested, cwd, new Map(environment), protections, depth + 1, nestedCommand);
-    const nestedExecutable = nestedCommand?.executable ?? "";
-    if (!REMOVERS.includes(nestedExecutable)) return verdict;
+    const nestedCommand = commandWords(nested, cwd, new Map(environment), envSplitBudget);
+    const verdict = segmentVerdict(nested, cwd, new Map(environment), protections, depth + 1,
+      envSplitBudget, nestedCommand);
+    if (!parsedExecutables(nestedCommand).some((name) => REMOVERS.includes(name))) return verdict;
     // What arrives on stdin is invisible, so a remover run from inside a managed root is refused
     // outright, and one run from a directory the classifier lost track of cannot be placed.
     if (shellInsideManagedRoot(cwd, protections)) return "protected";
@@ -1388,10 +1612,17 @@ function commandVerdict(
   if (executable === "gh" || executable === "glab") {
     return forgeCheckoutVerdict(executable, words, cwd, environment, protections);
   }
-  if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
-    return strongest(removerVerdicts(words, cwd, environment, protections));
+  if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd", "ri", "erase"].includes(executable)) {
+    const powerShell = ["remove-item", "del", "rd", "ri", "erase"].includes(executable) ||
+      (process.platform === "win32" && ["rm", "rmdir"].includes(executable));
+    return strongest([
+      ...removerVerdicts(words, cwd, environment, protections),
+      powerShell ? powershellRemoverVerdict(words, cwd, environment, protections, executable,
+        envSplitBudget) : null,
+    ]);
   }
   if (executable === "gio" && word(words[0], cwd, environment) === "trash") {
+    spendDestructiveVisits(envSplitBudget, words.length - 1);
     return strongest(removerVerdicts(words.slice(1), cwd, environment, protections));
   }
   if (["mv", "move", "mi", "move-item", "ren", "rni", "rename-item"].includes(executable)) {
@@ -1448,7 +1679,18 @@ function commandVerdict(
     const gnuSources = gnuClusterOperands.length === 0 ? []
       : targetDirectory ? [...gnuClusterOperands, ...operands]
       : [...gnuClusterOperands, ...operands].slice(0, -1);
-    const sources = [...namedSources, ...positionalSources, ...gnuSources];
+    // PowerShell's comma operator turns a source argument into an array for Move-Item's String[]
+    // Path and LiteralPath parameters. A protected source can be any element, not just the first.
+    // `mv` and `move` may also be PowerShell aliases, so include their array reading too.
+    const powerShellArrayReading = ["move-item", "mi"].includes(executable) ||
+      (["mv", "move"].includes(executable) && (process.platform === "win32" || namedSources.length > 0));
+    const sources = [...namedSources, ...positionalSources, ...gnuSources].flatMap((source) => {
+      const value = word(source, cwd, environment);
+      // Keep the whole source as well: comma is an ordinary filename character for GNU `mv`,
+      // and the protected worktree itself may have a comma in its name.
+      return powerShellArrayReading && value?.includes(",") ? [source, ...value.split(",")] : [source];
+    });
+    spendDestructiveVisits(envSplitBudget, Math.max(0, sources.length - words.length));
     return strongest(sources.map((source) =>
       operandVerdict(source, cwd, environment, protections, false, optionsEnded)));
   }
@@ -1473,6 +1715,7 @@ function commandVerdict(
           word(token, cwd, environment) === "!"));
       const roots = words.slice(rootStart, expressionStart < 0 ? actionIndex : expressionStart);
       const effectiveRoots = roots.length ? roots : ["."];
+      spendDestructiveVisits(envSplitBudget, effectiveRoots.length);
       // `find` defaults to -P: a symlink given as a search root is not followed, so `-delete`
       // unlinks the alias, not what it points at. -H and -L before the roots follow it, and so
       // does the `-follow` expression anywhere after them.
@@ -1487,10 +1730,11 @@ function commandVerdict(
         const end = words.findIndex((token, index) => index > actionIndex &&
           [";", "+"].includes(word(token, cwd, environment) ?? ""));
         const nested = words.slice(actionIndex + 1, end < 0 ? undefined : end);
-        const nestedCommand = commandWords(nested, cwd, new Map(environment));
-        const verdict = segmentVerdict(nested, cwd, new Map(environment), protections, depth + 1, nestedCommand);
-        const nestedExecutable = nestedCommand?.executable ?? "";
-        const removal = REMOVERS.includes(nestedExecutable) ? rootVerdict : null;
+        const nestedCommand = commandWords(nested, cwd, new Map(environment), envSplitBudget);
+        const verdict = segmentVerdict(nested, cwd, new Map(environment), protections, depth + 1,
+          envSplitBudget, nestedCommand);
+        const removal = parsedExecutables(nestedCommand).some((name) => REMOVERS.includes(name))
+          ? rootVerdict : null;
         if (verdict || removal) return strongest([verdict, removal]);
       }
     }
@@ -1572,12 +1816,150 @@ function commandVerdict(
  * variables; a variable exported by a startup file the shell sources is not seen, and a command
  * that indirects through a script file or an interpreter is not parsed at all.
  */
+/** Evaluate the POSIX single-line and-or grammar without executing skipped segments. */
+function classifyReachableList(
+  tokens: ShellToken[],
+  cwd: string,
+  protections: readonly ManagedWorktreeProtection[],
+  providerEnvironment: ReadonlyMap<string, string>,
+  depth: number,
+  budget: EnvSplitBudget,
+): Verdict {
+  type Reading = {
+    cwd: string;
+    environment: Map<string, string>;
+    succeeded: boolean;
+    priorNonDirectoryCommand: boolean;
+  };
+  let readings: Reading[] = [{
+    cwd: normalize(cwd), environment: new Map(providerEnvironment), succeeded: true,
+    priorNonDirectoryCommand: false,
+  }];
+  let previousOperator: string | null = null;
+  let segment: ShellToken[] = [];
+  let unresolved = false;
+  const unique = (candidates: Reading[]): Reading[] => {
+    const result: Reading[] = [];
+    for (const candidate of candidates) {
+      if (!result.some((existing) => existing.cwd === candidate.cwd &&
+          existing.succeeded === candidate.succeeded &&
+          existing.priorNonDirectoryCommand === candidate.priorNonDirectoryCommand &&
+          existing.environment.size === candidate.environment.size &&
+          [...existing.environment].every(([key, value]) => candidate.environment.get(key) === value))) {
+        result.push(candidate);
+      }
+    }
+    return result;
+  };
+  const evaluate = (followingOperator: string | null): Verdict => {
+    if (!segment.length) {
+      if (followingOperator === null && (previousOperator === null || previousOperator === ";")) return null;
+      throw new UnclassifiableCommandError("empty and-or segment");
+    }
+    const next: Reading[] = [];
+    const verdicts: Verdict[] = [];
+    for (const reading of readings) {
+      const runs = previousOperator === null || previousOperator === ";" ||
+        (previousOperator === "&&" ? reading.succeeded : !reading.succeeded);
+      if (!runs) {
+        next.push(reading);
+        continue;
+      }
+      spendTokenVisits(budget, segment.length);
+      const localEnvironment = new Map(reading.environment);
+      const parsed = commandWords(segment, reading.cwd, localEnvironment, budget);
+      if (parsed === null) {
+        // Assignment-only commands can fail through command substitution. Both statuses retain
+        // the assignment reading until the next separator makes status immaterial.
+        next.push({ ...reading, environment: localEnvironment, succeeded: true });
+        next.push({ ...reading, environment: localEnvironment, succeeded: false });
+        continue;
+      }
+      if (parsed.parentShellBuiltin && (parsed.executable === "cd" || parsed.executable === "pushd")) {
+        const alternateVerdict = strongest(parsed.alternateReadings.map(({ command: alternative,
+          environment: splitEnvironment }) =>
+          segmentVerdict([], reading.cwd, splitEnvironment, protections, depth, budget, alternative)));
+        if (refuses(alternateVerdict)) return alternateVerdict;
+        verdicts.push(alternateVerdict);
+        const operand = parsed.words[0];
+        const value = word(operand, reading.cwd, localEnvironment);
+        if (parsed.executable === "pushd" && value === "-n" && process.platform !== "win32") {
+          // Bash and zsh keep cwd; sh/dash fail because pushd is unavailable.
+          next.push({ ...reading, environment: localEnvironment, succeeded: true });
+          next.push({ ...reading, environment: localEnvironment, succeeded: false });
+          continue;
+        }
+        const stackForm = parsed.executable === "pushd" &&
+          (operand === undefined || value === "-n" || /^[+-]\d+$/u.test(value ?? ""));
+        const home = operand === undefined && parsed.executable === "cd"
+          ? lookup("HOME", reading.cwd, parsed.childEnvironment)
+          : undefined;
+        const target = stackForm ? null : operand === undefined
+          ? (home == null ? null : resolvedPath(home, reading.cwd))
+          : value === "-" ? null : resolvedOperand(operand, reading.cwd, localEnvironment);
+        if ((stackForm && shellInsideManagedRoot(reading.cwd, protections)) ||
+            (target && shellInsideManagedRoot(reading.cwd, protections) &&
+              !withinProtectedRoot(canonicalPath(target), physicalProtections(protections)))) return "escape";
+        const ambiguousBuiltin = parsed.builtinWrapper &&
+          (depth > 0 || parsed.builtinOptionTerminator || process.platform === "win32");
+        // A successful host-side directory probe cannot prove `cd` will succeed inside the
+        // provider's namespace, or that the directory will still exist when the shell runs.
+        // Retain the failure branch so a destructive `||` tail is never skipped optimistically.
+        const mayFail = followingOperator === "||" || ambiguousBuiltin ||
+          parsed.executable === "pushd" || target === null ||
+          !canEnterDirectory(target) || reading.priorNonDirectoryCommand;
+        if (mayFail) next.push({ ...reading, environment: new Map(localEnvironment), succeeded: false });
+        // Options, CDPATH and unresolved targets can make a successful shell change land at the
+        // original cwd even when the apparent operand points elsewhere. Unlike a failed change,
+        // this reading may continue through &&.
+        if (value === null || value.startsWith("-") || target === null ||
+            lookup("CDPATH", reading.cwd, parsed.childEnvironment) ||
+            parsed.alternateReadings.length > 0) {
+          next.push({ ...reading, environment: new Map(localEnvironment), succeeded: true });
+        }
+        next.push({ ...reading, cwd: target ?? UNKNOWN_CWD, environment: localEnvironment, succeeded: true });
+        continue;
+      }
+      verdicts.push(segmentVerdict(segment, reading.cwd, localEnvironment, protections, depth,
+        budget, parsed));
+      const base = { ...reading, environment: localEnvironment, priorNonDirectoryCommand: true };
+      // Even `true` and `false` can be shell functions inherited from the provider shell. Keep
+      // both statuses unless the directory change itself gives us a reachable result.
+      next.push({ ...base, succeeded: true });
+      next.push({ ...base, succeeded: false });
+    }
+    readings = unique(next.map((reading) => followingOperator === ";"
+      ? { ...reading, succeeded: true } : reading));
+    if (readings.length > MAX_CWD_READINGS) {
+      throw new UnclassifiableCommandError("directory readings exceeded their bound");
+    }
+    return strongest(verdicts);
+  };
+  for (const token of tokens) {
+    const op = operator(token);
+    if (op) {
+      const verdict = evaluate(op);
+      if (refuses(verdict)) return verdict;
+      if (verdict === "unresolved") unresolved = true;
+      segment = [];
+      previousOperator = op;
+    } else {
+      segment.push(token);
+    }
+  }
+  return strongest([evaluate(null), unresolved ? "unresolved" : null]);
+}
+
 function classify(
   command: string,
   cwd: string,
   protections: readonly ManagedWorktreeProtection[],
   providerEnvironment: ReadonlyMap<string, string>,
   depth: number,
+  envSplitBudget: EnvSplitBudget = {
+    remaining: MAX_ENV_ASSIGNMENT_READINGS, remainingTokens: MAX_CLASSIFICATION_TOKEN_VISITS,
+    remainingDestructive: MAX_DESTRUCTIVE_OPERAND_VISITS,
+  },
 ): Verdict {
   // A nested script is rebuilt from expanded values, so it is bounded again here.
   if (command.length > MAX_COMMAND_LENGTH) throw new UnclassifiableCommandError("nested script is too long");
@@ -1585,51 +1967,142 @@ function classify(
   try {
     tokens = parse(command, reference);
   } catch {
-    return null;
+    // A failed parse cannot safely tell whether a directory-changing segment was skipped.
+    return /(?:^|[\s;&|()])(?:builtin\s+|command\s+)?(?:cd|pushd)(?:\s|$)/u.test(command)
+      ? "protected" : null;
   }
   let segment: ShellToken[] = [];
-  let currentCwd = normalize(cwd);
-  const environment = new Map(providerEnvironment);
+  type CwdReading = { cwd: string; environment: Map<string, string> };
+  let readings: CwdReading[] = [{ cwd: normalize(cwd), environment: new Map(providerEnvironment) }];
+  let parkedReadings: CwdReading[] = [];
+  // shell-quote discards newlines and this classifier does not model pipelines or subshells.
+  // Restrict short-circuit tracking to simple single-line lists; keep other forms conservative.
+  const canTrackAndChain = !/[\r\n]/u.test(command) && tokens.every((token) => {
+    const op = operator(token);
+    return op === null || op === "&&" || op === "||" || op === ";";
+  });
+  if (canTrackAndChain && process.platform !== "win32") {
+    return classifyReachableList(tokens, cwd, protections, providerEnvironment, depth, envSplitBudget);
+  }
+  const hasDirectoryCommand = tokens.some((token, index) => {
+    const value = wordText(token);
+    if (value !== "cd" && value !== "pushd") return false;
+    const before = tokens[index - 1];
+    return index === 0 || operator(before) !== null ||
+      wordText(before) === "builtin" || wordText(before) === "command";
+  });
+  // shell-quote discards newlines and does not model pipeline/subshell cwd effects. The fallback
+  // must not replace the original cwd optimistically when those forms contain a directory change.
+  const ambiguousDirectoryControl =
+    (hasDirectoryCommand || (/[\r\n]/u.test(command) && tokens.some((token) =>
+      wordText(token) === "cd" || wordText(token) === "pushd"))) &&
+    (!canTrackAndChain || tokens.some((token) => operator(token) === "||"));
+  const sameReading = (left: CwdReading, right: CwdReading): boolean =>
+    left.cwd === right.cwd && left.environment.size === right.environment.size &&
+    [...left.environment].every(([key, value]) => right.environment.get(key) === value);
+  const uniqueReadings = (candidates: CwdReading[]): CwdReading[] => {
+    const unique: CwdReading[] = [];
+    for (const reading of candidates) {
+      if (!unique.some((existing) => sameReading(existing, reading))) unique.push(reading);
+    }
+    return unique;
+  };
+  // An earlier command may remove or replace a directory before a later cd reaches it. A chain
+  // made only of cd/pushd commands does not itself mutate the filesystem.
+  let priorNonDirectoryCommand = false;
   let unresolved = false;
-  const evaluate = (): Verdict => {
-    if (!segment.length) return null;
-    const localEnvironment = new Map(environment);
-    const parsed = commandWords(segment, currentCwd, localEnvironment);
-    if (parsed === null) {
-      // Assignments standing alone, or a command word this code cannot resolve. `commandWords` has
-      // already applied the former to `localEnvironment`; re-parsing would apply them twice.
-      for (const [key, value] of localEnvironment) environment.set(key, value);
+  const evaluate = (followingOperator: string | null): Verdict => {
+    if (!segment.length) {
+      if (followingOperator !== "&&" && parkedReadings.length) {
+        readings = uniqueReadings([...readings, ...parkedReadings]);
+        parkedReadings = [];
+      }
       return null;
     }
-    if (parsed.executable === "cd" || parsed.executable === "pushd") {
-      const operand = parsed.words[0];
-      // A bare `cd` goes home; `cd -`, a bare `pushd`, and a target that does not resolve go
-      // somewhere this code cannot name, and a later relative operand is then unresolved.
-      // `HOME=<root> cd` enters the prefix-assigned HOME: the builtin reads the environment it is
-      // given, which is the child environment, not the one its own words were expanded in.
-      const home = operand === undefined && parsed.executable === "cd"
-        ? lookup("HOME", currentCwd, parsed.childEnvironment)
-        : undefined;
-      const target = operand === undefined
-        ? (home == null ? null : resolvedPath(home, currentCwd))
-        : word(operand, currentCwd, localEnvironment) === "-"
-          ? null
-          : resolvedOperand(operand, currentCwd, localEnvironment);
-      // Claude's Bash tool keeps its shell directory between calls. Refuse an escape from every
-      // managed root so a later relative removal cannot be resolved against an unobservable cwd.
-      if (target && shellInsideManagedRoot(currentCwd, protections) &&
-          !withinProtectedRoot(canonicalPath(target), physicalProtections(protections))) return "escape";
-      currentCwd = target ?? UNKNOWN_CWD;
-      for (const [key, value] of localEnvironment) environment.set(key, value);
-      return null;
+    const next: CwdReading[] = [];
+    const parked = [...parkedReadings];
+    const verdicts: Verdict[] = [];
+    let sawNonDirectoryCommand = false;
+    for (const { cwd: currentCwd, environment } of readings) {
+      spendTokenVisits(envSplitBudget, segment.length);
+      const localEnvironment = new Map(environment);
+      const parsed = commandWords(segment, currentCwd, localEnvironment, envSplitBudget);
+      if (parsed === null) {
+        // No executable remains (for example, standalone assignments). Keep the cwd and use the
+        // environment `commandWords` produced for this reading.
+        next.push({ cwd: currentCwd, environment: localEnvironment });
+        continue;
+      }
+      if (parsed.parentShellBuiltin && (parsed.executable === "cd" || parsed.executable === "pushd")) {
+        const alternateVerdict = strongest(parsed.alternateReadings.map(({ command: alternative,
+          environment: splitEnvironment }) =>
+          segmentVerdict([], currentCwd, splitEnvironment, protections, depth, envSplitBudget, alternative)));
+        if (refuses(alternateVerdict)) return alternateVerdict;
+        verdicts.push(alternateVerdict);
+        const operand = parsed.words[0];
+        // A bare cd reads its prefix-assigned HOME. A directory-stack operand is not a path.
+        const value = word(operand, currentCwd, localEnvironment);
+        if (parsed.executable === "pushd" && value === "-n" && process.platform !== "win32") {
+          // Bash and zsh update the stack without changing the shell's working directory.
+          next.push({ cwd: currentCwd, environment: localEnvironment });
+          continue;
+        }
+        const stackForm = parsed.executable === "pushd" &&
+          (operand === undefined || value === "-n" || /^[+-]\d+$/u.test(value ?? ""));
+        const home = operand === undefined && parsed.executable === "cd"
+          ? lookup("HOME", currentCwd, parsed.childEnvironment)
+          : undefined;
+        const target = stackForm ? null : operand === undefined
+          ? (home == null ? null : resolvedPath(home, currentCwd))
+          : value === "-" ? null : resolvedOperand(operand, currentCwd, localEnvironment);
+        // A stack rotation can land anywhere; from a managed root it may escape the persistent
+        // shell. Literal targets keep the existing escape check even if the change might fail.
+        if ((stackForm && shellInsideManagedRoot(currentCwd, protections)) ||
+            (target && shellInsideManagedRoot(currentCwd, protections) &&
+              !withinProtectedRoot(canonicalPath(target), physicalProtections(protections)))) return "escape";
+        const ambiguousBuiltin = parsed.builtinWrapper &&
+          (depth > 0 || parsed.builtinOptionTerminator || process.platform === "win32");
+        // The caller does not tell us its shell dialect: sh/dash have no pushd even for an
+        // accessible literal target, while Bash/zsh do. Retain the old cwd for either result.
+        const mayFail = ambiguousBuiltin || parsed.executable === "pushd" || target === null ||
+          !canEnterDirectory(target) || priorNonDirectoryCommand;
+        if (mayFail) {
+          // A failed cd/pushd retains the old cwd. Under && its failure skips the rest of that
+          // chain, but a later ; or || can run from the old cwd again.
+          const failedReading = { cwd: currentCwd, environment: new Map(localEnvironment) };
+          if (canTrackAndChain && followingOperator === "&&" && parsed.alternateReadings.length === 0 &&
+              parsed.words.length === 1 && value !== null && !value.startsWith("-") && target !== null &&
+              !lookup("CDPATH", currentCwd, parsed.childEnvironment)) {
+            parked.push(failedReading);
+          } else {
+            next.push(failedReading);
+          }
+          next.push({ cwd: target ?? UNKNOWN_CWD, environment: localEnvironment });
+        } else {
+          next.push({ cwd: target, environment: localEnvironment });
+        }
+        continue;
+      }
+      sawNonDirectoryCommand = true;
+      verdicts.push(segmentVerdict(segment, currentCwd, localEnvironment, protections, depth,
+        envSplitBudget, parsed));
+      next.push({ cwd: currentCwd, environment: localEnvironment });
     }
-    const verdict = segmentVerdict(segment, currentCwd, localEnvironment, protections, depth, parsed);
-    for (const [key, value] of localEnvironment) environment.set(key, value);
-    return verdict;
+    const active = uniqueReadings(next);
+    const inactive = uniqueReadings(parked).filter((reading) =>
+      !active.some((existing) => sameReading(existing, reading)));
+    if (active.length + inactive.length > MAX_CWD_READINGS) {
+      throw new UnclassifiableCommandError("directory readings exceeded their bound");
+    }
+    readings = followingOperator === "&&" ? active : uniqueReadings([...active, ...inactive]);
+    parkedReadings = followingOperator === "&&" ? inactive : [];
+    priorNonDirectoryCommand ||= sawNonDirectoryCommand;
+    return strongest(verdicts);
   };
   for (const token of tokens) {
-    if (operator(token)) {
-      const verdict = evaluate();
+    const op = operator(token);
+    if (op) {
+      const verdict = evaluate(op);
       if (refuses(verdict)) return verdict;
       if (verdict === "unresolved") unresolved = true;
       segment = [];
@@ -1637,7 +2110,27 @@ function classify(
       segment.push(token);
     }
   }
-  return strongest([evaluate(), unresolved ? "unresolved" : null]);
+  const verdict = strongest([evaluate(null), unresolved ? "unresolved" : null]);
+  if (!ambiguousDirectoryControl || refuses(verdict)) return verdict;
+  // shell-quote discards newlines, so it cannot recover command boundaries from those inputs.
+  if (/[\r\n]/u.test(command)) return "protected";
+  // Pipes, redirections and subshells make a preceding cd's effect uncertain. Recheck each
+  // segment from an unknown directory: path-sensitive destructive operands then fail closed,
+  // while ordinary commands such as `cd sub && make > build.log` remain usable.
+  const uncertainVerdicts: Verdict[] = [];
+  let uncertainSegment: ShellToken[] = [];
+  const inspectUncertainSegment = () => {
+    if (!uncertainSegment.length) return;
+    uncertainVerdicts.push(segmentVerdict(uncertainSegment, UNKNOWN_CWD,
+      new Map(providerEnvironment), protections, depth, envSplitBudget));
+    uncertainSegment = [];
+  };
+  for (const token of tokens) {
+    if (operator(token)) inspectUncertainSegment();
+    else uncertainSegment.push(token);
+  }
+  inspectUncertainSegment();
+  return strongest([verdict, ...uncertainVerdicts]);
 }
 
 /** The provider environment as a lookup table, keeping only values a shell could hold. */
@@ -1737,6 +2230,11 @@ const MAX_ASSIGNED_SPELLINGS = 16;
 
 const UNMODELLED_SHAPE_REASON =
   "it uses a heredoc, newline, backtick, pipe, or subshell, which the guard does not model, and one of its words names a directory that contains that state";
+
+/** Reason for refusing a command whose tokenization still yields a comment the guard cannot separate
+ *  from an executable command (an unquoted `#` the escape pass could not neutralise). */
+const GUARD_STATE_COMMENT_REASON =
+  "it contains a comment the guard cannot separate from an executable command that could reach that state";
 
 /** The tokenizer's own complaint, without the command text it quotes back. */
 function tokenizerReason(error: unknown): string {
@@ -2081,7 +2579,7 @@ function guardStateReadings(text: string): GuardStateReading[] {
  * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
  * opaque word could be a recursion flag or another operand.
  */
-interface CommandSegment { operands: Array<string | null>; words: string[] | null }
+interface CommandSegment { operands: Array<string | null>; words: string[] | null; redirects: Array<string | null> }
 
 /**
  * Split a parsed command into segments, or `null` when it contains a construct this classifier does
@@ -2092,6 +2590,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
   const segments: CommandSegment[] = [];
   let operands: Array<string | null> = [];
   let words: string[] | null = [];
+  let redirects: Array<string | null> = [];
   let redirected = false;
   let previousWord: string | null = null;
   for (const token of tokens) {
@@ -2099,7 +2598,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
     if (op === null) {
       const text = tokenText(token);
       operands.push(text);
-      if (redirected) redirected = false;
+      if (redirected) { redirects.push(text); redirected = false; }
       else if (words !== null) {
         if (text === null || text.includes("\0")) words = null;
         else words.push(text);
@@ -2108,9 +2607,10 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
       continue;
     }
     if (SEGMENT_SEPARATORS.has(op)) {
-      segments.push({ operands, words });
+      segments.push({ operands, words, redirects });
       operands = [];
       words = [];
+      redirects = [];
       redirected = false;
       previousWord = null;
       continue;
@@ -2124,7 +2624,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
     redirected = true;
     previousWord = null;
   }
-  segments.push({ operands, words });
+  segments.push({ operands, words, redirects });
   return segments;
 }
 
@@ -2220,6 +2720,161 @@ function inspectsAncestorOnly(
   }
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * Two narrow, POSITIVE, WHITELIST-gated shapes — never modelling arbitrary bash (#1734; Codex
+ * review rounds 1–3).
+ *
+ * Rounds 1–3 each found a new bypass in syntax the pre-pass did not model (comments, escapes, ANSI-C
+ * quoting, brace expansion, `${...}` operators). Per the parent's binding direction the allowance is
+ * now matched by a CHARACTER WHITELIST, not by emulation: anything the whitelist does not recognise
+ * disqualifies the allowance and the command is read exactly as shell-quote reads it (the old,
+ * stricter behaviour).
+ *
+ *  1. STRIPPABLE HEREDOC (`matchStrippableHeredoc`). The body is dropped only when the command's
+ *     first line matches one anchored regex over a tiny charset — `cat`/`tee`/`tee -a`, one `>`/`>>`
+ *     redirect (cat) or target (tee) from `[A-Za-z0-9._/@+-]`, one `<<'DELIM'` with a plain
+ *     single-quoted word, single spaces only — AND the body is terminated by a line equal to DELIM
+ *     that is the last line (bar one trailing newline). Any `#`, `\`, `$`, backtick, extra quote,
+ *     brace, glob, `;&|()<>` beyond the exact operators, or odd whitespace disqualifies it. The
+ *     target is classified normally, so a target in the hook dir is refused.
+ *  2. NON-REACHING ANCESTOR / AC1 (the gate in `commandTargetsGuardState`). A single simple command
+ *     whose command word is the literal, unquoted `echo` — the only builtin that opens no operand and
+ *     cannot be coerced into executing one — with no redirect and every character whitelisted
+ *     (`ac1CommandWhitelisted`), is allowed even when it names `/`, `//`, or `~`. Only the ancestor
+ *     check is relaxed; the inside check and the raw-text scan still refuse anything resolving into
+ *     the state. (grep/sed/awk pattern/script exemptions were dropped as they could not be made both
+ *     whitelist-tight and useful; `printf` was dropped because `printf -v 'arr[$(cmd)]'` executes a
+ *     substitution, and `true`/`false`/`:` for conservatism — Codex round 4 CR-4.2, user scope.)
+ *
+ * The only text-level correction never touches quoted text, so it can never hide a reach: `shell-quote`
+ * treats an unquoted `#` as a comment running to the END of the whole string (past newlines), so
+ * `echo x#; cat <state>` dropped the `cat` unseen. Every UNQUOTED `#` is ESCAPED (`\#`), never removed;
+ * a `#` inside single/double quotes is left exactly as written so a quoted filename resolves the way
+ * bash resolves it (a quoted `'alias#'` symlink into the state — Codex round 4 CR-4.1). As a second
+ * guarantee, `wordRelation` resolves each token both as written and with any `\#` un-escaped. There is
+ * no `${...}` reduction and no quote-CONTENT modelling (round-2/round-3 bypass sources).
+ * ------------------------------------------------------------------------------------------ */
+
+/** The ONLY builtin whose operands are never opened as paths and which cannot be coerced into
+ *  executing one, so an ancestor among its operands cannot reach. `printf` is excluded because
+ *  `printf -v 'arr[$(cmd)]' …` evaluates the array subscript and executes a command substitution even
+ *  from a single-quoted argument the whitelist treats as opaque (Codex round 4 CR-4.2); `true`,
+ *  `false`, and `:` are excluded too, so the exemption is `echo` alone (the user's round-4 scope). */
+const GUARD_STATE_NONPATH_COMMANDS = new Set(["echo"]);
+
+/** The command word must be the literal, unquoted `echo` as the first thing on the line — not a
+ *  quoted (`'echo'`), escaped (`ec\ho`), or otherwise spelled word that tokenizes to `echo` but the
+ *  whitelist could not reason about. Leading blanks are allowed; a separator before it is not (that
+ *  would make it a second command, which the single-segment check already excludes). */
+const GUARD_STATE_LITERAL_ECHO = /^[ \t]*echo[ \t]/u;
+
+/** Characters allowed OUTSIDE single quotes in an AC1 command; a single-quoted run with no nested
+ *  `'` is otherwise opaque-clean. Excludes `$`, `` ` ``, `\`, `"`, `#`, braces, globs (`*?[]`), and
+ *  `;&|()<>`, so any substitution, expansion, quoting trick, or redirect disqualifies the exemption. */
+const GUARD_STATE_AC1_OUTSIDE_QUOTE = /[A-Za-z0-9._/:=,@+%~ -]/u;
+
+/** True when every character of a single simple command is whitelisted — plain characters outside
+ *  single quotes, and single-quoted runs (no nested `'`) treated as opaque. Fails closed on an
+ *  unterminated quote. Used to gate the AC1 ancestor exemption (#1734, Codex round 3). */
+function ac1CommandWhitelisted(command: string): boolean {
+  for (let i = 0; i < command.length;) {
+    const c = command[i]!;
+    if (c === "'") {
+      const close = command.indexOf("'", i + 1);
+      if (close < 0) return false;
+      i = close + 1;
+      continue;
+    }
+    if (!GUARD_STATE_AC1_OUTSIDE_QUOTE.test(c)) return false;
+    i += 1;
+  }
+  return true;
+}
+
+/** The command line of a strippable heredoc, as one anchored whitelist. A target is
+ *  `[A-Za-z0-9._/@+-]+` (no `$`, quotes, spaces, or metacharacters); the delimiter is a plain
+ *  single-quoted word; the redirect may precede or follow the `<<`. Single spaces only. */
+const GUARD_STATE_STRIPPABLE_HEREDOC_LINE = new RegExp(
+  "^(?:" +
+    "cat >>? ?[A-Za-z0-9._/@+-]+ <<'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // cat > T <<'D'
+    "cat <<'[A-Za-z_][A-Za-z0-9_]*' >>? ?[A-Za-z0-9._/@+-]+" + "|" + // cat <<'D' > T
+    "tee (?:-a )?[A-Za-z0-9._/@+-]+ <<'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // tee [-a] T <<'D'
+    "tee (?:-a )?<<'[A-Za-z_][A-Za-z0-9_]*' [A-Za-z0-9._/@+-]+" + // tee [-a] <<'D' T
+  ")$",
+  "u",
+);
+
+/**
+ * If the command's first line is exactly a `cat`/`tee` heredoc of the whitelisted shape, the body is
+ * terminated by a line equal to the delimiter that is the last line (bar one trailing newline), and
+ * nothing deviates, return that first line with the body removed (the caller still classifies the
+ * target). Otherwise `null`: the body is kept and scanned. The whitelist regex is the whole gate —
+ * a `#`, `\`, `$`, substitution, brace, glob, second command, or process substitution all fail it.
+ */
+function matchStrippableHeredoc(command: string): string | null {
+  const newline = command.indexOf("\n");
+  if (newline < 0) return null; // a heredoc needs a body on later lines
+  const commandLine = command.slice(0, newline);
+  if (!GUARD_STATE_STRIPPABLE_HEREDOC_LINE.test(commandLine)) return null;
+  const delimiter = /<<'([A-Za-z_][A-Za-z0-9_]*)'/u.exec(commandLine)?.[1];
+  if (delimiter === undefined) return null;
+  const lines = command.slice(newline + 1).split("\n");
+  const terminator = lines.indexOf(delimiter); // bash: the first body line equal to the delimiter
+  if (terminator < 0) return null; // unterminated → keep the body
+  const last = lines.length - 1;
+  if (terminator !== last && !(terminator === last - 1 && lines[last] === "")) return null; // content after → keep
+  return commandLine;
+}
+
+/** The two readings of a command the guard needs: `scan` for the literal-path text scan (only a
+ *  provably-inert stripped heredoc body removed), `parse` for the tokenizer. */
+export interface PreparedGuardStateCommand { scan: string; parse: string }
+
+/**
+ * Rewrite a command for the guard-state classifier, returning two readings. `scan` is the raw text
+ * with only a whitelisted strippable heredoc body removed; the literal-path text scan reads it, so
+ * no rewrite can hide a literal hook path. `parse` is the text the tokenizer reads: the same, with
+ * every UNQUOTED `#` escaped (`\#`) so `shell-quote` cannot start a comment — which it runs to the
+ * END of the whole string, past newlines, swallowing any command on a later line (the #1734
+ * under-refusal fix). The escape covers both word-start and word-interior `#`, because a word-start
+ * comment on one line would otherwise hide a reaching command on the next; it only ADDS a backslash,
+ * so it can never hide a reach.
+ *
+ * A `#` INSIDE single or double quotes is left untouched: `shell-quote` already keeps it literal, and
+ * rewriting inside quotes would corrupt a quoted filename for realpath resolution (a quoted
+ * `'alias#'` symlink into the state, Codex round 4 CR-4.1). The tracker models the three bash quote
+ * forms that make a `#` literal — `'…'`, `"…"`, and ANSI-C `$'…'` (where `\'` is escaped so only an
+ * unescaped `'` closes) — so it does not desync on `$'\''` and wrongly skip an unquoted `#`. As a
+ * hard backstop, `commandTargetsGuardState` refuses outright if `shell-quote` still returns a comment
+ * token (an unquoted `#` this pass failed to neutralise), so any residual quoting it does not model
+ * fails closed rather than swallowing a later command. There is no `${...}` reduction or content
+ * modelling.
+ */
+export function prepareGuardStateCommand(command: string): PreparedGuardStateCommand {
+  const stripped = matchStrippableHeredoc(command);
+  if (stripped !== null) return { scan: stripped, parse: stripped };
+  let parse = "";
+  let quote: "'" | '"' | "ansi" | null = null; // `ansi` = inside a `$'…'` ANSI-C string
+  for (let i = 0; i < command.length; i += 1) {
+    const c = command[i]!;
+    if (quote === "'") { parse += c; if (c === "'") quote = null; continue; } // single quotes: all literal
+    if (quote === "ansi") {
+      // `$'…'`: a backslash escapes the next char (including `\'`), so only an UNESCAPED `'` closes.
+      if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; }
+      parse += c; if (c === "'") quote = null; continue;
+    }
+    if (quote === '"') {
+      if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; } // keep an escaped pair whole
+      parse += c; if (c === '"') quote = null; continue;
+    }
+    if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; } // keep an escaped pair whole
+    if (c === "$" && command[i + 1] === "'") { parse += "$'"; i += 1; quote = "ansi"; continue; } // enter $'…'
+    if (c === "'" || c === '"') { quote = c; parse += c; continue; }
+    parse += c === "#" ? "\\#" : c; // an unquoted `#` is neutralised; quoted `#` never reaches here
+  }
+  return { scan: command, parse };
+}
+
 /**
  * Refuse a shell command that references the guard-state directory in any form. Unparsable input
  * is refused rather than allowed: this is the state the veto itself depends on. An operand that is
@@ -2233,8 +2888,12 @@ export function commandTargetsGuardState(
 ): string | null {
   if (!directory || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
   const root = resolve(directory);
+  // Two readings (#1734): a whitelisted `cat`/`tee` heredoc has its body removed, and every `#` is
+  // escaped so the tokenizer cannot run a comment to the end of the command. The text scan reads
+  // `scan` (literal paths kept everywhere bash could reach); the tokenizer reads `parse`.
+  const { scan: scanText, parse: parseText } = prepareGuardStateCommand(command);
   const foldCase = process.platform === "win32" || process.platform === "darwin";
-  const haystack = foldCase ? command.toLowerCase() : command;
+  const haystack = foldCase ? scanText.toLowerCase() : scanText;
   // Raw text first: concatenations, inline `--settings=<path>`, and quoting styles that tokenize
   // in ways a path comparison would miss still name the directory verbatim.
   for (const candidate of [root, root.split(sep).join("/")]) {
@@ -2245,11 +2904,18 @@ export function commandTargetsGuardState(
     // `$HOME` is as direct a spelling of the data directory's parent as `~`; every other variable
     // stays opaque, which is the documented limit of a command-text matcher. It is kept in place as
     // a reference so the word around it stays whole (see `guardStateReadings`).
-    tokens = parse(command, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
+    tokens = parse(parseText, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
   } catch (error) {
     // Still refused: this is the state the veto itself depends on. The raw-text scan above has
     // already refused any command that names the hook directory outright.
     return guardStateUninspectableRefusal(tokenizerReason(error));
+  }
+  // A surviving comment token means `shell-quote` ran a comment to the end of the string past an
+  // UNQUOTED `#` that `prepareGuardStateCommand` did not neutralise — a quoting form the escape pass
+  // does not model. Its text can hide a reaching command bash would run, so fail closed rather than
+  // letting the tokenizer swallow it (#1734 Codex round 4; the ANSI-C `$'\''` desync class).
+  if (tokens.some((token) => token != null && typeof token === "object" && "comment" in token)) {
+    return guardStateUninspectableRefusal(GUARD_STATE_COMMENT_REASON);
   }
   // Each distinct reading is resolved once, and a bounded `find` reads its START depths back from here.
   const relations = new Map<string, GuardStateRelation | null>();
@@ -2293,22 +2959,30 @@ export function commandTargetsGuardState(
   /** The strongest relation any reading of a word has: `inside`, then `ancestor`, then none. */
   const wordRelation = (value: string): GuardStateRelation["kind"] | null => {
     let strongest: GuardStateRelation["kind"] | null = null;
-    for (const text of spellings(value)) {
-      for (const { path, insideOnly } of guardStateReadings(text)) {
-        const relation = relationOf(path);
-        if (relation?.kind === "inside") return "inside";
-        if (relation?.kind === "ancestor" && !insideOnly) strongest = "ancestor";
+    for (const spelled of spellings(value)) {
+      // The tokenizer reads a `\#`-escaped command (#1734); inside single/double quotes shell-quote
+      // keeps that backslash literal, so a quoted filename would reach realpath as `alias\#` instead
+      // of `alias#` and miss a `#`-named symlink into the state. Resolve the token AS WRITTEN and with
+      // `\#` un-escaped, so a quoted path is classified the way bash resolves it (round 4 CR-4.1).
+      const texts = spelled.includes("\\#") ? [spelled, spelled.replaceAll("\\#", "#")] : [spelled];
+      for (const text of texts) {
+        for (const { path, insideOnly } of guardStateReadings(text)) {
+          const relation = relationOf(path);
+          if (relation?.kind === "inside") return "inside";
+          if (relation?.kind === "ancestor" && !insideOnly) strongest = "ancestor";
+        }
       }
     }
     return strongest;
   };
   // A backtick nests a command the tokenizer does not separate, and a newline would silently join
   // two commands into one; nothing in either is inspectable.
-  const segments = /[`\n\r]/u.test(command) ? null : commandSegments(tokens);
+  const segments = /[`\n\r]/u.test(parseText) ? null : commandSegments(tokens);
   if (segments === null) {
     // Nothing here is an inspection, so any related word refuses. A word INSIDE the hook directory
     // names the guard state itself. One that only encloses it is refused because the command cannot
-    // be inspected, which is what the refusal then says: a quoted heredoc's data can read as `/`.
+    // be inspected, which is what the refusal then says: a kept heredoc's data can read as `/`
+    // (a copy-only quoted body is removed before this point and no longer reaches here — #1734).
     let enclosing = false;
     for (const token of tokens) {
       const value = tokenText(token);
@@ -2324,6 +2998,25 @@ export function commandTargetsGuardState(
       }
     }
     return enclosing ? guardStateUninspectableRefusal(UNMODELLED_SHAPE_REASON) : null;
+  }
+  // AC1 (#1734): a SINGLE simple command whose command word is the literal, unquoted `echo` (the only
+  // builtin that opens no operand and cannot be coerced into executing one — printf/true/false/: are
+  // excluded, Codex round 4 CR-4.2), with no redirect and every character whitelisted, is allowed
+  // even when it names `/`, `//`, or `~`. Only the ancestor check is relaxed; the `inside` check below
+  // (with symlink resolution) and the raw-text scan still refuse anything resolving into the state.
+  // The command word must be the first token (no leading redirect/assignment) AND spelled literally
+  // (GUARD_STATE_LITERAL_ECHO, so a quoted/escaped `echo` the whitelist cannot reason about is out),
+  // and the whitelist (no `$`, backtick, `\`, `"`, `#`, braces, globs, or extra operators) keeps out
+  // any expansion or substitution that could reach — so this needs no bash modelling (Codex round 3).
+  if (segments.length === 1) {
+    const { operands, words, redirects } = segments[0]!;
+    if (words !== null && words.length > 0 && operands[0] === words[0] &&
+        GUARD_STATE_NONPATH_COMMANDS.has(words[0]!) && GUARD_STATE_LITERAL_ECHO.test(command) &&
+        redirects.length === 0 && ac1CommandWhitelisted(command)) {
+      // `echo` opens none of its operands; still refuse if one resolves inside the state.
+      const reaches = operands.some((value) => value !== null && wordRelation(value) === "inside");
+      if (!reaches) return null; // names at most an ancestor it cannot open → allowed
+    }
   }
   let namesAncestor = false;
   for (const { operands } of segments) {

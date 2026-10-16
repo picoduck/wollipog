@@ -1,4 +1,5 @@
-import { boundedIssueNumbers, normalizeCampaignIssueScopeSnapshot, runnerSupportsProtocol,
+import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement,
+  normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerSupportsProtocol, type RunnerCapabilityRequirementDetails,
   type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView, isTerminal } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { issueClosureActiveChildren } from "./github-issue-closure.js";
@@ -8,13 +9,22 @@ export function scopeParticipants(db: ControlPlaneDb, root: SessionView): Sessio
   return [root, ...db.campaignDescendantIds(root.id).flatMap((id) => { const s = db.getSession(id); return s?.orchestratorPolicy && !s.archived && !isTerminal(s.status) ? [s] : []; })];
 }
 
-export function scopeCompatibility(db: ControlPlaneDb, root: SessionView): string | null {
-  if (root.orchestratorPolicy?.control?.mode === "full_control" && root.orchestratorPolicy.control.boundary.issueAuthority &&
-      scopeParticipants(db, root).some((s) => (db.getRunner(s.runnerId)?.protocolVersion ?? 0) < 217)) {
-    return "Bounded Full Control issue writes require protocol-v217 on every participating Orchestrator runner.";
+/** The runner floor that blocks issue scope work, as the shared sentence plus the versions of the
+ * first participant below it, or null when every participating Orchestrator runner is current. */
+export function scopeCompatibility(db: ControlPlaneDb, root: SessionView): ({ error: string } & RunnerCapabilityRequirementDetails) | null {
+  const participants = scopeParticipants(db, root);
+  if (root.orchestratorPolicy?.control?.mode === "full_control" && root.orchestratorPolicy.control.boundary.issueAuthority) {
+    const outdated = participants.find((s) =>
+      (db.getRunner(s.runnerId)?.protocolVersion ?? 0) < RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlIssueAuthority);
+    if (outdated) return campaignIssueLimitsRequirement(db.getRunner(outdated.runnerId)?.protocolVersion);
   }
-  return scopeParticipants(db, root).every((s) => runnerSupportsProtocol(db.getRunner(s.runnerId)?.protocolVersion, "campaignIssueScopeChanges"))
-    ? null : "Campaign issue scope changes require protocol-v208 on every participating Orchestrator runner. Update the runners and reconnect before retrying.";
+  const outdated = participants.find((s) => !runnerSupportsProtocol(db.getRunner(s.runnerId)?.protocolVersion, "campaignIssueScopeChanges"));
+  return outdated ? campaignIssueScopeChangesRequirement(db.getRunner(outdated.runnerId)?.protocolVersion) : null;
+}
+
+/** A view's compatibility notice: the sentence, with the versions beside it rather than inside it. */
+export function compatibilityFields({ error, ...versions }: { error: string } & RunnerCapabilityRequirementDetails) {
+  return { compatibilityMessage: error, ...versions };
 }
 
 export function scopeView(db: ControlPlaneDb, root: SessionView, repository: string): CampaignIssueScopeView {
@@ -31,10 +41,10 @@ export function scopeView(db: ControlPlaneDb, root: SessionView, repository: str
     }
     cursor = result.data.nextCursor ?? undefined;
   } while (cursor);
-  const compatibilityMessage = scopeCompatibility(db, root);
+  const requirement = scopeCompatibility(db, root);
   return { campaignSessionId: root.id, repository, issueNumbers: numbers, revision: root.orchestratorPolicy?.issueScope?.revision ?? 0,
     ...(root.orchestratorPolicy?.issueScope ? { authorization: root.orchestratorPolicy.issueScope } : {}),
-    supported: !compatibilityMessage, ...(compatibilityMessage ? { compatibilityMessage } : {}), canPropose: false, outsideScope };
+    supported: !requirement, ...(requirement ? compatibilityFields(requirement) : {}), canPropose: false, outsideScope };
 }
 
 export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository: string, request: CampaignIssueScopeRequest): CampaignIssueScopeSnapshot | null {

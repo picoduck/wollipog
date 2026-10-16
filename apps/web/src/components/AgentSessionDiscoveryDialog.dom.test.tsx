@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { PROTOCOL_VERSION, type ExternalSessionDescriptor, type RunnerView } from "@wollipog/protocol";
 import { api } from "../api.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import {
   AgentSessionDiscoveryDialog,
   agentSupportsSessionDiscovery,
@@ -167,7 +168,8 @@ test("an old runner explains why Codex App Server discovery requires an update",
     assert.match(copy, /This machine needs a newer runner for Codex app server session discovery\. Update and restart the runner\./);
     assert.doesNotMatch(copy, /Codex(?: —)? Interactive session discovery/);
     assert.doesNotMatch(copy, /protocol|v6[23]/);
-    assert.equal((container.querySelector('input[value="codex-exec"]') as HTMLInputElement).disabled, false);
+    // Discovery's exec row restarts existing sessions only; it is not an adoption fallback.
+    assertNoDomNode(container.querySelector('input[value="codex-exec"]'));
   } finally {
     await act(async () => { root.unmount(); });
     mountPoint.remove();
@@ -262,8 +264,7 @@ test("agent session discovery waits for a selection and scopes the result list",
     assert.equal(calls.length, 0, "opening the dialog must not scan before the user selects an agent");
     assert.match(container.textContent ?? "", /Select an Agent/);
     assert.match(container.textContent ?? "", /Codex App Server/);
-    assert.match(container.textContent ?? "", /Codex — Non-Interactive \(codex exec\)/);
-    assert.match(container.textContent ?? "", /Uses codex exec to run each turn non-interactively/);
+    assert.doesNotMatch(container.textContent ?? "", /Non-Interactive|codex exec/);
 
     const findButton = Array.from(container.querySelectorAll("button"))
       .find((button) => button.textContent?.includes("Find Sessions")) as HTMLButtonElement;

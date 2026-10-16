@@ -188,13 +188,18 @@ test("a stalled session's badge turns danger, stops pulsing, and says how long i
 });
 
 
-test("available results use a neutral badge while required answers keep warning priority", () => {
+test("available results use a review badge while required answers keep warning priority", () => {
   const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
     result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
   const result = sessionRowStatus(session({ status: "idle", attention }));
   assert.equal(result.badge?.meta.label, "Ready for Review");
-  assert.equal(result.badge?.meta.tone, "neutral");
+  assert.equal(result.badge?.meta.tone, "review");
   assert.equal(result.badge?.ariaLabel, "Status: Ready for Review");
+  assert.match(result.badge?.title ?? "", /assessment or next instructions/);
+  const family = sessionRowStatus(session(), { familyFollowUpLabel: "Ready for Review" });
+  assert.equal(family.badge?.meta.tone, "review");
+  assert.equal(family.badge?.ariaLabel, "Status: Ready for Review");
+  assert.match(family.badge?.title ?? "", /in this family/);
   const question = sessionRowStatus(session({ status: "running", attention: { ...attention,
     humanActions: [{ requestId: "q", rank: 3, requestedAt: 2 }] },
     pendingApproval: { requestId: "q", kind: "question", title: "Choose", options: [] } }), {

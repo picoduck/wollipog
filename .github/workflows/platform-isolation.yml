@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, windows-2025, macos-latest]
+        os: [ubuntu-24.04, windows-latest, windows-2025, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
@@ -88,8 +88,16 @@ jobs:
       - name: Verify Native Provider-HOME Lease Protocol
         run: node --import tsx --test apps/runner/src/provider-home-lease.test.ts apps/runner/src/provider-home-lease-portable.test.ts apps/runner/src/provider-home-lease-io.test.ts apps/runner/src/provider-home-lease-async.test.ts apps/runner/src/provider-home-lease-worker-protocol.test.ts apps/runner/src/provider-home-lease-heartbeat.test.ts
 
+      - name: Verify Successor Readiness Regression Detects Barrier Removal
+        timeout-minutes: 2
+        run: node apps/runner/scripts/verify-successor-readiness-regression.mjs
+
       - name: Verify Session Writer Lock Across Processes
         run: node --import tsx --test apps/runner/src/session-store-lock.test.ts
+
+      - name: Verify Successor Load Timeout Diagnostics
+        timeout-minutes: 2
+        run: node --test apps/runner/scripts/successor-load-lifecycle.test.mjs
 
       - name: Verify Lock Result Publication Ten Times Under Windows Load
         if: github.event_name == 'workflow_dispatch' && inputs.lock_result_publication_load && startsWith(matrix.os, 'windows-')
@@ -125,11 +133,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash scripts/configure-ci-bubblewrap.sh
           bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-pid -- /bin/true
           output=$(node --import tsx --test --test-reporter=tap apps/runner/src/managed-worktree-sandbox.integration.test.ts apps/runner/src/managed-worktree-guard-sandbox.integration.test.ts < /dev/null)
           printf '%s\n' "$output"
           if printf '%s' "$output" | grep -q '^# skipped 0$'; then exit 0; fi
           echo "the bubblewrap enforcement test must run rather than skip on this job" >&2
+          exit 1
+
+      # The injected CLI from inside a sandbox built like Codex's network-off worker sandbox (#3270):
+      # real bubblewrap with --unshare-net and an equivalent seccomp filter, in workspace-write and
+      # read-only shapes, with proof in the same sandbox that no socket reaches out. The real-Codex
+      # variants need a Codex install, so this job leaves them out by name rather than skipping them.
+      - name: Verify Agent Control CLI Inside a Network-Off Sandbox
+        if: startsWith(matrix.os, 'ubuntu-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/configure-ci-bubblewrap.sh
+          output=$(node --import tsx --test --test-reporter=tap --test-skip-pattern='real codex sandbox' apps/runner/src/agent-control-sandbox-cli.integration.test.ts < /dev/null)
+          printf '%s\n' "$output"
+          if printf '%s' "$output" | grep -q '^# skipped 0$' && printf '%s' "$output" | grep -q '^# pass 3$'; then exit 0; fi
+          echo "the network-off sandbox CLI test must run all three cases rather than skip on this job" >&2
           exit 1
 
       # Linux adoption moves files through the fixed renameat2(RENAME_NOREPLACE) helper, compiled

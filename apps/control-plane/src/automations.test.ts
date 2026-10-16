@@ -1130,6 +1130,7 @@ test("scheduled sessions follow the saved installation through rediscovery and r
   service.tick(120_000);
   assert.ok(savedSystemResolutions > 0, "the second tick must resolve the saved system installation");
   assert.equal(created.length, 1, "the old id now belongs to a different installation");
+  assert.equal(db.getAutomation(automation.automationId)?.targetHealth?.error, TARGET_INSTALLATION_UNAVAILABLE);
   assert.equal(db.getAutomation(automation.automationId)?.action.kind, "create_session");
 });
 
@@ -1429,6 +1430,12 @@ test("pending legacy signed triggers pin on restart without changing accepted wo
   assert.equal(created.length, 1);
 });
 
+/** The two waiting reasons, pinned word for word (#3220). */
+const TARGET_UNAVAILABLE = "None of this automation's machines can run it now. " +
+  "Check that the machine is online and up to date and still has the workspace and project.";
+const TARGET_INSTALLATION_UNAVAILABLE = "This automation's agent installation isn't available on any of its machines. " +
+  "Choose an installation in Machine Settings, or edit the automation to choose another machine.";
+
 test("an on-time unresolved target follows runner policy across every misfire policy", () => {
   const misfires = [
     { kind: "skip" as const }, { kind: "fire_once" as const },
@@ -1446,7 +1453,7 @@ test("an on-time unresolved target follows runner policy across every misfire po
     online.clear();
     assert.equal(service.tick(60_001), 0);
     assert.equal(db.getAutomation(automation.automationId)?.targetHealth?.scheduledFor, 60_000);
-    assert.match(db.getAutomation(automation.automationId)?.targetHealth?.error ?? "", /target is available|Machine is online/);
+    assert.equal(db.getAutomation(automation.automationId)?.targetHealth?.error, TARGET_UNAVAILABLE);
     assert.equal(db.listAutomationExecutions(automation.automationId).length, 0);
     const unresolved = db.listAutomationEvents(automation.automationId).filter((event) => event.kind === "target_unresolved");
     assert.equal(unresolved.length, 1);
@@ -1479,7 +1486,7 @@ test("an on-time unresolved target expires with its resolution error instead of 
     const execution = db.listAutomationExecutions(automation.automationId)[0]!;
     assert.equal(execution.status, "expired");
     assert.equal(execution.scheduledFor, 60_000);
-    assert.match(execution.error ?? "", /Machine is online/);
+    assert.equal(execution.error, TARGET_UNAVAILABLE, "an expired run keeps the waiting reason");
     assert.equal(db.getAutomation(automation.automationId)?.targetHealth, undefined);
     assert.equal(db.listAutomationEvents(automation.automationId).some((event) =>
       event.kind === "misfire_skipped"), false);
@@ -1695,7 +1702,7 @@ test("runner wait, bounded expiry, and explicit alternate target policies are du
   assert.equal(db.listAutomationExecutions(expiring.automationId).length, 0, "offline wait is safe to retry because nothing was sent");
   assert.equal(service.tick(120_000), 1);
   assert.equal(db.listAutomationExecutions(expiring.automationId)[0]?.status, "expired");
-  assert.match(db.listAutomationExecutions(expiring.automationId)[0]?.error ?? "", /Machine is online/,
+  assert.equal(db.listAutomationExecutions(expiring.automationId)[0]?.error, TARGET_UNAVAILABLE,
     "an offline Machine must not be diagnosed as a missing saved installation");
   assert.equal(notifications.at(-1)?.endsWith(":expired"), true);
 

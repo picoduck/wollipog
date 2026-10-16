@@ -7,6 +7,8 @@ import {
   CSS_FEATURES,
   CSS_SURFACE,
   ENGINES,
+  FLOOR_FEATURES,
+  JS_FEATURES,
   floorSetting,
   formatTarget,
   requiredFloor,
@@ -40,7 +42,17 @@ test("the build target is the registry's floor, not a separately maintained list
     "vite.config.ts must derive its target from CSS_FEATURES rather than restate one");
   // The drift this issue was filed for, pinned as a value: every one of these is above the floor
   // that used to be declared by hand (chrome107 / edge107 / firefox104 / safari16).
-  assert.deepEqual(WOLLIPOG_WEBVIEW_TARGETS, ["chrome111", "edge111", "firefox121", "safari16.2"]);
+  assert.deepEqual(WOLLIPOG_WEBVIEW_TARGETS, ["chrome111", "edge111", "firefox121", "safari16.4"]);
+});
+
+test("JavaScript requirements raise the same floor the stylesheet sets", () => {
+  // #3213: the stylesheet alone needs Safari 16.2, but the bundle ships regex lookbehind, which
+  // Safari parses from 16.4. With the JS entry absent the build lowered every lookbehind into a
+  // RegExp(...) call that threw at run time; with it, the one floor covers both.
+  assert.deepEqual(webviewTargets(CSS_FEATURES), ["chrome111", "edge111", "firefox121", "safari16.2"]);
+  assert.deepEqual(JS_FEATURES.map((feature) => feature.id), ["regex lookbehind"]);
+  assert.deepEqual(webviewTargets(), webviewTargets(FLOOR_FEATURES));
+  assert.equal(webviewTargets().at(-1), "safari16.4");
 });
 
 test("the stylesheet uses no CSS outside the reviewed surface", () => {
@@ -162,19 +174,19 @@ test("only breaking features move the floor", () => {
   // Safari 18.2 in exchange for scrollbar cosmetics. This is the assertion that keeps that true.
   const scrollbars = CSS_FEATURES.find((feature) => feature.id.startsWith("scrollbar-"))!;
   assert.equal(scrollbars.kind, "degrades");
-  assert.deepEqual(requiredFloor().safari, [16, 2],
-    "a gracefully-degrading feature must not raise the Safari floor");
+  assert.deepEqual(requiredFloor().safari, [16, 4],
+    "a gracefully-degrading feature must not raise the Safari floor past what lookbehind needs");
   assert.ok(floorSetting().every((feature) => feature.kind === "requires-floor"));
 });
 
 test("the floor takes the maximum across features, per engine independently", () => {
   // Not one feature's row: the binding constraint differs by engine, which is exactly the kind of
-  // thing a hand-maintained list gets wrong. color-mix() sets Chrome/Edge and Safari; :has() sets
-  // Firefox, and does so from a version far above what any other feature needs.
+  // thing a hand-maintained list gets wrong. color-mix() sets Chrome/Edge; :has() sets Firefox, and
+  // does so from a version far above what any other feature needs; regex lookbehind sets Safari.
   const floor = requiredFloor();
   assert.deepEqual(floor.chrome, [111, 0], "color-mix() is the binding constraint on Chrome");
   assert.deepEqual(floor.firefox, [121, 0], ":has() is the binding constraint on Firefox");
-  assert.deepEqual(floor.safari, [16, 2], "color-mix() is the binding constraint on Safari");
+  assert.deepEqual(floor.safari, [16, 4], "regex lookbehind is the binding constraint on Safari");
 
   for (const engine of ENGINES) {
     const highest = Math.max(...floorSetting().map((feature) => feature.support[engine][0]));
@@ -203,14 +215,14 @@ test("a downlevelled entry is accounted for without raising the floor", () => {
     by: "Lightning CSS, which flattens nested rules into ordinary selectors",
     evidence: "synthetic fixture for this test",
   };
-  assert.deepEqual(webviewTargets([...CSS_FEATURES, nesting]), webviewTargets(),
+  assert.deepEqual(webviewTargets([...FLOOR_FEATURES, nesting]), webviewTargets(),
     "a downlevelled entry must not move the floor");
 });
 
 test("minor versions survive the target spelling", () => {
-  // safari16.2 is the whole point: a floor rounded to `safari16` is the stale declaration again,
-  // because Safari 16.0 and 16.1 cannot parse color-mix().
-  assert.equal(formatTarget("safari", [16, 2]), "safari16.2");
+  // safari16.4 is the whole point: a floor rounded to `safari16` is the stale declaration again,
+  // because Safari 16.0 to 16.3 cannot parse regex lookbehind (and 16.0 and 16.1 not color-mix()).
+  assert.equal(formatTarget("safari", [16, 4]), "safari16.4");
   assert.equal(formatTarget("chrome", [111, 0]), "chrome111");
 });
 
@@ -219,7 +231,7 @@ test("the compatibility document declares the same floor the build uses", () => 
   // asserted a floor the build had long since outgrown. Only the DECLARING sentence is checked:
   // the document also recounts the superseded floor as history, which is worth keeping and must not
   // be mistaken for a live claim.
-  // Whole line, not a sentence: `Safari 16.2.` contains the delimiter a sentence split would use.
+  // Whole line, not a sentence: `Safari 16.4.` contains the delimiter a sentence split would use.
   const declaration = /^- Production JavaScript and CSS target (.+)$/m.exec(compatibilityDoc);
   assert.ok(declaration, "the platform contract must state the target in one recognisable sentence");
   for (const target of WOLLIPOG_WEBVIEW_TARGETS) {

@@ -125,6 +125,7 @@ import {
   sweepAgentControlFiles,
 } from "./agent-control.js";
 import { AgentControlRelaySockets } from "./agent-control-relay.js";
+import { AgentControlFifoRelays, agentControlFifoRelayBase } from "./agent-control-fifo-relay.js";
 import {
   projectOrchestratorPresetForPeer,
   stripOrchestratorLaunchArgs,
@@ -256,7 +257,7 @@ import {
   type DurableCommandHandle,
   type DurableCommandReceipt,
 } from "./durable-command-store.js";
-import type { DurableCommandLifecycle, SessionCommandInvocationLifecycle } from "./session-manager.js";
+import type { DurableCommandLifecycle, SessionCommandInvocationLifecycle, SkillProviderHomeScope } from "./session-manager.js";
 import {
   isInvokeSessionCommandMessage,
   SessionCommandReceiptStore,
@@ -421,22 +422,34 @@ const claudeHookHost = {
 };
 const agentControlHost = defaultAgentControlHost(config.dataDir);
 const agentControlRelays = new AgentControlRelaySockets(relayAgentControlRequest);
+// The same relay through FIFOs, for a CLI inside a provider sandbox that refuses every socket
+// (#3270). Measured only against Codex's Linux sandbox, so other hosts keep the loopback relay.
+const agentControlFifoRelays = process.platform === "linux"
+  ? new AgentControlFifoRelays(agentControlFifoRelayBase(agentControlHost.configDir), relayAgentControlRequest)
+  : undefined;
 sweepClaudeHookFiles(claudeHookHost.configDir);
 // Verdict sockets (#1336). A runner that sandboxes its providers serves a path socket inside the
 // hidden hook state directory. One that does not (`provider` mode) serves an abstract-namespace
 // socket on Linux and answers from its own memory; elsewhere the guard reads its file as before.
 const guardSockets = new ManagedWorktreeGuardSockets(claudeHookHost.configDir);
 
-async function providerAgentControlRelayEndpoint(
+async function providerAgentControlRelay(
   meta: Pick<SessionMeta, "sessionId" | "context" | "executionTarget">,
-): Promise<string | undefined> {
+): Promise<{ providerRelayEndpoint?: string; providerRelayFifo?: string }> {
   if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionAgentControl") ||
       config.executionIsolation.mode !== "provider" || meta.context.kind !== "native" ||
       (meta.executionTarget && meta.executionTarget.adapter !== "host")) {
-    await agentControlRelays.close(meta.sessionId);
-    return undefined;
+    await Promise.all([agentControlRelays.close(meta.sessionId), agentControlFifoRelays?.close(meta.sessionId)]);
+    return {};
   }
-  return agentControlRelays.ensure(meta.sessionId);
+  const providerRelayEndpoint = await agentControlRelays.ensure(meta.sessionId);
+  // Optional: without it the CLI keeps the loopback relay, and the guidance stops offering the CLI
+  // where a provider sandbox would refuse that.
+  const providerRelayFifo = await agentControlFifoRelays?.ensure(meta.sessionId).catch((error: unknown) => {
+    log(`agent control ${meta.sessionId}: FIFO relay unavailable (${errText(error)})`);
+    return undefined;
+  });
+  return { providerRelayEndpoint, ...(providerRelayFifo ? { providerRelayFifo } : {}) };
 }
 
 /**
@@ -812,6 +825,7 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
   },
   credentialHomeInUse: (account) => store.listSessions().some((meta) =>
     meta.providerAccountId === account.id || meta.providerCredentialHome === account.directory),
+  serializeHomeRetirement: (work) => onSkillsQueue(work),
   onAccountRemoved: (account) => {
     providerAccountAuthStatus.delete(account.id);
     sendUp({
@@ -895,7 +909,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       const accountHome = pluginProvider === "claude" ? meta.env.CLAUDE_CONFIG_DIR : meta.env.CODEX_HOME;
       if (meta.context.kind === "native" && accountHome &&
           (!meta.executionTarget || meta.executionTarget.adapter === "host")) {
-        await sessions.acquireSkillReconciliationProviderHome(accountHome, cancellation);
+        await sessions.acquireLaunchProviderHome(accountHome, cancellation);
       }
       assertPreparationCurrent();
       if (pluginProvider === "claude") {
@@ -951,7 +965,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
         registerCredentialAndWait: registerAgentControlCredentialAndWait,
         orchestratorAgent: localAgent,
         executionIsolationMode: config.executionIsolation.mode,
-        providerRelayEndpoint: await providerAgentControlRelayEndpoint(meta),
+        ...await providerAgentControlRelay(meta),
         orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
       },
       log,
@@ -1253,6 +1267,7 @@ function sendUp(msg: RunnerToControlPlane): void {
   if (msg.type === "session_status" && ["completed", "failed", "stopped"].includes(msg.status)) {
     removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
     void agentControlRelays.close(msg.sessionId);
+    void agentControlFifoRelays?.close(msg.sessionId);
     for (const [key, pending] of pendingAgentControlRegistrations) {
       if (!key.startsWith(`${msg.sessionId}\0`)) continue;
       clearTimeout(pending.timer);
@@ -1490,6 +1505,12 @@ function completeChunkedSkillsSync(msg: Extract<ControlPlaneToRunner, { type: "s
 /** Serializes reconcile passes so concurrent syncs and discovery rescans cannot interleave the
  * link-replacement and removal steps. */
 let skillsReconcileQueue: Promise<void> = Promise.resolve();
+/** Run `work` after every queued skill transaction and before any later one. */
+function onSkillsQueue<T>(work: () => Promise<T>): Promise<T> {
+  const result = skillsReconcileQueue.then(work, work);
+  skillsReconcileQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
 /** Inventory and removal events belong to the current connection, never the general outbox. */
 function sendSkillState(message: import("@wollipog/protocol").SkillsStateMessage): void {
   const socket = ws;
@@ -1524,7 +1545,11 @@ function queueSkillsReconcile(requestId?: string): void {
         return current?.id === account.id && current.provider === account.provider && current.directory === account.directory;
       });
     let result: ReconcileSkillsResult | undefined;
+    // Release this pass's provider-HOME references once its links are written, so an idle runner
+    // does not keep every reconciled HOME leased against other runners.
+    let providerHomes: SkillProviderHomeScope | undefined;
     try {
+      const scope = providerHomes = sessions.skillProviderHomeScope();
       const accountScopesEnabled = runnerSupportsProtocol(
         controlPlaneProtocolVersion,
         "accountScopedAgentSkills",
@@ -1570,8 +1595,7 @@ function queueSkillsReconcile(requestId?: string): void {
         // newly cached digest (especially when previousVersionMinutes is configured to zero).
         allowRemovals,
         log,
-        acquireProviderHomeLease: () =>
-          sessions.acquireSkillReconciliationProviderHome(homedir()),
+        acquireProviderHomeLease: () => scope.acquire(homedir()),
         isCurrent: stillCurrent,
         removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
         previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
@@ -1597,8 +1621,7 @@ function queueSkillsReconcile(requestId?: string): void {
           desired: desired ?? [],
           allowRemovals,
           log,
-          acquireProviderHomeLease: () =>
-            sessions.acquireSkillReconciliationProviderHome(account.directory),
+          acquireProviderHomeLease: () => scope.acquire(account.directory),
           isCurrent: stillCurrent,
           removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
           previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
@@ -1628,6 +1651,8 @@ function queueSkillsReconcile(requestId?: string): void {
         ...(result?.superseded ? { superseded: true } : {}),
         error: `skill reconcile failed: ${errText(error)}`,
       };
+    } finally {
+      await providerHomes?.release();
     }
     // A failed handoff is transport failure, not a new empty reconciliation observation.
     skillStateReporter.report(result, request, stillCurrent(), generation);
@@ -1648,20 +1673,31 @@ function wslAdoptionEnvironment(): WslAdoptionEnvironment | undefined {
 function queueSkillAdoption(msg: SkillAdoptionMessage): void {
   const run = async () => {
     const wsl = wslAdoptionEnvironment();
-    const result = await handleSkillAdoption({
-      message: msg,
-      runnerId: config.runnerId,
-      home: homedir(),
-      dataDir: config.dataDir,
-      agents: metadata.agents,
-      currentAgents: () => metadata.agents,
-      providerAccounts: () => config.providerAccounts,
-      snapshots: machineSkillSnapshots,
-      desired: lastDesiredSkills,
-      currentDesired: () => lastDesiredSkills,
-      acquireProviderHomeLease: (home) => sessions.acquireSkillReconciliationProviderHome(home),
-      ...(wsl ? { wsl } : {}),
-    });
+    // An adoption that needs recovery (or threw) left a journaled mutation in the HOME, so its
+    // references stay held until runner shutdown, as every skill reference did before.
+    const providerHomes = sessions.skillProviderHomeScope();
+    let settled = false;
+    let result: Awaited<ReturnType<typeof handleSkillAdoption>>;
+    try {
+      result = await handleSkillAdoption({
+        message: msg,
+        runnerId: config.runnerId,
+        home: homedir(),
+        dataDir: config.dataDir,
+        agents: metadata.agents,
+        currentAgents: () => metadata.agents,
+        providerAccounts: () => config.providerAccounts,
+        snapshots: machineSkillSnapshots,
+        desired: lastDesiredSkills,
+        currentDesired: () => lastDesiredSkills,
+        acquireProviderHomeLease: providerHomes.acquire,
+        ...(wsl ? { wsl } : {}),
+      });
+      settled = result.status !== "recovery_required";
+    } finally {
+      if (settled) await providerHomes.release();
+      else await providerHomes.retain();
+    }
     sendUp(result);
     // A completed or interrupted transaction may have changed the source path. Reconcile and
     // inventory run next in the same queue so no link/GC pass can interleave with adoption.
@@ -1699,16 +1735,26 @@ function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
       }));
       return;
     }
-    const result = await restoreSkillAdoptionRecoveryWithWsl({
-      home: homedir(),
-      dataDir: config.dataDir,
-      agents: metadata.agents,
-      providerAccounts: runnerSupportsProtocol(controlPlaneProtocolVersion, "accountScopedAgentSkills")
-        ? config.providerAccounts
-        : [],
-      operationId: msg.operationId,
-      acquireProviderHomeLease: (home) => sessions.acquireSkillReconciliationProviderHome(home),
-    }, wslAdoptionEnvironment());
+    // Same rule as adoption: an unfinished restore keeps its references.
+    const providerHomes = sessions.skillProviderHomeScope();
+    let settled = false;
+    let result: Awaited<ReturnType<typeof restoreSkillAdoptionRecoveryWithWsl>>;
+    try {
+      result = await restoreSkillAdoptionRecoveryWithWsl({
+        home: homedir(),
+        dataDir: config.dataDir,
+        agents: metadata.agents,
+        providerAccounts: runnerSupportsProtocol(controlPlaneProtocolVersion, "accountScopedAgentSkills")
+          ? config.providerAccounts
+          : [],
+        operationId: msg.operationId,
+        acquireProviderHomeLease: providerHomes.acquire,
+      }, wslAdoptionEnvironment());
+      settled = result.status !== "recovery_required";
+    } finally {
+      if (settled) await providerHomes.release();
+      else await providerHomes.retain();
+    }
     sendUp(recoveryResult(config.runnerId, msg.requestId, result));
     // A restore attempt can move a managed link or source directory. Publish converged inventory
     // next in this same queue and keep reconcile/store GC out of every recovery transaction.
@@ -2517,6 +2563,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void guardSockets.close(msg.sessionId);
       removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
       void agentControlRelays.close(msg.sessionId);
+      void agentControlFifoRelays?.close(msg.sessionId);
       break;
     case "resolve_permission":
       sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId, msg.resolvedBy);
@@ -3175,7 +3222,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
               executionIsolationMode: config.executionIsolation.mode,
-              providerRelayEndpoint: await providerAgentControlRelayEndpoint(prepared),
+              ...await providerAgentControlRelay(prepared),
               orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
             }, log, agentControlHost);
           },
@@ -3882,7 +3929,9 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("dispose shells", () => shells.dispose());
   bestEffort("close guard sockets", () => { void guardSockets.closeAll(); });
-  bestEffort("close Agent Control relays", () => { void agentControlRelays.closeAll(); });
+  // The FIFO channels close synchronously: their directories are unlistable, so one left behind
+  // would block an ordinary recursive delete of the data directory until the next startup sweep.
+  bestEffort("close Agent Control relays", () => { void agentControlRelays.closeAll(); agentControlFifoRelays?.closeAllNow(); });
   // Providers that exited normally may have intentional background descendants retained under
   // their session boundary. Runner shutdown is the final owner and must drain every such scope.
   bestEffort("register retained descendant cleanup", () => terminateDescendantBoundariesAfterPendingKills());

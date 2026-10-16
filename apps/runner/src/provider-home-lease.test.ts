@@ -15,11 +15,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test, type TestContext } from "node:test";
 const previousMask = process.umask(0o077);
 after(() => process.umask(previousMask));
-import { providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { providerHomeLeaseRefusalKind, providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { killTreeAndWait, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 
 const OWNER_A = "a".repeat(64);
@@ -459,6 +459,26 @@ test("container and cloud launches never lease the host provider HOME", () => {
   );
 });
 
+test("protected bwrap with preserved provider state retains the shared-home lease", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-preserved-provider-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const isolated: SpawnIsolation = { backend: "bwrap", command: "bwrap", args: [], network: "inherit" };
+  const preserved: SpawnIsolation = { ...isolated, preservesProviderHome: true };
+  assert.equal(providerLaunchNeedsSharedHomeLease(isolated), false);
+  assert.equal(providerLaunchNeedsSharedHomeLease(preserved), true);
+  const first = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 101, hostname: "host-a", isProcessAlive: (pid) => pid === 101,
+  });
+  const second = new ProviderHomeLeaseRegistry(OWNER_B, {
+    pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 101,
+  });
+  first.acquire({ ...request(home), isolation: preserved });
+  assert.throws(() => second.acquire({ ...request(home), isolation: preserved }), /already in use by process 101/);
+  first.releaseAll();
+  second.acquire({ ...request(home), isolation: preserved });
+  second.releaseAll();
+});
+
 test("a configured credential home is created before its first lease", (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-provider-home-create-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -553,6 +573,8 @@ test("stale leases with a foreign owner or host and live leases all fail closed"
       assert.ok(String(error).includes(leasePaths(home).lock), "the operator can locate the refused state");
       assert.match(String(error), /quarantine the entire.*do not remove individual records/);
       assert.ok(!String(error).includes(OWNER_A) && !String(error).includes(OWNER_B));
+      assert.equal(providerHomeLeaseRefusalKind(error),
+        scenario === "owner" ? "foreign_owner" : scenario === "host" ? "foreign_host" : "busy");
       return true;
     });
     assert.deepEqual(readdirSync(leasePaths(home).lock), ["lease.json"]);
@@ -689,6 +711,8 @@ test("one fixed successor elects exactly one of two concurrent same-owner reclai
   winner.releaseAll();
 });
 
+const SUCCESSOR_REPORT_MS = 10_000;
+
 type SuccessorRaceOptions = {
   startupDelayMs?: number;
   publicationDelayMs?: number;
@@ -701,7 +725,7 @@ type SuccessorRaceOptions = {
 };
 
 async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOptions = {}) {
-  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-home-process-race-"));
+  const root = mkdtempSync(join(process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT ?? tmpdir(), "wollipog-provider-home-process-race-"));
   const home = join(root, "home");
   const staging = join(root, "staging");
   const start = join(root, "start");
@@ -886,6 +910,10 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         child.closeObserved = true;
         state.closed = true; state.code = code; state.signal = signal;
       });
+      // Advisory evidence only: a PID can be reused after the fixture dies.
+      writeFileSync(join(root, "contenders.json"), JSON.stringify({
+        version: 1, contenders: states.map((entry) => ({ pid: entry.child.pid, detached: process.platform !== "win32" })),
+      }));
     }
     // Windows measurements exceeded five seconds during both setup and actual
     // acquisition/verification. Each phase gets a separate finite ten-second bound;
@@ -894,7 +922,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     options.onReady?.();
     if (t.signal.aborted || options.signal?.aborted) throw new Error("successor election cancelled");
     writeFileSync(start, "go");
-    assert.ok(await waitUntil(() => states.every((state) => state.reported), 10_000, true), "both contenders report before the race deadline");
+    assert.ok(await waitUntil(() => states.every((state) => state.reported), SUCCESSOR_REPORT_MS, true), "both contenders report before the race deadline");
     outcomes = results.map((result) => readFileSync(result, "utf8"));
     assert.equal(outcomes.filter((outcome) => outcome === "won").length, 1, "exactly one winner");
     assert.equal(outcomes.filter((outcome) => outcome.startsWith("lost:")).length, 1, "exactly one refusal");
@@ -939,9 +967,34 @@ test("the exclusive successor elects one winner across real runner processes", a
   await runSuccessorElectionRace(t);
 });
 
+test("successor election uses its load harness's owned fixture parent", async (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-successor-parent-test-"));
+  const previous = process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT;
+  process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT = parent;
+  t.after(() => {
+    if (previous === undefined) delete process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT;
+    else process.env.WOLLIPOG_SUCCESSOR_FIXTURE_PARENT = previous;
+    rmSync(parent, { recursive: true, force: true });
+  });
+  let observedRoot: string | undefined;
+  let recorded: { contenders: Array<{ pid: number }> } | undefined;
+  await runSuccessorElectionRace(t, { beforeRemoveRoot(root) {
+    observedRoot = root;
+    recorded = JSON.parse(readFileSync(join(root, "contenders.json"), "utf8"));
+  } });
+  assert.ok(observedRoot, "the real fixture reached proved cleanup");
+  assert.equal(dirname(observedRoot), parent, "the harness can locate all fixture state after an outer timeout");
+  assert.equal(recorded?.contenders.length, 2);
+  assert.ok(recorded.contenders.every(({ pid }) => Number.isInteger(pid) && pid > 0 && pid !== process.pid));
+  assert.deepEqual(readdirSync(parent), [], "ordinary fixture cleanup leaves an empty parent");
+});
+
 test("successor election keeps slow startup out of the result deadline", async (t) => {
-  // Give the injected startup pause its own finite setup allowance.
-  await runSuccessorElectionRace(t, { startupDelayMs: 5_200, readinessMs: 15_000 });
+  // Startup must exceed the reporting window: removing only the readiness wait
+  // must expire reporting before either contender can publish. Keep two seconds
+  // of separation plus the normal ten-second setup margin for native initialization.
+  const startupDelayMs = SUCCESSOR_REPORT_MS + 2_000;
+  await runSuccessorElectionRace(t, { startupDelayMs, readinessMs: startupDelayMs + 10_000 });
 });
 
 test("successor election diagnoses startup failure without exposing fixture paths", async (t) => {

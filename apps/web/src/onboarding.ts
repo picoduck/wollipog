@@ -1,6 +1,6 @@
 /** Pure helpers for the "Add a runner" onboarding flow (no DOM, unit-tested). */
 
-import type { AgentDefinition, RunnerView } from "@wollipog/protocol";
+import { isRestartOnlyCodexExec, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
 import { agentDriverLabel } from "./agent-presentation.js";
 import { codexUpgradeGuidance } from "./runners.js";
 
@@ -87,7 +87,11 @@ function agentProblem(agent: AgentDefinition, os: RunnerView["os"]): { detail: s
       return { detail: `${label} is installed but not signed in.`, command: "codex login" };
     }
     if (agent.codexAppServer?.status === "unsupported") {
-      return { detail: `${label} needs a Codex version with interactive support. ${codexUpgradeGuidance(agent, os)}` };
+      // A check that timed out or could not run is fixed by rediscovering, not by an upgrade.
+      const failure = agent.codexAppServer.failure;
+      return failure?.retryable
+        ? { detail: failure.message }
+        : { detail: `${label} needs a Codex version with interactive support. ${codexUpgradeGuidance(agent, os)}` };
     }
     if (agent.codexAppServer?.status === "unavailable") {
       return { detail: `${label} is unavailable or could not be launched. ${codexUpgradeGuidance(agent, os)}` };
@@ -117,6 +121,11 @@ function agentProblem(agent: AgentDefinition, os: RunnerView["os"]): { detail: s
         : { detail: `${label} is unavailable. Check its launch command on the runner.` };
   }
   return null;
+}
+
+/** Discovery's restart-only exec row would otherwise report Codex ready when App Server is not. */
+function offeredAgents(runner: RunnerView): AgentDefinition[] {
+  return runner.agents.filter((agent) => !isRestartOnlyCodexExec(agent));
 }
 
 function agentVerifiedReady(agent: AgentDefinition, os: RunnerView["os"]): boolean {
@@ -152,7 +161,7 @@ export function localRunnerReadiness(runner: RunnerView | undefined): LocalRunne
       agentLabels: [],
     };
   }
-  const agents = runner.agents;
+  const agents = offeredAgents(runner);
   const labels = [...new Set(agents.map(agentDriverLabel))];
   const ready = agents.filter((agent) => agentVerifiedReady(agent, runner.os));
   if (ready.length) {
@@ -234,7 +243,8 @@ export function onboardingHealth(input: {
   if (runner.agentsRefreshed !== true) {
     checks.push({ id: "agents", label: "Agent Readiness", status: "pending", detail: "Waiting for this connection to finish live agent verification. Upgrade the runner if this does not complete." });
   } else {
-    const ready = runner.agents.find((agent) => agentVerifiedReady(agent, runner.os));
+    const agents = offeredAgents(runner);
+    const ready = agents.find((agent) => agentVerifiedReady(agent, runner.os));
     if (ready) {
       checks.push({
         id: "agents",
@@ -243,9 +253,9 @@ export function onboardingHealth(input: {
         detail: `${agentDriverLabel(ready)} ${online ? "is installed and ready" : "was ready when this runner was last online"}.`,
       });
     } else {
-      const problem = runner.agents.map((agent) => agentProblem(agent, runner.os))
+      const problem = agents.map((agent) => agentProblem(agent, runner.os))
         .find((item): item is NonNullable<typeof item> => item != null);
-      const awaitingLive = runner.agents.find((agent) =>
+      const awaitingLive = agents.find((agent) =>
         (agent.driver ?? "acp") === "acp" && !agentProblem(agent, runner.os) && !agentVerifiedReady(agent, runner.os));
       checks.push(problem
         ? {

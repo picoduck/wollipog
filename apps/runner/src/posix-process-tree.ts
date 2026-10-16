@@ -597,6 +597,14 @@ export function terminatePosixProcessBoundaries(owner?: object): Promise<boolean
     .map((boundary) => boundary.terminate());
 }
 
+/** Non-killing counterpart for one owner: each result is true only when that boundary's tracked
+ * processes are all gone (the boundary is then released). Live work is left running. */
+export function releaseEmptyPosixProcessBoundaries(owner: object): Promise<boolean>[] {
+  return [...boundaries]
+    .filter((boundary) => boundary.owner === owner)
+    .map((boundary) => boundary.releaseIfEmpty());
+}
+
 /** Reconstruct an exact marker-backed boundary after the runner process that created it is gone.
  * The random marker is runner-private durable cleanup identity; numeric PIDs alone are never
  * trusted because they may have been reused while the runner was offline. */

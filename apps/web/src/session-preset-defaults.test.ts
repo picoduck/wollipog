@@ -21,9 +21,14 @@ const view: AgentHarnessDefaultsView = { defaults: [{
   installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
 }] };
 
-test("saved preset identity includes agent, driver, context, and WSL distro", () => {
+test("saved preset identity is the harness: driver, context, and WSL distro, plus the agent id for ACP", () => {
   assert.equal(savedSessionPermissionMode(view, agent), "orchestrator");
-  assert.equal(savedSessionPermissionMode(view, { ...agent, id: "other" }), undefined);
+  assert.equal(savedSessionPermissionMode(view, { ...agent, id: "codex-app" }), "orchestrator",
+    "another Machine's name for the same built-in harness receives the default (#3247)");
+  const acp = structuredClone(view);
+  acp.defaults[0]!.driver = "acp";
+  assert.equal(savedSessionPermissionMode(acp, { ...agent, driver: "acp" }), "orchestrator");
+  assert.equal(savedSessionPermissionMode(acp, { ...agent, driver: "acp", id: "other" }), undefined);
   assert.equal(savedSessionPermissionMode(view, { ...agent, driver: "codex" }), undefined);
   assert.equal(savedSessionPermissionMode(view, { ...agent, context: { kind: "wsl", distro: "Ubuntu" } }), undefined);
   const wsl = structuredClone(view);

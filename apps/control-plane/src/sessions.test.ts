@@ -82,6 +82,26 @@ import {
 } from "./sessions.js";
 import { RunnerFrameQueue } from "./runner-frame-queue.js";
 
+/** A runner capability refusal: the exact sentence, with the versions beside it and never in it. */
+function assertRunnerRefusal(
+  result: { status: number; error?: string; capabilityRequirement?: unknown },
+  error: string,
+  requiredRunnerProtocolVersion: number,
+  runnerProtocolVersion: number,
+  message?: string,
+) {
+  assert.equal(result.status, 409, message);
+  assert.equal(result.error, error, message);
+  assert.doesNotMatch(result.error ?? "", /protocol/i, message);
+  assert.deepEqual(result.capabilityRequirement, { requiredRunnerProtocolVersion, runnerProtocolVersion }, message);
+}
+
+test("session refusals name no runner protocol numbers", () => {
+  // docs/design-system.md §17.2: capability refusals use the shared runner sentence and return the
+  // versions as `requiredRunnerProtocolVersion` and `runnerProtocolVersion` (#3219).
+  assert.doesNotMatch(readFileSync(new URL("./sessions.ts", import.meta.url), "utf8"), /protocol-v\d/);
+});
+
 for (const scenario of ["downgrade", "revision-ahead", "identity-conflict", "stopped", "archived"]) test(`unsupported reconciled snapshot isolates its session and preserves enforcement: ${scenario}`, async () => {
   const { db, hub, svc } = makeHarness();
   const now = Date.now();
@@ -187,7 +207,12 @@ test("capability config validation rejects unverified effort and permission mode
   };
   assert.match(capabilityConfigError({ effort: "max" }, caps)!, /effort/);
   assert.match(capabilityConfigError({ model: "missing" }, { ...caps, models: [{ id: "known" }] })!, /model/);
-  assert.match(capabilityConfigError({ permissionMode: "auto" }, caps)!, /permission mode/);
+  assert.equal(capabilityConfigError({ permissionMode: "auto" }, { ...caps, permissionModes: ["acceptEdits", "plan"] }),
+    'permission mode "auto" is not supported by this agent installation; supported permission modes: acceptEdits, plan',
+    "the refusal names the modes the caller can choose instead (#3271)");
+  assert.equal(capabilityConfigError({ permissionMode: "default" }, { ...caps, permissionModes: undefined }),
+    'permission mode "default" is not supported by this agent installation, which advertises no permission modes',
+    "an installation without modes says so instead of listing nothing");
   assert.equal(capabilityConfigError({ effort: "low", permissionMode: "acceptEdits" }, caps), null);
   const perModelCaps = {
     ...caps,
@@ -696,8 +721,12 @@ test("orchestrator separates default provider execution from the negotiated stri
       { ...request, config: { permissionMode: "orchestrator" } },
       undefined, undefined, false, false, false, { defaultOwnerUserId: "human" },
     );
-    assert.equal(unsupportedProviderPolicy.status, 409);
-    assert.match(unsupportedProviderPolicy.error!, /protocol-v144 runner/);
+    assertRunnerRefusal(
+      unsupportedProviderPolicy,
+      "This machine needs a newer runner for an Orchestrator without strict project isolation. Update and restart the runner. To start now, turn on Strict Project Isolation.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorExecutionPolicy,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl - 1,
+    );
     const olderRunner = svc.createSession(
       { ...request, config: { permissionMode: "orchestrator" },
         orchestrator: { execution: { strictProjectIsolation: true } } },
@@ -764,9 +793,13 @@ test("orchestrator separates default provider execution from the negotiated stri
     const outdatedScope = svc.createSession({ ...request, prompt: "Claim and orchestrate issue 1245.",
       config: { permissionMode: "orchestrator" } },
     undefined, undefined, false, false, false, { defaultOwnerUserId: "human" });
-    assert.equal(outdatedScope.status, 409);
-    assert.match(outdatedScope.error ?? "", /protocol-v158/,
-      "an older runner fails actionably instead of silently losing the issue scope");
+    assertRunnerRefusal(
+      outdatedScope,
+      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
+      "an older runner fails actionably instead of silently losing the issue scope",
+    );
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).ok, true);
@@ -790,9 +823,13 @@ test("orchestrator separates default provider execution from the negotiated stri
       undefined, undefined, false, false, false,
       { defaultOwnerUserId: "human", orchestratorDefaults: fixedHarnessDefaults, validateOrchestratorDefaults: () => null },
     );
-    assert.equal(mixedVersion.status, 409);
-    assert.match(mixedVersion.error ?? "", /protocol-v157.*Automatic Harness/,
-      "mixed-version campaigns fail actionably instead of dropping a fixed harness");
+    assertRunnerRefusal(
+      mixedVersion,
+      "This machine needs a newer runner for a fixed child harness. Update and restart the runner. To start now, choose Automatic for Child Harness.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy - 1,
+      "mixed-version campaigns fail actionably instead of dropping a fixed harness",
+    );
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     const advertised = agent.capabilities;
     delete agent.capabilities;
@@ -856,6 +893,82 @@ test("orchestrator separates default provider execution from the negotiated stri
       config: { permissionMode: "orchestrator" } }).status, 409,
     "WSL Orchestrator Native TUI remains unavailable");
   } finally { db.close(); }
+});
+
+test("a fixed Child Harness admits the same harness under another Machine's agent id (#3247)", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    // The second Machine names its Codex App Server row `codex-app` and uses `codex` for an ACP row.
+    const other = runnerMeta();
+    other.runnerId = "runner-2";
+    const codexApp = other.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
+    const acp = other.agents.find((agent) => agent.driver === "acp")!;
+    other.agents = [{ ...codexApp, id: "codex-app" }, { ...acp, id: CODEX_APP_AGENT_ID, capabilities: codexApp.capabilities }];
+    db.registerRunner(other, Date.now(), PROTOCOL_VERSION);
+    const settings: OrchestratorSettingsView = {
+      source: "user_default",
+      defaults: {
+        behavior: {
+          childHarness: { agentId: CODEX_APP_AGENT_ID, driver: "codex-app-server", context: { kind: "native" } },
+          childModel: "text-model",
+          childEffort: null,
+          maximumConcurrentChildren: 6,
+          followUps: "recommend_only",
+          completion: "retain",
+        },
+        delegation: {
+          parentControl: "questions",
+          decisions: {
+            implementation_question: "human",
+            pr_merge: "human",
+            merged_branch_deletion: "human",
+            follow_up_issue_publication: "human",
+            ui_evidence_approval: "human",
+          },
+        },
+        execution: { strictProjectIsolation: false, integrationIsolation: false },
+      },
+      capabilities: {
+        models: [{ id: "text-model" }], effortLevels: [], installations: 2, compatibleInstallations: 2, status: "available",
+      },
+    };
+    const created = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, prompt: "Orchestrate.",
+    }, undefined, undefined, false, false, false, {
+      defaultOwnerUserId: "owner", orchestratorDefaults: settings, validateOrchestratorDefaults: () => null,
+    });
+    assert.ok(created.ok && created.data, created.error);
+    const parent = created.data;
+    assert.equal(parent.orchestratorPolicy?.childHarnessMatch, "harness");
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    if (parent.projectId) db.addProjectLocation(parent.projectId, { runnerId: "runner-2", workspaceId: WORKSPACE_ID });
+
+    const child = (agentId: string) => svc.createSession({
+      runnerId: "runner-2", workspaceId: WORKSPACE_ID, agentId, config: { model: "text-model" },
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    const sameHarness = child("codex-app");
+    assert.ok(sameHarness.ok, sameHarness.error);
+    const acpNamedCodex = child(CODEX_APP_AGENT_ID);
+    assert.equal(acpNamedCodex.status, 409);
+    assert.match(acpNamedCodex.error ?? "", /fixed by campaign policy at Codex App Server \(native\)/,
+      "an ACP row sharing the policy's agent id is a different harness");
+
+    const legacy = db.sessionOrchestratorPolicy(parent.id)!;
+    delete legacy.childHarnessMatch;
+    db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(legacy), parent.id);
+    const legacyOther = child("codex-app");
+    assert.equal(legacyOther.status, 409, "a campaign created before #3247 keeps enforcing the exact agent id");
+    assert.match(legacyOther.error ?? "", /fixed by campaign policy at codex \(codex-app-server, native\)/);
+  } finally {
+    db.close();
+  }
 });
 
 test("Orchestrator campaign policy resolves precedence, isolates active sessions, and governs child defaults", async () => {
@@ -946,8 +1059,12 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }, Date.now());
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const legacyRunnerRestart = svc.restart(parent.id);
-    assert.equal(legacyRunnerRestart.status, 409);
-    assert.match(legacyRunnerRestart.error ?? "", /protocol-v158/);
+    assertRunnerRefusal(
+      legacyRunnerRestart,
+      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
+    );
     assert.equal(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, undefined,
       "an old runner cannot make recovered scope durable before it can enforce that scope");
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
@@ -958,9 +1075,13 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.deepEqual(db.getSession(parent.id)?.orchestratorPolicy?.issueNumbers, [1209, 1210, 1211]);
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1);
     const outdatedRestart = svc.restart(parent.id);
-    assert.equal(outdatedRestart.status, 409);
-    assert.match(outdatedRestart.error ?? "", /protocol-v158/,
-      "restart fails actionably rather than dropping a persisted campaign issue scope");
+    assertRunnerRefusal(
+      outdatedRestart,
+      "This machine needs a newer runner for campaign issue coordination. Update and restart the runner.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueScope - 1,
+      "restart fails actionably rather than dropping a persisted campaign issue scope",
+    );
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
 
     settings.defaults.behavior.childModel = "changed-later";
@@ -1094,7 +1215,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(child.data.orchestratorPolicy?.sources.behavior.childModel, "active_campaign");
     const assignment = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.data!.id)?.initialPrompt ?? "";
     assert.match(assignment, /Wollipog Campaign Policy — server-derived, revision 1/);
-    assert.match(assignment, new RegExp(`Child Harness ${CODEX_APP_AGENT_ID}`));
+    assert.match(assignment, /Child Harness Codex App Server \(native; use each Machine's agent from get_campaign childHarnessAgents\)/);
     assert.match(assignment, /This is not blanket approval/);
     assert.match(assignment, /exact-head CI/);
     assert.match(assignment, /UI evidence remains human-owned/);
@@ -7944,8 +8065,12 @@ test("provider account selection is capability-gated, persisted, and sent on res
     agentId: AGENT_ID,
     providerAccountId: "personal",
   });
-  assert.equal(unsupported.status, 409);
-  assert.match(unsupported.error ?? "", /protocol-v170/);
+  assertRunnerRefusal(
+    unsupported,
+    "This machine needs a newer runner for choosing an account. Update and restart the runner.",
+    RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts,
+    RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1,
+  );
 
   db.registerRunner(accountMeta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts);
   const created = svc.createSession({
@@ -22081,11 +22206,23 @@ test("Orchestrator is an additive role independent of the provider permission mo
       { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
       undefined, undefined, false, false, false, human,
     );
-    assert.equal(outdated.status, 409, "an older runner would launch this as an ordinary session");
-    assert.match(outdated.error ?? "", /protocol-v160/);
+    const independentPermissionsRefusal =
+      "This machine needs a newer runner for an Orchestrator with independent provider permissions. Update and restart the runner.";
+    assertRunnerRefusal(
+      outdated,
+      `${independentPermissionsRefusal} To start now, choose the Orchestrator preset permission mode.`,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1,
+      "an older runner would launch this as an ordinary session",
+    );
     const outdatedRestart = svc.restart(view.id);
-    assert.equal(outdatedRestart.status, 409, "restart after a runner downgrade fails the same way");
-    assert.match(outdatedRestart.error ?? "", /protocol-v160/);
+    assertRunnerRefusal(
+      outdatedRestart,
+      independentPermissionsRefusal,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1,
+      "restart after a runner downgrade fails the same way, with the shared sentence alone",
+    );
     const legacyOnOlderRunner = svc.createSession(
       { ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },
       undefined, undefined, false, false, false, human,
@@ -22097,16 +22234,26 @@ test("Orchestrator is an additive role independent of the provider permission mo
       { ...request, agentId: CODEX_APP_AGENT_ID, role: "orchestrator", config: { permissionMode: codexMode } },
       undefined, undefined, false, false, false, human,
     );
-    assert.equal(codexOnV160.status, 409, "a v160 runner has no additive Codex launch shape");
-    assert.match(codexOnV160.error ?? "", /protocol-v162/);
+    assertRunnerRefusal(
+      codexOnV160,
+      `${independentPermissionsRefusal} To start now, choose the Orchestrator preset permission mode.`,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
+      "a v160 runner has no additive Codex launch shape",
+    );
     const claudeOnV160 = svc.createSession(
       { ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" } },
       undefined, undefined, false, false, false, human,
     );
     assert.equal(claudeOnV160.ok, true, claudeOnV160.error);
     const codexRestartOnV160 = svc.restart(codex.data!.id);
-    assert.equal(codexRestartOnV160.status, 409, "restart refuses the same combination with the same guidance");
-    assert.match(codexRestartOnV160.error ?? "", /protocol-v162/);
+    assertRunnerRefusal(
+      codexRestartOnV160,
+      independentPermissionsRefusal,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
+      "restart refuses the same combination with the same guidance",
+    );
     // #1308: Codex's audited Linux or macOS sandbox is the COUPLED preset's precondition. The
     // additive launch injects no sandbox, approval, or reviewer setting, so it is admitted wherever
     // the runner advertises the role, and the session keeps the sandbox its permission mode already
@@ -22202,8 +22349,12 @@ test("a non-strict Pi Orchestrator keeps its provider permission mode and is gat
       RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1);
     const outdated = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "default" } },
       undefined, undefined, false, false, false, human);
-    assert.equal(outdated.status, 409);
-    assert.match(outdated.error ?? "", /protocol-v163 runner/);
+    assertRunnerRefusal(
+      outdated,
+      "This machine needs a newer runner for an Orchestrator with independent provider permissions. Update and restart the runner. To start now, choose the Orchestrator preset permission mode.",
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
+    );
     // Pre-existing limitation, unchanged by #1294: the control plane has never admitted a coupled
     // Orchestrator preset for Pi, so the additive shape is the only Pi Orchestrator there is.
     const preset = svc.createSession({ ...request, role: "orchestrator", config: { permissionMode: "orchestrator" } },
@@ -22366,8 +22517,13 @@ test("Integration Isolation is its own policy, gated separately and fixed at cre
       ...request, role: "orchestrator", config: { permissionMode: "acceptEdits" },
       orchestrator: { execution: { strictProjectIsolation: false, integrationIsolation: true } },
     }, undefined, undefined, false, false, false, human);
-    assert.equal(outdated.status, 409);
-    assert.match(outdated.error ?? "", /Integration Isolation requires a protocol-v164 runner/);
+    const integrationIsolationRefusal = "This machine needs a newer runner for integration isolation. Update and restart the runner.";
+    assertRunnerRefusal(
+      outdated,
+      `${integrationIsolationRefusal} To start now, turn off Integration Isolation.`,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
+    );
     // ...and equally for a saved account default. Unlike Parent Control, whose portable default
     // downgrades because dropping delegation only narrows what a session may do, silently dropping
     // this one would BROADEN the launch's reach into the user's credentials and tools.
@@ -22386,7 +22542,12 @@ test("Integration Isolation is its own policy, gated separately and fixed at cre
     });
     assert.equal(outdatedDefault.status, 409,
       "a security-relevant default fails closed for an older peer instead of downgrading");
-    assert.match(outdatedDefault.error ?? "", /Integration Isolation requires a protocol-v164 runner/);
+    assertRunnerRefusal(
+      outdatedDefault,
+      `${integrationIsolationRefusal} To start now, turn off Integration Isolation.`,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
+    );
     // The preset needs nothing new from the runner: it isolates on every runner ever shipped.
     const outdatedPreset = svc.createSession({
       ...request, role: "orchestrator", config: { permissionMode: "orchestrator" },
@@ -22397,8 +22558,13 @@ test("Integration Isolation is its own policy, gated separately and fixed at cre
     // Restart mirrors creation exactly: a runner that lost the capability cannot relaunch a
     // campaign whose stored policy says its integrations are gone.
     const restart = svc.restart(isolated.data!.id);
-    assert.equal(restart.status, 409);
-    assert.match(restart.error ?? "", /Integration Isolation requires a protocol-v164 runner/);
+    assertRunnerRefusal(
+      restart,
+      integrationIsolationRefusal,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
+      "restart gives the shared sentence alone",
+    );
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.restart(isolated.data!.id).ok, true);
     assert.deepEqual(specFor(isolated.data!.id)?.orchestrator,
@@ -27134,7 +27300,8 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
     db.registerRunner(meta, Date.now(),207);
     const unsupported = await svc.proposeCampaignIssueScope(id,{...proposal,requestId:"old-runner",expectedRevision:2,additions:[{repository:"team/repo",number:126}]});
     assert.equal(unsupported.ok,false);
-    assert.match(unsupported.error!,/protocol-v208/);
+    assert.equal(unsupported.error,"This machine needs a newer runner for campaign issue scope changes. Update and restart the runner.");
+    assert.deepEqual(unsupported.capabilityRequirement,{requiredRunnerProtocolVersion:208,runnerProtocolVersion:207});
     assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScope!.revision,2);
     await new Promise((resolve) => setTimeout(resolve,0));
   } finally { db.close(); }

@@ -11,7 +11,9 @@ installed public App Server does not expose. It constructs fresh options with no
 history, instructions provider, inherited environments, capability roots or client MCP extensions;
 it refuses ambient instruction/MCP configuration, persistent threads and feedback collection,
 and uses the existing two scoped tool schemas.
-This library never calls `ThreadManager.start_thread`, opens an account, or submits provider input.
+The host bridge contains guarded SDK-call adapters, including `ThreadManager.start_thread` and
+provider-input submission. Production admission has no available issuer, so this source preparation
+does not provide an admitted startup path. No account or provider process is opened by these tests.
 The manifest retains that SDK workspace's exact public dependency patches, which downstream Cargo
 packages do not inherit automatically. The release commit's Git tree is
 `572cdecd45cd985f0ad80b63d8b86ffcb345f47a`; commit and tree identities are distinct.
@@ -25,9 +27,10 @@ booleans, these tests and successful compilation do not establish those runtime 
 Human permit. Real frame/criteria delivery, final same-generation pricing/usage, terminal cleanup,
 private hosting and independent blind candidate/paced/maximum validation remain required.
 
-Current App Server preflight stays `builtin_tool_allowlist_unavailable`; media 221 stays
-unadvertised. Actual executable selection, driver registration, account use and SDK/provider/media
-launch require a separately audited contract and exact Human gate. The source is not an activation.
+Current App Server preflight stays `builtin_tool_allowlist_unavailable`. Private media protocol 223
+requires the separate exact compatibility identity `{ id: "wollipog-paced-video-review-v1", revision: 1 }`
+and stays unadvertised; an integer protocol version alone cannot establish media support. Actual
+executable selection, driver registration, account use and SDK/provider/media launch require a separately audited contract and exact Human gate. The source is not an activation.
 
 Pure standard-library tests can be compiled directly with the existing Rust toolchain without
 resolving or initializing any SDK dependencies. Full `cargo check/test --features native-core`

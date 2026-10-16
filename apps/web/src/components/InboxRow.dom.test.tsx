@@ -499,12 +499,13 @@ test("a parent row carries the chevron and family chip, and a child row its thre
 });
 
 
-test("a result remains neutral beside a visible compact working count on collapsed phone families", async () => {
+test("a result keeps its review tone beside a visible compact working count on collapsed phone families", async () => {
   const attention = { version: 1 as const, humanActions: [], meaningfulAt: NOW,
     result: { revision: "r1", at: NOW, owner: "human" as const }, acknowledgedRevision: null };
   await withRow(baseSession({ attention }), async (container, rerender) => {
     assert.equal(badges(container)[0]?.textContent, "Ready for Review");
-    assert.ok(badges(container)[0]?.classList.contains("t-neutral"));
+    assert.ok(badges(container)[0]?.classList.contains("t-review"));
+    assert.ok(container.querySelector(".inbox-thread-family.t-review"));
     assert.equal(container.querySelector(".inbox-thread-working")?.textContent, "2 Working");
     assert.match(container.querySelector(".inbox-thread-family")?.getAttribute("aria-label") ?? "", /2 Working/);
     await rerender({ threadChildren: JSON.stringify({ count: 1, waiting: 0, working: 0,
@@ -512,5 +513,5 @@ test("a result remains neutral beside a visible compact working count on collaps
     assertNoDomNode(container.querySelector(".inbox-thread-working"));
     assert.equal(badges(container)[0]?.textContent, "Ready for Review");
   }, { threeRow: true, threadCollapsed: true, threadChildren: JSON.stringify({ count: 1, waiting: 0, working: 2,
-    children: [{ id: "child", title: "Child", state: "running" }] }) });
+    followUpLabel: "Ready for Review", children: [{ id: "child", title: "Child", state: "running" }] }) });
 });

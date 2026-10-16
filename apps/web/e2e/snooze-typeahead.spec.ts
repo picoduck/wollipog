@@ -78,6 +78,27 @@ test("Snooze typeahead preserves the keyboard-first create flow", async ({ page 
   await pause(3_000);
 });
 
+test("keyboard alone snoozes: Enter on a preset tile, or typing a time on the tiles", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openNewSnoozeDialog(page);
+  await expect(page.locator(".choice-tile:focus")).toHaveCount(1);
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await page.evaluate(() => window.__reminderWriteCalls)).toBe(1);
+
+  await openNewSnoozeDialog(page);
+  await expect(page.locator(".choice-tile:focus")).toHaveCount(1);
+  await page.keyboard.type("in 2 hours");
+  const expression = page.getByRole("combobox", { name: "Snooze Until" });
+  await expect(expression).toBeFocused();
+  await expect(expression).toHaveValue("in 2 hours");
+  await expect(page.getByRole("radio", { name: "Custom…" })).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await page.evaluate(() => window.__reminderWriteCalls)).toBe(1);
+});
+
 test("Snooze suggestions remain touch-sized and contained on mobile", async ({ page }, testInfo) => {
   const pause = (milliseconds: number) => EVIDENCE_CAPTURE
     ? page.waitForTimeout(milliseconds)

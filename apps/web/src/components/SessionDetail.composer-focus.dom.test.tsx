@@ -13,7 +13,7 @@ import {
   type SessionView,
   type SideChatView,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { COMPOSER_FOCUS_DIAGNOSTIC_EVENT } from "../composer-focus.js";
 import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
@@ -755,6 +755,175 @@ for (const { name, draftText, caret, expected, expectedCaret } of [
     }
   });
 }
+
+test("composer recalls unloaded user messages without loading older transcript pages (#3300)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  let promptReads = 0;
+  let transcriptReads = 0;
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: [
+      { kind: "agent_message", text: "loaded activity", final: true },
+      { kind: "agent_message", text: "more activity", final: true },
+      { kind: "user_message", text: "newest prompt", images: [] },
+    ],
+    client: {
+      getSessionPromptHistory: async () => {
+        promptReads++;
+        return { prompts: [{ seq: 1, text: "older unloaded prompt" }, { seq: 3, text: "newest prompt" }],
+          eventEpoch: 0, hasMore: false, cacheComplete: true };
+      },
+      getSessionEventTailPage: async () => { transcriptReads++; throw new Error("unexpected transcript fetch"); },
+    },
+  });
+  const press = async (key: string) => {
+    await act(async () => {
+      fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }) as never);
+      await Promise.resolve();
+    });
+  };
+  try {
+    await resolveDraft(draft, "");
+    await focusRequestedComposer(fixture);
+    const initialTranscriptReads = transcriptReads;
+    await press("ArrowUp");
+    assert.equal(fixture.composer.value, "newest prompt");
+    await press("ArrowUp");
+    assert.equal(fixture.composer.value, "older unloaded prompt");
+    assert.ok(promptReads > 0);
+    assert.equal(transcriptReads, initialTranscriptReads, "recall does not page the transcript");
+    await press("ArrowDown");
+    assert.equal(fixture.composer.value, "newest prompt");
+    await press("ArrowDown");
+    assert.equal(fixture.composer.value, "");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+for (const cancel of ["typing", "session switch"] as const) {
+  test(`late prompt-history response cannot overwrite ${cancel} (#3300)`, async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const response = deferred<Awaited<ReturnType<ApiClient["getSessionPromptHistory"]>>>();
+    const fixture = await mountFixture(draft, {
+      mainEventPayloads: [{ kind: "user_message", text: "newest prompt", images: [] }],
+      client: { getSessionPromptHistory: () => response.promise },
+    });
+    try {
+      await resolveDraft(draft, "");
+      await focusRequestedComposer(fixture);
+      const pressUp = async () => act(async () => {
+        fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }) as never);
+      });
+      await pressUp();
+      await pressUp();
+      if (cancel === "typing") await act(async () => {
+        fixture.composer.value = "my edited draft";
+        fireDomEvent.change(fixture.composer);
+      });
+      else {
+        await fixture.rerenderSessionWithDraftLoader(fixture.alternateSessionId,
+          async () => ({ text: "other session draft", images: [], updatedAt: 1 }));
+        await flushAsyncWork();
+      }
+      await act(async () => response.resolve({ prompts: [{ seq: 1, text: "stale history" }],
+        eventEpoch: 0, hasMore: false, cacheComplete: true }));
+      const composer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
+      assert.equal(composer.value, cancel === "typing" ? "my edited draft" : "other session draft");
+    } finally { await unmountFixture(fixture); }
+  });
+}
+
+test("an older server preserves recall over already loaded prompts (#3300)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: [
+      { kind: "user_message", text: "old prompt", images: [] },
+      { kind: "user_message", text: "new prompt", images: [] },
+    ],
+    client: { getSessionPromptHistory: async () => { throw new ApiError("not found", 404); } },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await focusRequestedComposer(fixture);
+    for (const expected of ["new prompt", "old prompt"]) {
+      await act(async () => {
+        fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }) as never);
+      });
+      assert.equal(fixture.composer.value, expected);
+    }
+  } finally { await unmountFixture(fixture); }
+});
+
+for (const failure of ["offline", "incomplete cache", "server error"] as const) {
+  test(`loaded history remains recallable with ${failure} (#3300)`, async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, {
+      mainEventPayloads: [{ kind: "user_message", text: "older prompt" }, { kind: "user_message", text: "newer prompt" }],
+      client: { getSessionPromptHistory: async () => {
+        if (failure === "incomplete cache") return { prompts: [], eventEpoch: 0, hasMore: true, cacheComplete: false };
+        throw failure === "offline" ? new TypeError("fetch failed") : new ApiError("server error", 500);
+      } },
+    });
+    try {
+      await resolveDraft(draft, "");
+      for (const expected of ["newer prompt", "older prompt"]) {
+        await act(async () => {
+          fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }) as never);
+        });
+        assert.equal(fixture.composer.value, expected);
+      }
+    } finally { await unmountFixture(fixture); }
+  });
+}
+
+test("history response cannot replace a phrase added by dictation (#3300)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const response = deferred<Awaited<ReturnType<ApiClient["getSessionPromptHistory"]>>>();
+    const fixture = await mountFixture(draft, {
+      mainEventPayloads: [
+        { kind: "agent_message", text: "loaded activity", final: true },
+        { kind: "agent_message", text: "more activity", final: true },
+        { kind: "user_message", text: "newest prompt" },
+      ],
+      sessionCapabilities: PAUSED_LOOK_CAPABILITIES,
+      client: { getSessionPromptHistory: () => response.promise },
+    });
+    try {
+      await resolveDraft(draft, "");
+      for (let i = 0; i < 2; i++) await act(async () => {
+        fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }) as never);
+      });
+      const mic = micButton(fixture);
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      await act(async () => TrackedRecognition.instances[0]!.onresult?.({ resultIndex: 0,
+        results: [{ isFinal: true, 0: { transcript: "dictated phrase" } }] }));
+      const held = fixture.composer.value;
+      assert.ok(held.includes("dictated phrase"));
+      await act(async () => response.resolve({ prompts: [{ seq: 1, text: "older prompt" }], eventEpoch: 0,
+        hasMore: false, cacheComplete: true }));
+      assert.equal(fixture.composer.value, held);
+    } finally { await unmountFixture(fixture); }
+  });
+});
+
+test("replacing the event epoch exits history navigation without swallowing Down (#3300)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: [{ kind: "user_message", text: "recalled prompt" }],
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => {
+      fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }) as never);
+    });
+    await fixture.pushSession({ eventEpoch: 1 });
+    const down = new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+    await act(async () => { fixture.composer.dispatchEvent(down as never); });
+    assert.equal(down.defaultPrevented, false);
+  } finally { await unmountFixture(fixture); }
+});
 
 test("Reference a File… on a recalled prompt exits history browsing, so ArrowDown keeps the edited draft (#2203)", async () => {
   const draft = deferred<ComposerDraft | null>();

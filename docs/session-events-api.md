@@ -36,7 +36,9 @@ Example response (the identifiers and payload are illustrative):
 ```
 
 The cursor is an event sequence, not a row offset or count. Use `nextAfter` even when sequences
-have gaps. Completeness is a point-in-time fact about the known runner tail; live events can arrive
+have gaps. A session whose transcript [archived-history retention](./archived-history-retention.md)
+pruned has many gaps: its session view carries `historyPruned`, its cache stays complete, and only
+the kept events remain. Completeness is a point-in-time fact about the known runner tail; live events can arrive
 after a completed traversal. Pagination is not a frozen snapshot of a running session.
 
 To read the newest ordinary window, use `direction=backward&limit=200` without `after`. For older

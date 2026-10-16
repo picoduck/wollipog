@@ -452,6 +452,44 @@ test("buildBwrapArgs mounts runner-owned entries read-only after every writable 
   assert.deepEqual(args.slice(args.indexOf("--chdir")), ["--chdir", "/work/tree", "--", "/usr/bin/agent"]);
 });
 
+test("buildBwrapArgs pins a managed worktree root below a read-only parent", () => {
+  const args = buildBwrapArgs({ command: "/bin/sh", args: [], cwd: "/work/trees/s1" }, {
+    backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+    writableBinds: [
+      { source: "/work/trees", target: "/work/trees" },
+      { source: "/work/trees/s1.requested", target: "/work/trees/s1.requested" },
+    ],
+    protectedWorktree: {
+      parent: "/work/trees", path: "/work/trees/s1", gitWritableRoots: ["/repo/.git/objects"],
+    },
+    readOnlyBinds: ["/work/trees/s1/.git", "/repo/.git/worktrees/s1/gitdir"],
+  });
+  const parent = args.findIndex((value, index) => value === "--ro-bind" && args[index + 1] === "/work/trees");
+  const child = args.findIndex((value, index) => value === "--bind" && index > parent && args[index + 1] === "/work/trees/s1");
+  const requested = args.findIndex((value, index) => value === "--bind" && index > parent && args[index + 1] === "/work/trees/s1.requested");
+  const git = args.findIndex((value, index) => value === "--bind" && args[index + 1] === "/repo/.git/objects");
+  const registration = args.findIndex((value, index) => value === "--ro-bind" && args[index + 1] === "/repo/.git/worktrees/s1/gitdir");
+  assert.ok(parent > args.indexOf("--tmpfs") && requested > parent && child > requested && git > child && registration > git);
+});
+
+test("buildBwrapArgs rejects a different cwd under a protected worktree launch", () => {
+  assert.throws(() => buildBwrapArgs({ command: "/bin/sh", args: [], cwd: "/repo/.git/hooks" }, {
+    backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+    protectedWorktree: { parent: "/work/trees", path: "/work/trees/s1", gitWritableRoots: [] },
+  }), /cannot bind a different working directory writable/);
+});
+
+test("buildBwrapArgs allows an ACP terminal below the protected root without a separate cwd bind", () => {
+  const cwd = "/work/trees/s1/packages/web";
+  const args = buildBwrapArgs({ command: "/bin/sh", args: [], cwd }, {
+    backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+    protectedWorktree: { parent: "/work/trees", path: "/work/trees/s1", gitWritableRoots: [] },
+  });
+  assert.deepEqual(args.slice(args.indexOf("--chdir"), args.indexOf("--")), ["--chdir", cwd]);
+  assert.equal(args.some((value, index) => value === "--bind" && args[index + 1] === cwd), false);
+  assert.equal(args.some((value, index) => value === "--bind" && args[index + 1] === "/work/trees/s1"), true);
+});
+
 test("buildBwrapArgs hides the hook state directory last and re-exposes only the named entries", () => {
   const args = buildBwrapArgs({ command: "/usr/bin/agent", args: [], cwd: "/data/worktrees/s1" }, {
     backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny",

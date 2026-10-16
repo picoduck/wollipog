@@ -242,6 +242,86 @@ test("arrows move and select the tiles; only a pointer on Custom… goes on to i
   }
 });
 
+/** A keydown on whatever has focus, reporting whether the dialog took it from the browser. */
+async function keyOnFocus(key: string, init: Record<string, unknown> = {}) {
+  const event = new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
+  await act(async () => {
+    domWindow.document.activeElement!.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event.defaultPrevented;
+}
+
+test("Enter on a preset tile chooses it and snoozes, as Enter on a radio submits its form", async () => {
+  const saved: SetSessionReminderRequest[] = [];
+  let closes = 0;
+  const view = await mount(<SnoozeDialog
+    sessionTitle={TITLE}
+    onClose={() => { closes++; }}
+    onSave={async (request) => { saved.push(request); }}
+  />);
+  try {
+    assertFocused(tileNamed("Later Today"), "opening focus is on the tiles");
+    await keyOnFocus("ArrowRight");
+    assertFocused(tileNamed("Tomorrow Morning"));
+    assert.equal(await keyOnFocus("Enter"), true, "Enter never also clicks the tile");
+    const expected = parseReminderExpression("tomorrow morning")!;
+    assert.deepEqual(saved, [{ ...expected, wakePolicy: "until_activity", expectedRevision: 0 }]);
+    assert.equal(closes, 1);
+  } finally {
+    await view.unmount();
+  }
+
+  const unchosen: SetSessionReminderRequest[] = [];
+  const second = await mount(<SnoozeDialog sessionTitle={TITLE} onClose={() => undefined} onSave={async (request) => { unchosen.push(request); }} />);
+  try {
+    assert.equal(tileNamed("Later Today")?.getAttribute("aria-checked"), "false", "nothing is chosen on open");
+    await keyOnFocus("Enter");
+    assert.equal(unchosen.length, 1, "Enter on the focused tile is enough on its own");
+    assert.equal(unchosen[0]?.originalExpression, "later today");
+  } finally {
+    await second.unmount();
+  }
+});
+
+test("Enter on Custom… goes on to its field without submitting", async () => {
+  const saved: SetSessionReminderRequest[] = [];
+  const view = await mount(<SnoozeDialog sessionTitle={TITLE} onClose={() => undefined} onSave={async (request) => { saved.push(request); }} />);
+  try {
+    await keyOnFocus("End");
+    assertFocused(tileNamed("Custom…"));
+    await keyOnFocus("Enter");
+    assertFocused(field(), "Enter on Custom… moves to Snooze Until");
+    assert.equal(saved.length, 0, "an empty Custom… is not submitted");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("typing on the tiles starts a Custom… schedule with what was typed", async () => {
+  const saved: SetSessionReminderRequest[] = [];
+  const view = await mount(<SnoozeDialog sessionTitle={TITLE} onClose={() => undefined} onSave={async (request) => { saved.push(request); }} />);
+  try {
+    assertFocused(tileNamed("Later Today"));
+    assert.equal(await keyOnFocus("s", { ctrlKey: true }), false, "a shortcut chord is left alone");
+    assert.equal(await keyOnFocus(" "), false, "Space still chooses the tile");
+    assertNoDomNode(field());
+
+    assert.equal(await keyOnFocus("t"), true, "the typed character is not also handled by the tile");
+    assert.equal(tileNamed("Custom…")?.getAttribute("aria-checked"), "true");
+    assertFocused(field(), "focus moves to Snooze Until");
+    assert.equal(field()!.value, "t");
+    assert.equal(field()!.selectionStart, 1, "the caret follows what was typed");
+
+    await typeSchedule("tomorrow 3pm");
+    await act(async () => { fireDomEvent.submit(body.querySelector("form")!); });
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0]?.originalExpression, "tomorrow 3pm");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("Custom… takes a named date, and a numeric date is an error at the field with its fix", async () => {
   const saved: SetSessionReminderRequest[] = [];
   const view = await mount(<SnoozeDialog

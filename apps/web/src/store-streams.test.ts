@@ -1626,3 +1626,32 @@ test("restoring an inactive reader clears its provisional receipt attribution", 
   assert.equal(store.recoveryReadAfter("s1", 3, generation), 0,
     "retained data is not a newly completed provisional HTTP response for this view");
 });
+
+
+for (const targeted of [false, true]) test(`status-only resume clears the stalled set and count (${targeted ? "targeted" : "legacy"}, #3302)`, () => {
+  const store = new Store({ name: "inbox" });
+  store.tickActivity(0);
+  store.dispatch({ type: "conn", conn: "online" });
+  const waiting = { ...session("waiting"), status: "input_required", archived: false,
+    updatedAt: 0, lastEventAt: 0 } as SessionView;
+  message(store, { type: "snapshot", capabilities: { sessionSubscriptions: targeted },
+    runners: [], boxes: [], sessions: [waiting], runs: [], pods: [] }, 0);
+  if (targeted) {
+    store.prepareSubscriptionRecovery(1, [waiting.id]);
+    message(store, { type: "session_subscriptions_applied", revision: 1,
+      sessionIds: [waiting.id], podIds: [] }, 0);
+  }
+  store.tickActivity(600_000);
+  assert.equal(store.getState().stalledCount, 1);
+  const revision = store.getState().stalledRevision;
+  const resumed = { ...waiting, status: "running", updatedAt: 660_000 } as SessionView;
+  message(store, { type: "session_upsert", session: resumed }, 660_000);
+  assert.equal(store.getState().stalledSessionIds.has(waiting.id), false);
+  assert.equal(store.getState().stalledCount, 0);
+  assert.equal(store.getState().stalledRevision, revision + 1);
+  message(store, { type: "session_upsert", session: { ...resumed, updatedAt: 1_200_000 } }, 1_200_000);
+  store.tickActivity(1_259_999);
+  assert.equal(store.getState().stalledCount, 0);
+  store.tickActivity(1_260_000);
+  assert.equal(store.getState().stalledCount, 1, "a resumed session can stall again after ten silent minutes");
+});

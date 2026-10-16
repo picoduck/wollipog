@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openMobileQuestion } from "./open-mobile-question.js";
 
 const EVIDENCE = "test-results/composer-idle-capsule-evidence";
 
@@ -100,7 +101,7 @@ for (const exception of [
   { name: "multi-line draft", query: "&draft=Line%20one%5CnLine%20two", visible: ".composer-input" },
   { name: "attachment", query: "&attachment=1", visible: ".composer-attachments" },
   { name: "pending approval", query: "&approval=checkpoint", visible: ".request-dock .request-card" },
-  { name: "pending question", query: "&approval=question&draft=Preserved", visible: ".request-dock .question-style-composer" },
+  { name: "pending question", query: "&approval=question&draft=Preserved", visible: ".request-dock .dock-strip" },
   { name: "recovery notice", query: "&quarantine=1", visible: '[aria-label="Conversation Quarantined"]' },
 ]) {
   test(`${exception.name} keeps the phone composer expanded`, async ({ page }) => {
@@ -114,6 +115,7 @@ for (const exception of [
 
 test("Answer Mode keeps the phone composer expanded", async ({ page }) => {
   await openComposer(page, 393, "&approval=question&draft=Preserved");
+  await openMobileQuestion(page);
   await page.locator(".request-dock").getByRole("button", { name: "Answer", exact: true }).click();
   await expect(page.locator(".composer-box")).toHaveClass(/answer-mode/);
   await expect(page.locator(".composer-box")).not.toHaveClass(/idle-collapsed/);

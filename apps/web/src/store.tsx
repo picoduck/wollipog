@@ -49,7 +49,8 @@ import {
 } from "./activity.js";
 import { BrowserNavigation, sameView, viewFromNotificationMessage, type View, type ViewNavigation } from "./navigation.js";
 import { defaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
-import { interceptLeave } from "./leave-guard.js";
+import { interceptLeave, interceptTraversal } from "./leave-guard.js";
+import type { HistoryTraversal } from "./history-position.js";
 export { animationFramePublishScheduler, setDefaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
 import {
   INBOX_SELECTION_STORAGE_KEY,
@@ -2266,11 +2267,13 @@ export class Store {
     this.dispatch({ type: "navigate", view: activated });
     this.onNavigate?.(activated);
   };
-  navigateFromHistory = (view: View): void => {
+  navigateFromHistory = (view: View, traversal?: HistoryTraversal): void => {
     const { view: activated, activation } = this.activate(view);
-    // Not asked of a leave guard: Back and Forward have already moved the history position, and
-    // putting the editor's address back would truncate the forward entries (#3026's review).
-    if (!sameView(this.state.view, activated) || activation) {
+    const leaving = !sameView(this.state.view, activated);
+    // An editor with unsaved changes asks first, as in-app navigation does (#3218): the move is
+    // undone while it asks, and redone, arriving here again unguarded, if the person leaves.
+    if (leaving && traversal && interceptTraversal(traversal)) return;
+    if (leaving || activation) {
       this.dispatch({ type: "navigate", view: activated });
     }
   };
@@ -3125,7 +3128,7 @@ export function StoreProvider({
 
   // Browser history is an input as well as an output: popstate updates the same store action used
   // by in-app navigation, without pushing a duplicate entry while walking backward or forward.
-  useEffect(() => navigationRef.current?.listen((view) => store.navigateFromHistory(view)), [store]);
+  useEffect(() => navigationRef.current?.listen((view, traversal) => store.navigateFromHistory(view, traversal)), [store]);
 
   // An already-open dashboard receives a service-worker message. Fresh windows now open directly
   // on canonical paths; the boot shim still migrates links from older installed workers.

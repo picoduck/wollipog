@@ -1,5 +1,6 @@
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
+import { shellGuidance } from "./shell-guidance.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { isTerminal } from "@wollipog/protocol";
@@ -113,6 +114,7 @@ import {
   type SessionQueueHoldView,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -120,7 +122,7 @@ import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
-import { managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
+import { managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundJobStopResult,
@@ -163,7 +165,7 @@ import {
 import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
 import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
 import { supportsNativeOrchestratorBoundary } from "./orchestrator-preset.js";
-import type { SpawnIsolation } from "./spawn.js";
+import { provenProcessTreeExit, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import type { GuardStateMask } from "./managed-worktree-guard-socket.js";
 
 /** Runner-local wiring for the hook state directory at the sandbox boundary (#1336). */
@@ -191,7 +193,8 @@ import {
   usageWindowRejection,
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
-import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation } from "./provider-home-lease-async.js";
+import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference } from "./provider-home-lease-async.js";
+import type { ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -284,11 +287,21 @@ import { writeStarterWorktreeSetupConfig } from "./worktree-setup-generator.js";
 
 export interface SessionNamingExecutionAuthorization {
   isolation?: SpawnIsolation;
-  cleanup(): Promise<void>;
+  /** Ends the naming task. Pass every process it started so its provider-HOME reference is
+   * released only after each process tree is proven gone. */
+  cleanup(children?: readonly AgentProcess[]): Promise<void>;
 }
 
 type Send = (msg: RunnerToControlPlane) => void;
 type Logger = (msg: string) => void;
+/** Provider-HOME references held by one skill transaction; see `skillProviderHomeScope()`.
+ * Settle with `release` once the work finished, or `retain` to keep the references until shutdown. */
+export interface SkillProviderHomeScope {
+  acquire(home: string): Promise<void>;
+  release(): Promise<void>;
+  retain(): Promise<void>;
+}
+
 export type AcpContextResolver = (spec: SessionLaunchSpec) => SessionLaunchSpec["acpSessionContext"];
 export type ProviderAccountResolver = (spec: SessionLaunchSpec) => {
   id: string;
@@ -846,6 +859,9 @@ function withHookElicitation(capabilities?: AgentCapabilities): AgentCapabilitie
 
 /** Refresh a held lock well within its stale window so a long turn never looks abandoned. */
 const LOCK_REFRESH_MS = 20_000;
+/** Session handles stay open as long as their session. Half of the worker's 1024-handle pool;
+ * launches beyond it keep a plain reference until shutdown, as before #3238. */
+const DRIVER_PROVIDER_HOME_HANDLE_BUDGET = 512;
 
 /** Static guidance for a quarantined conversation. It names no provider text, no prompt content
  * and no thread identifier, so it is safe on every surface that shows a rejected submission. */
@@ -1283,6 +1299,7 @@ export class SessionManager {
   private readonly backgroundContinuationWakeAfterRepair = new Set<string>();
   private readonly backgroundContinuationTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly orphanDiscoveryLaunching = new Set<string>();
+  private readonly historicalJobInspections = new Set<string>();
   private lastOrphanRecoveryScanAt = 0;
   private orphanRecoveryScanTimer: ReturnType<typeof setTimeout> | null = null;
   /** Provider logout is asynchronous; fence prompts and other provider/worktree operations. */
@@ -1497,6 +1514,9 @@ export class SessionManager {
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: AsyncProviderHomeLeaseRegistry;
+  /** The provider-HOME reference each live driver instance took at launch (see
+   * settleDriverProviderHome). An instance launched past the handle budget has no entry. */
+  private readonly driverProviderHomes = new Map<Driver, ProviderHomeReference>();
   private readonly providerAuthOperations = new Set<string>();
   private readonly providerAuthPreparations = new Map<string, {
     sessionId: string; requestId: string; controller: AbortController;
@@ -2521,7 +2541,7 @@ export class SessionManager {
         prepareExecution: async () => {
           // Cloud isolation preparation snapshots the source worktree. Delaying this boundary until
           // runWorktreeSetup has copied all declared files makes the snapshot and remote cwd exact.
-          const resolvedIsolation = await this.resolveLaunchIsolation(meta, worktree.path);
+          const resolvedIsolation = await this.resolveLaunchIsolation(meta, worktree.path, undefined, undefined, "approved_worktree_hook");
           setupEnvironment = this.worktreeSetupRuntimeEnvironment(resolvedIsolation, hostSetupEnvironment);
           return {
             environment: setupEnvironment,
@@ -3472,7 +3492,7 @@ export class SessionManager {
     record: WorktreeCleanupRecord,
     meta?: SessionMeta,
   ): Promise<SpawnIsolation | undefined> {
-    if (meta) return this.resolveLaunchIsolation(meta, record.worktreePath);
+    if (meta) return this.resolveLaunchIsolation(meta, record.worktreePath, undefined, undefined, "approved_worktree_hook");
     const execution = record.execution;
     // Compatibility for cleanup records written before durable execution identity existed. Such
     // records cannot name a remote target and retain the former host-only replay behavior.
@@ -4319,7 +4339,7 @@ export class SessionManager {
   /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. */
   async acquireAgentTuiProviderHome(meta: SessionMeta): Promise<void> {
     const epoch = this.agentTuiLaunchEpoch(meta.sessionId);
-    await this.providerHomeLeases?.acquire({
+    const reference = await this.providerHomeLeases?.acquireReference({
       driver: meta.driver,
       command: meta.command,
       context: meta.context,
@@ -4327,17 +4347,149 @@ export class SessionManager {
     }, { isCurrent: () => !this.shuttingDown && this.sessionCanOpen(meta.sessionId) &&
       this.agentTuiLaunchEpoch(meta.sessionId) === epoch });
     if (this.shuttingDown || !this.sessionCanOpen(meta.sessionId) || this.agentTuiLaunchEpoch(meta.sessionId) !== epoch) {
+      // No TUI process exists yet, so the reference this launch just took is safe to drop.
+      if (reference) await this.releaseProviderHomeReference(reference);
       throw new Error("Agent TUI launch changed while waiting for provider-home ownership");
+    }
+    // A launched TUI keeps its reference until runner shutdown, as provider processes do.
+    if (reference) await this.retainProviderHomeReference(reference);
+  }
+
+  /** Launch preparation's account-HOME reference: same post-grant cancellation as skill
+   * acquisition, but a successful launch keeps the reference until shutdown. */
+  async acquireLaunchProviderHome(home: string, cancellation: LeaseCancellation = {}): Promise<void> {
+    const reference = await this.acquireSkillReconciliationProviderHome(home, cancellation);
+    if (reference) await this.retainProviderHomeReference(reference);
+  }
+
+  /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire one
+   * reference before reconciliation touches those shared directories. Returns null when this
+   * runner has no lease registry (nothing was acquired). */
+  async acquireSkillReconciliationProviderHome(
+    home: string,
+    cancellation: LeaseCancellation = {},
+  ): Promise<ProviderHomeReference | null> {
+    const isCurrent = () => !this.shuttingDown && !cancellation.signal?.aborted &&
+      (cancellation.isCurrent?.() ?? true);
+    if (!this.providerHomeLeases) return null;
+    const reference = await this.providerHomeLeases.acquireHomeReference(home, "skills", { ...cancellation, isCurrent });
+    if (!isCurrent()) {
+      // Cancelled after the worker granted the reference: drop it rather than leak it for the
+      // rest of the runner's life.
+      await this.releaseProviderHomeReference(reference);
+      throw new Error("provider-home acquisition was cancelled");
+    }
+    return reference;
+  }
+
+  /** Scope for one skill transaction (reconcile pass, adoption, or recovery restore). Each
+   * `acquire` adds one reference and `release` drops exactly those, after the transaction's
+   * filesystem work has finished. Each reference is released through its worker-side handle for
+   * the exact registry entry it joined, never by path, so a retargeted HOME alias cannot redirect
+   * the release to a reference a session, probe, or another scope still holds. */
+  skillProviderHomeScope(): SkillProviderHomeScope {
+    const held: ProviderHomeReference[] = [];
+    let released = false;
+    return {
+      acquire: async (home) => {
+        if (released) throw new Error("skill provider-home scope was already released");
+        const reference = await this.acquireSkillReconciliationProviderHome(home);
+        if (reference) held.push(reference);
+      },
+      release: async () => {
+        released = true;
+        for (const reference of held.splice(0)) await this.releaseProviderHomeReference(reference);
+      },
+      retain: async () => {
+        released = true;
+        for (const reference of held.splice(0)) await this.retainProviderHomeReference(reference);
+      },
+    };
+  }
+
+  /** Drop one reference. A failure is logged and the reference stays held, which is the
+   * conservative outcome; shutdown's close() still releases it. */
+  private async releaseProviderHomeReference(reference: ProviderHomeReference): Promise<void> {
+    try {
+      await reference.release();
+    } catch (error) {
+      this.log(`provider-home reference release deferred to shutdown: ${errText(error)}`);
     }
   }
 
-  /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire the
-   * registry's process-lifetime lease before reconciliation touches those shared directories. */
-  async acquireSkillReconciliationProviderHome(home: string, cancellation: LeaseCancellation = {}): Promise<void> {
-    const isCurrent = () => !this.shuttingDown && !cancellation.signal?.aborted &&
-      (cancellation.isCurrent?.() ?? true);
-    await this.providerHomeLeases?.acquireHome(home, "skills", { ...cancellation, isCurrent });
-    if (!isCurrent()) throw new Error("provider-home acquisition was cancelled");
+  /** Keep one reference until shutdown and free its worker-side handle. A failure leaves only the
+   * handle occupied; the reference is held either way. */
+  private async retainProviderHomeReference(reference: ProviderHomeReference): Promise<void> {
+    try {
+      await reference.retain();
+    } catch (error) {
+      this.log(`provider-home reference handle retention failed: ${errText(error)}`);
+    }
+  }
+
+  /** Acquire the provider-HOME reference for one driver instance. Session handles live as long as
+   * their session, so past a fixed budget a launch falls back to a reference kept until shutdown
+   * (null here), which leaves the worker's bounded handle pool for transactions and probes. */
+  private async acquireDriverProviderHome(
+    request: ProviderHomeLeaseRequest,
+    cancellation: LeaseCancellation,
+  ): Promise<ProviderHomeReference | null> {
+    if (!this.providerHomeLeases) return null;
+    if (this.driverProviderHomes.size >= DRIVER_PROVIDER_HOME_HANDLE_BUDGET) {
+      await this.providerHomeLeases.acquire(request, cancellation);
+      return null;
+    }
+    return this.providerHomeLeases.acquireReference(request, cancellation);
+  }
+
+  /** Dispose one driver instance outside runner shutdown and settle its provider-HOME reference. */
+  private disposeDriver(client: Driver, options?: { forceImmediate?: boolean }): void {
+    try {
+      client.dispose(options);
+    } catch (error) {
+      this.settleDriverProviderHome(client, "unproven");
+      throw error;
+    }
+    this.settleDriverProviderHome(client, "disposed");
+  }
+
+  /** Settle the provider-HOME reference a driver instance took at launch, exactly once (the map
+   * entry is removed first). It is released only when the instance proves its complete process
+   * tree gone: `disposed` uses the killing proof, `exited` the non-killing one, and a driver
+   * without a proof, or `unproven`, keeps the reference until shutdown. During shutdown nothing is
+   * settled here: close() releases every reference after the global reaping proof. */
+  private settleDriverProviderHome(client: Driver, ended: "disposed" | "exited" | "unproven"): void {
+    const reference = this.driverProviderHomes.get(client);
+    if (!reference) return;
+    this.driverProviderHomes.delete(client);
+    if (this.shuttingDown) return;
+    // Never pass an empty proof list for a driver that cannot prove: that would read as "nothing
+    // was started" and release.
+    const proof = ended === "unproven" || !client.proveProcessTreeExit
+      ? Promise.resolve(false)
+      : client.proveProcessTreeExit({ terminate: ended === "disposed" });
+    void (async () => {
+      const proven = await proof.catch(() => false);
+      if (this.shuttingDown) return;
+      await this.settleProviderProcessReference(reference, [Promise.resolve(proven)]);
+    })();
+  }
+
+  /** Settle a reference that covered short-lived provider processes. It is released only when every
+   * process the work started has a proven complete tree exit (no process at all also qualifies);
+   * an unproven, failed, or unprobeable tree keeps the reference until runner shutdown. */
+  private async settleProviderProcessReference(
+    reference: ProviderHomeReference | null | undefined,
+    proofs: readonly Promise<boolean>[],
+  ): Promise<void> {
+    if (!reference) return;
+    const proven = (await Promise.all(proofs.map((proof) => proof.catch(() => false)))).every(Boolean);
+    if (proven) {
+      await this.releaseProviderHomeReference(reference);
+      return;
+    }
+    this.log("provider-home reference kept until shutdown: a provider process tree was not proven gone");
+    await this.retainProviderHomeReference(reference);
   }
 
   /** Capture identity before launch preparation refreshes its mutable argument object. */
@@ -4426,10 +4578,15 @@ export class SessionManager {
     } satisfies SessionMeta;
     const scope = controller.describe(meta);
     if (!scope) return "unknown";
-    await this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env: meta.env },
+    const reference = await this.providerHomeLeases?.acquireReference({ driver, command: agent.command, context, env: meta.env },
       { isCurrent: () => !this.shuttingDown });
-    if (this.shuttingDown) return "unknown";
-    return (await controller.revalidate(meta)).status;
+    const processes: Promise<boolean>[] = [];
+    try {
+      if (this.shuttingDown) return "unknown";
+      return (await controller.revalidate(meta, { onProcess: (proof) => processes.push(proof) })).status;
+    } finally {
+      await this.settleProviderProcessReference(reference, processes);
+    }
   }
 
   /** Account probes are no-turn provider launches, but the provider may still mutate its effective
@@ -4455,15 +4612,27 @@ export class SessionManager {
       cwd,
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     });
-    await this.providerHomeLeases?.acquire({
+    const reference = await this.providerHomeLeases?.acquireReference({
       driver: agent.driver ?? "acp",
       command: agent.command,
       context,
       env,
       isolation,
     }, { isCurrent: () => !this.shuttingDown });
-    if (this.shuttingDown) throw new Error("subscription probe was cancelled by shutdown");
-    return { cwd, ...(isolation ? { isolation } : {}) };
+    if (this.shuttingDown) {
+      if (reference) await this.releaseProviderHomeReference(reference);
+      throw new Error("subscription probe was cancelled by shutdown");
+    }
+    let settled = false;
+    return {
+      cwd,
+      ...(isolation ? { isolation } : {}),
+      settle: async (children) => {
+        if (settled) return;
+        settled = true;
+        await this.settleProviderProcessReference(reference, children.map((child) => provenProcessTreeExit(child)));
+      },
+    };
   }
 
   /** Put metadata-only naming helpers behind the same runner-owned process and provider-HOME
@@ -4504,7 +4673,11 @@ export class SessionManager {
         ? "codex"
         : null;
     let seatbeltAdmitted = false;
-    const cleanup = async () => {
+    let reference: ProviderHomeReference | null | undefined;
+    const cleanup = async (children: readonly AgentProcess[] = []) => {
+      // Start the tree proofs first: they kill any survivors, and the reference may be released
+      // only once every naming process is proven gone.
+      const proofs = children.map((child) => provenProcessTreeExit(child));
       try {
         await this.removeIsolationState(
           this.executionIsolation,
@@ -4517,6 +4690,9 @@ export class SessionManager {
         );
       } finally {
         if (seatbeltAdmitted) this.boxAdmission.release(taskId);
+        const settling = reference;
+        reference = undefined;
+        await this.settleProviderProcessReference(settling, proofs);
       }
     };
     try {
@@ -4543,7 +4719,7 @@ export class SessionManager {
         cwd,
         ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
       });
-      await this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env, isolation },
+      reference = await this.providerHomeLeases?.acquireReference({ driver, command: agent.command, context, env, isolation },
         { isCurrent: () => !this.shuttingDown });
       if (this.shuttingDown) throw new Error("session naming was cancelled by shutdown");
       return { ...(isolation ? { isolation } : {}), cleanup };
@@ -4573,6 +4749,7 @@ export class SessionManager {
       this.upgradeLegacyBackgroundDeliveryEvidence(stored);
       if (stored.status === "stopped") continue;
       const meta = this.discoverOrphanedClaudeWork(stored);
+      this.scheduleHistoricalClaudeJobReconciliation(meta, "reconnect");
       const automatic = automaticClaudeRecoveryAllowed(meta);
       if (automatic && meta.orphanedWork) {
         this.scheduleOrphanRecovery(meta.sessionId);
@@ -5066,6 +5243,7 @@ export class SessionManager {
           this.log(`failed worktree recovery reconciliation failed for ${boundedSessionIdForLog(m.sessionId)}: ${errText(error)}`);
         });
       }
+      this.scheduleHistoricalClaudeJobReconciliation(this.store.readMeta(m.sessionId) ?? reconciled, "startup");
     }
     // Register every known-session namespace synchronization before replaying cleanup records.
     // Otherwise a reaper invoked at the top of this method could capture an empty promise slot,
@@ -5682,7 +5860,7 @@ export class SessionManager {
     this.discardRecovery(spec.sessionId);
     // Restart: a start for a session we already run replaces the old process.
     if (existing) {
-      existing.client.dispose({ forceImmediate: true });
+      this.disposeDriver(existing.client, { forceImmediate: true });
       // Keep the durable worktree lease until the provider has been told to terminate. Releasing
       // it first would briefly let a sibling runner clean the provider's still-live cwd.
       this.deleteActiveSession(spec.sessionId, existing);
@@ -7806,8 +7984,12 @@ export class SessionManager {
     }
 
     let client: Driver;
+    // The launch's provider-HOME reference belongs to the driver instance it creates; until then
+    // it is settled here: released if no constructor ran, kept if one may have started a process.
+    let launchHome: ProviderHomeReference | null = null;
+    let driverConstructionStarted = false;
     try {
-      await this.providerHomeLeases?.acquire({
+      launchHome = await this.acquireDriverProviderHome({
         driver: meta.driver,
         command: meta.command,
         context: meta.context,
@@ -7830,6 +8012,7 @@ export class SessionManager {
         meta.orchestrator.issueNumbers = [...authoritativeScope.issueNumbers];
         meta.orchestrator.issueScope = authoritativeScope;
       }
+      driverConstructionStarted = true;
       client = this.createDriver(
         meta.driver,
         {
@@ -7838,7 +8021,7 @@ export class SessionManager {
           cwd,
           env: meta.env,
           config: meta.config,
-          artifactGuidance: artifactGuidance(meta, this.controlPlaneProtocolVersion()),
+          artifactGuidance: [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
           ...(preparedProjectMemoryDirectory ? { projectMemoryDirectory: preparedProjectMemoryDirectory } : {}),
           orchestrator: meta.orchestrator,
           context: meta.context,
@@ -8071,6 +8254,10 @@ export class SessionManager {
       }),
       );
     } catch (error) {
+      if (launchHome) {
+        if (driverConstructionStarted) await this.retainProviderHomeReference(launchHome);
+        else await this.releaseProviderHomeReference(launchHome);
+      }
       if (worktreeLeaseOwner) this.store.releaseWorktreeLease(sessionId, worktreeLeaseOwner);
       if (!this.launchIsCurrent(sessionId, launchGeneration)) {
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during provider-home acquisition", launchGeneration);
@@ -8081,6 +8268,7 @@ export class SessionManager {
       this.emitStatus(sessionId, "failed", errText(error));
       return false;
     }
+    if (launchHome) this.driverProviderHomes.set(client, launchHome);
 
     const retainedPromotions = new Map<string, SteeringOperation>();
     for (const operation of this.steeringRegistry.get(sessionId)?.values() ?? []) {
@@ -8160,7 +8348,7 @@ export class SessionManager {
     // A launch that ends before establishing the provider session never sent the prompts admitted
     // while it was starting. Settle them rather than strand their receipts in a retired FIFO.
     const retireUnlaunched = () => {
-      client.dispose();
+      this.disposeDriver(client);
       this.deleteActiveSession(sessionId, entry);
       this.rejectQueued(entry.queue.splice(0), "the provider launch ended before this message was sent");
     };
@@ -8314,6 +8502,7 @@ export class SessionManager {
     cwd: string,
     launchGeneration?: number,
     projectMemoryDirectory?: string,
+    purpose: "provider" | "approved_worktree_hook" = "provider",
   ): SpawnIsolation | undefined | Promise<SpawnIsolation | undefined> {
     if (meta.executionTarget?.adapter === "container") {
       if (!this.containerTargets || !meta.agentId) throw new Error("container execution target is not configured for this agent");
@@ -8322,6 +8511,17 @@ export class SessionManager {
     if (meta.executionTarget?.adapter === "cloud") {
       return this.prepareCloudIsolation(meta, cwd, launchGeneration);
     }
+    // Only providers are forced into the managed-worktree boundary. Setup and teardown commands
+    // come from a frozen, explicitly approved configuration and retain the configured execution
+    // isolation. Reusing the provider boundary for hooks hides host paths under its private /tmp,
+    // where a hook can report success after writing a file that vanishes at sandbox exit.
+    // A strict Orchestrator launches providers in runner scratch, not its selected worktree.
+    const protectedWorktree = purpose === "provider" && cwd === meta.worktreePath && this.requiresManagedWorktreeBwrap(meta)
+      ? meta.worktreePath!
+      : undefined;
+    const isolationPolicy = protectedWorktree
+      ? { mode: "bwrap" as const, network: this.executionIsolation.network }
+      : this.executionIsolation;
     this.assertHostIsolationContextSupported(meta);
     // The provider may write anywhere in its managed worktree except the entries the runner owns.
     // Ordinary command approval cannot see a write a script performs at runtime, so the same set of
@@ -8331,21 +8531,40 @@ export class SessionManager {
     const readOnlyPaths = meta.context.kind === "native"
       ? managedWorktreeReadOnlyPaths(this.managedWorktreeProtections(meta))
       : [];
+    let gitWritableRoots: string[] = [];
+    let requiredReadOnlyPaths: string[] = [];
+    if (protectedWorktree) {
+      requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath: protectedWorktree, repoPath: meta.repoPath }], true);
+      for (const path of requiredReadOnlyPaths) {
+        if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
+      }
+      const gitLink = join(protectedWorktree, ".git");
+      gitWritableRoots = managedWorktreeGitWritableRoots(protectedWorktree, [{
+        worktreePath: protectedWorktree, repoPath: meta.repoPath,
+      }]);
+      if (requiredReadOnlyPaths.length < 4 || gitWritableRoots.length !== 4 ||
+          !lstatSync(gitLink).isFile() || realpathSync.native(gitLink) !== gitLink ||
+          !requiredReadOnlyPaths.every((path) => readOnlyPaths.includes(path))) {
+        throw new Error("managed worktree Git registration could not be protected before provider launch");
+      }
+    }
     // The runner's hook state directory is hidden from every native sandboxed launch (#1336),
     // whatever the driver: nothing a provider runs has a use for it, and only the guard's own
     // re-entry needed it, which now asks the runner instead. Native only for the same reason as
     // above; the modes that cannot express it are documented in docs/agent-control.md.
     const guardStateMask = meta.context.kind === "native" &&
-        (this.executionIsolation.mode === "bwrap" || this.executionIsolation.mode === "seatbelt")
+        (isolationPolicy.mode === "bwrap" || isolationPolicy.mode === "seatbelt")
       ? this.guardStateSandbox?.mask(meta)
       : undefined;
-    return this.requestedWorktreeIsolation(meta).then((additionalWritableRoots) => this.resolveIsolation(this.executionIsolation, meta.context, {}, {
+    return this.requestedWorktreeIsolation(meta, isolationPolicy.mode).then((additionalWritableRoots) => this.resolveIsolation(isolationPolicy, meta.context, {}, {
       driver: meta.driver,
       dataDir: this.stateDir,
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
       ...(projectMemoryDirectory ? { projectMemoryDirectory } : {}),
+      ...(protectedWorktree ? { protectedWorktree: { path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths } } : {}),
+      ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
@@ -8358,6 +8577,13 @@ export class SessionManager {
         : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
+  }
+
+  private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
+    if (process.platform !== "linux" || meta.context.kind !== "native" || !meta.worktreePath ||
+        meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return false;
+    const selected = this.attributedWorktreeForPath(meta, meta.worktreePath);
+    return !!selected && selected.source !== "attached";
   }
 
   /**
@@ -8393,9 +8619,10 @@ export class SessionManager {
 
   private async requestedWorktreeIsolation(
     meta: Pick<SessionMeta, "config" | "orchestrator" | "context" | "repoPath" | "sessionId" | "worktreePath">,
+    mode = this.executionIsolation.mode,
   ): Promise<string[]> {
     if (this.strictProjectIsolation(meta)) return [];
-    if (this.executionIsolation.mode !== "bwrap" && this.executionIsolation.mode !== "seatbelt") return [];
+    if (mode !== "bwrap" && mode !== "seatbelt") return [];
     // Direct WSL orchestration creates child worktrees through the runner; the provider never
     // needs the future requested-worktree boundary writable. Computing that legacy boundary would
     // itself reopen a mutable WSL HOME pathname before the target-local launcher can hold it.
@@ -11926,17 +12153,24 @@ export class SessionManager {
         targetScopeId = targetScope.id;
         this.providerAuthOperations.add(targetScopeId);
       }
-      await this.providerHomeLeases?.acquire({
+      const probeHome = await this.providerHomeLeases?.acquireReference({
         driver: probe.driver,
         command: probe.command,
         context: probe.context,
         env: probe.env,
       }, { isCurrent: () => !this.shuttingDown &&
         this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId === block.recoveryId });
-      if (this.shuttingDown || this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId !== block.recoveryId) {
-        return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
+      // The probe's reference covers only its status command; later steps take their own.
+      const probeProcesses: Promise<boolean>[] = [];
+      let observation: ProviderAuthObservation;
+      try {
+        if (this.shuttingDown || this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId !== block.recoveryId) {
+          return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
+        }
+        observation = await controller.revalidate(probe, { onProcess: (proof) => probeProcesses.push(proof) });
+      } finally {
+        await this.settleProviderProcessReference(probeHome, probeProcesses);
       }
-      const observation = await controller.revalidate(probe);
       if (observation.status === "unauthenticated") {
         return refuse("sign_in_required", "The provider reports that this account is signed out. Sign in to it, then choose it again.");
       }
@@ -13797,6 +14031,9 @@ export class SessionManager {
     );
 
     let temporary: Driver | null = null;
+    // Settled with the temporary driver; kept if its construction failed after starting.
+    let forkHome: ProviderHomeReference | null = null;
+    let forkConstructionStarted = false;
     let client: Driver | undefined;
     let worktree: WorktreeHandle | null = null;
     let forkedThreadId: string | null = null;
@@ -13924,7 +14161,7 @@ export class SessionManager {
         const isolation = await this.resolveLaunchIsolation(source, source.worktreePath);
         // The temporary provider is a provider like any other: its guard is proven first too.
         await this.proveGuardInsideSandbox(source, isolation, source.worktreePath);
-        await this.providerHomeLeases?.acquire({
+        forkHome = await this.acquireDriverProviderHome({
           driver: source.driver,
           command: source.command,
           context: source.context,
@@ -13932,8 +14169,12 @@ export class SessionManager {
           isolation,
         }, { isCurrent: forkIsCurrent });
         if (!forkIsCurrent()) {
+          const unused = forkHome;
+          forkHome = null;
+          if (unused) await this.releaseProviderHomeReference(unused);
           throw new Error("source session changed during provider-home acquisition");
         }
+        forkConstructionStarted = true;
         temporary = this.createDriver(
           source.driver,
           {
@@ -13985,6 +14226,24 @@ export class SessionManager {
       let providerStatePrecloned = false;
       let forkIsolation: SpawnIsolation | undefined;
       const targetDescendantMarker = this.worktreeProcessMarker(targetSessionId, worktree.path);
+      // Pi forks from a precloned target provider partition. Claude's CLI forks into the source
+      // partition first, which is verified and cloned only after its child transcript is durable.
+      // Both bootstrap processes run in the new worktree, so their filesystem boundary must use
+      // the target path even while Claude still uses the source provider-state identity.
+      const forkMeta: SessionMeta = {
+        ...source,
+        sessionId: source.driver === "pi" ? targetSessionId : sourceSessionId,
+        worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+        worktrees: [{
+          id: "legacy",
+          path: worktree.path,
+          branch: worktree.branch,
+          baseRef,
+          baseCommit: baseRef,
+          source: "legacy",
+        }],
+      };
       if (source.driver === "pi") {
         const priorCapabilities = source.capabilities;
         const priorSessionSlashCommands = source.sessionSlashCommands;
@@ -14026,22 +14285,8 @@ export class SessionManager {
         );
         providerStatePrecloned = this.executionIsolation.mode === "bwrap";
         if (providerStatePrecloned) forkStateOwner = targetSessionId;
-        const forkMeta: SessionMeta = {
-          ...source,
-          sessionId: targetSessionId,
-          worktreePath: worktree.path,
-          worktreeBranch: worktree.branch,
-          worktrees: [{
-            id: "legacy",
-            path: worktree.path,
-            branch: worktree.branch,
-            baseRef,
-            baseCommit: baseRef,
-            source: "legacy",
-          }],
-        };
         forkIsolation = await this.resolveLaunchIsolation(forkMeta, worktree.path);
-        await this.providerHomeLeases?.acquire({
+        forkHome = await this.acquireDriverProviderHome({
           driver: source.driver,
           command: source.command,
           context: source.context,
@@ -14049,8 +14294,12 @@ export class SessionManager {
           isolation: forkIsolation,
         }, { isCurrent: forkIsCurrent });
         if (!forkIsCurrent()) {
+          const unused = forkHome;
+          forkHome = null;
+          if (unused) await this.releaseProviderHomeReference(unused);
           throw new Error("source session changed during provider-home acquisition");
         }
+        forkConstructionStarted = true;
         temporary = this.createDriver(
           source.driver,
           {
@@ -14074,6 +14323,17 @@ export class SessionManager {
         // --fork startup path directly from the target partition, avoiding concurrent writers to
         // the copied JSONL while preserving the source process and source partition untouched.
         client = temporary;
+      } else if (source.driver === "claude-code") {
+        forkIsolation = await this.resolveLaunchIsolation(forkMeta, worktree.path);
+        await this.proveGuardInsideSandbox(forkMeta, forkIsolation, worktree.path);
+        await this.providerHomeLeases?.acquire({
+          driver: source.driver,
+          command: source.command,
+          context: source.context,
+          env: source.env,
+          isolation: forkIsolation,
+        }, { isCurrent: forkIsCurrent });
+        if (!forkIsCurrent()) throw new Error("source session changed during provider-home acquisition");
       }
       if (!client?.forkSession) throw new Error("this driver build does not support provider forks");
       forkedThreadId = await client.forkSession(point.agentTurnId, worktree.path, {
@@ -14276,7 +14536,16 @@ export class SessionManager {
       await this.cleanupProviderState(targetSessionId, source.driver, source.context, providerStateJournaled);
       return { ok: false, error: errText(err) };
     } finally {
-      temporary?.dispose();
+      if (temporary) {
+        if (forkHome) this.driverProviderHomes.set(temporary, forkHome);
+        forkHome = null;
+        this.disposeDriver(temporary);
+      } else if (forkHome) {
+        const unused = forkHome;
+        forkHome = null;
+        if (forkConstructionStarted) await this.retainProviderHomeReference(unused);
+        else await this.releaseProviderHomeReference(unused);
+      }
       clearInterval(forkLockRefresh);
       this.store.releaseLock(sourceSessionId, this.lockOwner);
       this.forking.delete(sourceSessionId);
@@ -14661,7 +14930,7 @@ export class SessionManager {
     this.closing.set(sessionId, retirement);
     if (!entry.client.close) {
       try {
-        entry.client.dispose({ forceImmediate: true });
+        this.disposeDriver(entry.client, { forceImmediate: true });
         this.completeProviderRetirement(sessionId, retirement);
       } catch (error) {
         retirement.unconfirmed = true;
@@ -14976,7 +15245,7 @@ export class SessionManager {
 
   private async closeAndDispose(sessionId: string, client: Driver, forceImmediate = false): Promise<void> {
     if (!client.close) {
-      client.dispose({ forceImmediate });
+      this.disposeDriver(client, { forceImmediate });
       return;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -14991,7 +15260,7 @@ export class SessionManager {
       this.log(`session ${sessionId} provider close incomplete; disposing process`);
     } finally {
       if (timer) clearTimeout(timer);
-      client.dispose({ forceImmediate });
+      this.disposeDriver(client, { forceImmediate });
     }
   }
 
@@ -16029,6 +16298,8 @@ export class SessionManager {
       } catch (statusError) {
         this.log(`agent exit failure status could not be persisted for ${sessionId}: ${errText(statusError)}`);
       }
+    } finally {
+      if (this.active.get(sessionId)?.client !== expectedClient) this.settleDriverProviderHome(expectedClient, "exited");
     }
   }
 
@@ -16114,7 +16385,7 @@ export class SessionManager {
           this.recoveryQueues.delete(sessionId);
         }
         if (recoveryEntry && this.active.get(sessionId) === recoveryEntry) {
-          recoveryEntry.client.dispose({ forceImmediate: true });
+          this.disposeDriver(recoveryEntry.client, { forceImmediate: true });
           this.deleteActiveSession(sessionId, recoveryEntry);
           this.releaseAdmission(sessionId);
           this.releaseResumeLock(sessionId, launchGeneration);
@@ -17355,10 +17626,69 @@ export class SessionManager {
     if (!meta) return;
     const discovered = this.discoverOrphanedClaudeWork(meta);
     const allowed = automatic && automaticClaudeRecoveryAllowed(discovered);
+    this.scheduleHistoricalClaudeJobReconciliation(discovered, "recovery_request", allowed);
     if (allowed && discovered.orphanedWork) {
       this.scheduleOrphanRecovery(sessionId);
     }
     else this.scheduleContextOrphanDiscovery(discovered, allowed);
+  }
+
+  /** Older ledgers can retain unfinished rows without aggregate state, pending ids, or task files.
+   * Repair only provider-confirmed model stops. Existing orphans belong to performOrphanRecovery,
+   * which also queues any finished siblings unblocked by the stop. When automatic recovery is
+   * disabled or blocked, this pass still repairs receipts without queueing or launching work. */
+  private scheduleHistoricalClaudeJobReconciliation(
+    meta: SessionMeta,
+    entryPoint: "startup" | "reconnect" | "recovery_request",
+    automatic = true,
+  ): void {
+    if (this.shuttingDown || meta.driver !== "claude-code" || !meta.agentSessionId ||
+        meta.status === "stopped" || this.active.has(meta.sessionId) ||
+        this.historicalJobInspections.has(meta.sessionId)) return;
+    if (meta.orphanedWork && automatic && automaticClaudeRecoveryAllowed(meta) &&
+        !meta.providerAuthBlock && !meta.providerHistoryBlock && !meta.worktreeRecovery) return;
+    const ids = (meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus &&
+      job.restartedAt === undefined).map((job) => job.id);
+    if (ids.length === 0) return;
+    const correlationId = randomUUID();
+    this.historicalJobInspections.add(meta.sessionId);
+    void inspectClaudeBackgroundWorkInContext(meta.context, meta.worktreePath ?? meta.repoPath,
+      meta.agentSessionId, ids, { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
+        projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(meta.sessionId), "projects"),
+      } : {}) })
+      .then((inspection) => {
+        const stopped = inspection.modelStoppedTaskIds;
+        if (this.shuttingDown || !stopped?.size || this.active.has(meta.sessionId)) return;
+        const current = this.store.readMeta(meta.sessionId);
+        // Never apply a historical observation across a prompt, stop, restart, or competing repair.
+        if (!current || JSON.stringify(current) !== JSON.stringify(meta)) return;
+        const now = Date.now();
+        const backgroundJobs = (current.backgroundJobs ?? []).map((job) => stopped.has(job.id)
+          ? { ...job, terminalStatus: "killed" as const, terminalObservedAt: now,
+              continuationRequired: false, assistantResultPersistedAt: now }
+          : job);
+        const pendingBackgroundTaskIds = current.pendingBackgroundTaskIds?.filter((id) => !stopped.has(id));
+        const orphanIds = current.orphanedWork?.pendingTaskIds.filter((id) => !stopped.has(id));
+        const orphanedWork = current.orphanedWork && orphanIds?.length
+          ? { ...current.orphanedWork, pendingTaskIds: orphanIds } : undefined;
+        const updated = this.store.patchMeta(meta.sessionId, {
+          backgroundJobs, pendingBackgroundTaskIds, orphanedWork,
+          recoveredBackgroundTaskIds: mergeRecoveredBackgroundTaskIds(current.recoveredBackgroundTaskIds, [...stopped]),
+          // This read-only pass never queues a return step. Clearing its last orphan must not
+          // invent continuation_pending from held rows, nor running from unverified history.
+          backgroundWorkState: orphanedWork ? "orphaned" : current.orphanedWork ? undefined
+            : current.backgroundWorkState ? managedBackgroundWorkState(backgroundJobs) : undefined,
+        });
+        if (updated) {
+          this.log(JSON.stringify({ event: "historical_claude_jobs_reconciled", entryPoint, correlationId,
+            sessionId: meta.sessionId, reconciledJobs: stopped.size,
+            unresolvedJobs: backgroundJobs.filter((job) => !job.terminalStatus).length }));
+          this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        }
+      })
+      .catch(() => this.log(JSON.stringify({ event: "historical_claude_job_inspection_failed",
+        entryPoint, correlationId, sessionId: meta.sessionId })))
+      .finally(() => this.historicalJobInspections.delete(meta.sessionId));
   }
 
   private discoverOrphanedClaudeWork(meta: SessionMeta): SessionMeta {
@@ -17885,7 +18215,11 @@ export class SessionManager {
       try {
         const inspection = await inspectClaudeBackgroundWorkInContext(
           meta.context, meta.worktreePath ?? meta.repoPath, meta.agentSessionId,
-          meta.pendingBackgroundTaskIds ?? meta.orphanedWork.pendingTaskIds,
+          new Set([
+            ...(meta.pendingBackgroundTaskIds ?? []), ...meta.orphanedWork.pendingTaskIds,
+            ...(meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus && job.restartedAt === undefined)
+              .map((job) => job.id),
+          ]),
           { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
             projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(sessionId), "projects"),
           } : {}) },
@@ -17906,8 +18240,9 @@ export class SessionManager {
               current.recoveredBackgroundTaskIds, [...inspection.terminalTaskIds],
             ),
           });
-          const pending = (current.pendingBackgroundTaskIds ?? current.orphanedWork!.pendingTaskIds)
-            .filter((id) => !inspection.terminalTaskIds.has(id));
+          const pending = [...new Set([
+            ...(current.pendingBackgroundTaskIds ?? []), ...current.orphanedWork!.pendingTaskIds,
+          ])].filter((id) => !inspection.terminalTaskIds.has(id));
           this.onDriverBackgroundWork(sessionId, {
             state: pending.length ? "orphaned" : null,
             pendingTaskIds: pending,
@@ -17918,7 +18253,9 @@ export class SessionManager {
                 id: job.id, toolUseId: job.toolUseId, launchType: job.launchType,
                 startedAt: job.registeredAt, outputFile: job.outputReference,
                 status: inspection.terminalTaskStatuses?.get(job.id) ?? job.terminalStatus ?? "completed",
-                terminalAt: Date.now(), continuationRequired: job.continuationRequired ?? false,
+                terminalAt: Date.now(),
+                continuationRequired: inspection.modelStoppedTaskIds?.has(job.id) ? false : job.continuationRequired ?? false,
+                ...(inspection.modelStoppedTaskIds?.has(job.id) ? { stoppedByModel: true } : {}),
               })),
           });
         }

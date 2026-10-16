@@ -32,6 +32,102 @@ type Theme = (typeof THEMES)[number];
  */
 test.use({ reducedMotion: "reduce" });
 
+/**
+ * What each test's page did, for a harness that never set its theme (#3216).
+ *
+ * On Windows a test occasionally found `<html>` without `data-theme` for the whole timeout, which
+ * means the harness module never ran, and the bare assertion could not say why. Navigations,
+ * failed requests, error responses, page errors and console output are recorded from the start of
+ * every test so `expectTheme` can put them in its failure; script requests that failed since the
+ * last navigation are kept apart, because they are what lets it tell a failed load from a broken
+ * harness.
+ */
+interface PageRecord {
+  events: string[];
+  failedScripts: string[];
+}
+const pageRecords = new WeakMap<Page, PageRecord>();
+
+test.beforeEach(({ page }) => {
+  const started = Date.now();
+  const record: PageRecord = { events: [], failedScripts: [] };
+  const note = (event: string) => {
+    record.events.push(`+${Date.now() - started}ms ${event}`);
+    return event;
+  };
+  pageRecords.set(page, record);
+  page.on("framenavigated", (frame) => {
+    if (frame !== page.mainFrame()) return;
+    record.failedScripts = [];
+    note(`navigated to ${frame.url()}`);
+  });
+  page.on("console", (message) => note(`console.${message.type()}: ${message.text()}`));
+  page.on("pageerror", (error) => note(`page error: ${error.stack ?? error.message}`));
+  page.on("requestfailed", (request) => {
+    const event = note(`request failed (${request.failure()?.errorText}): ${request.url()}`);
+    if (request.resourceType() === "script") record.failedScripts.push(event);
+  });
+  page.on("response", (response) => {
+    if (response.status() < 400) return;
+    const event = note(`HTTP ${response.status()}: ${response.url()}`);
+    if (response.request().resourceType() === "script") record.failedScripts.push(event);
+  });
+});
+
+/** Where the harness got to: whether it mounted anything into `#root`. */
+function documentState(page: Page) {
+  return page.evaluate(() => ({
+    url: location.href,
+    readyState: document.readyState,
+    rootChildren: document.getElementById("root")?.childElementCount ?? null,
+  })).catch((reason: unknown) => `unreadable: ${reason}`);
+}
+
+function describeLoad(record: PageRecord, state: Awaited<ReturnType<typeof documentState>>) {
+  return `The document: ${JSON.stringify(state)}\n` +
+    `What the page did since the test started:\n${record.events.join("\n") || "(nothing recorded)"}`;
+}
+
+/**
+ * Asserts the harness applied `theme`; when it did not, the failure carries what the page did.
+ *
+ * One reload is allowed, for exactly one cause: the harness mounted nothing AND a script request of
+ * that load failed, which is a module not being delivered, not the harness failing to apply its
+ * theme. That is what happened on win32 (#3216): a trace caught one static import of the harness
+ * entry failing with `net::ERR_NO_BUFFER_SPACE`, Winsock's WSAENOBUFS — the Windows host briefly
+ * out of socket resources — which aborts the whole module graph while `load` still fires. The
+ * reload is reported as a CI warning with the same diagnostics, so it cannot pass silently.
+ * Anything else fails at once — the harness throwing, mounting without its theme, or a load that
+ * fails again after the reload.
+ */
+async function expectTheme(page: Page, theme: Theme) {
+  const record = pageRecords.get(page)!;
+  const themed = () => expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const fail = async (error: unknown) => new Error(
+    `${(error as Error).message}\n\nThe harness never set data-theme="${theme}". ${describeLoad(record, await documentState(page))}`,
+  );
+  try {
+    await themed();
+    return;
+  } catch (error) {
+    const state = await documentState(page);
+    if (typeof state === "string" || state.rootChildren !== 0 || record.failedScripts.length === 0) throw await fail(error);
+    const details = `The harness module did not load, so the page was reloaded once.\n${describeLoad(record, state)}`;
+    test.info().annotations.push({ type: "harness reloaded", description: record.failedScripts.join("\n") });
+    await test.info().attach("harness-load-before-reload", { body: details, contentType: "text/plain" });
+    process.stderr.write(
+      `${process.env.GITHUB_ACTIONS ? "::warning title=Settings-Rows Harness Reloaded::" : ""}` +
+        `${test.info().titlePath.join(" › ")}: ${record.failedScripts.join("; ")}\n${details}\n`,
+    );
+  }
+  await page.reload();
+  try {
+    await themed();
+  } catch (error) {
+    throw await fail(error);
+  }
+}
+
 interface HarnessOptions {
   state?: "rest" | "busy-on" | "busy-off" | "disabled";
   topology?: "full" | "minimal";
@@ -61,7 +157,7 @@ async function useHarness(
   await page.goto(
     `/settings-rows-e2e.html?theme=${theme}&state=${state}&topology=${topology}&section=${section}&copy=${copy}&defaults=${defaults}&alerts=${alerts}&instances=${instances}${tailnet ? `&tailnet=${tailnet}` : ""}`,
   );
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expectTheme(page, theme);
   // The SECTION's own heading, not a fixed control: asserting a radio here would silently pass on
   // the wrong page for five of the six sections, since an absent locator is simply never visible.
   await expect(page.locator("#settings-panel-heading"))
@@ -81,7 +177,7 @@ async function useRow(page: Page, theme: Theme, key: RowKey, options: Omit<Harne
  */
 async function useDisabledNavRow(page: Page, theme: Theme) {
   await page.goto(`/settings-rows-e2e.html?theme=${theme}&view=kinds`);
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expectTheme(page, theme);
   return page.getByRole("button", { name: /^Manage Instances/ });
 }
 
@@ -2012,7 +2108,7 @@ test.describe("the appearance controls", () => {
 test.describe("the setting-row grid", () => {
   async function useKinds(page: Page, theme: Theme, groupWidth?: number) {
     await page.goto(`/settings-rows-e2e.html?theme=${theme}&view=kinds${groupWidth ? `&group-width=${groupWidth}` : ""}`);
-    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await expectTheme(page, theme);
     await expect(page.locator(".settings-group").first()).toBeVisible();
   }
   const group = (page: Page, title: string) =>

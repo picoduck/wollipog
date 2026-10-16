@@ -10,6 +10,7 @@ import {
   type UiSnapshotMessage,
   type WorkflowDefinition,
 } from "@wollipog/protocol";
+import { saveAgentDefault } from "../agent-defaults.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
@@ -60,6 +61,16 @@ const savedDefaults = fixtureParams.get("defaults");
  */
 const runDialog = fixtureParams.get("dialog") === "run";
 
+/**
+ * #3224: `?codexDiscovery=1` gives the Codex rows the shape discovery reports, so the exec row is
+ * the restart-only one rather than a configured agent. `?appServerCheck=timeout` makes App Server's
+ * check time out, and `?savedAgent=<id>` saves that agent as this runner's New Session default.
+ */
+const codexDiscovery = fixtureParams.get("codexDiscovery") === "1";
+const appServerCheckTimedOut = fixtureParams.get("appServerCheck") === "timeout";
+const savedAgent = fixtureParams.get("savedAgent");
+if (savedAgent) saveAgentDefault({}, "runner-1", savedAgent);
+
 /** `?theme=light|dark` pins the theme; without it the page keeps the app's own default. */
 const fixtureTheme = fixtureParams.get("theme");
 if (fixtureTheme === "light" || fixtureTheme === "dark") document.documentElement.setAttribute("data-theme", fixtureTheme);
@@ -96,8 +107,18 @@ const runner: RunnerView = {
       args: [],
       env: {},
       driver: "codex-app-server",
-      available: fixtureParams.get("agentUnavailable") !== "1",
+      available: fixtureParams.get("agentUnavailable") !== "1" && !appServerCheckTimedOut,
       authStatus: fixtureParams.get("agentUnavailable") === "1" ? "unauthenticated" : undefined,
+      ...(codexDiscovery ? { source: "discovered" as const } : {}),
+      ...(appServerCheckTimedOut ? { codexAppServer: {
+        status: "unsupported" as const,
+        appServerAvailable: false,
+        failure: {
+          code: "probe_timeout" as const,
+          message: "Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
+          retryable: true,
+        },
+      } } : {}),
     },
     {
       id: "codex-exec",
@@ -107,6 +128,7 @@ const runner: RunnerView = {
       env: {},
       driver: "codex",
       available: true,
+      ...(codexDiscovery ? { source: "discovered" as const } : {}),
     },
     {
       id: "pi",

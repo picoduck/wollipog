@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
   type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -56,7 +56,7 @@ function harness(full = true, maximum = 5) {
   assert.ok(svc.recordCampaignPlan("root", {items:[{key:"issue:100",issue:{repository:"team/repo",number:100}}],planComplete:true}).ok);
   const page = db.campaignWorkLedger.page("root", {state:"all",limit:100},Date.now()); assert.ok(page.ok);
   const item = page.data.items[0]!;
-  return { db, svc, hub, principal, state, approve, proposal, item };
+  return { db, svc, hub, metadata, principal, state, approve, proposal, item };
 }
 
 test("bounded epic scope records lineage, preserves the authorizing human and revokes outstanding grants atomically", async () => {
@@ -405,4 +405,81 @@ test("completed closure cannot rely on a reported stage, queue entry, stale forg
     detail.verifications=[]; assert.equal(closureEvidence(h.db,h.db.getSession("root")!,snapshot),null);
     h.db.campaignWorkLedger.detail=original;
   } finally { h.db.close(); }
+});
+
+test("an issue boundary refuses its scope limit and its runner floor as separate errors", () => {
+  const h = harness(false);
+  try {
+    const proposal = { mode: "full_control" as const, objective: "Implement epic 100", operations: ["campaign_issue_scope"] as Array<"campaign_issue_scope">,
+      delegatablePolicyIds: [], issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 1, closureReasons: [] } };
+    const policy = structuredClone(h.db.getSession("root")!.orchestratorPolicy!);
+    policy.issueScope = { ...policy.issueScope!, issueNumbers: [100, 101] };
+    policy.issueNumbers = [100, 101];
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), "root");
+    const overLimit = h.svc.setCampaignControl("root", proposal, 1, h.principal);
+    assert.equal(overLimit.status, 409);
+    assert.equal(overLimit.error, "The issue boundary exceeds its human-set scope limit.");
+    assert.equal(overLimit.capabilityRequirement, undefined, "a scope limit is not a runner refusal");
+    const floor = RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlIssueAuthority;
+    h.db.registerRunner(h.metadata, 3, floor - 1);
+    const outdated = h.svc.setCampaignControl("root", { ...proposal, issueAuthority: { ...proposal.issueAuthority, maxIssues: 5 } }, 1, h.principal);
+    assert.equal(outdated.status, 409);
+    assert.equal(outdated.error, "This machine needs a newer runner for campaign issue limits. Update and restart the runner.");
+    assert.deepEqual(outdated.capabilityRequirement, { requiredRunnerProtocolVersion: floor, runnerProtocolVersion: floor - 1 });
+  } finally { h.db.close(); }
+});
+
+test("a scoped Orchestrator refuses an older runner with the shared sentence on child creation and restart", () => {
+  const h = harness(false);
+  try {
+    const floor = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges;
+    const refusal = "This machine needs a newer runner for campaign issue scope changes. Update and restart the runner.";
+    const versions = { requiredRunnerProtocolVersion: floor, runnerProtocolVersion: floor - 1 };
+    h.db.updateSessionConfig("root", { permissionMode: "orchestrator" }, 3);
+    h.db.registerRunner({ ...h.metadata, agents: h.metadata.agents.map((agent) => ({ ...agent,
+      capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"] } })) }, 4, floor - 1);
+    const child = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "codex", role: "orchestrator", prompt: "Coordinate",
+      config: { permissionMode: "orchestrator" } }, undefined, undefined, false, false, false,
+    { parentSessionId: "root", defaultOwnerUserId: h.principal.userId });
+    assert.equal(child.error, refusal);
+    assert.equal(child.status, 409);
+    assert.deepEqual(child.capabilityRequirement, versions);
+    h.db.updateSessionStatus("root", "completed", 5);
+    const restart = h.svc.restart("root");
+    assert.equal(restart.error, refusal);
+    assert.equal(restart.status, 409);
+    assert.deepEqual(restart.capabilityRequirement, versions);
+  } finally { h.db.close(); }
+});
+
+test("campaign issue scope refuses each runner floor with the shared sentence and returns the versions beside it", async () => {
+  const {default:Fastify}=await import("fastify");
+  const {registerCampaignIssueScopeRoutes}=await import("./campaign-issue-scope-routes.js");
+  for (const [full, capability, label] of [
+    [true, "fullControlIssueAuthority", "campaign issue limits"],
+    [false, "campaignIssueScopeChanges", "campaign issue scope changes"],
+  ] as const) {
+    const h = harness(full);
+    const app = Fastify();
+    try {
+      registerCampaignIssueScopeRoutes(app, { db: h.db, svc: h.svc, requestPrincipal: () => h.principal });
+      const floor = RUNNER_CAPABILITY_MIN_PROTOCOL[capability];
+      const refusal = `This machine needs a newer runner for ${label}. Update and restart the runner.`;
+      const versions = { requiredRunnerProtocolVersion: floor, runnerProtocolVersion: floor - 1 };
+      assert.doesNotMatch(refusal, /protocol|v\d/u);
+      h.db.registerRunner(h.metadata, 3, floor - 1);
+      const view = await app.inject({ method: "GET", url: "/api/sessions/root/campaign/issue-scope" });
+      assert.equal(view.statusCode, 200, view.body);
+      assert.deepEqual(
+        (({ supported, compatibilityMessage, requiredRunnerProtocolVersion, runnerProtocolVersion }) =>
+          ({ supported, compatibilityMessage, requiredRunnerProtocolVersion, runnerProtocolVersion }))(view.json()),
+        { supported: false, compatibilityMessage: refusal, ...versions },
+      );
+      const proposed = await app.inject({ method: "POST", url: "/api/sessions/root/campaign/issue-scope/proposals",
+        payload: { requestId: `old-runner-${capability}`, expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }],
+          removals: [], explanation: "Verified intended member", lineage: { kind: "epic", epic: 100 } } });
+      assert.equal(proposed.statusCode, 409);
+      assert.deepEqual(proposed.json(), { error: refusal, ...versions }, "the HTTP refusal keeps the versions beside the sentence");
+    } finally { await app.close(); h.db.close(); }
+  }
 });

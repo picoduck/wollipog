@@ -23,6 +23,7 @@ import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-j
 import {
   DESCENDANT_MARKER_ENV,
   PosixProcessBoundary,
+  releaseEmptyPosixProcessBoundaries,
   terminatePosixProcessBoundaries,
   WORKTREE_DESCENDANT_MARKER_ENV,
 } from "./posix-process-tree.js";
@@ -34,6 +35,7 @@ import {
   type WslAgentControlLaunch,
 } from "./wsl-agent-control.js";
 import { buildWslBwrapRelayArgs } from "./wsl-bwrap-launcher.js";
+import { cancelClaudeNamespaceProvider, spawnClaudeNamespaceProvider, terminateClaudeNamespaces } from "./claude-namespace-session.js";
 
 const isWindows = process.platform === "win32";
 /** Runner credentials and policy switches are daemon input and must never become agent input. */
@@ -137,6 +139,10 @@ export interface SpawnAgentOptions {
   /** Stable owner for native POSIX descendants that may intentionally outlive one provider turn.
    * The boundary is retained after normal provider exit and terminated when that session disposes. */
   descendantOwner?: object;
+  /** Native protected Claude only: retain one PID namespace across provider exits. */
+  claudeNamespaceProvider?: boolean;
+  /** Stable Claude session key for host-visible task output ownership and crash reconciliation. */
+  claudeNamespaceSessionId?: string;
   /** Runner-private durable marker shared by processes owned by one managed worktree. */
   descendantMarker?: string;
   /** False for user-owned interactive shells whose daemonized children are not provider-owned. */
@@ -149,8 +155,12 @@ export interface BwrapSpawnIsolation {
   command: string;
   args: string[];
   network: "inherit" | "deny";
+  /** Forced managed-worktree bwrap still writes the shared provider transcript/credential home. */
+  preservesProviderHome?: true;
   /** Narrow durable state exceptions; source lives under runner data, target is the CLI's home path. */
   writableBinds?: Array<{ source: string; target: string }>;
+  /** A managed worktree whose parent must remain read-only while the child stays writable. */
+  protectedWorktree?: { parent: string; path: string; gitWritableRoots: string[] };
   /** Runner-owned administrative entries bound read-only over themselves. Rendered after every
    * writable bind, including the cwd, so the narrower rule is the one that lands. */
   readOnlyBinds?: string[];
@@ -161,6 +171,10 @@ export interface BwrapSpawnIsolation {
   guardStateMask?: { directory: string; readable: string[]; socket?: string };
   /** Ephemeral authenticated bridge state; never persisted or advertised. WSL only. */
   wslAgentControl?: WslAgentControlLaunch;
+  /** Runner-owned fallback for staging the fixed Claude pipe worker when TMPDIR is noexec. */
+  claudePipeHelperDataDir?: string;
+  /** Internal, attested bind points for a session-owned Claude namespace. */
+  claudeNamespace?: { helperPath: string; taskDirectory: string };
 }
 
 /** Exact target-local launcher authorization. This is deliberately not `bwrap`: generic WSL
@@ -324,6 +338,22 @@ export function buildCloudArgs(
 export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" | "cwd">, isolation: BwrapSpawnIsolation): string[] {
   const bridge = isolation.wslAgentControl;
   const socketDir = bridge?.socketPath ? posix.dirname(bridge.socketPath) : undefined;
+  const protectedParent = isolation.protectedWorktree?.parent;
+  const protectedChild = isolation.protectedWorktree?.path;
+  const within = (parent: string, path: string) => {
+    const relative = posix.relative(parent, path);
+    return relative !== "" && relative !== ".." && !relative.startsWith("../") && !posix.isAbsolute(relative);
+  };
+  if (protectedChild && opts.cwd !== protectedChild && !within(protectedChild, opts.cwd)) {
+    throw new Error("protected worktree launch cannot bind a different working directory writable");
+  }
+  const parentBinds = protectedParent && protectedChild
+    ? (isolation.writableBinds ?? []).filter((bind) => within(protectedParent, bind.target) &&
+        bind.target !== protectedChild && !within(protectedChild, bind.target))
+    : [];
+  const childBinds = protectedChild
+    ? (isolation.writableBinds ?? []).filter((bind) => within(protectedChild, bind.target))
+    : [];
   return [
     ...isolation.args,
     "--die-with-parent",
@@ -340,8 +370,24 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
     ...(socketDir ? ["--dir", WSL_AGENT_CONTROL_PRIVATE_DIR,
       "--ro-bind", socketDir, WSL_AGENT_CONTROL_PRIVATE_DIR] : []),
     ...(isolation.writableBinds ?? []).flatMap((bind) => ["--bind", bind.source, bind.target]),
-    "--bind", opts.cwd, opts.cwd,
+    // The protected child bind below already makes its descendants writable. Binding a terminal's
+    // cwd separately could follow a symlink out of that child and widen its writable boundary.
+    ...(!protectedChild ? ["--bind", opts.cwd, opts.cwd] : []),
+    ...(isolation.protectedWorktree
+      ? [
+        "--ro-bind", isolation.protectedWorktree.parent, isolation.protectedWorktree.parent,
+        ...parentBinds.flatMap((bind) => ["--bind", bind.source, bind.target]),
+        "--bind", isolation.protectedWorktree.path, isolation.protectedWorktree.path,
+        ...childBinds.flatMap((bind) => ["--bind", bind.source, bind.target]),
+        ...isolation.protectedWorktree.gitWritableRoots.flatMap((path) => ["--bind", path, path]),
+      ]
+      : []),
     ...(isolation.readOnlyBinds ?? []).flatMap((path) => ["--ro-bind", path, path]),
+    ...(isolation.claudeNamespace ? [
+      "--dir", "/tmp/claude",
+      "--bind", isolation.claudeNamespace.taskDirectory, "/tmp/claude",
+      "--ro-bind", isolation.claudeNamespace.helperPath, "/tmp/wollipog-claude-provider-pipe",
+    ] : []),
     ...(isolation.guardStateMask
       ? [
         "--tmpfs", isolation.guardStateMask.directory,
@@ -683,6 +729,13 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker }
       : {}),
   };
+  if (opts.claudeNamespaceProvider && opts.isolation?.backend === "bwrap" &&
+      opts.context?.kind !== "wsl" && opts.descendantOwner) {
+    return spawnClaudeNamespaceProvider(
+      { ...opts, isolation: opts.isolation, descendantOwner: opts.descendantOwner },
+      launchEnv, buildBwrapArgs,
+    );
+  }
   let child: AgentProcess;
   try {
     if (opts.isolation?.backend === "container") {
@@ -802,6 +855,7 @@ export async function waitForPendingKills(deadlineMs: number): Promise<boolean> 
 
 /** Register cleanup for descendants retained after a provider's normal per-turn exit. */
 export function terminateDescendantBoundaries(owner?: object): void {
+  for (const work of terminateClaudeNamespaces(owner)) trackPendingKill(work);
   for (const work of terminatePosixProcessBoundaries(owner)) trackPendingKill(work);
 }
 
@@ -820,9 +874,84 @@ export function terminateDescendantBoundariesAfterPendingKills(): void {
   }));
 }
 
+/** True when `child`'s process tree is gone by the same standard runner shutdown uses before it
+ * releases every provider-HOME lease: the POSIX boundary terminated every process it tracks
+ * (parent links plus the inherited environment marker) and found no survivor. It is idempotent,
+ * so a boundary already terminated on close returns that result.
+ *
+ * Known limit, shared with shutdown: a helper that detaches with a scrubbed environment before its
+ * parent link is observed, or whose environment cannot be read, is invisible to that tracking.
+ * Closing it needs kernel containment (a Linux subreaper or cgroup).
+ *
+ * Without a boundary (Windows, WSL, remote or untracked spawns) only the root's exit is
+ * observable, which is not a tree proof, so the answer is false. */
+export function provenProcessTreeExit(child: AgentProcess): Promise<boolean> {
+  return child.posixBoundary ? child.posixBoundary.terminate().catch(() => false) : Promise.resolve(false);
+}
+
+/** Every process one provider instance starts, so the instance can prove its complete process
+ * tree gone when it ends (same standard and known limit as provenProcessTreeExit).
+ *
+ * Children spawned with `owner` as their descendantOwner are covered by that owner's POSIX
+ * boundaries, which stay registered until proven gone. A child without a POSIX boundary (Windows,
+ * WSL, remote, or a spawn that never got a pid) can never be proven, so recording one makes every
+ * proof false. Proving seals the ledger: the instance must not start anything afterwards. */
+export class ProviderProcessLedger {
+  /** Pass as `descendantOwner` on every spawn the instance makes. */
+  readonly owner: object = {};
+  private sealed = false;
+  private unprovable = false;
+  private readonly separate = new Set<AgentProcess>();
+  private readonly proofs = new Map<boolean, Promise<boolean>>();
+
+  /** Throws once the instance has ended; call before every spawn. */
+  assertOpen(): void {
+    if (this.sealed) throw new Error("provider instance already ended; refusing to start another process");
+  }
+
+  /** Record a spawned process. A child whose boundary is not registered under `owner` (spawned
+   * without it, or by a spawn function that ignored it) is proven individually instead, so the
+   * owner proof can never pass vacuously for it. */
+  record(child: AgentProcess): AgentProcess {
+    if (!child.posixBoundary) this.unprovable = true;
+    else if (child.posixBoundary.owner !== this.owner) this.separate.add(child);
+    return child;
+  }
+
+  /** Run work that may start processes outside any boundary. Nothing can prove those processes
+   * gone, even after the work settles (a probe's group kill misses a descendant that left its
+   * group), so the instance stays unprovable for good and its references are retained. */
+  async untracked<T>(work: () => Promise<T>): Promise<T> {
+    this.unprovable = true;
+    return await work();
+  }
+
+  /** `terminate: true` after disposal (kills survivors, as disposal already started to); `false`
+   * after the instance exited on its own (never kills; live work makes the answer false).
+   * Memoized per mode and never rejects. */
+  prove(options: { terminate: boolean }): Promise<boolean> {
+    this.sealed = true;
+    const existing = this.proofs.get(options.terminate);
+    if (existing) return existing;
+    const proof = (async () => {
+      if (this.unprovable) return false;
+      const owned = options.terminate
+        ? terminatePosixProcessBoundaries(this.owner)
+        : releaseEmptyPosixProcessBoundaries(this.owner);
+      const results = await Promise.all([...owned, ...[...this.separate].map(provenProcessTreeExit)]
+        .map((work) => work.catch(() => false)));
+      return results.every(Boolean);
+    })().catch(() => false);
+    this.proofs.set(options.terminate, proof);
+    return proof;
+  }
+}
+
 /** Kill a process and all of its children, returning exact completion for callers that own one
  * cleanup boundary. Global shutdown still registers the same promise through killTree(). */
 export function killTreeAndWait(child: AgentProcess): Promise<boolean> {
+  const virtualKill = cancelClaudeNamespaceProvider(child);
+  if (virtualKill) return virtualKill;
   if (child.posixBoundary) {
     return child.posixBoundary.terminate();
   }

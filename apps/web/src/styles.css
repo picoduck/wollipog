@@ -1968,6 +1968,7 @@ kbd {
 .t-success { --tone: var(--green); --tone-text: var(--green-on-tint); }
 .t-warning { --tone: var(--amber); --tone-text: var(--amber-on-tint); }
 .t-danger { --tone: var(--red); --tone-text: var(--red-on-tint); }
+.t-review { --tone: var(--purple); --tone-text: var(--purple-on-tint); }
 .status {
   display: inline-flex;
   flex: none;
@@ -7080,6 +7081,15 @@ body.shell-dock-dragging * {
 .composer-box.answer-mode:has(.composer-answer-input[aria-invalid="true"]) {
   border-color: var(--red);
 }
+/* A long question belongs to the session's visible pane (#3256). Let the composer shrink and
+   scroll as a whole rather than overflowing the shell that clips it. Its question, choices and
+   actions then share a reachable surface, including when focus reveals the answer field. */
+.composer:has(.composer-answer) {
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .composer-answer {
   display: flex;
   flex-direction: column;
@@ -10832,7 +10842,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: var(--bg-elev);
 }
 
-/* The Sessions notice and quiet new-order/Reconnecting lines (#2221, §13.2, §6.3): inset at the
+/* The Sessions notice and Reconnecting line (#2221, §13.2, §6.3): inset at the
    list's edges and 8px from the top as the rows are. Together they take whole stacked-list rows. */
 .inbox-list-head,
 .inbox-list-notices {
@@ -10854,15 +10864,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow: auto;
     padding-bottom: var(--space-2);
   }
-}
-/* New activity would reorder the rows: one neutral line with Apply, never a notice. */
-.inbox-order-line {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  color: var(--text-dim);
-  font: var(--type-body);
 }
 /* Recommended Skills (#1768, #2221): each skill a link with its own Dismiss, then Dismiss All. Where
    the list is 600px or wider they share one line after the body; narrower, one skill per line. */
@@ -13117,6 +13118,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   cursor: pointer;
 }
 .inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
+.inbox-thread-family.t-review { border-color: transparent; color: var(--tone-text); background: color-mix(in srgb, var(--tone) 12%, transparent); }
 .inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
 .inbox-thread-working { display: none; overflow: hidden; text-overflow: ellipsis; }
 .inbox-row-copy .inbox-thread-working { display: inline; flex: none; }

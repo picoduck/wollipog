@@ -43,6 +43,7 @@ import {
 } from "./claude-code.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { ClaudeInitCatalog } from "../discovery/claude-slash-catalog.js";
+import { buildBwrapArgs } from "../spawn.js";
 
 /**
  * Unit tests for the claude stream-json -> SessionEventPayload mapping.
@@ -3331,6 +3332,56 @@ test("Claude fork mints a deterministic target session with a zero-cost local bo
   child.emit("close", 0);
   assert.equal(await fork, target);
   assert.equal(driver.agentSessionId(), source, "source driver id is immutable");
+  driver.dispose();
+});
+
+test("Claude fork uses the target worktree isolation for its bootstrap", async () => {
+  const source = "11111111-2222-3333-4444-555555555555";
+  const sourcePath = "/tmp/source-worktree";
+  const targetPath = "/tmp/target-worktree";
+  const sourceIsolation = {
+    backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "inherit" as const,
+    protectedWorktree: { parent: "/tmp", path: sourcePath, gitWritableRoots: [] },
+  };
+  const targetIsolation = {
+    ...sourceIsolation,
+    protectedWorktree: { ...sourceIsolation.protectedWorktree, path: targetPath },
+  };
+  const child = fakeProcess();
+  const launches: any[] = [];
+  const driver = new ClaudeCodeDriver({
+    ...baseOpts,
+    resumeId: source,
+    isolation: sourceIsolation,
+    descendantMarker: "source-marker",
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      supportsConversationFork: true, permissionModes: ["acceptEdits"],
+    },
+  }, noopCb, {
+    spawn: (options: any) => {
+      launches.push(options);
+      if (options.isolation?.backend !== "bwrap") throw new Error("Claude fork must use bubblewrap");
+      buildBwrapArgs(options, options.isolation);
+      return child;
+    },
+    kill: () => {},
+  } as any);
+  const fork = driver.forkSession(source, targetPath, {
+    isolation: targetIsolation,
+    descendantMarker: "target-marker",
+  });
+  void fork.catch(() => {});
+  assert.equal(launches[0]?.cwd, targetPath);
+  assert.equal(launches[0]?.isolation, targetIsolation);
+  assert.equal(launches[0]?.descendantMarker, "target-marker");
+  const args = launches[0].args as string[];
+  const target = args[args.indexOf("--session-id") + 1]!;
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: target }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: target, total_cost_usd: 0 }) + "\n");
+  child.emit("close", 0);
+  assert.equal(await fork, target);
   driver.dispose();
 });
 

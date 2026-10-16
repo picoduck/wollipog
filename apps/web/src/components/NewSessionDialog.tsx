@@ -14,6 +14,9 @@ import {
   WORKFLOW_DECISION_CATEGORIES,
   advertisesOrchestratorAdditiveRole,
   agentHarnessIdentityKey,
+  orchestratorChildHarnessRequirement,
+  orchestratorExecutionPolicyRequirement,
+  orchestratorIntegrationIsolationRequirement,
   type ProjectLocationView,
   type ProjectView,
   runnerCapabilityRequirement,
@@ -26,7 +29,7 @@ import {
   type SessionConfig,
   type DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
-import { agentHarnessOptionLabel } from "../agent-presentation.js";
+import { agentHarnessMachinesDescription, agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
 import { managedSkillsAvailableForTarget, SKILLS_UNAVAILABLE_ON_TARGET } from "./SkillsUnavailableNotice.js";
 import { ApiError } from "../api.js";
@@ -60,6 +63,7 @@ import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import {
   agentMeta,
   agentOptions,
+  codexAppServerSetupReason,
   currentAgentSelectionIssue,
   savedAgentSelection,
 } from "./agent-options.js";
@@ -246,7 +250,7 @@ export function NewSessionDialog({
       : runner?.workspaces[0]?.id) ?? "",
   );
   const initialAgentOptions = agentOptions(runner?.agents ?? []);
-  const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
+  const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId], runner?.agents);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [providerAccountId, setProviderAccountId] = useState("");
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
@@ -399,7 +403,9 @@ export function NewSessionDialog({
         ? option.advanced ? "Advanced Agent" : undefined
         : `${option.advanced ? "Advanced Agent · " : ""}${metadata}`,
       disabled: option.disabled,
-      disabledReason: option.disabled ? `Needs setup. ${metadata}` : undefined,
+      disabledReason: option.disabled
+        ? `Needs setup. ${codexAppServerSetupReason(option.agent) ?? metadata}`
+        : undefined,
     };
   }), [agentOpts]);
   const selectedAgentOption = agentOpts.find((option) => option.agent.id === agentId);
@@ -544,6 +550,7 @@ export function NewSessionDialog({
   const orchestratorCapabilities = orchestratorSettings?.view?.capabilities;
   const harnessPolicyAvailable = orchestratorCapabilities?.harnesses !== undefined;
   const childHarnessPolicySupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorChildHarnessPolicy");
+  const childHarnessPolicyUnavailable = orchestratorChildHarnessRequirement(runner?.protocolVersion).error;
   const childHarnesses = orchestratorCapabilities?.harnesses ?? [];
   const fixedChildHarness = orchestratorDraft.behavior.childHarness;
   const fixedChildHarnessCapability = fixedChildHarness
@@ -566,7 +573,7 @@ export function NewSessionDialog({
         ? agentHarnessOptionLabel(harness)
         : `${agentHarnessOptionLabel(harness)} (Unavailable)`,
       description: harness.installations > 0
-        ? `${harness.installations} current installation${harness.installations === 1 ? "" : "s"}.`
+        ? agentHarnessMachinesDescription(harness)
         : "No current installation advertises this saved Agent Harness.",
     })),
   ];
@@ -619,7 +626,7 @@ export function NewSessionDialog({
   const orchestratorCapabilitiesValid = !!fixedPairAvailable && fixedHarnessAvailable && fixedHarnessSupported &&
     fixedModelAvailable && fixedEffortAvailable;
   const orchestratorCapabilitiesError = fixedChildHarness && !fixedHarnessSupported
-    ? "Fixed Child Harness policy requires a protocol-v157 Orchestrator runner. Update the selected runner or choose Automatic."
+    ? childHarnessPolicyUnavailable
     : orchestratorCapabilities?.reason ??
       "A saved Child Harness, Child Model, or Child Effort is no longer advertised. Choose an available value.";
   const orchestratorDelegationValid =
@@ -718,11 +725,7 @@ export function NewSessionDialog({
   const integrationIsolationCopy = integrationIsolationDisclosure(agent?.driver);
   const integrationIsolationUnavailable = !integrationIsolationControlPlane
     ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
-    : runnerCapabilityRequirement(
-      runner?.protocolVersion,
-      "orchestratorIntegrationIsolation",
-      "integration isolation",
-    );
+    : orchestratorIntegrationIsolationRequirement(runner?.protocolVersion).error;
   const orchestratorExecutionValid = (orchestratorDraft.execution.strictProjectIsolation
     ? strictProjectBoundaryAvailable
     : providerExecutionAvailable) &&
@@ -732,7 +735,7 @@ export function NewSessionDialog({
       ? "Strict Project Isolation needs an audited Codex sandbox, Direct WSL bubblewrap, or runner bubblewrap/Seatbelt isolation with the required Claude mode."
       : "Strict Project Isolation is delivered by the Orchestrator preset, which this agent installation cannot launch here. Disable it to run this Orchestrator with ordinary provider permissions.")
     : !executionPolicySupported
-      ? "Delegate Implementation without Strict Project Isolation requires a protocol-v144 runner. Update the runner or enable Strict Project Isolation."
+      ? orchestratorExecutionPolicyRequirement(runner?.protocolVersion).error
       : "Provider-mode orchestration requires a native Codex, approval-capable Claude Code, or bridge-verified Pi harness.";
   const childModelOptions = [
     { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Resolve from live child capabilities." },
@@ -817,8 +820,8 @@ export function NewSessionDialog({
   const directoryGrants = !browsedPath && (agent?.driver ?? "acp") === "acp"
     ? (workspace?.additionalDirectoryGrants ?? [])
     : [];
-  const savedSelection = savedAgentSelection(agentOpts, agentDefaults[runnerId]);
-  const selectionIssue = currentAgentSelectionIssue(agentOpts, agentId, agentDefaults[runnerId]);
+  const savedSelection = savedAgentSelection(agentOpts, agentDefaults[runnerId], runner?.agents);
+  const selectionIssue = currentAgentSelectionIssue(agentOpts, agentId, agentDefaults[runnerId], runner?.agents);
   const suggestedAgentOption = agentOpts.find((option) => option.agent.id === savedSelection.recommendedId);
   // Browse the runner's filesystem in the selected agent's context (native host vs a WSL distro).
   const browseDistro = agent?.context?.kind === "wsl" ? agent.context.distro : undefined;
@@ -868,7 +871,7 @@ export function NewSessionDialog({
     const r = runners.get(id);
     setWorkspaceId(r?.workspaces[0]?.id ?? "");
     const options = agentOptions(r?.agents ?? []);
-    const selection = savedAgentSelection(options, agentDefaults[id]);
+    const selection = savedAgentSelection(options, agentDefaults[id], r?.agents);
     setAgentId(selection.agentId);
     setBrowsedPath(null);
     setChoosingFolder(false);
@@ -887,7 +890,7 @@ export function NewSessionDialog({
     setRunnerId(loc.runnerId);
     setWorkspaceId(loc.workspaceId);
     const options = agentOptions(r.agents);
-    const selection = savedAgentSelection(options, agentDefaults[loc.runnerId]);
+    const selection = savedAgentSelection(options, agentDefaults[loc.runnerId], r.agents);
     setAgentId(selection.agentId);
     setBrowsedPath(null);
     setChoosingFolder(false);
@@ -1561,7 +1564,7 @@ export function NewSessionDialog({
               <div className="agent-default-warning" role="alert">
                 <span>
                   {selectionIssue === "legacy"
-                    ? "Your saved default uses Codex non-interactive mode. Codex App Server supports interactive approvals and resumable conversations."
+                    ? "Your saved default uses Codex non-interactive mode, which new sessions no longer offer. Codex App Server supports interactive approvals and resumable conversations."
                     : selectionIssue === "unbound"
                       ? "This older saved agent choice has no installation identity. Select the installation shown here to keep future sessions bound to it."
                     : selectionIssue === "unavailable"
@@ -1716,7 +1719,7 @@ export function NewSessionDialog({
                   />
                   {!harnessPolicyAvailable && <small className="muted">Update or restart Wollipog to configure fixed Child Harness policy.</small>}
                   {fixedChildHarness && !childHarnessPolicySupported && <small className="form-error">
-                    Fixed Child Harness policy requires a protocol-v157 Orchestrator runner. Update the selected runner or choose Automatic.
+                    {childHarnessPolicyUnavailable}
                   </small>}
                 </div>
                 <div className="orchestrator-policy-control">

@@ -127,6 +127,8 @@ import type {
   UsageAggregationResponse,
   SubscriptionUsageResponse,
   UsageRetentionPolicy,
+  ArchivedHistoryRetentionView,
+  UpdateArchivedHistoryRetentionRequest,
   UsagePricingStatus,
   SessionUsageResponse,
   UsageDailyBudgetPolicy,
@@ -393,6 +395,18 @@ export function createApiClient(transport: ApiTransport) {
   usageUsers: () => req<{ users: UserCostWindows[] }>("/api/usage/users"),
   updateUsageRetention: (body: Pick<UsageRetentionPolicy, "hourlyDays" | "dailyDays">) =>
     req<{ retention: UsageRetentionPolicy }>("/api/usage/retention", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  /** The organization's archived-history retention (#2777). `previewDays` adds what that threshold
+   * would prune, for confirming a change before it is saved. */
+  archivedHistoryRetention: (previewDays?: number) => req<ArchivedHistoryRetentionView>(
+    `/api/archived-history-retention${previewDays === undefined ? "" : `?previewDays=${previewDays}`}`,
+  ),
+
+  updateArchivedHistoryRetention: (body: UpdateArchivedHistoryRetentionRequest) =>
+    req<ArchivedHistoryRetentionView>("/api/archived-history-retention", {
       method: "PUT",
       body: JSON.stringify(body),
     }),
@@ -718,6 +732,14 @@ export function createApiClient(transport: ApiTransport) {
         ? ((payload as { state?: ReportedSkillsState | null }).state ?? {})
         : ((payload as ReportedSkillsState | null) ?? {}),
     ),
+
+  getSessionPromptHistory: (id: string, before: number | undefined, eventEpoch: number, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ eventEpoch: String(eventEpoch), limit: "100" });
+    if (before !== undefined) query.set("before", String(before));
+    return req<import("@wollipog/protocol").SessionPromptHistoryPage>(
+      `/api/sessions/${encodeURIComponent(id)}/prompt-history?${query}`, { signal },
+    );
+  },
 
   sideChat: (id: string) =>
     req<SideChatResponse>(`/api/sessions/${encodeURIComponent(id)}/side-chat`),

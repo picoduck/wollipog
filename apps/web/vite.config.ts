@@ -7,6 +7,7 @@ import { DESKTOP_EXCLUDED_ASSETS, isDesktopBuild, stripManifestLink } from "./sr
 import { webviewTargets } from "./src/css-support.js";
 import { precompressEmittedAssets } from "./src/precompressed-assets.js";
 import { inboxEntryBudget } from "./src/entry-bundle-budget.js";
+import { jsFloorGuard } from "./src/js-floor.js";
 
 const appRoot = dirname(fileURLToPath(import.meta.url));
 
@@ -18,6 +19,8 @@ const appRoot = dirname(fileURLToPath(import.meta.url));
 // and container queries while the list still named versions that could parse none of them. Deriving
 // it from `FEATURE_SUPPORT` means adopting a newer feature raises the floor in the same commit, and
 // `css-support.test.ts` fails if the stylesheet uses anything that registry does not account for.
+// `jsFloorGuard()` holds the emitted JavaScript to the same floor (#3213): the target lowers what it
+// can and silently defers the rest, such as regex lookbehind, to a run-time SyntaxError.
 export const WOLLIPOG_WEBVIEW_TARGETS = webviewTargets();
 
 /**
@@ -72,7 +75,7 @@ function precompressAssets(mode: string): Plugin {
 // The control plane runs separately (default http://127.0.0.1:4317). The web app
 // talks to it directly over CORS + websocket; override via VITE_CONTROL_PLANE_*.
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), inboxEntryBudget(), excludePwaAssetsFromDesktop(), precompressAssets(mode)],
+  plugins: [react(), inboxEntryBudget(), jsFloorGuard(), excludePwaAssetsFromDesktop(), precompressAssets(mode)],
   build: {
     target: WOLLIPOG_WEBVIEW_TARGETS,
     cssTarget: WOLLIPOG_WEBVIEW_TARGETS,

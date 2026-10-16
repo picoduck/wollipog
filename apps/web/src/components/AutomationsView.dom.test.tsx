@@ -163,9 +163,20 @@ interface Fixture {
   triggerCreates: Array<{ id: string; request: CreateAutomationTriggerRequest }>;
   outboundCreates: CreateOutboundEventSubscriptionRequest[];
   replaceClient: (overrides: Partial<ApiClient>) => Promise<void>;
+  pushRunners: (views: RunnerView[]) => Promise<void>;
 }
 
 let fixtureSequence = 0;
+
+const CARD_INSTALLATION_ALERT =
+  /This automation's agent installation isn't available\. Edit the automation to choose another installation\./;
+const SAVED_INSTALLATION_WARNING =
+  /The saved installation of this agent isn't available\. This automation waits until you choose an available installation\./;
+const SAVED_ALTERNATE_INSTALLATION_WARNING = /The saved installation of this agent isn't available on the other machine\./;
+const SAVED_ROLE_WARNING = /The saved installation of this role's agent isn't available\./;
+const SAVED_ALTERNATE_ROLE_WARNING = /The saved installation of this role's agent isn't available on the other machine\./;
+const SAVED_ALTERNATE_ROLE_OR_ORCHESTRATOR_WARNING =
+  /The saved installation of (this role's|the Orchestrator's) agent isn't available on the other machine\./;
 
 async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -261,6 +272,10 @@ async function mountFixture(
     replaceClient: async (overrides) => {
       client = { ...client, ...overrides };
       await act(async () => { render(); });
+      await act(settle);
+    },
+    pushRunners: async (views) => {
+      await act(async () => { socket.push(snapshot(views)); });
       await act(settle);
     },
   };
@@ -584,7 +599,7 @@ test("an unavailable automation installation stays visible until explicitly rebo
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
   try {
     await expandCard(fixture, "Pinned Sweep");
-    assert.match(fixture.container.textContent ?? "", /Saved Agent Harness installation unavailable/);
+    assert.match(fixture.container.textContent ?? "", CARD_INSTALLATION_ALERT);
     await act(async () => { button(fixture.container, "Edit").click(); });
     await act(async () => { button(fixture.container, "Use Current Installation").click(); });
     await act(async () => { button(fixture.container, "Save Automation").click(); });
@@ -594,6 +609,48 @@ test("an unavailable automation installation stays visible until explicitly rebo
       action.installationBindings?.agent?.installationId, "local");
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+test("saving a rebind whose installation disappeared names the machine it needs", async () => {
+  const installed = (machine: RunnerView, selection: "selected" | "other"): RunnerView => ({
+    ...machine, protocolVersion: 175, agents: [{ ...machine.agents[0]!, installation: {
+      id: "local", path: "/home/u/.local/bin/claude", via: "common-dir" as const, selection,
+    } }],
+  });
+  const saved = { driver: "claude-code" as const, context: { kind: "native" as const }, installationId: "system" };
+  for (const alternate of [false, true]) {
+    const stored = schedule(`rebind-${alternate}`, alternate ? "Alternate Rebind" : "Primary Rebind");
+    if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
+    if (alternate) {
+      stored.runnerPolicy = { kind: "alternate", targets: [{
+        runnerId: "runner-2", workspaceId: "runner-2-workspace", agentId: "alternate-agent",
+        installationBindings: { agent: saved },
+      }] };
+    } else {
+      stored.action.installationBindings = { agent: saved };
+    }
+    const machines = [installed(runners[0]!, "selected"), installed(runners[1]!, "selected")];
+    const fixture = await mountFixture([stored], {}, {}, [], {}, machines);
+    try {
+      await expandCard(fixture, stored.name);
+      await act(async () => { button(fixture.container, "Edit").click(); });
+      assert.match(fixture.container.textContent ?? "",
+        alternate ? SAVED_ALTERNATE_INSTALLATION_WARNING : SAVED_INSTALLATION_WARNING);
+      await act(async () => { button(fixture.container, "Use Current Installation").click(); });
+      // Rediscovery while the editor is open: another installation is now selected on that machine.
+      await fixture.pushRunners(alternate
+        ? [machines[0]!, installed(runners[1]!, "other")]
+        : [installed(runners[0]!, "other"), machines[1]!]);
+      await act(async () => { button(fixture.container, "Save Automation").click(); });
+      await act(settle);
+      assert.equal(fixture.updates.length, 0);
+      assert.match(fixture.container.textContent ?? "", alternate
+        ? /Choose an available installation of this agent on the other machine\./
+        : /Choose an available installation of this agent on this machine\./);
+    } finally {
+      await unmountFixture(fixture);
+    }
   }
 });
 
@@ -712,7 +769,7 @@ test("switching workflows does not call a new discovered role's installation sav
     await expandCard(fixture, "Workflow Switch");
     await act(async () => { button(fixture.container, "Edit").click(); });
     await changeNativeSelect(fixture.container, "Workflow", "new-graph");
-    assert.doesNotMatch(fixture.container.textContent ?? "", /This saved role installation is unavailable or unbound/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ROLE_WARNING);
   } finally {
     await unmountFixture(fixture);
   }
@@ -748,7 +805,7 @@ test("switching workflow Machines stops displaying the old Machine's installatio
     await expandCard(fixture, "Workflow Machine");
     await act(async () => { button(fixture.container, "Edit").click(); });
     await changeNativeSelect(fixture.container, "Machine", "runner-2");
-    assert.doesNotMatch(fixture.container.textContent ?? "", /This saved role installation is unavailable or unbound/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ROLE_WARNING);
     assert.match(choiceTrigger(fixture.container, "Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
       /Rich-Agent Agent: Rich Agent/,
     "the new Machine's same-id installation must not replace the role shown in the editor");
@@ -798,7 +855,7 @@ test("switching alternate workflow Machines clears the old alternate installatio
     await expandCard(fixture, "Alternate Workflow Machine");
     await act(async () => { button(fixture.container, "Edit").click(); });
     await changeNativeSelect(fixture.container, "Alternate Machine", "runner-3");
-    assert.doesNotMatch(fixture.container.textContent ?? "", /This saved alternate role installation is unavailable or unbound/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ALTERNATE_ROLE_WARNING);
     assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
       /Alternate Rich-Agent Agent: Configured Alternate/);
     await act(async () => { button(fixture.container, "Save Automation").click(); });
@@ -896,7 +953,7 @@ test("inherited alternate installation pins display edited primary workflow iden
     await choose(fixture.container, "Orchestrator Agent", "Codex App Server");
     assert.match(alternateRole(), /Codex App Server/, "inherited role must display the identity that saving will pin");
     assert.match(alternateOrchestrator(), /Codex App Server/, "inherited Orchestrator must follow the primary edit");
-    assert.doesNotMatch(fixture.container.textContent ?? "", /This saved alternate (role|orchestrator) installation is unavailable or unbound/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ALTERNATE_ROLE_OR_ORCHESTRATOR_WARNING);
 
     await act(async () => { button(fixture.container, "Save Automation").click(); });
     await act(settle);
@@ -923,7 +980,7 @@ test("inherited alternate installation pins display edited primary workflow iden
     assert.match(choiceTrigger(unavailableFixture.container, "Alternate Orchestrator Agent")?.getAttribute("aria-label") ?? "",
       /other-agent \(Unavailable\)/);
     assert.equal([...unavailableFixture.container.querySelectorAll('[role="alert"]')]
-      .filter((alert) => /saved alternate (role|orchestrator) installation is unavailable or unbound/.test(alert.textContent ?? ""))
+      .filter((alert) => SAVED_ALTERNATE_ROLE_OR_ORCHESTRATOR_WARNING.test(alert.textContent ?? ""))
       .length, 2, "both inherited identities remain fail closed when the edited choice is missing");
   } finally {
     await unmountFixture(unavailableFixture);
@@ -944,7 +1001,7 @@ test("the automation card flags an unbound primary workflow orchestrator", async
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
   try {
     await expandCard(fixture, "Unbound Orchestrator");
-    assert.match(fixture.container.textContent ?? "", /Saved Agent Harness installation unavailable or unbound/);
+    assert.match(fixture.container.textContent ?? "", CARD_INSTALLATION_ALERT);
   } finally {
     await unmountFixture(fixture);
   }
@@ -967,7 +1024,7 @@ test("an unavailable alternate installation is visible on the automation card", 
   const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate]);
   try {
     await expandCard(fixture, "Alternate Missing");
-    assert.match(fixture.container.textContent ?? "", /Saved Agent Harness installation unavailable or unbound/);
+    assert.match(fixture.container.textContent ?? "", CARD_INSTALLATION_ALERT);
   } finally {
     await unmountFixture(fixture);
   }
@@ -977,14 +1034,15 @@ test("a waiting target's resolution error is visible on its automation card", as
   const stored = schedule("waiting-target", "Waiting Target");
   stored.targetHealth = {
     scheduledFor: 60_000, firstSeenAt: 60_001,
-    error: "No configured automation target is available. Check that its Machine is online.",
+    error: "None of this automation's machines can run it now. " +
+      "Check that the machine is online and up to date and still has the workspace and project.",
   };
   const fixture = await mountFixture([stored]);
   try {
     assert.match(cardToggle(fixture.container, "Waiting Target").textContent ?? "", /Target Unavailable/);
     await expandCard(fixture, "Waiting Target");
     assert.match(fixture.container.querySelector('[role="alert"]')?.textContent ?? "",
-      /Waiting for target: No configured automation target is available/);
+      /Waiting for target: None of this automation's machines can run it now\./);
   } finally {
     await unmountFixture(fixture);
   }
@@ -1001,10 +1059,10 @@ test("a legacy create-session Agent with one installation is shown as available"
   try {
     await expandCard(fixture, "Legacy Installation");
     assert.doesNotMatch(fixture.container.textContent ?? "",
-      /Saved Agent Harness installation unavailable or unbound/);
+      CARD_INSTALLATION_ALERT);
     await act(async () => { button(fixture.container, "Edit").click(); });
     assert.doesNotMatch(fixture.container.textContent ?? "",
-      /The saved Agent Harness installation is unavailable or unbound/);
+      SAVED_INSTALLATION_WARNING);
   } finally {
     await unmountFixture(fixture);
   }
@@ -1023,10 +1081,10 @@ test("an explicit empty installation binding remains visibly blocked", async () 
   try {
     await expandCard(fixture, "Explicit Unbound");
     assert.match(fixture.container.textContent ?? "",
-      /Saved Agent Harness installation unavailable or unbound/);
+      CARD_INSTALLATION_ALERT);
     await act(async () => { button(fixture.container, "Edit").click(); });
     assert.match(fixture.container.textContent ?? "",
-      /The saved Agent Harness installation is unavailable or unbound/);
+      SAVED_INSTALLATION_WARNING);
   } finally {
     await unmountFixture(fixture);
   }
@@ -1047,10 +1105,10 @@ test("legacy alternate targets auto-pin while explicitly unbound alternates warn
     const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate]);
     try {
       await expandCard(fixture, stored.name);
-      assert.equal(/Saved Agent Harness installation unavailable or unbound/.test(
+      assert.equal(CARD_INSTALLATION_ALERT.test(
         fixture.container.textContent ?? ""), explicit);
       await act(async () => { button(fixture.container, "Edit").click(); });
-      assert.equal(/The alternate Agent Harness installation is unavailable or unbound/.test(
+      assert.equal(SAVED_ALTERNATE_INSTALLATION_WARNING.test(
         fixture.container.textContent ?? ""), explicit);
     } finally {
       await unmountFixture(fixture);
@@ -1330,7 +1388,7 @@ test("execution history shows content-free signed delivery provenance", async ()
 });
 
 function pageError(fixture: Fixture): string | null {
-  return fixture.container.querySelector('.automation-error[role="alert"]')?.textContent ?? null;
+  return fixture.container.querySelector('.page > .automation-error[role="alert"]')?.textContent ?? null;
 }
 
 async function invokePolls(intervals: Set<() => void>): Promise<void> {
@@ -1582,6 +1640,249 @@ for (const mutationFails of [false, true]) {
         await act(settle);
         assert.equal(pageError(fixture), "New client polling failed");
         assert.equal(oldReads, 1, "the obsolete action cannot read with its old client");
+      } finally { release?.(); await unmountFixture(fixture); }
+    });
+  });
+}
+
+
+for (const failedEndpoint of ["list", "workflow", "detail", "trigger"] as const) {
+  test(`accepted Pause recovers its post-mutation ${failedEndpoint} read error`, async () => {
+    const items = [schedule("automation-a", "Alpha")];
+    const intervals = new Set<() => void>();
+    let fail = false;
+    let writes = 0;
+    const reads = { list: 0, workflow: 0, detail: 0, trigger: 0 };
+    const read = (endpoint: keyof typeof reads) => {
+      reads[endpoint]++;
+      if (fail && endpoint === failedEndpoint) throw new Error("Accepted Pause refresh failed");
+    };
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+    }, async () => {
+      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+        automations: async () => { read("list"); return { automations: structuredClone(items) }; },
+        workflowDefinitions: async () => { read("workflow"); return []; },
+        automation: async () => { read("detail"); return { automation: items[0]!, executions: [], events: [] }; },
+        automationTriggers: async () => { read("trigger"); return { triggers: [] }; },
+        updateAutomation: async (_id, spec) => {
+          writes++;
+          items[0] = { ...items[0]!, ...spec };
+          fail = true;
+          return items[0]!;
+        },
+        outboundEventSubscriptions: async () => { throw new Error("Unrelated subscription warning"); },
+      });
+      const subscriptionError = () => fixture.container.querySelector('.outbound-events .automation-error')?.textContent;
+      try {
+        await expandCard(fixture, "Alpha");
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Accepted Pause refresh failed");
+        assert.equal(items[0]!.enabled, false);
+        fail = false;
+        items[0] = { ...items[0]!, name: "Recovered" };
+        const before = { ...reads };
+        await invokePolls(intervals);
+        for (const endpoint of Object.keys(reads) as Array<keyof typeof reads>) {
+          assert.equal(reads[endpoint], before[endpoint] + 1, `healthy ${endpoint} read completed`);
+        }
+        assert.ok(maybeCardToggle(fixture.container, "Recovered"));
+        assert.ok(button(fixture.container, "Enable"));
+        assert.equal(pageError(fixture), null);
+        assert.equal(subscriptionError(), "Unrelated subscription warning", "automation recovery leaves subscription errors alone");
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), null);
+        assert.equal(writes, 1, "recovery must never retry the mutation");
+      } finally { await unmountFixture(fixture); }
+    });
+  });
+}
+
+for (const outcome of ["accepted", "rejected", "unknown acceptance"] as const) {
+  test(`healthy polls preserve the ${outcome} Pause outcome without another write`, async () => {
+    const items = [schedule("automation-a", "Alpha")];
+    const intervals = new Set<() => void>();
+    let writes = 0;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+    }, async () => {
+      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+        updateAutomation: async (_id, spec) => {
+          writes++;
+          // A transport failure after the server changes state still does not prove acceptance
+          // to the caller. Authoritative polling must not clear that failed write's error.
+          if (outcome !== "rejected") items[0] = { ...items[0]!, ...spec };
+          if (outcome !== "accepted") throw new Error(`Pause ${outcome}`);
+          return items[0]!;
+        },
+      });
+      try {
+        await expandCard(fixture, "Alpha");
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), outcome === "accepted" ? null : `Pause ${outcome}`);
+        assert.equal(items[0]!.enabled, outcome === "rejected");
+        assert.ok(button(fixture.container, outcome === "rejected" ? "Pause" : "Enable"));
+        assert.equal(writes, 1);
+      } finally { await unmountFixture(fixture); }
+    });
+  });
+}
+
+test("post-mutation read recovery needs a complete visible refresh", async () => {
+  const items = [schedule("automation-a", "Alpha")];
+  const intervals = new Set<() => void>();
+  let fail = false;
+  let hold = false;
+  let writes = 0;
+  let listReads = 0;
+  let release: (() => void) | undefined;
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+  }, async () => {
+    const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+      automations: async () => { listReads++; return { automations: structuredClone(items) }; },
+      workflowDefinitions: async () => { if (fail) throw new Error("Post-action workflow unavailable"); return []; },
+      automationTriggers: async () => {
+        if (hold) await new Promise<void>((resolve) => { release = resolve; });
+        return { triggers: [] };
+      },
+      updateAutomation: async (_id, spec) => { writes++; items[0] = { ...items[0]!, ...spec }; fail = true; return items[0]!; },
+    });
+    const visibility = Object.getOwnPropertyDescriptor(domWindow.document, "visibilityState");
+    try {
+      await expandCard(fixture, "Alpha");
+      await act(async () => { button(fixture.container, "Pause").click(); });
+      await act(settle);
+      assert.equal(pageError(fixture), "Post-action workflow unavailable");
+      await invokePolls(intervals);
+      assert.equal(pageError(fixture), "Post-action workflow unavailable", "another failed refresh is not recovery");
+      fail = false;
+      const beforeHidden = listReads;
+      Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "hidden" });
+      await invokePolls(intervals);
+      assert.equal(listReads, beforeHidden);
+      assert.equal(pageError(fixture), "Post-action workflow unavailable");
+      Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "visible" });
+      hold = true;
+      items[0] = { ...items[0]!, name: "Fresh List" };
+      await invokePolls(intervals);
+      assert.ok(maybeCardToggle(fixture.container, "Fresh List"));
+      assert.equal(pageError(fixture), "Post-action workflow unavailable", "partial fan-out completion cannot clear it");
+      const beforeBusy = listReads;
+      await invokePolls(intervals);
+      assert.equal(listReads, beforeBusy, "busy polls preserve serialization");
+      hold = false;
+      await act(async () => { release?.(); });
+      await act(settle);
+      assert.equal(pageError(fixture), null);
+      assert.equal(writes, 1);
+    } finally {
+      release?.();
+      if (visibility) Object.defineProperty(domWindow.document, "visibilityState", visibility);
+      else Reflect.deleteProperty(domWindow.document, "visibilityState");
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+for (const recoveryFails of [false, true]) {
+  test(`a ${recoveryFails ? "failed" : "healthy"} read recovery cannot overwrite a newer failed action`, async () => {
+    const items = [schedule("automation-a", "Alpha")];
+    const intervals = new Set<() => void>();
+    let failAfterWrite = false;
+    let holdRecovery = false;
+    let writes = 0;
+    let release: (() => void) | undefined;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+    }, async () => {
+      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+        workflowDefinitions: async () => { if (failAfterWrite) throw new Error("Old post-action read failed"); return []; },
+        automationTriggers: async () => {
+          if (holdRecovery) {
+            await new Promise<void>((resolve) => { release = resolve; });
+            if (recoveryFails) throw new Error("Old recovery failed");
+          }
+          return { triggers: [] };
+        },
+        updateAutomation: async (_id, spec) => {
+          writes++;
+          if (writes > 1) throw new Error("New Enable write failed");
+          items[0] = { ...items[0]!, ...spec }; failAfterWrite = true; return items[0]!;
+        },
+      });
+      try {
+        await expandCard(fixture, "Alpha");
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Old post-action read failed");
+        failAfterWrite = false; holdRecovery = true;
+        await invokePolls(intervals);
+        await act(async () => { button(fixture.container, "Enable").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "New Enable write failed");
+        await act(async () => { release?.(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "New Enable write failed");
+        holdRecovery = false;
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), "New Enable write failed");
+        assert.equal(writes, 2);
+      } finally { release?.(); await unmountFixture(fixture); }
+    });
+  });
+}
+
+for (const obsoleteReadFails of [false, true]) {
+  test(`API replacement revokes an accepted write's obsolete ${obsoleteReadFails ? "failed" : "healthy"} recovery`, async () => {
+    const items = [schedule("automation-a", "Alpha")];
+    const intervals = new Set<() => void>();
+    let hold = false;
+    let failAfterWrite = false;
+    let release: (() => void) | undefined;
+    let writes = 0;
+    let listReads = 0;
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => { intervals.clear(); },
+    }, async () => {
+      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+        automations: async () => { listReads++; return { automations: structuredClone(items) }; },
+        workflowDefinitions: async () => {
+          if (failAfterWrite) throw new Error("Accepted-write refresh failed");
+          if (hold) {
+            await new Promise<void>((resolve) => { release = resolve; });
+            if (obsoleteReadFails) throw new Error("Obsolete accepted-write refresh failed");
+          }
+          return [];
+        },
+        updateAutomation: async (_id, spec) => { writes++; items[0] = { ...items[0]!, ...spec }; failAfterWrite = true; return items[0]!; },
+      });
+      try {
+        await expandCard(fixture, "Alpha");
+        await act(async () => { button(fixture.container, "Pause").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Accepted-write refresh failed");
+        failAfterWrite = false;
+        hold = true;
+        await invokePolls(intervals);
+        assert.ok(release, "the old client's recovery is in flight");
+        await fixture.replaceClient({
+          workflowDefinitions: async () => [],
+          updateAutomation: async () => { throw new Error("Replacement Enable failed"); },
+        });
+        await act(async () => { button(fixture.container, "Enable").click(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Replacement Enable failed");
+        await act(async () => { release?.(); });
+        await act(settle);
+        assert.equal(pageError(fixture), "Replacement Enable failed");
+        await invokePolls(intervals);
+        assert.equal(pageError(fixture), "Replacement Enable failed");
+        assert.equal(writes, 1);
+        assert.equal(listReads, 5, "initial, accepted-action, old recovery and two current-client reads only");
       } finally { release?.(); await unmountFixture(fixture); }
     });
   });

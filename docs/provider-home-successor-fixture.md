@@ -27,11 +27,27 @@ measurements then showed an acquisition taking 2.887 seconds plus a 0.492-second
 verification, so the artificial publication pause left too little of the five-second reporting
 window. That was a defect in the initial regression, not grounds to expand reporting limits.
 
-The permanent regression instead injects 5.2 seconds of startup and no publication pause. The
-original barrier always expires its reporting budget before startup finishes; the coordinated
-barrier retains the complete reporting allowance for real acquisition/publication/verification work.
-Its finite fifteen-second readiness allowance adds setup margin for the injected pause. Normal
-readiness is ten seconds: Windows PR validation at head `7ba963e4` failed a post-report fault regression
+The startup regression initially injected 5.2 seconds of startup and no publication pause,
+with a fifteen-second readiness allowance. That caught the original five-second reporting window,
+but after the reporting allowance increased to ten seconds, removing only the readiness wait still
+passed in a controlled 5.626-second Linux run (#3274).
+
+The regression now derives its startup pause from the reporting window: ten seconds plus two
+seconds of separation, with no publication pause. Its separate twenty-two-second readiness bound
+adds the normal ten-second native setup margin to that twelve-second pause. Without the readiness
+wait, reporting expires before startup finishes; with it, real acquisition/publication/verification
+retains the full ten-second reporting allowance. `verify-successor-readiness-regression.mjs` makes
+a temporary copy beside the test, removes only the parent readiness wait, and requires the exact
+focused test to fail at the reporting deadline with both contenders closed and no retained fixture
+state. Platform Isolation runs this check on Linux, both Windows images, and macOS, after the
+unmodified lease suite. The temporary copy is removed on normal completion or handled failure.
+An external interruption may leave its uniquely named `provider-home-lease.readiness-*.mutation.ts`
+copy behind. These scratch copies do not match normal test discovery and are explicitly excluded
+from production TypeScript compilation. After the interrupted validation has exited, inspect and
+remove its untracked copy; never commit it. The test-only typecheck may still check its types,
+without executing or emitting it.
+
+Normal readiness is ten seconds: Windows PR validation at head `7ba963e4` failed a post-report fault regression
 before reaching that fault, with both contenders still initializing when the prior five-second
 readiness deadline expired. Other measured Windows runs reached readiness around 0.8–1.1 seconds;
 this full-suite outlier supports a separate bounded setup allowance.
@@ -62,6 +78,27 @@ workers continuously consume CPU and write/delete 16 KiB temporary files through
 executions of the exact focused election test. The harness verifies each test actually ran and
 that both load workers advanced during every run, and prints platform, Node, CPU, and phase data.
 Cancellation allows the current bounded fixture to finish cleanup before stopping the load workers.
+
+Each focused invocation creates its own fixture parent before launching Node and passes it through
+`WOLLIPOG_SUCCESSOR_FIXTURE_PARENT`. The real election puts its HOME, helper staging, and advisory
+`contenders.json` there. Ordinary fixture cleanup removes that root after observing both contenders
+close, and the load harness removes the now-empty parent.
+
+An outer timeout can kill the test runner before it cleans up detached POSIX contenders. Runner
+closure does not establish their closure. If the parent is nonempty, or runner closure cannot be
+observed within five seconds, validation fails and reports the retained absolute parent path,
+possibly live detached contenders, and unproved cleanup. The parent remains separate from the load
+workers' directory, so stopping the workers cannot erase fixture evidence. A successful runner exit
+with retained fixture evidence fails validation too. This deliberately uses the explicit-retention
+fallback: the outer harness does not automatically reclaim escaped detached contenders, scan global
+temporary directories, or signal PIDs recovered from files. Such PIDs are advisory historical
+evidence and may have been reused; inspect actual process identity before any manual recovery.
+
+Primary validation failures, tree-termination failures, close-wait failures, worker cleanup, and
+directory-removal failures are preserved together rather than replacing one another in `finally`.
+The lifecycle regression exercises a real outer timeout with a detached child, verifies retained
+evidence and an unrelated process/file, and injects termination, close-wait, and removal failures.
+Its synthetic detached child exits itself after eight seconds; the tests never signal stored PIDs.
 
 For native Windows evidence, dispatch the Platform Isolation workflow on the tested branch with
 `successor_election_load=true`. Both Windows images run the five focused loaded tests alongside the

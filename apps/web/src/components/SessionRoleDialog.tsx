@@ -7,6 +7,10 @@ import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { roleSettingsError, SessionRoleSettings } from "./SessionRoleSettings.js";
 
+/** The dialog notice and the More Actions item's description when Wollipog cannot convert an existing
+ * session's role. One sentence, so the two cannot drift (#3265). */
+export const SESSION_ROLE_UPDATE_REQUIRED = "Update Wollipog before changing an existing session's role.";
+
 export function SessionRoleDialog({ session, supported, onClose, returnFocusRef }: {
   session: SessionView;
   supported: boolean;
@@ -75,7 +79,7 @@ export function SessionRoleDialog({ session, supported, onClose, returnFocusRef 
       onChange={(value) => { dirty.current = true; setDraft(value); }} />}
     {preview?.policyInherited && <Notice>These settings are fixed by the controlling campaign and cannot be overridden by this session.</Notice>}
     {settingsError && <Notice tone="warning" role="alert">{settingsError}</Notice>}
-    {!supported && <Notice tone="warning">Update the control plane before changing an existing session's role.</Notice>}
+    {!supported && <Notice tone="warning">{SESSION_ROLE_UPDATE_REQUIRED}</Notice>}
     {supported && !preview && !error && <p role="status">Checking role compatibility…</p>}
     {preview?.reason && !preview.policyError && <Notice tone="warning">{preview.reason}</Notice>}
     {session.roleConversion && <Notice>Role conversion is in progress. These settings are already recorded and cannot change during retry. Retry to reconcile the same selection.</Notice>}

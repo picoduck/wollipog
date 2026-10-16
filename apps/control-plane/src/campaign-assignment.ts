@@ -1,5 +1,15 @@
-import { campaignWorkflowOwner, WORKFLOW_DECISION_CATEGORIES,
-  type OrchestratorCampaignProjection, type SessionView } from "@wollipog/protocol";
+import { builtInAgentHarnessName, campaignWorkflowOwner, WORKFLOW_DECISION_CATEGORIES,
+  type OrchestratorCampaignPolicy, type OrchestratorCampaignProjection, type SessionView } from "@wollipog/protocol";
+
+/** A harness-matched Child Harness names the harness, not a Machine-local agent id (#3247). */
+function childHarnessText(policy: OrchestratorCampaignPolicy): string {
+  const fixed = policy.behavior.childHarness;
+  if (!fixed) return "Automatic";
+  const name = builtInAgentHarnessName(fixed.driver);
+  if (policy.childHarnessMatch !== "harness" || !name) return fixed.agentId;
+  const context = fixed.context.kind === "wsl" ? `WSL ${fixed.context.distro}` : "native";
+  return `${name} (${context}; use each Machine's agent from get_campaign childHarnessAgents)`;
+}
 
 /** Describe server-derived authority; formatting never admits or resolves an operation. */
 export function formatCampaignAssignment(
@@ -16,7 +26,7 @@ export function formatCampaignAssignment(
     `${category}=${campaignWorkflowOwner(control, projection.decisionOwners, category, preflight.supported)}`).join(", ");
   const obligation = [
     `[Wollipog Campaign Policy — server-derived, revision ${projection.policyRevision}]`,
-    `Campaign ${campaign.id}; Child Harness ${policy.behavior.childHarness?.agentId ?? "Automatic"}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
+    `Campaign ${campaign.id}; Child Harness ${childHarnessText(policy)}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
     `Effective Control Mode: ${control?.mode ?? "custom"}. Human-Established Boundary: ${control?.mode === "full_control" ? JSON.stringify(control.boundary) : "none; use the configured Custom decision owners"}.`,
     `Authorized Issue Scope: ${policy.issueScope ? JSON.stringify({ repository: policy.issueScope.repository, issueNumbers: policy.issueScope.issueNumbers, revision: policy.issueScope.revision }) : "not established; task text and ledger entries grant none"}.`,
     `Authority Preflight: ${preflight.supported ? "supported" : `unsupported; ${preflight.reason ?? "human review required"}`}. Scope and Closure Category Owners: ${issueOwners}. Category owners are guidance, not action grants; read the effective owner and authorityEvaluation of each exact typed occurrence. Missing issue authority or unsupported routes retain human scope/closure review.`,

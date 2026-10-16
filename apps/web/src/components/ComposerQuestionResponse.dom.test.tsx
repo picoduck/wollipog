@@ -8,6 +8,7 @@ import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { clearQuestionDrafts, questionDraftIdentity, storedQuestionDrafts, storedQuestionStep, storeQuestionStep } from "../question-response.js";
+import { focusSessionRequest } from "./SessionApproval.js";
 import { ComposerQuestionResponse, answerSelectionSummary } from "./ComposerQuestionResponse.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -653,3 +654,26 @@ test("Answer Mode renders nothing while it is closed", async () => {
     container.remove();
   }
 });
+
+for (const action of ["navigate to request", "Enter while reading"] as const) {
+  test(`the keyboard reading panel stays safe after ${action} (#3256)`, async () => {
+    const { container, root } = mount();
+    const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+    try {
+      await act(async () => root.render(<Harness client={recordingClient(calls)} requestId="ask-single"
+        questions={[{ id: "note", question: "Read before answering.", options: [], required: false, allowOther: true }]} />));
+      const panel = container.querySelector<HTMLElement>(".composer-answer")!;
+      if (action === "navigate to request") {
+        await act(async () => { assert.equal(focusSessionRequest("session-1", "ask-single"), true); });
+        assert.equal(panel.tabIndex, 0, "request navigation preserves the reading Tab stop");
+      } else {
+        panel.focus();
+        await act(async () => { press(panel, "Enter"); await tick(); });
+        assert.deepEqual(calls, [], "Enter on the reading surface never submits");
+      }
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+}

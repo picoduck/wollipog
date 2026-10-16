@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { initRepo } from "./git-test-repo.js";
 import {
@@ -179,6 +179,449 @@ test("env does not swallow a destructive command from a split assignment expansi
   ), MANAGED_WORKTREE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("env $C=y", protectedPath, protection,
     { C: `rm -rf ${protectedPath} x` }), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("C='X=1 rm -rf .'; env $C", protectedPath, protection),
+    MANAGED_WORKTREE_REFUSAL, "a valid env assignment can be followed by a split remover");
+  assert.equal(commandTargetsManagedWorktree("env $C", protectedPath, protection,
+    { C: "X=1 rm -rf ." }), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree(`C='X=1 rm -rf ${protectedPath}'; env $C`,
+    protectedPath, protection), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree(`C='safe rm -rf ${protectedPath}'; env X=$C`,
+    protectedPath, protection), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree(`C='X=1 rm -rf ${protectedPath}'; env $C cd scratch`,
+    protectedPath, protection), MANAGED_WORKTREE_REFUSAL,
+  "an alternate remover is checked before the whole-word cd reading");
+  assert.equal(commandTargetsManagedWorktree("xargs env $C", protectedPath, protection,
+    { C: "X=1 rm -rf" }), MANAGED_WORKTREE_REFUSAL,
+  "xargs stdin may supply a protected path to an alternate remover");
+  assert.equal(commandTargetsManagedWorktree("find . -exec env $C {} +", protectedPath, protection,
+    { C: "X=1 rm -rf" }), MANAGED_WORKTREE_REFUSAL,
+  "find roots must be checked for an alternate remover");
+  assert.equal(commandTargetsManagedWorktree("env X=$C$MISSING", protectedPath, protection,
+    { C: `safe rm -rf ${protectedPath}` }), MANAGED_WORKTREE_REFUSAL,
+  "an unset suffix cannot erase the known command fields");
+  assert.equal(commandTargetsManagedWorktree("IFS=:; env $C", protectedPath, protection,
+    { C: `X=1 Y:rm:-rf:${protectedPath}` }), MANAGED_WORKTREE_REFUSAL,
+  "custom IFS must retain the command word containing its unsplit space");
+  const mixedEnvironment = { A: "X=1 2", B: "Y=1 rm -rf" };
+  assert.equal(commandTargetsManagedWorktree("xargs env $A $B", protectedPath, protection,
+    mixedEnvironment), MANAGED_WORKTREE_REFUSAL,
+  "the xargs remover is present only in a mixed whole-and-split env reading");
+  assert.equal(commandTargetsManagedWorktree("find . -exec env $A $B {} +", protectedPath, protection,
+    mixedEnvironment), MANAGED_WORKTREE_REFUSAL,
+  "the find remover is present only in a mixed whole-and-split env reading");
+});
+
+test("ambiguous env assignment readings have a shared work bound", () => {
+  const command = `env ${Array(9).fill("$A").join(" ")}`;
+  assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection, { A: "X=1 Y=2" }),
+    MANAGED_WORKTREE_REFUSAL);
+  const args = Array(3).fill("$A").join(" ");
+  const nested = `env ${args} sh -c 'env ${args} sh -c "env ${args} true"'`;
+  assert.equal(commandTargetsManagedWorktree(nested, protectedPath, protection, { A: "X=1 Y=2" }),
+    MANAGED_WORKTREE_REFUSAL, "nested shell classification shares the same reading budget");
+});
+
+test("ambiguous env readings share a total token-work bound", () => {
+  const operands = Array.from({ length: 1_500 }, (_, index) => `missing-${index}`).join(" ");
+  const command = `env $A $B $C rm ${operands}`;
+  assert.ok(command.length < 32_768);
+  assert.equal(commandTargetsManagedWorktree(command, "/tmp", protection,
+    { A: "X=1 Y=2", B: "X=1 Y=2", C: "X=1 Y=2" }), MANAGED_WORKTREE_REFUSAL,
+  "a legal command below the byte cap cannot multiply thousands of operand checks across readings");
+  assert.equal(commandTargetsManagedWorktree("env $A rm scratch", "/tmp", protection,
+    { A: "X=1 Y=2" }), null, "small ambiguous commands remain available");
+  const benign = `env $A $B $C cat ${Array.from({ length: 3_000 }, (_, index) => `file-${index}`).join(" ")}`;
+  assert.equal(commandTargetsManagedWorktree(benign, "/tmp", protection,
+    { A: "X=1 Y=2", B: "X=1 Y=2", C: "X=1 Y=2" }), null,
+  "a large benign operand list does not spend the destructive-work budget");
+  const largeGit = `git add ${Array.from({ length: 4_200 }, (_, index) => `f${index}`).join(" ")}`;
+  assert.ok(largeGit.length < 32_768);
+  assert.equal(commandTargetsManagedWorktree(largeGit, "/tmp", protection), null,
+    "a large ordinary Git command does not spend a per-operand path budget it never uses");
+  const array = Array(5_000).fill("x").join(",");
+  assert.ok(array.length < 32_768);
+  for (const command of [`Remove-Item -Path ${array}`, `Move-Item -Path ${array} -Destination /tmp/out`]) {
+    assert.equal(commandTargetsManagedWorktree(command, "/tmp", protection), MANAGED_WORKTREE_REFUSAL,
+      "a single array token cannot multiply destructive path checks past the shared bound");
+  }
+});
+
+test("option-first env expansions retain the split command reading", () => {
+  for (const value of [`-i rm -rf ${protectedPath}`, `--ignore-environment rm -rf ${protectedPath}`]) {
+    assert.equal(commandTargetsManagedWorktree("env $OPTS", "/tmp", protection, { OPTS: value }),
+      MANAGED_WORKTREE_REFUSAL, value);
+  }
+  assert.equal(commandTargetsManagedWorktree("env $OPTS", "/tmp", protection,
+    { OPTS: "-i printf marker" }), null);
+});
+
+test("env chdir options judge relative destructive operands from the child directory", () => {
+  const parent = "/runner/worktrees/session/requested";
+  for (const option of [`-C ${parent}`, `--chdir=${parent}`, `--chd=${parent}`]) {
+    assert.equal(commandTargetsManagedWorktree(`env ${option} rm -rf managed`, "/tmp", protection),
+      MANAGED_WORKTREE_REFUSAL, option);
+  }
+  assert.equal(commandTargetsManagedWorktree("env -C /tmp rm -rf scratch", "/projects/repo", protection),
+    null, "a known safe child directory stays available");
+  assert.equal(commandTargetsManagedWorktree("env -C $DIR", "/tmp", protection,
+    { DIR: `${parent} rm -rf managed` }), MANAGED_WORKTREE_REFUSAL,
+  "an unquoted directory expansion can also supply the wrapped command");
+  assert.equal(commandTargetsManagedWorktree("env -C ~ rm -rf managed", "/tmp", protection,
+    { HOME: parent }), MANAGED_WORKTREE_REFUSAL,
+  "a syntactic tilde in the directory argument uses the launch HOME");
+});
+
+test("external wrappers around cd do not change the parent shell's tracked directory", () => {
+  const parent = "/runner/worktrees/session/requested";
+  for (const wrapper of ["env", "nohup", "nice", "timeout 1", "setsid", "sudo"]) {
+    assert.equal(commandTargetsManagedWorktree(`${wrapper} cd /tmp; rm -rf managed`, parent, protection),
+      MANAGED_WORKTREE_REFUSAL, wrapper);
+    assert.equal(commandTargetsManagedWorktree(`${wrapper} cd ${protectedPath}/child; rm -rf "$PWD"`,
+      protectedPath, protection), MANAGED_WORKTREE_REFUSAL, wrapper);
+  }
+  assert.equal(commandTargetsManagedWorktree(`command cd ${protectedPath}/child; rm -rf "$PWD"`,
+    protectedPath, protection), MANAGED_WORKTREE_REFUSAL,
+  "the shell command builtin can perform cd, but this synthetic child does not exist");
+  assert.equal(commandTargetsManagedWorktree(`builtin cd ${parent}; rm -rf managed`, "/tmp", protection),
+    MANAGED_WORKTREE_REFUSAL, "builtin cd changes the parent shell directory");
+  assert.equal(commandTargetsManagedWorktree("builtin cd /tmp; rm -rf managed", parent, protection),
+    null, "builtin cd away from the worktree also changes the tracked directory");
+  assert.equal(commandTargetsManagedWorktree("builtin cd /tmp; rm -rf scratch", parent, protection),
+    null, "the harmless target after builtin cd remains available");
+  assert.equal(commandTargetsManagedWorktree("=builtin cd /tmp; rm -rf managed", parent, protection),
+    MANAGED_WORKTREE_REFUSAL, "an equals-expanded external builtin cannot change the parent directory");
+  assert.equal(commandTargetsManagedWorktree(`builtin -- cd ${parent}; rm -rf managed`, "/tmp", protection),
+    MANAGED_WORKTREE_REFUSAL, "bash accepts -- before the builtin cd name");
+  assert.equal(commandTargetsManagedWorktree("builtin -- cd /tmp; rm -rf managed", parent, protection),
+    MANAGED_WORKTREE_REFUSAL, "zsh rejects builtin -- and leaves the cwd unchanged");
+  assert.equal(commandTargetsManagedWorktree("sh -c 'builtin cd /tmp; rm -rf managed'", parent, protection),
+    MANAGED_WORKTREE_REFUSAL, "dash has no builtin wrapper, so a nested sh may keep its cwd");
+  assert.equal(commandTargetsManagedWorktree("sh -c 'builtin cd /tmp; rm -rf /tmp/scratch'", parent,
+    protection), null, "a safe absolute target stays placeable after an ambiguous nested builtin");
+  assert.equal(commandTargetsManagedWorktree("=command cd /tmp; rm -rf managed", parent, protection),
+    MANAGED_WORKTREE_REFUSAL, "an equals-prefixed command cannot run a parent-shell builtin");
+  assert.equal(commandTargetsManagedWorktree("=command rm -rf scratch", parent, protection), null,
+    "the protective equals-wrapper reading still permits an ordinary target");
+  for (const command of [
+    "command -v cd /tmp; rm -rf managed",
+    "command -V cd /tmp; rm -rf managed",
+    "/usr/bin/cd /tmp; rm -rf managed",
+    "/usr/bin/command cd /tmp; rm -rf managed",
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, parent, protection), MANAGED_WORKTREE_REFUSAL,
+      "a lookup or path-qualified executable cannot change the parent shell directory");
+  }
+  assert.equal(commandTargetsManagedWorktree("command -v cd /tmp; rm -rf scratch", parent, protection),
+    null, "the harmless target after a command lookup remains available");
+});
+
+test("win32 builtin cd cannot move the tracked PowerShell directory", () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+  try {
+    const parent = "/runner/worktrees/session/requested";
+    for (const remover of ["Remove-Item -Recurse -Force", "rm -rf"]) {
+      assert.equal(commandTargetsManagedWorktree(`builtin cd /tmp; ${remover} managed`, parent,
+        protection), MANAGED_WORKTREE_REFUSAL,
+      "PowerShell has no builtin directory-changing command, so a relative target must not be lost");
+      assert.equal(commandTargetsManagedWorktree(`builtin cd /tmp; ${remover} /tmp/scratch`, parent,
+        protection), null, "a harmless absolute target remains placeable");
+    }
+    assert.equal(commandTargetsManagedWorktree("builtin cd /tmp; Write-Output hello", parent,
+      protection), null, "a non-destructive PowerShell command remains available");
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+});
+
+test("failed POSIX cd cannot hide a relative managed-worktree removal", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-failed-cd-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const managed = join(parent, "managed");
+  const safe = join(parent, "safe");
+  mkdirSync(managed);
+  mkdirSync(safe);
+  writeFileSync(join(parent, "regular"), "not a directory");
+  const protectedFixture = [{ worktreePath: managed, repoPath: join(parent, "repo") }];
+
+  assert.ok(existsSync("/bin/sh"), "the required POSIX shell must be present");
+  for (const shell of ["/bin/sh", "/bin/bash", "/bin/dash", "/bin/zsh"].filter(existsSync)) {
+    for (const failedTarget of ["missing", "regular"]) {
+      // Probe only the shell's cwd. No remover is executed against this or any real worktree.
+      const actualCwd = execFileSync(shell, ["-c", `cd ${failedTarget} 2>/dev/null; pwd`],
+        { cwd: parent, encoding: "utf8" }).trim();
+      assert.equal(realpathSync(actualCwd), realpathSync(parent),
+        `${shell}: a failed cd leaves the parent cwd intact`);
+    }
+    assert.equal(realpathSync(execFileSync(shell, ["-c", "cd safe; pwd"],
+      { cwd: parent, encoding: "utf8" }).trim()), realpathSync(safe),
+    `${shell}: a real directory changes cwd`);
+  }
+
+  for (const failedTarget of ["missing", "regular"]) {
+    assert.equal(commandTargetsManagedWorktree(`cd ${failedTarget}; rm -rf managed`, parent,
+      protectedFixture), MANAGED_WORKTREE_REFUSAL, failedTarget);
+  }
+  assert.equal(commandTargetsManagedWorktree(`cd ${join(parent, "missing")}; rm -rf managed`, parent,
+    protectedFixture), MANAGED_WORKTREE_REFUSAL, "an absolute failed cd retains the parent reading");
+  assert.equal(commandTargetsManagedWorktree("cd missing; rm -rf managed", parent, protectedFixture),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("cd missing; rm -rf /tmp/harmless-scratch", parent,
+    protectedFixture), null, "an absolute safe target remains placeable");
+  assert.equal(commandTargetsManagedWorktree("cd missing; pwd", parent, protectedFixture), null,
+    "a non-destructive command remains available");
+  assert.equal(commandTargetsManagedWorktree("cd safe; rm -rf managed", parent, protectedFixture), null,
+    "a successful cd to a safe directory stays available");
+  assert.equal(commandTargetsManagedWorktree("FOO=bar; cd safe; rm -rf managed", parent,
+    protectedFixture), null, "a standalone assignment cannot invalidate a successful cd");
+  assert.equal(commandTargetsManagedWorktree("cd managed; rm -rf .", parent, protectedFixture),
+    MANAGED_WORKTREE_REFUSAL, "a successful cd into the protected root remains refused");
+});
+
+test("a failed cd retains the managed cwd for a later escape check", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-cd-escape-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const managed = join(parent, "managed");
+  mkdirSync(managed);
+  const protectedFixture = [{ worktreePath: managed, repoPath: join(parent, "repo") }];
+  for (const shell of ["/bin/sh", "/bin/bash", "/bin/dash", "/bin/zsh"].filter(existsSync)) {
+    const actualCwd = execFileSync(shell, ["-c", "cd missing 2>/dev/null; cd ..; pwd"],
+      { cwd: managed, encoding: "utf8" }).trim();
+    assert.equal(realpathSync(actualCwd), realpathSync(parent), shell);
+  }
+  assert.equal(commandTargetsManagedWorktree("cd missing; cd ..", managed, protectedFixture),
+    MANAGED_WORKTREE_ESCAPE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("cd missing; cd child", managed, protectedFixture), null,
+    "a non-escaping directory change remains available");
+  assert.equal(commandTargetsManagedWorktree("cd missing; pwd", managed, protectedFixture), null);
+});
+
+test("an inaccessible cd target retains the parent directory", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-inaccessible-cd-"));
+  const blocked = join(parent, "blocked");
+  t.after(() => {
+    chmodSync(blocked, 0o700);
+    rmSync(parent, { recursive: true, force: true });
+  });
+  const managed = join(parent, "managed");
+  mkdirSync(blocked);
+  mkdirSync(managed);
+  chmodSync(blocked, 0o000);
+  const protectedFixture = [{ worktreePath: managed, repoPath: join(parent, "repo") }];
+  if (process.getuid?.() === 0) return; // Root can enter a mode-000 directory on Linux.
+  for (const shell of ["/bin/sh", "/bin/bash", "/bin/dash", "/bin/zsh"].filter(existsSync)) {
+    const actualCwd = execFileSync(shell, ["-c", "cd blocked 2>/dev/null; pwd"],
+      { cwd: parent, encoding: "utf8" }).trim();
+    assert.equal(realpathSync(actualCwd), realpathSync(parent), shell);
+  }
+  assert.equal(commandTargetsManagedWorktree("cd blocked; rm -rf managed", parent, protectedFixture),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("cd blocked; rm -rf /tmp/harmless-scratch", parent,
+    protectedFixture), null);
+  assert.equal(commandTargetsManagedWorktree("cd blocked; pwd", parent, protectedFixture), null);
+});
+
+test("a prior command can remove a directory before cd reaches it", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-removed-cd-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const managed = join(parent, "managed");
+  const safe = join(parent, "safe");
+  mkdirSync(managed);
+  mkdirSync(safe);
+  const protectedFixture = [{ worktreePath: managed, repoPath: join(parent, "repo") }];
+  assert.equal(commandTargetsManagedWorktree("rmdir safe; cd safe; rm -rf managed", parent,
+    protectedFixture), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("rmdir safe; cd safe; rm -rf /tmp/harmless-scratch", parent,
+    protectedFixture), null);
+  assert.equal(commandTargetsManagedWorktree("cd safe; rm -rf managed", parent, protectedFixture), null);
+});
+
+test("failed directory readings short-circuit through && but resume at later separators", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-and-cwd-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const managed = join(parent, "managed");
+  const safe = join(managed, "safe");
+  const other = join(managed, "other");
+  mkdirSync(safe, { recursive: true });
+  mkdirSync(other);
+  const protectedFixture = [{ worktreePath: managed, repoPath: join(parent, "repo") }];
+
+  for (const shell of ["/bin/sh", "/bin/bash", "/bin/dash", "/bin/zsh"].filter(existsSync)) {
+    const actualCwd = execFileSync(shell, ["-c", "pwd && cd safe && pwd && cd ../other && pwd"],
+      { cwd: managed, encoding: "utf8" }).trim().split("\n").at(-1);
+    assert.equal(realpathSync(actualCwd ?? ""), realpathSync(other), shell);
+  }
+  assert.equal(commandTargetsManagedWorktree("pwd && cd safe && pwd && cd ../other", managed,
+    protectedFixture), null, "a successful && chain stays inside the managed root");
+  assert.equal(commandTargetsManagedWorktree("mkdir cloned && cd cloned && rm -rf .git", managed,
+    protectedFixture), null, "a created target is checked only on the reachable successful path");
+  assert.equal(commandTargetsManagedWorktree("pwd && cd cloned && rm -rf .git", managed,
+    protectedFixture), null, "a failed cd skips the destructive tail of its && chain");
+  assert.equal(commandTargetsManagedWorktree("pushd safe && cd ../other", managed,
+    protectedFixture), null, "an unavailable pushd skips the tail; a successful one stays inside");
+
+  for (const command of ["cd missing; cd ..", "cd missing || cd ..",
+    "cd missing && pwd; cd ..", "cd missing && pwd || cd ..",
+    "pwd && cd safe && pwd; cd ../other"]) {
+    assert.equal(commandTargetsManagedWorktree(command, managed, protectedFixture),
+      MANAGED_WORKTREE_ESCAPE_REFUSAL, command);
+  }
+  for (const command of ["cd missing; rm -rf .", "cd missing || rm -rf .",
+    `cd missing && rm -rf ${managed}`]) {
+    assert.equal(commandTargetsManagedWorktree(command, managed, protectedFixture),
+      MANAGED_WORKTREE_REFUSAL, command);
+  }
+  assert.equal(commandTargetsManagedWorktree("cd missing && rm -rf .", managed,
+    protectedFixture), null, "the relative remover cannot run from the retained failed cwd");
+  assert.equal(commandTargetsManagedWorktree("cd missing && pwd", managed, protectedFixture), null);
+  for (const option of ["--", "-P", "-L"]) {
+    assert.equal(commandTargetsManagedWorktree(`cd ${option} && rm -rf managed`, parent,
+      protectedFixture, { HOME: parent }), MANAGED_WORKTREE_REFUSAL,
+    `an option may make cd succeed at HOME rather than the apparent path: ${option}`);
+  }
+  assert.equal(commandTargetsManagedWorktree(
+    `pwd && cd ${basename(parent)} && rm -rf managed`, parent, protectedFixture,
+    { CDPATH: dirname(parent) }), MANAGED_WORKTREE_REFUSAL,
+  "CDPATH can make a successful cd land at the old cwd instead of its apparent relative path");
+  const cdpathCwd = execFileSync("/bin/sh", ["-c", `cd ${basename(parent)} >/dev/null 2>&1; pwd`],
+    { cwd: parent, env: { ...process.env, CDPATH: dirname(parent) }, encoding: "utf8" }).trim();
+  assert.equal(realpathSync(cdpathCwd), realpathSync(parent), "CDPATH changes the shell's cd search path");
+});
+
+test("and-or lists judge only reachable cwd and status readings", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-or-cwd-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const managed = join(parent, "managed");
+  const safe = join(parent, "safe");
+  mkdirSync(managed);
+  mkdirSync(safe);
+  const protectedFixture = [{ worktreePath: managed, repoPath: join(parent, "repo") }];
+
+  for (const command of ["true || cd safe && rm -rf managed",
+    "cd . || cd safe && rm -rf managed", "cd . || pushd safe && rm -rf managed",
+    "false && cd safe || rm -rf managed", "cd missing && pwd; rm -rf managed",
+    "cd missing && pwd || rm -rf managed", "false && rm -rf managed",
+    "true || rm -rf managed"]) {
+    assert.equal(commandTargetsManagedWorktree(command, parent, protectedFixture),
+      MANAGED_WORKTREE_REFUSAL, command);
+  }
+  for (const command of ["true || cd safe && cd ..", "cd . || pushd safe && cd .."]) {
+    assert.equal(commandTargetsManagedWorktree(command, managed, protectedFixture),
+      MANAGED_WORKTREE_ESCAPE_REFUSAL, command);
+  }
+  for (const command of ["cd missing || cd safe && rm -rf managed",
+    "cd missing || cd safe && pwd", "true || cd safe && pwd",
+    "pushd missing || cd safe && rm -rf managed", "cd missing && rm -rf managed",
+    "cd missing && pwd; cd safe && pwd"]) {
+    assert.equal(commandTargetsManagedWorktree(command, parent, protectedFixture), null, command);
+  }
+  assert.equal(commandTargetsManagedWorktree(`true && rm -rf ${managed}`, parent,
+    protectedFixture), MANAGED_WORKTREE_REFUSAL, "a reachable absolute target remains protected");
+  assert.equal(commandTargetsManagedWorktree(`false && rm -rf ${managed}`, parent,
+    protectedFixture), MANAGED_WORKTREE_REFUSAL,
+  "a shell function can override false, so an absolute protected target is conservatively refused");
+  assert.equal(commandTargetsManagedWorktree("pwd;", parent, protectedFixture), null,
+    "a trailing separator does not introduce an executable segment");
+
+  for (const shell of ["/bin/sh", "/bin/bash", "/bin/dash", "/bin/zsh"].filter(existsSync)) {
+    for (const [script, expected] of [
+      ["true || cd safe && pwd", parent],
+      ["false || cd safe && pwd", safe],
+      ["cd missing 2>/dev/null || cd safe && pwd", safe],
+      ["true || cd safe && false; pwd", parent],
+    ] satisfies Array<[string, string]>) {
+      const actual = execFileSync(shell, ["-c", script], { cwd: parent, encoding: "utf8" }).trim();
+      assert.equal(realpathSync(actual), realpathSync(expected), `${shell}: ${script}`);
+    }
+  }
+  assert.equal(execFileSync("/bin/sh", ["-c", "true() { return 1; }; true || printf overridden"],
+    { cwd: parent, encoding: "utf8" }), "overridden",
+  "a provider shell function can reverse the expected status of true");
+});
+
+test("ambiguous directory-control syntax checks destructive tails without blocking ordinary commands", () => {
+  const parent = "/runner/worktrees/session/requested";
+  const protectedFixture = [{ worktreePath: `${parent}/managed`, repoPath: "/projects/repo" }];
+  for (const command of ["cd safe\npwd", "echo before\ncd safe\npwd"]) {
+    assert.equal(commandTargetsManagedWorktree(command, parent, protectedFixture),
+      MANAGED_WORKTREE_REFUSAL, command);
+  }
+  for (const command of ["cd safe | pwd", "(cd safe) && pwd", "true || cd safe | pwd",
+    "cd safe && make > build.log", "cd safe && pnpm test 2>&1 | tail -5"]) {
+    assert.equal(commandTargetsManagedWorktree(command, parent, protectedFixture), null, command);
+  }
+  for (const command of ["cd safe | rm -rf managed", "cd safe && rm -rf managed > build.log"]) {
+    assert.notEqual(commandTargetsManagedWorktree(command, parent, protectedFixture), null, command);
+  }
+  assert.equal(commandTargetsManagedWorktree("printf '||' && cd /tmp && pwd", parent,
+    protectedFixture), null, "a quoted operator is a word, not control flow");
+  assert.equal(commandTargetsManagedWorktree("echo cd | cat", parent, protectedFixture), null,
+    "an argument named cd is not a directory-changing command");
+});
+
+test("a reachable cd retains its failure path through a destructive or-tail", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-cd-or-tail-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const managed = join(parent, "managed");
+  const safe = join(parent, "safe");
+  mkdirSync(managed);
+  mkdirSync(safe);
+  assert.equal(commandTargetsManagedWorktree(`cd ${safe} || rm -rf managed`, parent,
+    [{ worktreePath: managed, repoPath: join(parent, "repo") }]), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree(`cd ${safe} || echo okay`, parent,
+    [{ worktreePath: managed, repoPath: join(parent, "repo") }]), null);
+});
+
+test("failed pushd retains cwd while stack rotations cannot hide an escape", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-failed-pushd-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const managed = join(parent, "managed");
+  const safe = join(parent, "safe");
+  mkdirSync(managed);
+  mkdirSync(safe);
+  const protectedFixture = [{ worktreePath: managed, repoPath: join(parent, "repo") }];
+  for (const shell of ["/bin/bash", "/bin/zsh"].filter(existsSync)) {
+    const actualCwd = execFileSync(shell, ["-c", "pushd missing >/dev/null 2>&1; pwd"],
+      { cwd: parent, encoding: "utf8" }).trim();
+    assert.equal(realpathSync(actualCwd), realpathSync(parent), shell);
+    const stackOnlyCwd = execFileSync(shell, ["-c", `pushd -n ${safe} >/dev/null 2>&1; pwd`],
+      { cwd: managed, encoding: "utf8" }).trim();
+    assert.equal(realpathSync(stackOnlyCwd), realpathSync(managed), `${shell}: -n only updates the stack`);
+  }
+  for (const shell of ["/bin/sh", "/bin/dash"].filter(existsSync)) {
+    const actualCwd = execFileSync(shell, ["-c", "pushd safe >/dev/null 2>&1; pwd"],
+      { cwd: parent, encoding: "utf8" }).trim();
+    assert.equal(realpathSync(actualCwd), realpathSync(parent), `${shell}: no pushd builtin`);
+  }
+  assert.equal(commandTargetsManagedWorktree("pushd missing; rm -rf managed", parent,
+    protectedFixture), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("pushd +1", managed, protectedFixture),
+    MANAGED_WORKTREE_ESCAPE_REFUSAL);
+  if (process.platform !== "win32") {
+    assert.equal(commandTargetsManagedWorktree(`pushd -n ${safe}; pwd`, managed, protectedFixture), null,
+      "a stack-only POSIX update does not escape the worktree");
+  }
+  assert.equal(commandTargetsManagedWorktree("pushd missing; rm -rf /tmp/harmless-scratch", parent,
+    protectedFixture), null);
+  assert.equal(commandTargetsManagedWorktree("pushd missing; pwd", parent, protectedFixture), null);
+  assert.equal(commandTargetsManagedWorktree("pushd safe; rm -rf managed", parent, protectedFixture),
+    MANAGED_WORKTREE_REFUSAL, "an sh/dash shell may retain cwd even for an existing target");
+});
+
+test("directory-change alternatives are bounded before they can exhaust classification", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "wollipog-cwd-bound-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const managed = join(parent, "managed");
+  mkdirSync(managed);
+  const protectedFixture = [{ worktreePath: managed, repoPath: join(parent, "repo") }];
+  const manyFailedChanges = Array.from({ length: 6 }, (_, index) => `cd missing-${index}`).join("; ");
+  assert.equal(commandTargetsManagedWorktree(`${manyFailedChanges}; pwd`, parent, protectedFixture),
+    MANAGED_WORKTREE_REFUSAL, "the reading bound fails closed even without a destructive tail");
+  assert.equal(commandTargetsManagedWorktree(`${manyFailedChanges}; rm -rf managed`, parent,
+    protectedFixture), MANAGED_WORKTREE_REFUSAL);
+  const manyParkedChanges = Array.from({ length: 10 }, (_, index) => `cd missing-${index}`).join(" && ");
+  assert.equal(commandTargetsManagedWorktree(`${manyParkedChanges} && pwd`, parent, protectedFixture),
+    MANAGED_WORKTREE_REFUSAL, "active and parked cwd readings share the same fail-closed bound");
 });
 
 test("env names outside shell syntax cannot shadow a nested shell expansion", () => {
@@ -203,6 +646,11 @@ test("ordinary expanded env arguments remain available", () => {
   }
 });
 
+test("unresolved non-identifier env assignments retain their fail-closed verdict", () => {
+  assert.equal(commandTargetsManagedWorktree('env A-B="$(unknown)" make', protectedPath, protection),
+    MANAGED_WORKTREE_REFUSAL);
+});
+
 test("env options with equals signs remain options, while shell assignments still require identifiers", () => {
   for (const command of [
     "env --split-string='rm -rf .'",
@@ -217,6 +665,69 @@ test("env options with equals signs remain options, while shell assignments stil
   }
   assert.equal(commandTargetsManagedWorktree("A_B=x rm -rf .", protectedPath, protection),
     MANAGED_WORKTREE_REFUSAL);
+});
+
+test("glob-shaped assignment words do not hide a following remover", () => {
+  for (const command of ["A=* rm -rf .", "A=? rm -rf .", "env A=* rm -rf .",
+    `A=* rm -rf ${protectedPath}`, `env A=* rm -rf ${protectedPath}`]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_REFUSAL,
+      command);
+  }
+  for (const command of ["A=* pnpm test", "env A=* pnpm test", "env A=* rm -rf scratch"]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), null, command);
+  }
+});
+
+test("zsh equals-expanded destructive command names retain their guard verdict", () => {
+  for (const command of ["=rm -rf .", `=rm -rf ${protectedPath}`, "=env A=1 rm -rf ."]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_REFUSAL,
+      command);
+  }
+  assert.equal(commandTargetsManagedWorktree("=rm -rf scratch", protectedPath, protection), null);
+  assert.equal(commandTargetsManagedWorktree("=git status --short", protectedPath, protection), null);
+  assert.equal(commandTargetsManagedWorktree(`=cd ${protectedPath}/deep; rm -rf "$PWD"`,
+    protectedPath, protection), MANAGED_WORKTREE_REFUSAL,
+  "an equals-prefixed shell builtin must not change the classifier's tracked cwd");
+});
+
+test("PowerShell Move-Item checks every source in a comma-separated path array", () => {
+  for (const command of [
+    `Move-Item -Path scratch,${protectedPath} -Destination /tmp/moved`,
+    `Move-Item -Path:scratch,${protectedPath} -Destination /tmp/moved`,
+    `Move-Item scratch,${protectedPath} /tmp/moved`,
+    `mi -LiteralPath scratch,${protectedPath} -Destination /tmp/moved`,
+    `move -Path scratch,${protectedPath} -Destination /tmp/moved`,
+    `mv -Path scratch,${protectedPath} -Destination /tmp/moved`,
+  ]) assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_REFUSAL,
+    command);
+  for (const command of [
+    "Move-Item -Path scratch,/tmp/other -Destination /tmp/moved",
+    "Move-Item -Path scratch,/tmp/other -Destination /projects/repo/worktrees/managed/build",
+  ]) assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), null, command);
+  const commaPath = `${protectedPath},archive`;
+  assert.equal(commandTargetsManagedWorktree(`Move-Item -Path ${commaPath} -Destination /tmp/moved`,
+    protectedPath, [{ ...protection[0]!, worktreePath: commaPath }]), MANAGED_WORKTREE_REFUSAL,
+  "the whole source can itself be a protected worktree whose name contains a comma");
+  if (process.platform !== "win32") {
+    assert.equal(commandTargetsManagedWorktree(`mv scratch,${protectedPath} /tmp/moved`,
+      protectedPath, protection), null, "GNU mv receives one literal comma-bearing source");
+  }
+});
+
+test("PowerShell Remove-Item aliases check every source in Path and LiteralPath arrays", () => {
+  for (const executable of ["Remove-Item", "ri", "erase", "del", "rd"]) {
+    for (const source of [`scratch,${protectedPath}`, `-Path:scratch,${protectedPath}`,
+      `-LiteralPath scratch,${protectedPath}`]) {
+      assert.equal(commandTargetsManagedWorktree(`${executable} ${source} -Recurse -Force`, "/tmp", protection),
+        MANAGED_WORKTREE_REFUSAL, `${executable} ${source}`);
+    }
+  }
+  assert.equal(commandTargetsManagedWorktree("Remove-Item -Path scratch,/tmp/other", "/tmp", protection),
+    null, "a nonprotected source array stays available");
+  if (process.platform !== "win32") {
+    assert.equal(commandTargetsManagedWorktree(`rm scratch,${protectedPath}`, "/tmp", protection),
+      null, "GNU rm receives one comma-bearing source on POSIX");
+  }
 });
 
 test("direct writes to linked-worktree registration files are refused before redirection can run", () => {

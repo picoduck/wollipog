@@ -91,7 +91,7 @@ test("Machine and Connections explain pinned, suppressed, failed, and unavailabl
     "Select Rediscover for a native Machine, or Reconnect for an SSH Machine after active sessions finish",
   );
   await expect(installation("Legacy Tools")).toContainText("Unavailable");
-  await expect(installation("Legacy Tools")).toContainText("older than the verified app-server floor");
+  await expect(installation("Legacy Tools")).toContainText("older than the supported version");
   await expect(installation("Legacy Tools")).toContainText("New Release Published");
   await expect(installation("Legacy Tools")).toContainText("Use the package or version manager that installed this exact copy");
   await expect(installation("Legacy Tools").getByRole("button", { name: "Use This Installation" })).toBeEnabled();

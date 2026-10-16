@@ -53,6 +53,7 @@ import {
   CONTROL_PLANE_SERVICE,
   providerSupportsConversationFork,
   runnerCapabilityRequirementError,
+  runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
   scopeAudienceContained,
@@ -201,9 +202,11 @@ import {
   SessionNamingSettings,
 } from "./session-naming-settings.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
+import { ArchivedHistoryRetention } from "./archived-history-retention.js";
+import { registerArchivedHistoryRetentionRoutes } from "./archived-history-retention-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
-import { OrchestratorSettings } from "./orchestrator-settings.js";
+import { OrchestratorSettings, childHarnessAgents, childModelMachines } from "./orchestrator-settings.js";
 import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
@@ -224,8 +227,10 @@ import {
   Hub,
   INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
   isRunnerRequestTimeoutError,
+  SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED,
 } from "./hub.js";
 import { HistoryPreviewReader } from "./history-preview.js";
+import { registerPromptHistoryRoute } from "./prompt-history-route.js";
 import {
   buildRunnerWsUrl,
   isAllowedOrigin,
@@ -966,6 +971,8 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 }
 
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
+const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log });
+registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
 registerArtifactUploadSettingsRoutes(app, db, hub, requestPrincipal);
@@ -3946,8 +3953,16 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
   }
   const projection = await svc.campaignProjectionWithHistory(id);
+  const policy = db.getSession(id)?.orchestratorPolicy;
+  const runners = policy ? db.listRunnersForPrincipal(principal) : [];
+  const agents = policy ? childHarnessAgents(policy, runners) : undefined;
+  const modelMachines = policy ? childModelMachines(policy, runners) : undefined;
   return respond(reply, projection.ok && projection.data
-    ? { ...projection, data: withCampaignHoldAdviceFor(db, principal, projection.data) }
+    ? { ...projection, data: {
+      ...withCampaignHoldAdviceFor(db, principal, projection.data),
+      ...(agents ? { childHarnessAgents: agents } : {}),
+      ...(modelMachines ? { childModelMachines: modelMachines } : {}),
+    } }
     : projection);
 });
 
@@ -4371,6 +4386,12 @@ registerSideChatRoutes(app, {
   withQueue: (session) => hub.withQueue(session, true),
 });
 
+registerPromptHistoryRoute(app, {
+  db,
+  hydrateHistory: (id) => svc.hydrateHistory(id),
+  requestPrincipal: (req) => requestPrincipals.get(req) ?? requestPrincipal(req),
+});
+
 app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
@@ -4514,13 +4535,15 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   if (query.limit === undefined && query.after !== undefined && query.eventEpoch === undefined &&
       principal?.kind === "agent" && principal.credentialSessionId) {
     const actor = db.getSession(principal.credentialSessionId);
-    if (!runnerSupportsProtocol(actor ? db.getRunner(actor.runnerId)?.protocolVersion : undefined,
-      "boundedSessionEventReads")) {
+    const actorProtocolVersion = actor ? db.getRunner(actor.runnerId)?.protocolVersion : undefined;
+    if (!runnerSupportsProtocol(actorProtocolVersion, "boundedSessionEventReads")) {
+      const requirement = runnerCapabilityRequirementWithAlternative(actorProtocolVersion, "boundedSessionEventReads",
+        "paged session event reads", "To read now, request an explicit limit and eventEpoch.");
       return reply.code(426).send({
-        error: "This runner uses an older unpaged session events reader. Update the Wollipog runner " +
-          "to protocol v222 or newer, or request an explicit limit and eventEpoch.",
+        ...requirement,
         code: "session_event_reader_upgrade_required",
-        requiredProtocolVersion: 222,
+        // Installed readers predating the shared runner fields read this one.
+        requiredProtocolVersion: requirement.requiredRunnerProtocolVersion,
       });
     }
   }
@@ -5869,7 +5892,9 @@ app.get("/api/sessions/:id/reminder", async (req, reply) => {
     && (parseUiProtocolVersion(req.query) ?? 0) < INDEFINITE_SESSION_REMINDER_UI_PROTOCOL
   ) {
     return reply.code(409).send({
-      error: "This reminder uses Someday and requires Wollipog protocol v174. Update this client and try again.",
+      error: SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED,
+      requiredClientProtocolVersion: INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
+      clientProtocolVersion: parseUiProtocolVersion(req.query),
     });
   }
   return { reminder };
@@ -6438,6 +6463,7 @@ const artifactMaintenanceTimer = setInterval(() => {
   }
 }, 60_000);
 artifactMaintenanceTimer.unref();
+archivedHistoryRetention.start();
 // Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
 // rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
 // and its sessions 'running' forever, and prompts written to the dead socket are lost. The app-level
@@ -6496,6 +6522,7 @@ app.addHook("onClose", async () => {
   clearInterval(backgroundPushRetryTimer);
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
+  archivedHistoryRetention.stop();
   clearInterval(runnerLivenessTimer);
   try {
     await outboundEvents.close();

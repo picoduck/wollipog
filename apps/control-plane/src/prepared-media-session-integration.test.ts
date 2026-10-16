@@ -928,6 +928,70 @@ test("human campaign CAS derives evidence disclosure without replacing budget/sc
   assert.deepEqual(h.messages.filter((message) => (message as { type?: string }).type === "start_session"), []);
 });
 
+// Merge-boundary regressions: issue limits and disclosed media authority must compose atomically.
+for (const scenario of ["issue count", "outdated participant", "malformed disclosure", "stale disclosure", "valid composition"] as const) {
+  test(`human campaign CAS composes issue limits and media disclosure: ${scenario}`, (t) => {
+    const h = harness(); t.after(() => h.db.close());
+    if (scenario === "issue count") {
+      const policy = h.db.getSession("root")!.orchestratorPolicy!;
+      policy.issueScope!.issueNumbers = [1321, 2939];
+      policy.issueNumbers = [1321, 2939];
+      h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    }
+    if (scenario === "outdated participant") h.db.registerRunner(h.metadata, 3, 216);
+    let disclosureReads = 0;
+    const disclosures = {
+      destination: () => { disclosureReads++; return {
+        organizationId: h.human.organizationId, privacy: "private" as const, disclosureRevision: 1,
+      }; },
+      provider: () => { disclosureReads++; return {
+        disclosureRevision: 1, retentionDisclosure: "Synthetic CAS composition fixture; no provider delivery.",
+        reviewers: [{ driver: "claude-code" as const, modelId: "claude-opus-5-5" }],
+      }; },
+    };
+    const service = new SessionsService(h.db, h.hub, h.log, undefined, undefined, undefined, undefined, undefined, undefined,
+      false, undefined, undefined, undefined, disclosures);
+    const root = h.db.getSession("root")!, control = root.orchestratorPolicy!.control!;
+    assert.equal(control.mode, "full_control"); if (control.mode !== "full_control") throw new Error("No fixture boundary");
+    const issueAuthority = { epics: [1321], relatedFollowUps: true, maxIssues: 1, closureReasons: ["completed" as const] };
+    const proposal = { mode: "full_control" as const, objective: control.boundary.objective,
+      operations: control.boundary.operations, delegatablePolicyIds: control.boundary.delegatablePolicyIds,
+      budgetAuthority: control.boundary.budgetAuthority, issueAuthority, evidenceAuthority: {
+        destinationConfigurationId: scenario === "malformed disclosure" ? "" : "synthetic-private",
+        destinationDisclosureRevision: scenario === "stale disclosure" ? 2 : 1,
+        providers: [{ providerId: "synthetic-provider", disclosureRevision: 1,
+          reviewers: [{ driver: "claude-code" as const, modelId: "claude-opus-5-5" }] }],
+      } };
+    const state = () => ({ root: h.db.getSession("root"), budget: h.db.campaignBudgets.view("root"),
+      gate: h.db.workflowDecisionByOccurrence("original-gate"), governance: h.db.listGovernanceAudit("root"),
+      mutations: h.db.listMutationAudit(h.human.organizationId), messages: structuredClone(h.messages) });
+    const before = state(), revision = root.parentControlPolicy!.revision;
+    const result = service.setCampaignControl("root", proposal, revision, h.human);
+    if (scenario !== "valid composition") {
+      assert.equal(result.ok, false);
+      assert.deepEqual(state(), before, "refusal cannot change policy, audit, budget, occurrence or runner messages");
+      if (scenario === "issue count") assert.match(result.error!, /scope limit/u);
+      if (scenario === "outdated participant") assert.equal(result.status, 409);
+      if (scenario === "issue count" || scenario === "outdated participant") {
+        assert.equal(disclosureReads, 0, "issue bounds refuse before deriving media evidence authority");
+      }
+      return;
+    }
+    assert.ok(result.ok, result.error ?? "Valid composed Human CAS refused");
+    const next = result.data!.orchestratorPolicy!.control!;
+    assert.equal(next.mode, "full_control"); if (next.mode !== "full_control") throw new Error("No composed boundary");
+    assert.deepEqual(next.boundary.issueAuthority, issueAuthority);
+    assert.deepEqual(next.boundary.budgetAuthority, control.boundary.budgetAuthority);
+    assert.deepEqual(result.data!.orchestratorPolicy!.issueScope, root.orchestratorPolicy!.issueScope);
+    assert.equal(next.boundary.evidenceAuthority?.authorizedByUserId, h.human.userId);
+    assert.equal(next.boundary.evidenceAuthority?.revision, revision + 1);
+    assert.equal(next.boundary.evidenceAuthority?.campaignRootSessionId, "root");
+    assert.equal(next.boundary.evidenceAuthority?.providers[0]?.retentionDisclosure, disclosures.provider().retentionDisclosure);
+    assert.equal(h.db.workflowDecisionByOccurrence("original-gate")?.status, "revoked");
+    assert.deepEqual(h.messages.filter((message) => (message as { type?: string }).type === "start_session"), []);
+  });
+}
+
 // Disclosed SYNTHETIC fixtures only. No live principal/capture/provider/media/usage proof.
 test("Session deletion removes private quality metadata while retaining exact unknown command and budget proof", async (t) => {
   const h = await gateHarness(t); if (!h) return;

@@ -1,0 +1,219 @@
+/**
+ * Where each browser history entry sits, so Back and Forward can be held (#3218).
+ *
+ * By the time a page hears of Back or Forward (`popstate`) the history position has already moved,
+ * and nothing in the event says by how much: one entry, or several from a long press on the Back
+ * button. Each entry this app writes therefore records its own position in its state. The distance
+ * between the entry on screen and the one arrived at is what `history.go` needs to return to the
+ * editor without pushing anything, so no forward entry is lost, and then to complete the move.
+ *
+ * Positions are counted within one run of entries, named by `run`: an entry written before this was
+ * recorded, or by another document, starts a run of its own. Between runs the distance is unknown,
+ * and such a move is not held.
+ */
+
+import { browserRandomUUID } from "./browser-crypto.js";
+
+const ENTRY_KEY = "wollipogEntry";
+
+interface EntryPosition {
+  run: string;
+  index: number;
+}
+
+/** A Back or Forward that can be undone and redone. */
+export interface HistoryTraversal {
+  /** Returns to the entry that was on screen, then calls `then`. */
+  undo(then: () => void): void;
+  /** Completes the move that was undone. */
+  redo(): void;
+}
+
+export interface PositionedHistory {
+  state: unknown;
+  pushState(data: unknown, unused: string, url?: string | URL | null): void;
+  replaceState(data: unknown, unused: string, url?: string | URL | null): void;
+  /** Absent in a test double that cannot traverse; nothing is held then. */
+  go?(delta?: number): void;
+}
+
+function positionOf(state: unknown): EntryPosition | null {
+  if (!state || typeof state !== "object") return null;
+  const entry = (state as Record<string, unknown>)[ENTRY_KEY];
+  if (!entry || typeof entry !== "object") return null;
+  const { run, index } = entry as Record<string, unknown>;
+  return typeof run === "string" && typeof index === "number" && Number.isSafeInteger(index) ? { run, index } : null;
+}
+
+function withPosition(state: unknown, position: EntryPosition): Record<string, unknown> {
+  return { ...(state && typeof state === "object" ? state : {}), [ENTRY_KEY]: position };
+}
+
+function newRun(): EntryPosition {
+  return { run: browserRandomUUID(), index: 0 };
+}
+
+/** The current entry's position, recording a new run's first one where it has none. */
+function stamp(history: PositionedHistory): EntryPosition {
+  const existing = positionOf(history.state);
+  if (existing) return existing;
+  const position = newRun();
+  history.replaceState(withPosition(history.state, position), "");
+  return position;
+}
+
+/**
+ * Pushes `path` one position past the current entry, keeping the rest of the current state as every
+ * push here always has. Anything that pushes an entry the app's own navigation can arrive at uses
+ * this, or the distances counted across that entry are wrong.
+ */
+export function pushPositionedEntry(history: PositionedHistory, path: string): void {
+  const here = positionOf(history.state);
+  history.pushState(withPosition(history.state, here ? { run: here.run, index: here.index + 1 } : newRun()), "", path);
+}
+
+/**
+ * Corrections one return may make before it stops. Each is needed only when the person moves again
+ * before the return lands, so this is far more than a hand makes; the bound guarantees that a browser
+ * behaving unlike the model below cannot keep the history moving forever.
+ */
+export const MAX_CORRECTIONS = 32;
+
+/**
+ * How long a return waits for its own move before taking it to have landed nowhere. A move past
+ * either end of the history fires no `popstate`, which happens when the person moved first and the
+ * end is not known. Same-document moves land within a frame or two, so only such a move waits this
+ * long.
+ */
+export const RETURN_QUIET_MS = 1000;
+
+/**
+ * A return to the entry on screen that is under way. It asks for one move at a time and recognizes
+ * that move only by where it lands, so the person's moves, made before it landed, are never taken
+ * for it unless they land on the very same entry.
+ */
+interface Return {
+  then: () => void;
+  /** Where the last `popstate` left the history, or `null` where it cannot be placed. */
+  at: EntryPosition | null;
+  /** This class's own move not yet arrived. */
+  move: number | null;
+  corrections: number;
+  quiet?: ReturnType<typeof setTimeout>;
+}
+
+/** The positions of one navigation's entries: the one on screen, and the move a `popstate` made. */
+export class HistoryPositions {
+  private shown: EntryPosition | null = null;
+  /**
+   * The last entry, when it is known: after a push, which drops every entry after it. Unknown after
+   * a reload or a move, since entries after the one shown may survive unseen.
+   */
+  private end: EntryPosition | null = null;
+  private restoring: Return | null = null;
+
+  constructor(private readonly history: PositionedHistory) {}
+
+  /** Records the current entry as the one on screen. */
+  adopt(): void {
+    this.shown = stamp(this.history);
+  }
+
+  push(path: string): void {
+    pushPositionedEntry(this.history, path);
+    const pushed = positionOf(this.history.state)!;
+    this.end = pushed;
+    this.shown = pushed;
+  }
+
+  /**
+   * After a `popstate`: `null` when the move was part of this class's own return to the entry on
+   * screen, which the app must not see; otherwise the move to show, with a traversal when it can be
+   * held.
+   */
+  arrive(): { traversal?: HistoryTraversal } | null {
+    const from = this.shown;
+    const to = stamp(this.history);
+    const go = this.history.go?.bind(this.history);
+    const restoring = this.restoring;
+    if (restoring && go && from) {
+      this.settle(restoring, from, to, go);
+      return null;
+    }
+    this.shown = to;
+    if (!go || !from || from.run !== to.run || from.index === to.index) return {};
+    const delta = to.index - from.index;
+    return {
+      traversal: {
+        undo: (then) => {
+          this.shown = from;
+          const restoring: Return = { then, at: to, move: -delta, corrections: 0 };
+          this.restoring = restoring;
+          go(-delta);
+          this.settle(restoring, from, null, go);
+        },
+        redo: () => go(delta),
+      },
+    };
+  }
+
+  /**
+   * Takes a return one step on, after a `popstate` left the history at `to` (or, with `to` null,
+   * without one): done once it is back on `from` with its own move landed, otherwise corrected with
+   * one more move. The editor stays on screen throughout, whatever happens to the history.
+   */
+  private settle(restoring: Return, from: EntryPosition, to: EntryPosition | null, go: (delta: number) => void): void {
+    clearTimeout(restoring.quiet);
+    const landing = restoring.move !== null && restoring.at ? restoring.at.index + restoring.move : null;
+    if (to?.run === from.run) {
+      if (landing === to.index) restoring.move = null;
+      restoring.at = to;
+    } else if (to) {
+      if (landing !== null && landing < 0) {
+        // Its own move, into the entries before this run: placed by its distance.
+        restoring.at = { run: from.run, index: landing };
+        restoring.move = null;
+      } else {
+        restoring.at = null;
+      }
+    }
+    // A move past a known last entry lands nowhere: the person's move got there first.
+    const at = restoring.at;
+    if (restoring.move !== null && at && this.end?.run === at.run && at.index + restoring.move > this.end.index) {
+      restoring.move = null;
+    }
+    if (restoring.move === null) {
+      if (!at) {
+        this.stop(null);
+        return;
+      }
+      if (at.index === from.index) {
+        this.restoring = null;
+        restoring.then();
+        return;
+      }
+      if (++restoring.corrections > MAX_CORRECTIONS) {
+        this.stop(at);
+        return;
+      }
+      restoring.move = from.index - at.index;
+      go(restoring.move);
+    }
+    // A move that has not landed after a quiet spell landed nowhere: settle from where things are.
+    restoring.quiet = setTimeout(() => {
+      if (this.restoring !== restoring) return;
+      restoring.move = null;
+      this.settle(restoring, from, null, go);
+    }, RETURN_QUIET_MS);
+  }
+
+  /**
+   * Stops a return that cannot be completed. The editor stays on screen and is not asked, and its
+   * draft is kept; the next Back or Forward counts from where the history actually is.
+   */
+  private stop(at: EntryPosition | null): void {
+    if (this.restoring) clearTimeout(this.restoring.quiet);
+    this.restoring = null;
+    this.shown = at ?? stamp(this.history);
+  }
+}

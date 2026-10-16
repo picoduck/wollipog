@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -23,6 +24,8 @@ import {
   agentControlRegistrationsToResend,
   agentControlTokenPath,
   agentControlReadyPath,
+  INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG,
+  ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG,
   forgetAgentControlRegistrationAnswers,
   isCurrentAgentControlCredential,
   isStaleAgentControlAnswer,
@@ -41,6 +44,7 @@ import {
   AGENT_CONTROL_RELAY_ENDPOINT_ENV,
   AGENT_CONTROL_RELAY_KEY_ENV,
 } from "./agent-control-relay.js";
+import { AGENT_CONTROL_RELAY_FIFO_ENV, agentControlFifoRelayBase } from "./agent-control-fifo-relay.js";
 import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION, SESSION_CODEX_MCP_MARKER } from "./orchestrator-preset.js";
 import { claudeHookSettingsPath, provisionClaudeHooks, resetClaudeGuardState } from "./hook-settings.js";
 import { PI_ORCHESTRATOR_PRESET_TOOLS_ENV, PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
@@ -405,14 +409,20 @@ test("a non-strict Pi Orchestrator launches as a normal session plus only the Or
     }), { ...control, orchestratorAgent: piAgent }, () => {}, host),
       /Strict Project Isolation requires the Orchestrator preset/);
 
-    // An older control plane cannot request the additive Pi shape.
+    // An older control plane cannot request the additive Pi shape. The sentence names what to update;
+    // the versions go only to the runner log.
+    const piRefusalLog: string[] = [];
     assert.throws(() => provisionAgentControl(build("s_pi_old", {
       config: { permissionMode: "default" }, orchestrator: { strictProjectIsolation: false },
     }), {
       ...control,
       controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
       orchestratorAgent: piAgent,
-    }, () => {}, host), /protocol-v163 control plane/);
+    }, (line) => piRefusalLog.push(line), host), (error: Error) => error.message === ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG);
+    assert.equal(ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG,
+      "An Orchestrator with independent provider permissions on this harness needs a newer version of Wollipog. Update Wollipog and try again.");
+    assert.deepEqual(piRefusalLog, [`agent control s_pi_old: refused orchestratorAdditivePi; control plane protocol ${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi}`]);
 
     // The verified bridge is still required for the additive shape.
     assert.throws(() => provisionAgentControl(build("s_pi_nobridge", {
@@ -1014,6 +1024,63 @@ test("startup sweep removes final and interrupted staging files while retaining 
   }
 });
 
+test("startup sweep also removes FIFO relay channels an earlier runner left (#3270)", { skip: process.platform !== "linux" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-fifo-sweep-"));
+  try {
+    const channel = join(agentControlFifoRelayBase(root), `s_old.${"a".repeat(32)}`);
+    mkdirSync(channel, { recursive: true });
+    spawnSync("mkfifo", ["-m", "600", join(channel, "doorbell")]);
+    chmodSync(channel, 0o300);
+    chmodSync(agentControlFifoRelayBase(root), 0o300);
+    assert.equal(sweepAgentControlFiles(root), 1);
+    assert.equal(existsSync(channel), false);
+    assert.equal(existsSync(agentControlFifoRelayBase(root)), false, "no unlistable base is left behind");
+    assert.equal(sweepAgentControlFiles(root), 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("provider mode hands the session's FIFO channel to the CLI only (#3270)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-fifo-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/wollipog-runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider" as const,
+      providerRelayEndpoint: "tcp://127.0.0.1:4318",
+      providerRelayFifo: join(agentControlFifoRelayBase(root), "s_agent"),
+    };
+    for (const driver of ["codex-app-server", "claude-code"] as const) {
+      const launch = spec(driver);
+      provisionAgentControl(launch, control, () => {}, host);
+      assert.equal(launch.env[AGENT_CONTROL_RELAY_FIFO_ENV], control.providerRelayFifo);
+      assert.equal(launch.env[AGENT_CONTROL_RELAY_ENDPOINT_ENV], control.providerRelayEndpoint,
+        "the loopback relay stays for the MCP adapter, which runs outside any provider sandbox");
+      if (driver === "claude-code") {
+        const mcpConfig = readFileSync(agentControlMcpConfigPath(root, launch.sessionId), "utf8");
+        assert.equal(mcpConfig.includes(AGENT_CONTROL_RELAY_FIFO_ENV), false);
+      }
+      // A relaunch whose runner established no channel carries no stale path.
+      const { providerRelayFifo: _omitted, ...withoutFifo } = control;
+      provisionAgentControl(launch, withoutFifo, () => {}, host);
+      assert.equal(launch.env[AGENT_CONTROL_RELAY_FIFO_ENV], undefined);
+      removeAgentControlFiles(launch.sessionId, root);
+    }
+    // File-mode credentials have no relay key, so a channel is never handed to them.
+    const fileMode = spec("codex-app-server");
+    provisionAgentControl(fileMode, { ...control, executionIsolationMode: "bwrap" }, () => {}, host);
+    assert.equal(fileMode.env[AGENT_CONTROL_RELAY_FIFO_ENV], undefined);
+    assert.equal(fileMode.env[AGENT_CONTROL_RELAY_KEY_ENV], undefined);
+  } finally {
+    removeAgentControlFiles("s_agent", root);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a non-strict Codex Orchestrator launches as a normal session plus Wollipog's server and instructions", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-additive-codex-orchestrator-"));
   try {
@@ -1149,20 +1216,26 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
     acp.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(acp, control, () => {}, host),
       /native Claude Code, Codex, and Pi Orchestrators/);
+    const outdatedLog: string[] = [];
+    const outdatedCodexLog: string[] = [];
     const outdated = spec("claude-code");
     outdated.sessionId = "s_outdated_control_plane";
     outdated.config = { permissionMode: "acceptEdits" };
     outdated.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(outdated, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1,
-    }, () => {}, host), /protocol-v160/);
+    }, (line) => outdatedLog.push(line), host), (error: Error) => error.message === ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG);
+    assert.match(outdatedLog.join("\n"), new RegExp(`refused orchestratorAdditiveRole; control plane protocol ${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole}$`, "u"));
     const outdatedCodex = spec("codex");
     outdatedCodex.sessionId = "s_codex_outdated_control_plane";
     outdatedCodex.config = { permissionMode: "on-request" };
     outdatedCodex.orchestrator = { strictProjectIsolation: false };
     assert.throws(() => provisionAgentControl(outdatedCodex, {
       ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
-    }, () => {}, host), /protocol-v162/);
+    }, (line) => outdatedCodexLog.push(line), host), (error: Error) => error.message === ORCHESTRATOR_PERMISSIONS_NEED_NEWER_WOLLIPOG);
+    assert.match(outdatedCodexLog.join("\n"), new RegExp(`refused orchestratorAdditiveCodex; control plane protocol ${
+      RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1}, requires ${RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex}$`, "u"));
     for (const refused of [strict, pi, acp, outdated, outdatedCodex]) {
       assert.equal(existsSync(agentControlTokenPath(root, refused.sessionId)), false, "refusal precedes credential minting");
     }
@@ -1421,7 +1494,9 @@ test("Integration Isolation removes only integrations from an additive launch, a
     assert.throws(() => provisionAgentControl(outdated, {
       ...control,
       controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIntegrationIsolation - 1,
-    }, () => {}, host), /Integration Isolation requires a protocol-v164 control plane/);
+    }, () => {}, host), (error: Error) => error.message === INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG);
+    assert.equal(INTEGRATION_ISOLATION_NEEDS_NEWER_WOLLIPOG,
+      "Integration Isolation needs a newer version of Wollipog. Update Wollipog and try again.");
     assert.equal(existsSync(agentControlTokenPath(root, outdated.sessionId)), false);
 
     // A harness with no additive shape cannot enforce it either, and says so before minting.

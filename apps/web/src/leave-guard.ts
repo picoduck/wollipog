@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import type { HistoryTraversal } from "./history-position.js";
 
 /**
  * Leaving an editor with unsaved changes (docs/design-system.md §8.6, #3026).
@@ -9,9 +10,9 @@ import { useEffect, useRef } from "react";
  * reloading the window gets the browser's own leave prompt instead, because a page cannot show its
  * own dialog there.
  *
- * Browser Back and Forward are not asked: by the time a page hears of them the history position has
- * moved, and pushing the editor's address back would drop every forward entry. Holding them needs
- * the history index of each entry, which the router does not record yet.
+ * Browser Back and Forward are asked too (#3218), through `interceptTraversal`: by the time a page
+ * hears of them the history position has moved, so the move is undone first, which puts the editor's
+ * entry back without dropping any forward entry, and redone only if the person chooses to leave.
  *
  * One guard at a time: there is one editor on screen. A second registration replaces the first.
  */
@@ -30,6 +31,19 @@ export function interceptLeave(leave: () => void): boolean {
   guard(() => {
     if (current === guard) current = null;
     leave();
+  });
+  return true;
+}
+
+/**
+ * Whether a guard took over this Back or Forward. When it did, the move is undone, the guard is
+ * asked once the editor's entry is current again, and leaving redoes the move. A guard released
+ * while the move was undone (a save that finished) is not asked; the move is redone at once.
+ */
+export function interceptTraversal(traversal: HistoryTraversal): boolean {
+  if (!current) return false;
+  traversal.undo(() => {
+    if (!interceptLeave(() => traversal.redo())) traversal.redo();
   });
   return true;
 }

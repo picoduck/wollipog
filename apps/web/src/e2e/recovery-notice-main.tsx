@@ -55,6 +55,7 @@ const reportSetupStep = params.get("setup-step") === "1";
 const machineOffline = params.get("offline") === "1";
 const extraWorktrees = Number(params.get("extra-worktrees") ?? "0");
 const notSentFixture = params.get("not-sent") === "1";
+const promptHistoryFixture = params.get("prompt-history") === "1";
 
 const SESSION_ID = "recovery-e2e-session";
 
@@ -302,6 +303,15 @@ let tailRequestCount = 0;
 let rejectNextOlderPage = retryPagination;
 const client = {
   ...api,
+  getSessionPromptHistory: async (_id: string, before: number | undefined, eventEpoch: number) => {
+    const prompts = servedFixtureEvents.flatMap(event => event.payload.kind === "user_message" &&
+      (before === undefined || event.seq < before) ? [{ seq: event.seq, text: event.payload.text }] : []);
+    // Small pages exercise recall independently of the transcript's much larger event pages.
+    const entries = prompts.slice(-2);
+    document.body.dataset.promptHistoryReads = String(Number(document.body.dataset.promptHistoryReads ?? 0) + 1);
+    return { prompts: entries, nextBefore: entries[0]?.seq, hasMore: entries.length < prompts.length,
+      eventEpoch, cacheComplete: true };
+  },
   getSessionEventPage: () => new Promise<never>(() => {}),
   getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
     tailRequestCount += 1;
@@ -349,7 +359,7 @@ const client = {
       }), paginationDelay));
     }
     if ((!pagination && !resolvedPagination) || before !== undefined) return new Promise<never>(() => {});
-    const openingWindow = servedFixtureEvents.slice(-24);
+    const openingWindow = servedFixtureEvents.slice(promptHistoryFixture ? -4 : -24);
     const boundedOpeningWindow = eventHeavyOpening ? servedFixtureEvents.slice(-200) : openingWindow;
     return Promise.resolve({
       events: boundedOpeningWindow, eventEpoch, nextBefore: boundedOpeningWindow[0]?.seq ?? 0,
@@ -429,6 +439,11 @@ const fixtureEvents: SessionEvent[] = payloads.map((payload, index) => ({
   ts: index + 1,
   payload,
 }));
+if (promptHistoryFixture) {
+  const last = fixtureEvents.at(-1)!;
+  if (last.payload.kind === "agent_message") last.payload.text =
+    Array.from({ length: 12 }, (_, i) => `Paragraph ${i + 1}: This synthetic response keeps the latest turn scrollable while earlier user turns remain unloaded.`).join("\n\n");
+}
 
 const eventHeavyPayloads: SessionEvent["payload"][] = [];
 for (let turn = 0; turn < 110; turn += 1) {
@@ -479,7 +494,7 @@ function EventSeeder() {
   const { dispatch } = useStoreActions();
   React.useEffect(() => {
     if (!ready) return;
-    for (const event of servedFixtureEvents) {
+    for (const event of promptHistoryFixture ? servedFixtureEvents.slice(-4) : servedFixtureEvents) {
       dispatch({ type: "msg", msg: { type: "session_event", event } });
     }
   }, [dispatch, ready]);

@@ -6,6 +6,7 @@ import {
   agentDriverLabel,
   agentMeta,
   agentOptions,
+  codexAppServerSetupReason,
   currentAgentSelectionIssue,
   defaultRunAgentIds,
   firstEnabledAgentId,
@@ -180,6 +181,77 @@ test("exec-only runners do not nag about an unavailable interactive migration", 
   assert.deepEqual(savedAgentSelection(opts, "codex-exec"), {
     agentId: "codex-exec",
     recommendedId: "codex-exec",
+  });
+});
+
+test("discovery's restart-only exec row is never an option; a configured exec agent still is", () => {
+  const agents = [
+    agent({ id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered" }),
+    agent({ id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex", source: "discovered" }),
+    agent({ id: "my-exec", name: "My Codex exec", driver: "codex", source: "config" }),
+  ];
+  const opts = agentOptions(agents);
+  assert.deepEqual(opts.map((option) => option.agent.id), ["codex", "my-exec"]);
+  assert.deepEqual(advancedAgentOptions(opts).map((option) => option.agent.id), ["my-exec"]);
+  assert.deepEqual(agentOptions(agents, { includeProviderAdapters: true }).map((option) => option.agent.id), ["codex", "my-exec"]);
+  assert.deepEqual(runnableAgentIds(agents), ["codex", "my-exec"]);
+});
+
+test("the restart-only exec row does not hide a working Codex ACP adapter", () => {
+  const agents = [
+    agent({ id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered", available: false }),
+    agent({ id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex", source: "discovered" }),
+    agent({ id: "codex-acp", name: "Codex ACP", driver: "acp", source: "config" }),
+  ];
+  assert.deepEqual(agentOptions(agents).filter((option) => !option.disabled).map((option) => option.agent.id), ["codex-acp"]);
+});
+
+test("App Server failing its check leaves no selectable Codex instead of falling back to exec", () => {
+  const appServer = agent({
+    id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered", available: false,
+    codexAppServer: {
+      status: "unsupported",
+      appServerAvailable: false,
+      failure: {
+        code: "probe_timeout",
+        message: "Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
+        retryable: true,
+      },
+    },
+  });
+  const opts = agentOptions([
+    appServer,
+    agent({ id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex", source: "discovered" }),
+  ]);
+  assert.deepEqual(opts.map((option) => [option.agent.id, option.disabled === true]), [["codex", true]]);
+  assert.equal(firstEnabledAgentId(opts), "");
+  assert.equal(
+    codexAppServerSetupReason(appServer),
+    "Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
+  );
+  assert.equal(codexAppServerSetupReason({ ...appServer, authStatus: "unauthenticated" }), undefined,
+    "a signed-out row keeps agentMeta's codex login instruction");
+});
+
+test("a saved restart-only exec default selects nothing and recommends its App Server sibling", () => {
+  const installation = { id: "inst-1", path: "/usr/bin/codex", via: "path", selection: "selected" } as const;
+  const agents = [
+    agent({ id: "claude", name: "Claude", driver: "claude-code" }),
+    agent({ id: "codex", name: "Codex", driver: "codex-app-server", source: "discovered", installation }),
+    agent({ id: "codex-exec", name: "Codex (Non-Interactive)", driver: "codex", source: "discovered", installation }),
+  ];
+  const opts = agentOptions(agents);
+  const legacy = { agentId: "", issue: "legacy", recommendedId: "codex" };
+  assert.deepEqual(savedAgentSelection(opts, "codex-exec", agents), legacy);
+  assert.deepEqual(savedAgentSelection(opts, {
+    agentId: "codex-exec", installationId: "inst-1", driver: "codex", context: { kind: "native" },
+  }, agents), legacy);
+  assert.equal(currentAgentSelectionIssue(opts, "", "codex-exec", agents), "legacy");
+
+  const appServerDown = agents.map((candidate) =>
+    candidate.driver === "codex-app-server" ? { ...candidate, available: false } : candidate);
+  assert.deepEqual(savedAgentSelection(agentOptions(appServerDown), "codex-exec", appServerDown), {
+    agentId: "", issue: "legacy", recommendedId: "claude",
   });
 });
 
