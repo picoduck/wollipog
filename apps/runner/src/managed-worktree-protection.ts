@@ -2733,20 +2733,35 @@ function inspectsAncestorOnly(
  *     brace, glob, `;&|()<>` beyond the exact operators, or odd whitespace disqualifies it. The
  *     target is classified normally, so a target in the hook dir is refused.
  *  2. NON-REACHING ANCESTOR / AC1 (the gate in `commandTargetsGuardState`). A single simple command
- *     whose command word is a pure builtin (`echo`/`printf`/`true`/`false`/`:`) that opens no
- *     operand, with no redirect and every character whitelisted (`ac1CommandWhitelisted`), is allowed
- *     even when it names `/`, `//`, or `~`. Only the ancestor check is relaxed; the inside check and
- *     the raw-text scan still refuse anything resolving into the state. (grep/sed/awk pattern/script
- *     exemptions were dropped as they could not be made both whitelist-tight and useful.)
+ *     whose command word is the literal, unquoted `echo` — the only builtin that opens no operand and
+ *     cannot be coerced into executing one — with no redirect and every character whitelisted
+ *     (`ac1CommandWhitelisted`), is allowed even when it names `/`, `//`, or `~`. Only the ancestor
+ *     check is relaxed; the inside check and the raw-text scan still refuse anything resolving into
+ *     the state. (grep/sed/awk pattern/script exemptions were dropped as they could not be made both
+ *     whitelist-tight and useful; `printf` was dropped because `printf -v 'arr[$(cmd)]'` executes a
+ *     substitution, and `true`/`false`/`:` for conservatism — Codex round 4 CR-4.2, user scope.)
  *
- * The only text-level correction keeps ALL text, so it can never hide a reach: `shell-quote` treats
- * any `#` as a comment running to the end of the whole string, so `echo x#; cat <state>` dropped the
- * `cat` unseen. Every `#` is ESCAPED (`\#`), never removed. There is no `${...}` reduction and no
- * quote-state modelling (both were sources of round-2/round-3 bypasses).
+ * The only text-level correction never touches quoted text, so it can never hide a reach: `shell-quote`
+ * treats an unquoted `#` as a comment running to the END of the whole string (past newlines), so
+ * `echo x#; cat <state>` dropped the `cat` unseen. Every UNQUOTED `#` is ESCAPED (`\#`), never removed;
+ * a `#` inside single/double quotes is left exactly as written so a quoted filename resolves the way
+ * bash resolves it (a quoted `'alias#'` symlink into the state — Codex round 4 CR-4.1). As a second
+ * guarantee, `wordRelation` resolves each token both as written and with any `\#` un-escaped. There is
+ * no `${...}` reduction and no quote-CONTENT modelling (round-2/round-3 bypass sources).
  * ------------------------------------------------------------------------------------------ */
 
-/** Builtins whose operands are never opened as paths, so an ancestor among them cannot reach. */
-const GUARD_STATE_NONPATH_COMMANDS = new Set(["echo", "printf", "true", "false", ":"]);
+/** The ONLY builtin whose operands are never opened as paths and which cannot be coerced into
+ *  executing one, so an ancestor among its operands cannot reach. `printf` is excluded because
+ *  `printf -v 'arr[$(cmd)]' …` evaluates the array subscript and executes a command substitution even
+ *  from a single-quoted argument the whitelist treats as opaque (Codex round 4 CR-4.2); `true`,
+ *  `false`, and `:` are excluded too, so the exemption is `echo` alone (the user's round-4 scope). */
+const GUARD_STATE_NONPATH_COMMANDS = new Set(["echo"]);
+
+/** The command word must be the literal, unquoted `echo` as the first thing on the line — not a
+ *  quoted (`'echo'`), escaped (`ec\ho`), or otherwise spelled word that tokenizes to `echo` but the
+ *  whitelist could not reason about. Leading blanks are allowed; a separator before it is not (that
+ *  would make it a second command, which the single-segment check already excludes). */
+const GUARD_STATE_LITERAL_ECHO = /^[ \t]*echo[ \t]/u;
 
 /** Characters allowed OUTSIDE single quotes in an AC1 command; a single-quoted run with no nested
  *  `'` is otherwise opaque-clean. Excludes `$`, `` ` ``, `\`, `"`, `#`, braces, globs (`*?[]`), and
@@ -2814,18 +2829,34 @@ export interface PreparedGuardStateCommand { scan: string; parse: string }
  * Rewrite a command for the guard-state classifier, returning two readings. `scan` is the raw text
  * with only a whitelisted strippable heredoc body removed; the literal-path text scan reads it, so
  * no rewrite can hide a literal hook path. `parse` is the text the tokenizer reads: the same, with
- * every `#` escaped so `shell-quote` cannot run a comment to the end of the command and swallow a
- * later command (the #1734 under-refusal fix). Escaping only ADDS text, so it can never hide a reach;
- * there is no `${...}` reduction and no quote-state modelling.
+ * every UNQUOTED `#` escaped (`\#`) so `shell-quote` cannot start a comment — which it runs to the
+ * END of the whole string, past newlines, swallowing any command on a later line (the #1734
+ * under-refusal fix). The escape covers both word-start and word-interior `#`, because a word-start
+ * comment on one line would otherwise hide a reaching command on the next; it only ADDS a backslash,
+ * so it can never hide a reach.
+ *
+ * A `#` INSIDE single or double quotes is left untouched: `shell-quote` already keeps it literal, and
+ * rewriting inside quotes would corrupt a quoted filename for realpath resolution (a quoted
+ * `'alias#'` symlink into the state, Codex round 4 CR-4.1). The quote tracker only ever CLOSES a
+ * quote no later than bash would (single/double quotes share bash's exit rules; a `$'…'` ANSI-C body
+ * makes it close earlier, never later), so it never mistakes an unquoted `#` for a quoted one and can
+ * never fail to escape a comment-starting `#`. There is no `${...}` reduction or content modelling.
  */
 export function prepareGuardStateCommand(command: string): PreparedGuardStateCommand {
   const stripped = matchStrippableHeredoc(command);
   if (stripped !== null) return { scan: stripped, parse: stripped };
   let parse = "";
+  let quote: "'" | '"' | null = null;
   for (let i = 0; i < command.length; i += 1) {
     const c = command[i]!;
+    if (quote === "'") { parse += c; if (c === "'") quote = null; continue; } // single quotes: all literal
+    if (quote === '"') {
+      if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; } // keep an escaped pair whole
+      parse += c; if (c === '"') quote = null; continue;
+    }
     if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; } // keep an escaped pair whole
-    parse += c === "#" ? "\\#" : c;
+    if (c === "'" || c === '"') { quote = c; parse += c; continue; }
+    parse += c === "#" ? "\\#" : c; // an unquoted `#` is neutralised; quoted `#` never reaches here
   }
   return { scan: command, parse };
 }
@@ -2907,11 +2938,18 @@ export function commandTargetsGuardState(
   /** The strongest relation any reading of a word has: `inside`, then `ancestor`, then none. */
   const wordRelation = (value: string): GuardStateRelation["kind"] | null => {
     let strongest: GuardStateRelation["kind"] | null = null;
-    for (const text of spellings(value)) {
-      for (const { path, insideOnly } of guardStateReadings(text)) {
-        const relation = relationOf(path);
-        if (relation?.kind === "inside") return "inside";
-        if (relation?.kind === "ancestor" && !insideOnly) strongest = "ancestor";
+    for (const spelled of spellings(value)) {
+      // The tokenizer reads a `\#`-escaped command (#1734); inside single/double quotes shell-quote
+      // keeps that backslash literal, so a quoted filename would reach realpath as `alias\#` instead
+      // of `alias#` and miss a `#`-named symlink into the state. Resolve the token AS WRITTEN and with
+      // `\#` un-escaped, so a quoted path is classified the way bash resolves it (round 4 CR-4.1).
+      const texts = spelled.includes("\\#") ? [spelled, spelled.replaceAll("\\#", "#")] : [spelled];
+      for (const text of texts) {
+        for (const { path, insideOnly } of guardStateReadings(text)) {
+          const relation = relationOf(path);
+          if (relation?.kind === "inside") return "inside";
+          if (relation?.kind === "ancestor" && !insideOnly) strongest = "ancestor";
+        }
       }
     }
     return strongest;
@@ -2940,19 +2978,21 @@ export function commandTargetsGuardState(
     }
     return enclosing ? guardStateUninspectableRefusal(UNMODELLED_SHAPE_REASON) : null;
   }
-  // AC1 (#1734): a SINGLE simple command whose command word is a pure builtin that opens no operand
-  // (echo/printf/true/false/:), with no redirect and every character whitelisted, is allowed even
-  // when it names `/`, `//`, or `~`. Only the ancestor check is relaxed; the `inside` check below
+  // AC1 (#1734): a SINGLE simple command whose command word is the literal, unquoted `echo` (the only
+  // builtin that opens no operand and cannot be coerced into executing one — printf/true/false/: are
+  // excluded, Codex round 4 CR-4.2), with no redirect and every character whitelisted, is allowed
+  // even when it names `/`, `//`, or `~`. Only the ancestor check is relaxed; the `inside` check below
   // (with symlink resolution) and the raw-text scan still refuse anything resolving into the state.
-  // The command word must be the first token (no leading redirect/assignment), and the whitelist
-  // (no `$`, backtick, `\`, `"`, `#`, braces, globs, or extra operators) keeps out any expansion or
-  // substitution that could reach — so this needs no bash modelling (Codex round 3).
+  // The command word must be the first token (no leading redirect/assignment) AND spelled literally
+  // (GUARD_STATE_LITERAL_ECHO, so a quoted/escaped `echo` the whitelist cannot reason about is out),
+  // and the whitelist (no `$`, backtick, `\`, `"`, `#`, braces, globs, or extra operators) keeps out
+  // any expansion or substitution that could reach — so this needs no bash modelling (Codex round 3).
   if (segments.length === 1) {
     const { operands, words, redirects } = segments[0]!;
     if (words !== null && words.length > 0 && operands[0] === words[0] &&
-        GUARD_STATE_NONPATH_COMMANDS.has(words[0]!) && redirects.length === 0 &&
-        ac1CommandWhitelisted(command)) {
-      // A pure builtin opens none of its operands; still refuse if one resolves inside the state.
+        GUARD_STATE_NONPATH_COMMANDS.has(words[0]!) && GUARD_STATE_LITERAL_ECHO.test(command) &&
+        redirects.length === 0 && ac1CommandWhitelisted(command)) {
+      // `echo` opens none of its operands; still refuse if one resolves inside the state.
       const reaches = operands.some((value) => value !== null && wordRelation(value) === "inside");
       if (!reaches) return null; // names at most an ancestor it cannot open → allowed
     }

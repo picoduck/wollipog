@@ -1415,9 +1415,11 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     "bash <<'EOF'\nx=a#/b\nEOF\necho done",
     "bash <<'EOF'\n#!/bin/sh\necho hi\nEOF\necho done",
     // AC1: a SINGLE simple command that NAMES `/`, `//`, or `~` but cannot reach is allowed — a pure
-    // builtin (echo/printf/true/false/:) opens none of its operands. (grep/sed/awk were dropped from
-    // AC1 as they could not be made whitelist-tight; `grep '//'` is now a documented residual.)
-    "echo /", "echo // ~", "printf '%s\\n' //", "true /", ": /",
+    // builtin (echo/true/false/:) opens none of its operands. (grep/sed/awk were dropped from AC1 as
+    // they could not be made whitelist-tight, and `printf` because `printf -v 'arr[$(cmd)]'` executes
+    // a substitution — CR-4.2; `grep '//'`, `printf … //`, `true /`, `: /` are documented residuals.)
+    // Round 4 (user scope): the exemption is the literal, unquoted `echo` ALONE.
+    "echo /", "echo // ~", "  echo /",
     // sed/awk with the slash embedded in the script word (not a standalone ancestor) still allow.
     "sed 's|/|_|g' file", "awk '/\\//{print}' file",
   ]) {
@@ -1499,10 +1501,25 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `cat > f\\<<'EOF'\ncat ${join(directory, "s1.protections.json")}\nEOF`,
     `echo $'\\'\${X'; cat ${into}; echo '}'`,
     `grep / {-R,${into}}`,
-    // Documented residuals now refused: a `${...}` the tokenizer rejects outside a heredoc, and a
-    // grep/sed/awk pattern naming a standalone ancestor (grep/sed/awk dropped from AC1).
+    // Documented residuals now refused: a `${...}` the tokenizer rejects outside a heredoc, a
+    // grep/sed/awk pattern naming a standalone ancestor, and — the round-4 user scope — every builtin
+    // but the literal, unquoted `echo` (printf/true/false/: dropped from AC1).
     "echo ${r%% *}",
     "grep '//' file.ts",
+    "printf '%s\\n' //",
+    "true /",
+    ": /",
+    // A command word that only TOKENIZES to `echo` (quoted, escaped) is not the literal spelling the
+    // whitelist can reason about, so it does not get the exemption (CR-4.2 hardening).
+    "'echo' /",
+    "ec\\ho /",
+    // CR-4.2: `printf -v` evaluates an array subscript and executes a substitution even from a
+    // single-quoted argument the whitelist treats as opaque, so the standalone `/` stays refused —
+    // including the `-vX`, attached `-v'…'`, and `-- -v` spellings.
+    `printf -v 'slot[$(cat ${into} >&2)]' /`,
+    `printf -vX 'slot[$(cat ${into} >&2)]' /`,
+    `printf -v'slot[$(cat ${into} >&2)]' /`,
+    `printf -- -v 'slot[$(cat ${into} >&2)]' /`,
     // The ancestor and root triggers the report lists.
     "find / -name s1.protections.json",
     `cd / && cat ${directory.slice(1)}/s1.protections.json`,
@@ -1623,6 +1640,26 @@ test("a '#' inside a reaching path cannot slip the veto via the comment-escape (
     `cat '${rel}/#/..'`, // the file reached as a dir through a `#` segment
     `cat '${absHash}'`, // the same trick on the absolute path
     `cat '${rel}#'`, // a sibling INSIDE the hook dir (its name ends in `#`) is still inside → refused
+  ]) {
+    assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
+  }
+});
+
+test("a quoted '#'-named symlink into the hook directory is refused despite the comment-escape (#1734 Codex round 4 CR-4.1)", (t) => {
+  const { project, directory } = guardLayout(t);
+  // A worktree symlink whose name contains `#` points into the hook dir; bash follows it and reads
+  // the state. The `#`->\# escape would corrupt the quoted token (`alias\#`) for realpath, so the
+  // classifier must resolve the token with `\#` un-escaped too. Before the fix this was allowed.
+  symlinkSync(directory, join(project, "alias#"));
+  symlinkSync(directory, join(project, "q#dir"));
+  symlinkSync(directory, join(project, "a#b"));
+  for (const command of [
+    "cat 'alias#/s1.protections.json'", // single-quoted — the CR-4.1 scenario
+    'cat "q#dir/s1.protections.json"', // double-quoted variant
+    "cat alias#/s1.protections.json", // unquoted variant (shell-quote comments the `#` away → body kept)
+    "cat 'a#b/s1.protections.json'", // an `a#b`-style name
+    "cat 'alias#/./s1.protections.json'", // a `#` mid-path, not just leading
+    "rm -rf 'alias#'", // writing the symlinked directory itself is refused
   ]) {
     assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
   }
