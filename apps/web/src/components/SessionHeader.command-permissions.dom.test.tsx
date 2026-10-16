@@ -58,6 +58,7 @@ async function renderHeader(
   calls: string[],
   unarchiveAndRestartSupported = false,
   extra: Partial<React.ComponentProps<typeof SessionHeader>> = {},
+  confirmResult = true,
 ) {
   const client = {
     ...api,
@@ -74,7 +75,7 @@ async function renderHeader(
     root.render(
       <ApiProvider client={client}>
         <FeedbackContext.Provider value={{
-          confirm: async () => { calls.push("confirm"); return true; },
+          confirm: async () => { calls.push("confirm"); return confirmResult; },
           showToast: () => 1,
           showUndo: () => 1,
           dismissToast: () => undefined,
@@ -360,6 +361,27 @@ test("a running turn keeps Fork Conversation… disabled with its reason; a sess
   } finally {
     await noWorktree.unmount();
   }
+});
+
+test("historical idle-result recovery offers a confirmed restart and preserves command permissions", async () => {
+  const session = { id: "historical", runnerId: "runner-1", title: "Historical", status: "idle",
+    driver: "claude-code", backgroundDeliveries: [{ parentTurnId: "unknown", jobCount: 2,
+      terminalCount: 1, watchdogState: "continuation_blocked" }] } as SessionView;
+  for (const accepted of [false, true]) {
+    const calls: string[] = [];
+    const header = await renderHeader(session, calls, false, {}, accepted);
+    try {
+      await act(async () => { menuItem(page(), "Restart Session").click(); await tick(); });
+      assert.deepEqual(calls, accepted ? ["confirm", "restart:historical"] : ["confirm"]);
+    } finally { await header.unmount(); }
+  }
+  const calls: string[] = [];
+  const header = await renderHeader({ ...session, commandPermissions: readOnly }, calls);
+  try {
+    assert.equal(menuItem(page(), "Restart Session").disabled, true);
+    assert.match(description(menuItem(page(), "Restart Session")), /Viewer role is read-only/);
+    assert.deepEqual(calls, []);
+  } finally { await header.unmount(); }
 });
 
 test("Restart Session restarts with or without the page's callbacks, telling them in order (#2169)", async () => {

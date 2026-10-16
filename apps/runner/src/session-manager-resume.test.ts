@@ -10,6 +10,7 @@ import { test } from "node:test";
 import type { AgentDriverKind, RunnerToControlPlane, SessionConfig, SessionEventPayload, SessionLaunchSpec } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { ClaudeCodeDriver } from "./drivers/claude-code.js";
+import { claudeProjectPathKey } from "./claude-background-work.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { setGitRunnerForTests } from "./git-ops.js";
 import type { ProviderAuthRecoveryController } from "./provider-auth-recovery.js";
@@ -325,6 +326,56 @@ function exitActive(manager: SessionManager, sessionId: string, code: number | n
   assert.ok(client, `expected an active provider for ${sessionId}`);
   internals.onExit(sessionId, code, client);
 }
+
+test("startup repairs historical TaskStop rows without artifacts, aggregate state, or paid recovery", async () => {
+  const job = { id: "historical", parentTurnId: "unknown", runnerId: "runner", workspaceId: "workspace",
+    context: { kind: "native" as const }, launchType: "workflow" as const, registeredAt: 1 };
+  const h = harness({ driver: "claude-code", agentId: "claude-code", command: "claude",
+    agentSessionId: "provider-history", backgroundJobs: [job, { ...job, id: "unresolved" }, {
+      ...job, id: "already-submitted", terminalStatus: "completed", terminalObservedAt: 2,
+      continuationRequired: true, continuationId: "old-continuation", continuationSubmittedAt: 3,
+    }] });
+  try {
+    h.store.patchMeta("resume-session", { env: { HOME: h.root, TMPDIR: h.root } });
+    const projects = join(h.root, ".claude", "projects", claudeProjectPathKey(h.root));
+    mkdirSync(projects, { recursive: true });
+    writeFileSync(join(projects, "provider-history.jsonl"), [
+      { type: "assistant", message: { content: [
+        { type: "tool_use", id: "stop", name: "TaskStop", input: { task_id: "historical" } },
+      ] } },
+      { type: "user", message: { content: [
+        { type: "tool_result", tool_use_id: "stop", content: JSON.stringify({
+          task_id: "historical", message: "Successfully stopped task: historical",
+        }) },
+      ] } },
+    ].map((record) => JSON.stringify(record)).join("\n"));
+    h.manager.reconcileStore();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const first = h.store.readMeta("resume-session")!;
+    assert.equal(first.backgroundJobs?.[0]?.terminalStatus, "killed");
+    assert.equal(first.backgroundJobs?.[0]?.continuationRequired, false);
+    assert.ok(first.backgroundJobs?.[0]?.assistantResultPersistedAt);
+    assert.equal(first.backgroundJobs?.[1]?.terminalStatus, undefined, "unresolved work survives");
+    assert.equal(first.backgroundJobs?.[2]?.continuationSubmittedAt, 3);
+    assert.equal(first.backgroundWorkState, undefined, "unverified history is not live running proof");
+    assert.equal(first.orphanedWork, undefined);
+    assert.deepEqual(h.prompts, []);
+    assert.deepEqual(h.launches, []);
+    assert.ok(h.sent.some((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.backgroundJobs?.some((record) => record.id === "historical" && record.terminalStatus === "killed")));
+    const log = h.logs.map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((record) => record?.event === "historical_claude_jobs_reconciled");
+    assert.equal(log?.entryPoint, "startup");
+    assert.equal(log?.reconciledJobs, 1);
+    assert.equal(log?.unresolvedJobs, 1);
+    assert.equal(typeof log?.correlationId, "string");
+    h.manager.reconcileStore();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.terminalObservedAt,
+      first.backgroundJobs?.[0]?.terminalObservedAt, "repeated inspection is idempotent");
+    assert.deepEqual(h.prompts, [], "no automatic resubmission");
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
 
 test("provider auth failure stops the turn, parks exact recovery context, and holds FIFO until explicit retry", async () => {
   let h!: ReturnType<typeof harness>;

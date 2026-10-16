@@ -88,7 +88,7 @@ test("every watchdog is one notice at the top of its highlighted group, and its 
   const cases = [
     ["terminal_without_continuation", null, "Returning the result of a background job to this conversation."],
     ["continuation_blocked", "Result Blocked",
-      "A background job finished, but its result can't be returned while another job from the same turn is still running."],
+      "A background job finished, but its result is held because another job has no confirmed end."],
     ["accepted_without_result", "Result Missing",
       "A background job finished, but its result never reached this conversation. Wollipog won't retry on its own, so the step can't run twice."],
     ["result_not_projected", null, "The result of a background job reached Wollipog and is being added to this conversation."],
@@ -1064,7 +1064,7 @@ test("Result Blocked offers Stop <job name>… behind the Job Detail confirmatio
     await render(blockedSession("session-blocked-available"));
     assert.equal(notice().querySelector(".notice-title")?.textContent, "Result Blocked");
     assert.equal(notice().querySelector(".notice-body p")?.textContent,
-      "Agent job 04d2e1 finished, but its result can't be returned while another job from the same turn is still running.");
+      "Agent job 04d2e1 finished, but its result is held because another job has no confirmed end.");
     const stop = notice().querySelector<HTMLButtonElement>(".notice-actions button")!;
     assert.equal(stop.textContent, "Stop Monitor Job 7be210…");
     await act(async () => { stop.click(); await Promise.resolve(); await Promise.resolve(); });
@@ -1094,6 +1094,26 @@ test("Result Blocked offers Stop <job name>… behind the Job Detail confirmatio
     await act(async () => root.unmount());
     container.remove();
   }
+});
+
+test("historical unknown-parent Result Blocked explains uncertainty and the applicable session recovery", async () => {
+  const session = blockedSession("historical-session", true);
+  session.status = "idle";
+  session.backgroundWorkState = undefined;
+  session.backgroundJobs = session.backgroundJobs!.map((job) => ({ ...job, parentTurnId: "unknown" }));
+  session.backgroundDeliveries = session.backgroundDeliveries!.map((delivery) => ({ ...delivery, parentTurnId: "unknown" }));
+  const panel = await mountBackgroundWork({ session });
+  try {
+    const notice = panel.container.querySelector<HTMLElement>('.notice[data-state="continuation_blocked"]')!;
+    assert.ok(notice);
+    assert.match(notice.textContent!, /parent turn is unknown/);
+    assert.match(notice.textContent!, /cannot verify that the jobs are still running/);
+    assert.match(notice.textContent!, /More Actions → Restart Session/);
+    assert.match(notice.textContent!, /Restart ends every job and reports held results; it does not rerun their original commands/);
+    assert.equal([...notice.querySelectorAll("button")].some((button) => /^(Stop |Acknowledge)/.test(button.textContent!)), false);
+    await panel.render({ session, runnerProtocolVersion: 190 });
+    assert.match(panel.container.textContent!, /Restart ends every job and discards held results/);
+  } finally { await panel.dispose(); }
 });
 
 test("a lost job is one danger notice that names the job and the restart, with View Turn and no empty state (#2859)", async () => {

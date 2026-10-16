@@ -1,9 +1,19 @@
-import type { BackgroundDeliveryView, BackgroundDeliveryWatchdogState, ManagedBackgroundJobView } from "@wollipog/protocol";
+import type { BackgroundDeliveryView, BackgroundDeliveryWatchdogState, ManagedBackgroundJobView, SessionView } from "@wollipog/protocol";
 import type { ApiClient } from "./api.js";
 import { backgroundJobSentenceName } from "./background-job-stop.js";
 
 /** `pending` progresses on its own; `blocked` and `missing` do not and ask for a step. */
 export type BackgroundDeliverySeverity = "pending" | "blocked" | "missing";
+
+/** No current aggregate proves these historical jobs are running. Recovery is an explicit restart,
+ * never an automatic re-submission of their original commands. */
+export function historicalBackgroundResultRecovery(
+  session: Pick<SessionView, "driver" | "status" | "backgroundWorkState" | "backgroundDeliveries">,
+): boolean {
+  return session.driver === "claude-code" && session.status === "idle" && !session.backgroundWorkState &&
+    (session.backgroundDeliveries ?? []).some((delivery) => delivery.watchdogState === "continuation_blocked" ||
+      (delivery.parentTurnId === "unknown" && delivery.watchdogState === "terminal_without_continuation"));
+}
 
 export interface BackgroundDeliveryStatusCopy {
   label: string;
@@ -34,8 +44,8 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
   },
   continuation_blocked: {
     label: "Result Blocked",
-    description: "A background job finished, but its result cannot be returned while another job from the same turn is still running.",
-    recovery: "Wollipog returns the result automatically once the remaining job ends. It ends that job itself only when a queued handoff has waited on it past its bound.",
+    description: "A background job finished, but its result is held because another job has no confirmed end.",
+    recovery: "Wollipog returns the result automatically once the remaining job's end is confirmed. It ends that job itself only when a queued handoff has waited on it past its bound.",
     action: "Ask the session to stop the unfinished job (a monitor that never fires ends only with its provider process); stopping or restarting the session also ends that job, together with every other job.",
     diagnostic: "The job is terminal, but a sibling job from its parent turn has no terminal status, so no continuation can be recorded.",
     severity: "blocked",
@@ -124,8 +134,7 @@ export function backgroundRecoverySentence(
       return `${capitalize(subjectName(subject))} finished, but ${its} result never reached this conversation. ` +
         "Wollipog won't retry on its own, so the step can't run twice.";
     case "continuation_blocked":
-      return `${capitalize(subjectName(subject))} finished, but ${its} result can't be returned while another job ` +
-        "from the same turn is still running.";
+      return `${capitalize(subjectName(subject))} finished, but ${its} result is held because another job has no confirmed end.`;
     case "terminal_without_continuation":
       return `Returning ${subjectResult(subject)} to this conversation.`;
     case "result_not_projected":

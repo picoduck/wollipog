@@ -49,6 +49,7 @@ import { writeClipboardText } from "../clipboard.js";
 import { sessionStatusSummary } from "../status-meta.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
 import { useBackgroundDeliveryStep } from "./useBackgroundDeliveryStep.js";
+import { blockedResultSessionAlternative, historicalBackgroundResultRecovery } from "../background-delivery-status.js";
 
 /** The second line of an item that waits on another session action already running. */
 const BUSY_REASON = "Available when the current action finishes.";
@@ -201,7 +202,8 @@ export function SessionHeader({
   );
   const terminal = isTerminal(session.status);
   const showRetryStop = session.stopOperation?.status === "stop_failed" && !session.archiveStatus;
-  const showRestart = terminal && runnerOnline && session.stopOperation?.status !== "stop_failed" &&
+  const historicalResultRecovery = historicalBackgroundResultRecovery(session);
+  const showRestart = (terminal || historicalResultRecovery) && runnerOnline && session.stopOperation?.status !== "stop_failed" &&
     !sessionUnarchiveRestarts(session, unarchiveAndRestartSupported);
   // A command the server would refuse this person stays listed but disabled, with the reason (#1843).
   const stopRefusal = sessionCommandRefusal(session, "stop");
@@ -571,6 +573,14 @@ export function SessionHeader({
               if (restartReason !== null) return;
               closeMenu(true);
               void run(async () => {
+                if (historicalResultRecovery && !await confirm({
+                  title: "Restart Session",
+                  message: "This starts a new conversation and ends every background job. " +
+                    blockedResultSessionAlternative(runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork")) +
+                    " The original job commands are not rerun. Review the conversation before continuing.",
+                  confirmLabel: "Restart Session",
+                  tone: "danger",
+                })) return;
                 onRestartPendingChange?.(true);
                 try {
                   const restarted = await api.restart(session.id);

@@ -11,6 +11,7 @@ import { formatDuration, formatRecordedRelativeTime } from "../format.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import {
   backgroundLostSentence,
+  historicalBackgroundResultRecovery,
   backgroundDeliveryAcknowledgement,
   backgroundDeliveryRecoveryKind,
   requestBackgroundDeliveryAcknowledgement,
@@ -388,6 +389,9 @@ export function BackgroundWorkPanel({
                       stoppable: stoppableJobState(states.get(target.id)!),
                     }}
                     unfinishedListed={unfinished.length} unfinishedUnlisted={counts.partial}
+                    unknownParentTurn={group.parentTurnId === UNKNOWN_PARENT_TURN}
+                    unverifiedUnfinished={unfinished.some((job) => states.get(job.id) === "unverified")}
+                    historicalRecovery={historicalBackgroundResultRecovery(session)}
                     restartReportsResult={restartReportsResult} />
                 );
               })}
