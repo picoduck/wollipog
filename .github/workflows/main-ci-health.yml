@@ -1,0 +1,35 @@
+name: Main CI Health
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+# The workflow_run event executes trusted default-branch code. Never check out
+# the triggering commit or load its artifacts with this issue-writing token.
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  reconcile:
+    if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.repository.full_name == github.repository
+    # One reconciliation at a time, so two completions cannot both open an alert. This is on the
+    # job, not the workflow: every CI completion starts the workflow, and a skipped pull-request
+    # invocation must never replace a pending main reconciliation. A pending main reconciliation
+    # replaced by a newer one loses nothing, because each reads the latest main run itself.
+    concurrency:
+      group: main-ci-health
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Open, Update or Close the Main CI Alert
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/main-ci-health.mjs
