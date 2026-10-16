@@ -9,7 +9,7 @@ The credential transport follows the runner's execution-isolation boundary:
 
 | Execution path | Credential location and transport |
 | --- | --- |
-| Native host, `provider` isolation | **Runner memory only.** Provider-spawned CLI/MCP re-entries carry a random relay key and session-bound loopback endpoint. The runner pins the control-plane origin, supplies its memory-held bearer and exact-session actor header, and returns the response. The key is not accepted by the control plane. |
+| Native host, `provider` isolation | **Runner memory only.** Provider-spawned CLI/MCP re-entries carry a random relay key and session-bound loopback endpoint. The runner pins the control-plane origin, supplies its memory-held bearer and exact-session actor header, and returns the response. The key is not accepted by the control plane. On Linux the CLI reaches the same relay through a FIFO channel instead, so it also works inside a provider sandbox that refuses every socket (see "CLI Inside a Provider Sandbox"). |
 | Native host, `bwrap`, Seatbelt, or Windows Job isolation | Mode-0600 runner-state token and exact-hash acknowledgement files, passed by path to the re-entry. |
 | Verified Direct WSL Orchestrator | The Windows runner owns and rotates the registered credential; the provider sees only the mode-0600 copy inside its private bwrap `/tmp`, through the attested target-local bridge described below. |
 | Container, cloud, generic Direct WSL, and other non-host paths | Agent Control is not injected. |
@@ -43,6 +43,8 @@ The runner injects these non-transcript environment values at launch:
 - `WOLLIPOG_AGENT_CONTROL_RELAY_ENDPOINT`: native provider-mode, session-bound runner listener.
 - `WOLLIPOG_AGENT_CONTROL_RELAY_KEY`: native provider-mode opaque relay authorization; it is not a
   control-plane credential.
+- `WOLLIPOG_AGENT_CONTROL_RELAY_FIFO`: native Linux provider-mode FIFO channel directory for the
+  same relay. Only the CLI reads it; the MCP adapter keeps the loopback endpoint.
 - `WOLLIPOG_CLI`: directly executable session CLI launcher on POSIX and WSL.
 - `WOLLIPOG_CLI_ARGS`: empty on POSIX and WSL; native Windows retains JSON-encoded re-entry arguments. The launcher never contains a bearer credential.
 
@@ -51,6 +53,75 @@ The standalone installer publishes the same verified SEA bytes as both `wollipog
 runtime or second download is required. A paired-device client may instead set
 `WOLLIPOG_CONTROL_PLANE_URL` plus `WOLLIPOG_TOKEN` or `WOLLIPOG_TOKEN_FILE`. Device calls remain
 human-principal requests and do not send an agent-session claim header.
+
+## CLI Inside a Provider Sandbox
+
+Every Codex worker mode except full access and the Orchestrator preset runs shell commands in
+Codex's sandbox with network access off, and so does full access while the session owns a managed
+worktree, which narrows it to on-request. On Linux (codex-cli 0.162.1) that is bubblewrap with
+`--unshare-net` plus a seccomp filter that refuses `connect()` for every socket family, so the
+loopback relay and any Unix socket are unreachable: the CLI failed with
+`connect EPERM 127.0.0.1:<port>` (#3270). MCP servers run outside that sandbox, which is why the MCP
+tools kept working.
+
+On native Linux in `provider` isolation the runner therefore also serves each session's relay
+through FIFOs in its own state directory, and injects that directory as
+`WOLLIPOG_AGENT_CONTROL_RELAY_FIFO`. Opening a FIFO is not a socket operation, and the kernel opens
+FIFOs for writing on read-only mounts, so the CLI reaches the runner from the workspace-write and
+read-only sandboxes alike. The channel carries exactly the relay frame the loopback listener carries:
+the relay key authenticates it, and the runner pins the destination and supplies its memory-held
+bearer. A wrong key is refused before anything reaches the control plane.
+
+What the sandbox gains, per Codex mode, is only `open()`, `read()` and `write()` on FIFOs the runner
+created in that one directory:
+
+| Codex mode | Before | After |
+| --- | --- | --- |
+| Auto-review (default), on-request, untrusted, on-failure, legacy workspace-write | No sockets; writes only in the workspace | Unchanged, plus the session's FIFO channel |
+| Read-only | No sockets; no writes | Unchanged, plus the session's FIFO channel |
+| Full access without a managed worktree, Orchestrator preset | Network on | Unchanged; the CLI takes the FIFO channel there too |
+
+No network access, writable root, socket, port, seccomp rule or namespace setting changes. The
+directory is not a writable root, and the sandbox cannot create files there.
+
+The channel layout:
+
+- One directory per session, mode 0300, so a process can open a name it knows but cannot list the
+  directory.
+- The doorbell FIFO is write-only (0200) once the runner holds it open, so the nonces posted to it
+  cannot be read back.
+- A client writes one `{"nonce":"<32 hex>"}` line in a single atomic write. The runner creates
+  `<nonce>.res` and then `<nonce>.req`.
+- The client opens the response for reading, writes one newline-terminated frame to the request,
+  and keeps the request open until the response ends. Closing it early cancels the relayed request,
+  as a closed socket does.
+- The runner unlinks both names when the first request byte arrives.
+
+Limits:
+
+- At most 16 open exchanges per session; a further nonce is ignored and its client gives up after
+  10 seconds.
+- 10 seconds for a client to arrive.
+- 300 seconds for a whole exchange.
+- The loopback relay's frame bounds.
+
+An exchange that misses a limit is abandoned and its FIFOs removed. Session end removes the
+directory, and runner startup sweeps every channel an earlier runner left.
+
+Where no channel is established (macOS, Windows, runner `bwrap`/Seatbelt modes, or a failed
+setup), the Artifact Guidance of a Codex session other than the Orchestrator preset stops offering
+the CLI. It names `attach_session_artifact` when the session has its `wollipog` MCP server, and
+otherwise says that file attachment is unavailable. A CLI call that still meets `EPERM` names the
+sandbox as the cause and points to the MCP tools.
+
+Under that seccomp filter, Node cannot identify a socketpair as its standard output and silently
+discards what it writes there. Node's own `child_process` pipes are socketpairs, so a Node program
+that spawns the CLI inside the sandbox must give it a real pipe or a file. A shell pipeline or
+command substitution already does, as does Codex's own command runner.
+
+`agent-control-sandbox-cli.integration.test.ts` proves all of this on a real kernel in the Platform
+Isolation Ubuntu job, which fails if the test skips. Opt-in variants run the same probes under the
+real `codex sandbox` wherever a Codex install can start one.
 
 ## Commands
 

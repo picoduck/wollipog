@@ -402,8 +402,10 @@ test("native Linux isolation CI proves the managed-worktree read-only rule again
     "Linux skill adoption moves files through its no-replace rename helper, so its tests must run on the Linux leg (#1722)");
   assert.match(platform, /if: matrix\.os == 'macos-latest' \|\| matrix\.os == 'windows-latest'\r?\n        shell: bash\r?\n        run: \|\r?\n          set -uo pipefail\r?\n          status=0\r?\n          output=\$\(node --import tsx --test --test-reporter=tap apps\/runner\/src\/skill-kept-aside\.test\.ts apps\/runner\/src\/skill-drift\.test\.ts < \/dev\/null\)/u,
     "kept-aside discard and restore delete user-edited content, so their tests must run on the macOS and Windows legs (#1725)");
-  assert.equal(platform.match(/grep -q '\^# skipped 0\$'/gu)?.length, 6,
-    "neither sandbox's enforcement test, the native adoption tests, nor the kept-aside removal tests may pass by skipping");
+  assert.match(platform, /bash scripts\/configure-ci-bubblewrap\.sh\r?\n          output=\$\(node --import tsx --test --test-reporter=tap --test-skip-pattern='real codex sandbox' apps\/runner\/src\/agent-control-sandbox-cli\.integration\.test\.ts < \/dev\/null\)\r?\n          printf '%s\\n' "\$output"\r?\n          if printf '%s' "\$output" \| grep -q '\^# skipped 0\$' && printf '%s' "\$output" \| grep -q '\^# pass 3\$'; then exit 0; fi/u,
+    "the CLI must be proven from inside a network-off sandbox on the Linux leg, and all three cases must run (#3270)");
+  assert.equal(platform.match(/grep -q '\^# skipped 0\$'/gu)?.length, 7,
+    "neither sandbox's enforcement test, the network-off CLI test, the native adoption tests, nor the kept-aside removal tests may pass by skipping");
   assert.match(platform, /grep -q '\^# skipped 0\$'/u,
     "a host that cannot create a user namespace must fail the job rather than report skipped coverage");
 });

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -43,6 +44,7 @@ import {
   AGENT_CONTROL_RELAY_ENDPOINT_ENV,
   AGENT_CONTROL_RELAY_KEY_ENV,
 } from "./agent-control-relay.js";
+import { AGENT_CONTROL_RELAY_FIFO_ENV, agentControlFifoRelayBase } from "./agent-control-fifo-relay.js";
 import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION, SESSION_CODEX_MCP_MARKER } from "./orchestrator-preset.js";
 import { claudeHookSettingsPath, provisionClaudeHooks, resetClaudeGuardState } from "./hook-settings.js";
 import { PI_ORCHESTRATOR_PRESET_TOOLS_ENV, PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
@@ -1018,6 +1020,60 @@ test("startup sweep removes final and interrupted staging files while retaining 
     assert.equal(readFileSync(symlinkTarget, "utf8"), "retain");
     assert.equal(sweepAgentControlFiles(root), 0);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("startup sweep also removes FIFO relay channels an earlier runner left (#3270)", { skip: process.platform !== "linux" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-fifo-sweep-"));
+  try {
+    const channel = join(agentControlFifoRelayBase(root), "s_old");
+    mkdirSync(channel, { recursive: true });
+    spawnSync("mkfifo", ["-m", "600", join(channel, "doorbell")]);
+    chmodSync(channel, 0o300);
+    assert.equal(sweepAgentControlFiles(root), 1);
+    assert.deepEqual(readdirSync(agentControlFifoRelayBase(root)), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("provider mode hands the session's FIFO channel to the CLI only (#3270)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-fifo-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/wollipog-runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider" as const,
+      providerRelayEndpoint: "tcp://127.0.0.1:4318",
+      providerRelayFifo: join(agentControlFifoRelayBase(root), "s_agent"),
+    };
+    for (const driver of ["codex-app-server", "claude-code"] as const) {
+      const launch = spec(driver);
+      provisionAgentControl(launch, control, () => {}, host);
+      assert.equal(launch.env[AGENT_CONTROL_RELAY_FIFO_ENV], control.providerRelayFifo);
+      assert.equal(launch.env[AGENT_CONTROL_RELAY_ENDPOINT_ENV], control.providerRelayEndpoint,
+        "the loopback relay stays for the MCP adapter, which runs outside any provider sandbox");
+      if (driver === "claude-code") {
+        const mcpConfig = readFileSync(agentControlMcpConfigPath(root, launch.sessionId), "utf8");
+        assert.equal(mcpConfig.includes(AGENT_CONTROL_RELAY_FIFO_ENV), false);
+      }
+      // A relaunch whose runner established no channel carries no stale path.
+      const { providerRelayFifo: _omitted, ...withoutFifo } = control;
+      provisionAgentControl(launch, withoutFifo, () => {}, host);
+      assert.equal(launch.env[AGENT_CONTROL_RELAY_FIFO_ENV], undefined);
+      removeAgentControlFiles(launch.sessionId, root);
+    }
+    // File-mode credentials have no relay key, so a channel is never handed to them.
+    const fileMode = spec("codex-app-server");
+    provisionAgentControl(fileMode, { ...control, executionIsolationMode: "bwrap" }, () => {}, host);
+    assert.equal(fileMode.env[AGENT_CONTROL_RELAY_FIFO_ENV], undefined);
+    assert.equal(fileMode.env[AGENT_CONTROL_RELAY_KEY_ENV], undefined);
+  } finally {
+    removeAgentControlFiles("s_agent", root);
     rmSync(root, { recursive: true, force: true });
   }
 });

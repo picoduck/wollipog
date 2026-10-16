@@ -13,8 +13,8 @@ import { isSafeSessionFileId } from "./session-file-id.js";
 
 // A 32 MiB video becomes up to 42.7 MiB of base64 inside the JSON request envelope.
 // Keep responses at their previous bound; they return metadata, never video bytes.
-const MAX_REQUEST_FRAME_BYTES = 48 * 1024 * 1024;
-const MAX_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024;
+export const MAX_REQUEST_FRAME_BYTES = 48 * 1024 * 1024;
+export const MAX_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024;
 const MAX_PATH_BYTES = 16 * 1024;
 export const AGENT_CONTROL_RELAY_ENDPOINT_ENV = "WOLLIPOG_AGENT_CONTROL_RELAY_ENDPOINT";
 export const AGENT_CONTROL_RELAY_KEY_ENV = "WOLLIPOG_AGENT_CONTROL_RELAY_KEY";
@@ -38,7 +38,7 @@ export type AgentControlRelayHandler = (
   signal: AbortSignal,
 ) => Promise<AgentControlRelayResponse>;
 
-function parseRequest(value: unknown): AgentControlRelayRequest {
+export function parseRequest(value: unknown): AgentControlRelayRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("relay request is not an object");
   const { key, method, path, contentType, body } = value as Record<string, unknown>;
   if (typeof key !== "string" || key.length < 16 || key.length > 256 ||
@@ -58,7 +58,7 @@ function parseRequest(value: unknown): AgentControlRelayRequest {
   };
 }
 
-function parseResponse(value: unknown): AgentControlRelayResponse {
+export function parseResponse(value: unknown): AgentControlRelayResponse {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("relay response is not an object");
   const { status, body } = value as Record<string, unknown>;
   if (!Number.isInteger(status) || (status as number) < 100 || (status as number) > 599 || typeof body !== "string") {
@@ -127,6 +127,14 @@ function relayRoundTrip(
  * only the runner may add the session credential. */
 export function agentControlRelayFetch(endpoint: string, key: string): McpFetch {
   endpointPort(endpoint);
+  return relayFetchThrough(key, (request, signal) => relayRoundTrip(endpoint, request, signal));
+}
+
+/** The same fetch shape over any transport that carries one relay frame each way. */
+export function relayFetchThrough(
+  key: string,
+  roundTrip: (request: AgentControlRelayRequest, signal?: AbortSignal) => Promise<AgentControlRelayResponse>,
+): McpFetch {
   return async (url, init) => {
     const parsed = new URL(url);
     const method = init?.method?.toUpperCase() ?? "GET";
@@ -138,7 +146,7 @@ export function agentControlRelayFetch(endpoint: string, key: string): McpFetch 
     if (contentType !== undefined && contentType !== "application/json") {
       throw new Error("Agent Control relay permits only JSON request bodies");
     }
-    const response = await relayRoundTrip(endpoint, {
+    const response = await roundTrip({
       key,
       method,
       path: `${parsed.pathname}${parsed.search}`,
