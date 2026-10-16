@@ -88,6 +88,10 @@ jobs:
       - name: Verify Native Provider-HOME Lease Protocol
         run: node --import tsx --test apps/runner/src/provider-home-lease.test.ts apps/runner/src/provider-home-lease-portable.test.ts apps/runner/src/provider-home-lease-io.test.ts apps/runner/src/provider-home-lease-async.test.ts apps/runner/src/provider-home-lease-worker-protocol.test.ts apps/runner/src/provider-home-lease-heartbeat.test.ts
 
+      - name: Verify Successor Readiness Regression Detects Barrier Removal
+        timeout-minutes: 2
+        run: node apps/runner/scripts/verify-successor-readiness-regression.mjs
+
       - name: Verify Session Writer Lock Across Processes
         run: node --import tsx --test apps/runner/src/session-store-lock.test.ts
 

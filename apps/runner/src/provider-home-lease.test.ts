@@ -711,6 +711,8 @@ test("one fixed successor elects exactly one of two concurrent same-owner reclai
   winner.releaseAll();
 });
 
+const SUCCESSOR_REPORT_MS = 10_000;
+
 type SuccessorRaceOptions = {
   startupDelayMs?: number;
   publicationDelayMs?: number;
@@ -920,7 +922,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     options.onReady?.();
     if (t.signal.aborted || options.signal?.aborted) throw new Error("successor election cancelled");
     writeFileSync(start, "go");
-    assert.ok(await waitUntil(() => states.every((state) => state.reported), 10_000, true), "both contenders report before the race deadline");
+    assert.ok(await waitUntil(() => states.every((state) => state.reported), SUCCESSOR_REPORT_MS, true), "both contenders report before the race deadline");
     outcomes = results.map((result) => readFileSync(result, "utf8"));
     assert.equal(outcomes.filter((outcome) => outcome === "won").length, 1, "exactly one winner");
     assert.equal(outcomes.filter((outcome) => outcome.startsWith("lost:")).length, 1, "exactly one refusal");
@@ -988,8 +990,11 @@ test("successor election uses its load harness's owned fixture parent", async (t
 });
 
 test("successor election keeps slow startup out of the result deadline", async (t) => {
-  // Give the injected startup pause its own finite setup allowance.
-  await runSuccessorElectionRace(t, { startupDelayMs: 5_200, readinessMs: 15_000 });
+  // Startup must exceed the reporting window: removing only the readiness wait
+  // must expire reporting before either contender can publish. Keep two seconds
+  // of separation plus the normal ten-second setup margin for native initialization.
+  const startupDelayMs = SUCCESSOR_REPORT_MS + 2_000;
+  await runSuccessorElectionRace(t, { startupDelayMs, readinessMs: startupDelayMs + 10_000 });
 });
 
 test("successor election diagnoses startup failure without exposing fixture paths", async (t) => {
