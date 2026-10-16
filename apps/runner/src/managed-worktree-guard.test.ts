@@ -1455,6 +1455,10 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `bash <<'EOF'\n# only a comment\nEOF\ncat ${into}`,
     `python3 - <<'EOF'\nx = 1  # c\nEOF\ncat ${into}`,
     `cat <<E#F\nbody\nE#F\ncat ${into}`,
+    // A `#` in a kept body must not drop the rest of the line: a reach after a quoted `#` on the
+    // same body line is still scanned (the `#` is escaped, not used to truncate).
+    `bash <<'EOF'\nrm "a # b" ${into}\nEOF`,
+    `bash <<'EOF'\necho "x # y" && cat ${into}\nEOF`,
     // An UNQUOTED heredoc expands, so its body is kept and scanned, conservatively.
     `cat > a.ts <<EOF\n${into}\nEOF`,
     // A body handed to a shell is executed, so it is kept and scanned.

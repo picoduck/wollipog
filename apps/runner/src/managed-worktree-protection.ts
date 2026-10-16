@@ -2785,23 +2785,20 @@ function reduceBraceSubstitutions(text: string): string {
 }
 
 /**
- * Neutralise `#` in one heredoc body line the way bash reads it: a `#` that starts a word begins a
- * comment to the end of that line (dropped), a `#` inside a word is literal (escaped so the
- * tokenizer keeps it rather than running its own comment to the end of the whole command). Keeping a
- * mid-word `#` literal, instead of blanking every `#`, avoids splitting a word into a spurious
- * `/`-ancestor. Quotes in a heredoc body are the consumer's to interpret, not the shell's, so only
- * word boundaries are tracked here; the worst a misread does is scan a line more, never less.
+ * Neutralise every `#` in one kept heredoc body line by escaping it to `\#`, keeping the rest of the
+ * line. A `#` then can never start the tokenizer's comment-to-end-of-command and swallow what
+ * follows the heredoc, and — unlike dropping the line tail at a word-initial `#` — no character
+ * after the `#` is lost, so a reach that follows a quoted `#` on the same line is still scanned.
+ * Unlike blanking, the word is not split into a spurious `/`-ancestor. Backslash pairs are copied
+ * whole so an existing `\#` is not turned into `\\#` (which the tokenizer would read as `\` then a
+ * comment). A body `#` that was a genuine comment is kept and scanned, which can only over-refuse.
  */
-function neutralizeBodyLineComment(line: string): string {
+function neutralizeBodyLineHashes(line: string): string {
   let out = "";
-  let inWord = false;
-  for (const ch of line) {
-    if (ch === "#") {
-      if (!inWord) return out;    // comment: drop the rest of the line
-      out += "\\#"; continue;     // mid-word: literal
-    }
-    if (ch === " " || ch === "\t") { inWord = false; out += ch; continue; }
-    out += ch; inWord = true;
+  for (let k = 0; k < line.length; k += 1) {
+    const ch = line[k]!;
+    if (ch === "\\") { out += ch + (line[k + 1] ?? ""); k += 1; continue; } // keep an escaped pair intact
+    out += ch === "#" ? "\\#" : ch;
   }
   return out;
 }
@@ -2887,7 +2884,7 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
         // A kept body line is still scanned (a shell executes it). Reduce its `${...}` so a literal
         // substitution does not break tokenizing, and neutralise its `#` so the tokenizer's comment
         // rule cannot run from a body `#` to the end of the command and swallow what follows.
-        out += neutralizeBodyLineComment(isTerminator ? line : reduceBraceSubstitutions(line)) + sep;
+        out += neutralizeBodyLineHashes(isTerminator ? line : reduceBraceSubstitutions(line)) + sep;
       }
     }
   };
@@ -2988,9 +2985,9 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
     const strip = quoted && !dollar && strippableConsumer();
     pending.push({ delimiter, dashStrip, strip });
     scan += command.slice(start, j);
-    // Blank any `#` in the operator/delimiter for the tokenizer: an unquoted `<<E#F` would otherwise
-    // read as a comment there. The delimiter is never a path, so blanking it changes no verdict.
-    if (!strip) out += command.slice(start, j).replaceAll("#", " ");
+    // Escape any `#` in the operator/delimiter for the tokenizer: an unquoted `<<E#F` would otherwise
+    // read as a comment there. The delimiter is never a path, so this changes no verdict.
+    if (!strip) out += neutralizeBodyLineHashes(command.slice(start, j));
     inWord = false;
     return j;
   }
