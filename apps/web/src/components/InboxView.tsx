@@ -115,6 +115,7 @@ export function filterInboxSplitsForReminderMode(
   stalledSessionIds: ReadonlySet<string>,
   pinnedSessions: ReadonlySet<string> = new Set(),
 ): InboxSplit[] {
+  const familySessions = baseSplits.find((split) => split.kind === "all")?.sessions;
   return baseSplits.map((split) => {
     const visibleSessions = split.sessions.filter((session) => sessionVisibleForReminderMode(
       session, reminders.get(session.id), mode,
@@ -128,7 +129,7 @@ export function filterInboxSplitsForReminderMode(
       : Math.max(0, split.count - hiddenLocalCount);
     return {
       ...split,
-      sessions: sortSessionsForReminders(visibleSessions, reminders, mode, pinnedSessions),
+      sessions: sortSessionsForReminders(visibleSessions, reminders, mode, pinnedSessions, familySessions),
       count,
       blockedCount: visibleSessions.reduce((total, session) => total + Number(isInboxBlocked(session)), 0),
       stalledCount: visibleSessions.reduce((total, session) => total + Number(stalledSessionIds.has(session.id)), 0),
@@ -1064,7 +1065,7 @@ export function InboxView({
   const toggleThread = useCallback((sessionId: string) => {
     const row = threadRowOf(sessionId);
     if (!row) return;
-    if (row.thread.children) {
+    if (row.thread.children && row.thread.children.visibleCount !== 0) {
       if (row.thread.collapsed) expandThreads([sessionId]);
       else collapseThreads([sessionId]);
       return;
@@ -1091,7 +1092,7 @@ export function InboxView({
   }, [displayedSelection, selectRow, threadRowOf]);
   const expandThread = useCallback(() => {
     const row = threadRowOf(displayedSelection);
-    if (!row?.thread.children) return;
+    if (!row?.thread.children || row.thread.children.visibleCount === 0) return;
     if (row.thread.collapsed) { expandThreads([row.session.id]); return; }
     const firstChild = entries.find((entry) => entry.thread.parentId === row.session.id);
     if (firstChild) selectRow(firstChild.session.id);
@@ -1099,7 +1100,7 @@ export function InboxView({
   const collapseThread = useCallback(() => {
     const row = threadRowOf(displayedSelection);
     if (!row) return;
-    if (row.thread.children && !row.thread.collapsed) collapseThreads([row.session.id]);
+    if (row.thread.children && row.thread.children.visibleCount !== 0 && !row.thread.collapsed) collapseThreads([row.session.id]);
     else if (row.thread.parentId) selectRow(row.thread.parentId);
   }, [collapseThreads, displayedSelection, selectRow, threadRowOf]);
 

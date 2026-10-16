@@ -1286,12 +1286,14 @@ Rules
   instead (§6.3, #3175). Below a 600px list (a narrow column, Preview Right, phones) the
   chip keeps its dots and a compact "N Working" count while descendants are working; its accessible
   name and tooltip keep the full rollup. On narrow lists, dots give up space before the working
-  count so a large family cannot hide ongoing work. List rollups count nested descendants; Board
-  chips count direct children because Board cards remain flat. The list count remains visible
+  count so a large family cannot hide ongoing work. List and Board rollups count nested descendants; their dots represent direct children. The list count remains visible
   when collapsed. Available human-owned results use a purple **Ready for Review** badge and family
   rollup; questions
-  retain the amber **Answer Required** badge. A result is available for assessment independently of
-  lifecycle and does not imply that the session or its campaign has finished.
+  retain the amber **Answer Required** badge. Review readiness waits until the session and all
+  unarchived descendants finish foreground and background work. At-rest parents show **Children
+  Working**, or **Child Work Pending** without a pulse when no descendant is progressing. Human
+  questions and approvals keep priority. Filtered children still contribute to status; an expand
+  control appears only when child rows are available to show.
   Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or
   child says so once, with its one status badge (§11.1); there is no stalled rail or border, because
   the leading edge is the selection bar.
@@ -2189,6 +2191,8 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Session attention | Approval Required, Answer Required, Authentication Required, Account Required | warning |
 | Session attention | Recovery Required | danger |
 | Session lifecycle | Starting, Running, Stopping | info (pulse on Running/Starting) |
+| Session family | Children Working | info (pulse while descendants progress) |
+| Session family | Child Work Pending | neutral (no pulse; unfinished descendants are stalled or blocked) |
 | Session lifecycle | Awaiting Prompt | neutral |
 | Session lifecycle | Stalled, Failed, Stop Failed | danger |
 | Session lifecycle | Stopped, Archived, Snoozed | neutral |

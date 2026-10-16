@@ -183,10 +183,11 @@ export function sortInboxSessions(
   sessions: Iterable<SessionView>,
   pinnedSessions: ReadonlySet<string> = new Set(),
   stalledSessionIds: ReadonlySet<string> = new Set(),
+  familySessions?: readonly SessionView[],
 ): SessionView[] {
   const all = [...sessions];
   const childrenByParent = inboxChildrenByParent(all);
-  const workingFamilies = sessionsWithWorkingDescendants(all);
+  const workingFamilies = sessionsWithWorkingDescendants((familySessions ?? all).filter((session) => !session.archived));
   const ownKeys = new Map(all.map((session) => [session.id, sessionOrderKey(session, pinnedSessions, stalledSessionIds, workingFamilies.has(session.id))]));
   const familyKeys = new Map<string, InboxOrderKey>();
   const familyKey = (session: SessionView, trail: Set<string>): InboxOrderKey => {
@@ -240,6 +241,8 @@ export interface InboxThreadChild {
 export interface InboxThreadChildren {
   followUpLabel?: "Needs Your Input" | "Ready for Review";
   count: number;
+  /** Direct child rows available for expansion after filtering. */
+  visibleCount?: number;
   /** Working descendants, including those hidden by a collapsed nested thread. */
   working?: number;
   /** Includes blocked or stalled descendants, whose work is still unfinished. */
@@ -352,6 +355,7 @@ export function threadInboxRows<T extends { session: SessionView }>(
       ...(strongest && strongest.priority >= 2 ? { followUpLabel: strongest.group === "needs_input"
         ? "Needs Your Input" as const : "Ready for Review" as const } : {}),
       count: familyChildren.length,
+      visibleCount: children.length,
       hasActiveWork,
       working: members.filter((child) => !stalledSessionIds.has(child.id) && inboxThreadChildState(child, false) === "running").length,
       waiting: familyChildren.filter((child) => isInboxBlocked(child)).length,
@@ -362,7 +366,7 @@ export function threadInboxRows<T extends { session: SessionView }>(
         statusLabel: sessionStatusSummary(child).primary.meta.label,
       })),
     };
-    const collapsed = summary !== null && collapsedParents.has(row.session.id);
+    const collapsed = children.length > 0 && collapsedParents.has(row.session.id);
     out.push({ ...row, thread: { depth, parentId, last, children: summary, collapsed } });
     if (collapsed) return;
     children.forEach((child, index) => {
@@ -470,7 +474,7 @@ export function deriveInboxSplits(
         group.key,
         group.id === null ? "no_project" : "project",
         group.name,
-        sortInboxSessions(group.sessions, pinnedSessions, stalledSessionIds),
+        sortInboxSessions(group.sessions, pinnedSessions, stalledSessionIds, visible),
         stalledSessionIds,
         descriptor,
       );
@@ -489,7 +493,7 @@ export function deriveInboxSplits(
     durableInboxProjectKey(project.id),
     "project",
     project.name,
-    sortInboxSessions(visible.filter((session) => session.projectId === project.id), pinnedSessions, stalledSessionIds),
+    sortInboxSessions(visible.filter((session) => session.projectId === project.id), pinnedSessions, stalledSessionIds, visible),
     stalledSessionIds,
     {
       kind: "durable",
@@ -503,6 +507,7 @@ export function deriveInboxSplits(
     visible.filter((session) => session.projectId == null),
     pinnedSessions,
     stalledSessionIds,
+    visible,
   );
   const noProject = [inboxSplit(
       INBOX_NO_PROJECT_SPLIT_KEY,

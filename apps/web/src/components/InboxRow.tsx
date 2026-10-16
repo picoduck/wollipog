@@ -157,6 +157,7 @@ function InboxRowInner({
     reminder,
     familyFollowUpLabel: children?.followUpLabel,
     familyWorking: children?.hasActiveWork,
+    familyProgressing: (children?.working ?? 0) > 0,
     stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);
@@ -184,7 +185,7 @@ function InboxRowInner({
       aria-label={childrenLabel}
       title={childrenLabel}
       onClick={(event) => {
-        if (!onToggleThread) return;
+        if (!onToggleThread || children.visibleCount === 0) return;
         event.stopPropagation();
         onToggleThread(session.id);
       }}
@@ -323,7 +324,7 @@ function InboxRowInner({
         {/* The chevron (§5.5, #2215) is a SIBLING of the row button, absolutely positioned into the
             card's leading padding: a button cannot nest a button, and the list owns the keyboard (t
             toggles), so it is not a tab stop. */}
-        {children && (
+        {children && children.visibleCount !== 0 && (
           <button
             type="button"
             tabIndex={-1}

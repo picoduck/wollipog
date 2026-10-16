@@ -222,3 +222,10 @@ test("family work suppresses review readiness without hiding requests or recover
     assert.equal(label(sessionRowStatus(session({ attention, backgroundWorkState }))), expected);
   }
 });
+
+
+test("unfinished stalled children hold review without claiming progress (#3328)", () => {
+  const badge = sessionRowStatus(session(), { familyWorking: true, familyProgressing: false }).badge!;
+  assert.equal(badge.meta.label, "Child Work Pending");
+  assert.equal(badge.meta.pulse, false);
+});

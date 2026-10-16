@@ -485,7 +485,7 @@ test("threadInboxRows nests children under a present parent and drops a collapse
   ]);
   const parent = expanded[0]!.thread;
   assert.equal(parent.collapsed, false);
-  assert.deepEqual(parent.children, { followUpLabel: "Needs Your Input", count: 2, hasActiveWork: true, working: 1, waiting: 1, children: [
+  assert.deepEqual(parent.children, { followUpLabel: "Needs Your Input", count: 2, visibleCount: 2, hasActiveWork: true, working: 1, waiting: 1, children: [
     { id: "a", title: "Child A", state: "stalled", statusLabel: "Input Required" },
     { id: "b", title: "Child B", state: "done", statusLabel: "Completed" },
   ] });
@@ -850,4 +850,28 @@ test("an archived child does not reappear in the full-inventory family summary (
   const parent = session("parent");
   const child = session("child", { parentSessionId: parent.id, status: "completed", archived: true });
   assert.equal(threadInboxRows([{ session: parent }], new Set(), new Set(), [parent, child])[0]!.thread.children, null);
+});
+
+
+test("a hidden child contributes status without creating an expandable empty thread (#3328)", () => {
+  const parent = session("parent");
+  const child = session("child", { parentSessionId: parent.id, status: "running" });
+  const row = threadInboxRows([{ session: parent }], new Set([parent.id]), new Set(), [parent, child])[0]!;
+  assert.equal(row.thread.children!.visibleCount, 0);
+  assert.equal(row.thread.children!.hasActiveWork, true);
+  assert.equal(row.thread.collapsed, false);
+});
+
+test("project and reminder ordering use children outside the visible split (#3328)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 10,
+    result: { revision: "r", at: 10, owner: "human" as const }, acknowledgedRevision: null };
+  const parent = session("parent", { status: "idle", projectId: "alpha", attention });
+  const child = session("child", { status: "idle", projectId: "beta", parentSessionId: parent.id, backgroundWorkState: "running" });
+  const result = session("result", { status: "idle", projectId: "alpha", attention: { ...attention,
+    result: { ...attention.result, at: 1 } } });
+  const splits = deriveInboxSplits([parent, child, result], new Set(), new Set(), new Set(), [project("alpha"), project("beta")], true);
+  const alpha = splits.find((split) => split.name === "alpha")!;
+  assert.deepEqual(alpha.sessions.map(({ id }) => id), ["result", "parent"]);
+  assert.deepEqual(sortSessionsForReminders(alpha.sessions, new Map(), "ordinary", new Set(), [parent, child, result])
+    .map(({ id }) => id), ["result", "parent"]);
 });

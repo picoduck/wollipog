@@ -21,6 +21,8 @@ export interface SessionRowStatusContext {
   familyFollowUpLabel?: "Needs Your Input" | "Ready for Review";
   /** Any descendant still has work, including background jobs, blocked input, or a pending stop. */
   familyWorking?: boolean;
+  /** False when unfinished descendants are all stalled or blocked rather than progressing. */
+  familyProgressing?: boolean;
 }
 
 /** The one badge a row draws. */
@@ -138,7 +140,7 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
   if (context.familyWorking && needs.length === 0 && !sessionWorking(session as SessionView) &&
       (!primary || (primary.kind === "lifecycle" && !primary.needsYou && primary.meta.tone !== "danger" &&
         !session.stopOperation && reminder?.state !== "fired"))) {
-    primary = { kind: "lifecycle", meta: statusMeta("session", "children_working"),
+    primary = { kind: "lifecycle", meta: statusMeta("session", context.familyProgressing === false ? "children_pending" : "children_working"),
       description: "Child sessions still have unfinished work.", needsYou: false };
   }
   if (!primary) return { badge: null, others };

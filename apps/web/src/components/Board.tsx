@@ -168,8 +168,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   const threadChildren = useMemo(() => new Map(
     threadInboxRows(scoped.map((session) => ({ session })), new Set(), stalledSessionIds, [...allSessions.values()])
       .filter((row) => row.thread.children !== null)
-      .map((row) => [row.session.id, { ...row.thread.children!, followUpLabel:
-        row.thread.children!.followUpLabel === "Ready for Review" ? "Ready for Review" as const : undefined }]),
+      .map((row) => [row.session.id, row.thread.children!]),
   ), [scoped, stalledSessionIds, allSessions]);
 
   // Drag a card onto a column to file the session there manually (server-side
@@ -502,6 +501,8 @@ function SessionCard({
     runnerOnline: runnerConnected,
     reminder,
     familyWorking: threadChildren?.hasActiveWork,
+    familyProgressing: (threadChildren?.working ?? 0) > 0,
+    familyFollowUpLabel: threadChildren?.followUpLabel,
     stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);
@@ -617,7 +618,8 @@ function CardFamilyChip({ family, besideKey }: {
   /** What sits beside the chip (the badge and its "+N"), so a change to it measures again. */
   besideKey: string;
 }) {
-  const label = inboxThreadChildrenLabel(family);
+  const label = inboxThreadChildrenLabel(family.waiting > 0
+    ? { ...family, followUpLabel: undefined } : family);
   const chipRef = useRef<HTMLSpanElement>(null);
   const [dotsOnly, setDotsOnly] = useState(false);
   useLayoutEffect(() => {
