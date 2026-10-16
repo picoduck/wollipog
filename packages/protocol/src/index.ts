@@ -684,6 +684,7 @@ export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
+export * from "./session-review-job.js";
 export * from "./rate-priced-usage.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export type {
@@ -3307,6 +3308,8 @@ export interface RunnerRuntimeInfo {
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
   /** Exact read-only workspace inspection path only; never Full Control readiness. */
   campaignLaunchInspection?: { version: 1 };
+  /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
+  sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Native-host runner data root. WSL contexts use the same `.agent-manager` layout in-distro. */
   dataDir: string;
   worktreeRoot: string;
@@ -9016,6 +9019,7 @@ export interface SessionNamingCustomModelResultMessage {
 export type RunnerToControlPlane =
   | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
+  | import("./session-review-job.js").SessionReviewJobUpdate
   | RegisterMessage
   | HeartbeatMessage
   | SessionStatusMessage
@@ -10791,6 +10795,8 @@ export type ControlPlaneToRunner =
   | import("./campaign-control-launch.js").CampaignLaunchInspectionMessage
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
+  | import("./session-review-job.js").SessionReviewJobCommand
+  | import("./session-review-job.js").CancelSessionReviewJobCommand
   | RegisteredMessage
   | ConfigureHarnessInstallationChoicesMessage
   | RegisterRejectedMessage
