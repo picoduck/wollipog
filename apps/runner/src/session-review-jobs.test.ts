@@ -37,6 +37,12 @@ test("trusted paths refuse session-writable roots and other-user-writable compon
   assert.equal(trustedPath(tool, [], uid, rootUid), tool, "group-write is fine below a private (0700) ancestor");
   const link = join(root, "link"); symlinkSync(planted, link);
   assert.throws(() => trustedPath(link, [join(root, "home", ".codex")], uid, rootUid), /a session can write/, "symlinks are resolved first");
+  // A trusted target reached through a link a session could repoint is refused too.
+  const hop = join(root, "home", ".codex", "hop"); symlinkSync(tool, hop);
+  assert.throws(() => trustedPath(hop, [join(root, "home", ".codex")], uid, rootUid), /a session can write/);
+  const chained = join(safe, "chained"); symlinkSync(hop, chained);
+  assert.throws(() => trustedPath(chained, [join(root, "home", ".codex")], uid, rootUid), /a session can write/,
+    "every hop's directory is checked, not only the final path");
 });
 
 function fakeHome(t: { after(fn: () => void): void }) {
@@ -49,19 +55,22 @@ function fakeHome(t: { after(fn: () => void): void }) {
   writeFileSync(join(release, "scripts", "review_core.py"), "# core\n");
   writeFileSync(join(release, "reviewers.json"), "{}\n");
   writeFileSync(join(release, "workflow-contract.json"), JSON.stringify({ contract_version: 1 }));
-  mkdirSync(join(home, ".claude", "skills"), { recursive: true });
-  symlinkSync(release, join(home, ".claude", "skills", "cross-model-review"));
+  mkdirSync(join(home, ".devbox"), { recursive: true });
+  symlinkSync(join(root, "devbox", "releases", "abc", "skills"), join(home, ".devbox", "skills"));
   const bin = join(root, "bin"); mkdirSync(bin, { mode: 0o755 });
   for (const name of ["python3", "git", "claude"]) executable(join(bin, name));
   const codexBin = join(home, ".codex", "bin"); mkdirSync(codexBin, { recursive: true });
   executable(join(codexBin, "codex"));
-  return { root, home, dataDir: join(root, "data"), pathEnv: `${bin}:${codexBin}` };
+  return { root, home, dataDir: join(root, "data"), pathEnv: `${bin}:${codexBin}`, release };
 }
+
+/** Fixtures live under the system temporary directory, which real discovery treats as writable. */
+const temporaryRoots: string[] = [];
 
 test("discovery verifies the controller and refuses a reviewer a session could replace", posixOnly, (t) => {
   const f = fakeHome(t);
   mkdirSync(f.dataDir);
-  const install = discoverSessionReviewInstallation({ home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv: f.pathEnv });
+  const install = discoverSessionReviewInstallation({ home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv: f.pathEnv, temporaryRoots });
   assert.ok(install?.controller.endsWith("scripts/review.py"));
   if (!install) return;
   assert.match(install.controllerDigest, /^[0-9a-f]{64}$/u);
@@ -75,9 +84,28 @@ test("discovery reports an unsupported controller contract instead of using it",
   mkdirSync(f.dataDir);
   const skill = join(f.root, "devbox", "releases", "abc", "skills", "cross-model-review");
   writeFileSync(join(skill, "workflow-contract.json"), JSON.stringify({ contract_version: 2 }));
-  const install = discoverSessionReviewInstallation({ home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv: f.pathEnv });
+  const install = discoverSessionReviewInstallation({ home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv: f.pathEnv, temporaryRoots });
   assert.equal(install?.controller, "");
   assert.match(install?.capability.unavailable?.controller ?? "", /unsupported contract/);
+});
+
+test("discovery never finds the controller through a provider home's skills directory", posixOnly, (t) => {
+  const f = fakeHome(t);
+  mkdirSync(f.dataDir);
+  rmSync(join(f.home, ".devbox"), { recursive: true });
+  mkdirSync(join(f.home, ".claude", "skills"), { recursive: true });
+  symlinkSync(f.release, join(f.home, ".claude", "skills", "cross-model-review"));
+  assert.equal(discoverSessionReviewInstallation({ home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv: f.pathEnv, temporaryRoots }), null);
+});
+
+test("discovery refuses an installation under a session-writable root", posixOnly, (t) => {
+  const f = fakeHome(t);
+  mkdirSync(f.dataDir);
+  const install = discoverSessionReviewInstallation({
+    home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv: f.pathEnv, temporaryRoots, extraRoots: [join(f.root, "devbox")],
+  });
+  assert.equal(install?.controller, "");
+  assert.match(install?.capability.unavailable?.controller ?? "", /a session can write/);
 });
 
 test("each implementer gets the other model family as its reviewer", () => {
@@ -106,12 +134,16 @@ function harness(t: { after(fn: () => void): void }, options: {
   complete?: boolean;
   liveChild?: boolean;
   attached?: boolean;
+  /** Commits the mirror lacks until they are fetched from the forge. */
+  missing?: Set<string>;
 } = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-jobs-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const worktree = join(root, "worktree"); mkdirSync(worktree);
+  const repo = join(root, "repo"); mkdirSync(join(repo, ".git"), { recursive: true });
   const meta = {
     sessionId: "s_review", driver: "claude-code", context: { kind: "native" },
+    repoPath: repo,
     worktreePath: worktree,
     worktrees: [{ id: "wt", path: worktree, branch: "fix/feature", source: options.attached ? "attached" : "created" }],
     ...options.meta,
@@ -128,8 +160,12 @@ function harness(t: { after(fn: () => void): void }, options: {
     exec: async (_command, args) => {
       execs.push(args);
       if (args.includes("get-url")) return "https://github.com/acme/widget.git\n";
-      if (args.includes("--git-common-dir")) return `${join(root, "repo.git")}\n`;
+      if (args.includes("--git-common-dir")) return `${join(repo, ".git")}\n`;
       if (args.includes("clone")) { mkdirSync(args.at(-1)!, { recursive: true }); return ""; }
+      if (args.includes("cat-file") && options.missing?.has(args.at(-1)!.slice(0, 40))) throw new Error("missing");
+      if (args.includes("fetch") && args.some((arg) => arg.startsWith("https://"))) {
+        for (const sha of args.slice(args.indexOf("--end-of-options") + 2)) options.missing?.delete(sha);
+      }
       return "";
     },
     pullRequest: async () => ({
@@ -197,6 +233,33 @@ test("a completed review returns the controller's summary, report and ledger", p
   assert.equal(existsSync(args[args.indexOf("--repo") + 1]!), false, "the snapshot is removed when the job ends");
 });
 
+test("the snapshot comes from a runner-owned mirror, never from session-controlled git state", posixOnly, async (t) => {
+  const h = harness(t, { missing: new Set([HEAD]) });
+  await h.jobs.dispatch(h.command());
+  assert.equal((await settled(h, "srj_00000001")).state, "completed");
+  const location = h.execs.filter((args) => args.includes("get-url") || args.includes("--git-common-dir"));
+  assert.ok(location.length && location.every((args) => args[args.indexOf("-C") + 1] === join(h.root, "repo")),
+    "the repository is read from the runner-recorded checkout, not the worktree");
+  const fetches = h.execs.filter((args) => args.includes("fetch"));
+  assert.equal(fetches.length, 2);
+  assert.deepEqual(fetches.map((args) => args[args.indexOf("--end-of-options") + 1]), [
+    `file://${join(h.root, "repo", ".git")}`, "https://github.com/acme/widget.git",
+  ], "local objects pass through the pack protocol; the forge URL is built by the runner");
+  assert.ok(fetches.every((args) => args.includes("protocol.allow=never") && args.includes("transfer.fsckObjects=true")));
+  assert.equal(fetches[1]!.at(-1), HEAD);
+  const clone = h.execs.find((args) => args.includes("clone"))!;
+  assert.match(clone.at(-2)!, /reviews\/mirrors\/acme__widget\.git$/u);
+});
+
+test("repository names map to one review directory whatever their case", posixOnly, async (t) => {
+  const h = harness(t);
+  await h.jobs.dispatch(h.command());
+  await settled(h, "srj_00000001");
+  await h.jobs.dispatch(h.command({ brief: undefined, pullRequest: { repository: "ACME/Widget", number: 7 } }, "srj_00000002"));
+  const done = await settled(h, "srj_00000002");
+  assert.equal(done.round, 2, "the round count follows the repository, not its spelling");
+});
+
 test("a second round reviews the delta since the last valid round", posixOnly, async (t) => {
   const h = harness(t);
   await h.jobs.dispatch(h.command());
@@ -219,6 +282,8 @@ for (const [label, options, overrides, reason] of [
   ["a first round without a brief", {}, { brief: undefined }, /needs a brief/],
   ["an attached worktree", { attached: true }, {}, /native managed worktree/],
   ["a harness whose reviewer is untrusted", { reviewers: { "claude-code": "/trusted/claude" } }, {}, /reviewer for this session's harness is unavailable/],
+  ["a malformed repository name", {}, { pullRequest: { repository: "acme/..", number: 7 } }, /not this session's/],
+  ["an option-shaped repository name", {}, { pullRequest: { repository: "--upload-pack=x/widget", number: 7 } }, /not this session's/],
 ] as const) {
   test(`a review of ${label} is refused before anything launches`, posixOnly, async (t) => {
     const h = harness(t, options as never);

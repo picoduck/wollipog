@@ -8,18 +8,26 @@
  * keeps its own read-only sandbox; nothing is written to the session's worktree or git metadata.
  *
  * Trust: the runner runs only a controller and reviewer CLIs that no session can modify. Each is
- * resolved to its real path and refused when it is owned by another user, writable by other users,
- * or inside any root a session can write (provider credential homes, shared caches, worktrees and
- * runner state). A session could otherwise plant a binary the runner then runs unsandboxed.
+ * resolved one symlink at a time, and refused when the path or any directory holding a link on the
+ * way is owned by another user, writable by other users, or inside any root a session can write
+ * (provider credential homes, shared caches, temporary directories, project checkouts and runner
+ * state). A session could otherwise plant or repoint a binary the runner then runs unsandboxed.
+ * The controller is looked up only in its installed location, never through a provider home's
+ * skills directory, which sessions can write.
+ *
+ * Integrity: the reviewed snapshot comes from a runner-owned mirror filled over the pack protocol,
+ * which names every object by the hash it computes, so a session that rewrites its own object
+ * store cannot change what is reviewed. Every fetch URL is built by the runner from the verified
+ * repository name; no remote string from session-writable configuration reaches git.
  */
 import { execFile, spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
-  symlinkSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync,
+  statSync, symlinkSync, writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 import {
   SESSION_REVIEW_ARTIFACT_LIMIT_BYTES, SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_SUMMARY_LIMIT_BYTES,
@@ -41,11 +49,24 @@ const DEFAULT_MAX_CONCURRENT = 2;
 const SESSION_WRITABLE_CACHE_PATHS = [
   ".cache", ".npm", ".cargo/registry", ".cargo/git", ".local/share/pnpm/store", "go/pkg/mod",
 ] as const;
-const SKILL_DIRECTORIES = [".claude/skills/cross-model-review", ".agents/skills/cross-model-review"] as const;
+/** Where the controller is installed (Devbox). `~/.claude/skills/cross-model-review` usually links
+ * here, but that link sits in a provider home a session can write, so it is never followed. */
+const INSTALLED_SKILL_DIRECTORY = ".devbox/skills/cross-model-review";
+/** Temporary directories every session can write. */
+const SESSION_WRITABLE_TEMPORARY_ROOTS = ["/tmp", "/var/tmp", "/dev/shm"] as const;
+/** A GitHub `owner/name`; the only form a review request may name. */
+const GITHUB_REPOSITORY = /^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u;
+const SESSION_IDENTITY = /^[A-Za-z0-9_-]{1,128}$/u;
 
 /** Flags for every git command the runner runs against a session's repository. The session can
  * write its worktree's git config, and these commands run outside its sandbox. */
 const SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"] as const;
+/** Transports a mirror fetch may use, and full object checks on everything it receives. */
+const FETCH_GIT = [
+  "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.https.allow=always",
+  "-c", "protocol.ssh.allow=always", "-c", "transfer.fsckObjects=true",
+] as const;
+const MIRROR_FETCH_TIMEOUT_MS = 600_000;
 
 function sha256(bytes: string | Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -56,28 +77,34 @@ function within(parent: string, path: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-/** Every root a session can write, so nothing the runner runs may live there. */
-export function sessionWritableRoots(home: string, dataDir: string): string[] {
+/**
+ * Every root a session can write, so nothing the runner runs may live there. `extra` carries the
+ * configured project checkouts (their git directories are writable) and any provider homes set
+ * through the runner's environment.
+ */
+export function sessionWritableRoots(
+  home: string,
+  dataDir: string,
+  extra: readonly string[] = [],
+  temporary: readonly string[] = [tmpdir(), ...SESSION_WRITABLE_TEMPORARY_ROOTS],
+): string[] {
   const roots = [
     join(home, ".codex"),
     join(home, ".claude"),
     join(home, ".agent-manager"),
     ...SESSION_WRITABLE_CACHE_PATHS.map((path) => join(home, path)),
     dataDir,
+    ...temporary,
+    ...extra,
   ];
-  return roots.map((root) => {
-    try { return realpathSync(root); } catch { return root; }
-  });
+  return [...new Set(roots.flatMap((root) => {
+    try { return [root, realpathSync(root)]; } catch { return [root]; }
+  }))];
 }
 
-/**
- * Resolve `path` and refuse it unless no other user, and no session, could have changed it.
- * Every component must be owned by `uid` or root and not writable by other users. Group-write is
- * accepted only below a directory that only `uid` can enter, which keeps other users out.
- */
-export function trustedPath(path: string, roots: readonly string[], uid: number, rootUid = 0): string {
-  let real: string;
-  try { real = realpathSync(path); } catch { throw new Error(`${path} does not exist`); }
+/** Check one resolved path: outside every session-writable root, and every component owned by
+ * `uid` or root and not writable by other users. */
+function checkResolved(real: string, roots: readonly string[], uid: number, rootUid: number): void {
   for (const root of roots) {
     if (within(root, real)) throw new Error(`${real} is inside a directory a session can write (${root})`);
   }
@@ -98,7 +125,36 @@ export function trustedPath(path: string, roots: readonly string[], uid: number,
     if ((info.mode & 0o020) && !privateAncestor) throw new Error(`${component} is writable by its group`);
     if (info.isDirectory() && info.uid === uid && (info.mode & 0o077) === 0) privateAncestor = true;
   }
-  return real;
+}
+
+/**
+ * Resolve `path` and refuse it unless no other user, and no session, could have changed it.
+ * Links are followed one at a time: each must be owned by `uid` or root and sit in a directory that
+ * passes the same checks, so no hop on the way can be repointed. Group-write is accepted only
+ * below a directory that only `uid` can enter, which keeps other users out.
+ */
+export function trustedPath(path: string, roots: readonly string[], uid: number, rootUid = 0): string {
+  if (!isAbsolute(path)) throw new Error(`${path} is not an absolute path`);
+  let resolved = "/";
+  const pending = path.split("/").filter(Boolean);
+  let hops = 0;
+  while (pending.length) {
+    const name = pending.shift()!;
+    if (name === ".") continue;
+    if (name === "..") { resolved = dirname(resolved); continue; }
+    const next = join(resolved, name);
+    let info;
+    try { info = lstatSync(next); } catch { throw new Error(`${path} does not exist`); }
+    if (!info.isSymbolicLink()) { resolved = next; continue; }
+    if (++hops > 40) throw new Error(`${path} has too many symbolic links`);
+    if (info.uid !== uid && info.uid !== rootUid) throw new Error(`${next} is owned by another user`);
+    checkResolved(resolved, roots, uid, rootUid);
+    const target = readlinkSync(next);
+    if (isAbsolute(target)) resolved = "/";
+    pending.unshift(...target.split("/").filter(Boolean));
+  }
+  checkResolved(resolved, roots, uid, rootUid);
+  return resolved;
 }
 
 function whichExecutable(name: string, pathEnv: string | undefined): string | null {
@@ -129,21 +185,27 @@ export interface InstallationEnvironment {
   /** The uid root-owned files show; 0 except inside a user namespace (tests). */
   rootUid?: number;
   pathEnv: string | undefined;
+  /** Further session-writable roots: configured project checkouts and env-set provider homes. */
+  extraRoots?: readonly string[];
+  /** Session-writable temporary directories; defaults to the system's. */
+  temporaryRoots?: readonly string[];
+  /** Runner-configured controller skill directory, used instead of the Devbox install. */
+  skillDirectory?: string;
 }
 
 /** Find and verify the installed controller and reviewer CLIs. Never throws: an untrusted or
  * missing piece is reported in the capability and that piece is not used. */
 export function discoverSessionReviewInstallation(env: InstallationEnvironment): SessionReviewInstallation | null {
-  const roots = sessionWritableRoots(env.home, env.dataDir);
+  const roots = sessionWritableRoots(env.home, env.dataDir, env.extraRoots, env.temporaryRoots);
   const unavailable: NonNullable<SessionReviewCapability["unavailable"]> = {};
-  const skill = SKILL_DIRECTORIES.map((dir) => join(env.home, dir)).find((dir) => existsSync(dir));
-  if (!skill) return null;
+  const skill = env.skillDirectory ?? join(env.home, INSTALLED_SKILL_DIRECTORY);
+  if (!existsSync(skill)) return null;
   let controller: string;
   let controllerDigest: string;
   let python: string;
   let git: string;
   try {
-    const skillDir = realpathSync(skill);
+    const skillDir = trustedPath(skill, roots, env.uid, env.rootUid);
     controller = trustedPath(join(skillDir, "scripts", "review.py"), roots, env.uid, env.rootUid);
     const scripts = join(skillDir, "scripts");
     const files = [
@@ -186,6 +248,11 @@ export function reviewerForDriver(driver: string): SessionReviewHarness | null {
   if (driver === "claude-code") return "codex";
   if (driver === "codex" || driver === "codex-app-server") return "claude-code";
   return null;
+}
+
+/** A case-insensitive directory name for a validated `owner/name` (`_` cannot occur in an owner). */
+function repositoryKey(repository: string): string {
+  return repository.toLowerCase().replace("/", "__");
 }
 
 class RefusedReview extends Error {}
@@ -261,7 +328,12 @@ export interface SessionReviewDependencies {
   log(message: string): void;
 }
 
-export function defaultSessionReviewDependencies(dataDir: string, log: (message: string) => void): SessionReviewDependencies {
+export function defaultSessionReviewDependencies(
+  dataDir: string,
+  log: (message: string) => void,
+  /** Configured project checkouts, read at each discovery so configuration changes apply. */
+  projectPaths: () => readonly string[] = () => [],
+): SessionReviewDependencies {
   return {
     exec: async (command, args, options = {}) => (await execFileAsync(command, args, {
       encoding: "utf8", timeout: options.timeoutMs ?? 30_000, maxBuffer: 8_000_000,
@@ -291,6 +363,11 @@ export function defaultSessionReviewDependencies(dataDir: string, log: (message:
     }),
     installation: () => discoverSessionReviewInstallation({
       home: homedir(), dataDir, uid: process.getuid?.() ?? -1, pathEnv: process.env.PATH,
+      extraRoots: [
+        ...projectPaths(),
+        ...[process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value)),
+      ],
+      ...(process.env.WOLLIPOG_SESSION_REVIEW_SKILL_DIR ? { skillDirectory: process.env.WOLLIPOG_SESSION_REVIEW_SKILL_DIR } : {}),
     }),
     now: () => Date.now(),
     log,
@@ -304,6 +381,8 @@ export class SessionReviewJobs {
   private readonly active = new Set<string>();
   /** The single in-memory state of every unfinished job; cancel and poll share it. */
   private readonly states = new Map<string, JobState>();
+  /** One mirror fetch at a time per repository. */
+  private readonly mirrorQueues = new Map<string, Promise<void>>();
 
   constructor(
     private readonly root: string,
@@ -388,9 +467,19 @@ export class SessionReviewJobs {
       else if (state.phase === "running") this.poll(state);
       return;
     }
-    const prDir = join(this.root, "sessions", command.sessionId,
-      command.request.pullRequest.repository.replace("/", "-"), `pr-${command.request.pullRequest.number}`);
+    // GitHub names are case-insensitive: one directory per repository however a request spells it.
+    const repository = command.request.pullRequest.repository;
+    const named = GITHUB_REPOSITORY.test(repository) && SESSION_IDENTITY.test(command.sessionId) &&
+      Number.isSafeInteger(command.request.pullRequest.number) && command.request.pullRequest.number > 0;
+    const prDir = named
+      ? join(this.root, "sessions", command.sessionId, repositoryKey(repository), `pr-${command.request.pullRequest.number}`)
+      : join(this.root, "refused");
     const state: JobState = { command, phase: "prepared", prDir };
+    if (!named) {
+      this.save(state);
+      this.finish(state, { state: "not_launched", reason: "the pull request is not this session's open, same-repository pull request" });
+      return;
+    }
     if (this.active.has(command.sessionId)) {
       this.save(state);
       this.finish(state, { state: "not_launched", reason: "a review of this session is already running" });
@@ -430,9 +519,11 @@ export class SessionReviewJobs {
     if (!reviewerPath) refuse("the reviewer for this session's harness is unavailable on this runner");
     state.reviewer = reviewer!;
 
-    // Scope: the session's own open pull request, from its own repository, at its pushed head.
-    const worktreePath = realpathSync(worktree!.path);
-    const origin = (await this.deps.exec(install!.git, [...SAFE_GIT, "-C", worktreePath, "remote", "get-url", "origin"])).trim();
+    // Scope: the session's own open pull request, from its own repository, at its pushed head. The
+    // repository is read from the runner-recorded project checkout, never through the worktree's
+    // own `.git` pointer, which the session can rewrite.
+    const repoPath = realpathSync(meta!.repoPath);
+    const origin = (await this.deps.exec(install!.git, [...SAFE_GIT, "-C", repoPath, "remote", "get-url", "origin"])).trim();
     const repository = request.pullRequest.repository;
     if (githubSlug(origin)?.toLowerCase() !== repository.toLowerCase()) {
       refuse("the pull request is not this session's open, same-repository pull request");
@@ -461,11 +552,15 @@ export class SessionReviewJobs {
     const prState: PullRequestState = existsSync(prStatePath)
       ? JSON.parse(readFileSync(prStatePath, "utf8")) as PullRequestState
       : { epoch: 1, attempts: [] };
-    const commonDir = (await this.deps.exec(install!.git, [...SAFE_GIT, "-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+    const commonDir = realpathSync((await this.deps.exec(install!.git, [...SAFE_GIT, "-C", repoPath, "rev-parse", "--path-format=absolute", "--git-common-dir"])).trim());
+    // Built here from the verified name; the origin's spelling only chooses SSH or HTTPS.
+    const forgeUrl = /^https:\/\//iu.test(origin) ? `https://github.com/${pr.baseRepository}.git` : `git@github.com:${pr.baseRepository}.git`;
+    const mirror = join(this.root, "mirrors", `${repositoryKey(repository)}.git`);
+    await this.syncMirror(install!.git, mirror, commonDir, forgeUrl, [pr.baseSha, request.headSha]);
     let epochAttempts = prState.attempts.filter((attempt) => attempt.epoch === prState.epoch);
     const lastValid = [...epochAttempts].reverse().find((attempt) => attempt.valid);
     if (lastValid && lastValid.head !== request.headSha) {
-      const ancestor = await this.deps.exec(install!.git, [...SAFE_GIT, "--git-dir", commonDir, "merge-base", "--is-ancestor", lastValid.head, request.headSha])
+      const ancestor = await this.deps.exec(install!.git, [...SAFE_GIT, "--git-dir", mirror, "merge-base", "--is-ancestor", "--end-of-options", lastValid.head, request.headSha])
         .then(() => true, () => false);
       if (!ancestor) { // A rebase or force-push starts a new review epoch with a full round.
         prState.epoch += 1;
@@ -493,17 +588,10 @@ export class SessionReviewJobs {
     state.attemptDir = join(state.prDir, `e${prState.epoch}-r${round}-a${attempt}`);
     if (existsSync(state.attemptDir)) refuse("the review snapshot could not be prepared");
 
-    // Snapshot: a runner-private shared clone at the exact head. Nothing touches the session's
-    // worktree or its git metadata, and the session may keep working during the review.
+    // Snapshot: a checkout of the runner-owned mirror at the exact head. Nothing touches the
+    // session's worktree or its git metadata, and the session may keep working during the review.
     state.checkout = join(state.prDir, `checkout-${command.jobId}`);
-    await this.deps.exec(install!.git, [...SAFE_GIT, "clone", "--quiet", "--shared", "--no-checkout", commonDir, state.checkout], { timeoutMs: 120_000 });
-    const hasCommit = (sha: string) => this.deps.exec(install!.git, [...SAFE_GIT, "-C", state.checkout!, "cat-file", "-e", `${sha}^{commit}`])
-      .then(() => true, () => false);
-    for (const sha of [pr.baseSha, request.headSha]) {
-      if (!await hasCommit(sha)) {
-        await this.deps.exec(install!.git, [...SAFE_GIT, "-C", state.checkout, "fetch", "--quiet", origin, sha], { timeoutMs: 120_000 });
-      }
-    }
+    await this.deps.exec(install!.git, [...SAFE_GIT, "clone", "--quiet", "--shared", "--no-checkout", "--end-of-options", mirror, state.checkout], { timeoutMs: 120_000 });
     await this.deps.exec(install!.git, [...SAFE_GIT, "-C", state.checkout, "checkout", "--quiet", "--detach", request.headSha], { timeoutMs: 120_000 });
 
     const ledger = join(state.prDir, "ledger.md");
@@ -562,6 +650,45 @@ export class SessionReviewJobs {
     child.on("exit", () => this.poll(state));
     this.emit(state, { state: "running", controllerDigest: install!.controllerDigest });
     this.poll(state);
+  }
+
+  /**
+   * Bring `commits` into the runner-owned mirror. The session's object store is read over the pack
+   * protocol, which hashes everything it receives, so rewritten objects there are refused rather
+   * than reviewed; anything still missing comes from the forge.
+   */
+  private async syncMirror(git: string, mirror: string, commonDir: string, forgeUrl: string, commits: string[]): Promise<void> {
+    const previous = this.mirrorQueues.get(mirror) ?? Promise.resolve();
+    const run = previous.then(async () => {
+      if (!existsSync(join(mirror, "HEAD"))) {
+        mkdirSync(dirname(mirror), { recursive: true, mode: 0o700 });
+        await this.deps.exec(git, [...SAFE_GIT, "init", "--quiet", "--bare", "--end-of-options", mirror]);
+      }
+      const has = (sha: string) => this.deps.exec(git, [...SAFE_GIT, "--git-dir", mirror, "cat-file", "-e", `${sha}^{commit}`])
+        .then(() => true, () => false);
+      const missing = async () => (await Promise.all(commits.map(async (sha) => (await has(sha)) ? null : sha)))
+        .filter((sha): sha is string => sha !== null);
+      if ((await missing()).length) {
+        await this.deps.exec(git, [
+          ...SAFE_GIT, ...FETCH_GIT, "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+          "--end-of-options", `file://${commonDir}`, "+refs/heads/*:refs/session/heads/*", "+refs/remotes/*:refs/session/remotes/*",
+        ], { timeoutMs: MIRROR_FETCH_TIMEOUT_MS }).catch((error: Error) => this.deps.log(`session review mirror could not read the project repository: ${error.message}`));
+      }
+      const still = await missing();
+      if (still.length) {
+        await this.deps.exec(git, [
+          ...SAFE_GIT, ...FETCH_GIT, "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+          "--end-of-options", forgeUrl, ...still,
+        ], { timeoutMs: MIRROR_FETCH_TIMEOUT_MS });
+      }
+    });
+    const settledRun = run.then(() => {}, () => {});
+    this.mirrorQueues.set(mirror, settledRun);
+    try {
+      await run;
+    } finally {
+      if (this.mirrorQueues.get(mirror) === settledRun) this.mirrorQueues.delete(mirror);
+    }
   }
 
   private alive(state: JobState): boolean {
