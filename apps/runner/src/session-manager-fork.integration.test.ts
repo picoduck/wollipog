@@ -700,16 +700,28 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     await manager.delete("s_pi_target");
     assert.deepEqual(stateRemovals, ["s_clone_fail", "s_post_anchor_fail", "s_target", "s_claude_target", "s_pi_target"]);
     const leaseInternals = manager as unknown as {
-      providerHomeLeases?: { acquire(request: unknown, cancellation?: { isCurrent?: () => boolean }): Promise<void> };
+      providerHomeLeases?: {
+        acquire(request: unknown, cancellation?: { isCurrent?: () => boolean }): Promise<void>;
+        acquireReference(request: unknown, cancellation?: { isCurrent?: () => boolean }): Promise<null>;
+      };
     };
     const originalLeases = leaseInternals.providerHomeLeases;
     const forksBeforeLeaseFailure = forkSources.length;
     const protectedLeasePath = (request: unknown) =>
       (request as { isolation?: { protectedWorktree?: { path: string } } }).isolation?.protectedWorktree?.path;
+    // The temporary source driver takes a per-instance handle; the Claude target fork still takes a
+    // plain reference. Both draw from one acquisition sequence.
+    type LeaseStub = (request: unknown, cancellation?: { isCurrent?: () => boolean }) => Promise<void>;
+    const leaseStub = (acquire: LeaseStub) => ({
+      acquire,
+      acquireReference: async (request: unknown, cancellation?: { isCurrent?: () => boolean }) => {
+        await acquire(request, cancellation);
+        return null;
+      },
+    });
     try {
       const rejectedLeasePaths: Array<string | undefined> = [];
-      leaseInternals.providerHomeLeases = {
-        acquire: async (request, cancellation) => {
+      leaseInternals.providerHomeLeases = leaseStub(async (request, cancellation) => {
           assert.equal(cancellation?.isCurrent?.(), true);
           const path = protectedLeasePath(request);
           if (process.platform === "linux") assert.ok(path);
@@ -725,8 +737,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
             assert.notEqual(path, sourceWorktree.path, "the regression must reach the target fork lease");
           }
           throw new Error("lease refused");
-        },
-      };
+      });
       const refusedLease = await manager.forkConversation(
         "s_claude_source", "s_claude_lease_refused", 2, "Lease Refused",
       );
@@ -742,8 +753,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       const enteredLease = new Promise<void>((resolve) => { entered = resolve; });
       const leaseGate = new Promise<void>((resolve) => { release = resolve; });
       const delayedLeasePaths: Array<string | undefined> = [];
-      leaseInternals.providerHomeLeases = {
-        acquire: async (request, cancellation) => {
+      leaseInternals.providerHomeLeases = leaseStub(async (request, cancellation) => {
           assert.equal(cancellation?.isCurrent?.(), true);
           const path = protectedLeasePath(request);
           if (process.platform === "linux") assert.ok(path);
@@ -757,8 +767,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
           }
           entered();
           await leaseGate;
-        },
-      };
+      });
       const cancelledTarget = "s_claude_lease_cancelled";
       const pendingFork = manager.forkConversation("s_claude_source", cancelledTarget, 2, "Lease Cancelled");
       await enteredLease;
