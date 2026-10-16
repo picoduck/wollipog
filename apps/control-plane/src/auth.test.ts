@@ -233,6 +233,20 @@ test("carriesTokenParam: detects the token key in every spelling /ui auth accept
   assert.equal(carriesTokenParam("/board?x=token"), false); // token in a VALUE is fine
 });
 
+test("redactTokenInUrl preserves malformed query keys while redacting the token", () => {
+  assert.equal(redactTokenInUrl("/ui?%zz=1&token=secret"), "/ui?%zz=1&token=<redacted>");
+});
+
+for (const { url, expected } of [
+  { url: "/board?%zz=1", expected: false },
+  { url: "/board?%E0%A4%A=1&token=x", expected: true },
+  { url: "/board?token%=x", expected: false },
+]) {
+  test(`carriesTokenParam handles malformed query keys: ${url}`, () => {
+    assert.equal(carriesTokenParam(url), expected);
+  });
+}
+
 test("extractBearer parses the Authorization header case-insensitively", () => {
   assert.equal(extractBearer("Bearer abc123"), "abc123");
   assert.equal(extractBearer("bearer  abc123 "), "abc123");
