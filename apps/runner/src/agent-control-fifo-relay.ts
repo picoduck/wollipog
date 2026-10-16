@@ -11,8 +11,10 @@
  * pins the destination and supplies its memory-held bearer exactly as it does for the loopback
  * relay, and the sandbox gains no socket, port, or writable path.
  *
- * One directory per live session, mode 0300, so a process can open a name it knows but cannot
- * list the directory to learn anyone else's:
+ * Every other session's sandboxed commands run as the same user and can read the whole disk, so a
+ * channel must not be findable: each session's directory has a random 128-bit name that only its
+ * own environment carries, inside a base that cannot be listed. The directory itself is mode 0300,
+ * so a process can open a name it knows but cannot list it to learn anyone else's:
  *
  *   doorbell      The runner holds it open read-write, then makes it write-only (0200), so no other
  *                 process can read the nonces posted to it. A client writes one
@@ -73,6 +75,9 @@ export interface FifoRelayLimits {
   maxPendingExchanges: number;
   /** From the nonce to the client's first request byte. */
   arrivalMs: number;
+  /** From the first request byte to the end of the frame. Even the largest frame takes far less,
+   * so a client cannot hold a slot for the whole exchange by sending a single byte. */
+  requestMs: number;
   /** From the nonce to the end of the response, whatever the relayed request is doing. The slowest
    * relayed calls are bounded at 180 seconds by their own control-plane timeouts. */
   exchangeMs: number;
@@ -83,6 +88,7 @@ export interface FifoRelayLimits {
 export const DEFAULT_FIFO_RELAY_LIMITS: FifoRelayLimits = {
   maxPendingExchanges: 16,
   arrivalMs: 10_000,
+  requestMs: 60_000,
   exchangeMs: 300_000,
   maxRequestFrameBytes: MAX_REQUEST_FRAME_BYTES,
 };
@@ -140,13 +146,14 @@ function removeChannelDirectory(directory: string): void {
   rmSync(directory, { recursive: true, force: true });
 }
 
+/** The base holds every session's channel; 0300, so no session can list it to find another's. */
 function prepareBase(base: string): void {
   mkdirSync(base, { recursive: true, mode: 0o700 });
   const stat = lstatSync(base);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new Error("Agent Control FIFO relay base is not a directory");
   }
-  chmodSync(base, 0o700);
+  chmodSync(base, 0o300);
 }
 
 /** Startup cleanup: no channel survives a runner restart. A provider still holding an old path
@@ -154,11 +161,15 @@ function prepareBase(base: string): void {
 export function sweepAgentControlFifoRelays(base: string): number {
   let entries;
   try {
+    const stat = lstatSync(base);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return 0;
+    chmodSync(base, 0o700);
     entries = readdirSync(base, { withFileTypes: true });
   } catch {
     return 0;
   }
   for (const entry of entries) removeChannelDirectory(join(base, entry.name));
+  chmodSync(base, 0o300);
   return entries.length;
 }
 
@@ -200,8 +211,8 @@ export class AgentControlFifoRelays {
       if (existing && !existing.doorbell.destroyed) return existing.directory;
       this.closeNow(sessionId);
       prepareBase(this.base);
-      const directory = join(this.base, sessionId);
-      removeChannelDirectory(directory);
+      // Unguessable, so a process that knows only the session id cannot find the doorbell.
+      const directory = join(this.base, `${sessionId}.${randomBytes(16).toString("hex")}`);
       mkdirSync(directory, { mode: 0o700 });
       const doorbellPath = join(directory, DOORBELL);
       let doorbell: Socket | undefined;
@@ -236,11 +247,10 @@ export class AgentControlFifoRelays {
   private closeNow(sessionId: string): void {
     const channel = this.channels.get(sessionId);
     this.channels.delete(sessionId);
-    if (channel) {
-      for (const exchange of [...channel.exchanges.values()]) exchange.finish();
-      channel.doorbell.destroy();
-    }
-    if (isSafeSessionFileId(sessionId)) removeChannelDirectory(join(this.base, sessionId));
+    if (!channel) return;
+    for (const exchange of [...channel.exchanges.values()]) exchange.finish();
+    channel.doorbell.destroy();
+    removeChannelDirectory(channel.directory);
   }
 
   private listen(sessionId: string, channel: Channel): void {
@@ -280,11 +290,13 @@ export class AgentControlFifoRelays {
     const abort = new AbortController();
     let request: Socket | undefined;
     let response: Socket | undefined;
+    let requestTimer: NodeJS.Timeout | undefined;
     let finished = false;
     const finish = () => {
       if (finished) return;
       finished = true;
       clearTimeout(arrival);
+      clearTimeout(requestTimer);
       clearTimeout(deadline);
       abort.abort();
       request?.destroy();
@@ -320,6 +332,7 @@ export class AgentControlFifoRelays {
         if (finished || handling) return;
         if (!response) {
           clearTimeout(arrival);
+          requestTimer = setTimeout(finish, this.limits.requestMs);
           try {
             // The client opened the response FIFO before writing, so a reader exists unless it
             // broke the protocol, in which case this open fails and the exchange ends.
@@ -339,6 +352,7 @@ export class AgentControlFifoRelays {
         }
         chunks.push(chunk);
         if (!chunk.includes(0x0a)) return;
+        clearTimeout(requestTimer);
         const received = Buffer.concat(chunks);
         handling = true;
         let parsed: AgentControlRelayRequest;

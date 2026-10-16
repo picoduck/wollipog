@@ -214,9 +214,14 @@ after(async () => {
   await new Promise<void>((resolve) => (unixServer ? unixServer.close(() => resolve()) : resolve()));
   if (root) {
     removeAgentControlFiles(SESSION, join(root, "agent-control"));
-    for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
-      if (entry.isDirectory()) chmodSync(join(entry.parentPath, entry.name), 0o700);
-    }
+    // The FIFO relay base is 0300 and cannot be listed; open each directory before removing it.
+    const relax = (directory: string) => {
+      try { chmodSync(directory, 0o700); } catch { return; }
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) relax(join(directory, entry.name));
+      }
+    };
+    relax(root);
     rmSync(root, { recursive: true, force: true });
   }
 });

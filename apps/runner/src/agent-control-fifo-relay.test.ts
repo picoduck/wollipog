@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   openSync,
   readdirSync,
+  readSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -41,14 +42,21 @@ import {
 // The channel is provisioned only on Linux, where it was measured against Codex's sandbox.
 const SKIP = process.platform !== "linux" ? "the FIFO relay is provisioned only on Linux" : false;
 
+/** Channel directories are 0300 and cannot be listed, so open each one before removing the tree. */
+function removeTree(root: string): void {
+  const relax = (directory: string) => {
+    try { chmodSync(directory, 0o700); } catch { return; }
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) relax(join(directory, entry.name));
+    }
+  };
+  if (existsSync(root)) relax(root);
+  rmSync(root, { recursive: true, force: true });
+}
+
 const roots: string[] = [];
 after(() => {
-  for (const root of roots) {
-    for (const entry of existsSync(root) ? readdirSync(root, { recursive: true, withFileTypes: true }) : []) {
-      if (entry.isDirectory()) chmodSync(join(entry.parentPath, entry.name), 0o700);
-    }
-    rmSync(root, { recursive: true, force: true });
-  }
+  for (const root of roots) removeTree(root);
 });
 
 function base(): string {
@@ -120,17 +128,21 @@ test("a FIFO channel carries relay frames both ways, concurrently, and leaves no
   }
 });
 
-test("the channel directory cannot be listed and its doorbell cannot be read", { skip: SKIP }, async () => {
+test("no other session can find a channel, list its nonces, or read its doorbell", { skip: SKIP }, async () => {
   const channel = relays(async () => ({ status: 200, body: "{}" }));
   try {
     const directory = await channel.ensure("s_fifo_modes");
+    // Knowing a session id is not enough to reach its doorbell.
+    assert.match(directory, /\/s_fifo_modes\.[0-9a-f]{32}$/u);
+    assert.equal(existsSync(join(directory, "..", "s_fifo_modes")), false);
+    assert.throws(() => readdirSync(join(directory, "..")), { code: "EACCES" }, "the base cannot be listed");
+    assert.equal(statSync(join(directory, "..")).mode & 0o777, 0o300);
     assert.equal(statSync(directory).mode & 0o777, 0o300);
     assert.equal(statSync(join(directory, "doorbell")).mode & 0o777, 0o200);
     assert.ok(statSync(join(directory, "doorbell")).isFIFO());
     assert.throws(() => readdirSync(directory), { code: "EACCES" }, "a nonce cannot be learned by listing");
     assert.throws(() => openSync(join(directory, "doorbell"), constants.O_RDONLY | constants.O_NONBLOCK),
       { code: "EACCES" }, "a nonce cannot be learned by reading the doorbell");
-    assert.equal(statSync(join(directory, "..")).mode & 0o777, 0o700);
   } finally {
     await channel.closeAll();
   }
@@ -348,6 +360,41 @@ test("a response the client never reads is abandoned at the deadline instead of 
   }
 });
 
+test("a single request byte does not hold a slot past the request limit", { skip: SKIP }, async () => {
+  let calls = 0;
+  const channel = relays(async () => { calls++; return { status: 200, body: "{}" }; },
+    { maxPendingExchanges: 1, requestMs: 150 });
+  try {
+    const directory = await channel.ensure("s_fifo_trickle");
+    const nonce = "7".repeat(32);
+    ring(directory, `${JSON.stringify({ nonce })}\n`);
+    const requestPath = join(directory, `${nonce}.req`);
+    await until(() => isFifo(requestPath));
+    const reader = openSync(join(directory, `${nonce}.res`), constants.O_RDONLY | constants.O_NONBLOCK);
+    let writer: number | undefined;
+    await until(() => {
+      try { writer = openSync(requestPath, constants.O_WRONLY | constants.O_NONBLOCK); return true; } catch { return false; }
+    });
+    writeSync(writer!, "{");
+    // A FIFO without a writer reads as end-of-file, so first see the runner open its writer (an
+    // empty pipe with a writer is EAGAIN), then see it close once the frame is overdue.
+    const scratch = Buffer.alloc(16);
+    await until(() => {
+      try { readSync(reader, scratch); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "EAGAIN"; }
+    });
+    await until(() => {
+      try { return readSync(reader, scratch) === 0; } catch { return false; }
+    }, 2_000);
+    assert.equal(calls, 0);
+    assert.equal((await agentControlFifoRelayFetch(directory, KEY)("http://127.0.0.1:1/api/next")).status, 200,
+      "the slot is free again");
+    closeSync(writer!);
+    closeSync(reader);
+  } finally {
+    await channel.closeAll();
+  }
+});
+
 test("junk on the doorbell is ignored and valid requests keep being served", { skip: SKIP }, async () => {
   const channel = relays(async () => ({ status: 200, body: '{"ok":true}' }));
   try {
@@ -383,8 +430,10 @@ test("closing a session removes its directory, ends its exchanges and refuses la
   assert.equal(existsSync(directory), false);
   await assert.rejects(() => fetch("http://127.0.0.1:1/api/after"), /relay is not running for this session/);
   const again = await channel.ensure("s_fifo_close");
-  assert.equal(again, directory, "a relaunch gets a fresh channel at the same place");
+  assert.notEqual(again, directory, "a relaunch gets a fresh, newly random channel");
+  assert.match(again, /\/s_fifo_close\.[0-9a-f]{32}$/u);
   await channel.closeAll();
+  assert.equal(existsSync(again), false);
 });
 
 test("a doorbell nobody reads names the stopped relay instead of hanging", { skip: SKIP }, async () => {
@@ -409,9 +458,16 @@ test("startup sweep removes every channel an earlier runner left, unlistable or 
   writeFileSync(join(outside, "kept"), "kept");
   symlinkSync(outside, join(relayBase, "s_link"));
   assert.equal(sweepAgentControlFifoRelays(relayBase), 3);
-  assert.deepEqual(readdirSync(relayBase), []);
+  assert.equal(statSync(relayBase).mode & 0o777, 0o300, "the swept base stays unlistable");
+  assert.equal(sweepAgentControlFifoRelays(relayBase), 0, "nothing is left");
   assert.equal(existsSync(join(outside, "kept")), true, "a link is removed, never followed");
   assert.equal(sweepAgentControlFifoRelays(join(relayBase, "missing")), 0);
+  // A base a running runner made unlistable is swept just the same.
+  const channel = new AgentControlFifoRelays(relayBase, async () => ({ status: 200, body: "{}" }));
+  const live = await channel.ensure("s_live");
+  assert.equal(sweepAgentControlFifoRelays(relayBase), 1);
+  assert.equal(existsSync(live), false);
+  await channel.closeAll();
 });
 
 test("ensure refuses unsafe session ids and a linked base", { skip: SKIP }, async () => {

@@ -1027,13 +1027,16 @@ test("startup sweep removes final and interrupted staging files while retaining 
 test("startup sweep also removes FIFO relay channels an earlier runner left (#3270)", { skip: process.platform !== "linux" }, () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-fifo-sweep-"));
   try {
-    const channel = join(agentControlFifoRelayBase(root), "s_old");
+    const channel = join(agentControlFifoRelayBase(root), `s_old.${"a".repeat(32)}`);
     mkdirSync(channel, { recursive: true });
     spawnSync("mkfifo", ["-m", "600", join(channel, "doorbell")]);
     chmodSync(channel, 0o300);
+    chmodSync(agentControlFifoRelayBase(root), 0o300);
     assert.equal(sweepAgentControlFiles(root), 1);
-    assert.deepEqual(readdirSync(agentControlFifoRelayBase(root)), []);
+    assert.equal(existsSync(channel), false);
+    assert.equal(sweepAgentControlFiles(root), 0);
   } finally {
+    chmodSync(agentControlFifoRelayBase(root), 0o700);
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -84,9 +84,13 @@ created in that one directory:
 No network access, writable root, socket, port, seccomp rule or namespace setting changes. The
 directory is not a writable root, and the sandbox cannot create files there.
 
-The channel layout:
+Every other session's sandboxed commands run as the same user and can read the whole disk, so a
+channel must not be findable. The channel layout:
 
-- One directory per session, mode 0300, so a process can open a name it knows but cannot list the
+- One directory per session, named after the session plus a random 128-bit suffix that only that
+  session's environment carries, inside a base that cannot be listed (0300). Knowing a session id
+  is therefore not enough to reach its doorbell or exhaust its exchange limit.
+- Each directory is mode 0300 too, so a process can open a name it knows but cannot list the
   directory.
 - The doorbell FIFO is write-only (0200) once the runner holds it open, so the nonces posted to it
   cannot be read back.
@@ -102,6 +106,8 @@ Limits:
 - At most 16 open exchanges per session; a further nonce is ignored and its client gives up after
   10 seconds.
 - 10 seconds for a client to arrive.
+- 60 seconds from the first request byte to the end of the frame, so a single byte cannot hold a
+  slot for the whole exchange.
 - 300 seconds for a whole exchange.
 - The loopback relay's frame bounds.
 
