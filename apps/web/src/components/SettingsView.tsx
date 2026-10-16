@@ -1,3 +1,4 @@
+import { RemoteAccessPanel } from "./RemoteAccessPanel.js";
 import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-privacy.js";
 import React, { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
@@ -821,7 +822,7 @@ export function NetworkPanel({ tailnet, onNavigate }: { tailnet: TailnetAccessSe
       <SettingsGroup
         title="Connection"
         scope="This Window"
-        foot={tailnet.desktop ? undefined : "Tailnet access is turned on in the Wollipog desktop app, on the machine that runs the server."}
+        foot={tailnet.desktop ? undefined : "Set up secure remote access on the computer running this server."}
       >
         <ValueRow
           title="Connected To"
@@ -843,6 +844,7 @@ export function NetworkPanel({ tailnet, onNavigate }: { tailnet: TailnetAccessSe
           />
         )}
       </SettingsGroup>
+      <RemoteAccessPanel key={instances.activeProfile.id} />
       {tailnet.desktop && (
         <SettingsGroup title="Tailnet" scope="This Machine">
           <TailnetAccessRow tailnet={tailnet} />

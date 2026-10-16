@@ -167,6 +167,8 @@ import {
   localDeviceTokenPath,
   localPairingUrl,
 } from "./local-device-credential.js";
+import { RemoteAccess } from "./remote-access.js";
+import { registerRemoteAccessRoutes } from "./remote-access-route.js";
 import { probePublicOriginWithFetch, registerHostAdminRoute } from "./host-admin-route.js";
 import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
@@ -480,6 +482,12 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body,
 // signature depend on key order/whitespace chosen by the control plane instead of the sender.
 registerAutomationTriggerContentTypeParser(app);
 
+const remoteAccess = new RemoteAccess({
+  statePath: `${DB_PATH}.remote-access.json`, port: PORT, instanceId: db.instanceId(),
+  configuredOrigin: PUBLIC_ORIGIN.origin,
+  log: (data) => app.log.info(data, "remote access operation completed"),
+});
+
 const requestPrincipals = new WeakMap<object, AuthPrincipal>();
 const requestMutationAudits = new WeakMap<object, string>();
 
@@ -579,6 +587,11 @@ function authedApiPrincipal(
   },
   allowQueryToken = false,
 ): { id: string; name: string; principal: AuthPrincipal } | null {
+  if ((allowQueryToken || extractBearer(req.headers.authorization)) && remoteAccess.isProbeRequest(req)) {
+    return { id: "remote-access-check", name: "Connection Check", principal: {
+      ...localApiPrincipal().principal, role: "viewer", deviceId: null, localBootstrap: false,
+    } };
+  }
   const local = authedLocalBootstrap(req, allowQueryToken);
   if (local) return local;
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
@@ -675,7 +688,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (mutationError) return mutationError;
   if (!principal) return null;
 
-  const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/compatibility" ||
+  const memberScopedRoute = routePath === "/api/remote-access" || routePath === "/api/instance" || routePath === "/api/compatibility" ||
     routePath === "/api/identity" || routePath === "/api/runners" ||
     (routePath === "/api/session-naming" || routePath.startsWith("/api/session-naming/")) ||
     routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
@@ -2458,6 +2471,10 @@ app.post("/api/projects/:id/archive-sessions", async (req, reply) => {
   };
 });
 
+registerRemoteAccessRoutes(app, remoteAccess, (req) => {
+  const human = requestHuman(req);
+  return trustedLoopback(req) && human !== null && (human.role === "owner" || human.role === "admin");
+});
 registerInstanceRoute(app, {
   instanceId: () => db.instanceId(),
   displayName: () => db.localIdentityContext().organizationName,
@@ -2466,7 +2483,7 @@ registerHostAdminRoute(app, {
   localBootstrapPrincipal: (req) => authedLocalBootstrap(req),
   startedAt: STARTED_AT,
   bind: { host: HOST, port: PORT, tailnetOnly: TAILNET_ONLY },
-  publicOrigin: PUBLIC_ORIGIN.origin,
+  get publicOrigin() { return remoteAccess.publicOrigin(); },
   publicOriginWarning: PUBLIC_ORIGIN.warning,
   webServed: () => webDist !== null,
   pairingHosts: () => pairingHosts(HOST, TAILNET_ONLY ? tailnetIpv4(lanIpv4()) : lanIpv4()),
@@ -2538,6 +2555,7 @@ const skillGitAutoUpdater = new SkillGitAutoUpdater({ db, intervalMs: db.skillGi
 // mint further tokens. The plaintext token is returned exactly once; only its hash persists.
 app.post("/api/devices", async (req, reply) => {
   if (!trustedLoopback(req)) return reply.code(403).send({ error: "devices can only be paired from the local dashboard" });
+  await remoteAccess.status(true);
   const body = (req.body ?? {}) as { name?: unknown; userId?: unknown };
   const name = String(body.name ?? "").trim().slice(0, 64);
   if (!name) return reply.code(400).send({ error: "name is required" });
@@ -2572,7 +2590,8 @@ app.post("/api/devices", async (req, reply) => {
       boundBeyondLoopback: !isLoopbackBindHost(HOST),
       // Protocol v114+: the operator-configured dashboard origin, so a host CLI can print a
       // complete link even when the bind host is not what remote clients reach.
-      publicOrigin: PUBLIC_ORIGIN.origin,
+      publicOrigin: remoteAccess.publicOrigin(),
+      ...(remoteAccess.view(true).provider ? { remoteAccess: { phase: remoteAccess.view(true).phase, message: remoteAccess.view(true).message } } : {}),
     },
   });
 });

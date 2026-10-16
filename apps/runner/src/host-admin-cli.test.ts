@@ -911,3 +911,29 @@ test("admin doctor on a system-mode deployment expects the service account to ow
   assert.equal(byId["control-plane-reachable"].status, "pass", "root can read the service account's credential to reach the control plane");
   assert.equal(byId.lingering, undefined, "no lingering check in system mode");
 });
+
+test("admin remote-access uses the shared authenticated setup and requires mutation consent", async (t) => {
+  const { tokenFile } = fixture(t);
+  const backend = server();
+  const setups: unknown[] = [];
+  const fetchImpl: McpFetch = async (url, init) => {
+    if (!url.endsWith("/api/remote-access")) return backend.fetch(url, init);
+    assert.equal(init?.headers?.authorization, `Bearer ${TOKEN}`);
+    if (init?.method === "POST") setups.push(JSON.parse(init.body!));
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      canConfigure: true, phase: "ready", provider: "tailscale", origin: "https://fixture.example.ts.net:8443",
+      message: "Your secure dashboard is ready.", canDisable: true, verifiedAt: 1,
+    }) };
+  };
+  const piped = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "remote-access", "setup", "--json"], env(tokenFile), piped.io, fetchImpl, host), 2);
+  assert.equal(setups.length, 0);
+  const approved = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "remote-access", "setup", "--yes", "--json"], env(tokenFile), approved.io, fetchImpl, host), 0);
+  assert.deepEqual(setups, [{ provider: "tailscale" }]);
+  assert.equal(JSON.parse(approved.stdout()).origin, "https://fixture.example.ts.net:8443");
+  assert.ok(!approved.stdout().includes(TOKEN));
+  const existing = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "remote-access", "setup", "--origin", "https://proxy.example.test", "--yes"], env(tokenFile), existing.io, fetchImpl, host), 0);
+  assert.deepEqual(setups.at(-1), { provider: "https", origin: "https://proxy.example.test" });
+});

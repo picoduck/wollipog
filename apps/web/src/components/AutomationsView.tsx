@@ -1,3 +1,4 @@
+import { useDashboardPublicOrigin } from "../remote-access-context.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
@@ -25,7 +26,7 @@ import {
 import { AutomationsIcon } from "./Icons.js";
 import { useApi } from "../api-context.js";
 import { startVisiblePolling } from "../visible-polling.js";
-import { instancePublicOrigin, useInstances } from "../instances-context.js";
+import { useInstances } from "../instances-context.js";
 import { titleCaseLabel } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -146,7 +147,7 @@ function AutomationCard({
 export function AutomationsView() {
   const api = useApi();
   const instances = useInstances();
-  const publicOrigin = instancePublicOrigin(instances);
+  const publicOrigin = useDashboardPublicOrigin();
   const { confirm } = useFeedback();
   // Workflow runs belong to the Multi-Agent experiment: with it off, this view must not offer
   // creating one. An automation that ALREADY uses the action keeps its option so editing it

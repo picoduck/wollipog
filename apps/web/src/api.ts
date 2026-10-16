@@ -313,6 +313,16 @@ export function createApiClient(transport: ApiTransport) {
     return req<UsageAggregationResponse>(`/api/usage?${query.toString()}`);
   },
 
+  remoteAccess: async () => {
+    const view = await req<import("@wollipog/protocol").RemoteAccessView>("/api/remote-access");
+    if (typeof view.phase !== "string" || typeof view.canConfigure !== "boolean") throw new ApiError("Remote access setup is not available on this server.", 404);
+    return view;
+  },
+  setupRemoteAccess: (input: import("@wollipog/protocol").RemoteAccessSetup) =>
+    req<import("@wollipog/protocol").RemoteAccessView>("/api/remote-access", { method: "POST", body: JSON.stringify(input) }),
+  cancelRemoteAccess: () => req<import("@wollipog/protocol").RemoteAccessView>("/api/remote-access/cancel", { method: "POST" }),
+  disableRemoteAccess: () => req<import("@wollipog/protocol").RemoteAccessView>("/api/remote-access", { method: "DELETE" }),
+
   artifactUploadSettings: () => req<import("@wollipog/protocol").ArtifactUploadSettingsView>("/api/artifact-upload-settings"),
 
   updateArtifactUploadSettings: (input: import("@wollipog/protocol").ArtifactUploadSettingsView) =>

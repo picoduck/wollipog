@@ -65,6 +65,7 @@ export interface PairingReach {
    * front of a loopback-bound control plane. When set it is the pairing link.
    */
   publicOrigin?: string | null;
+  remoteAccess?: { phase: string; message: string };
 }
 
 /** A usable http(s) origin from the operator's public-origin setting, or null. */
@@ -91,6 +92,9 @@ export function pairingLinks(token: string, reach: PairingReach): { links: strin
   }
   // The operator said where remote clients reach the dashboard; that beats guessing from the bind
   // address, and it is the only link that works for a loopback bind behind a reverse proxy.
+  if (reach.remoteAccess && reach.remoteAccess.phase !== "ready") {
+    return { links: [], blocked: "secure remote access needs attention; open Network settings on the computer running Wollipog and retry setup" };
+  }
   const configured = publicOriginLink(reach.publicOrigin, token);
   if (configured) return { links: [configured], blocked: null };
   if (!reach.boundBeyondLoopback) {

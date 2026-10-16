@@ -171,6 +171,9 @@ export function hostAdminUsage(): string {
     "  admin pairing-url [--json]",
     "  admin status [--json]",
     "  admin doctor [--json]",
+    "  admin remote-access status [--json]",
+    "  admin remote-access setup [--origin <https-origin>] [--yes] [--json]",
+    "  admin remote-access disable [--yes] [--json]",
     "  admin user list [--json]",
     "  admin device list [--json]",
     "  admin device create --name <name> [--user <user-id>] [--origin <public-origin>] [--output <file>] [--json]",
@@ -424,7 +427,7 @@ function makeClient(fetchImpl: McpFetch, cpUrl: string, token: string): Client {
         method,
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(path === "/api/remote-access" ? 60_000 : 15_000),
       });
     } catch (error) {
       throw new CliError(`control plane at ${cpUrl} is unreachable: ${(error as Error).message}. Is the control-plane service running?`);
@@ -791,7 +794,7 @@ async function doctorCommand(
 interface DeviceCreateReply {
   device: DeviceView;
   token: string;
-  pairing: { hosts: string[]; port: number; webServed: boolean; boundBeyondLoopback: boolean; publicOrigin?: string | null };
+  pairing: { hosts: string[]; port: number; webServed: boolean; boundBeyondLoopback: boolean; publicOrigin?: string | null; remoteAccess?: { phase: string; message: string } };
 }
 
 export async function runHostAdminCli(
@@ -826,7 +829,7 @@ export async function runHostAdminCli(
 
     if (command === "doctor") return await doctorCommand(args, env, io, fetchImpl, host, installed, target, tokenPath, emit);
 
-    if (command !== "status" && command !== "user" && command !== "device" && command !== "runner-credential") {
+    if (command !== "status" && command !== "user" && command !== "device" && command !== "runner-credential" && command !== "remote-access") {
       throw new CliError(hostAdminUsage(), 2);
     }
     const token = readProtectedLocalToken(tokenPath, host);
@@ -837,6 +840,29 @@ export async function runHostAdminCli(
       const status = await client.get<HostAdminStatusView>("/api/admin/status");
       emit(status, () => formatStatus(status));
       return 0;
+    }
+
+    if (command === "remote-access") {
+      const verb = words[2];
+      if (verb !== "status" && verb !== "setup" && verb !== "disable") throw new CliError(hostAdminUsage(), 2);
+      if (verb !== "status" && !flag(args, "--yes")) {
+        if (!io.stdinIsTTY) throw new CliError("Pass --yes to confirm changing remote access, or run this command in a terminal.", 2);
+        if (!await io.confirm(verb === "setup" ? "Set up secure remote access on this host?" : "Turn off Wollipog-managed remote access?")) return 0;
+      }
+      type RemoteView = import("@wollipog/protocol").RemoteAccessView;
+      const input = option(args, "--origin") ? { provider: "https", origin: option(args, "--origin") } : { provider: "tailscale" };
+      let view: RemoteView;
+      if (verb === "disable") { await client.del("/api/remote-access"); view = await client.get<RemoteView>("/api/remote-access"); }
+      else view = verb === "setup" ? await client.post<RemoteView>("/api/remote-access", input) : await client.get<RemoteView>("/api/remote-access");
+      if (!json && view.authorizationUrl && io.stdinIsTTY) {
+        io.stdout(`${view.message}\nAuthorize HTTPS: ${view.authorizationUrl}\n`);
+        if (await io.confirm("After authorizing HTTPS in your browser, retry setup?")) view = await client.post<RemoteView>("/api/remote-access", input);
+      }
+      emit(view, () => [view.message, view.origin ? `Secure Address: ${view.origin}` : null,
+        view.authorizationUrl ? `Authorize HTTPS: ${view.authorizationUrl}` : null,
+        view.phase === "ready" ? "Next: wollipog admin device create --name <device-name> --output <pairing-file>" : null,
+      ].filter(Boolean).join("\n"));
+      return view.phase === "ready" || (verb === "disable" && view.phase === "not_configured") ? 0 : 3;
     }
 
     if (command === "user") {
@@ -893,6 +919,9 @@ export async function runHostAdminCli(
         }
         if (typeof reply.token !== "string" || !PAIR_TOKEN_RE.test(reply.token)) {
           throw new CliError("control plane returned an unusable device token");
+        }
+        if (!explicitOrigin && reply.pairing.remoteAccess && reply.pairing.remoteAccess.phase !== "ready") {
+          throw new CliError("Secure remote access needs attention. Run wollipog admin remote-access setup, then create the pairing link again.");
         }
         let origin: string;
         let originSource: "flag" | "public-origin" | "bind-host" | "loopback";

@@ -1,3 +1,4 @@
+import { useDashboardPublicOrigin } from "../remote-access-context.js";
 import React, { useEffect, useLayoutEffect, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import {
   isTerminal,
@@ -21,7 +22,7 @@ import {
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { discardComposerDraft } from "../composer-drafts.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { instancePublicOrigin, useInstances } from "../instances-context.js";
+import { useInstances } from "../instances-context.js";
 import { absoluteViewUrl, backLabel } from "../navigation.js";
 import { reminderMenuActionLabel } from "../session-reminders.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
@@ -225,7 +226,7 @@ export function SessionHeader({
     "sessionProviderAccountSwitch",
   );
   const accountSwitchApplicable = sessionAccountSwitchApplicable(session);
-  const dashboardOrigin = instancePublicOrigin(instances);
+  const dashboardOrigin = useDashboardPublicOrigin();
   const internalSessionUrl = dashboardOrigin
     ? absoluteViewUrl(dashboardOrigin, { name: "session", id: session.id })
     : null;

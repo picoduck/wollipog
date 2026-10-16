@@ -348,7 +348,8 @@ export function EvidenceSecureContextNotice({ evidence }: { evidence: readonly E
         marked reviewed. You can still deny the request from this page.
       </p>
       <p>
-        To finish the review, reopen Wollipog over HTTPS, for example through <code>tailscale serve</code>, or on
+        <a href="/settings/network">Set Up Remote Access</a> in Network settings on the computer running Wollipog.
+        {" "}To finish the review, reopen Wollipog over HTTPS, for example through <code>tailscale serve</code>, or on
         localhost on the machine that runs it.
       </p>
     </Notice>

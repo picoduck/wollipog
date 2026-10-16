@@ -1,3 +1,4 @@
+import { RemoteAccessProvider } from "./remote-access-context.js";
 import { ExperimentGate } from "./components/ExperimentGate.js";
 import {
   lazy,
@@ -75,6 +76,7 @@ import {
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { OfflineBanner } from "./components/OfflineBanner.js";
+import { SecureDashboardNotice } from "./components/SecureDashboardNotice.js";
 import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
 import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
@@ -883,6 +885,7 @@ export function Shell() {
               : <OfflineBanner connecting={conn === "connecting"} onRetryNow={reconnectNow} />
           )
         )}
+        <SecureDashboardNotice connected={conn === "online"} />
         {/* Every route's page root is the `main` F6 zone; master-detail pages mark their own list
             and detail panes inside it (focus-zones.ts). */}
         <div
@@ -1068,7 +1071,7 @@ export function Shell() {
     </div>
   );
   // The rail tile and the Instances card read the banner's truth from here, so they never disagree.
-  return <ActiveInstanceConnectionProvider value={instanceConnection}>{shell}</ActiveInstanceConnectionProvider>;
+  return <ActiveInstanceConnectionProvider value={instanceConnection}><RemoteAccessProvider>{shell}</RemoteAccessProvider></ActiveInstanceConnectionProvider>;
 }
 
 export function Header({

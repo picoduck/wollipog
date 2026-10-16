@@ -54,6 +54,8 @@ for (const [name, value] of Object.entries(globals)) {
   Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 }
 const { NetworkPanel } = await import("./SettingsView.js");
+const { ApiProvider } = await import("../api-context.js");
+const { api } = await import("../api.js");
 const { browserInstanceManager, InstancesContextProvider } = await import("../instances-context.js");
 
 after(() => {
@@ -100,9 +102,12 @@ async function render(
   const root = createRoot(container);
   const navigated: View[] = [];
   const draw = (next: TailnetAccessSetting) => act(async () => root.render(
-    <InstancesContextProvider value={instances}>
-      <NetworkPanel tailnet={next} onNavigate={(view) => navigated.push(view)} />
-    </InstancesContextProvider>,
+    <ApiProvider client={{ ...api, remoteAccess: async () => ({ canConfigure: next.desktop, phase: "not_configured", provider: null,
+      origin: null, message: "Set up a secure address on the host.", canDisable: false, verifiedAt: null }) }}>
+      <InstancesContextProvider value={instances}>
+        <NetworkPanel tailnet={next} onNavigate={(view) => navigated.push(view)} />
+      </InstancesContextProvider>
+    </ApiProvider>,
   ));
   await draw(setting);
   return {
@@ -135,10 +140,10 @@ test("in a browser Network shows the server this window uses, with Copy and the 
 
     assert.equal(
       view.container.querySelector(".settings-group-foot")?.textContent,
-      "Tailnet access is turned on in the Wollipog desktop app, on the machine that runs the server.",
+      "Set up secure remote access on the computer running this server.",
     );
     const groupTitles = [...view.container.querySelectorAll(".settings-group-title")].map((title) => title.textContent);
-    assert.deepEqual(groupTitles, ["Connection"], "a browser has no Tailnet group");
+    assert.deepEqual(groupTitles, ["Connection", "Remote Access"], "a browser shows secure setup guidance without a Tailnet switch");
     assert.equal(view.container.querySelector(".settings-group-scope")?.textContent, "This Window");
     assertNoDomNode(view.switch(), "nothing to switch in a browser");
     assert.equal(view.row("Manage Instances"), undefined, "a browser has no Instances to manage");
@@ -208,9 +213,9 @@ test("Tailnet Access is a noun-titled switch whose sentence follows its value", 
   const view = await render(tailnet());
   try {
     const groupTitles = [...view.container.querySelectorAll(".settings-group-title")].map((title) => title.textContent);
-    assert.deepEqual(groupTitles, ["Connection", "Tailnet"]);
+    assert.deepEqual(groupTitles, ["Connection", "Remote Access", "Tailnet"]);
     assert.deepEqual([...view.container.querySelectorAll(".settings-group-scope")].map((scope) => scope.textContent),
-      ["This Window", "This Machine"]);
+      ["This Window", "This Server", "This Machine"]);
     assertNoDomNode(view.container.querySelector(".settings-group-foot"), "the desktop app needs no pointer to itself");
     const control = view.switch()!;
     assert.equal(control.querySelector(".setting-row-title")?.textContent, "Tailnet Access");
