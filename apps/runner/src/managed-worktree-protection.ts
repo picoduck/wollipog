@@ -2231,6 +2231,11 @@ const MAX_ASSIGNED_SPELLINGS = 16;
 const UNMODELLED_SHAPE_REASON =
   "it uses a heredoc, newline, backtick, pipe, or subshell, which the guard does not model, and one of its words names a directory that contains that state";
 
+/** Reason for refusing a command whose tokenization still yields a comment the guard cannot separate
+ *  from an executable command (an unquoted `#` the escape pass could not neutralise). */
+const GUARD_STATE_COMMENT_REASON =
+  "it contains a comment the guard cannot separate from an executable command that could reach that state";
+
 /** The tokenizer's own complaint, without the command text it quotes back. */
 function tokenizerReason(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
@@ -2574,7 +2579,7 @@ function guardStateReadings(text: string): GuardStateReading[] {
  * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
  * opaque word could be a recursion flag or another operand.
  */
-interface CommandSegment { operands: Array<string | null>; words: string[] | null }
+interface CommandSegment { operands: Array<string | null>; words: string[] | null; redirects: Array<string | null> }
 
 /**
  * Split a parsed command into segments, or `null` when it contains a construct this classifier does
@@ -2585,6 +2590,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
   const segments: CommandSegment[] = [];
   let operands: Array<string | null> = [];
   let words: string[] | null = [];
+  let redirects: Array<string | null> = [];
   let redirected = false;
   let previousWord: string | null = null;
   for (const token of tokens) {
@@ -2592,7 +2598,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
     if (op === null) {
       const text = tokenText(token);
       operands.push(text);
-      if (redirected) redirected = false;
+      if (redirected) { redirects.push(text); redirected = false; }
       else if (words !== null) {
         if (text === null || text.includes("\0")) words = null;
         else words.push(text);
@@ -2601,9 +2607,10 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
       continue;
     }
     if (SEGMENT_SEPARATORS.has(op)) {
-      segments.push({ operands, words });
+      segments.push({ operands, words, redirects });
       operands = [];
       words = [];
+      redirects = [];
       redirected = false;
       previousWord = null;
       continue;
@@ -2617,7 +2624,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
     redirected = true;
     previousWord = null;
   }
-  segments.push({ operands, words });
+  segments.push({ operands, words, redirects });
   return segments;
 }
 
@@ -2713,6 +2720,161 @@ function inspectsAncestorOnly(
   }
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * Two narrow, POSITIVE, WHITELIST-gated shapes — never modelling arbitrary bash (#1734; Codex
+ * review rounds 1–3).
+ *
+ * Rounds 1–3 each found a new bypass in syntax the pre-pass did not model (comments, escapes, ANSI-C
+ * quoting, brace expansion, `${...}` operators). Per the parent's binding direction the allowance is
+ * now matched by a CHARACTER WHITELIST, not by emulation: anything the whitelist does not recognise
+ * disqualifies the allowance and the command is read exactly as shell-quote reads it (the old,
+ * stricter behaviour).
+ *
+ *  1. STRIPPABLE HEREDOC (`matchStrippableHeredoc`). The body is dropped only when the command's
+ *     first line matches one anchored regex over a tiny charset — `cat`/`tee`/`tee -a`, one `>`/`>>`
+ *     redirect (cat) or target (tee) from `[A-Za-z0-9._/@+-]`, one `<<'DELIM'` with a plain
+ *     single-quoted word, single spaces only — AND the body is terminated by a line equal to DELIM
+ *     that is the last line (bar one trailing newline). Any `#`, `\`, `$`, backtick, extra quote,
+ *     brace, glob, `;&|()<>` beyond the exact operators, or odd whitespace disqualifies it. The
+ *     target is classified normally, so a target in the hook dir is refused.
+ *  2. NON-REACHING ANCESTOR / AC1 (the gate in `commandTargetsGuardState`). A single simple command
+ *     whose command word is the literal, unquoted `echo` — the only builtin that opens no operand and
+ *     cannot be coerced into executing one — with no redirect and every character whitelisted
+ *     (`ac1CommandWhitelisted`), is allowed even when it names `/`, `//`, or `~`. Only the ancestor
+ *     check is relaxed; the inside check and the raw-text scan still refuse anything resolving into
+ *     the state. (grep/sed/awk pattern/script exemptions were dropped as they could not be made both
+ *     whitelist-tight and useful; `printf` was dropped because `printf -v 'arr[$(cmd)]'` executes a
+ *     substitution, and `true`/`false`/`:` for conservatism — Codex round 4 CR-4.2, user scope.)
+ *
+ * The only text-level correction never touches quoted text, so it can never hide a reach: `shell-quote`
+ * treats an unquoted `#` as a comment running to the END of the whole string (past newlines), so
+ * `echo x#; cat <state>` dropped the `cat` unseen. Every UNQUOTED `#` is ESCAPED (`\#`), never removed;
+ * a `#` inside single/double quotes is left exactly as written so a quoted filename resolves the way
+ * bash resolves it (a quoted `'alias#'` symlink into the state — Codex round 4 CR-4.1). As a second
+ * guarantee, `wordRelation` resolves each token both as written and with any `\#` un-escaped. There is
+ * no `${...}` reduction and no quote-CONTENT modelling (round-2/round-3 bypass sources).
+ * ------------------------------------------------------------------------------------------ */
+
+/** The ONLY builtin whose operands are never opened as paths and which cannot be coerced into
+ *  executing one, so an ancestor among its operands cannot reach. `printf` is excluded because
+ *  `printf -v 'arr[$(cmd)]' …` evaluates the array subscript and executes a command substitution even
+ *  from a single-quoted argument the whitelist treats as opaque (Codex round 4 CR-4.2); `true`,
+ *  `false`, and `:` are excluded too, so the exemption is `echo` alone (the user's round-4 scope). */
+const GUARD_STATE_NONPATH_COMMANDS = new Set(["echo"]);
+
+/** The command word must be the literal, unquoted `echo` as the first thing on the line — not a
+ *  quoted (`'echo'`), escaped (`ec\ho`), or otherwise spelled word that tokenizes to `echo` but the
+ *  whitelist could not reason about. Leading blanks are allowed; a separator before it is not (that
+ *  would make it a second command, which the single-segment check already excludes). */
+const GUARD_STATE_LITERAL_ECHO = /^[ \t]*echo[ \t]/u;
+
+/** Characters allowed OUTSIDE single quotes in an AC1 command; a single-quoted run with no nested
+ *  `'` is otherwise opaque-clean. Excludes `$`, `` ` ``, `\`, `"`, `#`, braces, globs (`*?[]`), and
+ *  `;&|()<>`, so any substitution, expansion, quoting trick, or redirect disqualifies the exemption. */
+const GUARD_STATE_AC1_OUTSIDE_QUOTE = /[A-Za-z0-9._/:=,@+%~ -]/u;
+
+/** True when every character of a single simple command is whitelisted — plain characters outside
+ *  single quotes, and single-quoted runs (no nested `'`) treated as opaque. Fails closed on an
+ *  unterminated quote. Used to gate the AC1 ancestor exemption (#1734, Codex round 3). */
+function ac1CommandWhitelisted(command: string): boolean {
+  for (let i = 0; i < command.length;) {
+    const c = command[i]!;
+    if (c === "'") {
+      const close = command.indexOf("'", i + 1);
+      if (close < 0) return false;
+      i = close + 1;
+      continue;
+    }
+    if (!GUARD_STATE_AC1_OUTSIDE_QUOTE.test(c)) return false;
+    i += 1;
+  }
+  return true;
+}
+
+/** The command line of a strippable heredoc, as one anchored whitelist. A target is
+ *  `[A-Za-z0-9._/@+-]+` (no `$`, quotes, spaces, or metacharacters); the delimiter is a plain
+ *  single-quoted word; the redirect may precede or follow the `<<`. Single spaces only. */
+const GUARD_STATE_STRIPPABLE_HEREDOC_LINE = new RegExp(
+  "^(?:" +
+    "cat >>? ?[A-Za-z0-9._/@+-]+ <<'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // cat > T <<'D'
+    "cat <<'[A-Za-z_][A-Za-z0-9_]*' >>? ?[A-Za-z0-9._/@+-]+" + "|" + // cat <<'D' > T
+    "tee (?:-a )?[A-Za-z0-9._/@+-]+ <<'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // tee [-a] T <<'D'
+    "tee (?:-a )?<<'[A-Za-z_][A-Za-z0-9_]*' [A-Za-z0-9._/@+-]+" + // tee [-a] <<'D' T
+  ")$",
+  "u",
+);
+
+/**
+ * If the command's first line is exactly a `cat`/`tee` heredoc of the whitelisted shape, the body is
+ * terminated by a line equal to the delimiter that is the last line (bar one trailing newline), and
+ * nothing deviates, return that first line with the body removed (the caller still classifies the
+ * target). Otherwise `null`: the body is kept and scanned. The whitelist regex is the whole gate —
+ * a `#`, `\`, `$`, substitution, brace, glob, second command, or process substitution all fail it.
+ */
+function matchStrippableHeredoc(command: string): string | null {
+  const newline = command.indexOf("\n");
+  if (newline < 0) return null; // a heredoc needs a body on later lines
+  const commandLine = command.slice(0, newline);
+  if (!GUARD_STATE_STRIPPABLE_HEREDOC_LINE.test(commandLine)) return null;
+  const delimiter = /<<'([A-Za-z_][A-Za-z0-9_]*)'/u.exec(commandLine)?.[1];
+  if (delimiter === undefined) return null;
+  const lines = command.slice(newline + 1).split("\n");
+  const terminator = lines.indexOf(delimiter); // bash: the first body line equal to the delimiter
+  if (terminator < 0) return null; // unterminated → keep the body
+  const last = lines.length - 1;
+  if (terminator !== last && !(terminator === last - 1 && lines[last] === "")) return null; // content after → keep
+  return commandLine;
+}
+
+/** The two readings of a command the guard needs: `scan` for the literal-path text scan (only a
+ *  provably-inert stripped heredoc body removed), `parse` for the tokenizer. */
+export interface PreparedGuardStateCommand { scan: string; parse: string }
+
+/**
+ * Rewrite a command for the guard-state classifier, returning two readings. `scan` is the raw text
+ * with only a whitelisted strippable heredoc body removed; the literal-path text scan reads it, so
+ * no rewrite can hide a literal hook path. `parse` is the text the tokenizer reads: the same, with
+ * every UNQUOTED `#` escaped (`\#`) so `shell-quote` cannot start a comment — which it runs to the
+ * END of the whole string, past newlines, swallowing any command on a later line (the #1734
+ * under-refusal fix). The escape covers both word-start and word-interior `#`, because a word-start
+ * comment on one line would otherwise hide a reaching command on the next; it only ADDS a backslash,
+ * so it can never hide a reach.
+ *
+ * A `#` INSIDE single or double quotes is left untouched: `shell-quote` already keeps it literal, and
+ * rewriting inside quotes would corrupt a quoted filename for realpath resolution (a quoted
+ * `'alias#'` symlink into the state, Codex round 4 CR-4.1). The tracker models the three bash quote
+ * forms that make a `#` literal — `'…'`, `"…"`, and ANSI-C `$'…'` (where `\'` is escaped so only an
+ * unescaped `'` closes) — so it does not desync on `$'\''` and wrongly skip an unquoted `#`. As a
+ * hard backstop, `commandTargetsGuardState` refuses outright if `shell-quote` still returns a comment
+ * token (an unquoted `#` this pass failed to neutralise), so any residual quoting it does not model
+ * fails closed rather than swallowing a later command. There is no `${...}` reduction or content
+ * modelling.
+ */
+export function prepareGuardStateCommand(command: string): PreparedGuardStateCommand {
+  const stripped = matchStrippableHeredoc(command);
+  if (stripped !== null) return { scan: stripped, parse: stripped };
+  let parse = "";
+  let quote: "'" | '"' | "ansi" | null = null; // `ansi` = inside a `$'…'` ANSI-C string
+  for (let i = 0; i < command.length; i += 1) {
+    const c = command[i]!;
+    if (quote === "'") { parse += c; if (c === "'") quote = null; continue; } // single quotes: all literal
+    if (quote === "ansi") {
+      // `$'…'`: a backslash escapes the next char (including `\'`), so only an UNESCAPED `'` closes.
+      if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; }
+      parse += c; if (c === "'") quote = null; continue;
+    }
+    if (quote === '"') {
+      if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; } // keep an escaped pair whole
+      parse += c; if (c === '"') quote = null; continue;
+    }
+    if (c === "\\") { parse += c + (command[i + 1] ?? ""); i += 1; continue; } // keep an escaped pair whole
+    if (c === "$" && command[i + 1] === "'") { parse += "$'"; i += 1; quote = "ansi"; continue; } // enter $'…'
+    if (c === "'" || c === '"') { quote = c; parse += c; continue; }
+    parse += c === "#" ? "\\#" : c; // an unquoted `#` is neutralised; quoted `#` never reaches here
+  }
+  return { scan: command, parse };
+}
+
 /**
  * Refuse a shell command that references the guard-state directory in any form. Unparsable input
  * is refused rather than allowed: this is the state the veto itself depends on. An operand that is
@@ -2726,8 +2888,12 @@ export function commandTargetsGuardState(
 ): string | null {
   if (!directory || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
   const root = resolve(directory);
+  // Two readings (#1734): a whitelisted `cat`/`tee` heredoc has its body removed, and every `#` is
+  // escaped so the tokenizer cannot run a comment to the end of the command. The text scan reads
+  // `scan` (literal paths kept everywhere bash could reach); the tokenizer reads `parse`.
+  const { scan: scanText, parse: parseText } = prepareGuardStateCommand(command);
   const foldCase = process.platform === "win32" || process.platform === "darwin";
-  const haystack = foldCase ? command.toLowerCase() : command;
+  const haystack = foldCase ? scanText.toLowerCase() : scanText;
   // Raw text first: concatenations, inline `--settings=<path>`, and quoting styles that tokenize
   // in ways a path comparison would miss still name the directory verbatim.
   for (const candidate of [root, root.split(sep).join("/")]) {
@@ -2738,11 +2904,18 @@ export function commandTargetsGuardState(
     // `$HOME` is as direct a spelling of the data directory's parent as `~`; every other variable
     // stays opaque, which is the documented limit of a command-text matcher. It is kept in place as
     // a reference so the word around it stays whole (see `guardStateReadings`).
-    tokens = parse(command, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
+    tokens = parse(parseText, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
   } catch (error) {
     // Still refused: this is the state the veto itself depends on. The raw-text scan above has
     // already refused any command that names the hook directory outright.
     return guardStateUninspectableRefusal(tokenizerReason(error));
+  }
+  // A surviving comment token means `shell-quote` ran a comment to the end of the string past an
+  // UNQUOTED `#` that `prepareGuardStateCommand` did not neutralise — a quoting form the escape pass
+  // does not model. Its text can hide a reaching command bash would run, so fail closed rather than
+  // letting the tokenizer swallow it (#1734 Codex round 4; the ANSI-C `$'\''` desync class).
+  if (tokens.some((token) => token != null && typeof token === "object" && "comment" in token)) {
+    return guardStateUninspectableRefusal(GUARD_STATE_COMMENT_REASON);
   }
   // Each distinct reading is resolved once, and a bounded `find` reads its START depths back from here.
   const relations = new Map<string, GuardStateRelation | null>();
@@ -2786,22 +2959,30 @@ export function commandTargetsGuardState(
   /** The strongest relation any reading of a word has: `inside`, then `ancestor`, then none. */
   const wordRelation = (value: string): GuardStateRelation["kind"] | null => {
     let strongest: GuardStateRelation["kind"] | null = null;
-    for (const text of spellings(value)) {
-      for (const { path, insideOnly } of guardStateReadings(text)) {
-        const relation = relationOf(path);
-        if (relation?.kind === "inside") return "inside";
-        if (relation?.kind === "ancestor" && !insideOnly) strongest = "ancestor";
+    for (const spelled of spellings(value)) {
+      // The tokenizer reads a `\#`-escaped command (#1734); inside single/double quotes shell-quote
+      // keeps that backslash literal, so a quoted filename would reach realpath as `alias\#` instead
+      // of `alias#` and miss a `#`-named symlink into the state. Resolve the token AS WRITTEN and with
+      // `\#` un-escaped, so a quoted path is classified the way bash resolves it (round 4 CR-4.1).
+      const texts = spelled.includes("\\#") ? [spelled, spelled.replaceAll("\\#", "#")] : [spelled];
+      for (const text of texts) {
+        for (const { path, insideOnly } of guardStateReadings(text)) {
+          const relation = relationOf(path);
+          if (relation?.kind === "inside") return "inside";
+          if (relation?.kind === "ancestor" && !insideOnly) strongest = "ancestor";
+        }
       }
     }
     return strongest;
   };
   // A backtick nests a command the tokenizer does not separate, and a newline would silently join
   // two commands into one; nothing in either is inspectable.
-  const segments = /[`\n\r]/u.test(command) ? null : commandSegments(tokens);
+  const segments = /[`\n\r]/u.test(parseText) ? null : commandSegments(tokens);
   if (segments === null) {
     // Nothing here is an inspection, so any related word refuses. A word INSIDE the hook directory
     // names the guard state itself. One that only encloses it is refused because the command cannot
-    // be inspected, which is what the refusal then says: a quoted heredoc's data can read as `/`.
+    // be inspected, which is what the refusal then says: a kept heredoc's data can read as `/`
+    // (a copy-only quoted body is removed before this point and no longer reaches here — #1734).
     let enclosing = false;
     for (const token of tokens) {
       const value = tokenText(token);
@@ -2817,6 +2998,25 @@ export function commandTargetsGuardState(
       }
     }
     return enclosing ? guardStateUninspectableRefusal(UNMODELLED_SHAPE_REASON) : null;
+  }
+  // AC1 (#1734): a SINGLE simple command whose command word is the literal, unquoted `echo` (the only
+  // builtin that opens no operand and cannot be coerced into executing one — printf/true/false/: are
+  // excluded, Codex round 4 CR-4.2), with no redirect and every character whitelisted, is allowed
+  // even when it names `/`, `//`, or `~`. Only the ancestor check is relaxed; the `inside` check below
+  // (with symlink resolution) and the raw-text scan still refuse anything resolving into the state.
+  // The command word must be the first token (no leading redirect/assignment) AND spelled literally
+  // (GUARD_STATE_LITERAL_ECHO, so a quoted/escaped `echo` the whitelist cannot reason about is out),
+  // and the whitelist (no `$`, backtick, `\`, `"`, `#`, braces, globs, or extra operators) keeps out
+  // any expansion or substitution that could reach — so this needs no bash modelling (Codex round 3).
+  if (segments.length === 1) {
+    const { operands, words, redirects } = segments[0]!;
+    if (words !== null && words.length > 0 && operands[0] === words[0] &&
+        GUARD_STATE_NONPATH_COMMANDS.has(words[0]!) && GUARD_STATE_LITERAL_ECHO.test(command) &&
+        redirects.length === 0 && ac1CommandWhitelisted(command)) {
+      // `echo` opens none of its operands; still refuse if one resolves inside the state.
+      const reaches = operands.some((value) => value !== null && wordRelation(value) === "inside");
+      if (!reaches) return null; // names at most an ancestor it cannot open → allowed
+    }
   }
   let namesAncestor = false;
   for (const { operands } of segments) {
