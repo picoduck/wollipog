@@ -43,6 +43,13 @@ test("Claude Code follows its override, then SHELL, then prefers zsh over bash",
   // The session's explicit environment overrides the runner's for the provider process.
   assert.equal(shell({ SHELL: "/usr/bin/zsh" }, undefined, { SHELL: "/usr/bin/bash" }), "/usr/bin/bash");
   assert.equal(shell({ SHELL: "/usr/bin/bash" }, undefined, { CLAUDE_CODE_SHELL: "/usr/bin/zsh" }), "/usr/bin/zsh");
+  // A bare name passes Claude Code's `<name> --version` probe through PATH.
+  assert.equal(shell({ SHELL: "/usr/bin/zsh", CLAUDE_CODE_SHELL: "bash" }), "bash");
+  assert.equal(shell({ SHELL: "/usr/bin/bash", CLAUDE_CODE_SHELL: "zsh" }), "zsh");
+  assert.equal(shell({ SHELL: "zsh" }), "zsh");
+  assert.equal(shell({ SHELL: "/usr/bin/zsh", CLAUDE_CODE_SHELL: "bash", PATH: "/opt/bin" }), "/usr/bin/zsh",
+    "a bare name missing from PATH falls through");
+  assert.equal(shell({ SHELL: "/usr/bin/zsh", CLAUDE_CODE_SHELL: "./bash" }), "/usr/bin/zsh", "a relative path is not looked up on PATH");
 });
 
 test("Claude Code sessions get zsh guidance only when the Bash tool runs zsh", () => {
@@ -50,20 +57,44 @@ test("Claude Code sessions get zsh guidance only when the Bash tool runs zsh", (
   assert.ok(shellGuidance(claude, host({ env: { SHELL: "/usr/bin/fish", PATH: "/usr/bin" } })));
   assert.equal(shellGuidance(claude, host({ env: { SHELL: "/usr/bin/bash" } })), undefined);
   assert.equal(shellGuidance(claude, host({ env: { SHELL: "/usr/bin/zsh", CLAUDE_CODE_SHELL: "/usr/bin/bash" } })), undefined);
+  assert.equal(shellGuidance(claude, host({ env: { SHELL: "/usr/bin/zsh", CLAUDE_CODE_SHELL: "bash", PATH: "/usr/bin" } })), undefined);
+  assert.ok(shellGuidance(claude, host({ env: { SHELL: "/usr/bin/bash", CLAUDE_CODE_SHELL: "zsh", PATH: "/usr/bin" } })));
 });
 
 test("Codex follows the passwd login shell rather than SHELL", () => {
   for (const driver of codexDrivers) {
     const meta = { driver, env: { SHELL: "/usr/bin/bash" }, context: { kind: "native" as const } };
+    const shell = (options: Parameters<typeof host>[0]) => providerCommandShell(meta, host(options));
+    assert.equal(shell({ loginShell: "/usr/bin/zsh", env: { SHELL: "/usr/bin/bash", PATH: "/usr/bin" } }), "/usr/bin/zsh", driver);
     assert.ok(shellGuidance(meta, host({ loginShell: "/usr/bin/zsh", env: { SHELL: "/usr/bin/bash" } })), driver);
     assert.equal(shellGuidance({ ...meta, env: { SHELL: "/usr/bin/zsh" } },
-      host({ loginShell: "/bin/bash", env: { SHELL: "/usr/bin/zsh" } })), undefined, driver);
-    assert.equal(shellGuidance(meta, host({ loginShell: "/bin/sh" })), undefined, driver);
-    // Codex falls back from an unrecognized login shell to zsh on macOS and bash elsewhere.
-    assert.equal(shellGuidance(meta, host({ loginShell: "/usr/bin/fish" })), undefined, driver);
-    assert.equal(shellGuidance(meta, host({ loginShell: undefined })), undefined, driver);
+      host({ loginShell: "/usr/bin/bash", env: { SHELL: "/usr/bin/zsh" } })), undefined, driver);
+    // A recognized but missing login shell type is found on PATH, else the fallback chain runs.
+    assert.equal(shell({ loginShell: "/bin/zsh", env: { PATH: "/usr/bin" } }), "/usr/bin/zsh", driver);
+    assert.equal(shell({ loginShell: "/bin/sh", env: { PATH: "/usr/bin" }, executables: ["/bin/sh", "/usr/bin/zsh"] }), "/bin/sh", driver);
+    assert.equal(shell({ loginShell: "/bin/sh", env: { PATH: "/usr/bin" } }), "/usr/bin/bash", driver);
+    // Unrecognized or absent login shells: bash then zsh on Linux, zsh then bash on macOS, then /bin/sh.
+    for (const loginShell of ["/usr/bin/fish", "/bin/ash", undefined]) {
+      assert.equal(shell({ loginShell }), "/usr/bin/bash", `${driver} ${loginShell}`);
+      assert.equal(shell({ loginShell, executables: ["/usr/bin/zsh"] }), "/usr/bin/zsh", `${driver} ${loginShell} without bash`);
+      assert.equal(shell({ loginShell, executables: ["/bin/zsh"], env: { PATH: "" } }), "/bin/zsh", `${driver} fixed zsh path`);
+      assert.equal(shell({ loginShell, platform: "darwin" }), "/usr/bin/zsh", `${driver} ${loginShell} macOS`);
+      assert.equal(shell({ loginShell, platform: "darwin", executables: ["/usr/bin/bash"] }), "/usr/bin/bash", `${driver} macOS without zsh`);
+      assert.equal(shell({ loginShell, executables: [] }), "/bin/sh", `${driver} ${loginShell} no shells`);
+    }
+    assert.ok(shellGuidance(meta, host({ loginShell: "/bin/ash", executables: ["/usr/bin/zsh"] })), `${driver} Linux without bash`);
     assert.ok(shellGuidance(meta, host({ loginShell: "/opt/homebrew/bin/fish", platform: "darwin" })), driver);
-    assert.ok(shellGuidance(meta, host({ loginShell: "/bin/zsh", platform: "darwin" })), driver);
+    // PowerShell is a supported login shell; it gets no zsh guidance when installed.
+    for (const loginShell of ["/usr/local/bin/pwsh", "/opt/microsoft/powershell/7/powershell", "/usr/local/bin/pwsh.exe"]) {
+      for (const platform of ["darwin", "linux"] as const) {
+        const pwsh = host({ loginShell, platform, env: { PATH: "/usr/local/bin:/bin" }, executables: [loginShell, "/bin/zsh", "/bin/bash"] });
+        assert.equal(providerCommandShell(meta, pwsh), loginShell, `${driver} ${platform} ${loginShell}`);
+        assert.equal(shellGuidance(meta, pwsh), undefined, `${driver} ${platform} ${loginShell}`);
+      }
+    }
+    assert.equal(shell({ loginShell: "/opt/pwsh", env: { PATH: "/usr/bin" }, executables: ["/usr/bin/pwsh", "/usr/bin/zsh"], platform: "darwin" }),
+      "/usr/bin/pwsh", `${driver} PowerShell found on PATH`);
+    assert.equal(shell({ loginShell: "/opt/pwsh", platform: "darwin" }), "/usr/bin/zsh", `${driver} missing PowerShell falls back`);
   }
 });
 

@@ -7106,7 +7106,7 @@ test("Claude Code and Codex launches carry zsh guidance only when their command 
   const shells = mkdtempSync(join(tmpdir(), "wollipog-shells-"));
   t.after(() => rmSync(shells, { recursive: true, force: true }));
   for (const name of ["zsh", "bash"]) writeFileSync(join(shells, name), "#!/bin/sh\n", { mode: 0o755 });
-  let loginShell = "/bin/bash";
+  let loginShell = join(shells, "bash");
   t.mock.method(os, "userInfo", () => ({ username: "agent", uid: 1, gid: 1, homedir: "/home/agent", shell: loginShell }));
   const launchGuidance = async (driver: AgentDriverKind, env: Record<string, string>) => {
     const h = harness({ driver, env: { ...env, WOLLIPOG_CLI: "/runner-private/cli" } });
@@ -7126,9 +7126,10 @@ test("Claude Code and Codex launches carry zsh guidance only when their command 
   assert.doesNotMatch(await launchGuidance("claude-code", { SHELL: join(shells, "bash"), CLAUDE_CODE_SHELL: "" }), /Shell Guidance|zsh/);
   assert.doesNotMatch(await launchGuidance("claude-code", { SHELL: join(shells, "zsh"), CLAUDE_CODE_SHELL: join(shells, "bash") }), /Shell Guidance/);
   for (const driver of ["codex-app-server", "codex"] as const) {
-    loginShell = "/usr/bin/zsh";
+    // Codex uses an installed login shell before searching PATH, so these hold on any CI host.
+    loginShell = join(shells, "zsh");
     assert.match(await launchGuidance(driver, { SHELL: join(shells, "bash") }), /Your shell commands run in zsh/, driver);
-    loginShell = "/bin/bash";
+    loginShell = join(shells, "bash");
     assert.doesNotMatch(await launchGuidance(driver, { SHELL: join(shells, "zsh") }), /Shell Guidance|zsh/, driver);
   }
 });
