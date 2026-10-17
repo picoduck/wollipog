@@ -88,6 +88,24 @@ test("routine inspection accepts semantic Git and GitHub operations across safe 
   ), true);
 });
 
+for (const [filter, allowed] of [
+  ["grep --file=/synthetic-patterns", false],
+  ["grep -f/synthetic-patterns", false],
+  ["grep -rTODO", false],
+  ["grep --recursive", false],
+  ["grep -E state", true],
+] as const) {
+  const command = `gh issue view 1209 --json body | ${filter}`;
+  test(`routine grep pipeline filter ${filter} is ${allowed ? "allowed" : "refused"}`, () => {
+    assert.equal(isRoutineClaudeOrchestratorBash(command), allowed, command);
+  });
+  test(`permission grep pipeline filter ${filter} is ${allowed ? "allowed" : "refused"}`, () => {
+    const permission = classifyRoutineClaudeOrchestratorPermission("Bash", { command });
+    if (allowed) assert.equal(permission, "allow", command);
+    else assert.notEqual(permission, "allow", command);
+  });
+}
+
 test("stdin-only presentation filters preserve routine authorization across generated compositions", () => {
   const filters = fc.array(fc.constantFrom("head -20", "tail -5", "wc -l", "grep -E state", "awk '{print $2}'"), {
     minLength: 1,
