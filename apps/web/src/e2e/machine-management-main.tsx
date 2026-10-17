@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
+  PERSONAL_ORGANIZATION_ID,
   PROTOCOL_VERSION,
   type AddBoxRequest,
   type BoxView,
@@ -230,13 +231,13 @@ const client = {
     context: {
       userId: "owner",
       userName: "Owner",
-      organizationId: "org",
+      organizationId: PERSONAL_ORGANIZATION_ID,
       organizationName: "Organization",
       role: identityRole,
       deviceId: null,
       localBootstrap: true,
     },
-    organizations: [{ organizationId: "org", name: "Organization", createdAt: 1 }],
+    organizations: [{ organizationId: PERSONAL_ORGANIZATION_ID, name: "Organization", createdAt: 1 }],
     memberships: [],
     teams: [],
   }),

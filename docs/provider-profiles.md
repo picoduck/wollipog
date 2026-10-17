@@ -97,8 +97,10 @@ managed profile paths are a later part of #3239.
 
 The Accounts list on a Machine shows each account's profile state from `profile.access`: **Profile**
 (`granted`), **Grant Pending** (`pending`) or **Not Granted** (`not_granted`); a legacy HOME has no
-badge. An organization Owner or Admin sees two actions on a v225 runner, and nobody sees them on an
-older runner (a member who can manage the Machine sees only the badges):
+badge. An Owner or Admin of the personal control-plane organization sees two actions on a v225
+runner, and nobody sees them on an older runner. A member who can manage the Machine, and an Owner or
+Admin of any other organization (whom the routes refuse; see
+[Authorization and Audit](#authorization-and-audit)), see only the badges:
 
 - **Adopt as Profile**, for an account without a profile, `not_granted`, or `pending` (a retry), while
   the Machine is online. The confirmation says that after adoption only control planes granted the
@@ -148,17 +150,29 @@ Account reports to a v225 control plane carry `profile: { id, access }` where `a
 A session's account binding is made once and is authoritative afterwards; a restart never re-reads
 the configured account. Provider profiles add one field to it:
 
-- A **new** binding (a session created with an account, or a later account handoff) records the
-  account's `profileId` as the session's `providerProfileId`, when the account has one. A binding to
-  an unadopted account records none.
+- A **new** binding (a session created with an account, an account switch target, or the account
+  chosen in authentication recovery) records the profile id the runner has verified for the
+  account's HOME as the session's `providerProfileId`: the account's configured `profileId`, or,
+  when the configuration has none (a replacement runner's account pointing at a HOME another runner
+  adopted), the HOME marker's identity when this control plane's access to it is `granted` or
+  `pending`. A binding to an unadopted account, or to a HOME this control plane may not use, records
+  none. Existing bindings are never backfilled, and the discovered id is not written back to the
+  account's configuration.
 - A binding made **before** the account was adopted keeps its recorded credential and conversation
   homes and gets no profile id. Its acquisitions still expect the id the configured account records
   for that HOME path, as above.
 - An account handoff (manual switch, automatic switch, or the account chosen in authentication
   recovery) records the target's id as `pendingProviderProfileId` with the rest of the pending
-  binding, so a handoff that resumes after a runner restart still knows it. The new binding takes the
-  target's id (or none); a follow-up selected mid-handoff keeps its own. A fork's temporary provider
-  uses the source session's binding.
+  binding, so a handoff that resumes after a runner restart still knows it. A follow-up selected
+  mid-handoff keeps its own. A fork's temporary provider uses the source session's binding.
+- When the handoff runs (resuming a stopped session, or replacing an active session's provider),
+  the runner re-resolves the target account, and the saved `pendingProviderProfileId` is
+  authoritative. A target that now reports a different profile id (its configured id, or a usable
+  marker identity) refuses the switch: nothing is bound, the pending binding is cleared, and the
+  refusal is reported like any other switch failure (the **Account Switch Failed** notice and a
+  transcript error for an active session; the command's failure for a stopped one). A target that
+  reports no id binds the saved one, so a replaced HOME is still refused at its lease. A handoff
+  saved without an id binds whatever the target reports when it runs.
 
 The session's recorded `providerProfileId` is the expected id of every acquisition of the session's
 credential HOME: the driver launch, an Agent TUI, launch preparation and provider forks. It takes

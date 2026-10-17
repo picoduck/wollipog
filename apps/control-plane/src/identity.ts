@@ -2,7 +2,7 @@ import type { BackgroundJobStopActor, OrganizationRole } from "@wollipog/protoco
 import type { ResourceScope } from "@wollipog/protocol";
 import { matchWorkspaceId } from "./workspace-match.js";
 
-export const PERSONAL_ORGANIZATION_ID = "org_personal";
+export { PERSONAL_ORGANIZATION_ID } from "@wollipog/protocol";
 export const LOCAL_OWNER_USER_ID = "usr_local_owner";
 
 export interface HumanPrincipal {

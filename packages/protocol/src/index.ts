@@ -3678,6 +3678,10 @@ export interface HostAdminDoctorView {
 }
 
 export type OrganizationRole = "owner" | "admin" | "operator" | "viewer";
+/** The control plane's personal organization. Global resources (routes that are neither
+ * member-scoped nor organization-admin routes, such as provider profile actions) belong to it, so
+ * Owners and Admins of any other organization are refused them. */
+export const PERSONAL_ORGANIZATION_ID = "org_personal";
 export type UserStatus = "active" | "suspended";
 
 export interface OrganizationView {

@@ -1589,6 +1589,7 @@ export class SessionManager {
    * a profile marker is refused as needing a newer control plane; marker-less homes are unaffected. */
   private providerProfileAccess: ProviderProfileAccessSource = () => ({ controlPlaneSupportsProfiles: false, activeProfileIds: [] });
   private providerProfileExpectation: (home: string) => string | undefined = () => undefined;
+  private providerProfileForBinding: (account: BoundProviderAccount) => string | undefined = () => undefined;
   /** The provider-HOME reference each live driver instance took at launch (see
    * settleDriverProviderHome). An instance launched past the handle budget has no entry. */
   private readonly driverProviderHomes = new Map<Driver, ProviderHomeReference>();
@@ -4699,9 +4700,24 @@ export class SessionManager {
   configureProviderProfiles(options: {
     access: ProviderProfileAccessSource;
     expectedProfileIdForHome: (home: string) => string | undefined;
+    /** The profile id the runner has verified for an account's HOME, recorded by a new binding when
+     * the configured account names none: a replacement runner's account may point at a HOME another
+     * runner adopted without recording its `profileId`. */
+    verifiedProfileIdForAccount?: (account: BoundProviderAccount) => string | undefined;
   }): void {
     this.providerProfileAccess = options.access;
     this.providerProfileExpectation = options.expectedProfileIdForHome;
+    this.providerProfileForBinding = options.verifiedProfileIdForAccount ?? (() => undefined);
+  }
+
+  /** Resolve the configured account for a NEW binding (a new session, an account switch target or
+   * the account chosen in authentication recovery), recording the profile id the runner verified
+   * for its HOME when the configuration lacks one (#3239). Existing bindings never pass here. */
+  private resolveNewProviderAccountBinding(spec: SessionLaunchSpec): BoundProviderAccount | undefined {
+    const account = this.resolveProviderAccount?.(spec);
+    if (!account || account.profileId !== undefined) return account;
+    const profileId = this.providerProfileForBinding(account);
+    return profileId ? { ...account, profileId } : account;
   }
 
   /** Record this control plane's grant in one account HOME's profile marker under its lease. */
@@ -6088,7 +6104,8 @@ export class SessionManager {
     const driver = spec.driver ?? "acp";
     let providerAccount: ReturnType<NonNullable<ProviderAccountResolver>>;
     try {
-      providerAccount = bindSessionProviderAccount(prior, spec, this.resolveProviderAccount);
+      providerAccount = bindSessionProviderAccount(prior, spec,
+        this.resolveProviderAccount ? (launch) => this.resolveNewProviderAccountBinding(launch) : undefined);
     } catch (error) {
       const message = `provider account rejected: ${errText(error)}`;
       if (prior) this.emitEvent(spec.sessionId, { kind: "error", message });
@@ -11361,7 +11378,7 @@ export class SessionManager {
     let switchedAccount: BoundProviderAccount | undefined;
     if (pendingAccount) {
       try {
-        switchedAccount = this.providerAccountForSession(fresh, pendingAccount.id);
+        switchedAccount = this.pendingProviderAccountTarget(fresh, pendingAccount);
       } catch (error) {
         this.parkProviderAccountSwitchFailure(sessionId, pendingAccount, errText(error));
         durable?.failed("provider account switch could not be applied", "INVALID_COMMAND");
@@ -11879,7 +11896,7 @@ export class SessionManager {
     if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
       throw new Error("provider accounts are available only for host sessions");
     }
-    const account = this.resolveProviderAccount({
+    const account = this.resolveNewProviderAccountBinding({
       sessionId: meta.sessionId,
       workspaceId: meta.workspaceId,
       workspacePath: meta.repoPath,
@@ -11899,6 +11916,20 @@ export class SessionManager {
       throw new Error("the selected account belongs to a different provider");
     }
     return account;
+  }
+
+  /** The account a scheduled handoff binds when it runs (#3239). The profile id saved with the
+   * pending binding is authoritative: a re-resolved account that now reports another profile (a
+   * re-pointed or re-adopted HOME) refuses the switch, and one that reports none binds the saved id,
+   * so the lease's expected id still refuses a replaced HOME. */
+  private pendingProviderAccountTarget(meta: SessionMeta, pending: BoundProviderAccount): BoundProviderAccount {
+    const target = this.providerAccountForSession(meta, pending.id);
+    const saved = pending.profileId;
+    if (saved === undefined) return target;
+    if (target.profileId !== undefined && target.profileId !== saved) {
+      throw new Error("the selected account's provider profile changed after the switch was scheduled; select the account again");
+    }
+    return { ...target, profileId: saved };
   }
 
   private pendingProviderAccount(meta: SessionMeta): BoundProviderAccount | undefined {
@@ -12789,7 +12820,7 @@ export class SessionManager {
     }
     let target: BoundProviderAccount;
     try {
-      target = this.providerAccountForSession(persisted, pending.id);
+      target = this.pendingProviderAccountTarget(persisted, pending);
     } catch (error) {
       entry.pendingProviderAccountSwitch = undefined;
       this.parkProviderAccountSwitchFailure(sessionId, pending, errText(error));

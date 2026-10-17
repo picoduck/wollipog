@@ -1131,6 +1131,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
 sessions.configureProviderProfiles({
   access: () => providerProfileGrants.access(),
   expectedProfileIdForHome: (home) => providerProfileGrants.expectedProfileIdForHome(home),
+  verifiedProfileIdForAccount: (account) => providerProfileGrants.bindingProfileId(account),
 });
 const providerProfileCommands: ProviderProfileCommandDeps = {
   controlPlaneInstanceId: attestation.instanceId,

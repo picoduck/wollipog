@@ -5,6 +5,7 @@ import {
   agentContextKey,
   CODEX_EXEC_RETIRED_CONFIG_REASON,
   isRetiredCodexExec,
+  PERSONAL_ORGANIZATION_ID,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AgentContext,
@@ -12,6 +13,7 @@ import {
   type BoxStatus,
   type BoxView,
   type IdentityAdministrationView,
+  type IdentityContextView,
   type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
@@ -392,7 +394,7 @@ function AgentRow({
 function RunnerDetails({ runner, online, canManageProfiles = false }: {
   runner: RunnerView;
   online: boolean;
-  /** The viewer is an organization Owner or Admin (provider profile routes are not member-scoped). */
+  /** The viewer may use the provider profile routes: see `canManageProviderProfiles`. */
   canManageProfiles?: boolean;
 }) {
   const pv = runner.protocolVersion;
@@ -1289,17 +1291,30 @@ function BoxConnectionDetailsDialog({ box, onClose }: { box: BoxView; onClose: (
   );
 }
 
+/** Provider profile routes (#3239) are neither member-scoped nor organization-admin routes, so the
+ * control plane confines them to Owners and Admins of its personal organization; an Owner or Admin
+ * of any other organization would be refused, so the actions are not offered there. */
+export function canManageProviderProfiles(
+  context: Pick<IdentityContextView, "organizationId" | "role"> | null | undefined,
+): boolean {
+  return !!context && (context.role === "owner" || context.role === "admin") &&
+    context.organizationId === PERSONAL_ORGANIZATION_ID;
+}
+
 /** A box card: SSH target + bootstrap status + actions, with the runner's details once online. */
 export function BoxCard({
   box,
   runner,
   canManage,
+  canManageProfiles = false,
   onReconnect,
   onRemove,
 }: {
   box: BoxView;
   runner: RunnerView | undefined;
   canManage: boolean;
+  /** See `canManageProviderProfiles`. */
+  canManageProfiles?: boolean;
   onReconnect: (boxId: string, force: boolean) => Promise<void>;
   onRemove: (boxId: string) => Promise<void>;
 }) {
@@ -1467,7 +1482,7 @@ export function BoxCard({
       {connHint && <Notice tone="info">{connHint}</Notice>}
       <Notice tone="neutral">{sshRunnerLifecycleHint()}</Notice>
       {runner ? (
-        <RunnerDetails runner={runner} online={harnessStatusCurrent} canManageProfiles={canManage} />
+        <RunnerDetails runner={runner} online={harnessStatusCurrent} canManageProfiles={canManageProfiles} />
       ) : inProgress ? (
         <div className="empty-sub">Waiting for the runner to come online…</div>
       ) : box.status === "offline" ? (
@@ -1492,6 +1507,7 @@ export function BoxCard({
 export function NativeRunnerCard({
   runner,
   canManage,
+  canManageProfiles = false,
   busy,
   removeError,
   onRediscover,
@@ -1500,6 +1516,8 @@ export function NativeRunnerCard({
 }: {
   runner: RunnerView;
   canManage: boolean;
+  /** See `canManageProviderProfiles`. */
+  canManageProfiles?: boolean;
   busy: boolean;
   removeError?: string;
   onRediscover: (runnerId: string) => void | Promise<void>;
@@ -1545,7 +1563,7 @@ export function NativeRunnerCard({
         )}
       </div>
       {removeError && <div className="empty-sub box-error" role="alert">{removeError}</div>}
-      <RunnerDetails runner={runner} online={runner.status === "online"} canManageProfiles={canManage} />
+      <RunnerDetails runner={runner} online={runner.status === "online"} canManageProfiles={canManageProfiles} />
       <NativeRunnerHealth
         runner={runner}
         canRepair={canManage}
@@ -1576,6 +1594,7 @@ export function RunnersView() {
     : requestedSection;
   const identityRole = identity?.context.role ?? null;
   const canManageMachines = identityRole === "owner" || identityRole === "admin";
+  const canManageProfiles = canManageProviderProfiles(identity?.context);
   const selectSection = (next: ConnectionSection) => navigate({ name: "runners", section: next });
   useEffect(() => {
     if (!instances.desktopMultiInstance && requestedSection === "instances") {
@@ -1804,6 +1823,7 @@ export function RunnersView() {
             box={box}
             runner={runners.get(box.runnerId)}
             canManage={canManageMachines}
+            canManageProfiles={canManageProfiles}
             onReconnect={reconnectBox}
             onRemove={removeBox}
           />
@@ -1813,6 +1833,7 @@ export function RunnersView() {
             key={runner.runnerId}
             runner={runner}
             canManage={canManageMachines}
+            canManageProfiles={canManageProfiles}
             busy={Boolean(busy[runner.runnerId])}
             removeError={removeError[runner.runnerId]}
             onRediscover={rediscover}
