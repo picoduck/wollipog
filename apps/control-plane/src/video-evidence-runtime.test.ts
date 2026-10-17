@@ -1,5 +1,5 @@
 import { VideoEvidenceDecisionBridge } from "./video-evidence-decision-bridge.js";
-import type { WorkflowDecisionView } from "@wollipog/protocol";
+import { pacedVideoReviewWindowPlan, type WorkflowDecisionView } from "@wollipog/protocol";
 import { reviewerBudgetAdmissionDigest } from "./evidence-review-admission.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -343,7 +343,7 @@ test("bounded consecutive batches preserve all 360 native frames and acknowledge
   let cursor = 0;
   while (cursor < template.manifest.frames.length) {
     const batch: ReturnType<VideoEvidenceRuntime["deliverBatch"]> = f.runtime.deliverBatch("video_test", "reviewer", cursor);
-    assert.ok(batch.deliveries.length > 0 && batch.deliveries.length <= 32);
+    assert.ok(batch.deliveries.length > 0 && batch.deliveries.length <= 20);
     const encoded = { deliveries: batch.deliveries.map((d) => ({
       receipt: d.receipt, mimeType: d.mimeType, sizeBytes: d.bytes.length, data: d.bytes.toString("base64"),
     })), nextIndex: batch.nextIndex, frameCount: batch.frameCount };
@@ -373,6 +373,29 @@ test("bounded consecutive batches preserve all 360 native frames and acknowledge
   assert.equal(verdict.receiptIds.length, 360);
   f.complete();
   assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
+});
+
+test("fresh-context windows keep every batch inside its planned window and repeat only the overlap frame", (t) => {
+  const f = fixture(t); if (!f || !template) return;
+  const plan = pacedVideoReviewWindowPlan(template.manifest.frames);
+  assert.ok(plan.windows.length > 1, "the paced fixture spans several fresh-context windows");
+  const seen: number[] = [];
+  for (const window of plan.windows) {
+    let cursor = window.firstIndex;
+    while (cursor < window.endIndex) {
+      const batch: ReturnType<VideoEvidenceRuntime["deliverBatch"]> = f.runtime.deliverBatch("video_test", "reviewer", cursor, window.endIndex);
+      assert.ok(batch.deliveries.length <= 20 && batch.nextIndex <= window.endIndex, "no batch crosses its window");
+      f.runtime.acknowledgeBatch("video_test", "reviewer", batch.deliveries.map((d) => ({
+        receiptId: d.receipt.receiptId, sha256: d.receipt.sha256 })));
+      seen.push(...batch.deliveries.map((d) => d.receipt.videoFrame.index));
+      cursor = batch.nextIndex;
+    }
+  }
+  const expected = plan.windows.flatMap((w) => Array.from({ length: w.endIndex - w.firstIndex }, (_, i) => w.firstIndex + i));
+  assert.deepEqual(seen, expected, "overlap frames are the only repeats");
+  assert.deepEqual([...new Set(seen)], template.manifest.frames.map((frame) => frame.index));
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, 0), refused("order"));
+  assert.equal(f.runtime.recordVerdict("video_test", "reviewer", report).receiptIds.length, 360);
 });
 
 test("original gate distinguishes parent-inspected images from exact worker video provenance at resolution and consumption", (t) => {

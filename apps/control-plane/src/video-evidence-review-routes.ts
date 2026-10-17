@@ -60,13 +60,17 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/frames", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
-    if (!body(req.body, ["reviewId", "index"]) || !text(req.body.reviewId) ||
-      !Number.isSafeInteger(req.body.index) || Number(req.body.index) < 0 || Number(req.body.index) >= 900) {
+    // `end` (exclusive) keeps a batch inside the reviewer's current fresh-context delivery window.
+    if (!(body(req.body, ["reviewId", "index"]) || body(req.body, ["reviewId", "index", "end"])) || !text(req.body.reviewId) ||
+      !Number.isSafeInteger(req.body.index) || Number(req.body.index) < 0 || Number(req.body.index) >= 900 ||
+      req.body.end !== undefined && (!Number.isSafeInteger(req.body.end) || Number(req.body.end) <= Number(req.body.index) ||
+        Number(req.body.end) > 900)) {
       return reply.code(400).send({ error: "A bounded review and source-frame index are required." });
     }
     reply.header("cache-control", "no-store");
     try {
-      const result = deps.service.deliverBatch(principal, req.body.reviewId, Number(req.body.index));
+      const result = deps.service.deliverBatch(principal, req.body.reviewId, Number(req.body.index),
+        req.body.end === undefined ? undefined : Number(req.body.end));
       return { deliveries: result.deliveries.map((delivery) => ({
         receipt: delivery.receipt, mimeType: delivery.mimeType, sizeBytes: delivery.bytes.length,
         data: delivery.bytes.toString("base64"),

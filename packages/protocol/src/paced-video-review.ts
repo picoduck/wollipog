@@ -2,7 +2,8 @@
 export const PACED_VIDEO_REVIEW_MIN_PROTOCOL = 223;
 export const PACED_VIDEO_REVIEW_CONTRACT_ID = "wollipog-paced-video-review-v1" as const;
 /** Compatibility metadata only. This cannot attest runtime isolation, mint a grant or enable
- * production admission. Current installations and compatibility responses emit no such claim. */
+ * production admission. Runners emit it only for a re-proven media-only reviewer installation;
+ * the control plane's compatibility response still emits none until PR C registers the adapters. */
 export interface PacedVideoReviewPeerContract {
   readonly id: typeof PACED_VIDEO_REVIEW_CONTRACT_ID;
   readonly revision: 1;
@@ -23,7 +24,10 @@ export function supportsPacedVideoReviewPeer(protocolVersion: unknown, contract:
 }
 import type { UiEvidenceReviewReceipt } from "./index.js";
 
-export const PACED_VIDEO_REVIEW_BATCH_LIMITS = Object.freeze({ frames: 32, responseBytes: 8 * 1024 * 1024 });
+/** At most 20 frames per batch. Claude Code 2.1.296 estimates 1600 tokens per tool-result image and,
+ * above its MCP output cap, DOWNSCALES images rather than failing. The media reviewer therefore
+ * runs with a reviewer-scoped cap that keeps a full batch below the CLI's no-inspection half. */
+export const PACED_VIDEO_REVIEW_BATCH_LIMITS = Object.freeze({ frames: 20, responseBytes: 8 * 1024 * 1024 });
 
 /** Permanent experimental purpose. These observations never authorize a production UI gate. */
 export interface OperatorVideoValidationPurpose { permitId: string; scopeSha256: string }

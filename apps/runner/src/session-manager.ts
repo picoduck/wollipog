@@ -4794,6 +4794,23 @@ export class SessionManager {
     this.boxAdmission.release(jobId);this.reportCapacity();this.drainAdmissionQueue();
   }
 
+  /** Box-wide process admission for one dedicated media reviewer (#1321). Unlike the native code
+   * reviewer it needs no provider-mode isolation: its own bwrap namespace is the boundary. */
+  reserveMediaReviewAdmission(id: string, agentId: string): boolean {
+    if (this.shuttingDown || !id.startsWith("media:")) return false;
+    if (this.controlledReviewAdmissions.has(id)) return false; // one dispatch per prepared Session
+    if (this.admissionQueue.length) return false;
+    const admitted = this.boxAdmission.acquire({ sessionId: id, agentId, weight: this.admissionPolicy.agentWeights[agentId] ?? 1,
+      ...(this.admissionPolicy.agentLimits[agentId] === undefined ? {} : { agentLimit: this.admissionPolicy.agentLimits[agentId] }) });
+    if (admitted) { this.controlledReviewAdmissions.set(id, agentId); this.reportCapacity(); }
+    return admitted;
+  }
+
+  releaseMediaReviewAdmission(id: string): void {
+    if (!this.controlledReviewAdmissions.delete(id)) return;
+    this.boxAdmission.release(id); this.reportCapacity(); this.drainAdmissionQueue();
+  }
+
   async prepareSessionNamingExecution(
     agent: AgentDefinition,
     env: Record<string, string>,
@@ -5803,7 +5820,9 @@ export class SessionManager {
     };
     if (spec.mediaReviewPurpose !== undefined) {
       // This refusal precedes any workspace remap, generation replacement, credential or driver
-      // action. A prepared purpose cannot fall through to the ordinary unrestricted launch path.
+      // action. A prepared purpose cannot fall through to the ordinary unrestricted launch path:
+      // it launches only through `media_review_dispatch` (MediaReviewerDispatcher), which carries
+      // the exact grant, delivery plan and attestation this generic command does not.
       durable?.failed("Media review requires its exact dedicated admitted dispatcher.", "INVALID_COMMAND");
       reportMaterialized(false);
       return false;

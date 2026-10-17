@@ -43,6 +43,10 @@ test("untrusted grant claims, URLs, unbounded indices and extra fields never rea
     ["prepare", { childSessionId: "child", occurrenceId: "workflow", evidenceId: "video", grant: true }],
     ["frame", { reviewId: "review", index: 900 }],
     ["frames", { reviewId: "review", index: 900 }],
+    ["frames", { reviewId: "review", index: 5, end: 5 }],
+    ["frames", { reviewId: "review", index: 5, end: 901 }],
+    ["frames", { reviewId: "review", index: 5, end: "60" }],
+    ["frames", { reviewId: "review", index: 5, end: 60, limit: 20 }],
     ["acknowledge-frames", { reviewId: "review", receipts: [] }],
     ["frame", { reviewId: "review", index: 0, url: "http://localhost/private" }],
     ["acknowledge", { reviewId: "review", receiptId: "receipt", sha256: "bad" }],
@@ -59,6 +63,7 @@ test("unsupported readiness and absent grants return bounded no-store errors wit
   for (const [action, payload] of [
     ["prepare", { childSessionId: "child", occurrenceId: "workflow", evidenceId: "video" }],
     ["frame", { reviewId: "review", index: 0 }],
+    ["frames", { reviewId: "review", index: 0, end: 60 }],
     ["acknowledge", { reviewId: "review", receiptId: "receipt", sha256: "a".repeat(64) }],
     ["verdict", { reviewId: "review", report: { outcome: "accept", criteria: [], rationale: "test" } }],
     ["provenance", { reviewId: "review" }],
@@ -68,5 +73,5 @@ test("unsupported readiness and absent grants return bounded no-store errors wit
     assert.equal(result.headers["cache-control"], "no-store");
     assert.doesNotMatch(result.body, /base64|grant in this route|receipt in this route|provenance in this route/u);
   }
-  assert.equal(f.calls(), 5);
+  assert.equal(f.calls(), 6);
 });
