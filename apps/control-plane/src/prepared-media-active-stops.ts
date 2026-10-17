@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { mediaActiveStopIdentityBody, mediaActiveStopRequestBody, mediaActiveStopAcknowledgementBody,
   type MediaActiveStopIdentity, type MediaActiveStopRequest, type MediaActiveStopAcknowledgement } from "@wollipog/protocol";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
-import type { PreparedMediaRecord } from "./prepared-media-sessions.js";
+import { initializePreparedMediaSchema, type PreparedMediaRecord } from "./prepared-media-sessions.js";
 
 export interface PreparedMediaActiveStopPorts {
   /** Trusted private current authority AND owning-runner registered same-command handle proof.
@@ -16,17 +16,14 @@ interface StopRecord { request: MediaActiveStopRequest; acknowledged: MediaActiv
 const json = (v: unknown) => JSON.stringify(v);
 const sha = (v: unknown) => createHash("sha256").update(json(v)).digest("hex");
 
-/** Dedicated lifecycle preparation, deliberately unregistered in hosting. Unknown operations
+/** Dedicated lifecycle preparation. Hosting composes it with no owning-handle port, so it never
+ * signals until a runner registers a media-only worker handle. Unknown operations
  * retain reservations/history and permit exact readback only. There is no settlement API here. */
 export class PreparedMediaActiveStops {
   private readonly purposes: MediaSessionPurposes;
   constructor(readonly database: DatabaseSync, private readonly ports: PreparedMediaActiveStopPorts) {
     this.purposes = new MediaSessionPurposes(database);
-    database.exec("CREATE TABLE IF NOT EXISTS prepared_media_active_stops (session_id TEXT PRIMARY KEY," +
-      "record TEXT NOT NULL,sha256 TEXT NOT NULL);");
-    if (!(database.prepare("PRAGMA table_info(prepared_media_sessions)").all() as Array<{ name: string }>).some((c) => c.name === "stop_operation_id")) {
-      database.exec("ALTER TABLE prepared_media_sessions ADD COLUMN stop_operation_id TEXT");
-    }
+    initializePreparedMediaSchema(database);
   }
   owns(sessionId: string): boolean {
     try {

@@ -38,7 +38,8 @@ separate gates from live acceptance.
   exhaustion recommends exact typed rejection for child correction, not a new human permission.
   Custom and genuinely unavailable trusted capability/access retain human fallback.
 - video-evidence-review-routes: exact credential-to-path binding, bounded media/ack/verdict methods,
-  no-store responses and separate owner provenance; not yet registered in the hosting entry point.
+  no-store responses and separate owner provenance; registered in hosting behind a readiness gate
+  that refuses every call (see Hosting Composition).
 - runner/evidence-review-namespace: allowlist mount namespace with no host-root/project bind and
   synthetic kernel probes denying oracle, generator, parent-path and symlink access.
 - runner/video-evidence-review-mcp: a two-handler registry enforces media-only names at discovery
@@ -47,10 +48,11 @@ separate gates from live acceptance.
 - runner/video-evidence-review-transport: pinned full-context/criterion/native-frame verification
   before authenticated acknowledgement and model image handoff; never claims typed approval.
 - video-live-validation: durable human-inspected candidate/paced/maximum empirical proof,
-  bound to exact driver/model/provider/capability digest. No default record is supplied.
+  bound to exact driver/model/provider/capability digest. No default record is supplied; hosting
+  exposes owner/admin-only record, revoke and list routes.
 - scripts/prepare-video-live-challenge.ts: offline fresh synthetic source/oracle preparation.
 
-The reviewer modules currently have no hosting entry-point caller. Artifact maintenance is
+Hosting composes these modules with inert ports only (see Hosting Composition). Artifact maintenance is
 prepared in the source tree only; the hosting process has not been changed or restarted. They do not advertise a current runner
 protocol revision or activate production. Current main advertises public protocol223 for
 runner-mediated session cross-model review; public221 describes background retry exhaustion and
@@ -162,6 +164,50 @@ campaign and Session IDs, actual provider/model, disclosed private artifact conf
 No real live delivery, model temporal recognition, model usage/cost, external transfer, human grant,
 or production activation has occurred in this implementation session. Until the final adapters,
 human-only empirical proof and preceding main dependencies are present, readiness fails closed.
+
+## Hosting Composition
+
+`hosting-video-evidence.ts` is the production composition (#1321 PR A). It constructs the review
+store and runtime, `WorkflowVideoEvidenceApprovals`, `PreparedMediaActiveStops`,
+`VideoLiveValidationRegistry` and `EvidenceReviewService`, and passes the approvals and dedicated
+Stop coordinator to `SessionsService`. Every port is inert: no binding is current, no gate is
+available, no source is readable, no pending review resolves and no runner has registered an owning
+media Stop handle. Construction creates the durable schema and nothing else, so no capability
+changes. The Full Control launch preflight still reports video as `human_required`, and video
+evidence still falls back to the Human with `media_video_unsupported`.
+
+Readiness refuses in this order, and every review route returns `409` with the matching code:
+
+1. `no_paced_video_peer`: no registered installation advertises the paced video review contract at
+   a supporting protocol.
+2. `live_validation`: no unrevoked, unexpired Human-inspected proof covers such an installation.
+3. `reviewer_unavailable`: this control plane has no media-only reviewer launcher or review adapters.
+
+Readiness never reports available in this slice. The fixed agent route allowlist is unchanged:
+ordinary Session credentials still cannot reach `prepare` or `provenance`, and only media-purpose
+reviewer credentials reach the media methods.
+
+The live validation ingress is Human-only and installation-wide. Owners and admins of the personal organization use
+`GET /api/video-evidence/live-validations` (inventory plus current readiness),
+`POST /api/video-evidence/live-validations` (an exact reviewer target and its three inspected runs)
+and `POST /api/video-evidence/live-validations/:proofId/revoke`. Session credentials, other
+members and other organizations are refused. Recording is refused with `no_paced_video_peer` unless a registered installation
+currently advertises the contract for that exact runner, agent, driver, model, protocol and contract
+revision. Its capability and namespace digests cannot be checked against a runner attestation until
+the media-only launcher exists. A recorded proof therefore enables nothing alone: admission still
+matches it against the server-derived target with `validVideoLiveProof`.
+
+Still required before delegated video review can run:
+
+- PR B: the runner Claude Code media-only reviewer launcher. Its real materialize, send, reconcile
+  and cancellation ports let hosting construct `PreparedMediaSessions`. It also supplies the
+  `preparedMediaRuntime` resolver, the `OperatorVideoValidationPermits` ports and the owning-handle
+  port for `PreparedMediaActiveStops`.
+- PR C: the review adapters and agent tools. This covers `resolvePending`, `currentOwner`, the peer
+  lookups, the runtime and gate access adapters, the `prepare` and `provenance` allowlist entries,
+  and replacing `reviewer_unavailable` with real admission.
+- A Human certification: three inspected live runs recorded through the ingress for the exact
+  target that PR B attests.
 
 ## Remaining Integration
 
@@ -314,9 +360,10 @@ and historical actor proof are checked again before consumption. Corrupt proof, 
 image receipt, revoked authority, unsupported peer or an absent runtime refuses. Delegated tools
 require private223 and the exact separate identity from the authenticated current compatibility
 response; a cached integer, public221/222/223, or another installation's metadata cannot authorize a
-POST. Hosting registration remains absent.
+POST. Hosting registers the bridge with an access adapter that reports no gate as available.
 
-The existing human-only campaign control CAS can compose an evidence proposal only through trusted destination/provider disclosure lookups, deriving the authenticated author, revision and scope. Public, unknown, stale or agent-authored disclosure is refused. Budget and issue scope retain their existing contracts. No disclosure lookup is registered on the hosting service and no authority has been minted there.
+The existing human-only campaign control CAS can compose an evidence proposal only through trusted destination/provider disclosure lookups, deriving the authenticated author, revision and scope. Public, unknown, stale or agent-authored disclosure is refused. Budget and issue scope retain their existing contracts. Hosting registers the server-authored disclosure lookups with the Full Control launch (#3379), which mints
+evidence authority only for a launch whose selected installation advertises the paced-video contract.
 
 
 ## Installed Native Readiness and Integrated Adapters
@@ -422,8 +469,8 @@ immutable active dispatch identity supplies terminal Stop, settlement or privacy
 
 Dedicated active Stop preparation uses `PreparedMediaActiveStops` and `RunnerMediaActiveStops`.
 The private ports require both the actual current prepared/purpose/member generation and the
-owning runner's exact durable launch claim plus registered worker handle. No hosting adapter is
-registered. Missing, revoked, corrupt, replaced or unknown ownership refuses; generic SessionManager
+owning runner's exact durable launch claim plus registered worker handle. Hosting registers the
+coordinator with no owning-handle port, so it never signals. Missing, revoked, corrupt, replaced or unknown ownership refuses; generic SessionManager
 or PID kills are never a fallback. With those trusted ports, a Stop can return 202 while retaining
 the queued identity, reservation and history. Request and ACK cannot settle cost, capacity or quality.
 The operation is committed before the first send/signal and anchored on the original command as

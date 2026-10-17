@@ -13,6 +13,8 @@ import {
   type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
+import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
+import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
 import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -24,7 +26,8 @@ const question: WorkflowDecisionResourceSnapshot = {
   options: [{ optionId: "inline", label: "Inline" }, { optionId: "footer", label: "Footer" }],
 };
 
-function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_VERSION) {
+/** `hostingVideo` composes the service exactly as hosting does, with its inert video evidence pieces. */
+function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_VERSION, hostingVideo = false) {
   const directory = mkdtempSync(join(tmpdir(), "full-control-acceptance-"));
   const path = join(directory, "control-plane.db");
   let db = ControlPlaneDb.open(path);
@@ -67,7 +70,12 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
         sessionId: message.sessionId, ok: true, repository: REPOSITORY, candidates: [] };
       throw new Error("Unexpected synthetic runner request");
     };
-    return new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+    if (!hostingVideo) return new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+    const video = composeHostingVideoEvidence(db);
+    const disclosures = hostingEvidenceAuthorityDisclosures({
+      organizationExists: (organizationId) => db.listOrganizationIds().includes(organizationId), listRunners: () => db.listRunners() });
+    return new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined, undefined,
+      undefined, false, undefined, undefined, video.workflowVideoApprovals, disclosures, undefined, video.preparedMediaActiveStops);
   };
   let svc = service();
   const enable = (budgetAuthority?: CampaignBudgetAuthority) => svc.setCampaignControl("root", {
@@ -282,8 +290,9 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
   });
 }
 
-test("foundation scope and attached video remain genuine human exceptions rather than a synthetic complete positive campaign", async () => {
-  const h = stack("codex-app-server");
+for (const hostingVideo of [false, true]) test("foundation scope and attached video remain genuine human exceptions rather than a synthetic complete positive campaign" +
+  (hostingVideo ? " under the hosting video composition" : ""), async () => {
+  const h = stack("codex-app-server", PROTOCOL_VERSION, hostingVideo);
   try {
     assert.ok(h.enable().ok);
     const scope = await h.svc.proposeCampaignIssueScope("root", { requestId: "fixture-scope", expectedRevision: 1,

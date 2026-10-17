@@ -14,6 +14,8 @@ import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orche
 import { authorizeFullControl, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { closureEvidence, publicationEvidence } from "./campaign-issue-authority.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
+import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
+import { syntheticInspectedVideoRuns, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectCampaignWorkspace, registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
@@ -31,7 +33,8 @@ const runtime: RunnerRuntimeInfo = { dataDir: "/fixture/data", worktreeRoot: "/f
   campaignLaunchInspection: { version: 2 }, campaignReview: review, executionIsolation: { mode: "provider", network: "inherit" } };
 const pacedVideoContract = { id: "wollipog-paced-video-review-v1", revision: 1 } as const;
 
-function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: number; priced?: boolean; images?: boolean; pacedVideo?: boolean } = {}) {
+function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: number; priced?: boolean; images?: boolean; pacedVideo?: boolean;
+  hostingVideo?: boolean } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const human: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -69,11 +72,13 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   };
   const disclosures = hostingEvidenceAuthorityDisclosures({
     organizationExists: (organizationId) => db.listOrganizationIds().includes(organizationId), listRunners: () => db.listRunners() });
+  // `hostingVideo` wires the service exactly as hosting does, with its inert video evidence pieces.
+  const video = options.hostingVideo ? composeHostingVideoEvidence(db) : undefined;
   const sessions = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined,
-    undefined, undefined, false, undefined, undefined, undefined, disclosures);
+    undefined, undefined, false, undefined, undefined, video?.workflowVideoApprovals, disclosures, undefined, video?.preparedMediaActiveStops);
   const scope = { organizationId: human.organizationId, owner: { kind: "user" as const, userId: human.userId } };
   const settings = new OrchestratorSettings(db);
-  return { db, hub, sent, starts, state, sessions, human, scope, settings, disclosures, reconnect };
+  return { db, hub, sent, starts, state, sessions, human, scope, settings, disclosures, reconnect, video };
 }
 
 async function app(f: ReturnType<typeof fixture>, inspectionTimeoutMs?: number) {
@@ -288,6 +293,29 @@ test("a peer declaring the private media contract gets the evidence envelope fro
       [["claude-code", CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, [{ driver: "claude-code", modelId: "claude-opus-5-5" }]]]);
     assert.equal(f.db.campaignProjection(admitted.json().id)!.decisionOwners.pr_merge, "orchestrator", "the envelope keeps the boundary supported");
   } finally { await server.close(); f.db.close(); }
+});
+
+test("the hosting video composition flips no launch capability: video stays with the Human even with a paced peer and a live proof", async () => {
+  const plain = fixture({ pacedVideo: true });
+  const hosted = fixture({ pacedVideo: true, hostingVideo: true });
+  const video = hosted.video!;
+  const plainApp = await app(plain), hostedApp = await app(hosted);
+  try {
+    assert.equal(video.readiness().code, "live_validation");
+    const peer = video.pacedPeers()[0]!;
+    const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5" });
+    assert.ok(video.liveValidation.recordInspectedRuns(hosted.human, target, syntheticInspectedVideoRuns(target, hosted.human.userId)));
+    assert.equal(video.readiness().code, "reviewer_unavailable", "a recorded proof alone does not make video review available");
+    const [expected, checked] = [(await preflight(plainApp.server, launch)).preflight!, (await preflight(hostedApp.server, launch)).preflight!];
+    assert.deepEqual(checked.capabilities.map((item) => [item.id, item.state]), expected.capabilities.map((item) => [item.id, item.state]));
+    const videoCapability = checked.capabilities.find((item) => item.id === "video_evidence")!;
+    assert.equal(videoCapability.state, "human_required");
+    assert.equal(videoCapability.reason, "Video evidence needs your review until production video review is available.");
+    assert.ok(checked.summary.humanRequired.some((item) => item.exception === "Video Evidence Review" && item.reason === videoCapability.reason));
+    assert.equal(checked.summary.evidence.statement, expected.summary.evidence.statement);
+  } finally {
+    await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
+  }
 });
 
 test("Project child-session ceilings block controlled review, and a task alone launches with an empty issue scope", async () => {

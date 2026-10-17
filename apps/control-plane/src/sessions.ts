@@ -12019,8 +12019,17 @@ export class SessionsService {
       return ok(session, 202);
     }
     if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId)) {
+      const media = this.mediaSessionPurposes.owns(session.id);
+      // A dedicated media Stop records no archive intent and settles nothing, so archival cannot be
+      // scheduled for an active or ambiguous media Session (#3365). Refuse before any effect rather
+      // than answer 202 for an archive that will never happen.
+      if (media && session.status !== "queued" && this.mediaSessionPurposes.lifecycleState(session.id) !== "cancelled") {
+        return fail("An active media review Session cannot be archived yet: Stop it and let authenticated reconciliation " +
+          "settle it first; capacity is retained.", 409);
+      }
       const pending = this.requestStop(session, now, true, refreshProject);
-      if (pending.status === "queued" && this.mediaSessionPurposes.owns(session.id)) {
+      // Acceptance needs the durable intent it promises: an archived row or an archive-after-Stop intent.
+      if (media && !pending.archived && !this.db.sessionStopIntent(sessionId)?.archiveAfterStop) {
         return fail("Prepared media archive requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
       }
       return ok(pending, 202);

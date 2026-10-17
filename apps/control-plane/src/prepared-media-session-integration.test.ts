@@ -1440,6 +1440,65 @@ test("dedicated Stop registration is required even after an authentic running st
     (m as { type?: string }).type === "stop_session"), "ordinary campaign budget Stop remains effective");
 });
 
+// #3365: archive acceptance (202) must mean a durable archive intent exists, in every media state.
+function archiveOutcome(h: Awaited<ReturnType<typeof activeStopHarness>> | ReturnType<typeof releaseHarness>) {
+  const session = h.db.getSession(h.actual.sessionId)!;
+  return { status: session.status, archived: session.archived === true,
+    archiveIntent: h.db.sessionStopIntent(h.actual.sessionId)?.archiveAfterStop === true,
+    stopIntent: h.db.hasSessionStopIntent(h.actual.sessionId), active: h.db.campaignBudgets.active(h.actual.sessionId) };
+}
+for (const state of ["active-running", "active-queued", "ambiguous-running", "ambiguous-queued"] as const) {
+  test("archive of " + state + " media refuses without an archive intent, generic kill or dedicated Stop", async (t) => {
+    const h = await activeStopHarness(t, state.startsWith("ambiguous"));
+    const record = h.prepared.get(h.actual)!;
+    assert.equal(record.state, state.startsWith("ambiguous") ? "uncertain" : "active");
+    // Only the trusted active command admits a running status; an ambiguous one is set directly.
+    if (state === "active-running") h.service.onSessionStatus(h.actual.sessionId, "running", undefined, undefined, "r");
+    if (state === "ambiguous-running") h.db.updateSessionStatus(h.actual.sessionId, "running", Date.now());
+    const status = state.endsWith("running") ? "running" : "queued";
+    assert.equal(h.db.getSession(h.actual.sessionId)?.status, status);
+    const result = h.service.setArchived(h.actual.sessionId, true);
+    assert.equal(result.ok, false); assert.equal(result.status, 409);
+    assert.match(result.error!, status === "running" ? /cannot be archived yet/u : /never-enqueued proof/u);
+    assert.deepEqual(archiveOutcome(h), { status, archived: false, archiveIntent: false, stopIntent: false, active: true });
+    assert.equal(h.stops(), 0); assert.equal(h.sends(), 0);
+    assert.deepEqual(h.messages, []);
+    assert.deepEqual(h.prepared.get(record), record);
+  });
+}
+test("a dedicated Stop acknowledgement is not archival: archive still refuses after an accepted media Stop", async (t) => {
+  const h = await activeStopHarness(t);
+  h.service.onSessionStatus(h.actual.sessionId, "running", undefined, undefined, "r");
+  assert.equal(h.service.stop(h.actual.sessionId).status, 202);
+  assert.equal(h.service.onMediaReviewStopAcknowledged("r", h.ack()!), true);
+  const result = h.service.setArchived(h.actual.sessionId, true);
+  assert.equal(result.ok, false); assert.equal(result.status, 409);
+  assert.deepEqual(archiveOutcome(h), { status: "running", archived: false, archiveIntent: false, stopIntent: false, active: true });
+  assert.equal(h.stops(), 1, "archive sends no second Stop"); assert.equal(h.sends(), 1);
+  assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null, "no final pricing is implied");
+});
+test("archive of locally cancelled and terminal media is accepted only with its durable archived state", async (t) => {
+  // Cancelled: never-enqueued cancellation already released capacity; archive commits directly.
+  const cancelled = releaseHarness(t);
+  assert.ok(cancelled.service.stop(cancelled.actual.sessionId).ok);
+  assert.equal(cancelled.service.mediaSessionPurposes.lifecycleState(cancelled.actual.sessionId), "cancelled");
+  const archived = cancelled.service.setArchived(cancelled.actual.sessionId, true);
+  assert.equal(archived.ok, true); assert.equal(archived.status, 200);
+  assert.deepEqual(archiveOutcome(cancelled), { status: "stopped", archived: true, archiveIntent: false, stopIntent: false, active: false });
+  // Queued and locally cancellable: the same request cancels and archives atomically.
+  const queued = releaseHarness(t);
+  const accepted = queued.service.setArchived(queued.actual.sessionId, true);
+  assert.equal(accepted.ok, true); assert.equal(accepted.status, 202);
+  assert.deepEqual(archiveOutcome(queued), { status: "stopped", archived: true, archiveIntent: false, stopIntent: false, active: false });
+  // Terminal row: no Stop is needed, and the archive is recorded rather than promised.
+  const terminal = await activeStopHarness(t);
+  terminal.db.updateSessionStatus(terminal.actual.sessionId, "failed", Date.now());
+  const done = terminal.service.setArchived(terminal.actual.sessionId, true);
+  assert.equal(done.ok, true); assert.equal(done.status, 200);
+  assert.equal(archiveOutcome(terminal).archived, true);
+  assert.equal(terminal.stops(), 0); assert.deepEqual(terminal.messages, []);
+});
+
 test("ordinary rate-priced usage sends exactly one authoritative accounting acknowledgement", (t) => {
   const h = releaseHarness(t); h.messages.length = 0;
   h.hub.runnerProtocolVersion = () => PACED_VIDEO_REVIEW_MIN_PROTOCOL; // Synthetic negotiated connection; no actual runner.
