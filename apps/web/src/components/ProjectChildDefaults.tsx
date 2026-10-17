@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ChildSessionDefaults, ProjectView } from "@wollipog/protocol";
+import { DetailSection } from "./DetailSection.js";
 
 /** Keyed by Project identity by the caller, so switching Projects discards the old draft. */
 export function ProjectChildDefaults({ project, disabled, onSave }: {
@@ -24,9 +25,9 @@ export function ProjectChildDefaults({ project, disabled, onSave }: {
     catch (err) { setError(err instanceof Error ? err.message : "Could not save child session defaults."); }
     finally { setSaving(false); }
   };
-  return <section className="project-detail-section" aria-labelledby="child-defaults-heading">
-    <h3 id="child-defaults-heading">Child Session Defaults</h3>
-    <p>These fallback per-child limits apply when the caller omits them. A bounded parent’s remaining allowance is always the ceiling. Without Project defaults, omitted limits remain unlimited for an unbounded parent.</p>
+  // The section recipe (#2959); #2962 turns its contents into setting rows.
+  return <DetailSection title="Child Session Defaults" note="These fallback per-child limits apply when the caller omits them.">
+    <p>A bounded parent’s remaining allowance is always the ceiling. Without Project defaults, omitted limits remain unlimited for an unbounded parent.</p>
     <form className="project-name-form" onSubmit={(event) => {
       event.preventDefault();
       const costBudgetUsd = Number(cost);
@@ -51,5 +52,5 @@ export function ProjectChildDefaults({ project, disabled, onSave }: {
     {error && <p role="alert" className="form-error">{error}</p>}
     <button className="btn" type="button" disabled={disabled || saving || !project.childSessionDefaults}
       onClick={() => void submit(null)}>Remove Child Defaults</button>
-  </section>;
+  </DetailSection>;
 }

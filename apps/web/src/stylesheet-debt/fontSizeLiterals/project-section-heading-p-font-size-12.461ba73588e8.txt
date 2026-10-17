@@ -1,1 +1,0 @@
-|.project-section-heading p|font-size|12

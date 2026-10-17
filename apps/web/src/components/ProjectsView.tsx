@@ -34,7 +34,11 @@ import { backLabel, destination } from "../navigation.js";
 import { useIsMobile } from "./useIsMobile.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
-import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
+import { suggestedProjectLocation } from "../project-session-selection.js";
+import { accessScopeLabel } from "../access-scopes.js";
+import { writeClipboardText } from "../clipboard.js";
+import { DetailSection } from "./DetailSection.js";
+import { PROJECT_ACTIONS_LABEL, ProjectDetailHeader, projectDetailMenu, projectNewSessionBlocker } from "./ProjectDetailHeader.js";
 import { DetailSkeleton, Modal } from "./common.js";
 import { Notice } from "./Notice.js";
 import { ProjectList } from "./ProjectList.js";
@@ -44,6 +48,13 @@ type DialogState =
   | { kind: "create" }
   | { kind: "add-location"; onboarding?: boolean }
   | { kind: "delete" };
+
+/** A failed project action: the sentence the detail's notice leads with, and the raw message behind
+ * its Show Details (§13.2). */
+interface ProjectActionError {
+  sentence: string;
+  detail: string;
+}
 
 function ProjectLocationWorktreeSetup({ project, location, runnerProtocolVersion }: {
   project: ProjectView;
@@ -166,7 +177,7 @@ export function ProjectsView({
   const [visibility, setVisibility] = useState<ProjectVisibilityFilter>("all");
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ProjectActionError | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const { identity: accessIdentity, error: accessIdentityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const createButtonRef = useRef<HTMLButtonElement>(null);
@@ -240,7 +251,9 @@ export function ProjectsView({
     setError(null);
     setDialog(next);
   };
-  const runProjectMutation = async (key: string, action: () => Promise<ProjectView>, reportError = true) => {
+  const fail = (sentence: string, cause: unknown) => setError({ sentence, detail: (cause as Error).message });
+  /** `failure` is the notice's sentence; null where the form that saved shows its own error. */
+  const runProjectMutation = async (key: string, action: () => Promise<ProjectView>, failure: string | null) => {
     if (busy) return;
     setBusy(key);
     setError(null);
@@ -249,7 +262,7 @@ export function ProjectsView({
       applyProject(project);
       return project;
     } catch (cause) {
-      if (reportError) setError((cause as Error).message);
+      if (failure) fail(failure, cause);
       throw cause;
     } finally {
       setBusy(null);
@@ -260,14 +273,16 @@ export function ProjectsView({
     event.preventDefault();
     if (!selected || !renameDraft.trim() || renameDraft.trim() === selected.name) return;
     try {
-      await runProjectMutation("rename", async () => (await api.updateProject(selected.id, { name: renameDraft.trim() })).project);
+      await runProjectMutation("rename", async () => (await api.updateProject(selected.id, { name: renameDraft.trim() })).project,
+        "Couldn't rename the project.");
       showToast("Project renamed.");
     } catch { /* inline error */ }
   };
   const toggleHidden = async () => {
     if (!selected) return;
     try {
-      await runProjectMutation("visibility", async () => (await api.updateProject(selected.id, { hidden: !selected.hidden })).project);
+      await runProjectMutation("visibility", async () => (await api.updateProject(selected.id, { hidden: !selected.hidden })).project,
+        selected.hidden ? "Couldn't show the project in Sessions." : "Couldn't hide the project from Sessions.");
       showToast(selected.hidden ? "Project shown in Sessions." : "Project hidden from Sessions.");
     } catch { /* inline error */ }
   };
@@ -290,7 +305,7 @@ export function ProjectsView({
     try {
       await archiveProjectWithFeedback({ projectId: selected.id, projectName: selected.name, api, showToast, showUndo });
     } catch (cause) {
-      setError((cause as Error).message);
+      fail("Couldn't archive the project's sessions.", cause);
     } finally {
       setBusy(null);
     }
@@ -306,14 +321,16 @@ export function ProjectsView({
     });
     if (!accepted) return;
     try {
-      await runProjectMutation(`remove:${location.id}`, async () => (await api.removeProjectLocation(selected.id, location.id)).project);
+      await runProjectMutation(`remove:${location.id}`, async () => (await api.removeProjectLocation(selected.id, location.id)).project,
+        "Couldn't remove the location.");
       showToast("Location removed. The folder and sessions were not deleted.");
     } catch { /* inline error */ }
   };
   const makeDefault = async (location: ProjectLocationView) => {
     if (!selected) return;
     try {
-      await runProjectMutation(`default:${location.id}`, async () => (await api.setDefaultProjectLocation(selected.id, location.id)).project);
+      await runProjectMutation(`default:${location.id}`, async () => (await api.setDefaultProjectLocation(selected.id, location.id)).project,
+        "Couldn't make that location the default.");
     } catch { /* inline error */ }
   };
   const reveal = async (location: ProjectLocationView) => {
@@ -321,7 +338,7 @@ export function ProjectsView({
     try {
       await api.revealWorkspace(location.runnerId, location.path);
     } catch (cause) {
-      setError((cause as Error).message);
+      fail("Couldn't reveal the location in the file manager.", cause);
     }
   };
   const deleteProject = async () => {
@@ -336,7 +353,7 @@ export function ProjectsView({
       navigate(next ? { name: "projects", id: next.id } : { name: "projects" });
       showToast("Project deleted. Sessions moved to No Project.");
     } catch (cause) {
-      setError((cause as Error).message);
+      fail("Couldn't delete the project.", cause);
     } finally {
       setBusy(null);
     }
@@ -348,8 +365,28 @@ export function ProjectsView({
       applyProject((await api.project(selected.id)).project);
       showToast("Access scope updated.");
     } catch (cause) {
-      setError((cause as Error).message);
+      fail("Access changed, but the project couldn't be reloaded.", cause);
     }
+  };
+  /** Copies the id and confirms it with a toast that shows what was copied. */
+  const copyProjectId = async (id: string) => {
+    // ⋯ has handed focus back to its trigger; a refused write falls back only while it still has it.
+    const from = document.activeElement;
+    const current = () => document.activeElement === null || document.activeElement === document.body ||
+      document.activeElement === from;
+    const copied = await writeClipboardText(id, current);
+    if (copied === null) return;
+    if (from instanceof HTMLElement && (document.activeElement === document.body || document.activeElement === null)) from.focus();
+    if (copied) showToast("Project ID copied.", { tone: "success", detail: id, detailStyle: "mono" });
+    else showToast("Couldn't copy the project ID.", { tone: "error" });
+  };
+  /** The project with its default location chosen, or the only one that can host a session. With
+   * several and no default, New Session asks which. */
+  const newSessionPreset = (project: ProjectView): NewSessionPreset => {
+    const location = suggestedProjectLocation(project, runners);
+    return location
+      ? { runnerId: location.runnerId, workspaceId: location.workspaceId, projectId: project.id, projectLocationId: location.id }
+      : { projectId: project.id };
   };
 
   const header = (primary: boolean) => (
@@ -388,6 +425,17 @@ export function ProjectsView({
   // every detail bar and shares the column's height with the panes.
   const phoneDetail = isMobile && detailOpen && !spanningEmpty;
   const noMatch = snapshotLoaded && allProjects.length > 0 && visibleProjects.length === 0;
+  const newSessionBlocker = selected ? projectNewSessionBlocker(selected, runners, machineName) : null;
+  const newSession = selected ? {
+    label: "New Session",
+    disabled: newSessionBlocker !== null,
+    onClick: () => onNewSession(newSessionPreset(selected)),
+  } : null;
+  const detailMenu = selected ? projectDetailMenu(selected, { stopsRuntime: selectedStopsRuntime, busy: busy !== null }, {
+    onCopyId: () => void copyProjectId(selected.id),
+    onArchive: () => void archiveSessions(),
+    onDelete: () => openDialog({ kind: "delete" }),
+  }) : [];
   return (
     <section className="page full fill">
       {phoneDetail && (
@@ -395,6 +443,9 @@ export function ProjectsView({
           title={selected?.name ?? "Project"}
           backLabel={backLabel("projects")}
           onBack={() => navigate({ name: "projects" })}
+          primary={newSession ? { ...newSession, icon: <PlusIcon />, title: newSessionBlocker ?? undefined } : undefined}
+          menu={detailMenu}
+          menuLabel={PROJECT_ACTIONS_LABEL}
         />
       )}
       {!phoneDetail && header(!spanningEmpty)}
@@ -449,89 +500,43 @@ export function ProjectsView({
               </div>
             )
           ) : (
-            // One grid item, so the detail keeps its own flow until its header and sections (#2959).
-            <div>
-              <div className="project-detail-heading">
-                <div>
-                  <h2>{selected.name}</h2>
-                  <span className="muted project-detail-meta">Project ID: {selected.id}</span>
-                  {projectAudienceVisibilitySummary(selected.audience) && (
-                    <span className="muted project-detail-meta">{projectAudienceVisibilitySummary(selected.audience)}</span>
-                  )}
-                </div>
-                <span className={`project-visibility-state${selected.hidden ? " is-hidden" : ""}`}>
-                  {selected.hidden ? "Hidden from Sessions" : "Shown in Sessions"}
-                </span>
-              </div>
-              {selected.canManage === false && (
-                <div className="project-permission-note" role="note">
-                  You can view this Project, but you don’t have permission to manage it.
-                </div>
-              )}
-              {error && <div className="form-error project-manager-error" role="alert">{error}</div>}
-              {accessIdentityError && (
-                <div className="form-error project-manager-error" role="alert">
-                  Access controls could not be loaded: {accessIdentityError}
-                </div>
-              )}
-              <section className="project-detail-section" aria-labelledby="project-details-heading">
-                <div className="project-section-heading">
-                  <div><h3 id="project-details-heading">Project Details</h3><p>Renaming a Project does not rename its folders or Locations.</p></div>
-                </div>
-                <form className="project-name-form" onSubmit={(event) => void rename(event)}>
-                  <label className="field">
-                    <span>Project Name</span>
-                    <input value={renameDraft} disabled={selected.canManage === false || busy !== null} maxLength={120} onChange={(event) => setRenameDraft(event.target.value)} />
-                  </label>
-                  <button type="submit" className="btn" disabled={selected.canManage === false || busy !== null || !renameDraft.trim() || renameDraft.trim() === selected.name}>
-                    <span>{busy === "rename" ? "Saving…" : "Save Changes"}</span>
-                  </button>
-                </form>
-                <div className="project-counts" aria-label="Project Counts">
-                  <div><strong>{selected.activeSessionCount}</strong><span>Active Sessions</span></div>
-                  <div><strong>{selected.unarchivedSessionCount}</strong><span>Unarchived Sessions</span></div>
-                  <div><strong>{selected.totalSessionCount}</strong><span>Total Sessions</span></div>
-                  <div><strong>{selected.locations.length}</strong><span>Locations</span></div>
-                </div>
-                <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => void toggleHidden()}>
-                  {busy === "visibility" ? "Saving…" : selected.hidden ? "Show Project" : "Hide Project"}
-                </button>
-                {accessScopeManagementSupported && selected.scope && (
-                  <AccessScopeSettings
-                    resource={{ kind: "project", projectId: selected.id, name: selected.name }}
-                    scope={selected.scope}
-                    identity={accessIdentity}
-                    disabled={selected.canManage === false || busy !== null}
-                    onUpdated={() => void refreshSelectedProject()}
-                  />
-                )}
-              </section>
-              <ProjectMemorySharingSettings key={`memory:${selected.id}`} project={selected} runners={runners}
-                disabled={selected.canManage === false || busy !== null}
-                onSave={async (memorySharing) => {
-                  const result = await runProjectMutation("memory-sharing",
-                    async () => (await api.updateProject(selected.id, { memorySharing })).project, false);
-                  if (!result) throw new Error("Could not save the memory policy.");
-                }} />
-              {selected.childSessionDefaults !== undefined && <ProjectChildDefaults
-                key={selected.id}
+            // The header, then the notices, then one section recipe in a fixed order (#2959): the
+            // section contents are reworked by #2961 (Locations), #2962 (Settings, Child Session
+            // Defaults) and #2963 (Memory Sharing).
+            <div className="project-detail">
+              <ProjectDetailHeader
                 project={selected}
-                disabled={selected.canManage === false || busy !== null}
-                onSave={async (childSessionDefaults) => {
-                  const result = await runProjectMutation("child-defaults",
-                    // This form owns its error alert; do not announce the rejection twice.
-                    async () => (await api.updateProject(selected.id, { childSessionDefaults })).project, false);
-                  if (!result) throw new Error("Could not save child session defaults.");
-                }}
-              />}
-              <section className="project-detail-section" aria-labelledby="project-locations-heading">
-                <div className="project-section-heading">
-                  <div><h3 id="project-locations-heading">Locations</h3><p>Exact folders where this Project can run. The default is used first when available.</p></div>
+                showTitle={!phoneDetail}
+                newSession={newSession!}
+                blocker={newSessionBlocker}
+                menu={detailMenu}
+                access={accessScopeManagementSupported && selected.scope ? accessScopeLabel(selected.scope, accessIdentity) : null}
+              />
+              {selected.canManage === false && (
+                <Notice tone="neutral" compact role="note">You can view this project, but you can't change it.</Notice>
+              )}
+              {/* Delete Project shows its own request's failure (§7.3). */}
+              {error && dialog?.kind !== "delete" && (
+                <Notice tone="danger" role="alert" onDismiss={() => setError(null)}
+                  details={<div className="code-well"><code>{error.detail}</code></div>}>
+                  {error.sentence}
+                </Notice>
+              )}
+              {accessIdentityError && (
+                <Notice tone="danger" role="alert" details={<div className="code-well"><code>{accessIdentityError}</code></div>}>
+                  Access controls couldn't be loaded, so access can't be changed here.
+                </Notice>
+              )}
+              <DetailSection
+                title="Locations"
+                note="The folders this project runs in; new sessions use the default first when it's available."
+                actions={(
                   <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "add-location" })}>
                     <PlusIcon />
                     <span>Add Location</span>
                   </button>
-                </div>
+                )}
+              >
                 {selected.locations.length === 0 ? (
                   <div className="project-manager-empty location-empty">
                     <strong>No Project Locations</strong>
@@ -611,17 +616,49 @@ export function ProjectsView({
                     })}
                   </div>
                 )}
-              </section>
-              <section className="project-detail-section" aria-labelledby="project-session-actions-heading">
-                <div className="project-section-heading"><div><h3 id="project-session-actions-heading">Session Actions</h3><p>Archiving sessions leaves this Project and its Locations in place.</p></div></div>
-                <button type="button" className="btn" disabled={selected.canManage === false || selected.unarchivedSessionCount === 0 || busy !== null} onClick={() => void archiveSessions()}>
-                  {busy === "archive" ? "Archiving…" : selectedStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions"}
+              </DetailSection>
+              <DetailSection title="Settings" note="Renaming a project doesn't rename its folders or locations.">
+                <form className="project-name-form" onSubmit={(event) => void rename(event)}>
+                  <label className="field">
+                    <span>Project Name</span>
+                    <input value={renameDraft} disabled={selected.canManage === false || busy !== null} maxLength={120} onChange={(event) => setRenameDraft(event.target.value)} />
+                  </label>
+                  <button type="submit" className="btn" disabled={selected.canManage === false || busy !== null || !renameDraft.trim() || renameDraft.trim() === selected.name}>
+                    <span>{busy === "rename" ? "Saving…" : "Save Changes"}</span>
+                  </button>
+                </form>
+                <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => void toggleHidden()}>
+                  {busy === "visibility" ? "Saving…" : selected.hidden ? "Show Project" : "Hide Project"}
                 </button>
-              </section>
-              <section className="project-detail-section project-danger-zone" aria-labelledby="project-danger-heading">
-                <div className="project-section-heading"><div><h3 id="project-danger-heading">Danger Zone</h3><p>Deleting removes only Project metadata. Sessions and files are retained.</p></div></div>
-                <button type="button" className="btn ghost danger" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "delete" })}>Delete Project</button>
-              </section>
+                {accessScopeManagementSupported && selected.scope && (
+                  <AccessScopeSettings
+                    resource={{ kind: "project", projectId: selected.id, name: selected.name }}
+                    scope={selected.scope}
+                    identity={accessIdentity}
+                    disabled={selected.canManage === false || busy !== null}
+                    onUpdated={() => void refreshSelectedProject()}
+                  />
+                )}
+              </DetailSection>
+              <ProjectMemorySharingSettings key={`memory:${selected.id}`} project={selected} runners={runners}
+                disabled={selected.canManage === false || busy !== null}
+                onSave={async (memorySharing) => {
+                  const result = await runProjectMutation("memory-sharing",
+                    // This form owns its error alert; do not announce the rejection twice.
+                    async () => (await api.updateProject(selected.id, { memorySharing })).project, null);
+                  if (!result) throw new Error("Could not save the memory policy.");
+                }} />
+              {selected.childSessionDefaults !== undefined && <ProjectChildDefaults
+                key={selected.id}
+                project={selected}
+                disabled={selected.canManage === false || busy !== null}
+                onSave={async (childSessionDefaults) => {
+                  const result = await runProjectMutation("child-defaults",
+                    // This form owns its error alert; do not announce the rejection twice.
+                    async () => (await api.updateProject(selected.id, { childSessionDefaults })).project, null);
+                  if (!result) throw new Error("Could not save child session defaults.");
+                }}
+              />}
             </div>
           )}
         </div>
@@ -682,7 +719,7 @@ export function ProjectsView({
         />
       )}
       {dialog?.kind === "delete" && selected && (
-        <DeleteProjectDialog project={selected} busy={busy === "delete"} error={error} onClose={() => setDialog(null)} onDelete={deleteProject} />
+        <DeleteProjectDialog project={selected} busy={busy === "delete"} error={error?.detail ?? null} onClose={() => setDialog(null)} onDelete={deleteProject} />
       )}
     </section>
   );
