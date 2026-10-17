@@ -190,6 +190,13 @@ export class EvidenceReviewService {
     return verdict;
   }
   ownerProvenance(principal: AuthPrincipal, reviewId: string): VideoReviewVerdict {
+    return this.ownerVerdict(principal, reviewId, "approval");
+  }
+  /** Either outcome, for the owner's decision; never usable as approval provenance by itself. */
+  ownerObservation(principal: AuthPrincipal, reviewId: string): VideoReviewVerdict {
+    return this.ownerVerdict(principal, reviewId, "observation");
+  }
+  private ownerVerdict(principal: AuthPrincipal, reviewId: string, purpose: "approval" | "observation"): VideoReviewVerdict {
     const root = agentSession(principal);
     const review = this.store.getReview(reviewId);
     if (principal.kind !== "agent" || principal.orchestrator !== true || !root || !review ||
@@ -198,7 +205,8 @@ export class EvidenceReviewService {
       throw new Error("Only the exact current workflow decision owner with supported private peers can inspect approval provenance.");
     }
     // Server chooses the authenticated admitted reviewer from the stored grant, not owner JSON.
-    const verdict = this.runtime.approvalProvenance(reviewId, review.binding.reviewerSessionId);
+    const verdict = purpose === "approval" ? this.runtime.approvalProvenance(reviewId, review.binding.reviewerSessionId)
+      : this.runtime.ownerObservation(reviewId, review.binding.reviewerSessionId);
     this.audit(review, "video_evidence_provenance", "owner_provenance", { verdictId: verdict.verdictId });
     return verdict;
   }

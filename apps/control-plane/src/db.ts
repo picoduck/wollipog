@@ -7498,9 +7498,16 @@ export class ControlPlaneDb {
       // Sessions that were mid-flight when the control plane stopped are orphaned
       // (we no longer have a live runner link to them) — mark them stopped, not
       // failed: an interrupted connection isn't an agent error.
-      const midFlight = this.stmt(
+      // A dedicated media reviewer (#1321) runs outside its runner's Session inventory. Unless it has
+      // an explicit Stop, startup leaves an unsettled one to its own lifecycle: an unsent command is
+      // released by its coordinator, a sent one is resolved by authenticated runner readback.
+      const dedicatedMedia = this.raw().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prepared_media_sessions'").get()
+        ? "AND id NOT IN (SELECT json_extract(payload,'$.sessionId') FROM prepared_media_sessions " +
+          "WHERE state IN ('prepared','bound','dispatching','uncertain','active') " +
+          "AND json_extract(payload,'$.sessionId') NOT IN (SELECT session_id FROM session_stop_intents))" : "";
+      const midFlight = this.raw().prepare(
         `SELECT id FROM sessions
-         WHERE status IN ('queued','starting','running','input_required','idle')`,
+         WHERE status IN ('queued','starting','running','input_required','idle') ${dedicatedMedia}`,
       ).all() as Array<{ id: string }>;
       // A child-creation approval is refreshed only by its agent's next create call, which could
       // not reach this process while it was down. The provisional stop below gives it only the
@@ -7514,10 +7521,10 @@ export class ControlPlaneDb {
              SELECT id FROM sessions WHERE status IN ('queued','starting','running','input_required','idle')
            )`,
       ).run(now, SPAWN_APPROVAL_REQUEST_ID_PREFIX);
-      this.stmt(
+      this.raw().prepare(
         `UPDATE sessions SET status = 'stopped', updated_at = ?,
            stop_cause = 'startup_settlement', stop_confirmation = NULL, stop_confirmed_at = NULL
-         WHERE status IN ('queued','starting','running','input_required','idle')`,
+         WHERE status IN ('queued','starting','running','input_required','idle') ${dedicatedMedia}`,
       ).run(now);
       // Terminality is the retry fence on every path: a runner disconnect already fences these
       // commands, and a control-plane restart is no less disruptive — without this the outbox

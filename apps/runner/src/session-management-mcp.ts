@@ -990,6 +990,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "request_github_issue_closure", "close_github_issue",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
+  "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
   "reconcile_workflow_decision", "list_workflow_decisions",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
@@ -1003,7 +1004,22 @@ const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campa
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
   "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
+  "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
 ]);
+
+/** Delegated video review exists only on a control plane that declares the exact private paced
+ * contract right now. A cached public protocol number is never enough (#1321). */
+async function pacedVideoReviewCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const cachedVersion = deps.controlPlaneProtocolVersion;
+  if (cachedVersion !== undefined && (!Number.isSafeInteger(cachedVersion) || cachedVersion < PACED_VIDEO_REVIEW_MIN_PROTOCOL)) {
+    return errorResult(`Delegated video review requires control plane protocol v${PACED_VIDEO_REVIEW_MIN_PROTOCOL} or newer; nothing was sent`);
+  }
+  const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+  if (!compatibility.ok || !supportsPacedVideoReviewPeer(compatibility.data?.protocolVersion, compatibility.data?.pacedVideoReviewContract)) {
+    return errorResult("This control plane does not offer delegated video review; video evidence stays with the Human. Nothing was sent");
+  }
+  return null;
+}
 
 export const TOOLS: McpTool[] = [
   {
@@ -1784,6 +1800,45 @@ export const TOOLS: McpTool[] = [
         },
         session: mapSession(r.data),
       });
+    },
+  },
+  {
+    name: "prepare_descendant_video_evidence_review",
+    description: "Start the managed media-only review of one video evidence item of an exact pending descendant ui_evidence_approval decision that this Orchestrator owns. The control plane derives every frame, admits a separate Claude Code reviewer and dispatches it; you never see or choose the frames, reviewer, model or budget. Returns the review id, frame and window counts, or a specific reason video stays with the Human. Then poll get_descendant_video_evidence_provenance.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" }, occurrenceId: { type: "string" }, evidenceId: { type: "string" } },
+      required: ["sessionId", "occurrenceId", "evidenceId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (typeof args?.sessionId !== "string" || !args.sessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId ||
+          typeof args?.evidenceId !== "string" || !args.evidenceId) return errorResult("sessionId, occurrenceId, and evidenceId are required");
+      const incompatible = await pacedVideoReviewCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/video-evidence-review/prepare`,
+        { childSessionId: args.sessionId, occurrenceId: args.occurrenceId, evidenceId: args.evidenceId });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "get_descendant_video_evidence_provenance",
+    description: "Read the managed reviewer's verdict for a video review this Orchestrator prepared: outcome, per-criterion observations with observed frame indices, the delivery-plan digest and the reviewer's identity and priced usage. Returns pending until the reviewer finished and its usage settled. A verdict does not resolve the decision: approve it with resolve_descendant_workflow_decision and delegatedVideoEvidence [{evidenceId, reviewId, verdictId, reviewerSessionId}].",
+    inputSchema: {
+      type: "object",
+      properties: { reviewId: { type: "string" } },
+      required: ["reviewId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (typeof args?.reviewId !== "string" || !args.reviewId || args.reviewId.length > 256) return errorResult("reviewId is required");
+      const incompatible = await pacedVideoReviewCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/video-evidence-review/provenance`,
+        { reviewId: args.reviewId });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
   {

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import { PACED_VIDEO_REVIEW_WINDOW_LIMITS, type ClaudeMediaReviewerAttestation } from "@wollipog/protocol";
+import { mediaReviewerAttestationBody, PACED_VIDEO_REVIEW_WINDOW_LIMITS, type ClaudeMediaReviewerAttestation } from "@wollipog/protocol";
 import { MEDIA_REVIEWER_TOOLS } from "./evidence-review-namespace.js";
 import { MEDIA_MCP_SERVER_NAME } from "./media-review-relay.js";
 
@@ -79,11 +79,7 @@ export function claudeMediaReviewerAttestation(agentId: string, install: ClaudeM
     tools: [...MEDIA_REVIEWER_TOOLS] as ClaudeMediaReviewerAttestation["tools"],
     credential: "dedicated_api_key", windowLimitsRevision: PACED_VIDEO_REVIEW_WINDOW_LIMITS.revision };
 }
-export const mediaReviewerAttestationSha256 = (attestation: ClaudeMediaReviewerAttestation) => sha(JSON.stringify({
-  profile: attestation.profile, harness: attestation.harness, agentId: attestation.agentId, cliVersion: attestation.cliVersion,
-  executableSha256: attestation.executableSha256, namespacePolicySha256: attestation.namespacePolicySha256,
-  tools: attestation.tools, credential: attestation.credential, windowLimitsRevision: attestation.windowLimitsRevision,
-}));
+export const mediaReviewerAttestationSha256 = (attestation: ClaudeMediaReviewerAttestation) => sha(mediaReviewerAttestationBody(attestation));
 
 /** One fresh conversation per window. `--tools ""` removes every built-in tool, `--bare` skips
  * hooks, plugin sync, CLAUDE.md, auto-memory and keychain/OAuth reads (auth is strictly the

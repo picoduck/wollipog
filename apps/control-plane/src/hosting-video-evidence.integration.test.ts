@@ -12,7 +12,7 @@ import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 
 /** The real hosting entry point composes the video evidence pieces and every new route refuses. */
-test("hosting composes inert video evidence and refuses every new route in the current state", { timeout: 60_000 }, async () => {
+test("hosting composes video evidence review and refuses every route until a reviewer is certified", { timeout: 60_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "hosting-video-evidence-"));
   const database = join(root, "control-plane.db");
   const listener = createServer();
@@ -95,13 +95,18 @@ test("hosting composes inert video evidence and refuses every new route in the c
       assert.equal((await call(as, "POST", "/api/video-evidence/live-validations", {})).status, refusedFor(as), `record as ${as}`);
       assert.equal((await call(as, "POST", "/api/video-evidence/live-validations/any/revoke")).status, refusedFor(as), `revoke as ${as}`);
     }
-    // Ordinary Session credentials stay outside the review routes; Humans never hold a reviewer credential.
+    // Orchestrator credentials reach only the owner routes, which refuse with readiness first; the
+    // media methods stay outside them, and Humans never hold a reviewer credential.
     for (const route of ["prepare", "frame", "frames", "acknowledge-frames", "acknowledge", "verdict", "provenance"]) {
-      for (const as of ["owner", "orchestrator"] as const) {
-        assert.equal((await call(as, "POST", `/api/sessions/orchestrator/video-evidence-review/${route}`, {})).status, refusedFor(as),
-          `${route} as ${as}`);
-      }
+      const owner = route === "prepare" || route === "provenance";
+      const asOrchestrator = await call("orchestrator", "POST", `/api/sessions/orchestrator/video-evidence-review/${route}`, {});
+      assert.deepEqual([asOrchestrator.status, asOrchestrator.body.code], owner ? [409, "no_paced_video_peer"] : [401, undefined],
+        `${route} as orchestrator`);
+      assert.equal((await call("owner", "POST", `/api/sessions/orchestrator/video-evidence-review/${route}`, {})).status, 403, `${route} as owner`);
     }
+    // The contract is declared so Orchestrator tools appear; declaring it admits nothing.
+    const compatibility = await call("orchestrator", "GET", "/api/compatibility");
+    assert.deepEqual(compatibility.body.pacedVideoReviewContract, { id: "wollipog-paced-video-review-v1", revision: 1 });
   } finally {
     live?.close();
     child.kill("SIGTERM");

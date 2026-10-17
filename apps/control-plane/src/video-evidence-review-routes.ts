@@ -9,10 +9,19 @@ const body = (value: unknown, keys: string[]): value is Record<string, unknown> 
   !!value && typeof value === "object" && !Array.isArray(value) &&
   Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
 
+/** The owner-facing coordinator: it materializes, derives and dispatches the reviewer itself and
+ * reports pending, withheld or refused states. Without it the routes use the bare service. */
+export interface VideoEvidenceReviewOwner {
+  prepare(principal: AuthPrincipal, request: { childSessionId: string; occurrenceId: string; evidenceId: string }):
+    Promise<{ ok: true } | { ok: false; code: string }>;
+  provenance(principal: AuthPrincipal, reviewId: string): { ok: true } | { ok: false; code: string };
+}
+
 /** Registration grants no credentials, scope or live proof. While `unavailable` reports a reason,
  * every authenticated call is refused with it before any body is read or service is reached. */
 export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   service: EvidenceReviewService;
+  owner?: VideoEvidenceReviewOwner;
   requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
   unavailable?(): { code: string; reason: string } | null;
 }): void {
@@ -37,9 +46,8 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
     }
     reply.header("cache-control", "no-store");
     try {
-      const result = await deps.service.prepare(principal, {
-        childSessionId: req.body.childSessionId, occurrenceId: req.body.occurrenceId, evidenceId: req.body.evidenceId,
-      });
+      const request = { childSessionId: req.body.childSessionId, occurrenceId: req.body.occurrenceId, evidenceId: req.body.evidenceId };
+      const result = deps.owner ? await deps.owner.prepare(principal, request) : await deps.service.prepare(principal, request);
       return reply.code(result.ok ? 200 : result.code === "not_authorized" ? 403 : 409).send(result);
     } catch (error) {
       return reply.code(error instanceof VideoReviewRefused ? 409 : 503).send({
@@ -147,7 +155,11 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
       return reply.code(400).send({ error: "An exact review identifier is required." });
     }
     reply.header("cache-control", "no-store");
-    try { return deps.service.ownerProvenance(principal, req.body.reviewId); }
+    try {
+      if (!deps.owner) return deps.service.ownerProvenance(principal, req.body.reviewId);
+      const result = deps.owner.provenance(principal, req.body.reviewId);
+      return reply.code(result.ok ? 200 : result.code === "not_authorized" ? 403 : 409).send(result);
+    }
     catch { return reply.code(409).send({ error: "Current owner authority and complete verified provenance are required." }); }
   });
 }

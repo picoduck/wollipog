@@ -12,7 +12,7 @@ const human: AuthPrincipal = {
   organizationId: "org", organizationName: "Synthetic Org", role: "owner", deviceId: null, localBootstrap: false,
 };
 const target: EvidenceReviewerTarget = {
-  agentId: "synthetic", driver: "codex-app-server", modelId: "synthetic-model", providerId: "synthetic-provider",
+  agentId: "synthetic", driver: "codex-app-server", modelId: "synthetic-model", effort: "high", providerId: "synthetic-provider",
   runnerId: "isolated", runnerProtocolVersion: 221, capabilitiesSha256: digest("audited capability"),
   auditedAllFrameDelivery: true, reviewerNamespaceSha256: digest("narrowed namespace"), mediaOnlyNamespaceVerified: true,
 };

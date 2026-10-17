@@ -1,21 +1,24 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { supportsPacedVideoReviewPeer, type PacedVideoReviewPeerContract } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
+import { DelegatedVideoReviews, mediaReviewerAttestationSha256, mediaReviewerInstallations, VIDEO_REVIEWER_EFFORT,
+  VIDEO_REVIEWER_MODEL, type DelegatedVideoHub, type DelegatedVideoSessions } from "./delegated-video-reviews.js";
 import { EvidenceReviewService } from "./evidence-review-service.js";
 import type { EvidenceReviewerTarget } from "./evidence-review-worker.js";
 import { PERSONAL_ORGANIZATION_ID, type AuthPrincipal, type HumanPrincipal } from "./identity.js";
+import { OperatorVideoValidationPermits } from "./operator-video-validation.js";
 import { PreparedMediaActiveStops } from "./prepared-media-active-stops.js";
 import { createControlPlaneVideoReviewStore } from "./video-evidence-artifacts.js";
 import { registerVideoEvidenceReviewRoutes } from "./video-evidence-review-routes.js";
-import { VideoEvidenceRuntime } from "./video-evidence-runtime.js";
+import { VideoEvidenceRuntime, type VideoReviewDecoder } from "./video-evidence-runtime.js";
 import { VideoLiveValidationRegistry, type InspectedVideoValidationRun } from "./video-live-validation.js";
 import { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 
-/** Why delegated video review is unavailable, checked in this order. Hosting has no production
- * reviewer yet, so readiness never reports available: the media-only reviewer launcher and its
- * review adapters are later work (#1321), and each still needs a Human-certified live proof. */
+/** Why delegated video review is unavailable, checked in this order. Readiness reports available
+ * only when an attested reviewer installation has a current Human-inspected live proof and the
+ * adapters are attached to Sessions; every admission still rechecks its own exact target. */
 export type VideoReviewUnavailableCode = "no_paced_video_peer" | "live_validation" | "reviewer_unavailable";
-export interface VideoReviewReadiness { available: false; code: VideoReviewUnavailableCode; reason: string }
+export type VideoReviewReadiness = { available: true } | { available: false; code: VideoReviewUnavailableCode; reason: string };
 
 /** A registered installation advertising the paced video review contract at a supporting protocol. */
 export interface PacedVideoPeer {
@@ -29,32 +32,31 @@ export interface PacedVideoPeer {
 
 const REASONS: Record<VideoReviewUnavailableCode, string> = {
   no_paced_video_peer: "No registered runner installation advertises the paced video review contract, so video evidence stays with the Human.",
-  live_validation: "No current Human-inspected live validation proof covers an installation that advertises paced video review, so video evidence stays with the Human.",
-  reviewer_unavailable: "This control plane has no media-only reviewer launcher or video review adapters yet, so video evidence stays with the Human.",
+  live_validation: "No current Human-inspected live validation proof covers an attested media-only reviewer installation, so video evidence stays with the Human.",
+  reviewer_unavailable: "This control plane's video review adapters are not attached yet, so video evidence stays with the Human.",
 };
 const refusal = (code: VideoReviewUnavailableCode): VideoReviewReadiness => ({ available: false, code, reason: REASONS[code] });
 
-const inert = (what: string) => () => { throw new Error(`${what} is not available in this control plane.`); };
-
-/** The production composition of the prepared video evidence pieces (#1321). Every port is inert:
- * no binding is current, no gate is available, no source is readable and no runner has registered
- * an owning media Stop handle. Constructing it creates their durable schema and nothing else. */
-export function composeHostingVideoEvidence(db: ControlPlaneDb) {
+/** The production composition of delegated video evidence review (#1321). Construction creates the
+ * durable schema; nothing is admitted until a Human records a live proof for an attested reviewer.
+ * `attach` connects the Session service and runner hub once they exist. */
+export function composeHostingVideoEvidence(db: ControlPlaneDb, options: {
+  log?: (event: string, fields: Record<string, unknown>) => void;
+  /** Test seams only; hosting passes none and uses the isolated native decoder and real timers. */
+  decoder?: VideoReviewDecoder;
+  clock?: () => number;
+  schedule?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
+} = {}) {
   const liveValidation = new VideoLiveValidationRegistry(db.raw());
   const reviewStore = createControlPlaneVideoReviewStore(db);
-  const runtime = new VideoEvidenceRuntime(reviewStore, {
-    currentBinding: () => null, normalCompletion: () => false, workerAdmission: () => null, readSource: () => null,
-  });
-  const workflowVideoApprovals = new WorkflowVideoEvidenceApprovals(db, runtime, {
-    available: () => false, decisionCurrent: () => false, linkedReview: () => null,
-  });
-  const preparedMediaActiveStops = new PreparedMediaActiveStops(db.raw(), {
-    current: () => false, send: inert("A media-only owning worker Stop handle"),
-  });
-  const reviewService = new EvidenceReviewService(runtime, reviewStore, {
-    resolvePending: () => null, currentOwner: () => false, reviewerProtocol: () => null, audit: () => {},
-    liveProof: (target) => liveValidation.current(target),
-  });
+  const delegated = new DelegatedVideoReviews(db, reviewStore, liveValidation, options.log, options.clock, options.schedule);
+  const runtime = new VideoEvidenceRuntime(reviewStore, delegated.runtimeAccess, options.clock, options.decoder);
+  const workflowVideoApprovals = new WorkflowVideoEvidenceApprovals(db, runtime, delegated.gateAccess);
+  const preparedMediaActiveStops = new PreparedMediaActiveStops(db.raw(), delegated.activeStopPorts);
+  const reviewService = new EvidenceReviewService(runtime, reviewStore, delegated.serviceAdapter);
+  // Human validation permits need a trusted scope adapter that no hosting route provides yet, so
+  // none can be minted here; the store exists so materialization can refuse unknown permits.
+  const operatorValidationPermits = new OperatorVideoValidationPermits(db.raw(), { current: () => null });
 
   const pacedPeers = (): PacedVideoPeer[] => db.listRunners().flatMap((runner) => runner.agents
     .filter((agent) => supportsPacedVideoReviewPeer(runner.protocolVersion, agent.capabilities?.pacedVideoReviewContract))
@@ -63,14 +65,20 @@ export function composeHostingVideoEvidence(db: ControlPlaneDb) {
       contract: agent.capabilities!.pacedVideoReviewContract as PacedVideoReviewPeerContract })));
 
   const readiness = (now = Date.now()): VideoReviewReadiness => {
-    const peers = pacedPeers();
-    if (!peers.length) return refusal("no_paced_video_peer");
-    if (!liveValidation.unexpired(now).some((proof) =>
-      peers.some((peer) => peer.driver === proof.driver && peer.models.includes(proof.modelId)))) return refusal("live_validation");
-    return refusal("reviewer_unavailable");
+    if (!pacedPeers().length) return refusal("no_paced_video_peer");
+    const installations = mediaReviewerInstallations(db);
+    if (!liveValidation.unexpired(now).some((proof) => proof.driver === "claude-code" && proof.modelId === VIDEO_REVIEWER_MODEL &&
+      proof.effort === VIDEO_REVIEWER_EFFORT && installations.some((installation) =>
+        proof.capabilitiesSha256 === mediaReviewerAttestationSha256(installation.attestation) &&
+        proof.reviewerNamespaceSha256 === installation.attestation.namespacePolicySha256))) return refusal("live_validation");
+    return delegated.ready ? { available: true } : refusal("reviewer_unavailable");
   };
 
-  return { liveValidation, reviewStore, runtime, workflowVideoApprovals, preparedMediaActiveStops, reviewService, pacedPeers, readiness };
+  const attach = (sessions: DelegatedVideoSessions, hub: DelegatedVideoHub) => delegated.attach(sessions, hub, reviewService);
+
+  return { liveValidation, reviewStore, runtime, workflowVideoApprovals, preparedMediaActiveStops, reviewService, delegated,
+    preparedMediaRuntime: delegated.runtimeResolver, operatorValidationPermits, pacedPeers, readiness, attach,
+    reviewerInstallations: () => mediaReviewerInstallations(db) };
 }
 export type HostingVideoEvidence = ReturnType<typeof composeHostingVideoEvidence>;
 
@@ -87,8 +95,11 @@ export function registerHostingVideoEvidenceRoutes(app: FastifyInstance, deps: {
   requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
 }): void {
   const { video } = deps;
-  registerVideoEvidenceReviewRoutes(app, { service: video.reviewService, requestPrincipal: deps.requestPrincipal,
-    unavailable: () => video.readiness() });
+  registerVideoEvidenceReviewRoutes(app, { service: video.reviewService, owner: video.delegated,
+    requestPrincipal: deps.requestPrincipal, unavailable: () => {
+      const readiness = video.readiness();
+      return readiness.available ? null : readiness;
+    } });
 
   app.get("/api/video-evidence/live-validations", async (req, reply) => {
     const principal = deps.requestPrincipal(req);
@@ -116,6 +127,16 @@ export function registerHostingVideoEvidenceRoutes(app: FastifyInstance, deps: {
       peer.contract.id === contract.id && peer.contract.revision === contract.revision)) {
       return reply.code(409).send({ code: "no_paced_video_peer",
         error: "No registered installation advertises the paced video review contract for this exact reviewer target." });
+    }
+    // The proof certifies one attested reviewer: the runner's current media-only attestation and
+    // namespace, at the certified model and effort. A changed attestation needs a new proof.
+    const installation = video.reviewerInstallations().find((candidate) =>
+      candidate.runnerId === target.runnerId && candidate.agentId === target.agentId);
+    if (!installation || target.driver !== "claude-code" || target.modelId !== VIDEO_REVIEWER_MODEL ||
+      target.effort !== VIDEO_REVIEWER_EFFORT || target.capabilitiesSha256 !== mediaReviewerAttestationSha256(installation.attestation) ||
+      target.reviewerNamespaceSha256 !== installation.attestation.namespacePolicySha256) {
+      return reply.code(409).send({ code: "attestation_mismatch",
+        error: `The target must name the runner's current media-only reviewer attestation at ${VIDEO_REVIEWER_MODEL}, effort ${VIDEO_REVIEWER_EFFORT}.` });
     }
     let proof;
     try { proof = video.liveValidation.recordInspectedRuns(principal, target, body.runs); } catch { proof = null; }
