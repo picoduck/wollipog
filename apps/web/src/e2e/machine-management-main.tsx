@@ -132,6 +132,24 @@ if (new URLSearchParams(window.location.search).has("profiles") && runner.provid
     if (state) account.profile = { id: `profile-${account.id}`, access: state };
   }
 }
+const fixtureParams = new URLSearchParams(window.location.search);
+// `machines=0` opens on the empty Machines tab (#2984).
+if (fixtureParams.get("machines") === "0") runner = null;
+// `identity=fail` fails every permission load until `restoreIdentity()`, so Retry can recover (#2984).
+let identityFails = fixtureParams.get("identity") === "fail";
+// `local=setup` stands in for the desktop app's bundled runner, available and not yet set up, so
+// This Machine is offered (#2984).
+if (fixtureParams.get("local") === "setup") {
+  Object.assign(globalThis, { isTauri: true });
+  Object.assign(window, {
+    __TAURI_INTERNALS__: {
+      invoke: async (command: string) => {
+        if (command === "local_runner_status") return { available: true, enabled: false, running: false, runnerId: null };
+        throw new Error(`${command} is not part of this fixture`);
+      },
+    },
+  });
+}
 let socket: FixtureSocket | null = null;
 let box: BoxView | null = null;
 let lastRegisteredWorkspace: { name: string; path: string } | null = null;
@@ -234,20 +252,23 @@ const client = {
       },
     };
   },
-  getIdentity: async () => ({
-    context: {
-      userId: "owner",
-      userName: "Owner",
-      organizationId: PERSONAL_ORGANIZATION_ID,
-      organizationName: "Organization",
-      role: identityRole,
-      deviceId: null,
-      localBootstrap: true,
-    },
-    organizations: [{ organizationId: PERSONAL_ORGANIZATION_ID, name: "Organization", createdAt: 1 }],
-    memberships: [],
-    teams: [],
-  }),
+  getIdentity: async () => {
+    if (identityFails) throw new Error("GET /api/identity failed: 503 Service Unavailable");
+    return {
+      context: {
+        userId: "owner",
+        userName: "Owner",
+        organizationId: PERSONAL_ORGANIZATION_ID,
+        organizationName: "Organization",
+        role: identityRole,
+        deviceId: null,
+        localBootstrap: true,
+      },
+      organizations: [{ organizationId: PERSONAL_ORGANIZATION_ID, name: "Organization", createdAt: 1 }],
+      memberships: [],
+      teams: [],
+    };
+  },
   updateMachine: async (_runnerId: string, body: { displayName: string }) => {
     if (!runner) throw new Error("runner not found");
     runner.displayName = body.displayName;
@@ -461,6 +482,7 @@ declare global {
         "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper" |
         "explicit-interpreter" | "older-interpreter-guidance"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
+      restoreIdentity(): void;
     };
   }
 }
@@ -636,6 +658,7 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
     runner.status = status;
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
   },
+  restoreIdentity: () => { identityFails = false; },
 };
 
 const root = document.getElementById("root");

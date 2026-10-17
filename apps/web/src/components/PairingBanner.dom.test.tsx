@@ -91,7 +91,7 @@ test("the browser banner says how to pair in the person's terms and keeps the st
     const banner = view.banner();
     assert.equal(banner.getAttribute("role"), "status");
     assert.equal(view.body(), "Pair this device to use Wollipog: open a pairing link on it, or paste the link or token here. "
-      + "An owner or admin can create one in Connections › People & Devices.");
+      + "An owner or admin can create one in Connections › People and Devices.");
     assert.doesNotMatch(banner.textContent ?? "", CONTROL_PLANE);
     assert.doesNotMatch(banner.textContent ?? "", /print-pair-url/u, "the operator command is not the main sentence");
     assert.equal(view.button("Retry Pairing"), undefined, "Retry Pairing is the desktop app's alone");

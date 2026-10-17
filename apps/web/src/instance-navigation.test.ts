@@ -143,6 +143,18 @@ test("an instance's old Settings address opens its new view and replaces its own
   assert.deepEqual(writes, [instanceViewPath("remote-a", behavior), instanceViewPath("remote-a", behavior)]);
 });
 
+test("an instance's replace takes the current entry's place, so Back skips the route it corrected (#2984)", () => {
+  const browser = new TestBrowserHistory(instanceViewPath("remote-a", { name: "usage" }));
+  const navigation = new DesktopInstanceNavigation("remote-a", browser.window);
+  navigation.current();
+  navigation.push({ name: "runners", section: "instances" });
+  navigation.replace({ name: "runners", section: "machines" });
+  assert.deepEqual(browser.paths(), [
+    instanceViewPath("remote-a", { name: "usage" }),
+    instanceViewPath("remote-a", { name: "runners", section: "machines" }),
+  ]);
+});
+
 test("an instance's own Back is offered for holding, and its return to the editor is not delivered (#3218)", () => {
   const browser = new TestBrowserHistory(instanceViewPath("remote-a", { name: "usage" }));
   const navigation = new DesktopInstanceNavigation("remote-a", browser.window);

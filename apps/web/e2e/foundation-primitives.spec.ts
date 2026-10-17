@@ -28,12 +28,12 @@ for (const pointer of ["fine", "coarse"] as const) {
       for (const height of await heights(page, ".tabs-bar .tab")) expect(height).toBe(tab);
 
       await page.goto(shell("/connections"));
-      const tabs = page.getByRole("tablist", { name: "Connection Settings" }).getByRole("tab");
+      const tabs = page.getByRole("tablist", { name: "Connections" }).getByRole("tab");
       await expect(tabs.first()).toBeVisible();
       for (const height of await tabs.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height))) {
         expect(height).toBe(tab);
       }
-      const selected = page.getByRole("tablist", { name: "Connection Settings" }).locator('[role="tab"][aria-selected="true"]');
+      const selected = page.getByRole("tablist", { name: "Connections" }).locator('[role="tab"][aria-selected="true"]');
       await expect(selected).toHaveCount(1);
       const look = await selected.evaluate((element) => ({
         background: getComputedStyle(element).backgroundColor,

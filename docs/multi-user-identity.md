@@ -85,9 +85,9 @@ automation, workflow, and reconciliation audits.
 
 ## Administration
 
-The Machines view includes **People & Devices**. Owners/admins can create members, assign roles,
-suspend/reactivate access, create teams, update team membership, and pair a device directly to an
-active member. The last active owner cannot be demoted or suspended. Owners alone can grant or alter
+The Connections page includes **People and Devices**. Owners/admins can create members, assign
+roles, suspend/reactivate access, create teams, update team membership, and pair a device directly
+to an active member. The last active owner cannot be demoted or suspended. Owners alone can grant or alter
 owner access. A team that still owns a runner, workspace, or session cannot be deleted until those
 resources are reassigned.
 

@@ -34,6 +34,32 @@ test("store navigation pushes only real in-app transitions", () => {
   assert.deepEqual(pushed, [{ name: "run", id: "run_1" }]);
 });
 
+test("a replace navigation takes the place of the route it corrects, so Back skips it (#2984)", () => {
+  const browser = new TestBrowserHistory("/");
+  const navigation = new BrowserNavigation(browser.window);
+  navigation.current();
+  const store = new Store({ name: "inbox" }, (view, options) =>
+    options?.replace ? navigation.replace(view) : navigation.push(view));
+  store.navigate({ name: "runners", section: "instances" });
+  // Instances cannot show on a phone, so its route lands on Machines in place.
+  store.navigate({ name: "runners", section: "machines" }, { replace: true });
+  assert.deepEqual(store.getState().view, { name: "runners", section: "machines" });
+  assert.deepEqual(browser.paths(), ["/", "/connections/machines"]);
+  assert.equal(browser.path, "/connections/machines");
+
+  // A replace still runs through the store's own transition, and asks no leave guard: the route it
+  // replaces could not be shown, so there is nothing to leave.
+  let asked = 0;
+  const release = registerLeaveGuard(() => { asked += 1; });
+  try {
+    store.navigate({ name: "runners", section: "people" }, { replace: true });
+  } finally {
+    release();
+  }
+  assert.equal(asked, 0);
+  assert.deepEqual(browser.paths(), ["/", "/connections/people"]);
+});
+
 test("repeated identical attention activation updates an ephemeral nonce without duplicate history", () => {
   const pushed: View[] = [];
   const target: View = { name: "session", id: "s_1", attention: { eventEpoch: 4, requestId: "request-2" } };

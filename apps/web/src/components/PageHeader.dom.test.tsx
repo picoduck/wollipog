@@ -270,6 +270,82 @@ test("a menu-button secondary opens its own menu, and folds into ⋯ as its item
   }
 });
 
+test("a primary with items is a menu button with a caret, and on a phone its `+` opens the items as a sheet", async () => {
+  const calls: string[] = [];
+  const primary = {
+    label: "Add Machine",
+    items: [
+      { label: "Connect via SSH…", description: "Over SSH.", onClick: () => calls.push("ssh") },
+      { label: "Install Manually…", description: "By hand.", onClick: () => calls.push("manual") },
+    ],
+  };
+  const view = await mount(<PageHeader title="Connections" primary={primary} />);
+  try {
+    const button = view.container.querySelector<HTMLButtonElement>(".page-actions > .page-primary")!;
+    assert.equal(button.className, "btn primary page-primary", "it keeps the primary recipe");
+    assert.equal(button.textContent, "Add Machine", "the icons are decorative, so the name is the label");
+    assert.ok(button.querySelector("svg.page-primary-caret"), "a caret marks it as a menu button");
+    assert.equal(button.getAttribute("aria-haspopup"), "menu");
+    assertNoDomNode(view.container.querySelector(".page-more"), "a menu primary adds nothing to ⋯");
+
+    await act(async () => button.click());
+    const menu = domWindow.document.querySelector('[role="menu"][aria-label="Add Machine"]') as unknown as HTMLElement;
+    assert.ok(menu, "the menu is named by the primary");
+    assert.equal(button.getAttribute("aria-controls"), menu.id);
+    assert.ok(menu.style.top !== "" || menu.style.left !== "" || menu.style.right !== "", "on desktop the menu is placed by its trigger");
+    assert.deepEqual([...menu.querySelectorAll('[role="menuitem"]')].map((item) =>
+      [item.querySelector(".menu-text")?.textContent, item.querySelector(".menu-desc")?.textContent]), [
+      ["Connect via SSH…", "Over SSH."],
+      ["Install Manually…", "By hand."],
+    ]);
+    await press(menu, "Escape");
+    assert.ok(domWindow.document.querySelector('[role="menu"]') === null, "Escape closes the menu");
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 5)); });
+    assert.ok(domWindow.document.activeElement === (button as never), "Escape returns focus to the primary");
+
+    await act(async () => button.click());
+    const again = domWindow.document.querySelector('[role="menu"][aria-label="Add Machine"]') as unknown as Element;
+    await act(async () => (again.querySelectorAll('[role="menuitem"]')[1] as unknown as HTMLButtonElement).click());
+    assert.deepEqual(calls, ["manual"]);
+    assert.ok(domWindow.document.activeElement === (button as never), "choosing an item returns focus to the primary");
+  } finally {
+    await view.unmount();
+  }
+
+  // A phone: the stylesheet clips the label to leave the `+`, which keeps the label as its name, and
+  // the menu is a docked sheet with the grabber, unplaced.
+  await act(async () => domWindow.happyDOM.setWindowSize({ width: 390, height: 844 }));
+  const phone = await mount(<PageHeader title="Connections" primary={primary} />);
+  try {
+    const plus = phone.container.querySelector<HTMLButtonElement>(".page-primary")!;
+    assert.equal(plus.textContent, "Add Machine");
+    assert.ok(plus.querySelector(".page-primary-label") && plus.querySelector("svg:first-child"), "the `+` and the clipped label");
+    await act(async () => plus.click());
+    const sheet = domWindow.document.querySelector('[role="menu"][aria-label="Add Machine"]') as unknown as HTMLElement;
+    assert.ok(sheet, "the `+` opens the same items");
+    assert.ok(sheet.querySelector(".sheet-grabber"), "as a sheet with the grabber");
+    assert.equal(sheet.querySelector(".menu-head")?.textContent, "Add Machine", "titled by the primary");
+    assert.equal(sheet.style.top + sheet.style.left + sheet.style.right, "", "a sheet has no placement: the stylesheet docks it");
+    assert.equal(sheet.querySelectorAll('[role="menuitem"]').length, 2);
+  } finally {
+    await phone.unmount();
+    await act(async () => domWindow.happyDOM.setWindowSize({ width: 1024, height: 768 }));
+  }
+
+  // A primary without items is unchanged: one button that runs it, with no menu semantics.
+  const plain = await mount(<PageHeader title="Agent Skills" primary={{ label: "New Skill", onClick: () => calls.push("new") }} />);
+  try {
+    const button = plain.container.querySelector<HTMLButtonElement>(".page-primary")!;
+    assert.equal(button.getAttribute("aria-haspopup"), null);
+    assertNoDomNode(button.querySelector(".page-primary-caret"));
+    await act(async () => button.click());
+    assert.deepEqual(calls, ["manual", "new"]);
+    assert.ok(domWindow.document.querySelector('[role="menu"]') === null);
+  } finally {
+    await plain.unmount();
+  }
+});
+
 test("a view switch leads the actions, and a toggle secondary folds into ⋯ as a checked item", async () => {
   const calls: string[] = [];
   const header = (pressed: boolean, count: number) => (
