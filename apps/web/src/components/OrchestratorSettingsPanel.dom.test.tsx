@@ -210,8 +210,9 @@ test("the panel header saves only the future preference and clears its control w
     assert.equal(view.container.querySelectorAll('[role="radiogroup"][aria-label="Orchestrator Control"]').length, 1);
     assert.equal(head.querySelector("h2")?.textContent, "Orchestrator");
     await act(async () => controlMode(head, "Full Control").click());
-    assert.match(view.container.textContent ?? "", /Activation Unavailable/);
-    assert.equal(button(view.container, "Authorize Full Control")?.disabled, true);
+    assert.doesNotMatch(view.container.textContent ?? "", /Activation Unavailable/);
+    assert.equal(button(view.container, "Authorize Full Control"), undefined, "a default never authorizes a campaign");
+    assert.match(view.container.textContent ?? "", /Each campaign still needs your authorization/);
     await act(async () => button(view.container, "Save Defaults")!.click());
     await settle();
     assert.equal(writes.length, 1);
@@ -259,8 +260,7 @@ test("Full Control defaults preview blocks saving and never mutates authenticate
     await act(async () => fireDomEvent.change(limit, { target: { value: "8" } }));
     const save = button(container, "Save Defaults")!;
     await act(async () => controlMode(container, "Full Control").click());
-    assert.match(container.textContent ?? "", /Activation Unavailable/);
-    assert.match(container.textContent ?? "", /Defaults apply only to new campaigns/);
+    assert.match(container.textContent ?? "", /This version can't save Full Control as a default/);
     assert.equal(save.getAttribute("aria-disabled"), "true");
     await act(async () => save.click());
     assert.equal(writes.length, 0);
@@ -279,12 +279,41 @@ test("a supported Full Control default saves only the preference and preserves o
   const view = await mount(panel(transport));
   try {
     await act(async () => controlMode(view.container, "Full Control").click());
-    assert.match(view.container.textContent ?? "", /Save Defaults records a preferred mode; it grants no campaign authority/);
+    assert.match(view.container.textContent ?? "", /Proposed whenever you start a Full Control campaign/);
     await act(async () => button(view.container, "Save Defaults")!.click());
     await settle();
     assert.equal(writes.length, 1);
     assert.deepEqual(writes[0]!.defaults, { ...initial.defaults, controlMode: "full_control" });
     assertNoDomNode(view.container.querySelector(".save-bar"));
+  } finally { await view.cleanup(); }
+});
+
+test("the Full Control campaign budget saves as a default only when both limits are valid, and clears as a pair", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    await act(async () => controlMode(container, "Full Control").click());
+    const cost = container.querySelector<HTMLInputElement>("#orchestrator-campaign-cost")!;
+    const tools = container.querySelector<HTMLInputElement>("#orchestrator-campaign-tools")!;
+    await act(async () => fireDomEvent.change(cost, { target: { value: "40" } }));
+    const save = button(container, "Save Defaults")!;
+    assert.equal(save.getAttribute("aria-disabled"), "true", "a cost without a tool-call limit cannot save");
+    assert.match(container.textContent ?? "", /Enter both a cost limit and a whole number of tool calls/);
+    await act(async () => fireDomEvent.change(tools, { target: { value: "400" } }));
+    assert.equal(save.getAttribute("aria-disabled"), null);
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0]!.defaults.campaignBudget, { costUsd: 40, toolCalls: 400 });
+    assert.equal(writes[0]!.defaults.controlMode, "full_control");
+    await act(async () => fireDomEvent.change(cost, { target: { value: "" } }));
+    await act(async () => fireDomEvent.change(tools, { target: { value: "" } }));
+    await act(async () => button(container, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes.length, 2);
+    assert.equal(writes[1]!.defaults.campaignBudget, null, "clearing both fields removes the saved budget");
   } finally { await view.cleanup(); }
 });
 

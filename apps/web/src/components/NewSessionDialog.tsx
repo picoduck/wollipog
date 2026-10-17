@@ -79,7 +79,8 @@ import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
 import { projectAvailabilityLabel, projectAvailabilityMeta, type ProjectLocationCandidate } from "../project-management.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { FullControlPreparation } from "./FullControlPreparation.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { FullControlLaunchPanel, OrchestratorControlChoice, type FullControlAuthorization } from "./FullControlPreparation.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
@@ -264,6 +265,7 @@ export function NewSessionDialog({
   );
   const [orchestratorOverrides, setOrchestratorOverrides] = useState(() => new Set<string>());
   const [controlPreview, setControlPreview] = useState<"custom" | "full_control">("custom");
+  const [fullControlAuthorization, setFullControlAuthorization] = useState<FullControlAuthorization | null>(null);
   const [liveChildLimitDraft, setLiveChildLimitDraft] = useState(String(DEFAULT_LIVE_CHILD_LIMIT));
   const [harnessDefaults, setHarnessDefaults] = useState<{
     api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
@@ -1020,6 +1022,8 @@ export function NewSessionDialog({
     liveChildLimitValid &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
   const valid = launchSelectionValid && (!orchestrator || controlPreview !== "full_control");
+  // Full Control never falls back to ordinary creation: its one action authorizes the reviewed preflight.
+  const fullControlLaunch = orchestrator && orchestratorSettingsReady && controlPreview === "full_control";
 
   // Validation feedback describes the state that produced it. Once any value participating in
   // validation changes, remove that stale diagnosis; request failures remain until the next submit.
@@ -1149,9 +1153,21 @@ export function NewSessionDialog({
     if (busyRef.current) return;
     setValidationError(null);
     setRequestError(null);
+    if (fullControlLaunch) {
+      if (!fullControlAuthorization?.ready) {
+        setValidationError("Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.");
+        focusValidationProblem('[data-control-mode="full_control"]');
+        return;
+      }
+      busyRef.current = true;
+      setBusy(true);
+      try { await fullControlAuthorization.authorize(); } catch { /* The panel shows why it did not start. */ }
+      finally { busyRef.current = false; setBusy(false); }
+      return;
+    }
     if (!valid) {
       if (orchestrator && controlPreview === "full_control") {
-        setValidationError("Check the Full Control preflight, then use Authorize and Create Session, or choose Custom.");
+        setValidationError("Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.");
         focusValidationProblem('[data-control-mode="full_control"]');
       } else if (retainedSessionId) {
         setValidationError("Open the retained session before creating another one.");
@@ -1253,6 +1269,227 @@ export function NewSessionDialog({
     (workspaceRowRef.current?.querySelector<HTMLElement>(".ui-select-trigger") ?? browseButtonRef.current)?.focus();
   });
 
+  // Custom shows these inline; Full Control keeps them under Advanced in its concise summary.
+  const orchestratorPolicyFields = <>
+              <fieldset className="orchestrator-policy-area">
+                <legend>Behavior</legend>
+                <p className="muted">These effective values are resolved and stored before the campaign's first turn.</p>
+                <div className="orchestrator-policy-control">
+                  <span>Child Harness <small aria-hidden="true">{orchestratorSource("behavior.childHarness")}</small></span>
+                  <Select<string>
+                    label="Child Harness"
+                    value={fixedChildHarness ? agentHarnessIdentityKey(fixedChildHarness) : AUTOMATIC_ORCHESTRATOR_VALUE}
+                    options={childHarnessOptions}
+                    disabled={!harnessPolicyAvailable}
+                    onChange={(value) => {
+                      const childHarness = value === AUTOMATIC_ORCHESTRATOR_VALUE
+                        ? null
+                        : (() => {
+                          const harness = childHarnesses.find((candidate) => agentHarnessIdentityKey(candidate) === value);
+                          return harness ? { agentId: harness.agentId, driver: harness.driver, context: harness.context } : null;
+                        })();
+                      setOrchestratorDraft((current) => ({
+                        ...current,
+                        behavior: { ...current.behavior, childHarness, childModel: null, childEffort: null },
+                      }));
+                      setOrchestratorOverrides((current) => new Set(current)
+                        .add("behavior.childHarness").add("behavior.childModel").add("behavior.childEffort"));
+                    }}
+                  />
+                  {!harnessPolicyAvailable && <small className="muted">Update or restart Wollipog to configure fixed Child Harness policy.</small>}
+                  {fixedChildHarness && !childHarnessPolicySupported && <small className="form-error">
+                    {childHarnessPolicyUnavailable}
+                  </small>}
+                </div>
+                <div className="orchestrator-policy-control">
+                  <span>Child Model <small aria-hidden="true">{orchestratorSource("behavior.childModel")}</small></span>
+                  <Select<string>
+                    label="Child Model"
+                    value={orchestratorDraft.behavior.childModel ?? AUTOMATIC_ORCHESTRATOR_VALUE}
+                    options={childModelOptions}
+                    onChange={(value) => {
+                      const childModel = value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value;
+                      const effortCompatible = !orchestratorDraft.behavior.childEffort || (harnessPolicyAvailable
+                        ? candidateChildHarnesses.some((harness) => childModel
+                          ? harness.supportedPairs.some((pair) => pair.modelId === childModel &&
+                            pair.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
+                          : harness.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
+                        : orchestratorCapabilities?.supportedPairs
+                          ? childModel
+                            ? orchestratorCapabilities.supportedPairs.some((pair) => pair.modelId === childModel &&
+                              pair.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
+                            : orchestratorCapabilities.effortLevels.includes(orchestratorDraft.behavior.childEffort)
+                          : true);
+                      setOrchestratorBehavior("childModel", childModel);
+                      if (!effortCompatible) setOrchestratorBehavior("childEffort", null);
+                    }}
+                  />
+                </div>
+                <div className="orchestrator-policy-control">
+                  <span>Child Effort <small aria-hidden="true">{orchestratorSource("behavior.childEffort")}</small></span>
+                  <Select<string>
+                    label="Child Effort"
+                    value={orchestratorDraft.behavior.childEffort ?? AUTOMATIC_ORCHESTRATOR_VALUE}
+                    options={childEffortOptions}
+                    onChange={(value) => setOrchestratorBehavior("childEffort", value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value)}
+                  />
+                </div>
+                <label className="orchestrator-policy-control" htmlFor={liveChildLimitInputId}>
+                  <span>Maximum Concurrent Children <small aria-hidden="true">{orchestratorSource("behavior.maximumConcurrentChildren")}</small></span>
+                  <input
+                    id={liveChildLimitInputId}
+                    type="number"
+                    inputMode="numeric"
+                    min="0"
+                    max={String(MAX_LIVE_CHILD_LIMIT)}
+                    step="1"
+                    required
+                    value={liveChildLimitDraft}
+                    aria-invalid={!liveChildLimitValid}
+                    aria-describedby={liveChildLimitHelpId}
+                    onChange={(event) => {
+                      setLiveChildLimitDraft(event.currentTarget.value);
+                      const value = Number(event.currentTarget.value);
+                      setOrchestratorBehavior("maximumConcurrentChildren", value);
+                    }}
+                  />
+                </label>
+                <span id={liveChildLimitHelpId} className={liveChildLimitValid ? "muted" : "form-error"} role={liveChildLimitValid ? undefined : "alert"}>
+                  {liveChildLimitValid ? "Choose 0 to pause admission, or up to 64 live children." : "Enter a whole number from 0 to 64."}
+                </span>
+                <div className="orchestrator-policy-control">
+                  <span>Follow-Ups <small aria-hidden="true">{orchestratorSource("behavior.followUps")}</small></span>
+                  <Select<OrchestratorDefaults["behavior"]["followUps"]>
+                    label="Follow-Ups"
+                    value={orchestratorDraft.behavior.followUps}
+                    options={[
+                      { value: "recommend_only", label: "Recommend Only", description: "Recommend justified follow-ups and wait." },
+                      { value: "execute_approved", label: "Execute Approved", description: "Execute follow-ups only after approval." },
+                    ]}
+                    onChange={(value) => setOrchestratorBehavior("followUps", value)}
+                  />
+                </div>
+                <div className="orchestrator-policy-control">
+                  <span>Completion <small aria-hidden="true">{orchestratorSource("behavior.completion")}</small></span>
+                  <Select<OrchestratorDefaults["behavior"]["completion"]>
+                    label="Completion"
+                    value={orchestratorDraft.behavior.completion}
+                    options={[
+                      { value: "retain", label: "Retain", description: "Retain verified finished children for inspection." },
+                      { value: "stop_and_archive", label: "Stop and Archive", description: "Stop and archive only after verified completion." },
+                    ]}
+                    onChange={(value) => setOrchestratorBehavior("completion", value)}
+                  />
+                </div>
+              </fieldset>
+              <fieldset className="orchestrator-policy-area">
+                <legend>Execution Permissions</legend>
+                <div className="orchestrator-policy-control">
+                  <span>Strict Project Isolation <small aria-hidden="true">{orchestratorSource("execution.strictProjectIsolation")}</small></span>
+                  <Select<"disabled" | "enabled">
+                    label="Strict Project Isolation"
+                    value={orchestratorDraft.execution.strictProjectIsolation ? "enabled" : "disabled"}
+                    options={[
+                      {
+                        value: "disabled",
+                        label: "Disabled",
+                        description: "Use provider permissions. Explicit parent implementation must use a dedicated worktree.",
+                      },
+                      {
+                        value: "enabled",
+                        label: "Enabled",
+                        description: "Enforce a scratch-only project boundary with a compatible isolation backend.",
+                      },
+                    ]}
+                    onChange={(value) => setStrictProjectIsolation(value === "enabled")}
+                  />
+                </div>
+                <p className="muted">
+                  {orchestratorDraft.execution.strictProjectIsolation
+                    ? "Operating-system or audited provider sandbox enforcement blocks Project writes."
+                    : "Provider approval controls and governance still apply; no read-only operating-system boundary is claimed."}
+                </p>
+                <div className="orchestrator-policy-control">
+                  <span>Integration Isolation <small aria-hidden="true">{orchestratorSource("execution.integrationIsolation")}</small></span>
+                  <Select<"disabled" | "enabled">
+                    label="Integration Isolation"
+                    value={effectiveIntegrationIsolation ? "enabled" : "disabled"}
+                    disabled={integrationIsolationImplied || !integrationIsolationControlPlane}
+                    options={[
+                      {
+                        value: "disabled",
+                        label: "Disabled",
+                        description: "Load the same integrations as a normal session with this harness.",
+                      },
+                      {
+                        value: "enabled",
+                        label: "Enabled",
+                        description: integrationIsolationCopy.removed,
+                      },
+                    ]}
+                    onChange={(value) => setIntegrationIsolation(value === "enabled")}
+                  />
+                </div>
+                <p className="muted">
+                  {integrationIsolationImplied
+                    ? `${orchestratorDraft.execution.strictProjectIsolation ? "Strict Project Isolation" : "The Orchestrator preset"} already launches without provider integrations, so this policy is implied and cannot be disabled. ${ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE}`
+                    : !integrationIsolationControlPlane
+                      ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
+                      : effectiveIntegrationIsolation
+                      ? `${integrationIsolationCopy.removed} ${integrationIsolationCopy.kept} ${INTEGRATION_ISOLATION_PRESERVED}${hostExecutionTarget ? "" : ` ${SKILLS_UNAVAILABLE_ON_TARGET}`}`
+                      : hostExecutionTarget
+                      ? "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."
+                      : `Hooks, plugins, extensions, and configured MCP servers load exactly as they would for a normal session with this harness. ${SKILLS_UNAVAILABLE_ON_TARGET}`}
+                </p>
+                {!orchestratorExecutionValid && <p className="form-error" role="alert">
+                  {effectiveIntegrationIsolation && !integrationIsolationSupported
+                    ? integrationIsolationUnavailable
+                    : orchestratorExecutionUnavailable}
+                </p>}
+              </fieldset>
+              <fieldset className="orchestrator-policy-area">
+                <legend>Decision Delegation</legend>
+                <div className="orchestrator-policy-control">
+                  <span>Descendant Requests <small aria-hidden="true">{orchestratorSource("delegation.parentControl")}</small></span>
+                  <Select<ParentControlMode>
+                    label="Descendant Requests"
+                    value={effectiveParentControl}
+                    options={[
+                      { value: "off", label: "Human", description: "Keep descendant questions and approvals human-owned." },
+                      { value: "questions", label: "Questions", description: "Delegate non-secret descendant implementation questions.", disabled: !parentControlSupported, disabledReason: parentControlUnavailable },
+                      { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals.", disabled: !parentControlSupported, disabledReason: parentControlUnavailable },
+                    ]}
+                    onChange={(value) => {
+                      setOrchestratorDraft((current) => ({ ...current, delegation: { ...current.delegation, parentControl: value } }));
+                      setOrchestratorOverrides((current) => new Set(current).add("delegation.parentControl"));
+                    }}
+                  />
+                </div>
+                {!parentControlSupported && <span className="form-error">{parentControlUnavailable}</span>}
+                {WORKFLOW_DECISION_CATEGORIES.map((category) => <div className="orchestrator-policy-control" key={category}>
+                  <span>{ORCHESTRATOR_DECISION_LABELS[category]} <small aria-hidden="true">{orchestratorSource(`delegation.decisions.${category}`)}</small></span>
+                  <Select<"human" | "orchestrator">
+                    label={ORCHESTRATOR_DECISION_LABELS[category]}
+                    value={effectiveDecision(category)}
+                    options={[
+                      { value: "human", label: "Human", description: "Require a human decision for this exact gate." },
+                      { value: "orchestrator", label: "Orchestrator", description: "Delegate this typed gate to the campaign Orchestrator.", disabled: !typedDelegationSupported, disabledReason: typedDelegationUnavailable },
+                    ]}
+                    onChange={(value) => setOrchestratorDelegation(category, value)}
+                  />
+                </div>)}
+                <p className="muted">Secrets, authentication, persistent permission grants, governance changes, cost budgets, and tool guardrails stay human-only.</p>
+              </fieldset>
+              {!orchestratorCapabilitiesValid && <p className="form-error" role="alert">
+                {orchestratorCapabilitiesError}
+              </p>}
+              {!orchestratorDelegationValid && <p className="form-error" role="alert">
+                {effectiveParentControl !== "off" && !parentControlSupported
+                  ? `${parentControlUnavailable} Choose Human for Descendant Requests or update the runner.`
+                  : `${typedDelegationUnavailable} Choose Human for every typed decision or update the runner.`}
+              </p>}
+  </>;
+
   return (
     <>
     <Modal
@@ -1279,9 +1516,12 @@ export function NewSessionDialog({
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" form={formId} className="btn primary" disabled={busy || !valid}>
-            {busy ? "Creating…" : "Create Session"}
-          </button>
+          {fullControlLaunch
+            ? <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Starting the campaign…"
+              disabled={!fullControlAuthorization?.ready}>Authorize and Start</BusyButton>
+            : <button type="submit" form={formId} className="btn primary" disabled={busy || !valid}>
+              {busy ? "Creating…" : "Create Session"}
+            </button>}
         </>
       }
     >
@@ -1703,232 +1943,15 @@ export function NewSessionDialog({
               >Retry Orchestrator Defaults</button>}
             </div>}
             {orchestrator && orchestratorSettingsReady && <div className="new-session-orchestrator-policy" data-validation-target="orchestrator-defaults">
-              <FullControlPreparation surface="launch" defaults={{ ...orchestratorDraft,
-                execution: { ...orchestratorDraft.execution, integrationIsolation: effectiveIntegrationIsolation } }} mode={controlPreview}
-                onChange={setControlPreview} disabled={busy}
-                launchRequest={buildSessionRequest} launchSelectionValid={launchSelectionValid}
-                onCampaignCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
-                onLaunchActivity={() => setValidationError(null)}
-                root={{ driver: agent?.driver, permissionMode: roleOverride === "orchestrator" &&
-                  (providerPermissionsPreset || !orchestratorRoleSupported) ? "orchestrator" : savedPermissionMode }}
-                workspace={workspaceId || browsedPath} />
-              <fieldset className="orchestrator-policy-area">
-                <legend>Behavior</legend>
-                <p className="muted">These effective values are resolved and stored before the campaign's first turn.</p>
-                <div className="orchestrator-policy-control">
-                  <span>Child Harness <small aria-hidden="true">{orchestratorSource("behavior.childHarness")}</small></span>
-                  <Select<string>
-                    label="Child Harness"
-                    value={fixedChildHarness ? agentHarnessIdentityKey(fixedChildHarness) : AUTOMATIC_ORCHESTRATOR_VALUE}
-                    options={childHarnessOptions}
-                    disabled={!harnessPolicyAvailable}
-                    onChange={(value) => {
-                      const childHarness = value === AUTOMATIC_ORCHESTRATOR_VALUE
-                        ? null
-                        : (() => {
-                          const harness = childHarnesses.find((candidate) => agentHarnessIdentityKey(candidate) === value);
-                          return harness ? { agentId: harness.agentId, driver: harness.driver, context: harness.context } : null;
-                        })();
-                      setOrchestratorDraft((current) => ({
-                        ...current,
-                        behavior: { ...current.behavior, childHarness, childModel: null, childEffort: null },
-                      }));
-                      setOrchestratorOverrides((current) => new Set(current)
-                        .add("behavior.childHarness").add("behavior.childModel").add("behavior.childEffort"));
-                    }}
-                  />
-                  {!harnessPolicyAvailable && <small className="muted">Update or restart Wollipog to configure fixed Child Harness policy.</small>}
-                  {fixedChildHarness && !childHarnessPolicySupported && <small className="form-error">
-                    {childHarnessPolicyUnavailable}
-                  </small>}
-                </div>
-                <div className="orchestrator-policy-control">
-                  <span>Child Model <small aria-hidden="true">{orchestratorSource("behavior.childModel")}</small></span>
-                  <Select<string>
-                    label="Child Model"
-                    value={orchestratorDraft.behavior.childModel ?? AUTOMATIC_ORCHESTRATOR_VALUE}
-                    options={childModelOptions}
-                    onChange={(value) => {
-                      const childModel = value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value;
-                      const effortCompatible = !orchestratorDraft.behavior.childEffort || (harnessPolicyAvailable
-                        ? candidateChildHarnesses.some((harness) => childModel
-                          ? harness.supportedPairs.some((pair) => pair.modelId === childModel &&
-                            pair.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
-                          : harness.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
-                        : orchestratorCapabilities?.supportedPairs
-                          ? childModel
-                            ? orchestratorCapabilities.supportedPairs.some((pair) => pair.modelId === childModel &&
-                              pair.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
-                            : orchestratorCapabilities.effortLevels.includes(orchestratorDraft.behavior.childEffort)
-                          : true);
-                      setOrchestratorBehavior("childModel", childModel);
-                      if (!effortCompatible) setOrchestratorBehavior("childEffort", null);
-                    }}
-                  />
-                </div>
-                <div className="orchestrator-policy-control">
-                  <span>Child Effort <small aria-hidden="true">{orchestratorSource("behavior.childEffort")}</small></span>
-                  <Select<string>
-                    label="Child Effort"
-                    value={orchestratorDraft.behavior.childEffort ?? AUTOMATIC_ORCHESTRATOR_VALUE}
-                    options={childEffortOptions}
-                    onChange={(value) => setOrchestratorBehavior("childEffort", value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value)}
-                  />
-                </div>
-                <label className="orchestrator-policy-control" htmlFor={liveChildLimitInputId}>
-                  <span>Maximum Concurrent Children <small aria-hidden="true">{orchestratorSource("behavior.maximumConcurrentChildren")}</small></span>
-                  <input
-                    id={liveChildLimitInputId}
-                    type="number"
-                    inputMode="numeric"
-                    min="0"
-                    max={String(MAX_LIVE_CHILD_LIMIT)}
-                    step="1"
-                    required
-                    value={liveChildLimitDraft}
-                    aria-invalid={!liveChildLimitValid}
-                    aria-describedby={liveChildLimitHelpId}
-                    onChange={(event) => {
-                      setLiveChildLimitDraft(event.currentTarget.value);
-                      const value = Number(event.currentTarget.value);
-                      setOrchestratorBehavior("maximumConcurrentChildren", value);
-                    }}
-                  />
-                </label>
-                <span id={liveChildLimitHelpId} className={liveChildLimitValid ? "muted" : "form-error"} role={liveChildLimitValid ? undefined : "alert"}>
-                  {liveChildLimitValid ? "Choose 0 to pause admission, or up to 64 live children." : "Enter a whole number from 0 to 64."}
-                </span>
-                <div className="orchestrator-policy-control">
-                  <span>Follow-Ups <small aria-hidden="true">{orchestratorSource("behavior.followUps")}</small></span>
-                  <Select<OrchestratorDefaults["behavior"]["followUps"]>
-                    label="Follow-Ups"
-                    value={orchestratorDraft.behavior.followUps}
-                    options={[
-                      { value: "recommend_only", label: "Recommend Only", description: "Recommend justified follow-ups and wait." },
-                      { value: "execute_approved", label: "Execute Approved", description: "Execute follow-ups only after approval." },
-                    ]}
-                    onChange={(value) => setOrchestratorBehavior("followUps", value)}
-                  />
-                </div>
-                <div className="orchestrator-policy-control">
-                  <span>Completion <small aria-hidden="true">{orchestratorSource("behavior.completion")}</small></span>
-                  <Select<OrchestratorDefaults["behavior"]["completion"]>
-                    label="Completion"
-                    value={orchestratorDraft.behavior.completion}
-                    options={[
-                      { value: "retain", label: "Retain", description: "Retain verified finished children for inspection." },
-                      { value: "stop_and_archive", label: "Stop and Archive", description: "Stop and archive only after verified completion." },
-                    ]}
-                    onChange={(value) => setOrchestratorBehavior("completion", value)}
-                  />
-                </div>
-              </fieldset>
-              <fieldset className="orchestrator-policy-area">
-                <legend>Execution Permissions</legend>
-                <div className="orchestrator-policy-control">
-                  <span>Strict Project Isolation <small aria-hidden="true">{orchestratorSource("execution.strictProjectIsolation")}</small></span>
-                  <Select<"disabled" | "enabled">
-                    label="Strict Project Isolation"
-                    value={orchestratorDraft.execution.strictProjectIsolation ? "enabled" : "disabled"}
-                    options={[
-                      {
-                        value: "disabled",
-                        label: "Disabled",
-                        description: "Use provider permissions. Explicit parent implementation must use a dedicated worktree.",
-                      },
-                      {
-                        value: "enabled",
-                        label: "Enabled",
-                        description: "Enforce a scratch-only project boundary with a compatible isolation backend.",
-                      },
-                    ]}
-                    onChange={(value) => setStrictProjectIsolation(value === "enabled")}
-                  />
-                </div>
-                <p className="muted">
-                  {orchestratorDraft.execution.strictProjectIsolation
-                    ? "Operating-system or audited provider sandbox enforcement blocks Project writes."
-                    : "Provider approval controls and governance still apply; no read-only operating-system boundary is claimed."}
-                </p>
-                <div className="orchestrator-policy-control">
-                  <span>Integration Isolation <small aria-hidden="true">{orchestratorSource("execution.integrationIsolation")}</small></span>
-                  <Select<"disabled" | "enabled">
-                    label="Integration Isolation"
-                    value={effectiveIntegrationIsolation ? "enabled" : "disabled"}
-                    disabled={integrationIsolationImplied || !integrationIsolationControlPlane}
-                    options={[
-                      {
-                        value: "disabled",
-                        label: "Disabled",
-                        description: "Load the same integrations as a normal session with this harness.",
-                      },
-                      {
-                        value: "enabled",
-                        label: "Enabled",
-                        description: integrationIsolationCopy.removed,
-                      },
-                    ]}
-                    onChange={(value) => setIntegrationIsolation(value === "enabled")}
-                  />
-                </div>
-                <p className="muted">
-                  {integrationIsolationImplied
-                    ? `${orchestratorDraft.execution.strictProjectIsolation ? "Strict Project Isolation" : "The Orchestrator preset"} already launches without provider integrations, so this policy is implied and cannot be disabled. ${ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE}`
-                    : !integrationIsolationControlPlane
-                      ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
-                      : effectiveIntegrationIsolation
-                      ? `${integrationIsolationCopy.removed} ${integrationIsolationCopy.kept} ${INTEGRATION_ISOLATION_PRESERVED}${hostExecutionTarget ? "" : ` ${SKILLS_UNAVAILABLE_ON_TARGET}`}`
-                      : hostExecutionTarget
-                      ? "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."
-                      : `Hooks, plugins, extensions, and configured MCP servers load exactly as they would for a normal session with this harness. ${SKILLS_UNAVAILABLE_ON_TARGET}`}
-                </p>
-                {!orchestratorExecutionValid && <p className="form-error" role="alert">
-                  {effectiveIntegrationIsolation && !integrationIsolationSupported
-                    ? integrationIsolationUnavailable
-                    : orchestratorExecutionUnavailable}
-                </p>}
-              </fieldset>
-              <fieldset className="orchestrator-policy-area">
-                <legend>Decision Delegation</legend>
-                <div className="orchestrator-policy-control">
-                  <span>Descendant Requests <small aria-hidden="true">{orchestratorSource("delegation.parentControl")}</small></span>
-                  <Select<ParentControlMode>
-                    label="Descendant Requests"
-                    value={effectiveParentControl}
-                    options={[
-                      { value: "off", label: "Human", description: "Keep descendant questions and approvals human-owned." },
-                      { value: "questions", label: "Questions", description: "Delegate non-secret descendant implementation questions.", disabled: !parentControlSupported, disabledReason: parentControlUnavailable },
-                      { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals.", disabled: !parentControlSupported, disabledReason: parentControlUnavailable },
-                    ]}
-                    onChange={(value) => {
-                      setOrchestratorDraft((current) => ({ ...current, delegation: { ...current.delegation, parentControl: value } }));
-                      setOrchestratorOverrides((current) => new Set(current).add("delegation.parentControl"));
-                    }}
-                  />
-                </div>
-                {!parentControlSupported && <span className="form-error">{parentControlUnavailable}</span>}
-                {WORKFLOW_DECISION_CATEGORIES.map((category) => <div className="orchestrator-policy-control" key={category}>
-                  <span>{ORCHESTRATOR_DECISION_LABELS[category]} <small aria-hidden="true">{orchestratorSource(`delegation.decisions.${category}`)}</small></span>
-                  <Select<"human" | "orchestrator">
-                    label={ORCHESTRATOR_DECISION_LABELS[category]}
-                    value={effectiveDecision(category)}
-                    options={[
-                      { value: "human", label: "Human", description: "Require a human decision for this exact gate." },
-                      { value: "orchestrator", label: "Orchestrator", description: "Delegate this typed gate to the campaign Orchestrator.", disabled: !typedDelegationSupported, disabledReason: typedDelegationUnavailable },
-                    ]}
-                    onChange={(value) => setOrchestratorDelegation(category, value)}
-                  />
-                </div>)}
-                <p className="muted">Secrets, authentication, persistent permission grants, governance changes, cost budgets, and tool guardrails stay human-only.</p>
-              </fieldset>
-              {!orchestratorCapabilitiesValid && <p className="form-error" role="alert">
-                {orchestratorCapabilitiesError}
-              </p>}
-              {!orchestratorDelegationValid && <p className="form-error" role="alert">
-                {effectiveParentControl !== "off" && !parentControlSupported
-                  ? `${parentControlUnavailable} Choose Human for Descendant Requests or update the runner.`
-                  : `${typedDelegationUnavailable} Choose Human for every typed decision or update the runner.`}
-              </p>}
+              <OrchestratorControlChoice surface="launch" mode={controlPreview} onChange={setControlPreview} disabled={busy} />
+              {controlPreview === "full_control"
+                ? <FullControlLaunchPanel request={buildSessionRequest} selectionValid={launchSelectionValid} disabled={busy}
+                  savedDefaults={orchestratorSettings?.view?.defaults ?? null}
+                  onAuthorization={setFullControlAuthorization}
+                  onCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
+                  onActivity={() => setValidationError(null)}
+                  advanced={orchestratorPolicyFields} />
+                : orchestratorPolicyFields}
             </div>}
             {directWslRequiresSafeOrchestrator && !orchestrator &&
               <span className="form-error">Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.</span>}

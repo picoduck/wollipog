@@ -1,10 +1,14 @@
-import { useEffect, useId, useRef, useState } from "react";
-import type { CampaignControlMode, CampaignLaunchPreflight, CreateSessionRequest, FullControlLaunchRequest } from "@wollipog/protocol";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import type {
+  CampaignControlMode, CampaignLaunchPreflight, CreateSessionRequest, FullControlEnableRequest, FullControlLaunchOverrides,
+  FullControlLaunchRequest, OrchestratorDefaults, SessionView,
+} from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { titleCaseLabel } from "../format.js";
-import { fullControlPreflight, type FullControlPreparation as PreparationInput } from "../full-control-preflight.js";
+import { ChevronRightIcon } from "./Icons.js";
 import { ChoiceRows, SegmentedControl } from "./ui/ChoiceControls.js";
 import { Notice } from "./Notice.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { Switch } from "./ui/SettingsRows.js";
 
 /** A future preference only; the selected option cannot authorize a campaign. */
@@ -17,176 +21,302 @@ export function FullControlModeChoice({ mode, onChange, disabled = false, prefer
     options={[
       { value: "custom", label: "Custom", description: "Choose individual workflow owners. Defaults apply only to new campaigns.", disabled },
       { value: "full_control", label: "Full Control", description: preferenceSupported
-        ? "Prefer Full Control for new campaigns; each needs authenticated human authorization."
-        : "Preview Full Control; this version cannot save the preference.", disabled },
+        ? "Prefer Full Control for new campaigns; each still needs your authorization."
+        : "This version cannot save the preference.", disabled },
     ]} /></span>;
 }
 
-/** Shared preference/preflight display. Launch uses only the exact Human endpoint, which admits
- * only when the server verifies every mandatory capability; ordinary creation stays fenced. */
-export function FullControlPreparation({ mode, onChange, disabled = false, preferenceSupported = false,
-  launchRequest, launchSelectionValid = false, onCampaignCreated, onLaunchActivity, ...input }: PreparationInput & {
-  mode: CampaignControlMode; onChange: (mode: CampaignControlMode) => void; disabled?: boolean; preferenceSupported?: boolean;
-  launchRequest?: () => CreateSessionRequest; launchSelectionValid?: boolean; onCampaignCreated?: (id: string) => void;
-  /** The Human acted on the launch preflight, so a stale ordinary-submit hint no longer applies. */
-  onLaunchActivity?: () => void;
+/** The launch and active-campaign choice. Choosing Full Control only shows its preflight; one
+ * explicit authorization action is still required. */
+export function OrchestratorControlChoice({ mode, onChange, disabled = false, surface, embedded = false }: {
+  mode: CampaignControlMode; onChange: (mode: CampaignControlMode) => void; disabled?: boolean; surface: "launch" | "campaign";
+  /** Rendered inside a section that already carries the Orchestrator Control heading. */
+  embedded?: boolean;
 }) {
   const id = useId();
-  const preflight = fullControlPreflight(input);
-  const current = preflight.effectiveMode;
-  const defaults = input.surface === "defaults";
-  // New Session's launch preflight comes from the server; the local preview below cannot judge it.
-  const serverLaunch = input.surface === "launch" && launchRequest !== undefined && onCampaignCreated !== undefined;
-  if (defaults && mode === "custom") return null;
-  return <section className="section" aria-labelledby={defaults ? undefined : `${id}-title`}
-    aria-label={defaults ? "Orchestrator Control" : undefined}>
-    {!defaults && <>
-      <h3 className="section-title" id={`${id}-title`}>Orchestrator Control</h3>
-      <ChoiceRows<CampaignControlMode> label="Orchestrator Control" value={mode} onChange={onChange}
-        options={[
-          { value: "custom", title: "Custom", description: "Choose individual request and workflow decision owners.", disabled, inputData: { "data-control-mode": "custom" } },
-          { value: "full_control", title: "Full Control", description: serverLaunch
-            ? "Authorize one bounded campaign once the server verifies it is ready."
-            : "Review autonomous control within one human-established campaign boundary. Activation is unavailable here.", disabled, inputData: { "data-control-mode": "full_control" } },
-        ]} />
-      <p className="section-note">Selecting the Orchestrator role or assigning all five owners does not authorize Full Control.</p>
-    </>}
-    {input.surface === "campaign" && <p className="section-note">Effective Mode: {current === "full_control" ? "Full Control" : current === "custom" ? "Custom" : "Current Root State Not Reported"}. Enabling or revoking control requires an explicit authenticated campaign operation against the current revision and revokes incompatible unused approvals. This preview does not change the mode.</p>}
-    {mode === "full_control" && <>
-      {defaults && <>
-        <p className="section-note">Selecting the Orchestrator role or assigning all five owners does not authorize Full Control.</p>
-        <p className="section-note">Defaults apply only to new campaigns. {preferenceSupported ? "Save Defaults records a preferred mode; it grants no campaign authority. " : "This version cannot save a control preference. "}Each new campaign still needs its own exact scope and authenticated human authorization.</p>
-      </>}
-      {!serverLaunch && <>
-        <h4 className="section-title">Full Control Preflight</h4>
-        <Notice tone="neutral" role="status">Activation Unavailable</Notice>
-        <dl className="facts orchestrator-facts">
-          {preflight.facts.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
-        </dl>
-        <h4 className="section-title">Human Required and Unsupported Capabilities</h4>
-        <ul>{preflight.blockers.map((reason) => <li key={reason}>{reason}</li>)}</ul>
-      </>}
-      <p className="section-note">One authenticated human confirmation must bind the complete issue, budget, and evidence authorities together. Agent JSON, saved defaults, and this preview cannot grant authorization.</p>
-      {serverLaunch
-        ? <CampaignLaunchForm request={launchRequest!()} selectionValid={launchSelectionValid} disabled={disabled} onCreated={onCampaignCreated!} onActivity={onLaunchActivity} />
-        : <button type="button" className="btn primary" disabled>Authorize Full Control</button>}
-    </>}
+  const rows = <ChoiceRows<CampaignControlMode> label="Orchestrator Control" value={mode} onChange={onChange}
+      options={[
+        { value: "custom", title: "Custom", description: "Choose individual request and workflow decision owners.", disabled, inputData: { "data-control-mode": "custom" } },
+        { value: "full_control", title: "Full Control", description: "Let the Orchestrator finish this campaign within the limits you authorize.", disabled, inputData: { "data-control-mode": "full_control" } },
+      ]} />;
+  if (embedded) return rows;
+  return <section className="section" aria-labelledby={`${id}-title`}>
+    <h3 className="section-title" id={`${id}-title`}>Orchestrator Control</h3>
+    {rows}
   </section>;
 }
 
-const CAPABILITY_STATE_LABELS: Record<CampaignLaunchPreflight["capabilities"][number]["state"], string> = {
+const STATE_LABELS: Record<CampaignLaunchPreflight["capabilities"][number]["state"], string> = {
   verified: "Verified", unsupported: "Blocks Launch", human_required: "Human Required",
 };
+const DEBOUNCE_MS = 400;
 
-function CampaignLaunchForm({ request, selectionValid, disabled, onCreated, onActivity }: {
-  request: CreateSessionRequest; selectionValid: boolean; disabled: boolean; onCreated: (id: string) => void; onActivity?: () => void;
+/** One readiness answer per input. A newer input aborts the older request, so a late answer can
+ * never describe what the person is looking at now. */
+export function useServerPreflight<T>(key: string | null, run: (signal: AbortSignal) => Promise<T>) {
+  const latest = useRef(run);
+  latest.current = run;
+  const [state, setState] = useState<{ key: string | null; value: T | null; error: string | null; loading: boolean }>(
+    { key: null, value: null, error: null, loading: false });
+  useEffect(() => {
+    if (key === null) { setState({ key: null, value: null, error: null, loading: false }); return; }
+    const controller = new AbortController();
+    setState((prior) => ({ ...prior, loading: true, error: null }));
+    const timer = window.setTimeout(() => {
+      latest.current(controller.signal).then(
+        (value) => { if (!controller.signal.aborted) setState({ key, value, error: null, loading: false }); },
+        (cause) => { if (!controller.signal.aborted) setState({ key, value: null, error: cause instanceof Error ? cause.message : "Full Control readiness is unavailable.", loading: false }); });
+    }, DEBOUNCE_MS);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [key]);
+  return { value: state.key === key ? state.value : null, error: state.key === key || state.key === null ? state.error : null,
+    loading: state.loading || state.key !== key };
+}
+
+/** A response boolean alone never enables authorization: every mandatory capability must be verified. */
+export function preflightReady(preflight: CampaignLaunchPreflight | null): boolean {
+  return preflight?.ready === true && preflight.capabilities.some((item) => item.mandatory) &&
+    preflight.capabilities.every((item) => !item.mandatory || item.state === "verified");
+}
+
+function newRequestId(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+interface BudgetDraft { cost: string; tools: string; save: boolean }
+function budgetValue(draft: BudgetDraft): { costUsd?: number; toolCalls?: number } {
+  const cost = Number(draft.cost), tools = Number(draft.tools);
+  return { ...(draft.cost.trim() && Number.isFinite(cost) && cost > 0 ? { costUsd: cost } : {}),
+    ...(draft.tools.trim() && Number.isSafeInteger(tools) && tools > 0 ? { toolCalls: tools } : {}) };
+}
+
+interface LimitDrafts { concurrency: string; followUps: string; maxIssues: string; related: boolean | null }
+function limitOverrides(limits: LimitDrafts): Pick<FullControlLaunchOverrides, "budget" | "issues"> {
+  const whole = (value: string, minimum: number) => value.trim() && Number.isSafeInteger(Number(value)) && Number(value) >= minimum ? Number(value) : undefined;
+  const concurrency = whole(limits.concurrency, 1), acceptedFollowUps = whole(limits.followUps, 0), maxIssues = whole(limits.maxIssues, 1);
+  return {
+    ...(concurrency !== undefined || acceptedFollowUps !== undefined ? { budget: {
+      ...(concurrency !== undefined ? { concurrency } : {}), ...(acceptedFollowUps !== undefined ? { acceptedFollowUps } : {}) } } : {}),
+    ...(maxIssues !== undefined || limits.related !== null ? { issues: {
+      ...(maxIssues !== undefined ? { maxIssues } : {}), ...(limits.related !== null ? { relatedFollowUps: limits.related } : {}) } } : {}),
+  };
+}
+
+function mergeOverrides(budget: BudgetDraft, limits: LimitDrafts): Pick<FullControlLaunchOverrides, "budget" | "issues"> {
+  const limit = limitOverrides(limits);
+  const amounts = budgetValue(budget);
+  const merged = { ...limit.budget, ...amounts };
+  return { ...(Object.keys(merged).length ? { budget: merged } : {}), ...(limit.issues ? { issues: limit.issues } : {}) };
+}
+
+/** The capability exceptions by name; the standing protections every campaign has are counted. */
+function humanRequiredSummary(preflight: CampaignLaunchPreflight): string {
+  const exceptions = preflight.capabilities.filter((item) => item.state === "human_required").map((item) => item.capability);
+  const standing = preflight.summary.humanRequired.length - exceptions.length;
+  const protections = standing > 0 ? `${standing} standing ${standing === 1 ? "protection" : "protections"}, such as secrets and sign-in` : "";
+  return [exceptions.join(", "), protections].filter(Boolean).join(" · ") || "None";
+}
+
+function money(value: number): string {
+  return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
+}
+
+/** The concise readiness summary shared by launch and enable. Details live under Advanced. */
+export function FullControlSummary({ preflight, loading, error, scopeLabel, budgetEntry, advanced, action }: {
+  preflight: CampaignLaunchPreflight | null; loading: boolean; error: string | null; action: "start" | "enable";
+  scopeLabel: (preflight: CampaignLaunchPreflight) => string;
+  budgetEntry?: ReactNode; advanced?: ReactNode;
+}) {
+  const ready = preflightReady(preflight);
+  const budget = preflight?.summary.budget;
+  return <div aria-busy={loading}>
+    {error ? <Notice tone="danger" role="alert">{error}</Notice>
+      : !preflight ? <Notice tone="neutral" role="status">Checking Full Control Readiness…</Notice>
+      : ready ? <Notice tone="success" role="status">{action === "start" ? "Ready to Authorize and Start" : "Ready to Enable"}</Notice>
+      : <Notice tone="warning" role="status" title={action === "start" ? "Can't Start Yet" : "Can't Enable Yet"}>
+        <ul>{preflight.summary.blockers.map((item) => <li key={item.capability}><strong>{item.capability}:</strong> {item.reason}</li>)}</ul>
+      </Notice>}
+    {preflight && <dl className="facts orchestrator-facts">
+      <div><dt>Scope</dt><dd>{scopeLabel(preflight)}</dd></div>
+      <div><dt>Budget</dt><dd>{budget && budget.costUsd !== null && budget.toolCalls !== null
+        ? `${money(budget.costUsd)} · ${budget.toolCalls} tool calls · ${budget.concurrency} at a time${budget.source === "saved_defaults" ? " · Saved Default" : ""}`
+        : "Not Set"}</dd></div>
+      <div><dt>Follow-Ups</dt><dd>{`${titleCaseLabel(preflight.summary.followUps.policy.replaceAll("_", " "))} · up to ${preflight.summary.followUps.maxIssues} ${preflight.summary.followUps.maxIssues === 1 ? "issue" : "issues"}`}</dd></div>
+      <div><dt>Evidence</dt><dd>{preflight.summary.evidence.statement}</dd></div>
+      <div><dt>Human Required</dt><dd>{humanRequiredSummary(preflight)}</dd></div>
+    </dl>}
+    {budgetEntry}
+    {preflight?.summary.evidence.provider && <p className="section-note">{preflight.summary.evidence.provider.retentionDisclosure}</p>}
+    <details className="disclosure">
+      <summary><ChevronRightIcon size={14} className="disclosure-chevron" />Advanced</summary>
+      <div className="disclosure-body">
+        {advanced}
+        {preflight && <>
+          <h4 className="section-title">Human Required</h4>
+          <ul>{preflight.summary.humanRequired.map((item) => <li key={item.exception}>{item.exception}</li>)}</ul>
+          <h4 className="section-title">Capabilities</h4>
+          <ul>{preflight.capabilities.map((item) => <li key={item.id}>{item.capability} ({STATE_LABELS[item.state]}): {item.reason}</li>)}</ul>
+        </>}
+      </div>
+    </details>
+  </div>;
+}
+
+function BudgetEntry({ draft, onChange, disabled }: { draft: BudgetDraft; onChange: (draft: BudgetDraft) => void; disabled: boolean }) {
+  const id = useId();
+  return <fieldset className="orchestrator-policy-area">
+    <legend>Campaign Budget</legend>
+    <p className="muted">Choose the most this campaign may spend. The Orchestrator stops admitting new work at either limit.</p>
+    <label className="field"><span>Cost Limit (USD)</span>
+      <input type="number" inputMode="decimal" min="0" step="any" value={draft.cost} disabled={disabled}
+        onChange={(event) => onChange({ ...draft, cost: event.currentTarget.value })} /></label>
+    <label className="field"><span>Tool Call Limit</span>
+      <input type="number" inputMode="numeric" min="1" step="1" value={draft.tools} disabled={disabled}
+        onChange={(event) => onChange({ ...draft, tools: event.currentTarget.value })} /></label>
+    <div className="field"><span id={`${id}-save`}>Save as Default</span>
+      <Switch labelledBy={`${id}-save`} checked={draft.save} disabled={disabled}
+        onChange={(save) => onChange({ ...draft, save })} />
+    </div>
+  </fieldset>;
+}
+
+function LimitFields({ budget, onBudget, limits, onLimits, disabled, savedBudget }: {
+  budget: BudgetDraft; onBudget: (draft: BudgetDraft) => void; limits: LimitDrafts; onLimits: (limits: LimitDrafts) => void;
+  disabled: boolean; savedBudget: boolean;
+}) {
+  const id = useId();
+  const field = (label: string, value: string, change: (value: string) => void, mode: "decimal" | "numeric") => <label className="field">
+    <span>{label}</span>
+    <input type="number" inputMode={mode} min="0" step={mode === "decimal" ? "any" : "1"} value={value} disabled={disabled}
+      placeholder="Use Default" onChange={(event) => change(event.currentTarget.value)} />
+  </label>;
+  return <fieldset className="orchestrator-policy-area">
+    <legend>Campaign Limits</legend>
+    <p className="muted">Leave a field empty to use the derived value. Changes check readiness again.</p>
+    {savedBudget && field("Cost Limit (USD)", budget.cost, (cost) => onBudget({ ...budget, cost }), "decimal")}
+    {savedBudget && field("Tool Call Limit", budget.tools, (tools) => onBudget({ ...budget, tools }), "numeric")}
+    {field("Concurrent Children", limits.concurrency, (concurrency) => onLimits({ ...limits, concurrency }), "numeric")}
+    {field("Accepted Follow-Ups", limits.followUps, (followUps) => onLimits({ ...limits, followUps }), "numeric")}
+    {field("Maximum Issues", limits.maxIssues, (maxIssues) => onLimits({ ...limits, maxIssues }), "numeric")}
+    <div className="field"><span id={`${id}-related`}>Related Follow-Ups</span>
+      <Switch labelledBy={`${id}-related`} checked={limits.related ?? false} disabled={disabled}
+        onChange={(related) => onLimits({ ...limits, related })} />
+    </div>
+  </fieldset>;
+}
+
+async function saveBudgetDefault(api: ReturnType<typeof useApi>, defaults: OrchestratorDefaults | null, draft: BudgetDraft): Promise<void> {
+  const amounts = budgetValue(draft);
+  if (!draft.save || !defaults || amounts.costUsd === undefined || amounts.toolCalls === undefined) return;
+  await api.updateOrchestratorSettings({ defaults: { ...defaults, campaignBudget: { costUsd: amounts.costUsd, toolCalls: amounts.toolCalls } } });
+}
+
+/** Imperative handle New Session's footer uses for its single primary action. */
+export interface FullControlAuthorization { ready: boolean; authorize: () => Promise<void> }
+
+/** New Session with Full Control: the server checks readiness as soon as a workspace is chosen,
+ * and the one footer action authorizes and starts the campaign. */
+export function FullControlLaunchPanel({ request, selectionValid, disabled, savedDefaults, onAuthorization, onCreated, onActivity, advanced }: {
+  request: () => CreateSessionRequest; selectionValid: boolean; disabled: boolean; savedDefaults: OrchestratorDefaults | null;
+  onAuthorization: (authorization: FullControlAuthorization) => void; onCreated: (id: string) => void; onActivity?: () => void;
+  advanced?: ReactNode;
 }) {
   const api = useApi();
-  const id = useId();
+  const [task, setTask] = useState("");
   const [issues, setIssues] = useState("");
-  const [objective, setObjective] = useState("");
-  const [cost, setCost] = useState("");
-  const [tools, setTools] = useState("");
-  const [concurrency, setConcurrency] = useState("");
-  const [followUps, setFollowUps] = useState("0");
-  const [maximumIssues, setMaximumIssues] = useState("");
-  const [relatedFollowUps, setRelatedFollowUps] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [checked, setChecked] = useState<{ input: string; value: CampaignLaunchPreflight } | null>(null);
-  const generation = useRef(0);
-  const numbers = issues.trim() ? issues.trim().split(/[,\s]+/).map(Number) : [];
-  const { runnerId, workspaceId, projectId, projectLocationId, agentId, providerAccountId, title, useWorktree, config, orchestrator } = request;
-  // The server derives the repository, scope and authority; these fields are explicit overrides.
+  const [budget, setBudget] = useState<BudgetDraft>({ cost: "", tools: "", save: true });
+  const [limits, setLimits] = useState<LimitDrafts>({ concurrency: "", followUps: "", maxIssues: "", related: null });
+  const numbers = issues.trim() ? issues.trim().split(/[,\s]+/).map((value) => Number(value.replace(/^#/, ""))) : [];
+  const issuesValid = numbers.length <= 100 && numbers.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(numbers).size === numbers.length;
+  const hasWork = task.trim().length > 0 || numbers.length > 0;
+  const savedBudget = Boolean(savedDefaults?.campaignBudget);
+  const base = request();
+  const { runnerId, workspaceId, projectId, projectLocationId, agentId, providerAccountId, title, useWorktree, config, orchestrator } = base;
+  // The server derives repository, scope and authority. Without a task yet, readiness is still
+  // checked so a person never has to fill anything in to learn that a launch cannot start.
   const launch: FullControlLaunchRequest = {
     runnerId, workspaceId, ...(projectId !== undefined ? { projectId } : {}), ...(projectLocationId !== undefined ? { projectLocationId } : {}),
-    task: objective.trim(), ...(numbers.length ? { issueNumbers: numbers } : {}),
+    task: task.trim() || "Full Control readiness check", ...(numbers.length && issuesValid ? { issueNumbers: numbers } : {}),
     overrides: {
       session: { agentId, ...(providerAccountId ? { providerAccountId } : {}), ...(title ? { title } : {}),
         ...(useWorktree !== undefined ? { useWorktree } : {}), ...(config ? { config } : {}), ...(orchestrator ? { orchestrator } : {}) },
-      budget: { costUsd: Number(cost), toolCalls: Number(tools), concurrency: Number(concurrency), acceptedFollowUps: Number(followUps) },
-      issues: { relatedFollowUps, maxIssues: Number(maximumIssues), closureReasons: ["completed"] },
+      ...mergeOverrides(budget, limits),
     },
   };
-  const valid = selectionValid && objective.trim().length > 0 && objective.length <= 4000 &&
-    numbers.length <= 100 && numbers.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(numbers).size === numbers.length &&
-    [cost, tools, concurrency, maximumIssues].every((value) => value.trim() && Number.isFinite(Number(value)) && Number(value) > 0) &&
-    [tools, concurrency, followUps, maximumIssues].every((value) => value.trim() && Number.isSafeInteger(Number(value))) &&
-    Number(followUps) >= 0 && Number(concurrency) <= 64 && Number(maximumIssues) >= numbers.length && Number(maximumIssues) <= 100;
-  const input = JSON.stringify(launch);
-  const currentInput = useRef(input);
-  currentInput.current = input;
-  const identity = useRef<{ input: string; requestId: string } | null>(null);
-  if (identity.current?.input !== input) identity.current = { input,
-    requestId: Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("") };
-  useEffect(() => { generation.current++; setError(null); }, [input]);
-  useEffect(() => () => { generation.current++; }, []);
-  const fresh = checked?.input === input ? checked.value : null;
-  // A mode choice or a response boolean alone never enables admission.
-  const ready = fresh?.ready === true && fresh.capabilities.some((item) => item.mandatory) &&
-    fresh.capabilities.every((item) => !item.mandatory || item.state === "verified");
-  const check = async () => {
-    if (!valid || disabled || busy) return;
-    const attempt = ++generation.current;
-    onActivity?.();
-    setBusy(true); setError(null);
+  const key = selectionValid && runnerId && workspaceId && issuesValid ? JSON.stringify(launch) : null;
+  const { value, error, loading } = useServerPreflight(key, (signal) => api.fullControlLaunchPreflight(launch, signal).then((result) => result.preflight));
+  const identity = useRef<{ key: string | null; requestId: string }>({ key: null, requestId: newRequestId() });
+  if (identity.current.key !== key) identity.current = { key, requestId: newRequestId() };
+  const [authorizeError, setAuthorizeError] = useState<string | null>(null);
+  useEffect(() => { setAuthorizeError(null); onActivity?.(); }, [key]);
+  const ready = hasWork && !loading && preflightReady(value);
+  const authorizeRef = useRef<() => Promise<void>>(async () => undefined);
+  authorizeRef.current = async () => {
+    if (!ready || !value || disabled) return;
+    setAuthorizeError(null);
     try {
-      const { preflight } = await api.fullControlLaunchPreflight(JSON.parse(input));
-      if (attempt === generation.current && currentInput.current === input) setChecked({ input, value: preflight });
-    } catch (caught) {
-      if (attempt === generation.current) setError(caught instanceof Error ? caught.message : "Full Control preflight is unavailable.");
-    } finally { setBusy(false); }
-  };
-  const authorize = async () => {
-    if (!ready || !fresh || !valid || disabled || busy) return;
-    setBusy(true); setError(null);
-    try {
-      const session = await api.createFullControlCampaign({ ...launch, requestId: identity.current!.requestId, preflightDigest: fresh.digest });
+      await saveBudgetDefault(api, savedDefaults, budget);
+      const session = await api.createFullControlCampaign({ ...launch, requestId: identity.current.requestId, preflightDigest: value.digest });
       onCreated(session.id);
-    } catch (caught) { setError(caught instanceof Error ? caught.message : "The campaign was not created."); }
+    } catch (cause) {
+      setAuthorizeError(cause instanceof Error ? cause.message : "The campaign was not started.");
+      throw cause;
+    }
+  };
+  useEffect(() => { onAuthorization({ ready, authorize: () => authorizeRef.current() }); }, [ready]);
+  const scopeLabel = (preflight: CampaignLaunchPreflight) => `${preflight.summary.repository ?? "Repository Not Verified"} · ${
+    preflight.summary.issueNumbers.length ? preflight.summary.issueNumbers.map((n) => `#${n}`).join(", ") : "Task Only"}`;
+  return <section className="section" aria-label="Full Control Launch">
+    <label className="field"><span>Task</span>
+      <textarea rows={3} value={task} disabled={disabled} placeholder="Describe what this campaign should deliver."
+        onChange={(event) => setTask(event.currentTarget.value)} /></label>
+    <label className="field"><span>Issue Numbers</span>
+      <input type="text" inputMode="numeric" value={issues} disabled={disabled} placeholder="Optional, for example 12, 14"
+        aria-invalid={!issuesValid} onChange={(event) => setIssues(event.currentTarget.value)} /></label>
+    {!issuesValid && <span className="form-error" role="alert">Enter up to 100 distinct issue numbers.</span>}
+    <FullControlSummary preflight={value} loading={loading} error={error} scopeLabel={scopeLabel} action="start"
+      budgetEntry={!savedBudget ? <BudgetEntry draft={budget} onChange={setBudget} disabled={disabled} /> : undefined}
+      advanced={<>
+        <LimitFields budget={budget} onBudget={setBudget} limits={limits} onLimits={setLimits} disabled={disabled} savedBudget={savedBudget} />
+        {advanced}
+      </>} />
+    {!hasWork && <p className="muted">Describe the task or enter issue numbers to authorize.</p>}
+    {authorizeError && <Notice tone="danger" role="alert">{authorizeError}</Notice>}
+  </section>;
+}
+
+/** Active campaign: the same summary and one Enable action through the existing control operation. */
+export function FullControlEnablePanel({ session, disabled, savedDefaults, onEnabled }: {
+  session: SessionView; disabled: boolean; savedDefaults: OrchestratorDefaults | null; onEnabled: (session: SessionView) => void;
+}) {
+  const api = useApi();
+  const [budget, setBudget] = useState<BudgetDraft>({ cost: "", tools: "", save: true });
+  const [limits, setLimits] = useState<LimitDrafts>({ concurrency: "", followUps: "", maxIssues: "", related: null });
+  const [busy, setBusy] = useState(false);
+  const [enableError, setEnableError] = useState<string | null>(null);
+  const savedBudget = Boolean(savedDefaults?.campaignBudget);
+  const overrides = mergeOverrides(budget, limits);
+  const body: FullControlEnableRequest = Object.keys(overrides).length ? { overrides } : {};
+  const key = JSON.stringify([session.id, session.parentControlPolicy?.revision ?? 0, body]);
+  const { value, error, loading } = useServerPreflight(key, (signal) => api.fullControlEnablePreflight(session.id, body, signal));
+  const ready = !loading && preflightReady(value?.preflight ?? null);
+  const enable = async () => {
+    if (!ready || !value || busy || disabled) return;
+    setBusy(true); setEnableError(null);
+    try {
+      await saveBudgetDefault(api, savedDefaults, budget);
+      onEnabled(await api.enableFullControl(session.id, { ...body, expectedRevision: value.expectedRevision, preflightDigest: value.preflight.digest }));
+    } catch (cause) { setEnableError(cause instanceof Error ? cause.message : "Full Control was not enabled."); }
     finally { setBusy(false); }
   };
-  const field = (label: string, value: string, change: (value: string) => void, numeric = false) => <label className="field">
-    <span>{label}</span>
-    <input type={numeric ? "number" : "text"} value={value} disabled={disabled || busy} onChange={(event) => change(event.target.value)} />
-  </label>;
-  return <section className="section" aria-labelledby={`${id}-launch`}>
-    <h4 className="section-title" id={`${id}-launch`}>Exact Human Launch Proposal</h4>
-    <p className="section-note">The server derives the repository from the workspace origin. Review it, the objective, permitted effects and finite campaign limits before authorizing. A preflight request grants no authority.</p>
-    {field("Issue Numbers", issues, setIssues)}
-    {field("Objective", objective, setObjective)}
-    {field("Campaign Cost Limit (USD)", cost, setCost, true)}
-    {field("Campaign Tool Call Limit", tools, setTools, true)}
-    {field("Campaign Concurrency Limit", concurrency, setConcurrency, true)}
-    {field("Accepted Follow-Up Limit", followUps, setFollowUps, true)}
-    {field("Maximum Authorized Issues", maximumIssues, setMaximumIssues, true)}
-    <div className="field"><span id={`${id}-related-follow-ups`}>Related Follow-Ups</span>
-      <Switch labelledBy={`${id}-related-follow-ups`} checked={relatedFollowUps}
-        disabled={disabled || busy} onChange={setRelatedFollowUps} />
-    </div>
-    <p className="section-note">Requested effects: implementation questions, eligible one-time repository approvals, exact PR merge and merged branch deletion, bounded follow-up publication and issue scope, completed issue closure, and compatible UI evidence review. Secrets, sign-in, persistent permissions, governance, budgets and guardrails stay Human Required.</p>
-    <button type="button" className="btn" disabled={!valid || disabled || busy} onClick={() => void check()}>Check Full Control Preflight</button>
-    {fresh && <>
-      <Notice tone="neutral" role="status">{ready ? "Ready for Exact Human Authorization" : "Full Control Launch Blocked"}</Notice>
-      <dl className="facts orchestrator-facts">
-        <div><dt>Resolved Repository</dt><dd>{fresh.summary.repository ?? "Unverified"}</dd></div>
-        <div><dt>Issue Scope</dt><dd>{fresh.summary.issueNumbers?.length ? fresh.summary.issueNumbers.map((n) => "#" + n).join(", ") : "No Issues"}</dd></div>
-        {fresh.summary.budget && <div><dt>Campaign Budget</dt><dd>{fresh.summary.budget.costUsd === null || fresh.summary.budget.toolCalls === null
-          ? "Not Set" : "$" + fresh.summary.budget.costUsd + " · " + fresh.summary.budget.toolCalls + " tool calls · " + fresh.summary.budget.concurrency + " concurrent"}</dd></div>}
-        {fresh.summary.followUps && <div><dt>Follow-Ups</dt><dd>{titleCaseLabel(fresh.summary.followUps.policy.replaceAll("_", " ")) + " · up to " + fresh.summary.followUps.maxIssues + " issues"}</dd></div>}
-        <div><dt>Resolved Root Model</dt><dd>{fresh.advanced.plan.config.model ?? "Unverified"}</dd></div>
-        <div><dt>Resolved Root Effort</dt><dd>{fresh.advanced.plan.config.effort ? titleCaseLabel(fresh.advanced.plan.config.effort) : "Provider Default"}</dd></div>
-        <div><dt>Resolved Provider Permissions</dt><dd>{fresh.advanced.plan.config.permissionMode ? titleCaseLabel(fresh.advanced.plan.config.permissionMode) : "Provider Default"}</dd></div>
-      </dl>
-      <ul>{fresh.capabilities.map((capability) => <li key={capability.id}>{capability.capability} ({CAPABILITY_STATE_LABELS[capability.state]}): {capability.reason}</li>)}</ul>
-      <p className="section-note">{fresh.summary.evidence.statement}</p>
-      {fresh.summary.evidence.provider && <p className="section-note">{fresh.summary.evidence.provider.retentionDisclosure}</p>}
-      {fresh.summary.humanRequired?.length ? <>
-        <h5 className="section-title">Always Needs Your Decision</h5>
-        <ul>{fresh.summary.humanRequired.map((item) => <li key={item.exception}>{item.exception}</li>)}</ul>
-      </> : null}
-    </>}
-    {error && <Notice tone="danger" role="alert">{error}</Notice>}
-    <button type="button" className="btn primary" disabled={!ready || !valid || disabled || busy} onClick={() => void authorize()}>Authorize and Create Session</button>
+  const scopeLabel = (preflight: CampaignLaunchPreflight) => `${preflight.summary.repository ?? "No Repository Scope"} · ${
+    preflight.summary.issueNumbers.length ? preflight.summary.issueNumbers.map((n) => `#${n}`).join(", ") : "No Issues"}`;
+  return <section className="section" aria-label="Enable Full Control">
+    <FullControlSummary preflight={value?.preflight ?? null} loading={loading} error={error} scopeLabel={scopeLabel} action="enable"
+      budgetEntry={!savedBudget ? <BudgetEntry draft={budget} onChange={setBudget} disabled={disabled || busy} /> : undefined}
+      advanced={<LimitFields budget={budget} onBudget={setBudget} limits={limits} onLimits={setLimits} disabled={disabled || busy} savedBudget={savedBudget} />} />
+    {enableError && <Notice tone="danger" role="alert">{enableError}</Notice>}
+    <BusyButton className="btn primary" busy={busy} progress="Enabling Full Control…" disabled={!ready || disabled}
+      onClick={() => void enable()}>Enable Full Control</BusyButton>
   </section>;
 }

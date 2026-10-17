@@ -3,6 +3,7 @@ import {
   WORKFLOW_DECISION_CATEGORIES,
   type DelegatableWorkflowDecisionCategory,
   type OrchestratorCampaignProjection,
+  type OrchestratorDefaults,
   type ParentControlDecisionPolicy,
   type ParentControlMode,
   type SessionView,
@@ -23,7 +24,7 @@ import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import { SAVED_MS } from "./ui/SettingsRows.js";
-import { FullControlPreparation } from "./FullControlPreparation.js";
+import { FullControlEnablePanel, OrchestratorControlChoice } from "./FullControlPreparation.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
  * matching each gate's Human | Orchestrator (#2192). */
@@ -274,6 +275,18 @@ export function OrchestratorControlsDialog({
     ? session.orchestratorCampaign.control : undefined;
   const fullControl = (projectedControl ?? (session.parentSessionId ? undefined : session.orchestratorPolicy?.control))?.mode === "full_control";
   const canRevoke = fullControl && !session.parentSessionId && policy !== undefined && refusal === null;
+  // A descendant's copied policy is not authoritative; only the projected root state is.
+  const effectiveMode = projectedControl ? projectedControl.mode
+    : session.parentSessionId ? "unknown" : session.orchestratorPolicy?.control?.mode ?? "custom";
+  // The saved Full Control budget is proposed when enabling; Revoke never needs it.
+  const [savedDefaults, setSavedDefaults] = useState<OrchestratorDefaults | null>(null);
+  const canEnable = !fullControl && !session.parentSessionId && session.orchestratorPolicy !== undefined;
+  useEffect(() => {
+    if (!canEnable || controlPreview !== "full_control") return;
+    let live = true;
+    api.orchestratorSettings().then((view) => { if (live) setSavedDefaults(view.defaults); }, () => undefined);
+    return () => { live = false; };
+  }, [api, canEnable, controlPreview]);
   const savedStatus = saved === null
     ? ""
     : `${saved === "parentControl" ? "Child Session Requests" : saved === "control" ? "Orchestrator Control" : WORKFLOW_DECISION_LABELS[saved]} saved`;
@@ -287,16 +300,26 @@ export function OrchestratorControlsDialog({
       footer={<button type="button" className="btn" onClick={onClose}>Done</button>}
     >
       {refusal !== null && <Notice tone="neutral" compact>{refusal}</Notice>}
-      {session.orchestratorPolicy && <FullControlPreparation surface="campaign" session={session}
-        defaults={session.orchestratorPolicy} mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null} />}
-      {fullControl && <section className="section">
-        <p className="section-note">Revoking Full Control updates this root campaign and its descendants and invalidates unused approvals. Your saved defaults and selected session configuration stay unchanged.</p>
-        <button type="button" className="btn" disabled={!canRevoke || Object.keys(pending).length > 0}
-          onClick={() => change("control", "custom", (current) => api.revokeCampaignControl(current.id, current.parentControlPolicy!.revision))}>
-          Revoke Full Control
-        </button>
+      {session.orchestratorPolicy && <section className="section" aria-labelledby={`${ids}-control`}>
+        <div className="section-head">
+          <h3 className="section-title" id={`${ids}-control`}>Orchestrator Control</h3>
+          {saved === "control" && <SavedCheck />}
+        </div>
+        <p className="section-note">Effective Mode: {effectiveMode === "full_control" ? "Full Control" : effectiveMode === "custom" ? "Custom" : "Current Root State Not Reported"}.</p>
+        {canEnable && <>
+          <OrchestratorControlChoice surface="campaign" embedded mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null} />
+          {controlPreview === "full_control" && <FullControlEnablePanel session={session} savedDefaults={savedDefaults}
+            disabled={refusal !== null || Object.keys(pending).length > 0}
+            onEnabled={(next) => { onSessionChanged(next); showSaved("control"); }} />}
+        </>}
+        {fullControl && <>
+          <p className="section-note">Revoking Full Control updates this root campaign and its descendants and invalidates unused approvals. Your saved defaults and selected session configuration stay unchanged.</p>
+          <button type="button" className="btn" disabled={!canRevoke || Object.keys(pending).length > 0}
+            onClick={() => change("control", "custom", (current) => api.revokeCampaignControl(current.id, current.parentControlPolicy!.revision))}>
+            Revoke Full Control
+          </button>
+        </>}
         {session.parentSessionId && <p className="section-note">Change control on the root campaign.</p>}
-        {saved === "control" && <SavedCheck />}
       </section>}
 
       <section className="section" aria-labelledby={`${ids}-requests`}>

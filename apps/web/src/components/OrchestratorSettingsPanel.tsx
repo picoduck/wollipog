@@ -30,7 +30,7 @@ import { SaveBar } from "./SaveBar.js";
 import { useSettingsPanelHead } from "./SettingsView.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
 import { NumberRow, SegmentedRow, SelectRow, SettingsGroup } from "./ui/SettingsRows.js";
-import { FullControlModeChoice, FullControlPreparation } from "./FullControlPreparation.js";
+import { FullControlModeChoice } from "./FullControlPreparation.js";
 
 const AUTO = "__automatic__";
 const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
@@ -140,6 +140,13 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const generation = useRef(0);
 
   const dirty = !!draft && !!view && canonical(draft) !== canonical(view.defaults);
+  // Typed text for the saved Full Control budget; the draft holds it only once both parts are valid.
+  const [budgetText, setBudgetText] = useState({ cost: "", tools: "" });
+  const budgetFromDefaults = (defaults: OrchestratorDefaults | undefined) => ({
+    cost: defaults?.campaignBudget ? String(defaults.campaignBudget.costUsd) : "",
+    tools: defaults?.campaignBudget ? String(defaults.campaignBudget.toolCalls) : "",
+  });
+  useEffect(() => { setBudgetText(budgetFromDefaults(view?.defaults)); }, [view]);
   // Read by a refresh that lands later: discovery brings new capabilities, never a lost draft.
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -393,7 +400,25 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const pairFallbackError = !fixedPairValid && !harnessError && !modelError && !effortError && selectedHarness
     ? "Choose another Child Harness, or Automatic." : null;
   const limitError = limitValid ? null : LIMIT_ERROR;
-  const invalidCount = [harnessError ?? pairFallbackError, modelError, effortError, limitError].filter(Boolean).length;
+  const budgetCost = Number(budgetText.cost), budgetTools = Number(budgetText.tools);
+  const budgetEmpty = !budgetText.cost.trim() && !budgetText.tools.trim();
+  const budgetComplete = Number.isFinite(budgetCost) && budgetCost > 0 && budgetCost <= 1_000_000 &&
+    Number.isSafeInteger(budgetTools) && budgetTools > 0 && budgetTools <= 10_000_000;
+  const budgetError = budgetEmpty || budgetComplete ? null : "Enter both a cost limit and a whole number of tool calls, or clear both.";
+  const changeBudget = (next: { cost: string; tools: string }) => {
+    setBudgetText(next);
+    const cost = Number(next.cost), tools = Number(next.tools);
+    const empty = !next.cost.trim() && !next.tools.trim();
+    const complete = Number.isFinite(cost) && cost > 0 && cost <= 1_000_000 && Number.isSafeInteger(tools) && tools > 0 && tools <= 10_000_000;
+    if (!empty && !complete) return;
+    setDraft((current) => {
+      if (!current) return current;
+      const { campaignBudget: _previous, ...rest } = current;
+      return empty ? (view?.defaults.campaignBudget ? { ...rest, campaignBudget: null } : rest)
+        : { ...rest, campaignBudget: { costUsd: cost, toolCalls: tools } };
+    });
+  };
+  const invalidCount = [harnessError ?? pairFallbackError, modelError, effortError, limitError, budgetError].filter(Boolean).length;
 
   // No connected machine reports child capabilities at all: the group says so once, at its top, and
   // a model or effort left on Automatic has nothing else to offer until one does.
@@ -454,6 +479,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   };
   const discard = () => {
     if (view) setDraft(cloneDefaults(view.defaults));
+    setBudgetText(budgetFromDefaults(view?.defaults));
     setSaveError(null);
   };
 
@@ -489,8 +515,30 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
 
   const limit = draft.behavior.maximumConcurrentChildren;
   return <>
-    <FullControlPreparation surface="defaults" defaults={draft} mode={controlMode}
-      onChange={changeControlMode} disabled={busy} preferenceSupported={view.controlModeSupported} />
+    {controlMode === "full_control" && <SettingsGroup
+      title="Full Control"
+      intro="Proposed whenever you start a Full Control campaign. Each campaign still needs your authorization, and you can change its limits before you start."
+    >
+      <NumberRow
+        title="Campaign Cost Limit"
+        description="The most one campaign may spend, in USD."
+        inputId="orchestrator-campaign-cost"
+        min={0}
+        step={0.01}
+        value={budgetText.cost}
+        error={budgetError}
+        onChange={(cost) => changeBudget({ ...budgetText, cost })}
+      />
+      <NumberRow
+        title="Campaign Tool Call Limit"
+        description="The most tool calls one campaign may use."
+        inputId="orchestrator-campaign-tools"
+        min={1}
+        step={1}
+        value={budgetText.tools}
+        onChange={(tools) => changeBudget({ ...budgetText, tools })}
+      />
+    </SettingsGroup>}
     <SettingsGroup
       title="Children"
       action={!hasPanelHead ? <FullControlModeChoice mode={controlMode} onChange={changeControlMode}
@@ -697,7 +745,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       busy={busy}
       error={saveError}
       saveLabel="Save Defaults"
-      blockedReason={controlPreview === "full_control" && !view.controlModeSupported ? "Full Control activation is unavailable. Choose Custom to save defaults."
+      blockedReason={controlPreview === "full_control" && !view.controlModeSupported ? "This version can't save Full Control as a default. Choose Custom to save."
         : invalidCount > 0 ? `Fix ${invalidCount} setting${invalidCount === 1 ? "" : "s"} to save` : null}
       onDiscard={discard}
       onSave={() => void save()}

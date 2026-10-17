@@ -355,7 +355,7 @@ if (composerFixture) {
       };
     }
     const fullFixture = params.get("fullControlFixture");
-    if (["1", "legacy"].includes(fullFixture ?? "") && session.orchestratorCampaign) {
+    if (["1", "legacy", "enable"].includes(fullFixture ?? "") && session.orchestratorCampaign) {
       // Opt-in source UI fixture only: no authenticated Human/account/profile is created.
       const issueScope = { repository: "example/full-control-fixture", issueNumbers: [12], revision: 1,
         authorizedByUserId: "fixture-human", authorizedAt: 1 };
@@ -365,6 +365,13 @@ if (composerFixture) {
         repository: issueScope.repository, objective: "Review the source fixture", authorizedByUserId: "fixture-human", authorizedAt: 2,
         operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [] } };
       session.orchestratorCampaign.control = session.orchestratorPolicy.control;
+      if (fullFixture === "enable") {
+        // A live Custom root with a Human-established scope, ready to enable through the server preflight.
+        session.orchestratorPolicy.control = { mode: "custom" };
+        session.orchestratorCampaign.control = { mode: "custom" };
+        session.parentControlPolicy = { ...session.parentControlPolicy!, revision: 3 };
+        session.orchestratorCampaign.policyRevision = 3;
+      }
       if (fullFixture === "legacy") {
         session.parentSessionId = "fixture-root-not-loaded";
         delete session.orchestratorCampaign.control;
@@ -568,6 +575,19 @@ let tailRequestCount = 0;
 const settledUsage = params.get("settled") !== "0";
 const client = {
   ...api,
+  enableFullControl: async (id: string, input: Parameters<typeof api.enableFullControl>[1]) => {
+    if (params.get("fullControlFixture") !== "enable") return api.enableFullControl(id, input);
+    if (input.expectedRevision !== session.parentControlPolicy!.revision) throw new ApiError("Fixture revision changed", 409);
+    const revision = input.expectedRevision + 1;
+    const scope = session.orchestratorPolicy!.issueScope!;
+    const control = { mode: "full_control" as const, boundary: { version: 1 as const, revision, issueScopeRevision: scope.revision,
+      repository: scope.repository, objective: "Review the source fixture", authorizedByUserId: "fixture-human", authorizedAt: 3,
+      operations: ["implementation_question", "pr_merge"] as Array<"implementation_question" | "pr_merge">, delegatablePolicyIds: [] } };
+    session.orchestratorPolicy = { ...session.orchestratorPolicy!, control };
+    session.parentControlPolicy = { ...session.parentControlPolicy!, revision };
+    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control, policyRevision: revision };
+    return { ...session };
+  },
   revokeCampaignControl: async (id: string, expectedRevision: number) => {
     if (params.get("fullControlFixture") !== "1") return api.revokeCampaignControl(id, expectedRevision);
     if (expectedRevision !== session.parentControlPolicy!.revision) throw new ApiError("Fixture revision changed", 409);
