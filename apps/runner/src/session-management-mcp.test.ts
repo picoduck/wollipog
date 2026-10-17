@@ -481,6 +481,10 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "get_cross_model_review",
       "list_cross_model_reviews",
       "cancel_cross_model_review",
+      "request_review_session",
+      "get_review_session",
+      "list_review_sessions",
+      "cancel_review_session",
       "list_runs",
       "list_governance_policies",
       "get_governance_policy",
@@ -2835,6 +2839,40 @@ test("a version-floor refusal whose Wollipog version is unknown omits it and kee
     error: "Campaign allocations need a newer version of Wollipog. Update Wollipog and try again.",
     requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission,
   });
+});
+
+test("review session tools are self-scoped session tools behind their own floor (#3368)", async () => {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession;
+  const old = makeDeps();
+  old.deps.controlPlaneProtocolVersion = required - 1;
+  const refused = await callTool(old.deps, "request_review_session", { repository: "o/r", number: 1, headSha: "a".repeat(40), brief: "B" });
+  assert.deepEqual(resultJson(refused), {
+    error: "Review sessions need a newer version of Wollipog. Update Wollipog and try again.",
+    requiredControlPlaneProtocolVersion: required, controlPlaneProtocolVersion: required - 1,
+  });
+  assert.equal(old.calls.length, 0);
+
+  const orchestrator = makeDeps();
+  orchestrator.deps.orchestrator = true;
+  orchestrator.deps.controlPlaneProtocolVersion = required;
+  const listed = await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }, orchestrator.deps);
+  const names = (listed!.result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
+  assert.equal(names.includes("request_review_session"), false, "an Orchestrator coordinates; it does not review its own pull request");
+
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { reviewSessionId: "s_review", terminal: false } }));
+  deps.controlPlaneProtocolVersion = required;
+  const base = `${CP_URL}/api/sessions/${SELF_ID}/review-sessions`;
+  await callTool(deps, "request_review_session", { repository: "o/r", number: 7, headSha: "a".repeat(40), brief: "B" });
+  assert.equal(calls.at(-1)?.method, "POST");
+  assert.equal(calls.at(-1)?.url, base);
+  assert.deepEqual(calls.at(-1)?.body, { pullRequest: { repository: "o/r", number: 7 }, headSha: "a".repeat(40), brief: "B" });
+  assert.deepEqual(resultJson(await callTool(deps, "get_review_session", { reviewSessionId: "s_review" })), { reviewSessionId: "s_review", terminal: false });
+  assert.equal(calls.at(-1)?.url, `${base}/s_review`);
+  await callTool(deps, "list_review_sessions", { limit: 5, afterReviewSessionId: "s_review" });
+  assert.equal(calls.at(-1)?.url, `${base}?limit=5&afterReviewSessionId=s_review`);
+  await callTool(deps, "cancel_review_session", { reviewSessionId: "s_review" });
+  assert.equal(calls.at(-1)?.method, "POST");
+  assert.equal(calls.at(-1)?.url, `${base}/s_review/cancel`);
 });
 
 test("cross-model review tools are self-scoped session tools behind their own floor (#3306)", async () => {

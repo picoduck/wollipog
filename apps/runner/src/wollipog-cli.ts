@@ -449,6 +449,30 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
     }
     return { error: worktreeHelp() };
   }
+  if (words[0] === "review" && words[1] === "session") {
+    if (optionPresent(args, "--session")) return { error: "review commands act only on the injected session and do not accept --session" };
+    const verb = words[2];
+    if (verb === "run") {
+      const repository = option(args, "--repo");
+      const number = option(args, "--pr");
+      const headSha = option(args, "--head");
+      const briefFile = option(args, "--brief-file");
+      if (!repository || !number || !/^[1-9][0-9]*$/u.test(number) || !headSha || !briefFile || briefFile.startsWith("--")) {
+        return { error: "review session run requires --repo <owner/name>, --pr <number>, --head <sha> and --brief-file <path>" };
+      }
+      let brief: string;
+      try { brief = readFileSync(resolvePath(briefFile), "utf8"); }
+      catch (error) { return { error: `could not read the brief: ${(error as Error).message}` }; }
+      return { tool: "request_review_session", input: { repository, number: Number(number), headSha, brief } };
+    }
+    if ((verb === "get" || verb === "cancel") && words[3]) {
+      return { tool: verb === "get" ? "get_review_session" : "cancel_review_session", input: { reviewSessionId: words[3] } };
+    }
+    if (verb === "list") {
+      return { tool: "list_review_sessions", input: { limit: numeric(option(args, "--limit")), afterReviewSessionId: option(args, "--cursor") } };
+    }
+    return { error: reviewHelp() };
+  }
   if (words[0] === "review") {
     if (optionPresent(args, "--session")) return { error: "review commands act only on the injected session and do not accept --session" };
     const verb = words[1];
@@ -830,6 +854,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
     : ["request_cross_model_review", "get_cross_model_review", "list_cross_model_reviews", "cancel_cross_model_review"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob
+    : ["request_review_session", "get_review_session", "list_review_sessions", "cancel_review_session"].includes(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession
     : ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
       "adjudicate_campaign_recommendation", "get_campaign_work_items"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger

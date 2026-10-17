@@ -242,6 +242,12 @@ export function reviewHelp(): string {
     "Push first: --head must be the pull request's current head. The first round of a pull request needs --brief-file (intent, acceptance criteria, verification); later rounds reuse it and review only the changes since the last valid round unless --scope full is given with --full-reason.",
     "review run returns a job id at once. Poll review get until terminal is true; it then prints the controller's summary, report and the runner-owned ledger. One review runs per session at a time.",
     "Sessions in a campaign with an allowance are refused; their Orchestrator runs the campaign's controlled review job. Tools: request_cross_model_review, get_cross_model_review, list_cross_model_reviews, cancel_cross_model_review.",
+    "",
+    "  review session run --repo <owner/name> --pr <number> --head <sha> --brief-file <path> [--json]",
+    "  review session get <review-session-id> [--json]",
+    "  review session list [--limit <1-100>] [--cursor <review-session-id>] [--json]",
+    "  review session cancel <review-session-id> [--json]",
+    "review session run starts a review session: the other model family as its own read-only session, launched by the runner outside this session's sandbox against the runner's checkout of the pull request's pushed head, loading none of the repository's settings, hooks, skills or MCP servers. It takes no session slot; one review session is active per session at a time. Poll review session get until terminal is true; the output is the reviewer's structured result, unvalidated. Tools: request_review_session, get_review_session, list_review_sessions, cancel_review_session.",
   ].join("\n");
 }
 
