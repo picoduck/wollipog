@@ -77,6 +77,7 @@ import {
 } from "../managed-worktree-protection.js";
 import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
 import { managedWorktreeGitWritableRoots } from "../managed-worktree-sandbox.js";
+import { CODEX_REVIEW_THREAD_PARAMS, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -869,8 +870,11 @@ export class CodexAppServerDriver implements Driver {
     // preset's audited boundary keeps nothing but Wollipog's entry.
     const presetPermissions = this.config.permissionMode === "orchestrator";
     // MCP inventory probing starts provider processes outside any boundary: no proof while it runs.
-    const isolationArgs = presetPermissions || this.opts.orchestrator?.integrationIsolation === true
-      ? await this.processes.untracked(() => codexOrchestratorMcpArgs(this.opts, this.cwd, {}, !presetPermissions)) : [];
+    // A review session (#3368) isolates every server, with no exemption: an empty `mcp_servers`
+    // table does not remove servers from the user's or the checkout's configuration.
+    const isolationArgs = presetPermissions || this.opts.orchestrator?.integrationIsolation === true || this.opts.review
+      ? await this.processes.untracked(() => codexOrchestratorMcpArgs(this.opts, this.cwd, {}, !presetPermissions && !this.opts.review,
+        this.opts.review === true)) : [];
     if (this.disposed) throw new Error("session disposed before provider launch");
     // #1336: bind the permission profile to the mode this app-server starts under. A profile is
     // selected by config, and `turn/start` carries no per-turn selection, so the base is fixed for
@@ -1105,6 +1109,7 @@ export class CodexAppServerDriver implements Driver {
         res = await this.initializationRequest<Json>(peer, "thread/start", {
           cwd,
           ...configuredServiceTier(this.config, this.opts.capabilities),
+          ...(this.opts.review ? CODEX_REVIEW_THREAD_PARAMS : {}),
         });
       }
     } catch (caught) {
@@ -1322,7 +1327,15 @@ export class CodexAppServerDriver implements Driver {
     return this.submitTurn(slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text, images, []);
   }
 
+  /** Review sessions: the text of the turn's last completed top-level agent message. */
+  private reviewOutputText: string | null = null;
+
+  reviewOutput(): string | null {
+    return this.reviewOutputText;
+  }
+
   private async submitTurn(base: string, images: PromptImage[] | undefined, commandItems: Json[]): Promise<StopReason> {
+    this.reviewOutputText = null;
     // An in-flight turn has not settled, so its own outcome is still unset; clearing here keeps a
     // refused submission from reporting the previous one.
     this.turnStartError = null;
@@ -1384,6 +1397,12 @@ export class CodexAppServerDriver implements Driver {
         this.threadCarriesLegacySandboxPolicy ? null : this.permissionProfileBase,
         this.managedWorktreeGuardActive,
       );
+      if (this.opts.review) {
+        // A review turn is read-only with network access off, never asks, and must return the
+        // review schema; nothing from the session's permission mode can widen that.
+        delete params.approvalsReviewer;
+        Object.assign(params, CODEX_REVIEW_TURN_PARAMS);
+      }
       const nullParameters = nullCodexParameterPaths(params);
       if (nullParameters.length) {
         this.cb.onStderr(JSON.stringify({ event: "codex_turn_start_null_parameter", parameters: nullParameters }));
@@ -2449,6 +2468,7 @@ export class CodexAppServerDriver implements Driver {
         break;
       }
       case "agentMessage":
+        if (completed && item.text && !parentToolUseId) this.reviewOutputText = String(item.text);
         // Keep the legacy event SEQUENCE for rolling compatibility: an older dashboard ignores
         // messageId, so emitting a second authoritative completion after deltas would duplicate
         // the bubble. A completion-only item is already whole and may be marked final safely.
@@ -2585,7 +2605,8 @@ export class CodexAppServerDriver implements Driver {
     isCurrent: () => boolean = () => true,
   ): Promise<void> {
     const peer = this.peer;
-    if (!peer || this.disposed || !isCurrent()) return;
+    // A review session installs and reconciles nothing.
+    if (!peer || this.disposed || !isCurrent() || this.opts.review) return;
     const request = async (method: string, params: Json): Promise<Json | null> => {
       if (this.unsupportedPluginMethods.has(method) || this.peer !== peer || this.disposed || !isCurrent()) return null;
       try {

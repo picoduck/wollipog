@@ -110,6 +110,7 @@ export class SessionRoleConversions {
       return refuse("Resume this session and wait until it is idle before changing its role. Finish or stop active work first.");
     }
     if (session.runId || this.db.sideChatParent(id)) return refuse("Workflow and side-chat sessions cannot change roles. Use a standalone session.");
+    if (this.db.reviewSessions.isReviewSession(id)) return refuse("A review session cannot change roles.");
     if (this.db.listShells(id).some((shell) => shell.kind === "agent_tui" && shell.status !== "exited")) {
       return refuse("Close the Native TUI before changing roles so the previous provider tools can be retired safely.");
     }

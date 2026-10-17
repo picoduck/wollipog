@@ -111,7 +111,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 225);
+  assert.equal(PROTOCOL_VERSION, 226);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -264,11 +264,14 @@ test("older peers never receive display-only live Claude usage, but still accoun
   assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
 });
 
-test("PROTOCOL_VERSION is 225", () => {
-  assert.equal(PROTOCOL_VERSION, 225);
+test("PROTOCOL_VERSION is 226", () => {
+  assert.equal(PROTOCOL_VERSION, 226);
   assert.equal(runnerSupportsProtocol(223, "providerProfiles"), false);
   assert.equal(runnerSupportsProtocol(225, "providerProfiles"), true);
   assert.equal(runnerSupportsProtocol(null, "providerProfiles"), false);
+  // A v225 runner has provider profiles but no review sessions.
+  assert.equal(runnerSupportsProtocol(225, "reviewSession"), false);
+  assert.equal(runnerSupportsProtocol(226, "reviewSession"), true);
   assert.equal(runnerSupportsProtocol(222, "sessionReviewJob"), false);
   assert.equal(runnerSupportsProtocol(223, "sessionReviewJob"), true);
   assert.equal(runnerSupportsProtocol(218, "ratePricedSnapshotUsage"), false);

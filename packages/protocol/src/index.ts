@@ -690,7 +690,11 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      (the profile a session's account binding recorded). The control plane sends
 //      profile commands only to a v225+ runner; a runner projects profiles, and uses a HOME holding
 //      a profile marker, only for a v225+ control plane that lists an active grant for it.
-export const PROTOCOL_VERSION = 225;
+// 226: review sessions (#3368): `SessionLaunchSpec.review`, `SessionView.kind`/`review`,
+//      `RunnerRuntimeInfo.reviewSession` and the `review_session_update` reply. The control plane
+//      creates a review session only on a v226+ runner that advertises the reviewer, and the
+//      session tools refuse against an older control plane.
+export const PROTOCOL_VERSION = 226;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -698,6 +702,7 @@ export * from "./campaign-evidence-authority.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
+export * from "./review-session.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
@@ -929,6 +934,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionReviewJob: 223,
   /** v225 provider profile adoption and per-control-plane grants (#3239). */
   providerProfiles: 225,
+  /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
+   * same floor against the connected control plane. */
+  reviewSession: 226,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -3381,6 +3389,8 @@ export interface RunnerRuntimeInfo {
   campaignLaunchInspection?: { version: 1 | 2 };
   /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
+  /** Review sessions (#3368): the reviewer harnesses this runner can launch. Missing is unsupported. */
+  reviewSession?: import("./review-session.js").ReviewSessionCapability;
   /** Native-host runner data root. WSL contexts use the same `.agent-manager` layout in-distro. */
   dataDir: string;
   worktreeRoot: string;
@@ -7218,6 +7228,10 @@ export interface SessionView {
   /** Current session role. Omitted by control planes predating v160; use `sessionRole()` to read
    * it so the legacy coupled preset in `permissionMode` still resolves to the Orchestrator role. */
   role?: SessionRole;
+  /** v226: immutable session kind. Omitted for ordinary sessions and by older control planes. */
+  kind?: import("./review-session.js").SessionKind;
+  /** v226: present on a review session (#3368): what it reviews and for whom. */
+  review?: import("./review-session.js").ReviewSessionLink;
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
@@ -9119,6 +9133,7 @@ export type RunnerToControlPlane =
   | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | import("./session-review-job.js").SessionReviewJobUpdate
+  | import("./review-session.js").ReviewSessionUpdate
   | RegisterMessage
   | HeartbeatMessage
   | SessionStatusMessage
@@ -9281,6 +9296,9 @@ export interface SessionLaunchSpec {
   config?: SessionConfig;
   /** Runner-enforced Orchestrator restrictions. Missing on legacy peers means strict isolation. */
   orchestrator?: OrchestratorLaunchPolicy;
+  /** v226: present only on a control-plane-created review session (#3368). The runner launches it
+   * read-only, outside every sandbox, against its own checkout of the exact pushed head. */
+  review?: import("./review-session.js").ReviewLaunchPolicy;
   /** ACP-only, additive in protocol v38. Contains references, never resolved secret values. */
   acpSessionContext?: AcpSessionContextConfig;
 }

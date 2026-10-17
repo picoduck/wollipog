@@ -322,6 +322,18 @@ async function sessionReviewCompatibilityError(deps: McpDeps): Promise<ToolResul
     : controlPlaneUpdateRequired(needsNewerWollipog("Cross-model review through the runner needs"), required, actual);
 }
 
+async function reviewSessionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!compatibility.ok) return errorResult(wollipogSupportUnverified("review sessions", compatibility.message));
+    actual = compatibility.data?.protocolVersion;
+  }
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession;
+  return Number.isInteger(actual) && actual! >= required ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Review sessions need"), required, actual);
+}
+
 async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
@@ -2211,6 +2223,66 @@ export const TOOLS: McpTool[] = [
       if (incompatible) return incompatible;
       const r = await cpFetch(deps, "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/cross-model-reviews/${encodeURIComponent(args.jobId)}/cancel`, {});
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "request_review_session",
+    description: "Start a review session for this session's own open pull request at its pushed head (#561). The reviewer is the other model family (Codex for a Claude Code session, Claude Code for a Codex session), launched by your runner as its own read-only session outside your sandbox, against the runner's checkout of exactly that head: it never touches your worktree and loads none of the repository's settings, hooks, skills or MCP servers. Push first: headSha must be the pull request's current head, and the pull request must be open, from this repository, on this session's managed worktree branch. The brief (intent, acceptance criteria, verification already run) is the reviewer's only context. A review session takes no session slot or child capacity; this session may have one active review. Returns reviewSessionId at once: you can watch it with get_session_events, and poll get_review_session until terminal is true. Its output is the reviewer's structured result, returned unvalidated: adjudicate every finding yourself. Campaign sessions with an allowance use their Orchestrator's run_campaign_review_job instead.",
+    inputSchema: { type: "object", properties: {
+      repository: { type: "string", description: "The pull request's GitHub repository, owner/name." },
+      number: { type: "integer", minimum: 1 },
+      headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The pull request's current pushed head commit." },
+      brief: { type: "string", minLength: 1, description: "Intent, acceptance criteria and the verification already run." },
+    }, required: ["repository", "number", "headSha", "brief"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const incompatible = await reviewSessionCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const { repository, number, ...rest } = args as Record<string, unknown>;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/review-sessions`,
+        { pullRequest: { repository, number }, ...rest });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "get_review_session",
+    description: "Read one of this session's review sessions: state (requested, running, completed, failed, cancelled), reviewer, reason and, once completed, the reviewer's structured output (up to 256 KiB, unvalidated; validated is always false in this version).",
+    inputSchema: { type: "object", properties: { reviewSessionId: { type: "string" } }, required: ["reviewSessionId"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.reviewSessionId !== "string") return errorResult("reviewSessionId and a session identity are required");
+      const incompatible = await reviewSessionCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "GET",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/review-sessions/${encodeURIComponent(args.reviewSessionId)}`);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "list_review_sessions",
+    description: "List this session's review sessions, newest first. Continue with nextAfterReviewSessionId.",
+    inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 100 }, afterReviewSessionId: { type: "string" } }, additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const incompatible = await reviewSessionCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const params = new URLSearchParams();
+      for (const key of ["limit", "afterReviewSessionId"]) if (args?.[key] !== undefined) params.set(key, String(args[key]));
+      const query = params.toString();
+      const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/review-sessions${query ? `?${query}` : ""}`);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "cancel_review_session",
+    description: "Cancel one of this session's unfinished review sessions. Its session is stopped and the review is reported as cancelled; poll get_review_session for the final state.",
+    inputSchema: { type: "object", properties: { reviewSessionId: { type: "string" } }, required: ["reviewSessionId"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.reviewSessionId !== "string") return errorResult("reviewSessionId and a session identity are required");
+      const incompatible = await reviewSessionCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/review-sessions/${encodeURIComponent(args.reviewSessionId)}/cancel`, {});
       return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },

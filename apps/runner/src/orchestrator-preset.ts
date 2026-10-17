@@ -941,17 +941,24 @@ export function stripOrchestratorLaunchArgs(
  * declares, which ADR 0011 keeps. It is ALWAYS empty for the coupled preset: that shape's audited
  * behaviour is to disable everything but Wollipog's entry, and this issue must not change it.
  */
-export function isolateCodexMcpServers(output: string, exempt: ReadonlySet<string> = new Set()): string[] {
+export function isolateCodexMcpServers(
+  output: string,
+  exempt: ReadonlySet<string> = new Set(),
+  /** Orchestrator launches prove Wollipog's own server is present and keep it. A review session
+   * (#3368) has none to keep, so every listed server is disabled. */
+  keepWollipog = true,
+): string[] {
   let servers: unknown;
   try { servers = JSON.parse(output); } catch { throw new Error("cannot verify orchestrator MCP isolation"); }
-  if (!Array.isArray(servers) || !servers.some((server) => server?.name === "wollipog" && server?.enabled === true)) {
+  if (!Array.isArray(servers) ||
+      (keepWollipog && !servers.some((server) => server?.name === "wollipog" && server?.enabled === true))) {
     throw new Error("cannot verify orchestrator MCP isolation");
   }
   return servers.flatMap((server) => {
     if (!server || typeof server.name !== "string" || !/^[A-Za-z0-9_-]+$/.test(server.name)) {
       throw new Error("cannot verify orchestrator MCP isolation");
     }
-    return server.name === "wollipog" || exempt.has(server.name)
+    return (keepWollipog && server.name === "wollipog") || exempt.has(server.name)
       ? []
       : ["-c", `mcp_servers.${server.name}.enabled=false`];
   });
@@ -1052,6 +1059,8 @@ export async function codexOrchestratorMcpArgs(
   cwd: string,
   dependencies: CodexOrchestratorProbeDependencies = {},
   exemptDeclaredServers = false,
+  /** A review session: disable every server, Wollipog's included, and require none to exist. */
+  disableAll = false,
 ): Promise<string[]> {
   // Derived here from the launch arguments rather than accepted as a caller-supplied list, so a
   // caller cannot exempt a name the agent definition never declared.
@@ -1061,9 +1070,9 @@ export async function codexOrchestratorMcpArgs(
       if (opts.context?.kind !== "wsl") throw new Error("target-local WSL isolation context mismatch");
       const probeArgs = [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"];
       const stdout = await (dependencies.runIsolated ?? runIsolatedCodexMcpProbe)(opts, cwd, probeArgs);
-      return isolateCodexMcpServers(stdout, exempt);
+      return isolateCodexMcpServers(stdout, exempt, !disableAll);
     }
-    return isolateCodexMcpServers(await readCodexMcpInventory(opts, cwd), exempt);
+    return isolateCodexMcpServers(await readCodexMcpInventory(opts, cwd), exempt, !disableAll);
   } catch {
     throw new Error("Orchestrator launch refused: unable to isolate Codex MCP servers.");
   }

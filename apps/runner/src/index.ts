@@ -1,6 +1,8 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
 import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
 import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
+import { ReviewSnapshotter } from "./review-snapshot.js";
+import { defaultReviewSessionDependencies, reviewLaunchArgs, ReviewSessionLauncher } from "./review-sessions.js";
 import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
 import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
 /**
@@ -974,6 +976,9 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
           sessionId: meta.sessionId, provider: pluginProvider }));
       }
     }
+    // A review session (#3368) gets its provider account and nothing else: no guard, no runner
+    // hooks, no Wollipog tools or credential, no plugins or prompt catalogs.
+    if (meta.review) return { sessionCommandCatalogFresh: false };
     const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
     // Refresh the launch capability observation instead of trusting the session's creation-time version.
     meta.agentVersion = projectMemoryAgentVersion(meta, metadata.agents);
@@ -1514,11 +1519,29 @@ const campaignReviewer = new ControlledCampaignReviewer(resolve(config.dataDir,"
 // read from /proc, and the protected session namespace it works around exists only there.
 // Nothing it runs may live where a session can write: project checkouts, provider account homes,
 // provider homes an agent's or session's environment names, and every session's provider homes.
+const sessionWritablePaths = () => configuredSessionWritablePaths({
+  workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
+  sessions: store.listSessions(), hostEnv: process.env,
+});
+const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths);
+// One owner of every review mirror, so the bridge's fetches and review sessions' never race.
+const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), sessionReviewDependencies.exec, log);
 const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session-review-jobs"), store, sendUp,
-  defaultSessionReviewDependencies(config.dataDir, log, () => configuredSessionWritablePaths({
-    workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
-    sessions: store.listSessions(), hostEnv: process.env,
-  })));
+  sessionReviewDependencies, undefined, reviewSnapshots);
+// Review sessions (#3368): a typed reviewer session launched outside the requester's sandbox.
+const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store,
+  defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
+    (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
+// Startup reconciliation has already settled every review session: no checkout is in use.
+reviewSessionLauncher.releaseAll();
+sessions.setReviewSessions({
+  markPreparing: (sessionId) => reviewSessionLauncher.markPreparing(sessionId),
+  recordOutcome: (update) => reviewSessionLauncher.recordOutcome(update),
+  outcomes: () => reviewSessionLauncher.outcomes(),
+  prepare: (sessionId, policy, launch, brief) => reviewSessionLauncher.prepare(sessionId, policy, launch, brief),
+  launchArgs: reviewLaunchArgs,
+  release: (sessionId) => reviewSessionLauncher.release(sessionId),
+});
 // #1321: dedicated Claude Code media-only reviewers. The dispatcher's durable fences live in their
 // own private database; nothing here launches a provider until an exact prepared dispatch arrives.
 const mediaReviewRoot = resolve(config.dataDir, "media-review");
@@ -1576,9 +1599,15 @@ function sessionReviewCapability(): SessionReviewCapability | undefined {
   }
 }
 function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]>): NonNullable<RunnerMetadata["runtime"]> {
-  const { sessionReview: _previous, ...rest } = runtime;
+  const { sessionReview: _previous, reviewSession: _previousReviewSession, ...rest } = runtime;
   const sessionReview = sessionReviewCapability();
-  return { ...rest, ...(sessionReview ? { sessionReview } : {}) };
+  let reviewSession: ReturnType<ReviewSessionLauncher["capability"]>;
+  try {
+    reviewSession = reviewSessionLauncher.capability();
+  } catch (error) {
+    log(`review session discovery failed: ${errText(error)}`);
+  }
+  return { ...rest, ...(sessionReview ? { sessionReview } : {}), ...(reviewSession ? { reviewSession } : {}) };
 }
 
 function startTrackedSession(
@@ -2207,6 +2236,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         const stale = providerProfileGrants.synchronize(controlPlaneProtocolVersion, msg.providerProfileGrants);
         runCommandTask("provider_profile_grants", revokeStaleProviderProfileGrants(providerProfileCommands, stale));
       }
+      // Every recorded review outcome goes up again; the control plane keeps the first (#3368).
+      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "reviewSession")) {
+        for (const update of sessions.reviewSessionUpdates()) sendUp(update);
+        reviewSessionLauncher.outcomesSent();
+      }
       automaticAccountSwitchConfigurationSynchronized = false;
       harnessSelectionGeneration++;
       subscriptionUsage.selectionChanged();
@@ -2463,9 +2497,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log("ignored start_session with malformed prompt images");
         break;
       }
-      // Provision managed hooks before persisting launch metadata.
+      // Provision managed hooks before persisting launch metadata. A review session gets none: its
+      // launch preset disables every hook (#3368).
       try {
-        provisionClaudeHooks(
+        if (!msg.spec.review) provisionClaudeHooks(
           msg.spec,
           {
             controlPlaneUrl: config.controlPlaneUrl,
@@ -2589,7 +2624,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       if (msg.command.type === "start_session") {
         try {
-          provisionClaudeHooks(
+          if (!msg.command.spec.review) provisionClaudeHooks(
             msg.command.spec,
             {
               controlPlaneUrl: config.controlPlaneUrl,

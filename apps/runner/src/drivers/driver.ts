@@ -254,6 +254,9 @@ export interface DriverOptions {
   hookStateDir?: string;
   /** Codex App Server: custom prompts discovered for this launch, bodies included. */
   codexPrompts?: readonly CodexPromptTemplate[];
+  /** A review session (#3368): the driver applies the read-only review parameters and keeps the
+   * turn's final structured output for `reviewOutput()`. */
+  review?: boolean;
 }
 
 export type { ProviderFailureCategory } from "./provider-failure.js";
@@ -279,6 +282,8 @@ export interface Driver {
    * a turn the provider itself ended in error; the session manager attaches it to the durable
    * receipt so a scheduler sees the cause instead of a bare stop reason. */
   lastTurnError?(): string | null;
+  /** Review sessions: the last completed turn's final structured output, exactly as returned. */
+  reviewOutput?(): string | null;
   /** Reliable provider evidence for the exact runner turn; null preserves diagnostic fallback.
    * Optional for older drivers. It must reset before submission and ignore unrelated turns. */
   lastTurnFailureCategory?(): import("./provider-failure.js").ProviderFailureCategory | null;

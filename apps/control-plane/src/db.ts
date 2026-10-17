@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { CampaignBudgetLedger } from "./campaign-budget.js";
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
+import { ReviewSessions } from "./review-sessions.js";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
@@ -5306,6 +5307,13 @@ export class ControlPlaneDb {
   readonly campaignBudgets: CampaignBudgetLedger;
   readonly campaignReviewJobs: CampaignReviewJobs;
   readonly sessionReviewJobs: SessionReviewJobs;
+  readonly reviewSessions: ReviewSessions;
+  /** A review session's immutable kind and what it reviews (#3368); nothing for ordinary sessions. */
+  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review"> {
+    const review = this.reviewSessions.link(sessionId);
+    return review ? { kind: "review", review } : {};
+  }
+
   private constructor(
     private readonly db: DatabaseSync,
     private readonly artifactBlobs: ArtifactBlobStore,
@@ -5320,6 +5328,7 @@ export class ControlPlaneDb {
       return scope?.owner.kind==="user"?{organizationId:scope.organizationId,userId:scope.owner.userId}:null;
     });
     this.sessionReviewJobs = new SessionReviewJobs(db);
+    this.reviewSessions = new ReviewSessions(db);
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
       : null;
@@ -23660,6 +23669,7 @@ export class ControlPlaneDb {
         remaining: Math.max(0, (row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT)-row.summary_children) },
       parentControl: row.parent_control === "questions" || row.parent_control === "questions_and_approvals" ? row.parent_control : "off",
       role: sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }),
+      ...this.reviewSessionProjection(row.id),
       orchestratorPolicy: row.orchestrator_policy ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined : undefined,
       campaignRequests: context.campaignRequests.get(row.id),
       useWorktree: row.use_worktree === 1, worktreePath: row.worktree_path,
@@ -23860,6 +23870,7 @@ export class ControlPlaneDb {
         };
       })(),
       role: sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }),
+      ...this.reviewSessionProjection(row.id),
       ...(() => {
         const policy = orchestratorCampaignPolicyFromJson(row.orchestrator_policy);
         return policy ? { orchestratorPolicy: policy } : {};

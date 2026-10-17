@@ -1094,7 +1094,15 @@ export class ClaudeCodeDriver implements Driver {
     });
   }
 
+  /** Review sessions: `structured_output` from the last successful root result (`--json-schema`). */
+  private lastStructuredOutput: string | null = null;
+
+  reviewOutput(): string | null {
+    return this.lastStructuredOutput;
+  }
+
   prompt(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
+    this.lastStructuredOutput = null;
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
@@ -3411,6 +3419,9 @@ export class ClaudeCodeDriver implements Driver {
         if (msg.subtype === "error_max_turns") {
           if (!parentId) this.streamedAgentResponse = false;
           return "max_turn_requests";
+        }
+        if (!parentId && this.opts.review) {
+          this.lastStructuredOutput = msg.structured_output === undefined ? null : JSON.stringify(msg.structured_output);
         }
         if (!parentId && this.streamedAgentResponse) {
           this.streamedAgentResponse = false;

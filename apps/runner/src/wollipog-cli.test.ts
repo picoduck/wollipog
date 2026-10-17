@@ -1450,6 +1450,49 @@ test("CLI campaign ledger commands map to their tools and refuse other sessions 
   assert.ok(calls.every((call)=>call.url.endsWith("/api/compatibility")));
 });
 
+test("review session commands map to the session's own review session tools (#3368)", async () => {
+  const calls: Array<{ url: string; method?: string; body?: string }> = [];
+  let version = PROTOCOL_VERSION;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, method: init?.method, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { reviewSessionId: "s_review", terminal: false }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "self" };
+  const io = { stdout: () => {}, stderr: () => {} };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args], env, io, fetch);
+  const last = () => calls.filter((call) => !call.url.endsWith("/api/compatibility")).at(-1)!;
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-session-brief-"));
+  try {
+    const brief = join(root, "brief.md");
+    writeFileSync(brief, "# Intent\nReview #3368.\n");
+    const head = "c".repeat(40);
+    assert.equal(await invoke(["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "3368", "--head", head, "--brief-file", brief, "--json"]), 0);
+    assert.equal(last().method, "POST");
+    assert.equal(last().url, "http://cp/api/sessions/self/review-sessions");
+    assert.deepEqual(JSON.parse(last().body!), { pullRequest: { repository: "picoduck/wollipog", number: 3368 }, headSha: head, brief: "# Intent\nReview #3368.\n" });
+    assert.equal(await invoke(["review", "session", "get", "s_review", "--json"]), 0);
+    assert.equal(last().url, "http://cp/api/sessions/self/review-sessions/s_review");
+    assert.equal(await invoke(["review", "session", "list", "--limit", "5", "--cursor", "s_review", "--json"]), 0);
+    assert.equal(last().url, "http://cp/api/sessions/self/review-sessions?limit=5&afterReviewSessionId=s_review");
+    assert.equal(await invoke(["review", "session", "cancel", "s_review", "--json"]), 0);
+    assert.equal(last().url, "http://cp/api/sessions/self/review-sessions/s_review/cancel");
+
+    calls.length = 0;
+    for (const args of [
+      ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head],
+      ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "0", "--head", head, "--brief-file", brief],
+      ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head, "--brief-file", join(root, "missing.md")],
+      ["review", "session", "get", "s_review", "--session", "other"],
+      ["review", "session", "get"],
+    ]) assert.equal(await invoke([...args, "--json"]), 2, args.join(" "));
+    assert.equal(calls.length, 0);
+    version = RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession - 1;
+    assert.equal(await invoke(["review", "session", "list", "--json"]), 1);
+    assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("review commands map to the session's own cross-model review tools (#3306)", async () => {
   const calls: Array<{ url: string; method?: string; body?: string }> = [];
   let version = PROTOCOL_VERSION;

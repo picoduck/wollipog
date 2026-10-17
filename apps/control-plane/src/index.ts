@@ -8,7 +8,7 @@ import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.
  */
 
 import os from "node:os";
-import { handoffDestinationError, sessionRole, type SessionConfig, type SessionReviewJobRequest } from "@wollipog/protocol";
+import { handoffDestinationError, sessionRole, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -1399,6 +1399,7 @@ app.register(async (instance) => {
         svc.recoverCampaignBudgetAllocations(runnerId);
         svc.recoverCampaignReviewJobs(runnerId);
         svc.recoverSessionReviewJobs(runnerId);
+        svc.recoverReviewSessions(runnerId);
         automations.tick(Date.now());
         automations.commandOutbox.flush(Date.now(), runnerId);
         hub.runnerChanged(runnerId);
@@ -1451,6 +1452,9 @@ app.register(async (instance) => {
         break;
       case "session_review_job_update":
         if (runnerId) svc.onSessionReviewJobUpdate(runnerId, msg);
+        break;
+      case "review_session_update":
+        if (runnerId) svc.onReviewSessionUpdate(runnerId, msg);
         break;
       case "policy_hook_credential":
         {
@@ -3635,6 +3639,8 @@ async function openSessionShell(
 ): Promise<OpenSessionShellResult> {
   const session = db.getSession(sessionId);
   if (!session) return { ok: false, status: 404, error: "session not found" };
+  const reviewRefusal = svc.reviewSessionRefusal(sessionId, "opens no terminal or Native TUI");
+  if (reviewRefusal) return { ok: false, status: 409, error: reviewRefusal };
   if (!hub.isRunnerOnline(session.runnerId)) return { ok: false, status: 409, error: "runner is offline" };
   const unsupported = runnerCapabilityError(session.runnerId, "sessionShells", "session terminal access");
   if (unsupported) return { ok: false, status: 409, ...unsupported };
@@ -4177,6 +4183,38 @@ app.post("/api/sessions/:id/cross-model-reviews/:jobId/cancel", async (req, repl
   const { id, jobId } = req.params as { id: string; jobId: string };
   if (!sessionReviewRequester(req, reply, id)) return reply;
   return respond(reply, svc.cancelSessionReviewJob(id, jobId));
+});
+
+// Review sessions (#3368): a typed reviewer session for the session's own pull request. The same
+// rules as the bridge: only the session's own credential requests or cancels; a person with access
+// to the session, or the session itself, reads them.
+app.post("/api/sessions/:id/review-sessions", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = sessionReviewRequester(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.requestReviewSession(id, req.body as ReviewSessionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  const query = req.query as { limit?: string; afterReviewSessionId?: string };
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.reviewSessionsPage(id, {
+    ...(query.limit === undefined ? {} : { limit: Number(query.limit) }),
+    ...(query.afterReviewSessionId === undefined ? {} : { afterReviewSessionId: query.afterReviewSessionId }),
+  }));
+});
+app.get("/api/sessions/:id/review-sessions/:reviewSessionId", async (req, reply) => {
+  const { id, reviewSessionId } = req.params as { id: string; reviewSessionId: string };
+  if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.reviewSessionView(id, reviewSessionId));
+});
+app.post("/api/sessions/:id/review-sessions/:reviewSessionId/cancel", async (req, reply) => {
+  const { id, reviewSessionId } = req.params as { id: string; reviewSessionId: string };
+  if (!sessionReviewRequester(req, reply, id)) return reply;
+  return respond(reply, svc.cancelReviewSession(id, reviewSessionId));
 });
 
 // Budget minting shares the foundation's human-only CAS and revocation contract. No agent
@@ -5290,6 +5328,8 @@ async function runSessionWorktreeRequest(
 ) {
   const session = db.getSession(sessionId);
   if (!session) return reply.code(404).send({ error: "session not found" });
+  const reviewRefusal = svc.reviewSessionRefusal(sessionId, "reads its runner's checkout and takes no worktree");
+  if (reviewRefusal) return reply.code(409).send({ error: reviewRefusal });
   const authorizationError = orchestratorSelfWorktreeAuthorizationError(
     principal,
     sessionId,
@@ -5490,6 +5530,8 @@ app.post("/api/sessions/:id/rewind", async (req, reply) => {
 const conversationBranchesInFlight = new Set<string>();
 app.post("/api/sessions/:id/fork", async (req, reply) => {
   const sourceId = (req.params as { id: string }).id;
+  const reviewRefusal = svc.reviewSessionRefusal(sourceId, "cannot be forked");
+  if (reviewRefusal) return reply.code(409).send({ error: reviewRefusal });
   const reconciliationBlock = svc.podReconciliationMutationError(sourceId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   const turn = Number((req.body as { turn?: number })?.turn);

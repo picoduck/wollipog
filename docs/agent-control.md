@@ -284,6 +284,68 @@ recovered; with neither, the job reports `not_launched` and the attempt is not c
 runner cannot record a controller it has just started, it stops that controller and reports the
 job failed.
 
+### Review Sessions
+
+`wollipog review session run` (MCP `request_review_session`, #3368, phase 1 of #561) starts a
+**review session**: a typed, immutable session kind whose reviewer runs as its own Wollipog
+session, with a live and recorded transcript, instead of as an external controller. It reviews the
+calling session's own pull request at its pushed head, with the same scope as the bridge above: a
+native managed worktree the session created, an open pull request from the same repository on that
+worktree's branch, and `--head` equal to its pushed head. `--brief-file` (MCP `brief`, at most
+100 KiB) is required and is the reviewer's only context besides the pinned patch.
+
+The control plane creates the review session on the requester's runner. The reviewer is the other
+model family, through the native agent the runner advertises for that harness in
+`runtime.reviewSession`. The runner proves the scope again against the requester's runner-recorded
+worktree, fills the same verified mirror as the bridge, and checks out the exact head into a
+runner-owned directory, with symbolic links checked out as plain files. That checkout is the review
+session's working directory. The reviewer launches outside every runner sandbox (the requester's
+namespace would stop Codex's own sandbox from nesting), through the normal managed driver, with a
+launch preset the runner owns and nothing can widen:
+
+- Claude Code: only `Read`, `Grep` and `Glob`, allowed only inside the checkout with its `.git`
+  denied, `dontAsk`, `--setting-sources ""`, every hook disabled, an empty strict MCP configuration,
+  slash commands and skills disabled, the review contract as the system prompt, and the review
+  output schema through `--json-schema`.
+- Codex: `--strict-config`; apps, plugins, hooks, other agents, browser and computer use, and image
+  generation disabled; no MCP servers and no automatically loaded project instructions; a read-only
+  sandbox without network access, approvals never asked, the contract as developer instructions,
+  and the schema as the turn's output schema.
+
+No hook, guard, Wollipog tool, agent-control credential, plugin or project memory is provisioned.
+The reviewer CLI must pass the bridge's trust checks as the first match on the `PATH` its provider
+is spawned with, and the runner re-checks the exact authorized agent and command at launch. The
+review contract and output schema (version 2) are ported from the cross-model-review skill
+(Apache-2.0, attributed).
+
+A review session is exempt from every session limit: it takes no runner slot, per-agent limit or
+active turn, and it is not a child, so it takes no delegation slot or charge and gives the requester
+no descendant authority. The requester's remaining cost budget, if it has one, bounds the review.
+A requester has one active review session at a time. A review session runs one turn: it takes no
+further messages, steering, configuration or commands, cannot be restarted, relaunched, forked or
+converted to another role, and has no worktree, terminal, Native TUI, side chat or children. It is never
+parked. Every MCP server Codex would load, from user or project configuration, is disabled by name.
+
+The request returns `reviewSessionId` at once in state `requested`; the review session's own status
+moves it to `running`, and the runner reports exactly one outcome: `completed` with the reviewer's
+structured output (at most 256 KiB, `outputTruncated` beyond that), or `failed` or `cancelled` with
+a fixed reason. The output is not validated against the review contract in this phase
+(`validated: false`); the review run's validation, rounds and epochs are #3369. `review session get`
+(`get_review_session`) reads it, `review session list` (`list_review_sessions`) pages them newest
+first, and `review session cancel` (`cancel_review_session`) stops the review session. The runner
+persists the outcome before reporting it and re-sends it at each registration; a runner restart
+fails any unsettled review session for good, and the checkout is removed once the review settles.
+
+The routes are `/api/sessions/:id/review-sessions` (POST to request, GET to list),
+`.../:reviewSessionId` and `.../:reviewSessionId/cancel` (POST), with the bridge's credential rules.
+Orchestrator sessions do not have these tools, and a session in a campaign with an allowance is
+refused as with the bridge. The feature needs protocol 226 on both the control plane and the runner,
+and a Linux runner that advertises `runtime.reviewSession`.
+
+A Codex reviewer's read-only sandbox can still read files outside the checkout: Codex's read-only
+sandbox policy has no readable-roots restriction. Network access is off for its commands, but what it
+reads reaches the model and can appear in its output, as with the bridge.
+
 `wollipog session wait` (MCP `wait_session`) polls a session until its status is one of `--for`
 (default `input_required,completed,failed,stopped`) and returns `outcome: "reached"`, the status it
 `reached`, and the session's metadata. A bounded wait usually ends at its timeout (1 ms–1 hour,

@@ -150,6 +150,11 @@ import {
   type ClaudeSessionCatalogInputs,
 } from "./discovery/claude-slash-catalog.js";
 import { BoxAdmission, type AdmissionObservation, type AdmissionRequest } from "./box-admission.js";
+import {
+  REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, type ReviewSessionUpdate,
+} from "@wollipog/protocol";
+import { ReviewScopeRefusal } from "./review-snapshot.js";
+import type { ReviewSessionHooks } from "./review-sessions.js";
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_WORKTREE_PORTS } from "./config.js";
 import type { RunnerAdmissionPolicy, RunnerExecutionIsolation, RunnerWorktreePorts } from "./config.js";
@@ -1921,6 +1926,153 @@ export class SessionManager {
   /** Swap the upstream send fn when the control-plane socket reconnects. */
   setSend(send: Send): void {
     this.send = send;
+  }
+
+  /** Review sessions (#3368): preparation, launch preset and checkout release. */
+  private reviewSessions: ReviewSessionHooks | null = null;
+  /** Review sessions whose snapshot is being prepared, and those stopped meanwhile. */
+  private readonly reviewsPreparing = new Set<string>();
+  private readonly reviewsStoppedBeforeLaunch = new Set<string>();
+
+  setReviewSessions(hooks: ReviewSessionHooks): void {
+    this.reviewSessions = hooks;
+  }
+
+  private isReviewSession(sessionId: string): boolean {
+    return !!this.store.readMeta(sessionId)?.review;
+  }
+
+  /**
+   * Prove a review session's scope, prepare its checkout and prompt, and return the launch the
+   * runner owns: the checkout as the working directory, the review preset after the agent's own
+   * arguments, the read-only permission mode, and nothing from project memory, ACP context or
+   * artifact uploads. A review session launches once; anything else is refused and reported.
+   */
+  private async prepareReviewLaunch(
+    spec: SessionLaunchSpec,
+    brief: string,
+    authorizationError: string | undefined,
+  ): Promise<{ spec: SessionLaunchSpec; prompt: string } | { error: string }> {
+    // Nothing is persisted for a refused review session: its status and outcome go up directly.
+    // The outcome is persisted before it is sent (nothing else records a review refused before its
+    // session exists), and goes up before the terminal status, which would otherwise settle it
+    // generically.
+    const refuse = (reason: string) => {
+      const sanitized = sanitizedReviewSessionReason(reason);
+      const update: ReviewSessionUpdate = { type: "review_session_update", sessionId: spec.sessionId, state: "failed", reason: sanitized };
+      this.reviewSessions?.recordOutcome(update);
+      this.send(update);
+      this.send({ type: "session_status", sessionId: spec.sessionId, status: "failed", detail: sanitized });
+      return { error: sanitized };
+    };
+    // A review session launches once; a relaunch leaves its recorded status and outcome alone, and a
+    // duplicate start while the first still prepares leaves that preparation's resources alone.
+    if (this.store.has(spec.sessionId) || this.reviewsPreparing.has(spec.sessionId)) {
+      return { error: "a review session runs once and cannot be relaunched" };
+    }
+    const driver = spec.driver;
+    if (!this.reviewSessions || authorizationError || spec.useWorktree || (spec.context && spec.context.kind !== "native") ||
+        (spec.executionTarget && spec.executionTarget.adapter !== "host") || spec.orchestrator ||
+        (driver !== "claude-code" && driver !== "codex-app-server")) {
+      return refuse("the runner cannot launch this reviewer");
+    }
+    let prepared: Awaited<ReturnType<ReviewSessionHooks["prepare"]>>;
+    this.reviewsPreparing.add(spec.sessionId);
+    try {
+      this.reviewSessions.markPreparing(spec.sessionId);
+      prepared = await this.reviewSessions.prepare(spec.sessionId, spec.review!, { driver, agentId: spec.agentId, command: spec.command }, brief);
+    } catch (error) {
+      this.reviewsStoppedBeforeLaunch.delete(spec.sessionId);
+      if (!(error instanceof ReviewScopeRefusal)) this.log(`review session ${spec.sessionId} preparation failed: ${errText(error)}`);
+      return refuse(error instanceof ReviewScopeRefusal ? error.message : "the review snapshot could not be prepared");
+    } finally {
+      this.reviewsPreparing.delete(spec.sessionId);
+    }
+    // Preparation can take minutes; a stop that arrived meanwhile wins over the launch.
+    if (this.reviewsStoppedBeforeLaunch.delete(spec.sessionId)) {
+      const reason = sanitizedReviewSessionReason("the review was cancelled");
+      const update: ReviewSessionUpdate = { type: "review_session_update", sessionId: spec.sessionId, state: "cancelled", reason };
+      this.reviewSessions.recordOutcome(update);
+      this.send(update);
+      this.send({ type: "session_status", sessionId: spec.sessionId, status: "stopped", detail: reason });
+      return { error: reason };
+    }
+    return {
+      spec: {
+        ...spec,
+        workspaceId: null,
+        workspacePath: prepared.checkout,
+        useWorktree: false,
+        args: [...spec.args, ...this.reviewSessions.launchArgs(driver, prepared.checkout)],
+        config: { ...spec.config, permissionMode: driver === "claude-code" ? "dontAsk" : "read-only" },
+        acpSessionContext: undefined,
+        projectMemory: undefined,
+        artifactUploads: undefined,
+        campaignBudgetDispatch: undefined,
+      },
+      prompt: prepared.prompt,
+    };
+  }
+
+  /**
+   * Record a review session's one outcome, report it and release its checkout. The first outcome
+   * wins; a later one (a stop after completion, say) changes nothing. The outcome is persisted
+   * before it is sent, so a lost frame is re-sent at the next registration.
+   */
+  private settleReviewSession(sessionId: string, outcome: Omit<ReviewSessionUpdate, "type" | "sessionId">): void {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta?.review || meta.review.update) return;
+    const update: ReviewSessionUpdate = { type: "review_session_update", sessionId, state: outcome.state };
+    if (outcome.output !== undefined) {
+      const bytes = Buffer.from(outcome.output, "utf8");
+      const truncated = bytes.length > REVIEW_SESSION_OUTPUT_LIMIT_BYTES;
+      update.output = truncated ? bytes.subarray(0, REVIEW_SESSION_OUTPUT_LIMIT_BYTES).toString("utf8") : outcome.output;
+      if (truncated) update.outputTruncated = true;
+    }
+    if (outcome.reason !== undefined) update.reason = sanitizedReviewSessionReason(outcome.reason);
+    this.store.patchMeta(sessionId, { review: { ...meta.review, update } });
+    this.store.flush(sessionId);
+    this.reviewSessions?.release(sessionId);
+    this.send(update);
+  }
+
+  /** Every recorded review outcome, re-sent at registration; the control plane keeps the first.
+   * That includes reviews that ended before their session was persisted, and reviews an earlier
+   * process accepted and lost (recorded as failed at startup). */
+  reviewSessionUpdates(): ReviewSessionUpdate[] {
+    return [
+      ...this.store.listSessions().flatMap((meta) => meta.review?.update ? [meta.review.update] : []),
+      ...(this.reviewSessions?.outcomes() ?? []),
+    ];
+  }
+
+  /** The reviewer's one turn has settled: record its outcome and stop the provider. */
+  private finishReviewTurn(sessionId: string, client: Driver, stop: Awaited<ReturnType<Driver["prompt"]>>, interrupted: boolean): void {
+    if (!this.isReviewSession(sessionId)) return;
+    const output = client.reviewOutput?.() ?? null;
+    if (interrupted || stop === "cancelled") {
+      this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
+    } else if (stop === "end_turn" && output) {
+      this.settleReviewSession(sessionId, { state: "completed", output });
+    } else {
+      this.settleReviewSession(sessionId, { state: "failed", reason: "the review ended without a result" });
+    }
+    // A review session does one turn; its provider is not kept for another.
+    setImmediate(() => {
+      try { this.stop(sessionId); } catch (error) { this.log(`review session ${sessionId} stop failed: ${errText(error)}`); }
+    });
+  }
+
+  /** At startup no review session's provider survives: an unsettled review has failed for good. */
+  private reconcileReviewSessions(): void {
+    for (const meta of this.store.listSessions()) {
+      if (!meta.review || this.store.isDeleted(meta.sessionId)) continue;
+      if (!meta.review.update) {
+        this.settleReviewSession(meta.sessionId, { state: "failed", reason: "the review session ended when its runner restarted" });
+      }
+      if (meta.status !== "stopped" && meta.status !== "failed") this.store.patchMeta(meta.sessionId, { status: "stopped", pendingApproval: null });
+      this.reviewSessions?.release(meta.sessionId);
+    }
   }
 
   worktreePortRuntime(): RunnerWorktreePorts & { capacity: number } {
@@ -5486,6 +5638,7 @@ export class SessionManager {
     } catch (error) {
       this.log(`checkpoint ref ownership reconciliation failed: ${errText(error)}`);
     }
+    this.reconcileReviewSessions();
     this.store.reapDeletedMarkers();
     void this.reconcileWorktreePullRequests();
     // Keep archive/index work out of synchronous startup and provider command paths. One bounded
@@ -5927,6 +6080,23 @@ export class SessionManager {
     }
     const authorization = this.authorizeHostLaunch(spec);
     spec = authorization.spec;
+    const reviewLaunch = !!spec.review;
+    if (!spec.review && this.store.readMeta(spec.sessionId)?.review) {
+      durable?.failed("a review session runs once and cannot be relaunched", "INVALID_COMMAND");
+      reportMaterialized(false);
+      return false;
+    }
+    if (spec.review) {
+      const review = await this.prepareReviewLaunch(spec, initialPrompt ?? "", authorization.error);
+      if ("error" in review) {
+        durable?.failed(review.error, "INVALID_COMMAND");
+        reportMaterialized(false);
+        return false;
+      }
+      spec = review.spec;
+      initialPrompt = review.prompt;
+      initialImages = undefined;
+    }
     if (authorization.error && this.store.has(spec.sessionId)) {
       // Validate Restart before allocating a replacement generation: rejection cannot supersede
       // the live provider or overwrite its known-good launch metadata.
@@ -5949,8 +6119,9 @@ export class SessionManager {
     }
     const launchGeneration = this.beginLaunchGeneration(spec.sessionId);
     this.preLaunchAdmissionGenerations.set(spec.sessionId, launchGeneration);
+    let started = false;
     try {
-      return await this.startGeneration(
+      return started = await this.startGeneration(
         spec,
         initialPrompt,
         initialImages,
@@ -5960,6 +6131,10 @@ export class SessionManager {
         authorization.error,
       );
     } finally {
+      if (reviewLaunch && !started) {
+        this.settleReviewSession(spec.sessionId, { state: "failed", reason: "the review session could not be launched" });
+        this.reviewSessions?.release(spec.sessionId);
+      }
       reportMaterialized(false);
       this.releaseResumeLock(spec.sessionId, launchGeneration);
       if (this.launchGenerations.get(spec.sessionId) === launchGeneration) {
@@ -6240,6 +6415,7 @@ export class SessionManager {
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
       orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
+      ...(spec.review ? { review: { ...spec.review, checkout: repoPath, launchOwner: this.lockOwner } } : {}),
       acpSessionContext,
       acpSessionOverrides,
       tokensIn: retainAccounting ? (prior?.tokensIn ?? 0) : 0,
@@ -7278,7 +7454,9 @@ export class SessionManager {
 
   sessionCanOpen(sessionId: string): boolean {
     return !this.deleted.has(sessionId) && !this.deleting.has(sessionId) &&
-      !this.store.isDeleted(sessionId) && this.store.has(sessionId) && !this.roleConversionPending(sessionId);
+      !this.store.isDeleted(sessionId) && this.store.has(sessionId) && !this.roleConversionPending(sessionId) &&
+      // A review session's one provider runs its review; nothing else opens on it (#3368).
+      !this.isReviewSession(sessionId);
   }
 
   /** A completed replacement must still invalidate asynchronous TUI launch preparation. */
@@ -7288,6 +7466,8 @@ export class SessionManager {
 
   private acquireAdmission(sessionId: string): Promise<boolean> {
     if (this.admitted.has(sessionId)) return Promise.resolve(true);
+    // Review sessions take no runner slot and count against no agent limit (#3368).
+    if (this.isReviewSession(sessionId)) return Promise.resolve(true);
     // A restarted start command supersedes an older not-yet-admitted request for this session.
     this.cancelAdmissionWait(sessionId);
     const request = this.admissionRequest(sessionId);
@@ -7441,6 +7621,7 @@ export class SessionManager {
 
   private acquireActiveTurn(sessionId: string): boolean {
     if (this.activeTurnAdmitted.has(sessionId)) return true;
+    if (this.isReviewSession(sessionId)) return true;
     const request = this.activeTurnRequest(sessionId);
     if (this.activeTurnAdmission.acquire(request)) {
       this.activeTurnWaiters.delete(sessionId);
@@ -7519,7 +7700,7 @@ export class SessionManager {
       this.settleActiveWorkPermit(sessionId, entry);
       return;
     }
-    if (this.activeTurnAdmitted.has(sessionId)) return;
+    if (this.activeTurnAdmitted.has(sessionId) || this.isReviewSession(sessionId)) return;
     // Orphaned and continuation-pending metadata describes retained work, not a provider that is
     // executing right now. A filesystem inspection can also rediscover an uncertain artifact and
     // report it as running while the provider is idle or still initializing. Preserve that work as
@@ -7560,7 +7741,7 @@ export class SessionManager {
     // parking keeps it, and the process is as reclaimable as any idle one (#3100).
     const idle = entry.status === "idle" ||
       (entry.status === "input_required" && this.providerRejectionHolds.has(sessionId));
-    return !!meta && idle && !entry.running && !entry.providerInitiatedTurnActive &&
+    return !!meta && !meta.review && idle && !entry.running && !entry.providerInitiatedTurnActive &&
       entry.queue.length === 0 && !entry.pendingWorktreeRebind && !entry.pendingProviderAccountSwitch &&
       !entry.authenticationBlocked &&
       !entry.historyQuarantined && !entry.historyIntegrityFailure && !entry.governanceTripped &&
@@ -8040,6 +8221,10 @@ export class SessionManager {
     const launchStarted = Date.now();
     const sessionId = meta.sessionId;
     if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+    if (meta.review && (meta.review.update || meta.review.launchOwner !== this.lockOwner || resumeId)) {
+      this.emitStatus(sessionId, "stopped", "A review session runs once and cannot be relaunched.");
+      return false;
+    }
     this.revokeSessionCommandAuthority(sessionId);
     const hadCloudHandoffBeforeLaunch = !!meta.cloudAdapterHandoffKey;
     this.emitStatus(sessionId, "starting");
@@ -8140,7 +8325,7 @@ export class SessionManager {
         return false;
       }
       if (meta.executionTarget?.adapter !== "container" && meta.executionTarget?.adapter !== "cloud" &&
-          this.executionIsolation.mode === "bwrap" &&
+          this.executionIsolation.mode === "bwrap" && !meta.review &&
           meta.providerStateVersion !== (meta.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(meta, launchGeneration);
       }
@@ -8191,7 +8376,7 @@ export class SessionManager {
       }
       const unavailableMemory = projectMemoryUnavailable(meta);
       if (unavailableMemory && meta.projectMemory?.sharing === "separate") this.noticeSessionLaunch(sessionId, unavailableMemory);
-      const projectMemoryDirectory = await prepareProjectMemory(meta, this.stateDir, this.runnerOwnerHash);
+      const projectMemoryDirectory = meta.review ? undefined : await prepareProjectMemory(meta, this.stateDir, this.runnerOwnerHash);
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration, projectMemoryDirectory);
       preparedProjectMemoryDirectory = projectMemoryDirectory;
       if (projectMemoryDirectory) preparedProjectMemoryArgs = await prepareProjectMemoryArgs(meta);
@@ -8276,7 +8461,8 @@ export class SessionManager {
           cwd,
           env: meta.env,
           config: meta.config,
-          artifactGuidance: [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
+          artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
+          ...(meta.review ? { review: true } : {}),
           ...(preparedProjectMemoryDirectory ? { projectMemoryDirectory: preparedProjectMemoryDirectory } : {}),
           orchestrator: meta.orchestrator,
           context: meta.context,
@@ -8330,7 +8516,8 @@ export class SessionManager {
           managedWorktreeProtections: () => this.managedWorktreeGuardProtections(
             this.store.readMeta(sessionId) ?? meta,
           ),
-          hookStateDir: this.guardStateSandbox?.hookStateDir,
+          // A review session's preset is exact: no permission profile is layered onto it.
+          hookStateDir: meta.review ? undefined : this.guardStateSandbox?.hookStateDir,
           ...(launchPreparation?.codexPrompts ? { codexPrompts: launchPreparation.codexPrompts } : {}),
         },
         this.coalesceTextDeltas(sessionId, {
@@ -8766,6 +8953,9 @@ export class SessionManager {
     if (meta.executionTarget?.adapter === "cloud") {
       return this.prepareCloudIsolation(meta, cwd, launchGeneration);
     }
+    // A review session runs outside the requester's sandbox, under its harness's own read-only
+    // sandbox and tool restrictions (#3368): the runner's namespace would stop Codex's from nesting.
+    if (meta.review && purpose === "provider") return undefined;
     // Only providers are forced into the managed-worktree boundary. Setup and teardown commands
     // come from a frozen, explicitly approved configuration and retain the configured execution
     // isolation. Reusing the provider boundary for hooks hides host paths under its private /tmp,
@@ -9259,6 +9449,10 @@ export class SessionManager {
   ): boolean {
     if (this.roleConversionPending(sessionId)) {
       durable?.failed("wait for the session role change to finish before sending a message", "COMMAND_CANCELLED");
+      return false;
+    }
+    if (!launchInitialPrompt && this.isReviewSession(sessionId)) {
+      durable?.failed("a review session takes no further prompts", "INVALID_COMMAND");
       return false;
     }
     if (durable && this.store.readEvents(sessionId).some((event) =>
@@ -13805,6 +13999,7 @@ export class SessionManager {
       await this.recordConversationForkPoint(sessionId, entry, stop, postTurnTree);
       if (entry.historyIntegrityFailure) return;
       const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
+      this.finishReviewTurn(sessionId, entry.client, stop, Boolean(interrupted));
       // A provider result is the terminal turn boundary even when authentication or governance
       // installs its own independent hold. Clear only the Stop Turn fence before those branches
       // return; their distinct gates continue to block the FIFO.
@@ -13855,6 +14050,7 @@ export class SessionManager {
       }
       entry.currentBackgroundJobIds = undefined;
     } catch (err) {
+      this.finishReviewTurn(sessionId, entry.client, "refusal", false);
       // A thrown prompt proves nothing about delivery, so it never extends a rejection streak. A
       // retired generation's late settle must not touch the replacement's streak.
       if (this.active.get(sessionId) === entry) this.lastProviderRejections.delete(sessionId);
@@ -15198,6 +15394,9 @@ export class SessionManager {
 
   stop(sessionId: string): void {
     this.flushTextDeltas(sessionId);
+    this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
+    // A review session still preparing its snapshot has nothing persisted yet; its launch checks this.
+    if (this.reviewsPreparing.has(sessionId)) this.reviewsStoppedBeforeLaunch.add(sessionId);
     // Stop is a terminal lifecycle boundary even while launch is suspended in an asynchronous
     // provider-authentication probe. Fence that generation before the probe can persist a new
     // recovery block or publish a non-terminal status for the stopped session.
@@ -16550,6 +16749,9 @@ export class SessionManager {
     if (!entry || entry.client !== expectedClient) return;
     this.releaseAdmission(sessionId);
     this.clearLock(sessionId);
+    if (entry.status !== "stopped") {
+      this.settleReviewSession(sessionId, { state: "failed", reason: "the review ended without a result" });
+    }
     const meta = this.store.readMeta(sessionId);
     const pendingClaudeTaskIds = meta?.driver === "claude-code" && entry.status !== "stopped"
       ? [...new Set([
@@ -18716,7 +18918,7 @@ export class SessionManager {
     const live = this.active.get(sessionId);
     if (live?.client !== client) return;
     if (state === "started") {
-      const sharedRunnerTurn = this.activeTurnAdmitted.has(sessionId);
+      const sharedRunnerTurn = this.activeTurnAdmitted.has(sessionId) || this.isReviewSession(sessionId);
       if (!sharedRunnerTurn && !this.activeTurnAdmission.acquire(this.activeTurnRequest(sessionId))) {
         this.emitEvent(sessionId, {
           kind: "error",
