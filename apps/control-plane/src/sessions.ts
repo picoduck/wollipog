@@ -4547,6 +4547,8 @@ export class SessionsService {
     const budgetRoot = parentSessionId ? this.db.campaignBudgets.root(parentSessionId) : null;
     if (budgetRoot) {
       if (delivery) return fail("Campaign budget admission for pre-staged automation dispatch is unsupported.", 409);
+      const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
+      if (ceilingError) return fail(ceilingError, 409);
       const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
       if(parentError) return fail(parentError,409);
       const view = this.db.campaignBudgets.view(budgetRoot)!;
@@ -8181,6 +8183,17 @@ export class SessionsService {
     const root = this.orchestratorCampaignController(controller);
     return controllerId === requesterId && controller?.orchestratorPolicy?.control?.mode === "full_control" &&
       campaignBoundaryCurrent(controller) && root !== "refused" && root?.id === controllerId;
+  }
+
+  /** Controlled review refuses any worker holding its own cost or tool-call ceiling, so a campaign
+   * that requires it admits only children the campaign allocation alone limits. Refusing here,
+   * before any write, keeps every admitted child review-admissible. */
+  private controlledReviewCeilingError(budgetRoot: string, limits: { costUsd?: number; toolCalls?: number }): string | null {
+    if (!this.db.campaignBudgets.view(budgetRoot)?.authority.controlledReview) return null;
+    if (!((limits.costUsd ?? 0) > 0 || (limits.toolCalls ?? 0) > 0)) return null;
+    return "This campaign requires controlled cross-model review, which cannot run under a per-session cost or tool-call limit. " +
+      "Create the child without costBudgetUsd or maxToolCalls; the campaign allocation limits it. " +
+      "If the Project sets child-session defaults, a person must clear them for this campaign's Project.";
   }
 
   /** Production reviewer adapters must use this preflight rather than treating a shell worker
@@ -13887,6 +13900,8 @@ export class SessionsService {
       const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
       const budgetRoot = parentSessionId ? this.db.campaignBudgets.root(parentSessionId) : null;
       if (budgetRoot) {
+        const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
+        if (ceilingError) throw new Error(ceilingError);
         const view = this.db.campaignBudgets.view(budgetRoot)!;
         const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
         if(parentError) throw new Error(parentError);

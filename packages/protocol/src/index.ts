@@ -706,7 +706,7 @@ export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export type {
-  CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, PreparedCampaignLaunch,
+  CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, FullControlEnableRequest, PreparedCampaignLaunch,
   CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
   CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary,
 } from "./campaign-control-launch.js";
@@ -2087,8 +2087,12 @@ export interface AgentCapabilities {
    */
   imageToolResults?: boolean;
   /** Private compatibility identity for this exact installation, never a runtime attestation.
-   * No current discovery path emits it. Native admission/delivery/quality proof remains separate. */
+   * Only a runner that re-proved its Claude Code media-only reviewer emits it, alongside
+   * `mediaReviewerAttestation`. Native admission/delivery/quality proof remains separate. */
   pacedVideoReviewContract?: import("./paced-video-review.js").PacedVideoReviewPeerContract;
+  /** Installed Claude Code media-only reviewer this runner can launch (#1321). Present only with
+   * the contract above and a provisioned dedicated reviewer key; never live validation. */
+  mediaReviewerAttestation?: import("./paced-video-review-windows.js").ClaudeMediaReviewerAttestation;
   /** Provider exposes a receipted primitive that incorporates input into the active turn. */
   supportsSteering?: boolean;
   /** Provider can mint an independent conversation from its current/history checkpoint. */
@@ -2550,9 +2554,25 @@ export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults 
 export interface OrchestratorDefaults {
   /** Future-campaign UI preference only. Omission means Custom; never a human authority grant. */
   controlMode?: import("./campaign-authority.js").CampaignControlMode;
+  /** Saved Full Control campaign envelope the launch summary proposes. A default only: each launch
+   * still needs its own Human authorization. On update, omission keeps the saved value; null clears it. */
+  campaignBudget?: OrchestratorCampaignBudgetDefault | null;
   behavior: OrchestratorBehaviorDefaults;
   delegation: OrchestratorDelegationDefaults;
   execution: OrchestratorExecutionDefaults;
+}
+
+export interface OrchestratorCampaignBudgetDefault {
+  costUsd: number;
+  toolCalls: number;
+}
+
+export function validOrchestratorCampaignBudgetDefault(value: unknown): value is OrchestratorCampaignBudgetDefault {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const budget = value as Record<string, unknown>;
+  return Object.keys(budget).every((key) => key === "costUsd" || key === "toolCalls") &&
+    typeof budget.costUsd === "number" && Number.isFinite(budget.costUsd) && budget.costUsd > 0 && budget.costUsd <= 1_000_000 &&
+    Number.isSafeInteger(budget.toolCalls) && (budget.toolCalls as number) > 0 && (budget.toolCalls as number) <= 10_000_000;
 }
 
 export const DEFAULT_ORCHESTRATOR_DEFAULTS: OrchestratorDefaults = {
@@ -9095,6 +9115,8 @@ export interface SessionNamingCustomModelResultMessage {
 export type RunnerToControlPlane =
   | { type: "media_review_stop_acknowledged"; receipt: import("./media-active-stop.js").MediaActiveStopAcknowledgement }
   | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence }
+  | { type: "media_review_dispatch_receipt"; receipt: import("./paced-video-review-windows.js").MediaReviewDispatchReceipt }
+  | { type: "media_review_finished"; result: import("./paced-video-review-windows.js").MediaReviewFinished }
   | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | import("./session-review-job.js").SessionReviewJobUpdate
@@ -10930,6 +10952,8 @@ export interface GitActionResultMessage {
 
 export type ControlPlaneToRunner =
   | { type: "media_review_stop"; request: import("./media-active-stop.js").MediaActiveStopRequest }
+  | { type: "media_review_dispatch"; dispatch: import("./paced-video-review-windows.js").MediaReviewDispatch }
+  | { type: "media_review_readback"; identity: import("./media-active-stop.js").MediaActiveStopIdentity }
   | import("./campaign-control-launch.js").CampaignLaunchInspectionMessage
   | import("./campaign-control-launch.js").CampaignLaunchInspectionCancelMessage
   | import("./campaign-review-job.js").CampaignReviewJobCommand
@@ -11771,6 +11795,10 @@ export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoRevie
 export { PACED_VIDEO_REVIEW_BATCH_LIMITS, PACED_VIDEO_REVIEW_MIN_PROTOCOL, PACED_VIDEO_REVIEW_CONTRACT_ID,
   validPacedVideoReviewPeerContract, supportsPacedVideoReviewPeer } from "./paced-video-review.js";
 export type { PacedVideoReviewPeerContract } from "./paced-video-review.js";
+export { PACED_VIDEO_REVIEW_WINDOW_LIMITS, pacedVideoReviewWindowPlan, pacedVideoReviewWindowPlanBody,
+  parsePacedVideoReviewWindowNotes, validPacedVideoReviewWindowNotes } from "./paced-video-review-windows.js";
+export type { PacedVideoReviewWindow, PacedVideoReviewWindowPlan, PacedVideoReviewWindowNotes, PacedVideoReviewWindowLimits,
+  ClaudeMediaReviewerAttestation, MediaReviewDispatch, MediaReviewDispatchReceipt, MediaReviewFinished } from "./paced-video-review-windows.js";
 export type { MediaDispatchFenceIdentity, MediaNeverDispatchedFence } from "./media-dispatch-fence.js";
 export type { MediaActiveStopIdentity, MediaActiveStopRequest, MediaActiveStopAcknowledgement } from "./media-active-stop.js";
 export { mediaActiveStopIdentityBody, mediaActiveStopRequestBody, mediaActiveStopAcknowledgementBody } from "./media-active-stop.js";

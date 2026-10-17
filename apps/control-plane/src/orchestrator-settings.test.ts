@@ -154,6 +154,26 @@ test("Full Control defaults are a future-launch preference, never campaign autho
   } finally { db.close(); }
 });
 
+test("a saved Full Control campaign budget persists, survives legacy omission, clears on null and never reaches a campaign", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const settings = new OrchestratorSettings(db);
+    const principal = human(db);
+    const budget = { costUsd: 40, toolCalls: 400 };
+    assert.deepEqual(settings.update(principal, { defaults: { ...defaults(), campaignBudget: budget } }).defaults.campaignBudget, budget);
+    assert.deepEqual(settings.update(principal, { defaults: defaults() }).defaults.campaignBudget, budget,
+      "a client that predates the budget keeps the saved envelope");
+    assert.equal(settings.view({ ...principal, userId: "other" }).defaults.campaignBudget, undefined);
+    assert.equal(resolveOrchestratorCampaignPolicy({ ...defaults(), campaignBudget: budget }, "user_default").campaignBudget, undefined,
+      "a saved envelope is a launch default, never campaign policy or authority");
+    for (const invalid of [{ costUsd: 0, toolCalls: 1 }, { costUsd: 1, toolCalls: 1.5 }, { costUsd: 1 }, { costUsd: 1, toolCalls: 1, concurrency: 2 }, "40"]) {
+      assert.equal(parseOrchestratorDefaults({ ...defaults(), campaignBudget: invalid }), null, JSON.stringify(invalid));
+    }
+    assert.equal(parseOrchestratorOverrides({ campaignBudget: budget } as never), null, "children cannot inject an envelope");
+    assert.equal(settings.update(principal, { defaults: { ...defaults(), campaignBudget: null } }).defaults.campaignBudget, undefined);
+  } finally { db.close(); }
+});
+
 test("Orchestrator capabilities keep identical model ids scoped to stable harness identities", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {

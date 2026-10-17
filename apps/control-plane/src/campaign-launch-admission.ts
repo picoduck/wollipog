@@ -5,7 +5,8 @@ import {
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId,
   type CampaignAuthorityOperation, type CampaignLaunchCapability, type CampaignLaunchPreflight,
   type CampaignLaunchProposal, type CampaignLaunchInspectionResult, type ChildSessionDefaults,
-  type CreateSessionRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
+  type OrchestratorCampaignBudgetDefault,
+  type CreateSessionRequest, type FullControlEnableRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
   type PreparedCampaignLaunch, type RunnerView,
 } from "@wollipog/protocol";
 import type { UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
@@ -67,6 +68,17 @@ export function parseFullControlLaunchRequest(value: unknown, admit: boolean): F
   return structuredClone(r);
 }
 
+/** Strict shape of an enable request; values flow through the same derivation and schema. */
+export function parseFullControlEnableRequest(value: unknown, enable: boolean): FullControlEnableRequest | null {
+  if (!record(value) || !only(value, ["overrides", "expectedRevision", "preflightDigest"])) return null;
+  const r = value as FullControlEnableRequest;
+  if (r.overrides !== undefined && (!validOverrides(r.overrides) || (r.overrides as FullControlLaunchOverrides).session !== undefined)) return null;
+  if (enable ? !Number.isSafeInteger(r.expectedRevision) || (r.expectedRevision as number) < 0 ||
+      typeof r.preflightDigest !== "string" || !/^[a-f0-9]{64}$/.test(r.preflightDigest)
+    : r.expectedRevision !== undefined || r.preflightDigest !== undefined) return null;
+  return structuredClone(r);
+}
+
 function validOverrides(o: unknown): o is FullControlLaunchOverrides {
   if (!record(o) || !only(o, ["session", "objective", "operations", "delegatablePolicyIds", "budget", "issues"])) return false;
   const v = o as FullControlLaunchOverrides;
@@ -124,6 +136,13 @@ export interface CampaignLaunchFacts {
   pacedVideoPeer: boolean;
   /** Hosting disclosure port is wired. */
   disclosuresAvailable: boolean;
+  /** The authorizing Human's saved Full Control campaign envelope, if any. */
+  savedBudget?: OrchestratorCampaignBudgetDefault | null;
+  /** Enabling Full Control on an existing campaign: its Human-established issue scope stands in for
+   * the workspace inspection. `authorizedByCaller` is false when another person established it. */
+  campaignScope?: { repository: string; issueNumbers: number[]; authorizedByCaller: boolean } | null;
+  /** Enabling on an existing campaign: a live participant already holds its own cost or tool limit. */
+  participantCeiling?: boolean;
 }
 
 function canonical(value: unknown): string {
@@ -154,25 +173,28 @@ const HUMAN_REQUIRED_LABELS: Record<string, string> = {
  * actionable reason; `human_required` is a disclosed exception that routes that decision class to
  * the Human. No caller field, preset, protocol number alone or fixture can mark a capability verified. */
 export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight: CampaignLaunchPreflight; proposal: CampaignLaunchProposal | null } {
-  const { request, plan, runner, inspection } = facts;
+  const { request, plan, runner, inspection, campaignScope } = facts;
   const overrides = request.overrides ?? {};
-  const issueNumbers = [...(request.issueNumbers ?? [])].sort((a, b) => a - b);
+  const issueNumbers = [...(campaignScope ? campaignScope.issueNumbers : request.issueNumbers ?? [])].sort((a, b) => a - b);
   const behavior = plan.policy.behavior;
   const inspectionVersion = runner.runtime?.campaignLaunchInspection?.version ?? 0;
-  const verified = inspection?.ok === true && inspection.workspaceId === plan.workspaceId &&
-    typeof inspection.repository === "string" && /^[a-f0-9]{64}$/.test(inspection.digest ?? "") &&
-    canonical(inspection.issueNumbers) === canonical(issueNumbers);
-  const repository = verified ? inspection!.repository!.toLowerCase() : null;
+  const verified = campaignScope ? campaignScope.authorizedByCaller && /^[\w.-]+\/[\w.-]+$/u.test(campaignScope.repository)
+    : inspection?.ok === true && inspection.workspaceId === plan.workspaceId &&
+      typeof inspection.repository === "string" && /^[a-f0-9]{64}$/.test(inspection.digest ?? "") &&
+      canonical(inspection.issueNumbers) === canonical(issueNumbers);
+  const repository = verified ? (campaignScope?.repository ?? inspection!.repository!).toLowerCase() : null;
 
   const acceptedFollowUps = overrides.budget?.acceptedFollowUps ??
     (behavior.followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0);
   const concurrency = overrides.budget?.concurrency ?? behavior.maximumConcurrentChildren;
-  // The campaign envelope is always an explicit Human amount. Saved per-session limits (root
-  // ceilings, Project child-session defaults) are tighter ceilings, not a campaign envelope, and
-  // controlled review refuses to run under them.
-  const costUsd = overrides.budget?.costUsd;
-  const toolCalls = overrides.budget?.toolCalls;
-  const budgetSource = costUsd !== undefined && toolCalls !== undefined ? "override" as const : "unset" as const;
+  // The envelope is a Human amount: this request's override or the Human's saved Full Control
+  // default. Saved per-session limits (root ceilings, Project child-session defaults) are tighter
+  // ceilings, never the envelope, and controlled review refuses to run under them.
+  const overridden = overrides.budget?.costUsd !== undefined || overrides.budget?.toolCalls !== undefined;
+  const costUsd = overrides.budget?.costUsd ?? facts.savedBudget?.costUsd;
+  const toolCalls = overrides.budget?.toolCalls ?? facts.savedBudget?.toolCalls;
+  const budgetSource = costUsd === undefined || toolCalls === undefined ? "unset" as const
+    : overridden ? "override" as const : "saved_defaults" as const;
   const relatedFollowUps = overrides.issues?.relatedFollowUps ?? behavior.followUps === "execute_approved";
   const maxIssues = overrides.issues?.maxIssues ?? Math.min(100, Math.max(1, issueNumbers.length + acceptedFollowUps));
   const closureReasons = overrides.issues?.closureReasons ?? ["completed" as const];
@@ -194,7 +216,11 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const add = (id: CampaignLaunchCapability["id"], capability: string, state: CampaignLaunchCapability["state"], reason: string, mandatory = true) =>
     capabilities.push({ id, capability, state, reason, mandatory });
 
-  add("repository_scope", "Repository and Issue Scope", verified ? "verified" : "unsupported", verified
+  add("repository_scope", "Repository and Issue Scope", verified ? "verified" : "unsupported", campaignScope ? verified
+    ? `This campaign's Human-established scope is ${repository}${issueNumbers.length ? ` with issues ${issueNumbers.map((n) => `#${n}`).join(", ")}` : " with no issues yet"}.`
+    : !campaignScope.authorizedByCaller ? "Only the person who established this campaign's issue scope can enable Full Control for it."
+    : "This campaign's issue scope is not repository-qualified; establish its scope first."
+    : verified
     ? `The registered workspace's origin is ${repository}${issueNumbers.length ? ` and issues ${issueNumbers.map((n) => `#${n}`).join(", ")} were read from it` : "; no issues were selected, so the campaign starts with an empty issue scope"}.`
     : inspection?.cancelled ? "The workspace inspection was cancelled before it finished; refresh the preflight."
     : !inspectionVersion ? "This runner cannot inspect the workspace origin and issues; update the runner."
@@ -215,7 +241,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const budgetValid = budgetSource !== "unset" && Boolean(proposal || !repository);
   add("accounting_budget", "Campaign Accounting and Budget", !facts.accountingError && budgetValid ? "verified" : "unsupported",
     facts.accountingError ? facts.accountingError
-      : budgetSource === "unset" ? "No campaign cost and tool-call budget: enter both limits for this campaign."
+      : budgetSource === "unset" ? "No campaign budget yet: enter a cost limit and a tool-call limit."
       : !budgetValid ? "The derived campaign limits are invalid; adjust the budget, concurrency or issue limits."
       : `Managed workers are metered and priced; the campaign is limited to $${costUsd} and ${toolCalls} tool calls.`);
 
@@ -224,15 +250,17 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   // inherit the Project's child-session defaults as such ceilings.
   const rootCeiling = (plan.config.costBudgetUsd ?? 0) > 0 || (plan.config.maxToolCalls ?? 0) > 0;
   const workerCeiling = facts.projectDefaults !== null;
+  const participantCeiling = facts.participantCeiling === true;
   add("native_review", "Controlled Cross-Model Review",
     controlledReview && runnerSupportsProtocol(runner.protocolVersion, "campaignBudgetAdmission") && reviewOwnerScope && !facts.dailyLimit &&
-      !rootCeiling && !workerCeiling ? "verified" : "unsupported",
+      !rootCeiling && !workerCeiling && !participantCeiling ? "verified" : "unsupported",
     !controlledReview ? `This runner does not advertise the controlled native reviewer. It needs executionIsolation.mode "provider" (current: ${runner.runtime?.executionIsolation?.mode ?? "unreported"}), a native claude-code agent whose command is "claude", Claude Code CLI 2.1.296 and python3 on a Linux host; restart the runner after configuring it.`
       : !runnerSupportsProtocol(runner.protocolVersion, "campaignBudgetAdmission") ? "Controlled review admission needs a protocol-v218 runner; update the runner."
       : !reviewOwnerScope ? "Controlled review accounting needs a user-owned campaign."
       : facts.dailyLimit ? "Controlled review cannot honor this organization's per-user daily limit; remove the limit or launch in Custom."
       : rootCeiling ? "Controlled review cannot run under the root session's own cost or tool-call limit; clear the root limits and rely on the campaign budget."
       : workerCeiling ? "Controlled review cannot run under the Project's child-session defaults, which every worker inherits as a tighter limit; clear them for this Project and rely on the campaign budget."
+      : participantCeiling ? "Controlled review cannot run under the cost or tool-call limits some of this campaign's sessions already hold; finish those sessions or launch a new campaign."
       : `Reviews run as ${controlledReview.profile} through agent ${controlledReview.agentId}, charged to this campaign's budget.`);
 
   const isolation = runner.runtime?.executionIsolation;
@@ -282,7 +310,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   };
   const advanced: CampaignLaunchPreflight["advanced"] = {
     proposal, plan,
-    ...(verified ? { inspection: { repository: inspection!.repository, issueNumbers: inspection!.issueNumbers, digest: inspection!.digest } } : {}),
+    ...(verified && inspection ? { inspection: { repository: inspection.repository, issueNumbers: inspection!.issueNumbers, digest: inspection!.digest } } : {}),
     ...(controlledReview ? { controlledReview } : {}),
     humanRequiredRequests,
   };

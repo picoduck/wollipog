@@ -48,9 +48,11 @@ numbers, and optional overrides (`FullControlLaunchRequest` in
   the root joins the workspace's Project.
 - Concurrency from `behavior.maximumConcurrentChildren`; accepted follow-ups from the saved
   follow-up policy (none for Recommend Only); closure reasons default to completed. The cost and
-  tool-call envelope is always entered by the Human: saved per-session limits (root ceilings,
-  Project child-session defaults) are tighter ceilings, and controlled review refuses to run under
-  them, so they block readiness instead of becoming the envelope.
+  tool-call envelope is the Human's saved Full Control campaign budget (`campaignBudget` in
+  Orchestrator defaults; omitted by older clients, cleared by `null`), unless this request
+  overrides it. With neither, the summary asks for one. Saved per-session limits (root ceilings,
+  Project child-session defaults) are tighter ceilings, never the envelope: controlled review
+  refuses to run under them, so they block readiness.
 - `controlledReview` from the runner's discovered `campaignReview` profile.
 
 The preflight returns `ready`, a digest, a concise `summary` (scope, budget, follow-up policy,
@@ -74,6 +76,20 @@ Duplicate identity returns the retained root without another send; a changed ide
 SQL failure leaves no partial authority. A Hub send failure cannot prove that zero bytes escaped,
 so the root and reservation are retained with uncertain dispatch state and are never replayed
 automatically.
+
+An existing live root campaign enables Full Control through
+`POST /api/sessions/:id/orchestrator-campaign/full-control/preflight` and
+`POST /api/sessions/:id/orchestrator-campaign/full-control`. These are Human-only and the session
+owner's. The preflight reuses the launch evaluation, with the campaign's own Human-established
+issue scope in place of the workspace inspection. Only the person who established that scope can
+enable it, and live participants holding their own cost or tool limits block controlled review.
+Enabling requires the exact reviewed digest, which also binds the campaign and its current policy
+revision. It then runs the existing `setCampaignControl` operation. Revoke keeps using the ordinary
+control endpoint.
+
+In a campaign whose allowance includes controlled review, child creation refuses a resolved
+cost or tool-call ceiling (Orchestrator-supplied or from Project child-session defaults) with an
+actionable reason. Every admitted child therefore stays admissible for its required review.
 
 The paced-media evidence envelope (`evidenceAuthority`) is minted by the same launch only when
 every peer declares the private media contract. The hosting control plane supplies its disclosures:
