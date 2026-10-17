@@ -1,28 +1,37 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { githubApi, MONITOR_MS, monitor, obsoleteEvidence, POLL_MS, REQUEST_MS, targetFromEvent } from "./merge-group-cleanup.mjs";
+import {
+  activeTargets, githubApi, MONITOR_MS, monitor, obsoleteEvidence, POLL_MS, REQUEST_MS, RUN_PAGE, targetFromEvent, targetFromRun,
+} from "./merge-group-cleanup.mjs";
 
 const repository = "example/project";
 const sha = "a".repeat(40);
 const otherSha = "b".repeat(40);
+const thirdSha = "e".repeat(40);
 const branch = "gh-readonly-queue/main/pr-42-" + "c".repeat(40);
+const otherBranch = "gh-readonly-queue/main/pr-43-" + "d".repeat(40);
 const target = { repository, id: 123, attempt: 1, branch, sha };
-const run = () => ({
+const run = (changes = {}) => ({
   id: target.id, run_attempt: 1, status: "in_progress", event: "merge_group",
   path: ".github/workflows/ci.yml", repository: { full_name: repository },
-  head_repository: { full_name: repository }, head_branch: branch, head_sha: sha,
+  head_repository: { full_name: repository }, head_branch: branch, head_sha: sha, ...changes,
 });
+// A second integration that stays in the queue throughout.
+const liveRun = () => run({ id: 456, head_branch: otherBranch, head_sha: otherSha });
+const listing = (...runs) => ({ total_count: runs.length, workflow_runs: runs });
 const event = () => ({ action: "in_progress", workflow_run: run() });
 const connection = (nodes) => ({ nodes, totalCount: nodes.length, pageInfo: { hasNextPage: false } });
 const proof = () => ({ data: { repository: {
-  nameWithOwner: repository, ref: null,
+  nameWithOwner: repository,
   refs: connection([{ name: "pr-43-" + "d".repeat(40), target: { oid: otherSha } }]),
   mergeQueue: { entries: connection([{ state: "AWAITING_CHECKS", headCommit: { oid: otherSha } }]) },
 } } });
 
-test("only an exact same-repository main merge-group CI attempt is eligible", () => {
+test("only an exact same-repository main merge-group CI attempt is a target", () => {
+  assert.deepEqual(targetFromRun(run(), repository), target);
   assert.deepEqual(targetFromEvent(event(), repository), target);
+  assert.deepEqual(targetFromEvent({ ...event(), action: "completed" }, repository), target);
   for (const changes of [
     { event: "pull_request" }, { event: "push" }, { event: "workflow_dispatch" },
     { path: ".github/workflows/platform-isolation.yml" },
@@ -30,8 +39,23 @@ test("only an exact same-repository main merge-group CI attempt is eligible", ()
     { head_repository: { full_name: "fork/repo" } },
     { head_branch: "gh-readonly-queue/other/pr-42-" + "c".repeat(40) },
     { head_branch: "main" }, { head_sha: "bad" }, { id: 0 }, { run_attempt: 0 },
-  ]) assert.throws(() => targetFromEvent({ ...event(), workflow_run: { ...run(), ...changes } }, repository));
-  assert.throws(() => targetFromEvent({ ...event(), action: "completed" }, repository));
+  ]) {
+    assert.equal(targetFromRun(run(changes), repository), null);
+    assert.throws(() => targetFromEvent({ ...event(), workflow_run: run(changes) }, repository));
+  }
+  assert.equal(targetFromRun(run(), "not a repository"), null);
+  assert.throws(() => targetFromEvent({ ...event(), action: "requested" }, repository));
+});
+
+test("the active listing keeps only recognised, unfinished merge-group attempts", async () => {
+  const paths = [];
+  const api = async (path) => {
+    paths.push(path);
+    return listing(run(), liveRun(), run({ id: 7, status: "completed" }), run({ id: 8, event: "push" }), run({ id: 9, status: "mystery" }));
+  };
+  assert.deepEqual((await activeTargets(api, repository)).map((t) => t.id), [123, 456]);
+  assert.equal(paths[0], `/repos/${repository}/actions/workflows/ci.yml/runs?event=merge_group&exclude_pull_requests=true&per_page=${RUN_PAGE}`);
+  await assert.rejects(activeTargets(async () => ({ message: "nope" }), repository));
 });
 
 test("a deleted integration absent from complete live evidence is obsolete", () => {
@@ -47,9 +71,16 @@ test("all live queue entries and refs protect an integration, including another 
     const payload = proof();
     if (source === "ref") payload.data.repository.refs.nodes[0].target.oid = sha;
     if (source === "entry") payload.data.repository.mergeQueue.entries.nodes[0].headCommit.oid = sha;
-    if (source === "own-ref") payload.data.repository.ref = { target: { oid: sha } };
+    // The integration's own ref, even pointing somewhere unexpected, keeps it.
+    if (source === "own-ref") payload.data.repository.refs = connection([
+      ...payload.data.repository.refs.nodes, { name: "pr-42-" + "c".repeat(40), target: { oid: thirdSha } },
+    ]);
     assert.equal(obsoleteEvidence(payload, target).obsolete, false, source);
   }
+  // Complete evidence reaches the membership check itself, not the completeness guard (#3343 review).
+  const own = proof();
+  own.data.repository.refs = connection([{ name: "pr-42-" + "c".repeat(40), target: { oid: thirdSha } }]);
+  assert.deepEqual(obsoleteEvidence(own, target), { obsolete: false, reason: "integration-ref-present" });
 });
 
 test("partial, unauthorized, malformed, or uncomputed evidence cannot authorize cancellation", () => {
@@ -57,7 +88,7 @@ test("partial, unauthorized, malformed, or uncomputed evidence cannot authorize 
     (p) => { p.errors = [{ message: "denied" }]; },
     (p) => { p.data.repository = null; },
     (p) => { p.data.repository.nameWithOwner = "another/repo"; },
-    (p) => { delete p.data.repository.ref; },
+    (p) => { delete p.data.repository.refs; },
     (p) => { p.data.repository.mergeQueue = null; },
     (p) => { p.data.repository.refs.pageInfo.hasNextPage = true; },
     (p) => { p.data.repository.mergeQueue.entries.pageInfo.hasNextPage = true; },
@@ -75,7 +106,11 @@ test("partial, unauthorized, malformed, or uncomputed evidence cannot authorize 
   assert.equal(obsoleteEvidence(null, target).obsolete, false);
 });
 
-async function simulate({ runs = [], proofs = [], polls = 3, failCancel = false } = {}) {
+/**
+ * Drives the monitor against scripted responses. `listings` are the active-run listings in poll
+ * order (the last repeats), `runs` the per-run re-reads, `proofs` the queue snapshots.
+ */
+async function simulate({ listings = [listing(run(), liveRun())], runs = [], proofs = [], polls = 3, failCancel = false } = {}) {
   const calls = [], waits = [], logs = [];
   const api = async (path, body) => {
     calls.push({ path, body });
@@ -83,22 +118,44 @@ async function simulate({ runs = [], proofs = [], polls = 3, failCancel = false 
       if (failCancel) throw Object.assign(new Error("secret error"), { status: 403 });
       return null;
     }
-    const value = path === "/graphql" ? (proofs.length ? proofs.shift() : proof()) : (runs.length ? runs.shift() : run());
+    let value;
+    if (path === "/graphql") value = proofs.length ? proofs.shift() : proof();
+    else if (path.includes("/workflows/ci.yml/runs")) value = listings.length > 1 ? listings.shift() : listings[0];
+    else value = runs.length ? runs.shift() : run();
     if (value instanceof Error) throw value;
     return value;
   };
-  const result = await monitor(target, { api, polls, wait: async (ms) => waits.push(ms), log: (line) => logs.push(JSON.parse(line)) });
+  const result = await monitor(repository, { api, polls, wait: async (ms) => waits.push(ms), log: (line) => logs.push(JSON.parse(line)) });
   return { result, calls, waits, logs, cancels: calls.filter((call) => call.path.endsWith("/cancel")) };
 }
 
-test("two separated observations plus a fresh recheck cancel only the named run", async () => {
+test("two separated observations plus a fresh recheck cancel only the obsolete run", async () => {
   const result = await simulate();
-  assert.equal(result.result, "cancel-requested");
-  assert.deepEqual(result.waits, [POLL_MS]);
   assert.deepEqual(result.cancels, [{ path: "/repos/example/project/actions/runs/123/cancel", body: {} }]);
-  assert.equal(result.calls.filter((c) => c.path === "/graphql").length, 3);
-  assert.ok(result.logs.every((log) => log.runId === 123 && log.entryPoint === "workflow_run"));
-  assert.equal(result.logs.at(-1).event, "merge_group_cancel_requested");
+  assert.deepEqual(result.waits, [POLL_MS, POLL_MS]);
+  // One snapshot per poll, plus the recheck before the cancellation.
+  assert.equal(result.calls.filter((c) => c.path === "/graphql").length, 4);
+  const requested = result.logs.filter((log) => log.event === "merge_group_cancel_requested");
+  assert.deepEqual(requested.map((log) => [log.runId, log.runAttempt, log.headSha]), [[123, 1, sha]]);
+  assert.ok(result.logs.every((log) => log.entryPoint === "workflow_run"));
+  assert.ok(result.logs.some((log) => log.runId === 456 && log.reason === "integration-ref-present"));
+  assert.equal(result.result, "retained");
+});
+
+test("an attempt asked to stop is not asked again while it is still listed", async () => {
+  const result = await simulate({ polls: 6 });
+  assert.equal(result.cancels.length, 1);
+});
+
+test("the monitor exits as soon as no merge-group CI is active", async () => {
+  const result = await simulate({ listings: [listing(run({ status: "completed" }))] });
+  assert.equal(result.result, "idle");
+  assert.equal(result.calls.length, 1);
+  assert.deepEqual(result.waits, []);
+  assert.equal(result.logs.at(-1).reason, "no-active-merge-group-ci");
+  const later = await simulate({ listings: [listing(liveRun()), listing()], polls: 5 });
+  assert.equal(later.result, "idle");
+  assert.deepEqual(later.waits, [POLL_MS]);
 });
 
 test("live or uncomputed groups retain CI and stop at the monitor budget", async () => {
@@ -112,36 +169,51 @@ test("live or uncomputed groups retain CI and stop at the monitor budget", async
 });
 
 test("transient errors and live observations reset the consecutive-observation proof", async () => {
-  const live = proof(); live.data.repository.ref = { target: { oid: sha } };
+  const live = proof();
+  live.data.repository.refs = connection([...live.data.repository.refs.nodes, { name: "pr-42-" + "c".repeat(40), target: { oid: sha } }]);
   for (const middle of [new Error("secret error"), live]) {
     const result = await simulate({ proofs: [proof(), middle, proof()] });
     assert.equal(result.cancels.length, 0);
     assert.equal(result.waits.length, 2);
     assert.ok(!JSON.stringify(result.logs).includes("secret error"));
   }
+  const listingFailure = await simulate({ listings: [listing(run()), new Error("secret error"), listing(run())] });
+  assert.equal(listingFailure.cancels.length, 0);
+  assert.ok(listingFailure.logs.some((log) => log.event === "merge_group_evidence_unavailable" && log.runId === undefined));
+});
+
+test("an attempt that drops out of the listing must earn two fresh observations", async () => {
+  const result = await simulate({ listings: [listing(run(), liveRun()), listing(liveRun()), listing(run(), liveRun())] });
+  assert.equal(result.cancels.length, 0);
 });
 
 test("reappearance immediately before cancellation invalidates the proof", async () => {
   const live = proof(); live.data.repository.refs.nodes[0].target.oid = sha;
   const result = await simulate({ proofs: [proof(), proof(), live], polls: 2 });
   assert.equal(result.cancels.length, 0);
-  assert.ok(result.logs.some((log) => log.event === "merge_group_cancel_withheld"));
+  assert.ok(result.logs.some((log) => log.event === "merge_group_cancel_withheld" && log.runId === 123));
 });
 
 test("a final API failure keeps checks intact", async () => {
   const result = await simulate({ proofs: [proof(), proof(), new Error("unavailable")], polls: 2 });
   assert.equal(result.cancels.length, 0);
-  assert.ok(result.logs.some((log) => log.event === "merge_group_evidence_unavailable"));
+  assert.ok(result.logs.some((log) => log.event === "merge_group_evidence_unavailable" && log.runId === 123));
 });
 
-test("completed or replaced attempts are not cancelled, including at the final check", async () => {
+test("completed or replaced attempts are not cancelled at the final check", async () => {
   for (const changes of [{ status: "completed" }, { status: "unknown" }, { run_attempt: 2 }, { head_sha: otherSha }, { event: "push" }]) {
-    for (const final of [false, true]) {
-      const changed = { ...run(), ...changes };
-      const result = await simulate({ runs: final ? [run(), run(), changed] : [changed], polls: final ? 2 : 1 });
-      assert.equal(result.cancels.length, 0);
-    }
+    const result = await simulate({ runs: [run(changes)], polls: 2 });
+    assert.equal(result.cancels.length, 0);
+    assert.ok(result.logs.some((log) => log.reason === "run-changed-before-cancel"));
   }
+});
+
+test("each attempt of one run is judged separately", async () => {
+  const rerun = run({ run_attempt: 2 });
+  const result = await simulate({ listings: [listing(run()), listing(rerun)], polls: 2 });
+  assert.equal(result.cancels.length, 0);
+  const later = await simulate({ listings: [listing(run()), listing(rerun)], runs: [rerun] });
+  assert.deepEqual(later.cancels.map((call) => call.path), ["/repos/example/project/actions/runs/123/cancel"]);
 });
 
 test("cancellation failure is diagnosed as retained, never as successful", async () => {
@@ -168,29 +240,35 @@ test("HTTP transport is bounded, refuses redirects, and does not leak error bodi
 
 test("privileged monitoring checks out only trusted workflow_run code and stays outside required CI", () => {
   const text = readFileSync(".github/workflows/merge-group-cleanup.yml", "utf8");
-  assert.match(text, /workflows: \[CI\]\s+types: \[in_progress\]/);
+  assert.match(text, /workflows: \[CI\]\s+types: \[in_progress, completed\]/);
   assert.match(text, /ref: \$\{\{ github.sha \}\}/);
   assert.match(text, /persist-credentials: false/);
   assert.doesNotMatch(text, /workflow_run\.(head_sha|head_branch)|download-artifact|pull_request_target/);
-  assert.match(text, /group: merge-group-cleanup-\$\{\{ github.event.workflow_run.id \}\}-\$\{\{ github.event.workflow_run.run_attempt \}\}/);
-  assert.match(text, /cancel-in-progress: false/);
   assert.match(text, /contents: read\s+pull-requests: read\s+actions: write/);
   assert.match(text, /workflow_run.event == 'merge_group'/);
   assert.match(text, /node scripts\/merge-group-cleanup.mjs/);
+  // One shared monitor: job-level concurrency (so skipped pull-request invocations cannot replace
+  // a waiting monitor), never cancelling the running one, and no per-run workflow concurrency.
+  assert.match(text, /\n    concurrency:\n      group: merge-group-cleanup\n      cancel-in-progress: false\n/);
+  assert.doesNotMatch(text, /^concurrency:/m);
   // A monotonic wall budget bounds slow API responses as well as polling sleeps.
   assert.ok(MONITOR_MS + 5 * REQUEST_MS < 40 * 60_000);
+  assert.match(text, /timeout-minutes: 40/);
 });
 
 test("slow requests cannot extend polling beyond the wall budget", async () => {
   let elapsed = 0;
   const mutations = [];
-  const result = await monitor(target, {
+  const result = await monitor(repository, {
     polls: 1000, now: () => elapsed, wait: async (ms) => { elapsed += ms; }, log: () => {},
     api: async (path) => {
       elapsed += REQUEST_MS;
       if (path.endsWith("/cancel")) mutations.push(path);
-      const live = proof(); live.data.repository.ref = { target: { oid: sha } };
-      return path === "/graphql" ? live : run();
+      if (path === "/graphql") {
+        const live = proof(); live.data.repository.mergeQueue.entries.nodes[0].headCommit.oid = sha;
+        return live;
+      }
+      return path.includes("/workflows/ci.yml/runs") ? listing(run()) : run();
     },
   });
   assert.equal(result, "retained");
@@ -200,12 +278,13 @@ test("slow requests cannot extend polling beyond the wall budget", async () => {
 
 test("a final proof arriving after the wall deadline cannot authorize cancellation", async () => {
   let elapsed = 0, snapshots = 0, cancelled = false;
-  await monitor(target, {
+  await monitor(repository, {
     now: () => elapsed, wait: async (ms) => { elapsed += ms; }, log: () => {},
     api: async (path) => {
       if (path.endsWith("/cancel")) cancelled = true;
       if (path === "/graphql" && ++snapshots === 3) elapsed = MONITOR_MS;
-      return path === "/graphql" ? proof() : run();
+      if (path === "/graphql") return proof();
+      return path.includes("/workflows/ci.yml/runs") ? listing(run()) : run();
     },
   });
   assert.equal(cancelled, false);
