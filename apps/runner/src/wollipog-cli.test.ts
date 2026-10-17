@@ -172,7 +172,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
 test("pr wait runs locally through gh with outcome exit codes and never contacts the control plane", async () => {
   const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
   const json = (value: unknown): GhOutcome => ({ stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false });
-  const fakeGh = (conclusion: string | null, extra: Record<string, unknown> = {}) => {
+  const fakeGh = (conclusion: string | null, extra: Record<string, unknown> = {}, admitted = false) => {
     const calls: string[][] = [];
     const gh: GhRunner = async (args) => {
       calls.push(args);
@@ -181,9 +181,13 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
         return json({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
           url: "https://github.com/picoduck/wollipog/pull/7", state: "OPEN", isDraft: false, headRefOid: head, baseRefName: "main",
           mergeStateStatus: "BLOCKED", mergeCommit: null, mergeQueueEntry: null,
+          createdAt: "2026-10-11T10:00:00Z", timelineItems: { nodes: [{ createdAt: "2026-10-12T09:00:00Z" }] },
           commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [
-            { __typename: "CheckRun", name: "CI", status: conclusion ? "COMPLETED" : "IN_PROGRESS", conclusion, startedAt: "t" },
-            ...(conclusion === "SKIPPED" ? [{ __typename: "CheckRun", name: "Browser", status: "QUEUED", conclusion: null }] : []),
+            { __typename: "CheckRun", name: "CI", status: conclusion ? "COMPLETED" : "IN_PROGRESS", conclusion, startedAt: "t",
+              ...(admitted ? { databaseId: 200, checkSuite: { workflowRun: { databaseId: 20, runAttempt: 1, event: "pull_request",
+                createdAt: "2026-10-12T10:00:00Z", workflow: { databaseId: 30 } } } } : {}),
+            },
+            ...(conclusion === "SKIPPED" && !admitted ? [{ __typename: "CheckRun", name: "Browser", status: "QUEUED", conclusion: null }] : []),
           ] } } } }] },
           ...extra,
         } } } });
@@ -191,6 +195,14 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
       if (args.some((arg) => arg.includes("/rules/branches/"))) {
         return json([{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "CI" }] } }]);
       }
+      if (args.some((arg) => arg.includes("/attempts/"))) return json({ total_count: 1, jobs: [{
+        name: "CI", check_run_url: "https://api.github.com/repos/picoduck/wollipog/check-runs/200",
+        run_attempt: 1, status: "completed", conclusion: "skipped",
+      }] });
+      if (args.some((arg) => arg.includes("/actions/runs?"))) return json({ total_count: 1, workflow_runs: [{
+        id: 20, workflow_id: 30, head_sha: head, event: "pull_request", run_attempt: 1,
+        created_at: "2026-10-12T10:00:00Z", status: "completed",
+      }] });
       return json({});
     };
     return { gh, calls };
@@ -223,6 +235,12 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   assert.equal(skipped.code, 124, "an old skipped draft check cannot certify newly admitted CI");
   assert.equal(JSON.parse(skipped.stdout).outcome, "timeout");
   assert.deepEqual(JSON.parse(skipped.stdout).checks.required, [{ name: "CI", state: "pending", reported: true }]);
+
+  const legitimateSkip = await run(["pr", "wait", "picoduck/wollipog#7", "--head", head, "--timeout", "1000", "--json"],
+    fakeGh("SKIPPED", {}, true).gh);
+  assert.equal(legitimateSkip.code, 0, "a current admitted skip satisfies the check wait behind an independent gate");
+  assert.equal(JSON.parse(legitimateSkip.stdout).outcome, "checks_passed");
+  assert.equal(JSON.parse(legitimateSkip.stdout).merged, false);
 
   const merged = await run(["pr", "wait", "https://github.com/picoduck/wollipog/pull/7", "--json"],
     fakeGh(null, { state: "MERGED", mergeCommit: { oid: head } }).gh);
