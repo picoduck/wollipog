@@ -5,6 +5,7 @@ import {
   agentContextKey,
   CODEX_EXEC_RETIRED_CONFIG_REASON,
   isRetiredCodexExec,
+  PERSONAL_ORGANIZATION_ID,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AgentContext,
@@ -12,6 +13,7 @@ import {
   type BoxStatus,
   type BoxView,
   type IdentityAdministrationView,
+  type IdentityContextView,
   type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
@@ -56,6 +58,7 @@ import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
 import { AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { InstancesPanel } from "./InstancesPanel.js";
 import { ProviderAccountsSection } from "./ProviderAccountsSection.js";
+import { activeSessionConflict } from "./active-session-conflict.js";
 import { MachineSkillsSection } from "./MachineSkillsSection.js";
 import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettings.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
@@ -388,7 +391,12 @@ function AgentRow({
 }
 
 /** The meta + agents + workspaces body shared by runner cards and (once online) box cards. */
-function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean }) {
+function RunnerDetails({ runner, online, canManageProfiles = false }: {
+  runner: RunnerView;
+  online: boolean;
+  /** The viewer may use the provider profile routes: see `canManageProviderProfiles`. */
+  canManageProfiles?: boolean;
+}) {
   const pv = runner.protocolVersion;
   const [findingSessions, setFindingSessions] = useState(false);
   const externalSessionsSupported = runnerSupportsProtocol(pv, "externalSessions");
@@ -455,7 +463,7 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
             </>
           )}
         </dl>
-        <ProviderAccountsSection runner={runner} online={online} />
+        <ProviderAccountsSection runner={runner} online={online} canManageProfiles={canManageProfiles} />
         <details className="runner-agents disclosure">
           <summary>
             <ChevronRightIcon className="disclosure-chevron" />
@@ -595,33 +603,16 @@ export interface LifecycleConflictPresentation {
   detailRowsOverflow: number;
 }
 
-function normalizedSessionTitle(value: unknown): string {
-  if (typeof value !== "string") return "Untitled Session";
-  return value.replace(/\s+/g, " ").trim() || "Untitled Session";
-}
-
 export function lifecycleConflictPresentation(
   error: ApiError,
   action: "update" | "reconnect" | "adopt",
 ): LifecycleConflictPresentation {
-  const count = typeof error.details?.activeSessionCount === "number" ? error.details.activeSessionCount : null;
-  const detailRows: ConfirmationDetailRow[] = Array.isArray(error.details?.activeSessions)
-    ? error.details.activeSessions
-        .filter((session): session is { title?: unknown; status?: unknown } => !!session && typeof session === "object")
-        .map((session) => ({
-          label: normalizedSessionTitle(session.title),
-          ...(typeof session.status === "string" ? { status: statusMeta("session", session.status) } : {}),
-        }))
-    : [];
+  const { count, detailRows, detailRowsOverflow } = activeSessionConflict(error);
   const actionLabel = action === "update" ? "Updating" : action === "reconnect" ? "Reconnecting" : "Adopting legacy data for";
   const message = count == null
     ? `${actionLabel} this runner will interrupt active work.`
     : `${actionLabel} this runner will interrupt ${count} active session${count === 1 ? "" : "s"}.`;
-  return {
-    message,
-    detailRows,
-    detailRowsOverflow: count == null ? 0 : Math.max(0, count - detailRows.length),
-  };
+  return { message, detailRows, detailRowsOverflow };
 }
 
 function updateSourceLabel(source: "staged" | "release-cache", releaseTag: string): string {
@@ -1300,17 +1291,30 @@ function BoxConnectionDetailsDialog({ box, onClose }: { box: BoxView; onClose: (
   );
 }
 
+/** Provider profile routes (#3239) are neither member-scoped nor organization-admin routes, so the
+ * control plane confines them to Owners and Admins of its personal organization; an Owner or Admin
+ * of any other organization would be refused, so the actions are not offered there. */
+export function canManageProviderProfiles(
+  context: Pick<IdentityContextView, "organizationId" | "role"> | null | undefined,
+): boolean {
+  return !!context && (context.role === "owner" || context.role === "admin") &&
+    context.organizationId === PERSONAL_ORGANIZATION_ID;
+}
+
 /** A box card: SSH target + bootstrap status + actions, with the runner's details once online. */
 export function BoxCard({
   box,
   runner,
   canManage,
+  canManageProfiles = false,
   onReconnect,
   onRemove,
 }: {
   box: BoxView;
   runner: RunnerView | undefined;
   canManage: boolean;
+  /** See `canManageProviderProfiles`. */
+  canManageProfiles?: boolean;
   onReconnect: (boxId: string, force: boolean) => Promise<void>;
   onRemove: (boxId: string) => Promise<void>;
 }) {
@@ -1478,7 +1482,7 @@ export function BoxCard({
       {connHint && <Notice tone="info">{connHint}</Notice>}
       <Notice tone="neutral">{sshRunnerLifecycleHint()}</Notice>
       {runner ? (
-        <RunnerDetails runner={runner} online={harnessStatusCurrent} />
+        <RunnerDetails runner={runner} online={harnessStatusCurrent} canManageProfiles={canManageProfiles} />
       ) : inProgress ? (
         <div className="empty-sub">Waiting for the runner to come online…</div>
       ) : box.status === "offline" ? (
@@ -1503,6 +1507,7 @@ export function BoxCard({
 export function NativeRunnerCard({
   runner,
   canManage,
+  canManageProfiles = false,
   busy,
   removeError,
   onRediscover,
@@ -1511,6 +1516,8 @@ export function NativeRunnerCard({
 }: {
   runner: RunnerView;
   canManage: boolean;
+  /** See `canManageProviderProfiles`. */
+  canManageProfiles?: boolean;
   busy: boolean;
   removeError?: string;
   onRediscover: (runnerId: string) => void | Promise<void>;
@@ -1556,7 +1563,7 @@ export function NativeRunnerCard({
         )}
       </div>
       {removeError && <div className="empty-sub box-error" role="alert">{removeError}</div>}
-      <RunnerDetails runner={runner} online={runner.status === "online"} />
+      <RunnerDetails runner={runner} online={runner.status === "online"} canManageProfiles={canManageProfiles} />
       <NativeRunnerHealth
         runner={runner}
         canRepair={canManage}
@@ -1587,6 +1594,7 @@ export function RunnersView() {
     : requestedSection;
   const identityRole = identity?.context.role ?? null;
   const canManageMachines = identityRole === "owner" || identityRole === "admin";
+  const canManageProfiles = canManageProviderProfiles(identity?.context);
   const selectSection = (next: ConnectionSection) => navigate({ name: "runners", section: next });
   useEffect(() => {
     if (!instances.desktopMultiInstance && requestedSection === "instances") {
@@ -1815,6 +1823,7 @@ export function RunnersView() {
             box={box}
             runner={runners.get(box.runnerId)}
             canManage={canManageMachines}
+            canManageProfiles={canManageProfiles}
             onReconnect={reconnectBox}
             onRemove={removeBox}
           />
@@ -1824,6 +1833,7 @@ export function RunnersView() {
             key={runner.runnerId}
             runner={runner}
             canManage={canManageMachines}
+            canManageProfiles={canManageProfiles}
             busy={Boolean(busy[runner.runnerId])}
             removeError={removeError[runner.runnerId]}
             onRediscover={rediscover}

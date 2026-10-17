@@ -686,7 +686,8 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 // 225: provider profile grants (#3239): `adopt_provider_profile` / `revoke_provider_profile_grant`
 //      and their results, `RegisterMessage.providerProfileIds`, `RegisteredMessage.providerProfileGrants`
 //      (the complete active grants for the profiles this runner reports, plus its own accounts'
-//      pending grants), and `ProviderAccountDefinition.profile`. The control plane sends
+//      pending grants), `ProviderAccountDefinition.profile`, and `SessionSnapshot.providerProfileId`
+//      (the profile a session's account binding recorded). The control plane sends
 //      profile commands only to a v225+ runner; a runner projects profiles, and uses a HOME holding
 //      a profile marker, only for a v225+ control plane that lists an active grant for it.
 export const PROTOCOL_VERSION = 225;
@@ -3697,6 +3698,10 @@ export interface HostAdminDoctorView {
 }
 
 export type OrganizationRole = "owner" | "admin" | "operator" | "viewer";
+/** The control plane's personal organization. Global resources (routes that are neither
+ * member-scoped nor organization-admin routes, such as provider profile actions) belong to it, so
+ * Owners and Admins of any other organization are refused them. */
+export const PERSONAL_ORGANIZATION_ID = "org_personal";
 export type UserStatus = "active" | "suspended";
 
 export interface OrganizationView {
@@ -7250,6 +7255,9 @@ export interface SessionView {
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  /** Protocol v225 (#3239): the provider profile the account binding recorded. Absent for a binding
+   * made before the account was adopted, a legacy HOME, and older control planes. */
+  providerProfileId?: string;
   title: string;
   titleSource?: SessionTitleSource;
   /** Canonical provider activity timestamp from stable ACP session_info_update; presentation-only. */
@@ -7461,6 +7469,11 @@ export interface SessionSnapshot {
   providerAccountAutomaticallySelected?: boolean;
   /** Three-valued: undefined is an older peer; null explicitly clears an earlier failure. */
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView | null;
+  /** Protocol v225 (#3239): the provider profile the session's account binding recorded when it was
+   * made. Three-valued: undefined carries no information (an older peer, or a registration snapshot
+   * built before version negotiation); null is a binding without a profile (a legacy HOME, or one
+   * made before adoption). */
+  providerProfileId?: string | null;
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;

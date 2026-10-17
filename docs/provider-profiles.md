@@ -88,10 +88,32 @@ naming the profile). Each (runner, account, grant) is sent at most once per five
 account reports do not repeat it. No reconnect is needed.
 
 Adoption is strict. After adoption only explicitly granted control planes may use the HOME; grants are
-never reconstructed from lease-journal owners. Sessions created after adoption that use the account
-are checked against its recorded profile id. Session-level `providerProfileId` binding, the adoption
-confirmation copy, automatic grants for accounts created through Add Account and managed profile
-paths are later parts of #3239.
+never reconstructed from lease-journal owners. Other control planes that share the Machine's OS
+account lose the implicit access they had to the HOME. Sessions created after adoption record the
+profile id (see [Sessions](#sessions)). Automatic grants for accounts created through Add Account and
+managed profile paths are a later part of #3239.
+
+## Web Actions
+
+The Accounts list on a Machine shows each account's profile state from `profile.access`: **Profile**
+(`granted`), **Grant Pending** (`pending`) or **Not Granted** (`not_granted`); a legacy HOME has no
+badge. An Owner or Admin of the personal control-plane organization sees two actions on a v225
+runner, and nobody sees them on an older runner. A member who can manage the Machine, and an Owner or
+Admin of any other organization (whom the routes refuse; see
+[Authorization and Audit](#authorization-and-audit)), see only the badges:
+
+- **Adopt as Profile**, for an account without a profile, `not_granted`, or `pending` (a retry), while
+  the Machine is online. The confirmation says that after adoption only control planes granted the
+  profile can use the HOME, so other control planes sharing the Machine's account lose access, and
+  that existing sessions keep working while new sessions record the profile. Coded refusals, the
+  capability refusal and a 504 (the Machine did not confirm in time; the grant completes when it
+  reports the account again) are shown in the section.
+- **Revoke Access**, for `granted` or `pending`, also while the Machine is offline (the control plane
+  records the revocation; the runner drops the grant at its next registration). The confirmation
+  says sessions that use the profile cannot restart until access is granted again and that other
+  control planes are not affected. A `PROVIDER_PROFILE_HAS_ACTIVE_SESSIONS` refusal opens a second
+  confirmation, **Revoke Access from Active Sessions**, listing the sessions, which retries with
+  `force: true`.
 
 ## Registration and Use
 
@@ -122,6 +144,58 @@ so one refused HOME does not fail the whole pass.
 
 Account reports to a v225 control plane carry `profile: { id, access }` where `access` is `granted`,
 `pending` (this control plane's grant is recorded but not yet confirmed here) or `not_granted`.
+
+## Sessions
+
+A session's account binding is made once and is authoritative afterwards; a restart never re-reads
+the configured account. Provider profiles add one field to it:
+
+- A **new** binding (a session created with an account, an account switch target, or the account
+  chosen in authentication recovery) records the profile id the runner has verified for the
+  account's HOME as the session's `providerProfileId`: the account's configured `profileId`, or,
+  when the configuration has none (a replacement runner's account pointing at a HOME another runner
+  adopted), the HOME marker's identity when this control plane's access to it is `granted` or
+  `pending`. A binding to an unadopted account, or to a HOME this control plane may not use, records
+  none. Existing bindings are never backfilled, and the discovered id is not written back to the
+  account's configuration.
+- A binding made **before** the account was adopted keeps its recorded credential and conversation
+  homes and gets no profile id. Its acquisitions still expect the id the configured account records
+  for that HOME path, as above.
+- An account handoff (manual switch, automatic switch, or the account chosen in authentication
+  recovery) records the target's id as `pendingProviderProfileId` with the rest of the pending
+  binding, so a handoff that resumes after a runner restart still knows it. A follow-up selected
+  mid-handoff keeps its own. A fork's temporary provider uses the source session's binding.
+- When the handoff runs (resuming a stopped session, or replacing an active session's provider),
+  the runner re-resolves the target account, and the saved `pendingProviderProfileId` is
+  authoritative. A target that now reports a different profile id (its configured id, or a usable
+  marker identity) refuses the switch: nothing is bound, the pending binding is cleared, and the
+  refusal is reported like any other switch failure (the **Account Switch Failed** notice and a
+  transcript error for an active session; the command's failure for a stopped one). A target that
+  reports no id binds the saved one, so a replaced HOME is still refused at its lease. A handoff
+  saved without an id binds whatever the target reports when it runs.
+
+The session's recorded `providerProfileId` is the expected id of every acquisition of the session's
+credential HOME: the driver launch, an Agent TUI, launch preparation and provider forks. It takes
+precedence over the id the configured account records for the path, so a HOME substituted under a
+renamed or re-pointed account, or a replacement directory without the marker, is refused for that
+session as `profile_changed` before any provider starts. An acquisition of any other HOME is not
+bound by it.
+
+Session snapshots to a v225 control plane carry `providerProfileId`: the id, or `null` for a binding
+without one. It is absent for older control planes and in the register frame's pre-negotiation
+snapshots, and the control plane keeps the stored value when it is absent. The control plane stores
+it in `sessions.provider_profile_id` and projects it as `SessionView.providerProfileId`.
+
+Session creation refuses, before anything is sent to the runner, an account the runner would refuse
+at its lease:
+
+| Case | Refusal |
+| --- | --- |
+| The runner is below v225 and this control plane holds an active grant for the account | 409 "This machine needs a newer runner for provider profiles. Update and restart the runner." |
+| The account reports a profile, this control plane's grant for it was revoked, and no live grant is left | 409 "Access to this provider profile was revoked for this control plane." |
+
+Both read grants in the runner's scope only. An account without a profile, or one with a live grant,
+is unaffected.
 
 ## Revocation
 
@@ -156,9 +230,9 @@ apply unchanged: a runner-created HOME is deleted only when nothing on the Machi
 
 | Peer | Behavior |
 | --- | --- |
-| Runner below v225 | Every profile route returns 409 "This machine needs a newer runner for provider profiles. Update and restart the runner." |
-| Control plane below v225 | The runner never reports a profile-bearing account to it, and a HOME holding a marker is refused as `profile_unsupported_control_plane`. Marker-less homes behave as before. |
-| Revoked or never-granted control plane | The runner refuses the HOME as `profile_not_granted`. |
+| Runner below v225 | Every profile route returns 409 "This machine needs a newer runner for provider profiles. Update and restart the runner." Session creation with an account this control plane holds an active grant for returns the same sentence. The web hides the profile actions. |
+| Control plane below v225 | The runner never reports a profile-bearing account to it, and a HOME holding a marker is refused as `profile_unsupported_control_plane`. Marker-less homes behave as before. Session snapshots omit `providerProfileId`. |
+| Revoked or never-granted control plane | The runner refuses the HOME as `profile_not_granted`. Session creation with a revoked account returns 409 "Access to this provider profile was revoked for this control plane." |
 
 ## Authorization and Audit
 

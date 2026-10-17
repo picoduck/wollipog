@@ -4416,6 +4416,34 @@ test("provider account switch failures round-trip and clear through runner snaps
   assert.equal(db.getSession("account-switch-failure")?.providerAccountId, "work");
 });
 
+test("a session's recorded provider profile id is stored, projected, kept when absent and cleared by null (#3239)", () => {
+  const db = withRunner();
+  const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  const summary = (id: string) => db.listSessionSummaries().find((session) => session.id === id);
+  db.createSessionFromSnapshot(snapshot({ id: "profiled", providerAccountId: "work", providerAccountLabel: "Work", providerProfileId: profileId }),
+    "runner-1", 2_000);
+  assert.equal(db.getSession("profiled")?.providerProfileId, profileId);
+  assert.equal(summary("profiled")?.providerProfileId, profileId);
+
+  // A pre-negotiation registration snapshot (or an older runner) carries no information.
+  db.updateSessionFromSnapshot("profiled", snapshot({ id: "profiled", providerAccountId: "work", providerAccountLabel: "Work", seq: 1 }), 3_000);
+  assert.equal(db.getSession("profiled")?.providerProfileId, profileId);
+
+  // A malformed id is ignored rather than stored.
+  db.updateSessionFromSnapshot("profiled", snapshot({ id: "profiled", providerAccountId: "work", providerProfileId: "../home", seq: 2 }), 4_000);
+  assert.equal(db.getSession("profiled")?.providerProfileId, profileId);
+
+  // A handoff to an unprofiled account reports an explicit null.
+  db.updateSessionFromSnapshot("profiled", snapshot({ id: "profiled", providerAccountId: "personal", providerAccountLabel: "Personal",
+    providerProfileId: null, seq: 3 }), 5_000);
+  assert.equal(db.getSession("profiled")?.providerProfileId, undefined);
+  assert.equal(summary("profiled")?.providerProfileId, undefined);
+  assert.equal("providerProfileId" in db.getSession("profiled")!, false);
+
+  db.createSessionFromSnapshot(snapshot({ id: "legacy", providerAccountId: "work", providerAccountLabel: "Work" }), "runner-1", 2_000);
+  assert.equal(db.getSession("legacy")?.providerProfileId, undefined, "a binding made before adoption records none");
+});
+
 test("session worktree identity round-trips through create and update snapshots", () => {
   const db = withRunner();
   const first = {

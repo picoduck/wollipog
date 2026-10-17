@@ -154,6 +154,22 @@ export class ProviderProfileGrants {
     return this.deps.accounts().find((account) => account.profileId !== undefined && resolve(account.directory) === target)?.profileId;
   }
 
+  /** The profile id a new session binding records for a configured account (#3239): the id its
+   * configuration records, else its HOME marker's identity when this control plane may use it
+   * (`granted` or `pending`). A replacement runner's account may point at a HOME another runner
+   * adopted without recording `profileId`; the marker is what the runner verified. Only the exact
+   * configured account (id, provider and HOME path) counts. */
+  bindingProfileId(binding: { id: string; provider: "claude" | "codex"; credentialHome: string }): string | undefined {
+    let target: string;
+    try { target = resolve(binding.credentialHome); } catch { return undefined; }
+    const account = this.deps.accounts().find((candidate) => candidate.id === binding.id &&
+      candidate.provider === binding.provider && resolve(candidate.directory) === target);
+    if (!account) return undefined;
+    if (account.profileId !== undefined) return account.profileId;
+    const profile = this.accountProfile(account);
+    return profile && (profile.access === "granted" || profile.access === "pending") ? profile.id : undefined;
+  }
+
   /** Whether an acquisition for this account would pass the worker's profile check now. Background
    * passes skip accounts that fail it, so one refused HOME does not fail the whole pass. */
   usable(account: RunnerProviderAccount): boolean {
