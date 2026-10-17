@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   campaignAuthorityPreflight, runnerSupportsProtocol, validCampaignControl,
+  FULL_CONTROL_EVIDENCE_EXCEPTIONS, FULL_CONTROL_HUMAN_REQUIRED_LABELS, FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId,
   type CampaignAuthorityOperation, type CampaignLaunchCapability, type CampaignLaunchPreflight,
@@ -156,19 +157,6 @@ export function campaignLaunchDigest(value: unknown): string {
   return createHash("sha256").update(canonical(value)).digest("hex");
 }
 
-const HUMAN_REQUIRED_LABELS: Record<string, string> = {
-  secrets_and_sign_in: "Secrets and Sign-In",
-  persistent_permissions: "Persistent Permission Grants",
-  provider_access_expansion: "Provider Access Expansion",
-  external_elicitation: "External Provider Forms",
-  root_forms_without_suggested_answers: "Root Questions Without a Suggested Answer",
-  unverified_tool_effects: "Tool Effects That Cannot Be Verified",
-  git_execution_without_bounded_effect_proof: "Git Commands Without Bounded Effect Proof",
-  script_execution_without_bounded_effect_proof: "Scripts Without Bounded Effect Proof",
-  human_required_rules: "Human Required Governance Rules",
-  relative_shell_commands_without_verified_cwd: "Relative Shell Commands Without a Verified Directory",
-};
-
 /** Readiness comes from current server and runner facts. `unsupported` blocks the launch with an
  * actionable reason; `human_required` is a disclosed exception that routes that decision class to
  * the Human. No caller field, preset, protocol number alone or fixture can mark a capability verified. */
@@ -274,10 +262,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     ? "Screenshots attached as private Session artifacts are reviewed by the Orchestrator."
     : facts.imageReview.effectiveOwner === "human" && facts.imageReview.fallback ? `Screenshots need your review: ${facts.imageReview.fallback.reason}`
     : "Screenshots need your review because UI evidence approval is not delegated.", false);
-  add("video_evidence", "Video Evidence Review", "human_required",
-    "Video evidence needs your review until production video review is available.", false);
-  add("external_evidence", "External Evidence Review", "human_required",
-    "Evidence stored outside private Session artifacts (links only) needs your review.", false);
+  for (const item of FULL_CONTROL_EVIDENCE_EXCEPTIONS) add(item.id, item.exception, "human_required", item.reason, false);
 
   const blockers = capabilities.filter((item) => item.mandatory && item.state !== "verified");
   const ready = blockers.length === 0 && proposal !== null;
@@ -304,7 +289,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     },
     humanRequired: [
       ...capabilities.filter((item) => item.state === "human_required").map((item) => ({ exception: item.capability, reason: item.reason })),
-      ...humanRequiredRequests.map((id) => ({ exception: HUMAN_REQUIRED_LABELS[id] ?? id, reason: "Always decided by the Human under Full Control." })),
+      ...humanRequiredRequests.map((id) => ({ exception: FULL_CONTROL_HUMAN_REQUIRED_LABELS[id] ?? id, reason: FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON })),
     ],
     blockers: blockers.map((item) => ({ capability: item.capability, reason: item.reason })),
   };

@@ -17519,6 +17519,7 @@ button.setting-row { cursor: pointer; }
   border-radius: var(--radius-md);
 }
 .orchestrator-policy-area legend { padding: 0 var(--space-1); font-weight: var(--weight-semibold); }
+.facts + .orchestrator-policy-area { margin-top: var(--space-3); }
 .orchestrator-policy-area > p { margin: 0; }
 .orchestrator-policy-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 220px); align-items: center; gap: var(--space-3); }
 .orchestrator-policy-control > span { display: flex; flex-direction: column; gap: 2px; font-weight: var(--weight-medium); }
