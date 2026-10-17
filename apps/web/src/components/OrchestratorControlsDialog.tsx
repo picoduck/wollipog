@@ -278,6 +278,13 @@ export function OrchestratorControlsDialog({
   // A descendant's copied policy is not authoritative; only the projected root state is.
   const effectiveMode = projectedControl ? projectedControl.mode
     : session.parentSessionId ? "unknown" : session.orchestratorPolicy?.control?.mode ?? "custom";
+  // The choice follows the root whenever its effective mode changes (enabled, revoked, reloaded), so a
+  // revoked campaign shows Custom instead of offering Full Control back with a fresh readiness check.
+  const [choiceFollows, setChoiceFollows] = useState(effectiveMode);
+  if (choiceFollows !== effectiveMode) {
+    setChoiceFollows(effectiveMode);
+    if (effectiveMode !== "unknown") setControlPreview(effectiveMode);
+  }
   // The saved Full Control budget is proposed when enabling; Revoke never needs it.
   const [savedDefaults, setSavedDefaults] = useState<OrchestratorDefaults | null>(null);
   const canEnable = !fullControl && !session.parentSessionId && session.orchestratorPolicy !== undefined;

@@ -200,8 +200,10 @@ test("explicit Full Control revocation uses the current revision and preserves c
   const writes: unknown[] = [];
   const fresh = { ...initial, orchestratorPolicy: { ...initial.orchestratorPolicy!, control: { mode: "custom" as const } },
     parentControlPolicy: { ...initial.parentControlPolicy!, revision: 4 } };
+  const preflights: unknown[] = [];
   const harness = await open(initial, {
     revokeCampaignControl: async (...args) => { writes.push(args); return fresh; },
+    fullControlEnablePreflight: async (...args) => { preflights.push(args); return { preflight: enablePreflight(false), expectedRevision: 4 }; },
   });
   await act(async () => [...harness.dialog().querySelectorAll<HTMLButtonElement>("button")]
     .find((node) => node.textContent?.trim() === "Revoke Full Control")!.click());
@@ -210,6 +212,11 @@ test("explicit Full Control revocation uses the current revision and preserves c
   assert.deepEqual(harness.changed[0]!.orchestratorPolicy!.behavior, initial.orchestratorPolicy!.behavior);
   assert.deepEqual(harness.changed[0]!.orchestratorPolicy!.execution, initial.orchestratorPolicy!.execution);
   assert.match(harness.dialog().textContent ?? "", /Effective Mode: Custom/);
+  // The choice follows the revoked root: Custom, with no enable summary or readiness check offered back.
+  await settle();
+  assert.equal(harness.dialog().querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.checked, true);
+  assertNoDomNode(harness.dialog().querySelector('section[aria-label="Enable Full Control"]'));
+  assert.deepEqual(preflights, []);
 });
 
 test("a conflicting Full Control revocation reloads without replay and descendants cannot revoke", async () => {
