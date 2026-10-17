@@ -3258,9 +3258,12 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  /** `requireDelivered` callers (archive retirement) also probe a live upstream: a pushed,
+   * squash-merged branch is published but not delivered until the forge proves its exact head. */
   private async discoverUnlinkedMergedWorktree(
     sessionId: string,
     path: string,
+    options: { requireDelivered?: boolean } = {},
   ): Promise<{ forgeUnavailable: boolean }> {
     const initial = this.store.readMeta(sessionId);
     if (!initial) return { forgeUnavailable: false };
@@ -3273,7 +3276,11 @@ export class SessionManager {
     const discovered = await this.discoverMergedWorktreePullRequest(
       worktree.path,
       checkedOutBranch,
-      { context: initial.context, onForgeUnavailable: () => { forgeUnavailable = true; } },
+      {
+        context: initial.context,
+        onForgeUnavailable: () => { forgeUnavailable = true; },
+        ...(options.requireDelivered ? { includeLiveUpstream: true } : {}),
+      },
     );
     if (!discovered) return { forgeUnavailable };
     this.worktreePullRequestDiscoveryRetryAt.delete(JSON.stringify([sessionId, worktree.path]));
@@ -3951,7 +3958,9 @@ export class SessionManager {
     }
     let unlinkedForgeUnavailable = false;
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
-      unlinkedForgeUnavailable = (await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path)).forgeUnavailable;
+      unlinkedForgeUnavailable = (await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path, {
+        requireDelivered: options.trigger === "archive_retirement",
+      })).forgeUnavailable;
       const latest = this.store.readMeta(sessionId);
       if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
       const current = this.attributedWorktrees(latest)
@@ -15618,7 +15627,8 @@ export class SessionManager {
     let unlinkedForgeUnavailable = false;
     if (!worktree.pullRequest) {
       unlinkedForgeUnavailable = (await this.discoverUnlinkedMergedWorktree(
-        record.sessionId, record.worktreePath)).forgeUnavailable;
+        record.sessionId, record.worktreePath,
+        { requireDelivered: record.trigger === "archive_retirement" })).forgeUnavailable;
       meta = this.store.readMeta(record.sessionId);
       worktree = locate(meta);
       if (!meta || !worktree || worktree.source === "attached") return "unavailable";
