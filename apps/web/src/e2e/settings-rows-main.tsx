@@ -229,6 +229,9 @@ let retentionState: Pick<ArchivedHistoryRetentionView, "retentionDays" | "source
   source: retentionMode === "off" ? "default" : retentionMode === "environment" ? "environment" : "organization",
   prunesFrom: retentionMode === "off" ? null : Date.UTC(2026, 8, 2, 15, 0),
 };
+/** Fixed, not relative to the real clock, so captures stay stable. The panel compares it with
+ * `Date.now()`: a spec asserting the schedule must pin the page clock before it, as
+ * archived-history-retention.spec.ts does. */
 const RETENTION_ARMED_AT = Date.UTC(2026, 9, 17, 9, 30);
 
 function retentionView(previewDays: number | null): ArchivedHistoryRetentionView {
