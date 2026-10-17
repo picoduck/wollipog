@@ -270,14 +270,11 @@ const AA_NON_TEXT = 3;
  * blocks something.
  */
 const ICON_ONLY = new Set([
-  // Onboarding status marks: each renders one aria-hidden glyph (✓, ! or △) beside a heading or
-  // label that states the status in text, which OnboardRunnerDialog.test.tsx pins. They are measured
-  // over their own `--bg-elev-3` disc as colour-only rules on a base fill.
+  // The local runner's status mark: one aria-hidden glyph (✓ or !) beside a heading that states the
+  // status in text, which OnboardRunnerDialog.test.tsx pins. It is measured over its own
+  // `--bg-elev-3` disc as a colour-only rule on a base fill.
   ".onboard-local-ready .onboard-local-icon",
   ".onboard-local-needs-attention .onboard-local-icon",
-  ".onboard-health-pass .onboard-health-icon",
-  ".onboard-health-warning .onboard-health-icon",
-  ".onboard-health-fail .onboard-health-icon",
 ]);
 
 /**

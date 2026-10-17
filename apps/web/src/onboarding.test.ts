@@ -4,8 +4,10 @@ import { CODEX_EXEC_RETIRED_CONFIG_REASON, type RunnerView } from "@wollipog/pro
 import {
   buildRunnerConfigJson,
   buildRunnerStartCommand,
+  firstWorkspace,
   localRunnerReadiness,
   onboardingHealth,
+  runnerHostLabel,
   RUNNER_START_COMMAND,
   RUNNER_TOKEN_FILE,
   suggestRunnerId,
@@ -16,8 +18,7 @@ test("buildRunnerConfigJson produces valid JSON wired to the given control plane
   const json = buildRunnerConfigJson({
     runnerId: "laptop",
     runnerWsUrl: "ws://192.168.1.20:4317/runner",
-    workspaceId: "my-repo",
-    workspacePath: "/home/me/my-repo",
+    workspace: firstWorkspace("/home/me/my-repo", ""),
   });
   const cfg = JSON.parse(json);
   assert.equal(cfg.runnerId, "laptop");
@@ -42,6 +43,18 @@ test("buildRunnerConfigJson produces valid JSON wired to the given control plane
   );
 });
 
+test("Install Manually's first workspace is optional and named from its folder when unnamed", () => {
+  assert.equal(firstWorkspace("  ", "Ignored"), null);
+  assert.equal(JSON.parse(buildRunnerConfigJson({ runnerId: "laptop", runnerWsUrl: "ws://h/runner", workspace: null })).workspaces.length, 0);
+  assert.deepEqual(firstWorkspace("/srv/Work Repo/", ""), { id: "work-repo", name: "Work Repo", path: "/srv/Work Repo/" });
+  assert.deepEqual(firstWorkspace("C:\\code\\api", "API Server"), { id: "api-server", name: "API Server", path: "C:\\code\\api" });
+});
+
+test("the host choices read in words", () => {
+  assert.equal(runnerHostLabel("127.0.0.1"), "This computer (127.0.0.1)");
+  assert.equal(runnerHostLabel("192.0.2.10"), "192.0.2.10 (local network)");
+});
+
 function runner(overrides: Partial<RunnerView> = {}): RunnerView {
   return {
     runnerId: "laptop",
@@ -58,29 +71,73 @@ function runner(overrides: Partial<RunnerView> = {}): RunnerView {
   };
 }
 
-test("onboarding health stays pending until the configured runner connects", () => {
-  const checks = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceId: "repo" });
-  assert.deepEqual(checks.map((check) => check.status), ["pass", "pass", "pending", "pending", "pending"]);
-  assert.match(checks.find((check) => check.id === "credentials")?.detail ?? "", /runner\.token/);
-  assert.equal(checks.find((check) => check.id === "runner")?.command, RUNNER_START_COMMAND);
+test("before a credential every check waits for the person, and nothing is pending on the machine (#2992)", () => {
+  const checks = onboardingHealth({ credentialAvailable: false, runnerId: "gpu-lab-01", workspaceIds: ["repo"] });
+  assert.deepEqual(checks.map((check) => check.status), ["pass", "waiting", "waiting", "waiting", "waiting"]);
+  assert.equal(checks.find((check) => check.id === "credentials")?.detail, "Generate the credential for gpu-lab-01.");
+  assert.equal(checks.find((check) => check.id === "runner")?.detail, "Generate the credential, then start the runner.");
 });
 
-test("remote onboarding keeps the explicit insecure transport acknowledgement in recovery commands", () => {
-  const startCommand = buildRunnerStartCommand(true);
-  const checks = onboardingHealth({
-    credentialAvailable: true,
-    runnerId: "laptop",
-    workspaceId: "repo",
-    startCommand,
+test("once a credential exists, the machine checks are pending until the runner connects", () => {
+  const checks = onboardingHealth({ credentialAvailable: true, runnerId: "gpu-lab-01", workspaceIds: ["repo"] });
+  assert.deepEqual(checks.map((check) => check.status), ["pass", "pass", "pending", "pending", "pending"]);
+  const connection = checks.find((check) => check.id === "runner")!;
+  assert.equal(connection.detail, "Waiting for gpu-lab-01 to connect…");
+  assert.equal(connection.command, undefined, "the Start step already shows the command");
+});
+
+test("a blank workspace skips the workspace check, so an online runner completes without a workspace failure", () => {
+  const ready = {
+    id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server" as const,
+    available: true, authStatus: "authenticated" as const,
+    codexAppServer: { status: "supported" as const, appServerAvailable: true },
+  };
+  const before = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceIds: [] });
+  assert.equal(before.some((check) => check.id === "workspace"), false);
+  const online = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceIds: [], runner: runner({ agents: [ready] }) });
+  assert.deepEqual(online.map((check) => [check.id, check.status]), [
+    ["control-plane", "pass"], ["credentials", "pass"], ["runner", "pass"], ["agents", "pass"],
+  ]);
+});
+
+test("an offline runner's last-known ready agents are no warning: that row waits for the runner", () => {
+  const offline = runner({
+    status: "offline",
+    agents: [{
+      id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server",
+      available: true, authStatus: "authenticated", codexAppServer: { status: "supported", appServerAvailable: true },
+    }],
   });
-  assert.equal(checks.find((check) => check.id === "runner")?.command, startCommand);
+  const before = onboardingHealth({ credentialAvailable: false, runnerId: "laptop", workspaceIds: [], runner: offline, repair: true });
+  assert.deepEqual(before.map((check) => check.status), ["waiting", "waiting"]);
+  const after = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceIds: [], runner: offline, repair: true });
+  assert.deepEqual(after.map((check) => check.status), ["pending", "pending"]);
+});
+
+test("repair checks only the runner's known workspaces and reports agent problems as a warning", () => {
+  const machine = runner({
+    runnerId: "gpu-lab-01",
+    workspaces: [{ id: "models", name: "Models", path: "/data/models" }],
+    agents: [{ id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: false, authStatus: "unauthenticated" }],
+  });
+  const offline = onboardingHealth({ credentialAvailable: false, runnerId: "gpu-lab-01", workspaceIds: ["models"], runner: { ...machine, status: "offline" }, repair: true });
+  assert.deepEqual(offline.map((check) => check.id), ["runner", "workspace", "agents"], "no control-plane or credential rows");
+  assert.equal(offline[0]!.status, "waiting");
+  assert.equal(offline[0]!.detail, "gpu-lab-01 is offline. Replace its credential, then restart it.");
+  assert.equal(offline[1]!.status, "waiting");
+  assert.equal(offline[2]!.status, "warning");
+
+  const back = onboardingHealth({ credentialAvailable: true, runnerId: "gpu-lab-01", workspaceIds: ["models"], runner: machine, repair: true });
+  assert.deepEqual(back.map((check) => check.status), ["pass", "pass", "warning"]);
+  assert.equal(back[2]!.command, "claude auth login");
+  assert.ok(back.every((check) => !/has not advertised/.test(check.detail)));
 });
 
 test("onboarding health verifies online runner, workspace, and a friendly ready agent", () => {
   const checks = onboardingHealth({
     credentialAvailable: true,
     runnerId: "laptop",
-    workspaceId: "repo",
+    workspaceIds: ["repo"],
     runner: runner({
       workspaces: [{ id: "repo", name: "My repo", path: "/work/repo" }],
       agents: [{
@@ -104,7 +161,7 @@ test("onboarding health gives exact recovery commands for offline and unauthenti
   const checks = onboardingHealth({
     credentialAvailable: false,
     runnerId: "laptop",
-    workspaceId: "repo",
+    workspaceIds: ["repo"],
     runner: runner({
       status: "offline",
       agents: [{
@@ -120,11 +177,13 @@ test("onboarding health gives exact recovery commands for offline and unauthenti
     }),
   });
   const credential = checks.find((check) => check.id === "credentials")!;
-  assert.equal(credential.status, "pending");
-  assert.match(credential.detail, /Generate the one-time credential for “laptop”/);
+  assert.equal(credential.status, "waiting");
+  assert.match(credential.detail, /Generate the credential for laptop/);
   assert.doesNotMatch(credential.detail, /CONTROL_PLANE_TOKEN|shared/i);
-  assert.equal(checks.find((check) => check.id === "runner")?.status, "fail");
-  assert.equal(checks.find((check) => check.id === "agents")?.command, "claude auth login");
+  assert.equal(checks.find((check) => check.id === "runner")?.status, "waiting");
+  const agents = checks.find((check) => check.id === "agents")!;
+  assert.equal(agents.status, "warning", "a last-known problem is a warning while the runner is offline");
+  assert.equal(agents.command, "claude auth login");
 });
 
 test("Codex onboarding uses installation guidance without a universal npm command", () => {
@@ -133,7 +192,7 @@ test("Codex onboarding uses installation guidance without a universal npm comman
     evidenceSource: "Executable installation provenance", managedExternally: true as const,
     guidance: "Use this installation's exact manager.",
   };
-  const unsupported = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceId: "repo",
+  const unsupported = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceIds: ["repo"],
     runner: runner({ agents: [{ id: "codex", name: "Codex", command: "codex", args: [], env: {},
       driver: "codex-app-server", available: false,
       codexAppServer: { status: "unsupported", appServerAvailable: false }, update,
@@ -143,7 +202,7 @@ test("Codex onboarding uses installation guidance without a universal npm comman
   assert.match(unsupported.detail, /Use this installation's exact manager/);
   assert.doesNotMatch(unsupported.detail, /npm install/);
 
-  const missing = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceId: "repo",
+  const missing = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceIds: ["repo"],
     runner: runner({ agents: [{ id: "codex", name: "Codex", command: "codex", args: [], env: {},
       driver: "codex-app-server", available: false,
       codexAppServer: { status: "unavailable", appServerAvailable: false },
@@ -166,7 +225,7 @@ test("Codex onboarding suppresses an older Windows runner's unsafe update comman
       evidenceSource: "Executable installation provenance", managedExternally: true,
       guidance: legacy },
   }] });
-  const health = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceId: "repo",
+  const health = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceIds: ["repo"],
     runner: machine }).find((check) => check.id === "agents")!;
   assert.match(health.detail, /No copyable update command is available/);
   assert.doesNotMatch(health.detail, /Run `|%PATH%/);
@@ -179,7 +238,7 @@ test("onboarding health waits for current discovery even when registration carri
   const checks = onboardingHealth({
     credentialAvailable: true,
     runnerId: "laptop",
-    workspaceId: "repo",
+    workspaceIds: ["repo"],
     runner: runner({
       agentsRefreshed: false,
       agents: [{ id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true }],
@@ -189,16 +248,16 @@ test("onboarding health waits for current discovery even when registration carri
 });
 
 test("onboarding health blocks baseline runner-id collisions", () => {
-  const checks = onboardingHealth({ credentialAvailable: true, runnerId: "existing", workspaceId: "repo", runnerIdCollision: true });
+  const checks = onboardingHealth({ credentialAvailable: true, runnerId: "existing", workspaceIds: ["repo"], runnerIdCollision: true });
   assert.equal(checks.find((check) => check.id === "runner")?.status, "fail");
-  assert.match(checks.find((check) => check.id === "runner")?.detail ?? "", /already existed/);
+  assert.match(checks.find((check) => check.id === "runner")?.detail ?? "", /A runner named existing already exists/);
 });
 
 test("onboarding health keeps ACP auth guidance provider-neutral and configured agents honest", () => {
   const unauthenticated = onboardingHealth({
     credentialAvailable: true,
     runnerId: "laptop",
-    workspaceId: "repo",
+    workspaceIds: ["repo"],
     runner: runner({ agents: [{ id: "gemini", name: "Gemini", command: "gemini", args: [], env: {}, driver: "acp", available: false, authStatus: "unauthenticated" }] }),
   });
   const issue = unauthenticated.find((check) => check.id === "agents")!;
@@ -208,7 +267,7 @@ test("onboarding health keeps ACP auth guidance provider-neutral and configured 
   const configured = onboardingHealth({
     credentialAvailable: true,
     runnerId: "laptop",
-    workspaceId: "repo",
+    workspaceIds: ["repo"],
     runner: runner({ agents: [{ id: "custom", name: "Custom ACP", command: "custom", args: [], env: {}, driver: "acp" }] }),
   });
   assert.equal(configured.find((check) => check.id === "agents")?.status, "fail");
@@ -219,7 +278,7 @@ test("onboarding health requires ACP live evidence and promotes configured ACP a
   const registry = onboardingHealth({
     credentialAvailable: true,
     runnerId: "laptop",
-    workspaceId: "repo",
+    workspaceIds: ["repo"],
     runner: runner({ agents: [{ id: "registry", name: "Registry agent", command: "npx", args: [], env: {}, driver: "acp", source: "registry", available: true, authStatus: "unknown" }] }),
   });
   assert.equal(registry.find((check) => check.id === "agents")?.status, "warning");
@@ -228,7 +287,7 @@ test("onboarding health requires ACP live evidence and promotes configured ACP a
   const initialized = onboardingHealth({
     credentialAvailable: true,
     runnerId: "laptop",
-    workspaceId: "repo",
+    workspaceIds: ["repo"],
     runner: runner({ agents: [{
       id: "configured", name: "Configured ACP", command: "agent", args: [], env: {}, driver: "acp",
       available: true,
@@ -243,7 +302,7 @@ test("onboarding health never counts Codex exec as ready and labels offline prob
   const exec = onboardingHealth({
     credentialAvailable: true,
     runnerId: "laptop",
-    workspaceId: "repo",
+    workspaceIds: ["repo"],
     runner: runner({ agents: [{
       id: "codex-exec", name: "Codex", command: "codex", args: ["exec"], env: {}, driver: "codex", available: true,
       codexAppServer: { status: "unsupported", appServerAvailable: false },
@@ -256,7 +315,7 @@ test("onboarding health never counts Codex exec as ready and labels offline prob
   const offline = onboardingHealth({
     credentialAvailable: true,
     runnerId: "laptop",
-    workspaceId: "repo",
+    workspaceIds: ["repo"],
     runner: runner({ status: "offline", agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", available: false, authStatus: "unauthenticated" }] }),
   });
   const offlineAgent = offline.find((check) => check.id === "agents")!;
@@ -286,7 +345,7 @@ test("discovery's restart-only exec row does not make Codex ready when App Serve
   assert.equal(readiness.detail, message, "a failed check is fixed by rediscovering, not by an upgrade");
   assert.deepEqual(readiness.agentLabels, ["Codex App Server"]);
 
-  const health = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceId: "repo", runner: runner({ agents }) });
+  const health = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceIds: ["repo"], runner: runner({ agents }) });
   const check = health.find((item) => item.id === "agents")!;
   assert.equal(check.status, "fail");
   assert.equal(check.detail, message);

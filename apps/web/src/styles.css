@@ -12352,13 +12352,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex-direction: column;
   gap: 6px;
 }
-.onboard-error {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 8px 0;
-}
 .onboard-local {
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
@@ -12400,9 +12393,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font-size: 13px;
   line-height: 1.5;
 }
-.onboard-local-benefits {
-  margin-bottom: 13px;
-}
 .onboard-local-agents {
   display: flex;
   flex-wrap: wrap;
@@ -12438,18 +12428,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font-family: var(--mono);
   font-size: var(--text-sm);
 }
-.onboard-advanced-toggle {
-  align-self: flex-start;
-  margin-top: 8px;
-}
-.step-head {
-  font-weight: 600;
-  margin-bottom: 8px;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-}
 .tick {
   margin: 0;
   padding-left: 18px;
@@ -12475,72 +12453,122 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   color: var(--text-faint);
   margin: 8px 0 0;
 }
-.hint.warn {
-  color: var(--amber);
-}
-/* The onboarding host choices are LAN addresses: a long list scrolls sideways inside the track
-   rather than wrapping (§10.2). */
-.seg.runner-hosts {
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.onboard-health {
+
+/* -------------------------- Install Manually, Repair Connection --------------------------
+   RunnerSetupParts.tsx and its two dialogs (#2992; docs/design-system.md §7, §8.1, §8.7, §11.7):
+   a closed "What the Machine Needs" disclosure, numbered steps, then the Connection Check. */
+.runner-setup {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin: 12px 0 0;
+  gap: var(--space-5);
+  min-width: 0;
+}
+.runner-setup-needs {
+  margin: 0;
+  padding: var(--space-2) 0 0 var(--space-1);
+  list-style: none;
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+.runner-setup-needs > li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.runner-setup-needs svg {
+  flex: none;
+  margin-top: 3px;
+  color: var(--positive-text);
+}
+/* Each step: its title on the number's line, then its fields and wells 12px apart. */
+.runner-setup-steps > li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.runner-setup-steps > li > h3 {
+  margin: 0;
+  font: var(--type-body-strong);
+}
+.runner-setup-steps > li > p {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+.runner-setup-steps > li > .btn { align-self: flex-start; }
+.runner-setup-check {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.runner-setup-check > h3 {
+  margin: 0;
+  font: var(--type-section);
+}
+/* The Connection Check: one row per check, its icon on the title's line. A check waiting for the
+   person shows a hollow circle and a faint title; only one waiting on the machine spins. */
+.connection-check {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
   padding: 0;
   list-style: none;
 }
-.onboard-health > li {
+.connection-check > li {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  gap: 8px;
-  padding: 9px 10px;
+  grid-template-columns: var(--icon) minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--bg-elev-2);
 }
-.onboard-health-icon {
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: var(--bg-elev-3);
+.connection-check-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
   color: var(--text-dim);
-  font-weight: 700;
 }
-.onboard-health-pass .onboard-health-icon { color: var(--green); }
-.onboard-health-warning .onboard-health-icon { color: var(--amber); }
-.onboard-health-fail .onboard-health-icon { color: var(--red); }
-.onboard-health > li > div {
+.connection-check-pass .connection-check-icon { color: var(--positive-text); }
+.connection-check-warning .connection-check-icon { color: var(--amber); }
+.connection-check-fail .connection-check-icon { color: var(--danger-text); }
+.connection-check-waiting .connection-check-icon { color: var(--text-faint); }
+.connection-check-text {
   display: flex;
-  min-width: 0;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-1);
+  min-width: 0;
 }
-.onboard-health > li span,
-.onboard-health > li code {
+.connection-check-text > strong { font: var(--type-body-strong); }
+.connection-check-waiting .connection-check-text > strong { color: var(--text-faint); }
+.connection-check-text > span {
   color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.4;
-}
-.onboard-health > li code {
-  margin-top: 3px;
+  font: var(--type-small);
   overflow-wrap: anywhere;
 }
-.onboard-health-command {
-  display: flex;
+/* The check Wollipog is waiting on reads in full ink: it is the line that will change next. */
+.connection-check-pending .connection-check-text > span { color: var(--text); }
+@media (forced-colors: active) {
+  .runner-setup-needs svg,
+  .connection-check-icon { color: inherit; }
+}
+/* Why Done is off (§7.3): the footer's left slot, small and dim, with the spinner while Wollipog
+   waits for the runner; its own row on a phone, above the two buttons. */
+.modal-foot > .runner-setup-reason {
+  display: inline-flex;
+  flex: 0 1 auto;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 3px;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0 auto 0 0;
+  color: var(--text-dim);
+  font: var(--type-small);
 }
-.onboard-health-command .copy-btn {
-  margin-left: 0;
+@media (max-width: 760px) {
+  .modal-foot > .runner-setup-reason { flex-basis: 100%; }
 }
-
 /* Project management --------------------------------------------------- */
 .projects-view { min-height: 100%; }
 .project-manager-grid {

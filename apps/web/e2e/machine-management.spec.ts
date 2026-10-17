@@ -369,8 +369,8 @@ test("offline recovery stays stacked and usable in a narrow card on a desktop vi
   await expect.poll(() => card.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThan(280);
   expect(await page.evaluate(() => window.innerWidth)).toBe(1280);
 
-  const repair = page.getByRole("button", { name: "Repair Credentials", exact: true });
-  await expect(repair).toHaveText("Repair Credentials");
+  const repair = page.getByRole("button", { name: "Repair Connection…", exact: true });
+  await expect(repair).toHaveText("Repair Connection…");
   const geometry = await page.locator('[aria-label="Connection Offline"]').evaluate(recoveryGeometry);
   expect(geometry.button).not.toBeNull();
   // A Notice puts its actions in a row under the body (docs/design-system.md §13.2): the content
@@ -387,7 +387,7 @@ test("offline recovery stays stacked and usable in a narrow card on a desktop vi
   expect(geometry.button!.scrollHeight).toBeLessThanOrEqual(geometry.button!.clientHeight);
 
   await repair.click();
-  await expect(page.getByRole("dialog", { name: "Repair Runner Connection" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Repair Connection" })).toBeVisible();
 });
 
 test.describe("on a touch phone", () => {
@@ -399,7 +399,7 @@ test.describe("on a touch phone", () => {
     await setOffline(page);
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
 
-    const repair = page.getByRole("button", { name: "Repair Credentials", exact: true });
+    const repair = page.getByRole("button", { name: "Repair Connection…", exact: true });
     await expect(repair).toBeVisible();
     const geometry = await page.locator('[aria-label="Connection Offline"]').evaluate(recoveryGeometry);
     expect(geometry.button).not.toBeNull();
@@ -428,7 +428,7 @@ test("non-admin recovery guidance wraps inside a narrow mobile card", async ({ p
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
   await setOffline(page);
 
-  await expect(page.getByRole("button", { name: "Repair Credentials", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Repair Connection…", exact: true })).toHaveCount(0);
   const guidance = page.getByText("Ask an organization owner or admin to repair this connection.", { exact: true });
   await expect(guidance).toBeVisible();
   const geometry = await guidance.evaluate((element) => {
