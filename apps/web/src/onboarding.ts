@@ -4,12 +4,18 @@ import { CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec, type AgentDefinit
 import { agentDriverLabel } from "./agent-presentation.js";
 import { codexUpgradeGuidance } from "./runners.js";
 
+export interface RunnerConfigWorkspaceOption {
+  id: string;
+  name: string;
+  path: string;
+}
+
 export interface RunnerConfigOptions {
   runnerId: string;
   /** ws URL the runner registers against (control plane /runner channel). */
   runnerWsUrl: string;
-  workspaceId: string;
-  workspacePath: string;
+  /** The first workspace, or null for a runner that starts without one. */
+  workspace: RunnerConfigWorkspaceOption | null;
 }
 
 /** Produce a ready-to-save runner.config.json for a new runner. */
@@ -17,7 +23,7 @@ export function buildRunnerConfigJson(o: RunnerConfigOptions): string {
   const config = {
     runnerId: o.runnerId,
     controlPlaneUrl: o.runnerWsUrl,
-    workspaces: [{ id: o.workspaceId, name: o.workspaceId, path: o.workspacePath }],
+    workspaces: o.workspace ? [o.workspace] : [],
     agents: [
       { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" },
       { id: "codex-app", name: "Codex App Server", command: "codex", args: [], env: {}, driver: "codex-app-server" },
@@ -49,6 +55,27 @@ export function withHost(wsUrl: string, host: string): string {
   }
 }
 
+/**
+ * The first workspace from Install Manually's optional folder and name, or null when the folder is
+ * blank. A blank name falls back to the folder's last segment; the id is the name in lowercase with
+ * every run of other characters turned into one dash. An id of only dots ("." or "..", from a folder
+ * such as `.`) would be a URL dot segment in the workspace's API routes, so it becomes "workspace".
+ */
+export function firstWorkspace(folder: string, name: string): RunnerConfigWorkspaceOption | null {
+  const path = folder.trim();
+  if (!path) return null;
+  const segment = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+  const label = name.trim() || (/^\.+$/.test(segment) ? "workspace" : segment);
+  const slug = label.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const id = !slug || /^\.+$/.test(slug) ? "workspace" : slug;
+  return { id, name: label, path };
+}
+
+/** Where a runner connects from, in words: "This computer (127.0.0.1)", "192.0.2.10 (local network)". */
+export function runnerHostLabel(host: string): string {
+  return host === "127.0.0.1" ? "This computer (127.0.0.1)" : `${host} (local network)`;
+}
+
 /** The shell command that starts the runner against a saved config file. */
 export const RUNNER_TOKEN_FILE = ".agent-manager/runner.token";
 export const RUNNER_START_COMMAND = `pnpm runner --config runner.config.json --token-file ${RUNNER_TOKEN_FILE}`;
@@ -60,7 +87,11 @@ export function buildRunnerStartCommand(allowInsecureTransport = false): string 
     : RUNNER_START_COMMAND;
 }
 
-export type OnboardingHealthStatus = "pass" | "pending" | "warning" | "fail";
+/**
+ * One check's state. `waiting` waits for the person (a credential, a start command) and draws a
+ * hollow circle; `pending` is Wollipog waiting on the machine and is the only state with a spinner.
+ */
+export type OnboardingHealthStatus = "pass" | "waiting" | "pending" | "warning" | "fail";
 
 export interface OnboardingHealthCheck {
   id: "control-plane" | "credentials" | "runner" | "workspace" | "agents";
@@ -176,105 +207,129 @@ export function localRunnerReadiness(runner: RunnerView | undefined): LocalRunne
   };
 }
 
-/** Derive a live, actionable verification checklist from the runner snapshot already in the app. */
+/**
+ * The Connection Check: a live checklist derived from the runner snapshot already in the app.
+ *
+ * Nothing spins until a credential exists: until then every check waits for the person, not for
+ * the machine. An empty `workspaceIds` skips the workspace check. `repair` checks a runner that
+ * already exists: there are no control-plane or credential rows, and an agent problem is a warning,
+ * since the connection is what is being repaired.
+ */
 export function onboardingHealth(input: {
   credentialAvailable: boolean;
   runnerId: string;
-  workspaceId: string;
+  workspaceIds: readonly string[];
   runner?: RunnerView;
   runnerIdCollision?: boolean;
-  startCommand?: string;
+  repair?: boolean;
 }): OnboardingHealthCheck[] {
   const runnerId = input.runnerId.trim() || "runner";
-  const workspaceId = input.workspaceId.trim() || "my-repo";
-  const runner = input.runner;
-  const startCommand = input.startCommand ?? RUNNER_START_COMMAND;
-  const checks: OnboardingHealthCheck[] = [
-    {
-      id: "control-plane",
-      label: "Control Plane",
-      status: "pass",
-      detail: "Onboarding settings loaded from this control plane.",
-    },
-    input.credentialAvailable
-      ? { id: "credentials", label: "Runner Credential", status: "pass", detail: `A one-time credential was generated for “${runnerId}”. Save it as ${RUNNER_TOKEN_FILE} and restrict the file to the runner account.` }
-      : { id: "credentials", label: "Runner Credential", status: "pending", detail: `Generate the one-time credential for “${runnerId}” before saving the runner configuration.` },
+  const workspaceIds = input.workspaceIds.map((id) => id.trim()).filter(Boolean);
+  const { runner, credentialAvailable: credential } = input;
+  const repair = input.repair === true;
+  const checks: OnboardingHealthCheck[] = repair ? [] : [
+    { id: "control-plane", label: "Control Plane", status: "pass", detail: "Setup details loaded from this control plane." },
+    credential
+      ? { id: "credentials", label: "Runner Credential", status: "pass", detail: `A one-time credential was issued for ${runnerId}.` }
+      : { id: "credentials", label: "Runner Credential", status: "waiting", detail: `Generate the credential for ${runnerId}.` },
   ];
+  const workspaceLabel = workspaceIds.length > 1 ? "Workspaces" : "Workspace";
+  const quoted = (ids: readonly string[]) => ids.map((id) => `“${id}”`).join(", ");
+  /** A check that can only run once the runner is online: waiting for the person until a
+   * credential exists, then waiting on the machine. */
+  const notYet = (id: "workspace" | "agents", label: string, waiting: string, pending: string): OnboardingHealthCheck =>
+    credential ? { id, label, status: "pending", detail: pending } : { id, label, status: "waiting", detail: waiting };
 
   if (input.runnerIdCollision) {
-    checks.push(
-      { id: "runner", label: "Runner Connection", status: "fail", detail: `Runner id “${runnerId}” already existed when this dialog opened. Choose a unique id for the new runner.` },
-      { id: "workspace", label: "Workspace", status: "pending", detail: "Choose a unique runner id before workspace verification begins." },
-      { id: "agents", label: "Agent Readiness", status: "pending", detail: "Choose a unique runner id before agent verification begins." },
-    );
+    const later = "Checked once the runner has a unique name.";
+    checks.push({ id: "runner", label: "Runner Connection", status: "fail", detail: `A runner named ${runnerId} already exists. Choose another name.` });
+    if (workspaceIds.length) checks.push({ id: "workspace", label: workspaceLabel, status: "waiting", detail: later });
+    checks.push({ id: "agents", label: "Agent Readiness", status: "waiting", detail: later });
     return checks;
   }
 
-  if (!runner) {
-    checks.push(
-      { id: "runner", label: "Runner Connection", status: "pending", detail: `Waiting for “${runnerId}” to connect.`, command: startCommand },
-      { id: "workspace", label: "Workspace", status: "pending", detail: `Waiting for “${workspaceId}” to be advertised by the runner.` },
-      { id: "agents", label: "Agent Readiness", status: "pending", detail: "Waiting for the runner to discover and verify agent CLIs." },
-    );
-    return checks;
-  }
-
-  const online = runner.status === "online";
-  checks.push(online
-    ? { id: "runner", label: "Runner Connection", status: "pass", detail: `${runner.hostname} is online as “${runner.runnerId}”.` }
-    : { id: "runner", label: "Runner Connection", status: "fail", detail: `“${runner.runnerId}” is offline. Restart it with the generated config.`, command: startCommand });
-
-  const workspace = runner.workspaces.find((candidate) => candidate.id === workspaceId);
-  checks.push(workspace
-    ? {
-        id: "workspace",
-        label: "Workspace",
-        status: online ? "pass" : "warning",
-        detail: `“${workspace.name}” ${online ? "is available" : "was last advertised"} at ${workspace.path}.`,
-      }
-    : { id: "workspace", label: "Workspace", status: online ? "fail" : "pending", detail: `The runner has not advertised workspace “${workspaceId}”. Check the id and path in runner.config.json.` });
-
-  if (runner.agentsRefreshed !== true) {
-    checks.push({ id: "agents", label: "Agent Readiness", status: "pending", detail: "Waiting for this connection to finish live agent verification. Upgrade the runner if this does not complete." });
-  } else {
-    const agents = runner.agents;
-    const ready = agents.find((agent) => agentVerifiedReady(agent, runner.os));
-    if (ready) {
-      checks.push({
-        id: "agents",
-        label: "Agent Readiness",
-        status: online ? "pass" : "warning",
-        detail: `${agentDriverLabel(ready)} ${online ? "is installed and ready" : "was ready when this runner was last online"}.`,
-      });
-    } else {
-      const problem = agents.map((agent) => agentProblem(agent, runner.os))
-        .find((item): item is NonNullable<typeof item> => item != null);
-      const awaitingLive = agents.find((agent) =>
-        (agent.driver ?? "acp") === "acp" && !agentProblem(agent, runner.os) && !agentVerifiedReady(agent, runner.os));
-      checks.push(problem
-        ? {
-            id: "agents",
-            label: "Agent Readiness",
-            status: online ? "fail" : "warning",
-            detail: online ? problem.detail : `Last reported when this runner was online: ${problem.detail}`,
-            ...(problem.command ? { command: problem.command } : {}),
-          }
-        : awaitingLive
-          ? {
-              id: "agents",
-              label: "Agent Readiness",
-              status: "warning",
-              detail: `${agentDriverLabel(awaitingLive)} is configured or installed, but readiness is verified only on its first live initialize.`,
-            }
-          : {
-            id: "agents",
-            label: "Agent Readiness",
-            status: online ? "fail" : "warning",
-            detail: online
-              ? "No agent CLI was discovered. Install Claude Code, Codex, or Pi, then run Rediscover."
-              : "No agent CLI was discovered when this runner was last online.",
-          });
+  if (runner?.status !== "online") {
+    const later = "Checked once the runner connects.";
+    checks.push(credential
+      ? { id: "runner", label: "Runner Connection", status: "pending", detail: `Waiting for ${runnerId} to connect…` }
+      : runner
+        ? { id: "runner", label: "Runner Connection", status: "waiting", detail: `${runnerId} is offline. Replace its credential, then restart it.` }
+        : { id: "runner", label: "Runner Connection", status: "waiting", detail: "Generate the credential, then start the runner." });
+    if (workspaceIds.length) {
+      checks.push(notYet("workspace", workspaceLabel, later, `Waiting for ${runnerId} to advertise ${quoted(workspaceIds)}.`));
     }
+    // A runner that was online before can say what was wrong with its agents then, as a warning. A
+    // last-known ready agent is no problem, so that row still waits for the runner like the others.
+    const lastKnown = runner?.agentsRefreshed === true ? agentsCheck(runner, false, repair) : null;
+    checks.push(lastKnown && lastKnown.status !== "pass"
+      ? lastKnown
+      : notYet("agents", "Agent Readiness", later, `Waiting for ${runnerId} to report its agents.`));
+    return checks;
   }
+
+  checks.push({ id: "runner", label: "Runner Connection", status: "pass", detail: `${runner.hostname} is online as ${runner.runnerId}.` });
+
+  if (workspaceIds.length) {
+    const advertised = runner.workspaces.filter((workspace) => workspaceIds.includes(workspace.id));
+    const missing = workspaceIds.filter((id) => !advertised.some((workspace) => workspace.id === id));
+    checks.push(missing.length
+      ? {
+          id: "workspace",
+          label: workspaceLabel,
+          status: "fail",
+          detail: `The runner has not advertised ${quoted(missing)}. Check the folder in runner.config.json.`,
+        }
+      : {
+          id: "workspace",
+          label: workspaceLabel,
+          status: "pass",
+          detail: advertised.length === 1
+            ? `“${advertised[0]!.name}” is available at ${advertised[0]!.path}.`
+            : `${quoted(advertised.map((workspace) => workspace.name))} are available.`,
+        });
+  }
+
+  checks.push(runner.agentsRefreshed === true
+    ? agentsCheck(runner, true, repair)
+    : { id: "agents", label: "Agent Readiness", status: "pending", detail: "Waiting for this connection to finish live agent verification. Upgrade the runner if this does not complete." });
   return checks;
+}
+
+/** The Agent Readiness row for a runner that has reported its agents, live or last known. */
+function agentsCheck(runner: RunnerView, online: boolean, repair: boolean): OnboardingHealthCheck {
+  const failed: OnboardingHealthStatus = online && !repair ? "fail" : "warning";
+  const agents = runner.agents;
+  const ready = agents.find((agent) => agentVerifiedReady(agent, runner.os));
+  if (ready) {
+    return { id: "agents", label: "Agent Readiness", status: "pass", detail: `${agentDriverLabel(ready)} is installed and ready.` };
+  }
+  const problem = agents.map((agent) => agentProblem(agent, runner.os))
+    .find((item): item is NonNullable<typeof item> => item != null);
+  if (problem) {
+    return {
+      id: "agents",
+      label: "Agent Readiness",
+      status: failed,
+      detail: online ? problem.detail : `Last reported when this runner was online: ${problem.detail}`,
+      ...(problem.command ? { command: problem.command } : {}),
+    };
+  }
+  const awaitingLive = agents.find((agent) =>
+    (agent.driver ?? "acp") === "acp" && !agentProblem(agent, runner.os) && !agentVerifiedReady(agent, runner.os));
+  if (awaitingLive) {
+    return {
+      id: "agents",
+      label: "Agent Readiness",
+      status: "warning",
+      detail: `${agentDriverLabel(awaitingLive)} is configured or installed, but readiness is verified only on its first live initialize.`,
+    };
+  }
+  return {
+    id: "agents",
+    label: "Agent Readiness",
+    status: failed,
+    detail: online
+      ? "No agent CLI was discovered. Install Claude Code, Codex, or Pi, then run Rediscover."
+      : "No agent CLI was discovered when this runner was last online.",
+  };
 }

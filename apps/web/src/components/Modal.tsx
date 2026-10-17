@@ -241,6 +241,12 @@ export function Modal({
   useLayoutEffect(() => {
     if (layerRef.current) layerRef.current.title = title;
     placePanels(phone);
+    // The grabber leads the sheet (§7.5). A sheet that turns from full height to its fitted height
+    // mounts it after the panel already placed in the surface, where React appends it, so it is
+    // moved back to the top.
+    const surface = surfaceRef.current;
+    const grabber = surface?.querySelector(":scope > .sheet-grabber");
+    if (surface && grabber && surface.firstChild !== grabber) surface.insertBefore(grabber, surface.firstChild);
   });
 
   useLayoutEffect(() => {

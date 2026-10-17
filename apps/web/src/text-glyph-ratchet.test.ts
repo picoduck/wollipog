@@ -36,17 +36,15 @@ const SESSION_FRAME = "Session Page Frame and Header epic (not yet filed)";
 const RIGHT_PANEL = "Right Panel and Code Review epic (#2870)";
 const APPROVALS = "Approvals, Questions and Governance epic (#2226)";
 const AUTOMATIONS = "Automations epic (not yet filed)";
-const CONNECTIONS = "Connections epic (not yet filed)";
+const CONNECTIONS = "Connections epic (#3031)";
 const PODS = "Pods epic (not yet filed)";
 
 /** The inventory, exact: [file, glyph, the enclosing literal's text, the owning area epic]. */
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/AutomationsView.tsx", "▸", "▸", AUTOMATIONS],
   ["components/AutomationsView.tsx", "×", "×", AUTOMATIONS],
+  // The local readiness icon's mark, which Set Up This Machine (#2993) replaces.
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
-  ["components/OnboardRunnerDialog.tsx", "△", "△", CONNECTIONS],
-  ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
-  ["components/OnboardRunnerDialog.tsx", "↻", "↻ Retry", CONNECTIONS],
   ["components/PodsView.tsx", "→", "→", PODS],
   ["components/PodsView.tsx", "→", "→", PODS],
 ];
