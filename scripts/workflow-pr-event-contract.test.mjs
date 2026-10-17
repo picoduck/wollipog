@@ -354,15 +354,20 @@ test("workflow actions use immutable commit pins", () => {
 
 test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provider boundary", () => {
   const platform = readFileSync(resolve(process.cwd(), WORKFLOWS[2]), "utf8");
+  const integration = readFileSync(resolve(process.cwd(), "apps/runner/src/wsl-bwrap-fail-closed.integration.test.ts"), "utf8");
 
   assert.match(platform, /os: \[ubuntu-24\.04, windows-latest, windows-2025, macos-latest\]/u);
   assert.match(platform, /Verify WSL Boundaries Stay Fail-Closed/u);
   assert.match(platform, /WOLLIPOG_WSL_FAIL_CLOSED_DISTRO = "Ubuntu-24\.04"/u);
   assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-bwrap-fail-closed\.integration\.test\.ts/u,
-    "the real WSL job must exercise the product's Direct bwrap rejection against a target-local alias");
+    "the real WSL job must exercise the product's Direct bwrap alias and PE rejection");
   assert.match(platform, /\$wslBoundaryOutput -notmatch '\(\?m\)\^# pass 1\\r\?\$'/u);
   assert.match(platform, /\$wslBoundaryOutput -notmatch '\(\?m\)\^# skipped 0\\r\?\$'/u,
     "the WSL boundary job must fail if its opt-in real integration test silently skips");
+  assert.match(platform, /if \(\$wslBoundaryExit -ne 0\) \{ throw "WSL Direct bwrap fail-closed integration test failed" \}/u,
+    "a failed native-launcher assertion must fail the Windows job");
+  assert.match(platform, /if \(\$wslBoundaryOutput -notmatch '\(\?m\)\^# pass 1\\r\?\$' -or \$wslBoundaryOutput -notmatch '\(\?m\)\^# skipped 0\\r\?\$'\) \{\s+throw/u,
+    "the exact pass and skip counts must be enforced together with a fatal check");
   assert.match(platform,
     /\$savedBoundaryPreference = \$ErrorActionPreference[\s\S]*\$ErrorActionPreference = "Continue"[\s\S]*\$wslBoundaryExit = \$LASTEXITCODE[\s\S]*\$ErrorActionPreference = \$savedBoundaryPreference/u,
     "native stderr capture must not terminate PowerShell before the explicit exit and TAP checks");
@@ -375,27 +380,40 @@ test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provide
   assert.match(platform, /\$safeWslOutput -notmatch '\(\?m\)\^# pass 1\\r\?\$'/u);
   assert.match(platform, /\$safeWslOutput -notmatch '\(\?m\)\^# skipped 0\\r\?\$'/u,
     "the safe-launcher integration must fail if it silently skips");
-  assert.match(platform, /wsl\.exe -d Ubuntu-24\.04 -- cmd\.exe \/d \/c exit 0/u,
+  assert.match(integration, /await installWslBwrapLauncher\(distro!\)/u,
+    "the PE probe must install the checked-in production launcher");
+  assert.match(integration, /await prepareWslBwrapIsolation\(context,/u,
+    "the PE probe must use the production preparation ABI");
+  assert.match(integration, /const outside = await wsl\(\["-d", distro!, "--", "cmd\.exe", "\/d", "\/c", "exit", "0"\]\)/u,
     "the capability-sensitive outside probe must use WSL's ordinary binfmt command path");
-  assert.match(platform, /WSLInterop registration outside bwrap:/u);
-  assert.match(platform, /WSLInterop registration inside bwrap: absent/u);
-  assert.match(platform, /\$registrationExit = \$LASTEXITCODE/u);
-  assert.match(platform, /cmd\.exe executable outside bwrap: \$outsideInterop/u);
-  assert.match(platform, /Hosted WSL baseline lacks PE interop; verifying bwrap does not add it/u);
-  assert.match(platform, /-not \$outsideInterop -and \$outsideOutput -notmatch 'Exec format error'/u,
+  assert.match(integration, /WSLInterop control file outside: \$\{registration\}; PE executable outside: \$\{outside\.code === 0\}/u);
+  assert.match(integration, /if \(outside\.code !== 0\) assert\.match\(`\$\{outside\.stdout\}\$\{outside\.stderr\}`, \/Exec format error\/u\)/u,
     "unexpected host-side failures must not be accepted as a fail-closed baseline");
-  assert.doesNotMatch(platform, /WSL Windows interop baseline failed outside bwrap/u,
-    "host PE interop availability is diagnostic, not a prerequisite");
-  assert.match(platform, /--chdir \/ -- \/bin\/true/u,
-    "a production-shaped bwrap smoke test must prove the sandbox itself works");
-  assert.match(platform, /test ! -e \/proc\/sys\/fs\/binfmt_misc\/WSLInterop/u,
-    "the fresh provider proc must explicitly prove the automatic WSL binfmt registration is absent");
-  assert.match(platform, /--proc \/proc --tmpfs \/tmp --chdir \/ -- \$cmdPath/u);
-  assert.match(platform, /bwrap unexpectedly preserved automatic PE\/binfmt interop/u);
-  assert.doesNotMatch(platform, /\$blockedOutput -notmatch/u,
-    "libc execvp may fall back to a shell after ENOEXEC, so denial is behavioral rather than stderr-textual");
-  assert.doesNotMatch(platform, /--bind[^\n]*\/init|--ro-bind[^\n]*\/init/u,
-    "CI must never add a dedicated WSL /init bind inside bwrap");
+  assert.match(integration, /else if \(typeof error\.code === "number"\) resolve\([\s\S]*?else reject\(error\)/u,
+    "a transport error or timeout must reject rather than masquerade as a blocked PE launch");
+  assert.match(integration, /socket\(AF_VSOCK, SOCK_STREAM, 0\);\n  if \(fd != -1 \|\| errno != EPERM\) return 1;/u,
+    "the VM transport probe must require policy denial even when host PE interop is unavailable");
+  assert.match(integration, /if \(socketpair\(AF_UNIX, SOCK_STREAM, 0, pair\) != 0\) return 2;/u,
+    "the transport probe must also prove ordinary Unix sockets remain usable");
+
+  const modes = integration.match(/for \(const network of \["inherit", "deny"\] as const\) \{([\s\S]*?)\n    \}\n  \} finally/u)?.[1];
+  assert.ok(modes, "both network policies must execute the same mandatory native-launcher assertions");
+  assert.match(modes, /const launch = \(command: string, args: string\[\]\) => wsl\(buildWslBwrapLaunchArgs\(\{[\s\S]*?preparation, network,[\s\S]*?command, args,/u,
+    "every sandbox probe must use the real launcher with the selected network policy");
+  assert.match(modes, /const smoke = await launch\("\/bin\/true", \[\]\);\n      assert\.equal\(smoke\.code, 0,/u,
+    "a failed sandbox launch must not be mistaken for PE denial");
+  assert.match(modes, /test ! -e \/proc\/sys\/fs\/binfmt_misc\/WSLInterop; test -z "\$\{WSL_INTEROP\+x\}"; test ! -s \/init/u,
+    "both policies must check the fresh proc, cleared interop environment, and masked interpreter");
+  assert.match(modes, /const visibility = await launch\("\/bin\/sh", \["-ec",/u,
+    "the interop-mask checks must run through the native launcher and fail on any shell assertion");
+  assert.match(modes, /assert\.equal\(visibility\.code, 0,/u,
+    "a failed interop-mask check must fail the test");
+  assert.match(modes, /const transport = await launch\(transportProbe, \[\]\);\n      assert\.equal\(transport\.code, 0,/u,
+    "both policies must execute and enforce the VM-socket denial probe");
+  assert.match(modes, /const pe = await launch\(cmd, \["\/d", "\/c", "exit", "0"\]\);\n      assert\.notEqual\(pe\.code, 0,/u,
+    "successful Windows PE execution must fail under either network policy");
+  assert.ok(modes.includes('assert.doesNotMatch(`${pe.stdout}${pe.stderr}`, /CMD\\.EXE was started/u);'),
+    "Windows startup output must fail even if the PE command eventually exits nonzero");
 });
 
 test("native Linux isolation CI proves the managed-worktree read-only rule against a real kernel", () => {
