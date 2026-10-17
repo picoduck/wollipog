@@ -7,7 +7,9 @@ import type { AgentContext } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 
 export const WSL_BWRAP_LAUNCHER_PROTOCOL = 1 as const;
-export const WSL_BWRAP_LAUNCHER_PATH = "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1";
+// The preparation ABI remains v1. A distinct installation generation prevents older runners
+// publishing their pre-hardening binary over the launcher a patched runner will execute.
+export const WSL_BWRAP_LAUNCHER_PATH = "/usr/local/lib/wollipog/wsl-bwrap-launcher-v2";
 export const WSL_BWRAP_STATE_ROOT = "/var/lib/wollipog-wsl-launcher/runner-instances";
 /** Source-checkout provisioning input. Packaged runners must replace this with an SEA asset. */
 export const WSL_BWRAP_LAUNCHER_SOURCE_PATH = isSea() ? "" : fileURLToPath(

@@ -645,7 +645,7 @@ static int self_test_main(int argc) {
   restrict_windows_interop();
   if (socket(AF_VSOCK, SOCK_STREAM, 0) != -1 || errno != EPERM)
     fail("WSL interop transport self-test failed");
-  puts("wsl-bwrap-launcher-v1");
+  puts("wsl-bwrap-launcher-v2");
   return 0;
 }
 

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import {
+  WSL_BWRAP_LAUNCHER_PATH,
   WSL_BWRAP_LAUNCHER_SOURCE_PATH,
   buildWslBwrapLaunchArgs,
   buildWslBwrapPrepareArgs,
@@ -76,6 +77,9 @@ test("WSL launcher argv keeps paths and provider arguments as native boundaries"
     network: "deny", pidfile: "/tmp/wlp.pgid", command: "/usr/bin/provider",
     args: ["value with spaces", "$(not-code)", "line one\nline two"],
   });
+  assert.equal(WSL_BWRAP_LAUNCHER_PATH, "/usr/local/lib/wollipog/wsl-bwrap-launcher-v2",
+    "pre-hardening runners must publish to a different installed binary path");
+  assert.equal(launch[5], WSL_BWRAP_LAUNCHER_PATH);
   assert.deepEqual(launch.slice(0, 5), ["-d", "Ubuntu Dev", "--cd", "/work/a b", "--exec"]);
   assert.deepEqual(launch.slice(-4), ["/usr/bin/provider", "value with spaces", "$(not-code)", "line one\nline two"]);
 });
