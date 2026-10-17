@@ -107,6 +107,7 @@ function cloneDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
     behavior: { ...defaults.behavior },
     delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
     execution: { ...defaults.execution },
+    ...(defaults.campaignBudget === undefined ? {} : { campaignBudget: defaults.campaignBudget ? { ...defaults.campaignBudget } : null }),
   };
 }
 
@@ -139,14 +140,17 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const [saveError, setSaveError] = useState<string | null>(null);
   const generation = useRef(0);
 
-  const dirty = !!draft && !!view && canonical(draft) !== canonical(view.defaults);
   // Typed text for the saved Full Control budget; the draft holds it only once both parts are valid.
+  // It is replaced only where the draft is (load into a clean editor, save, discard), so a discovery
+  // refresh never drops a half-typed budget, and typed text counts as an unsaved change.
   const [budgetText, setBudgetText] = useState({ cost: "", tools: "" });
   const budgetFromDefaults = (defaults: OrchestratorDefaults | undefined) => ({
     cost: defaults?.campaignBudget ? String(defaults.campaignBudget.costUsd) : "",
     tools: defaults?.campaignBudget ? String(defaults.campaignBudget.toolCalls) : "",
   });
-  useEffect(() => { setBudgetText(budgetFromDefaults(view?.defaults)); }, [view]);
+  const savedBudgetText = budgetFromDefaults(view?.defaults);
+  const budgetTextDirty = budgetText.cost !== savedBudgetText.cost || budgetText.tools !== savedBudgetText.tools;
+  const dirty = !!draft && !!view && (canonical(draft) !== canonical(view.defaults) || budgetTextDirty);
   // Read by a refresh that lands later: discovery brings new capabilities, never a lost draft.
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -158,7 +162,10 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       const next = await api.orchestratorSettings();
       if (generation.current !== current) return;
       setView(next);
-      if (!dirtyRef.current) setDraft(cloneDefaults(next.defaults));
+      if (!dirtyRef.current) {
+        setDraft(cloneDefaults(next.defaults));
+        setBudgetText(budgetFromDefaults(next.defaults));
+      }
     } catch (caught) {
       // A refresh that fails keeps the loaded editor; only a first load has nothing else to show.
       if (generation.current === current) setFailure(loadFailure(caught));
@@ -414,7 +421,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     setDraft((current) => {
       if (!current) return current;
       const { campaignBudget: _previous, ...rest } = current;
-      return empty ? (view?.defaults.campaignBudget ? { ...rest, campaignBudget: null } : rest)
+      return empty ? (view?.defaults.campaignBudget !== undefined ? { ...rest, campaignBudget: null } : rest)
         : { ...rest, campaignBudget: { costUsd: cost, toolCalls: tools } };
     });
   };
@@ -462,6 +469,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       const next = await api.updateOrchestratorSettings({ defaults: draft });
       setView(next);
       setDraft(cloneDefaults(next.defaults));
+      setBudgetText(budgetFromDefaults(next.defaults));
       saved = true;
     } catch (caught) {
       // The draft stays as typed, and the bar offers Try Again (§8.6).

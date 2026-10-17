@@ -998,13 +998,14 @@ test("choosing Full Control checks readiness at once, asks only for the budget, 
   const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
   const admissions: Array<Record<string, unknown>> = [];
   const saved: unknown[] = [];
+  const order: string[] = [];
   const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
     fullControlLaunchPreflight: async (input) => {
       preflights.push(structuredClone(input));
       return { preflight: launchPreflight(Boolean(input.overrides?.budget?.costUsd && input.overrides.budget.toolCalls && input.task !== "Full Control readiness check"), input) };
     },
-    createFullControlCampaign: async (input) => { admissions.push(structuredClone(input) as unknown as Record<string, unknown>); return { id: "campaign-1" } as SessionView; },
-    updateOrchestratorSettings: async (input) => { saved.push(structuredClone(input)); return { defaults: input.defaults, source: "user_default", controlModeSupported: true,
+    createFullControlCampaign: async (input) => { order.push("admit"); admissions.push(structuredClone(input) as unknown as Record<string, unknown>); return { id: "campaign-1" } as SessionView; },
+    updateOrchestratorSettings: async (input) => { order.push("save"); saved.push(structuredClone(input)); return { defaults: input.defaults, source: "user_default", controlModeSupported: true,
       capabilities: { models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" } }; },
   });
   try {
@@ -1034,13 +1035,79 @@ test("choosing Full Control checks readiness at once, asks only for the budget, 
     assert.match(fixture.container.textContent ?? "", /owner\/repo · #12/);
     assert.equal(authorizeButton(fixture.container).disabled, false);
     assert.equal(admissions.length, 0);
+    assert.equal(saved.length, 0, "nothing is saved while the person is still reviewing");
     await act(async () => authorizeButton(fixture.container).click());
     assert.equal(admissions.length, 1);
+    assert.deepEqual(order, ["admit", "save"], "the first budget is saved only after the reviewed launch is admitted");
     assert.equal(admissions[0]!.preflightDigest, "b".repeat(64));
     assert.match(String(admissions[0]!.requestId), /^[a-f0-9]{32}$/);
     assert.deepEqual((saved[0] as { defaults: { campaignBudget: unknown } }).defaults.campaignBudget, { costUsd: 20, toolCalls: 200 },
       "Save as Default records the budget the person chose");
     assert.equal(fixture.requests.length, 0, "ordinary creation never runs");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("Full Control authorizes exactly what is shown: issue-only work, the derived follow-up switch, valid limits, and no default rewrite", async () => {
+  const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
+  const admissions: Array<Record<string, unknown>> = [];
+  const saved: unknown[] = [];
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined,
+    async () => ({ defaults: { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), controlMode: "full_control", campaignBudget: { costUsd: 30, toolCalls: 300 } },
+      source: "user_default", controlModeSupported: true,
+      capabilities: { models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" } }), {
+      fullControlLaunchPreflight: async (input) => {
+        preflights.push(structuredClone(input));
+        const preflight = launchPreflight(input.task !== "Full Control readiness check", input);
+        // The server derives related follow-ups from the campaign behavior when the person has not chosen.
+        preflight.summary.followUps.relatedFollowUps = input.overrides?.issues?.relatedFollowUps ?? true;
+        return { preflight };
+      },
+      createFullControlCampaign: async (input) => { admissions.push(structuredClone(input) as unknown as Record<string, unknown>); return { id: "campaign-1" } as SessionView; },
+      updateOrchestratorSettings: async (input) => { saved.push(structuredClone(input)); throw new Error("a saved budget is never rewritten from launch"); },
+    });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await settlePreflight();
+    const field = (label: string, advanced: boolean) => [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
+      .find((node) => node.querySelector("span")?.textContent === label && Boolean(node.closest("details")) === advanced)!
+      .querySelector("input, textarea") as HTMLInputElement;
+    await act(async () => fireDomEvent.change(field("Issue Numbers", false), { target: { value: "12" } }));
+    await settlePreflight();
+    const issueOnly = preflights.at(-1)!;
+    assert.deepEqual(issueOnly.issueNumbers, [12]);
+    assert.equal(Object.hasOwn(issueOnly, "task"), false, "issue-only work never carries the readiness placeholder");
+    assert.equal(authorizeButton(fixture.container).disabled, false);
+
+    const related = fixture.container.querySelector<HTMLButtonElement>('details [role="switch"]')!;
+    assert.equal(fixture.container.ownerDocument.getElementById(related.getAttribute("aria-labelledby")!)?.textContent, "Related Follow-Ups");
+    assert.equal(related.getAttribute("aria-checked"), "true", "the switch shows the server-derived value that would be authorized");
+
+    const before = preflights.length;
+    await act(async () => fireDomEvent.change(field("Cost Limit (USD)", true), { target: { value: "-5" } }));
+    await settlePreflight();
+    assert.match(fixture.container.textContent ?? "", /Enter an amount above 0, up to 1,000,000\./);
+    assert.match(fixture.container.textContent ?? "", /Correct the highlighted limits to check readiness\./);
+    assert.equal(field("Cost Limit (USD)", true).getAttribute("aria-invalid"), "true");
+    assert.equal(authorizeButton(fixture.container).disabled, true, "an invalid entry is never silently replaced by a default");
+    assert.equal(preflights.length, before, "no readiness check runs for a launch the person did not enter");
+    await act(async () => fireDomEvent.change(field("Maximum Issues", true), { target: { value: "1.5" } }));
+    await act(async () => fireDomEvent.change(field("Cost Limit (USD)", true), { target: { value: "45" } }));
+    await settlePreflight();
+    assert.equal(authorizeButton(fixture.container).disabled, true);
+    assert.match(fixture.container.textContent ?? "", /Enter a whole number from 1 to 100\./);
+    await act(async () => fireDomEvent.change(field("Maximum Issues", true), { target: { value: "" } }));
+    await act(async () => fireDomEvent.change(field("Tool Call Limit", true), { target: { value: "450" } }));
+    await act(async () => related.click());
+    await settlePreflight();
+    const override = preflights.at(-1)!;
+    assert.deepEqual(override.overrides!.budget, { costUsd: 45, toolCalls: 450 });
+    assert.deepEqual(override.overrides!.issues, { relatedFollowUps: false });
+    assert.equal(authorizeButton(fixture.container).disabled, false);
+    await act(async () => authorizeButton(fixture.container).click());
+    assert.equal(admissions.length, 1);
+    assert.equal(Object.hasOwn(admissions[0]!, "task"), false);
+    assert.deepEqual(saved, [], "an Advanced override applies to this campaign only and never replaces the saved budget");
   } finally { await unmountFixture(fixture); }
 });
 

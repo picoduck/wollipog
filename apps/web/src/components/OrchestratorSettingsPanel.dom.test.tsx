@@ -699,6 +699,34 @@ test("runner discovery refreshes capabilities without discarding unsaved default
   }
 });
 
+test("runner discovery keeps a typed campaign budget, complete or not, and saves what was typed", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  initial.defaults = { ...initial.defaults, controlMode: "full_control" };
+  const { transport, state, writes } = server(initial);
+  const view = await mount(panel(transport, { revision: 1 }));
+  try {
+    const cost = () => view.container.querySelector<HTMLInputElement>("#orchestrator-campaign-cost")!;
+    const tools = () => view.container.querySelector<HTMLInputElement>("#orchestrator-campaign-tools")!;
+    await act(async () => { fireDomEvent.change(cost(), { target: { value: "40" } }); });
+    assert.ok(view.container.querySelector(".save-bar"), "a half-typed budget is an unsaved change");
+    state.set({ ...state.current(), capabilities: { ...state.current().capabilities, installations: 2 } });
+    await act(async () => view.root.render(panel(transport, { revision: 2 })));
+    await settle();
+    assert.equal(cost().value, "40", "a discovery refresh keeps the incomplete budget");
+    await act(async () => { fireDomEvent.change(tools(), { target: { value: "400" } }); });
+    await act(async () => view.root.render(panel(transport, { revision: 3 })));
+    await settle();
+    assert.deepEqual([cost().value, tools().value], ["40", "400"]);
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    await settle();
+    assert.deepEqual(writes.at(-1)!.defaults.campaignBudget, { costUsd: 40, toolCalls: 400 });
+    assert.deepEqual([cost().value, tools().value], ["40", "400"]);
+    assertNoDomNode(view.container.querySelector(".save-bar"));
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("isolation is Off | On, and Strict Project Isolation On includes Integration Isolation", async () => {
   const { transport, writes } = server(settings());
   const view = await mount(panel(transport));

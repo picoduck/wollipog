@@ -294,14 +294,30 @@ test("choosing Full Control on a live campaign checks readiness at once and asks
 
 test("a ready campaign enables Full Control through one reviewed action bound to the exact digest and revision", async () => {
   const enables: unknown[] = [];
+  const bodies: unknown[] = [];
+  const saved: unknown[] = [];
   const harness = await open(orchestrator(), {
     orchestratorSettings: settings({ costUsd: 30, toolCalls: 300 }),
-    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(true), expectedRevision: 2 }),
+    fullControlEnablePreflight: async (_id, body) => {
+      bodies.push(structuredClone(body));
+      const preflight = enablePreflight(true);
+      preflight.summary.followUps.relatedFollowUps = body.overrides?.issues?.relatedFollowUps ?? true;
+      return { preflight, expectedRevision: 2 };
+    },
     enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
+    updateOrchestratorSettings: async (input) => { saved.push(input); throw new Error("a saved budget is never rewritten from enable"); },
   });
   const dialog = harness.dialog();
   await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
   await settle();
+  const related = dialog.querySelector<HTMLButtonElement>('details [role="switch"]')!;
+  assert.equal(related.getAttribute("aria-checked"), "true", "the switch shows the server-derived value that would be authorized");
+  await act(async () => related.click());
+  await settle();
+  assert.deepEqual(bodies.at(-1), { overrides: { issues: { relatedFollowUps: false } } });
+  await act(async () => related.click());
+  await settle();
+  assert.deepEqual(bodies.at(-1), { overrides: { issues: { relatedFollowUps: true } } });
   assert.match(dialog.textContent ?? "", /Ready to Enable/);
   assert.match(dialog.textContent ?? "", /\$30 · 300 tool calls · 4 at a time/);
   assert.equal([...dialog.querySelectorAll("label span")].some((node) => node.textContent === "Cost Limit (USD)" && !node.closest("details")), false,
@@ -309,7 +325,8 @@ test("a ready campaign enables Full Control through one reviewed action bound to
   const enable = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Enable Full Control")!;
   assert.equal(enable.disabled, false);
   await act(async () => enable.click());
-  assert.deepEqual(enables, [["orch", { expectedRevision: 2, preflightDigest: "b".repeat(64) }]]);
+  assert.deepEqual(enables, [["orch", { overrides: { issues: { relatedFollowUps: true } }, expectedRevision: 2, preflightDigest: "b".repeat(64) }]]);
+  assert.deepEqual(saved, [], "enabling never rewrites the saved budget");
   assert.equal(harness.changed.at(-1)!.orchestratorPolicy!.control!.mode, "full_control");
   assert.match(dialog.textContent ?? "", /Effective Mode: Full Control/);
   assert.ok([...dialog.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"));

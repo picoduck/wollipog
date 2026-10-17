@@ -49,7 +49,10 @@ async function routeSettings(page: Page, writes: unknown[]) {
   });
 }
 
-const settle = (page: Page) => page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished))
+// A closed <details> is never rendered, so transitions inside it never finish; they cannot affect a screenshot.
+const settle = (page: Page) => page.evaluate(() => Promise.all(document.getAnimations()
+  .filter((animation) => !(animation.effect as KeyframeEffect | null)?.target?.closest("details:not([open])"))
+  .map((animation) => animation.finished))
   .then(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))));
 async function shoot(page: Page, anchor: Locator, path: string) {
   await anchor.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
