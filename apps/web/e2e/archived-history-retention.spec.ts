@@ -5,6 +5,13 @@ import { expect, test } from "@playwright/test";
 
 test.use({ reducedMotion: "reduce" });
 
+/** The harnesses' retention schedule is fixed: the last pass finished Oct 16 2026 09:00 UTC, the next
+ * runs at 10:00, a policy turned on now arms at Oct 17 09:30, and the archive's own clock reads
+ * Oct 16 12:00. The page reads the real clock, so pin it there: otherwise "Pruning starts" became
+ * "Next pass" once the armed time passed and turned main red (#3388). Timers keep running. */
+const FIXTURE_NOW = new Date(Date.UTC(2026, 9, 16, 12, 0));
+test.beforeEach(async ({ page }) => { await page.clock.setFixedTime(FIXTURE_NOW); });
+
 test("Settings › Storage confirms turning retention on before it saves, and lists what it would prune", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/settings-rows-e2e.html?theme=dark&section=storage&retention=off");
