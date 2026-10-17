@@ -5,13 +5,14 @@ import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
   campaignWorkflowOwner,
   type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
-  type ControlPlaneToRunner, type CreateSessionRequest, type FullControlLaunchRequest, type RunnerMetadata, type RunnerRuntimeInfo,
+  type ControlPlaneToRunner, type CreateSessionRequest, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { OrchestratorSettings } from "./orchestrator-settings.js";
-import { authorizeFullControl } from "./campaign-authority.js";
+import { authorizeFullControl, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { closureEvidence, publicationEvidence } from "./campaign-issue-authority.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectCampaignWorkspace, registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
@@ -327,6 +328,62 @@ test("Project child-session ceilings block controlled review, and a task alone l
     assert.ok(ordinary.ok);
     assert.deepEqual(ordinary.scope, organizationScope);
     assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, true);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an empty launch scope delegates no issue writes: additions are refused and closure or publication get no bounded admission", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  const send = f.hub.sendToRunner;
+  f.hub.sendToRunner = (runnerId, message) => {
+    if (message.type === "campaign_issue_scope" && message.operation === "inspect") {
+      const issues = message.issues ?? [];
+      queueMicrotask(() => f.hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId,
+        sessionId: message.sessionId, ok: true, repository: "owner/repo",
+        candidates: issues.map((number) => ({ issue: { repository: "owner/repo", number }, title: `Issue ${number}`, source: "member_checklist" as const })) }, "r"));
+      return true;
+    }
+    return send(runnerId, message);
+  };
+  try {
+    const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", task: "Investigate flaky tests",
+      overrides: { session: { config: { model: "claude-opus-5-5", permissionMode: "orchestrator" } }, budget: { costUsd: 10, toolCalls: 100 } } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "empty-scope", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const root = f.db.getSession(admitted.json().id)!;
+    const control = root.orchestratorPolicy!.control!;
+    if (control.mode !== "full_control") throw new Error("Full Control expected");
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.deepEqual(control.boundary.issueAuthority!.epics, []);
+
+    // The Orchestrator cannot widen an empty scope: an addition needs epic or in-scope lineage.
+    const addition = await f.sessions.proposeCampaignIssueScope(root.id, { requestId: "add-5", expectedRevision: 1,
+      additions: [{ repository: "owner/repo", number: 5 }], removals: [], explanation: "Fixture addition without lineage" });
+    assert.equal(addition.ok, false);
+    assert.equal(addition.status, 403);
+    assert.match(addition.error!, /authorized epic or exact related-publication lineage/);
+    const epic = await f.sessions.proposeCampaignIssueScope(root.id, { requestId: "add-epic", expectedRevision: 1,
+      additions: [{ repository: "owner/repo", number: 5 }], removals: [], explanation: "Fixture epic addition", lineage: { kind: "epic", epic: 5 } });
+    assert.equal(epic.ok, false);
+    assert.equal(epic.status, 403, "an epic outside the empty authorized epic list grants nothing");
+    assert.equal(f.db.getSession(root.id)!.orchestratorPolicy!.issueScope!.revision, 1);
+
+    // Closure and publication have no bounded admission, so the typed gate stays with the Human.
+    const closure = { category: "issue_closure", repository: "owner/repo", issue: 5, title: "Issue 5", forgeDigest: "f".repeat(64),
+      reason: "completed", explanation: "Fixture closure", evidence: [], activeChildren: [], openPullRequests: [] } as unknown as GithubIssueClosureSnapshot;
+    assert.equal(closureEvidence(f.db, root, closure), null);
+    const publication = { category: "follow_up_issue_publication" as const, repository: "owner/repo", sanitizedTitle: "Fixture Follow-Up",
+      sanitizedBody: "## Problem\nFixture\n## Proposed Behavior\nFixture\n## Acceptance Criteria\n- Fixture\n## Security and Compatibility\nNone",
+      labels: [], recommendationId: "rec-1" };
+    assert.equal(publicationEvidence(f.db, root, publication), null);
+    for (const snapshot of [closure, publication]) {
+      const evaluation = evaluateCampaignAuthority(root, root, PROTOCOL_VERSION, snapshot);
+      assert.equal(evaluation.owner, "human", snapshot.category);
+      assert.equal(evaluation.basis, "human_required", snapshot.category);
+    }
   } finally { await server.close(); f.db.close(); }
 });
 
