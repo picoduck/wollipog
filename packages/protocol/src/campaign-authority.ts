@@ -243,6 +243,33 @@ export function resolveCampaignAuthority(input: {
   return result("orchestrator", input.root ? "standing_authorization" : "campaign_delegation", "authorized_operation");
 }
 
+/** Request classes every Full Control boundary keeps with the Human, by the root's driver. */
+export function fullControlStandingHumanRequired(driver: string): string[] {
+  return ["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "git_execution_without_bounded_effect_proof", "script_execution_without_bounded_effect_proof", "human_required_rules",
+    ...(driver === "claude-code" ? ["relative_shell_commands_without_verified_cwd"] : [])];
+}
+
+export const FULL_CONTROL_HUMAN_REQUIRED_LABELS: Record<string, string> = {
+  secrets_and_sign_in: "Secrets and Sign-In",
+  persistent_permissions: "Persistent Permission Grants",
+  provider_access_expansion: "Provider Access Expansion",
+  external_elicitation: "External Provider Forms",
+  root_forms_without_suggested_answers: "Root Questions Without a Suggested Answer",
+  unverified_tool_effects: "Tool Effects That Cannot Be Verified",
+  git_execution_without_bounded_effect_proof: "Git Commands Without Bounded Effect Proof",
+  script_execution_without_bounded_effect_proof: "Scripts Without Bounded Effect Proof",
+  human_required_rules: "Human Required Governance Rules",
+  relative_shell_commands_without_verified_cwd: "Relative Shell Commands Without a Verified Directory",
+};
+
+export const FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON = "Always decided by the Human under Full Control.";
+
+/** Evidence every Full Control campaign routes to the Human, whatever its boundary. */
+export const FULL_CONTROL_EVIDENCE_EXCEPTIONS: ReadonlyArray<{ id: "video_evidence" | "external_evidence"; exception: string; reason: string }> = [
+  { id: "video_evidence", exception: "Video Evidence Review", reason: "Video evidence needs your review until production video review is available." },
+  { id: "external_evidence", exception: "External Evidence Review", reason: "Evidence stored outside private Session artifacts (links only) needs your review." },
+];
+
 export function campaignAuthorityPreflight(control: CampaignControl | undefined, driver: string, protocolVersion: number | null | undefined,
   peerContract?: unknown): { supported: boolean; reason?: string; humanRequiredRequests?: string[] } {
   if (!control || control.mode === "custom") return { supported: true };
@@ -251,6 +278,5 @@ export function campaignAuthorityPreflight(control: CampaignControl | undefined,
     reason: `Production evidence authority requires protocol v${PACED_VIDEO_REVIEW_MIN_PROTOCOL} and the exact private media contract; compatibility metadata does not establish runtime readiness.` };
   if (control.boundary.budgetAuthority && (protocolVersion ?? 0) < 218) return { supported: false, reason: "Campaign limits require a protocol-v218 runner; unsupported peers cannot admit protected work." };
   if ((protocolVersion ?? 0) < (control.boundary.issueAuthority ? 217 : 215) || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
-  return { supported: true, humanRequiredRequests: ["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "git_execution_without_bounded_effect_proof", "script_execution_without_bounded_effect_proof", "human_required_rules",
-    ...(driver === "claude-code" ? ["relative_shell_commands_without_verified_cwd"] : [])] };
+  return { supported: true, humanRequiredRequests: fullControlStandingHumanRequired(driver) };
 }

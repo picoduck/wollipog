@@ -1,10 +1,19 @@
 # Full Control Launch Preparation
 
 Issue #2940 offers Custom and Full Control in Orchestrator defaults, New Session, and active
-Orchestrator Controls. Full Control opens a shared preflight. A supported settings API can save
-the preferred mode for future campaigns. This preference grants no authority. Older settings APIs
-retain an unsupported preview and refuse saving it. New Session initializes from the saved mode
-and refuses Full Control launch while complete admission and execution support are unverified.
+Orchestrator Controls. Choosing Full Control in New Session or on a live root campaign runs the
+server preflight at once (debounced; a newer input aborts the older request). It shows a concise
+summary: scope, budget, follow-ups, evidence with the provider retention disclosure, and Human
+Required exceptions. Specific blockers and the operator fix come first. Detailed limits, the full
+capability list and the behavior and execution settings sit under a collapsed Advanced
+disclosure; changing an override checks readiness again. When no campaign budget is saved, the
+summary asks for the cost and tool-call limits inline, with Save as Default.
+
+New Session's one footer action, Authorize and Start, admits the exact reviewed preflight.
+Ordinary Create Session never runs for Full Control. A live root campaign's one action, Enable
+Full Control, does the same through the enable route; Revoke is unchanged. Orchestrator defaults
+save the preferred mode and a Full Control campaign budget. Neither grants authority; older
+settings APIs refuse saving the mode.
 
 The owned preparation delta from PR #3069 is integrated onto main's authority, issue-scope and
 budget contracts, preserving subsequent launch UI changes. It advertises no new runner capability
@@ -28,9 +37,8 @@ not constitute actual media-quality or native admission proof.
 Unestablished facts are explicit. Codex permission-profile approvals disclose the session lifetime
 and remain human-owned; command/file one-time approvals keep their existing semantics.
 
-The server half of the launch is integrated (see Atomic Launch below). Remaining work under
-#2940 is the simple web launch experience on that protocol and verification of the complete live
-flow on final main through #2939. Production video review remains #1321.
+Verification of the complete live flow on final main remains #2939. Production video review
+remains #1321.
 
 The deterministic browser fixtures test the real components and the unsupported state. Their
 captures prove layout and launch fencing, not unattended readiness or live provider media support.
