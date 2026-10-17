@@ -206,6 +206,8 @@ test("an undelivered review launch leaves no active review behind", () => {
     const refused = h.svc.requestReviewSession("s1", request());
     assert.equal(refused.status, 409);
     assert.equal(h.db.reviewSessions.activeFor("s1"), null);
+    assert.deepEqual(h.svc.reviewSessionsPage("s1", {}).data?.reviews.map((review) => [review.state, review.reason]),
+      [["failed", "the review session could not be launched"]], "the undelivered review stays on record, settled");
     h.setDeliver(true);
     assert.ok(h.svc.requestReviewSession("s1", request()).ok, "the requester can retry at once");
   } finally { h.db.close(); }

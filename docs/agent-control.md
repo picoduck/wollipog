@@ -323,7 +323,8 @@ active turn, and it is not a child, so it takes no delegation slot or charge and
 no descendant authority. The requester's remaining cost budget, if it has one, bounds the review.
 A requester has one active review session at a time. A review session runs one turn: it takes no
 further messages, steering, configuration or commands, cannot be restarted, relaunched, forked or
-converted to another role, and has no worktree, side chat or children. It is never parked.
+converted to another role, and has no worktree, terminal, Native TUI, side chat or children. It is never
+parked. Every MCP server Codex would load, from user or project configuration, is disabled by name.
 
 The request returns `reviewSessionId` at once in state `requested`; the review session's own status
 moves it to `running`, and the runner reports exactly one outcome: `completed` with the reviewer's

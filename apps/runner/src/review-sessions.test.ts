@@ -281,9 +281,11 @@ test("a review accepted but lost before its session was persisted is reported on
   f.launcher.markPreparing("s_lost");
   f.launcher.markPreparing("s_review");
   f.metas.set("s_review", { sessionId: "s_review" } as SessionMeta);
-  assert.deepEqual(f.launcher.lostPreparations(), ["s_lost"], "a persisted session is settled by its own metadata");
+  assert.deepEqual(f.launcher.lostPreparations(), [], "nothing is lost before this process's startup sweep");
   f.launcher.releaseAll();
-  assert.deepEqual(f.launcher.lostPreparations(), ["s_lost"], "a recent intent survives startup");
+  assert.deepEqual(f.launcher.lostPreparations(), ["s_lost"], "a persisted session is settled by its own metadata");
+  f.launcher.markPreparing("s_preparing");
+  assert.deepEqual(f.launcher.lostPreparations(), ["s_lost"], "a preparation in this process is never reported lost");
   f.launcher.releaseAll(Date.now() + 8 * 24 * 60 * 60_000);
   assert.deepEqual(f.launcher.lostPreparations(), [], "a week-old intent is pruned");
   f.launcher.markPreparing("s_lost");

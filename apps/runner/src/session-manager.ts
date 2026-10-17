@@ -1935,8 +1935,11 @@ export class SessionManager {
       this.send({ type: "session_status", sessionId: spec.sessionId, status: "failed", detail: sanitized });
       return { error: sanitized };
     };
-    // A review session launches once; a relaunch leaves its recorded status and outcome alone.
-    if (this.store.has(spec.sessionId)) return { error: "a review session runs once and cannot be relaunched" };
+    // A review session launches once; a relaunch leaves its recorded status and outcome alone, and a
+    // duplicate start while the first still prepares leaves that preparation's resources alone.
+    if (this.store.has(spec.sessionId) || this.reviewsPreparing.has(spec.sessionId)) {
+      return { error: "a review session runs once and cannot be relaunched" };
+    }
     const driver = spec.driver;
     if (!this.reviewSessions || authorizationError || spec.useWorktree || (spec.context && spec.context.kind !== "native") ||
         (spec.executionTarget && spec.executionTarget.adapter !== "host") || spec.orchestrator ||

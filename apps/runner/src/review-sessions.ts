@@ -369,8 +369,12 @@ export class ReviewSessionLauncher {
     }
   }
 
+  /** Reviews found lost at startup; a later preparation in this process is never among them. */
+  private lostAtStartup: string[] = [];
+
   /** Remove every checkout, and intents older than a week. Only at startup, when no review
-   * session's provider can be running; younger intents are still reported as lost reviews. */
+   * session's provider can be running. Younger intents without a persisted session are this
+   * process's record of lost reviews, reported by `lostPreparations`. */
   releaseAll(now = Date.now()): void {
     try { rmSync(join(this.root, "checkouts"), { recursive: true, force: true }); } catch (error) {
       this.deps.log(`review session checkouts could not be removed: ${(error as Error).message}`);
@@ -381,6 +385,7 @@ export class ReviewSessionLauncher {
         if (now - statSync(path).mtimeMs > INTENT_RETENTION_MS) rmSync(path, { force: true });
       } catch { /* already gone */ }
     }
+    this.lostAtStartup = this.intents().filter((sessionId) => !this.store.readMeta(sessionId));
   }
 
   private intents(): string[] {
@@ -396,9 +401,11 @@ export class ReviewSessionLauncher {
     writeFileSync(join(this.root, "intents", sessionId), "", { mode: 0o600 });
   }
 
-  /** Accepted reviews whose session was never persisted: an earlier process lost them. */
+  /** Accepted reviews an earlier process lost before persisting their session, as found at startup
+   * and while their intent remains. */
   lostPreparations(): string[] {
-    return this.intents().filter((sessionId) => !this.store.readMeta(sessionId));
+    const intents = new Set(this.intents());
+    return this.lostAtStartup.filter((sessionId) => intents.has(sessionId) && !this.store.readMeta(sessionId));
   }
 
   /** Remove the review session's checkout and intent; safe to repeat. */

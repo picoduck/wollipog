@@ -212,6 +212,10 @@ test("a stop that arrives while the snapshot is prepared cancels the review befo
   });
   const pending = h.manager.start(reviewSpec(), "brief");
   await until(() => release !== undefined, "the preparation");
+  // A duplicate start while it prepares is refused without touching the first launch's resources.
+  assert.equal(await h.manager.start(reviewSpec(), "brief"), false);
+  assert.deepEqual(h.released, []);
+  assert.deepEqual(h.updates(), []);
   h.manager.stop("s_review");
   // An unrelated stop of an unknown session leaves nothing behind.
   h.manager.stop("s_unrelated");
