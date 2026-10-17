@@ -8545,10 +8545,11 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("this session's runner is offline; request the review again once it reconnects", 409);
     const active = this.db.reviewSessions.activeFor(session.id);
     if (active) return fail(`This session already has an active review session (${active}); wait for it, or cancel it with cancel_review_session.`, 409);
-    // The requester's guardrails: a review spends from what remains of its cost budget.
+    // The requester's guardrails: a review spends from what remains of its cost budget after its own
+    // spending and everything its earlier reviews spent, so repeated reviews cannot exceed it.
     let costBudgetUsd: number | undefined;
     if (session.costBudgetUsd != null && session.costBudgetUsd > 0) {
-      costBudgetUsd = session.costBudgetUsd - (session.costUsd ?? 0);
+      costBudgetUsd = session.costBudgetUsd - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id);
       if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
     }
     const policy: ReviewLaunchPolicy = {

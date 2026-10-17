@@ -72,6 +72,13 @@ export class ReviewSessions {
     );
   }
 
+  /** What every review session of a requester has cost so far, settled usage only. */
+  spentFor(requesterSessionId: string): number {
+    const row = this.sql.prepare(`SELECT COALESCE(SUM(s.cost_usd), 0) AS spent FROM review_sessions r
+      JOIN sessions s ON s.id = r.review_session_id WHERE r.requester_session_id=?`).get(requesterSessionId) as { spent: number };
+    return row.spent;
+  }
+
   isReviewSession(sessionId: string): boolean {
     return !!this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(sessionId);
   }

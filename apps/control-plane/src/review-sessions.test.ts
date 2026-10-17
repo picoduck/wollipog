@@ -280,6 +280,15 @@ test("a requester's cost budget bounds its review, and an exhausted budget refus
     h.db.addSessionUsage("s1", { costUsd: 4 }, 6);
     assert.ok(h.svc.requestReviewSession("s1", request()).ok);
     assert.equal(h.starts()[0]?.spec.config?.costBudgetUsd, 6);
+    // A later review spends only what the requester and its earlier reviews left.
+    const first = h.db.reviewSessions.activeFor("s1")!;
+    h.db.addSessionUsage(first, { costUsd: 5 }, 7);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: first, state: "completed", output: "{}" });
+    assert.ok(h.svc.requestReviewSession("s1", request()).ok);
+    assert.equal(h.starts()[1]?.spec.config?.costBudgetUsd, 1);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: h.db.reviewSessions.activeFor("s1")!, state: "failed" });
+    h.db.addSessionUsage(h.starts()[1]!.spec.sessionId, { costUsd: 1 }, 8);
+    assert.match(h.svc.requestReviewSession("s1", request()).error!, /no cost budget left/u);
     h.db.updateSessionCostBudget("s2", 1, 5);
     h.db.addSessionUsage("s2", { costUsd: 2 }, 6);
     assert.match(h.svc.requestReviewSession("s2", request()).error!, /no cost budget left/u);
