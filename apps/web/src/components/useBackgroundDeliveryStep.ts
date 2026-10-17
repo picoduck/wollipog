@@ -156,9 +156,11 @@ export function useBackgroundDeliveryStep({
     pruneDone(sessionKey, offer?.key ?? null);
   });
 
-  if (condition?.delivery?.watchdogState === "continuation_blocked" && blocked.available) {
-    return { label: "Acknowledge", progress: "Acknowledging blocked results…", busy: blocked.busy,
-      run: blocked.acknowledge };
+  if (condition?.delivery?.watchdogState === "continuation_blocked" && condition.delivery.blockedResultRevision) {
+    // A completed acknowledgement waits for its session update. Never substitute a destructive
+    // action into that same row while it is settling; recovery remains in Background Work.
+    return blocked.available ? { label: "Acknowledge", progress: "Acknowledging blocked results…", busy: blocked.busy,
+      run: blocked.acknowledge } : undefined;
   }
   if (!offer) return undefined;
   const sessionId = session.id;

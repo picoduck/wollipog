@@ -12,7 +12,7 @@ export function historicalBackgroundResultRecovery(
 ): boolean {
   return session.driver === "claude-code" && session.status === "idle" && !session.backgroundWorkState &&
     (session.backgroundDeliveries ?? []).some((delivery) => delivery.watchdogState === "continuation_blocked" ||
-      delivery.watchdogState === "terminal_without_continuation");
+      delivery.watchdogState === "terminal_without_continuation" || delivery.blockedResultAcknowledgedAt != null);
 }
 
 export interface BackgroundDeliveryStatusCopy {

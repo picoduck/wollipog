@@ -26,8 +26,10 @@ export function useBlockedResultAcknowledgement(session: SessionView) {
       pending.current = true;
       setBusy(true);
       void api.acknowledgeBackgroundBlockedResults(session.id, targets).then((updated) => {
+        const requested = new Set(targets.map((target) => key(target.parentTurnId, target.revision)));
         const resolved = (updated.backgroundDeliveries ?? []).flatMap((delivery) =>
-          delivery.blockedResultAcknowledgedAt != null && delivery.blockedResultRevision
+          delivery.blockedResultAcknowledgedAt != null && delivery.blockedResultRevision &&
+            requested.has(key(delivery.parentTurnId, delivery.blockedResultRevision))
             ? [key(delivery.parentTurnId, delivery.blockedResultRevision)] : []);
         setAcknowledged((current) => new Set([...current, ...resolved]));
         showToast(resolved.length ? "Blocked-result alerts acknowledged." : "Background results changed. Review the current alerts.",

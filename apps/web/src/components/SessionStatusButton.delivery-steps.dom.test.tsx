@@ -59,6 +59,8 @@ const finishedAgent = job("agent", {
 });
 const runningMonitor = job("monitor");
 
+/** Legacy control-plane projection, without acknowledgement support. Modern projections add a
+ * blockedResultRevision, exercised by the #3408 tests below. */
 function blocked(overrides: Partial<SessionView> = {}): Partial<SessionView> {
   return {
     driver: "claude-code",
@@ -261,6 +263,10 @@ test("Result Blocked acknowledges all displayed snapshots without stopping jobs 
       ...delivery, watchdogState: undefined, blockedResultAcknowledgedAt: NOW,
     })) });
     await act(async () => { harness.blockedAcknowledgements[0]!.reply.resolve(acknowledged as SessionView); });
+    await settle();
+    await openPopover();
+    assert.equal(rowAction("Result Blocked").name, "Open Background Work",
+      "acknowledgement settling must not substitute Stop Job into the same row");
     await harness.rerender(acknowledged);
     assert.doesNotMatch(trigger().getAttribute("aria-label")!, /Result Blocked/);
     await harness.rerender(blocked({ backgroundDeliveries: [{ ...deliveries[0]!, blockedResultRevision: "new-result" }] }));
@@ -270,7 +276,24 @@ test("Result Blocked acknowledges all displayed snapshots without stopping jobs 
   } finally { await cleanUp(harness.root); }
 });
 
-test("Result Blocked is the bar's status and its row offers Stop Job… for the one job still running", async () => {
+test("a changed blocked result cannot claim acknowledgement success from an older acknowledged group (#3408)", async () => {
+  const original = { parentTurnId: "turn-1", jobCount: 1, terminalCount: 1,
+    watchdogState: "continuation_blocked" as const, blockedResultRevision: "current" };
+  const old = { parentTurnId: "old", jobCount: 1, terminalCount: 1,
+    blockedResultRevision: "old", blockedResultAcknowledgedAt: NOW };
+  const harness = await renderHeader(blocked({ backgroundDeliveries: [original, old] }));
+  try {
+    await openPopover();
+    await act(async () => { rowAction("Result Blocked").button.click(); });
+    await act(async () => { harness.blockedAcknowledgements[0]!.reply.resolve({
+      backgroundDeliveries: [{ ...original, blockedResultRevision: "new" }, old],
+    } as SessionView); });
+    await settle();
+    assert.deepEqual(harness.toasts.at(-1), { message: "Background results changed. Review the current alerts.", tone: "info" });
+  } finally { await cleanUp(harness.root); }
+});
+
+test("a legacy Result Blocked row offers Stop Job… for the one job still running", async () => {
   const harness = await renderHeader(blocked());
   try {
     assert.equal(trigger().getAttribute("aria-label"), "Session Status: Result Blocked");
