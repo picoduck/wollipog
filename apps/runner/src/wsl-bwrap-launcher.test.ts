@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import {
+  WSL_BWRAP_LAUNCHER_PATH,
   WSL_BWRAP_LAUNCHER_SOURCE_PATH,
   buildWslBwrapLaunchArgs,
   buildWslBwrapPrepareArgs,
@@ -76,6 +77,9 @@ test("WSL launcher argv keeps paths and provider arguments as native boundaries"
     network: "deny", pidfile: "/tmp/wlp.pgid", command: "/usr/bin/provider",
     args: ["value with spaces", "$(not-code)", "line one\nline two"],
   });
+  assert.equal(WSL_BWRAP_LAUNCHER_PATH, "/usr/local/lib/wollipog/wsl-bwrap-launcher-v2",
+    "pre-hardening runners must publish to a different installed binary path");
+  assert.equal(launch[5], WSL_BWRAP_LAUNCHER_PATH);
   assert.deepEqual(launch.slice(0, 5), ["-d", "Ubuntu Dev", "--cd", "/work/a b", "--exec"]);
   assert.deepEqual(launch.slice(-4), ["/usr/bin/provider", "value with spaces", "$(not-code)", "line one\nline two"]);
 });
@@ -144,6 +148,53 @@ test("target launcher rejects singleton flags without values", { skip: process.p
     const rejected = spawnSync(f.launcher, ["launch", option], { encoding: "utf8" });
     assert.equal(rejected.status, 125, `${option} fails closed instead of dereferencing argv[argc]`);
   }
+});
+
+test("WSL interop restriction survives fork and exec while ordinary socket families remain usable", {
+  skip: process.platform !== "linux",
+}, (t) => {
+  const f = fixture();
+  t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const source = join(f.root, "transport-test.c"), binary = join(f.root, "transport-test");
+  // Include the production implementation so this exercises the actual installed kernel filter,
+  // without needing a WSL kernel or permitting a Windows process to start on this host.
+  writeFileSync(source, `#define main launcher_main
+#include ${JSON.stringify(WSL_BWRAP_LAUNCHER_SOURCE_PATH)}
+#undef main
+int main(int argc, char **argv) {
+  if (argc == 1) {
+    restrict_windows_interop();
+    pid_t child = fork();
+    if (child < 0) return 1;
+    if (child == 0) { execl(argv[0], argv[0], "probe", NULL); _exit(2); }
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return 3;
+    return WEXITSTATUS(status);
+  }
+  if (socket(AF_VSOCK, SOCK_STREAM, 0) != -1 || errno != EPERM) return 4;
+  int pair[2];
+  if (socketpair(AF_VSOCK, SOCK_STREAM, 0, pair) != -1 || errno != EPERM) return 5;
+  if (syscall(SYS_socket, (1ULL << 32) | AF_VSOCK, SOCK_STREAM, 0) != -1 || errno != EPERM) return 6;
+  if (syscall(SYS_io_uring_setup, 0, NULL) != -1 || errno != EPERM) return 7;
+  if (syscall(SYS_io_uring_enter, -1, 0, 0, 0, NULL, 0) != -1 || errno != EPERM) return 8;
+  if (syscall(SYS_io_uring_register, -1, 0, NULL, 0) != -1 || errno != EPERM) return 9;
+#if defined(__x86_64__)
+  if (syscall(SYS_socket | 0x40000000U, AF_VSOCK, SOCK_STREAM, 0) != -1 || errno != ENOSYS) return 10;
+#endif
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) return 11;
+  close(pair[0]); close(pair[1]);
+  int inet = socket(AF_INET, SOCK_STREAM, 0);
+  if (inet < 0) return 12;
+  close(inet);
+  return 0;
+}
+`);
+  const compiled = spawnSync("cc", ["-O2", "-std=c11", "-Wall", "-Wextra", "-Werror", "-o", binary, source], {
+    encoding: "utf8",
+  });
+  assert.equal(compiled.status, 0, compiled.stderr);
+  const probe = spawnSync(binary, [], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(probe.status, 0, `transport restriction probe: ${probe.status}; ${probe.stderr}`);
 });
 
 test("target-local state roots contain only fixed prefixes and full hashes", () => {
