@@ -2042,6 +2042,7 @@ export function NewSessionDialog({
     {choosingFolder && runner && (
       <ChooseFolderDialog
         runnerId={runner.runnerId}
+        machineName={runnerDisplay(runner, boxByRunner.get(runner.runnerId), runner.runnerId).name}
         protocolVersion={runner.protocolVersion}
         distro={browseDistro}
         returnFocusRef={browseButtonRef}

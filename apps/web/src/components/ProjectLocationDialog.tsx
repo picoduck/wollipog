@@ -325,6 +325,7 @@ export function ProjectLocationDialog({
               {browsing && selectedMachine && (
                 <DirectoryPicker
                   runnerId={selectedMachine.runner.runnerId}
+                  machineName={selectedMachine.display.name}
                   protocolVersion={selectedMachine.runner.protocolVersion}
                   onPick={pickFolder}
                   onCancel={() => setBrowsing(false)}

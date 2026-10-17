@@ -10,7 +10,7 @@ import "../styles.css";
  * answers that.
  *
  * - A transcript bubble declares no transition, so a change to it must apply in the same frame.
- * - A directory entry declares a background-color transition, which must still run and end.
+ * - A button row declares a background-color transition, which must still run and end.
  * - A menu declares an entrance animation, and re-places itself on `animationend` (Menu.tsx).
  * - A combobox's list re-places itself on `animationend` too (interactions.ts).
  */
@@ -23,7 +23,7 @@ function Harness() {
   return (
     <main style={{ display: "grid", gap: 24, padding: 24, maxWidth: 480 }}>
       <div className="tl-bubble" data-testid="undeclared">A bubble with no transition of its own.</div>
-      <div className="dir-entry" data-testid="declared">A row that declares a transition.</div>
+      <button type="button" className="row" data-testid="declared">A row that declares a transition.</button>
       <div>
         <button type="button" className="btn" ref={triggerRef} onClick={() => setMenuOpen(true)}>Open Menu</button>
         {menuOpen && (
