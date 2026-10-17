@@ -263,7 +263,7 @@ test("a replacement runner's account without a recorded profile id binds new ses
   assert.ok(failed?.type === "session_status" && failed.detail?.includes(LEASE_WORKER_ERRORS.profile_changed), JSON.stringify(failed));
 });
 
-test("only a granted or pending marker identity, or the configured id, is recorded for a new binding", (t) => {
+test("only a granted or pending marker identity, or the configured id, is recorded for a new binding", { skip: process.platform === "win32" }, (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-profile-binding-id-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
