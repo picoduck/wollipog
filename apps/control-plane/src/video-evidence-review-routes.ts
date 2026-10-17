@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AuthPrincipal } from "./identity.js";
 import { EvidenceReviewService } from "./evidence-review-service.js";
 import { VIDEO_REVIEW_BATCH, VideoReviewRefused, type VideoReviewVerdict } from "./video-evidence-runtime.js";
@@ -9,13 +9,18 @@ const body = (value: unknown, keys: string[]): value is Record<string, unknown> 
   !!value && typeof value === "object" && !Array.isArray(value) &&
   Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
 
-/** Registered only with the concrete current authority/admission adapters after foundation,
- * scope and allowance integration. Registration grants no credentials, scope or live proof. */
+/** Registration grants no credentials, scope or live proof. While `unavailable` reports a reason,
+ * every authenticated call is refused with it before any body is read or service is reached. */
 export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   service: EvidenceReviewService;
   requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
+  unavailable?(): { code: string; reason: string } | null;
 }): void {
   const prefix = "/api/sessions/:id/video-evidence-review";
+  const refused = (reply: FastifyReply) => {
+    const refusal = deps.unavailable?.();
+    return refusal ? reply.code(409).send({ error: refusal.reason, code: refusal.code }) : null;
+  };
   const principalFor = (req: FastifyRequest) => {
     const principal = deps.requestPrincipal(req);
     return principal?.kind === "agent" && principal.credentialSessionId === (req.params as { id: string }).id
@@ -24,6 +29,8 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/prepare", async (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching Session credential is required." });
+    const refusal = refused(reply);
+    if (refusal) return refusal;
     if (!body(req.body, ["childSessionId", "occurrenceId", "evidenceId"]) ||
       !text(req.body.childSessionId) || !text(req.body.occurrenceId) || !text(req.body.evidenceId)) {
       return reply.code(400).send({ error: "Exact child, occurrence and evidence identifiers are required." });
@@ -43,6 +50,8 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/frame", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
+    const refusal = refused(reply);
+    if (refusal) return refusal;
     if (!body(req.body, ["reviewId", "index"]) || !text(req.body.reviewId) ||
       !Number.isSafeInteger(req.body.index) || Number(req.body.index) < 0 || Number(req.body.index) >= 900) {
       return reply.code(400).send({ error: "A bounded review and source-frame index are required." });
@@ -60,6 +69,8 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/frames", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
+    const refusal = refused(reply);
+    if (refusal) return refusal;
     // `end` (exclusive) keeps a batch inside the reviewer's current fresh-context delivery window.
     if (!(body(req.body, ["reviewId", "index"]) || body(req.body, ["reviewId", "index", "end"])) || !text(req.body.reviewId) ||
       !Number.isSafeInteger(req.body.index) || Number(req.body.index) < 0 || Number(req.body.index) >= 900 ||
@@ -80,6 +91,8 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/acknowledge-frames", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
+    const refusal = refused(reply);
+    if (refusal) return refusal;
     if (!body(req.body, ["reviewId", "receipts"]) || !text(req.body.reviewId) ||
       !Array.isArray(req.body.receipts) || !req.body.receipts.length || req.body.receipts.length > VIDEO_REVIEW_BATCH.frames ||
       req.body.receipts.some((r: unknown) => !body(r, ["receiptId", "sha256"]) || !text(r.receiptId) ||
@@ -95,6 +108,8 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/acknowledge", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
+    const refusal = refused(reply);
+    if (refusal) return refusal;
     if (!body(req.body, ["reviewId", "receiptId", "sha256"]) || !text(req.body.reviewId) || !text(req.body.receiptId) ||
       typeof req.body.sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(req.body.sha256)) {
       return reply.code(400).send({ error: "An exact review receipt and digest are required." });
@@ -108,6 +123,8 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/verdict", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
+    const refusal = refused(reply);
+    if (refusal) return refusal;
     if (!body(req.body, ["reviewId", "report"]) || !text(req.body.reviewId) ||
       !body(req.body.report, ["outcome", "criteria", "rationale"]) ||
       !["accept", "reject"].includes(String(req.body.report.outcome)) ||
@@ -124,6 +141,8 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/provenance", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching decision-owner Session credential is required." });
+    const refusal = refused(reply);
+    if (refusal) return refusal;
     if (!body(req.body, ["reviewId"]) || !text(req.body.reviewId)) {
       return reply.code(400).send({ error: "An exact review identifier is required." });
     }

@@ -16,7 +16,8 @@ interface StopRecord { request: MediaActiveStopRequest; acknowledged: MediaActiv
 const json = (v: unknown) => JSON.stringify(v);
 const sha = (v: unknown) => createHash("sha256").update(json(v)).digest("hex");
 
-/** Dedicated lifecycle preparation, deliberately unregistered in hosting. Unknown operations
+/** Dedicated lifecycle preparation. Hosting composes it with no owning-handle port, so it never
+ * signals until a runner registers a media-only worker handle. Unknown operations
  * retain reservations/history and permit exact readback only. There is no settlement API here. */
 export class PreparedMediaActiveStops {
   private readonly purposes: MediaSessionPurposes;

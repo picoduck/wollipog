@@ -220,6 +220,7 @@ import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
+import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
   canAssignSessionProject,
@@ -968,6 +969,8 @@ const evidenceAuthorityDisclosures = hostingEvidenceAuthorityDisclosures({
   organizationExists: (organizationId) => db.listOrganizationIds().includes(organizationId),
   listRunners: () => db.listRunners(),
 });
+// Inert until a paced-video peer, a Human-certified live proof and the media-only reviewer exist.
+const videoEvidence = composeHostingVideoEvidence(db);
 const svc = new SessionsService(
   db,
   hub,
@@ -990,8 +993,10 @@ const svc = new SessionsService(
   VIDEO_FRAME_VALIDATION_SESSION_ID !== undefined,
   VIDEO_FRAME_VALIDATION_SESSION_ID,
   undefined,
-  undefined,
+  videoEvidence.workflowVideoApprovals,
   evidenceAuthorityDisclosures,
+  undefined,
+  videoEvidence.preparedMediaActiveStops,
 );
 const roleConversions = new SessionRoleConversions(db, hub, (event, fields) =>
   app.log.info({ event, ...fields }, "session role conversion"));
@@ -1006,6 +1011,7 @@ registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPri
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
 registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures });
+registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });
 registerArtifactUploadSettingsRoutes(app, db, hub, requestPrincipal);
 
 // An attempt session's observed status moves its work item without a ledger write; give such

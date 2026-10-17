@@ -38,6 +38,21 @@ export interface InspectedVideoValidationRun {
   inspectedByUserId: string;
 }
 
+/** Owner/admin inventory row. Evidence digests and run bodies stay in the stored proof. */
+export interface VideoLiveValidationSummary {
+  proofId: string;
+  driver: string;
+  modelId: string;
+  providerId: string;
+  capabilitiesSha256: string;
+  validatedAt: number;
+  expiresAt: number;
+  verifiedByUserId: string;
+  revoked: boolean;
+  expired: boolean;
+}
+const administrator = (principal: AuthPrincipal) => principal.kind === "human" && ["owner", "admin"].includes(principal.role);
+
 /** Separate explicit operator/human approval of actual empirical proof; production settings
  * cannot create it. It is invalidated when the harness/model/capability contract changes. */
 export class VideoLiveValidationRegistry {
@@ -49,8 +64,7 @@ export class VideoLiveValidationRegistry {
 
   recordInspectedRuns(principal: AuthPrincipal, target: EvidenceReviewerTarget,
     runs: readonly InspectedVideoValidationRun[], now = Date.now()): VideoProfileLiveProof | null {
-    if (principal.kind !== "human" || !["owner", "admin"].includes(principal.role) ||
-      runs.length !== 3 || new Set(runs.map((r) => r.kind)).size !== 3 ||
+    if (principal.kind !== "human" || !administrator(principal) || !Array.isArray(runs as unknown) || runs.length !== 3 || new Set(runs.map((r) => r.kind)).size !== 3 ||
       new Set(runs.map((r) => r.runId)).size !== 3 || !Number.isSafeInteger(now) || now <= 0) return null;
     const digest = (value: string) => /^[a-f0-9]{64}$/u.test(value);
     const expected = {
@@ -112,8 +126,27 @@ export class VideoLiveValidationRegistry {
     return null;
   }
 
+  /** Unrevoked proofs inside their validity window, for readiness only. Admission still checks
+   * each proof against its exact current reviewer target with validVideoLiveProof. */
+  unexpired(now = Date.now()): VideoProfileLiveProof[] {
+    return (this.db.prepare("SELECT proof FROM video_profile_live_validation WHERE revoked=0 ORDER BY rowid DESC").all() as Array<{ proof: string }>)
+      .map((row) => JSON.parse(row.proof) as VideoProfileLiveProof)
+      .filter((proof) => proof.validatedAt <= now && proof.expiresAt > now);
+  }
+
+  list(principal: AuthPrincipal, now = Date.now()): VideoLiveValidationSummary[] | null {
+    if (!administrator(principal)) return null;
+    return (this.db.prepare("SELECT proof, revoked FROM video_profile_live_validation ORDER BY rowid DESC LIMIT 100").all() as
+      Array<{ proof: string; revoked: number }>).map((row) => {
+      const proof = JSON.parse(row.proof) as VideoProfileLiveProof;
+      return { proofId: proof.proofId, driver: proof.driver, modelId: proof.modelId, providerId: proof.providerId,
+        capabilitiesSha256: proof.capabilitiesSha256, validatedAt: proof.validatedAt, expiresAt: proof.expiresAt,
+        verifiedByUserId: proof.verifiedByUserId, revoked: row.revoked !== 0, expired: proof.expiresAt <= now };
+    });
+  }
+
   revoke(principal: AuthPrincipal, proofId: string): boolean {
-    return principal.kind === "human" && ["owner", "admin"].includes(principal.role) &&
+    return administrator(principal) &&
       Number(this.db.prepare("UPDATE video_profile_live_validation SET revoked=1 WHERE proof_id=? AND revoked=0")
         .run(proofId).changes) === 1;
   }
