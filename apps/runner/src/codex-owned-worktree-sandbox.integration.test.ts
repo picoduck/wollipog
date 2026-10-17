@@ -142,8 +142,9 @@ test("a Codex sandbox commits in the session's owned second worktree while anoth
 
     const refused = await server.exec(selected, before, commitIn(owned, "before"));
     assert.notEqual(refused.exitCode, 0, "the policy without the owned worktree refuses the commit");
-    git(owned, "checkout", "--quiet", "--", ".");
-    git(owned, "clean", "--quiet", "-fd");
+    // A read-only worktree takes nothing, so there is nothing to clean before the real attempt. The
+    // fixture's only commit is empty, which also rules out pathspec-based cleanup.
+    assert.equal(git(owned, "status", "--porcelain", "--untracked-files=all"), "", "the refused attempt wrote nothing");
 
     const work = await server.exec(selected, policy, `${commitIn(owned, "owned")} && ${commitIn(selected, "selected")}`);
     assert.equal(work.exitCode, 0, work.stderr);
