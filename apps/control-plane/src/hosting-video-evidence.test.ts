@@ -33,7 +33,8 @@ async function harness(t: { after(fn: () => unknown): void }) {
     orchestrator, organizationId: identity.organizationId, delegatedScope: { organizationId: identity.organizationId,
       owner: { kind: "user", userId: identity.userId } } });
   const principals: Record<string, AuthPrincipal> = { owner: human("owner"), admin: human("admin"), operator: human("operator"),
-    viewer: human("viewer"), orchestrator: agent(true), reviewer: agent(false) };
+    viewer: human("viewer"), orchestrator: agent(true), reviewer: agent(false),
+    foreignOwner: { ...human("owner"), organizationId: "org_foreign", organizationName: "Foreign" } };
   const server = Fastify();
   registerHostingVideoEvidenceRoutes(server, { video,
     requestPrincipal: (req) => principals[String(req.headers["x-fixture-principal"])] ?? null });
@@ -63,7 +64,8 @@ test("every video evidence route refuses in the current state with a specific re
       assert.match(String(refused.body.error), /stays with the Human/u);
     }
   }
-  for (const as of [null, "operator", "viewer", "orchestrator", "reviewer"]) {
+  // Proofs are installation-wide: another organization's owner cannot read or change them.
+  for (const as of [null, "operator", "viewer", "orchestrator", "reviewer", "foreignOwner"]) {
     assert.equal((await h.call(as, "GET", "/api/video-evidence/live-validations")).status, 403, `list as ${as}`);
     assert.equal((await h.call(as, "POST", "/api/video-evidence/live-validations", {})).status, 403, `record as ${as}`);
     assert.equal((await h.call(as, "POST", "/api/video-evidence/live-validations/any/revoke")).status, 403, `revoke as ${as}`);
@@ -126,6 +128,9 @@ test("readiness advances only through a paced peer and a Human proof, and still 
   }
   const listed = await h.call("admin", "GET", "/api/video-evidence/live-validations");
   assert.deepEqual((listed.body.proofs as Array<{ proofId: string }>).map((item) => item.proofId), [proof.proofId]);
+  assert.equal((await h.call("foreignOwner", "GET", "/api/video-evidence/live-validations")).status, 403);
+  assert.equal((await h.call("foreignOwner", "POST", `/api/video-evidence/live-validations/${proof.proofId}/revoke`)).status, 403);
+  assert.equal(h.video.readiness().code, "reviewer_unavailable", "a foreign organization cannot revoke the proof");
 
   const revoked = await h.call("admin", "POST", `/api/video-evidence/live-validations/${proof.proofId}/revoke`);
   assert.equal(revoked.status, 200);

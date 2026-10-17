@@ -187,11 +187,11 @@ Readiness never reports available in this slice. The fixed agent route allowlist
 ordinary Session credentials still cannot reach `prepare` or `provenance`, and only media-purpose
 reviewer credentials reach the media methods.
 
-The live validation ingress is Human-only. Organization owners and admins use
+The live validation ingress is Human-only and installation-wide. Owners and admins of the personal organization use
 `GET /api/video-evidence/live-validations` (inventory plus current readiness),
 `POST /api/video-evidence/live-validations` (an exact reviewer target and its three inspected runs)
-and `POST /api/video-evidence/live-validations/:proofId/revoke`. Session credentials and other
-members are refused. Recording is refused with `no_paced_video_peer` unless a registered installation
+and `POST /api/video-evidence/live-validations/:proofId/revoke`. Session credentials, other
+members and other organizations are refused. Recording is refused with `no_paced_video_peer` unless a registered installation
 currently advertises the contract for that exact runner, agent, driver, model, protocol and contract
 revision. Its capability and namespace digests cannot be checked against a runner attestation until
 the media-only launcher exists. A recorded proof therefore enables nothing alone: admission still

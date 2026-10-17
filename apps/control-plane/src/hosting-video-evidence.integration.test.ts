@@ -27,9 +27,13 @@ test("hosting composes inert video evidence and refuses every new route in the c
     const local = seed.localIdentityContext();
     ownerId = local.userId;
     seed.createIdentityMember({ userId: "fixture-operator", displayName: "Operator", organizationId: local.organizationId, role: "operator", now: 1 });
-    for (const userId of [local.userId, "fixture-operator"]) {
+    seed.raw().prepare("INSERT INTO identity_organizations (organization_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+      .run("org_foreign", "Foreign", 1, 1);
+    seed.createIdentityMember({ userId: "fixture-foreign-admin", displayName: "Foreign Admin", organizationId: "org_foreign", role: "admin", now: 1 });
+    for (const [userId, organizationId] of [[local.userId, local.organizationId], ["fixture-operator", local.organizationId],
+      ["fixture-foreign-admin", "org_foreign"]] as const) {
       seed.createDevice({ id: `device-${userId}`, name: "Video Test", tokenHash: hashToken(`device-${userId}`), userId,
-        organizationId: local.organizationId, now: 2 });
+        organizationId, now: 2 });
     }
     seed.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "test", agents: [], workspaces: [] }, 1, PROTOCOL_VERSION);
     seed.createSession({ id: "orchestrator", runnerId: "r", workspaceId: null, agentId: null, title: "Orchestrator", useWorktree: false,
@@ -62,10 +66,11 @@ test("hosting composes inert video evidence and refuses every new route in the c
     }
     live.updateSessionStatus("orchestrator", "running", Date.now());
     assert.equal(live.setAgentControlCredential("orchestrator", "r", hashToken("token-orchestrator"), Date.now()), true);
-    const call = async (as: "owner" | "operator" | "orchestrator", method: "GET" | "POST", path: string, body?: unknown) => {
+    const devices = { owner: ownerId, operator: "fixture-operator", foreignAdmin: "fixture-foreign-admin" };
+    const call = async (as: keyof typeof devices | "orchestrator", method: "GET" | "POST", path: string, body?: unknown) => {
       const headers: Record<string, string> = as === "orchestrator"
         ? { authorization: "Bearer token-orchestrator", [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: "orchestrator" }
-        : { authorization: `Bearer device-${as === "owner" ? ownerId : "fixture-operator"}` };
+        : { authorization: `Bearer device-${devices[as]}` };
       if (method === "POST") headers["content-type"] = "application/json";
       const response = await fetch(`http://127.0.0.1:${port}${path}`, { method, headers, signal: AbortSignal.timeout(5000),
         ...(method === "POST" ? { body: JSON.stringify(body ?? {}) } : {}) });
@@ -84,7 +89,8 @@ test("hosting composes inert video evidence and refuses every new route in the c
     assert.equal((await call("orchestrator", "GET", "/api/sessions/orchestrator")).status, 200);
     // A Session credential is never authenticated outside its allowlist (401); members are refused (403).
     const refusedFor = (as: string) => as === "orchestrator" ? 401 : 403;
-    for (const as of ["operator", "orchestrator"] as const) {
+    // Proofs are installation-wide, so another organization's admin is refused like any member.
+    for (const as of ["operator", "foreignAdmin", "orchestrator"] as const) {
       assert.equal((await call(as, "GET", "/api/video-evidence/live-validations")).status, refusedFor(as), `list as ${as}`);
       assert.equal((await call(as, "POST", "/api/video-evidence/live-validations", {})).status, refusedFor(as), `record as ${as}`);
       assert.equal((await call(as, "POST", "/api/video-evidence/live-validations/any/revoke")).status, refusedFor(as), `revoke as ${as}`);

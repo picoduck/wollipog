@@ -3,7 +3,7 @@ import { supportsPacedVideoReviewPeer } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { EvidenceReviewService } from "./evidence-review-service.js";
 import type { EvidenceReviewerTarget } from "./evidence-review-worker.js";
-import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
+import { PERSONAL_ORGANIZATION_ID, type AuthPrincipal, type HumanPrincipal } from "./identity.js";
 import { PreparedMediaActiveStops } from "./prepared-media-active-stops.js";
 import { createControlPlaneVideoReviewStore } from "./video-evidence-artifacts.js";
 import { registerVideoEvidenceReviewRoutes } from "./video-evidence-review-routes.js";
@@ -74,9 +74,12 @@ export function composeHostingVideoEvidence(db: ControlPlaneDb) {
 }
 export type HostingVideoEvidence = ReturnType<typeof composeHostingVideoEvidence>;
 
+/** Proofs certify an installation's reviewer for the whole control plane, so, like the hosting gate
+ * for every global resource, only owners and admins of the personal organization manage them. */
 const administrator = (principal: AuthPrincipal | null): principal is HumanPrincipal =>
-  principal?.kind === "human" && (principal.role === "owner" || principal.role === "admin");
-const ADMIN_ONLY = "Live video validation is recorded and revoked only by an organization owner or admin.";
+  principal?.kind === "human" && (principal.role === "owner" || principal.role === "admin") &&
+  principal.organizationId === PERSONAL_ORGANIZATION_ID;
+const ADMIN_ONLY = "Live video validation is installation-wide, so only an owner or admin of the personal organization manages it.";
 
 /** Agent review routes behind the readiness gate, plus the Human-only live validation ingress. */
 export function registerHostingVideoEvidenceRoutes(app: FastifyInstance, deps: {
