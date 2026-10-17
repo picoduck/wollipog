@@ -12,7 +12,7 @@ import { videoPreparationDecoderAvailable } from "./video-evidence-preparation.j
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PACED_VIDEO_REVIEW_MIN_PROTOCOL,
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PACED_VIDEO_REVIEW_MIN_PROTOCOL, pacedVideoReviewWindowPlan,
   PACED_VIDEO_REVIEW_CONTRACT_ID, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -735,10 +735,13 @@ async function gateHarness(t: { skip(reason: string): void; after(fn: () => void
     service.resolveWorkflowDecision("root", "child", original.occurrenceId, resolution, "orchestrator",
       { kind: "agent", id: "root" }, () => true);
   const complete = () => {
-    for (let index = 0; index < record.manifest.frames.length;) {
-      const batch = runtime.deliverBatch(record.reviewId, reviewer.sessionId, index);
-      runtime.acknowledgeBatch(record.reviewId, reviewer.sessionId, batch.deliveries.map((delivery) => delivery.receipt));
-      index = batch.nextIndex;
+    // Window by window, as the runner's paced reviewer delivers them; overlap frames repeat.
+    for (const window of pacedVideoReviewWindowPlan(record.manifest.frames).windows) {
+      for (let index = window.firstIndex; index < window.endIndex;) {
+        const batch = runtime.deliverBatch(record.reviewId, reviewer.sessionId, index, window.endIndex);
+        runtime.acknowledgeBatch(record.reviewId, reviewer.sessionId, batch.deliveries.map((delivery) => delivery.receipt));
+        index = batch.nextIndex;
+      }
     }
     const verdict = runtime.recordVerdict(record.reviewId, reviewer.sessionId, { outcome: "accept", criteria: [{
       criterionId: "transients", outcome: "pass", observedFrameIndices: [157],
@@ -762,7 +765,9 @@ test("original UI gate persists actual media actor separately and consumes compl
   assert.deepEqual(approved.data?.resourceSnapshot, h.original.resourceSnapshot);
   assert.equal(approved.data?.resourceDigest, h.original.resourceDigest);
   assert.equal(h.db.validUiEvidenceReviewReceipts(h.original.occurrenceId, "root", Date.now()).length, 0);
-  assert.equal(h.store.latestReceipts(h.record.reviewId).length, 360);
+  assert.equal(h.store.latestReceipts(h.record.reviewId).length,
+    pacedVideoReviewWindowPlan(h.record.manifest.frames).windows.reduce((n, w) => n + w.endIndex - w.firstIndex, 0),
+    "every window receipts each of its frames");
   const consumed = await h.service.consumeWorkflowDecision("child", h.original.occurrenceId,
     { resourceSnapshot: h.original.resourceSnapshot });
   assert.ok(consumed.ok, consumed.error ?? "Consumption refused"); assert.equal(consumed.data?.status, "consumed");
@@ -1135,7 +1140,11 @@ test("exact prior quality schema migrates atomically, preserves live provenance 
     const h = await gateHarness(t); if (!h) return; h.complete();
     const sql = h.db.raw();
     const review = sql.prepare("SELECT review_id,binding_sha256,record,status FROM temporal_video_reviews").get()!;
-    const receipts = sql.prepare("SELECT * FROM temporal_video_receipts ORDER BY frame_index").all();
+    // Legacy rows predate window binding: one receipt per frame (the overlap frame's last delivery).
+    const byFrame = new Map<number, Record<string, unknown>>();
+    for (const r of sql.prepare("SELECT review_id,frame_index,receipt_id,receipt,acknowledged FROM temporal_video_receipts " +
+      "ORDER BY window_index,frame_index").all()) byFrame.set(Number(r.frame_index), { ...r });
+    const receipts = [...byFrame.values()].sort((a, b) => Number(a.frame_index) - Number(b.frame_index)) as Array<Record<string, string | number>>;
     const verdict = sql.prepare("SELECT * FROM temporal_video_verdicts").get()!;
     const intents = sql.prepare("SELECT * FROM prepared_media_sessions").all();
     sql.exec("BEGIN; DROP TABLE temporal_video_verdicts; DROP TABLE temporal_video_receipts; DROP TABLE temporal_video_reviews;" +
@@ -1163,8 +1172,11 @@ test("exact prior quality schema migrates atomically, preserves live provenance 
       assert.equal(migrated.latestReceipts(h.record.reviewId).length, 0);
       assert.equal(migrated.getVerdict(h.record.reviewId), null);
     } else {
-      assert.deepEqual(sql.prepare("SELECT review_id,binding_sha256,record,status FROM temporal_video_reviews").get(), review);
-      assert.deepEqual(sql.prepare("SELECT * FROM temporal_video_receipts ORDER BY frame_index").all(), receipts);
+      assert.deepEqual({ ...sql.prepare("SELECT review_id,binding_sha256,record,status FROM temporal_video_reviews").get() },
+        { ...review, status: "revoked" }, "a pending review cannot prove which window saw each frame");
+      assert.deepEqual(sql.prepare("SELECT review_id,frame_index,receipt_id,receipt,acknowledged FROM temporal_video_receipts ORDER BY frame_index")
+        .all().map((r) => ({ ...r })), receipts.map((r) => ({ ...r })));
+      assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM temporal_video_receipts WHERE window_index<>0").get()!.n, 0, "kept as window 0");
       assert.deepEqual(sql.prepare("SELECT * FROM temporal_video_verdicts").get(), verdict);
       h.db.deleteSession(h.record.binding.reviewerSessionId);
       assert.equal(migrated.getReview(h.record.reviewId), null);
