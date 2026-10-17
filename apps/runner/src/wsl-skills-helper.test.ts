@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { after, test } from "node:test";
+import { after, test, type TestContext } from "node:test";
 const previousMask = process.umask(0o077);
 after(() => process.umask(previousMask));
 import type { SkillFile } from "@wollipog/protocol";
@@ -274,7 +274,11 @@ test("helper acquisition tolerates a publication temporary file removed after en
 });
 
 test("real native and helper processes elect one winner while a release mirror finishes publication", async (t) => {
-  for (const contenders of ["native", "helper", "both"] as const) await t.test(contenders, async (t) => {
+  const runElection = async (
+    t: TestContext,
+    contenders: "native" | "helper" | "both",
+    refusalStage?: "recovery" | "publication",
+  ) => {
     const home = mkdtempSync(join(tmpdir(), "wollipog-wsl-release-window-"));
     const released = join(home, "released");
     const finishMirror = join(home, "finish-mirror");
@@ -357,6 +361,8 @@ try {
 } catch (error) { publishResult("lost:" + error.message); }
   `);
     if (contenders !== "helper") launch(process.execPath, ["--import", "tsx", nativeProgram]);
+    // Both controlled cases let the native contender publish first. Recovery pauses before
+    // the helper's confirmation read; publication pauses after it, before the fenced publish.
     if (contenders !== "native") launch("python3", ["-c", leaseProgram(`
 original_read = read_owned_lease_chain
 reads = 0
@@ -364,11 +370,18 @@ def interleaved(root, lock, include_snapshot=False, include_details=False):
     global reads
     if include_snapshot and not include_details:
         reads += 1
-        if reads == 2:
+        if reads == 2 and ${JSON.stringify(refusalStage ?? "uncontested")} != "publication":
             with open(${JSON.stringify(helperReady)}, "w") as stream: stream.write("ready")
-            while not os.path.exists(${JSON.stringify(mirrored)}): time.sleep(0.01)
+            while not os.path.exists(${JSON.stringify(refusalStage === "recovery" ? nativeResult : mirrored)}): time.sleep(0.01)
     return original_read(root, lock, include_snapshot, include_details)
 read_owned_lease_chain = interleaved
+original_publish = publish_lease
+def interleaved_publish(root, lock, target, value):
+    if ${JSON.stringify(refusalStage ?? "uncontested")} == "publication" and target.startswith("next-") and value.get("state") == "active":
+        with open(${JSON.stringify(helperReady)}, "w") as stream: stream.write("ready")
+        while not os.path.exists(${JSON.stringify(nativeResult)}): time.sleep(0.01)
+    return original_publish(root, lock, target, value)
+publish_lease = interleaved_publish
 def publish_result(result):
     with open(${JSON.stringify(helperResult + ".tmp")}, "w") as stream: stream.write(result)
     os.replace(${JSON.stringify(helperResult + ".tmp")}, ${JSON.stringify(helperResult)})
@@ -393,12 +406,26 @@ finally: os.close(home_fd)
     const outcomes = resultPaths.map((path) => readFileSync(path, "utf8"));
     assert.equal(outcomes.filter((result) => result === "won").length, 1, outcomes.join("\n"));
     assert.equal(outcomes.filter((result) => result.startsWith("lost:")).length, contenders === "both" ? 1 : 0, outcomes.join("\n"));
-    if (contenders === "both") assert.match(outcomes.find((result) => result.startsWith("lost:"))!, /lease changed during (recovery|publication)/);
+    if (contenders === "both") {
+      assert.equal(outcomes[0], "won", "the controlled interleaving elects the native contender");
+      const canonicalRoot = realpathSync(root);
+      assert.equal(outcomes[1],
+        `lost:provider home lease at ${canonicalRoot}/mutable-home.lock provider home lease changed during ${refusalStage}; ` +
+        `after proving no provider process or runner uses this HOME, manually quarantine the entire ${canonicalRoot} directory ` +
+        "(including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and retry; do not remove individual records");
+    }
     assert.deepEqual(readFileSync(join(root, "mutable-home.lock", releaseName)), readFileSync(join(root, releaseName)));
     writeFileSync(finishWinner, "done");
     const statuses = await Promise.all(exits);
     assert.deepEqual(statuses.map(({ code }) => code), contenders === "both" ? [0, 0, 0] : [0, 0], statuses.map(({ stderr }) => stderr).join("\n"));
     assert.equal(invokeLease(home, acquireAndRelease).status, 0, "winner releases a usable canonical journal");
+  };
+
+  for (const contenders of ["native", "helper", "both"] as const) await t.test(contenders, async (t) => {
+    if (contenders !== "both") return runElection(t, contenders);
+    for (const stage of ["recovery", "publication"] as const) {
+      await t.test(stage, (t) => runElection(t, contenders, stage));
+    }
   });
 });
 
