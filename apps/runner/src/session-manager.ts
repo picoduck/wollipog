@@ -789,6 +789,16 @@ interface ActiveSession {
   usageWindowRejection?: UsageWindowRejection;
   /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
   seatbeltWritableRoots?: readonly string[];
+  /** The session's other managed worktrees this live process's bwrap boundary binds (#3316). The
+   * driver renders the same bind list for every later spawn — a persistent transport restart or a
+   * resume probe — so once one of them is retired the provider is rebound into its selected
+   * worktree before its next turn instead of failing on a bind source that no longer exists. */
+  boundOwnedWorktrees?: readonly string[];
+  /** The selected worktree a retirement rebind targets, while that rebind is the pending one. Unlike
+   * a selection change, it waits for provider-initiated work instead of retiring it (#3402). */
+  retiredWorktreeRebind?: string;
+  /** A retirement rebind that could not run; this process is never handed to another one. */
+  retiredWorktreeRebindFailed?: true;
 }
 
 interface ProviderRetirement {
@@ -4396,6 +4406,11 @@ export class SessionManager {
     }).catch(() => false);
     const snapshot = this.snapshot(updated);
     this.send({ type: "session_runtime_updated", snapshot });
+    // A live provider whose sandbox binds the removed worktree would fail its next spawn (#3402).
+    const live = this.active.get(record.sessionId);
+    if (live && this.requestRetiredWorktreeRebind(record.sessionId, live) && !live.running) {
+      setImmediate(() => this.scheduleDrain(record.sessionId));
+    }
     return snapshot;
   }
 
@@ -8722,6 +8737,10 @@ export class SessionManager {
       }
     }
     const pendingProviderAccountSwitch = this.pendingProviderAccount(meta);
+    const boundOwnedWorktrees = isolation?.backend === "bwrap" && isolation.protectedWorktree
+      ? this.managedWorktreeProtections(meta).map((protection) => protection.worktreePath)
+        .filter((path) => path !== cwd && !!isolation.writableBinds?.some((bind) => bind.target === path))
+      : [];
     const entry: ActiveSession = {
       orchestratorLaunchPolicy: meta.orchestrator,
       projectMemoryKey: effectiveProjectMemoryKey(meta),
@@ -8734,6 +8753,7 @@ export class SessionManager {
       worktreeLeaseOwner,
       context: meta.context,
       ...(isolation?.backend === "seatbelt" ? { seatbeltWritableRoots: [...isolation.writableRoots] } : {}),
+      ...(boundOwnedWorktrees.length ? { boundOwnedWorktrees } : {}),
       status: "starting",
       providerReady: false,
       providerLaunchPending: true,
@@ -11842,6 +11862,58 @@ export class SessionManager {
     }
   }
 
+  /** Whether a worktree this live provider's sandbox binds has since been retired: it is no longer
+   * one of the session's managed worktrees, or its `.git` link — a bind source — is gone. */
+  private boundWorktreeRetired(sessionId: string, entry: ActiveSession): boolean {
+    if (!entry.boundOwnedWorktrees?.length) return false;
+    const meta = this.store.readMeta(sessionId);
+    if (!meta) return false;
+    const owned = this.managedWorktreeProtections(meta);
+    return entry.boundOwnedWorktrees.some((path) => {
+      if (!owned.some((protection) => sameWorktreePath(meta.context, protection.worktreePath, path))) return true;
+      try {
+        return !lstatSync(join(path, ".git")).isFile();
+      } catch {
+        return true;
+      }
+    });
+  }
+
+  /** Hand a provider whose bound worktree was retired to the same deferred rebind a selection change
+   * uses, targeting the selected worktree. The rebind resumes the conversation in a fresh process
+   * whose launch binds only the worktrees that still exist, and it keeps that handoff's queue hold,
+   * background-work bound, and wakeups. Returns whether a rebind is now pending.
+   *
+   * | Provider state when the rebind is due           | Outcome                                     |
+   * | ----------------------------------------------- | ------------------------------------------- |
+   * | Idle                                            | Rebind at once                              |
+   * | Runner turn running                             | Wait; rebind when the turn ends             |
+   * | Provider-initiated turn, with or without an ask | Wait; its settlement wakes the rebind       |
+   * | Unfinished background work                      | Bounded handoff hold, then rebind           |
+   * | Worktree gone but its row still recorded        | Requested by the next drain, then as above  |
+   * | Conversation cannot resume, or lock is held     | Fail once: one error, never requested again | */
+  private requestRetiredWorktreeRebind(sessionId: string, entry: ActiveSession): boolean {
+    if (entry.pendingWorktreeRebind) return true;
+    if (entry.retiredWorktreeRebindFailed || !this.boundWorktreeRetired(sessionId, entry)) return false;
+    const selection = this.store.readMeta(sessionId)?.worktreePath;
+    if (!selection) return false;
+    entry.pendingWorktreeRebind = selection;
+    entry.retiredWorktreeRebind = selection;
+    return true;
+  }
+
+  private retirementRebindPending(entry: ActiveSession): boolean {
+    return !!entry.retiredWorktreeRebind && entry.retiredWorktreeRebind === entry.pendingWorktreeRebind;
+  }
+
+  /** A retirement rebind that cannot run stops here, so later drains do not request it again. */
+  private failRetirementRebind(entry: ActiveSession): void {
+    if (!this.retirementRebindPending(entry)) return;
+    entry.pendingWorktreeRebind = undefined;
+    entry.retiredWorktreeRebind = undefined;
+    entry.retiredWorktreeRebindFailed = true;
+  }
+
   /** Persist turn configuration without presenting a model resolved under an older alias. The
    * effective context window was observed for the previous model, so a model or context-window
    * change drops it until the next turn reports what the provider actually serves. */
@@ -11881,7 +11953,7 @@ export class SessionManager {
         return;
       }
     }
-    if (entry.pendingWorktreeRebind) {
+    if (this.requestRetiredWorktreeRebind(sessionId, entry)) {
       if (this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
         return;
@@ -12022,7 +12094,8 @@ export class SessionManager {
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
         }
-        if (entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind || this.projectMemoryChanged(sessionId, entry)) break;
+        if (entry.pendingProviderAccountSwitch || this.requestRetiredWorktreeRebind(sessionId, entry) ||
+            this.projectMemoryChanged(sessionId, entry)) break;
         if (entry.authenticationBlocked || entry.historyQuarantined) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
@@ -12085,6 +12158,7 @@ export class SessionManager {
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
       !meta?.orphanedWork?.recoveryAttemptedAt;
     return !entry.running &&
+      !(entry.providerInitiatedTurnActive && this.retirementRebindPending(entry)) &&
       this.active.get(sessionId) === entry &&
       !backgroundWorkBlocksRebind &&
       !this.rewinding.has(sessionId) &&
@@ -13137,10 +13211,15 @@ export class SessionManager {
     // normal stopped-session path and prevents a failed first conversation from becoming fresh.
     const hasConversation = (resumable?.seq ?? 0) > 0;
     if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
+      const retirement = this.retirementRebindPending(entry);
+      this.failRetirementRebind(entry);
       entry.pendingWorktreeRebind = undefined;
       this.emitEvent(sessionId, {
         kind: "error",
-        message: "the selected worktree cannot resume this provider conversation",
+        message: retirement
+          ? "this provider conversation cannot resume, so the provider keeps its launch sandbox after one of " +
+            "its worktrees was retired; restart the session to drop it"
+          : "the selected worktree cannot resume this provider conversation",
       });
       if (entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
       return;
@@ -13149,6 +13228,7 @@ export class SessionManager {
     let rebindLockHeld = false;
     if (resumeId) {
       if (!this.store.acquireLock(sessionId, this.lockOwner)) {
+        this.failRetirementRebind(entry);
         if (!this.emitEvent(sessionId, {
           kind: "error",
           message: "this session is being driven by another dashboard",
@@ -18969,6 +19049,10 @@ export class SessionManager {
         ? "input_required" : state === "started" ? "running" : "idle");
       if (interrupted &&
           (live.queue.length || live.pendingProviderAccountSwitch || live.pendingWorktreeRebind)) {
+        setImmediate(() => this.scheduleDrain(sessionId));
+      } else if (state === "settled" && this.requestRetiredWorktreeRebind(sessionId, live) &&
+          this.retirementRebindPending(live)) {
+        // A retirement rebind waited for this turn (#3402); nothing else wakes it on normal settlement.
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }

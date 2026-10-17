@@ -4,7 +4,14 @@ import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DriverOptions } from "./drivers/driver.js";
+import type { RunnerToControlPlane, SessionQueueHoldView } from "@wollipog/protocol";
+import type {
+  DriverBackgroundJob,
+  DriverBackgroundTerminalJob,
+  DriverBackgroundWorkEndResult,
+  DriverCallbacks,
+  DriverOptions,
+} from "./drivers/driver.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
@@ -1598,5 +1605,290 @@ test("a managed launch binds only this session's other worktrees (#3316)", async
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/** A protected launch in a session's second worktree that also binds its first, legacy one. */
+async function retiredWorktreeFixture(options: {
+  handoffWaitMaxMs?: number;
+  /** A provider that never reports a resumable conversation id. */
+  noResume?: boolean;
+  /** Awaited inside each provider turn, so a test can hold one open. */
+  onPrompt?: (text: string) => Promise<void> | void;
+} = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-retired-worktree-")));
+  const home = mkdtempSync(join(tmpdir(), "wollipog-managed-retired-home-"));
+  const { repoPath, worktreePath: first } = hostWorktree(root, "s1");
+  const second = join(root, "second");
+  execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "stacked", second]);
+  const store = new SessionStore(join(root, "sessions"));
+  store.create({
+    ...meta(), repoPath, worktreePath: second, worktreeBranch: "stacked", env: { HOME: home },
+    worktrees: [
+      { id: "legacy", path: first, branch: "agent/s1", source: "legacy" },
+      { id: "stacked", path: second, branch: "stacked", source: "created" },
+    ],
+  });
+  const observed: Array<Parameters<typeof resolveExecutionIsolation>[3]> = [];
+  const sent: RunnerToControlPlane[] = [];
+  const live = new Map<string, DriverBackgroundJob>();
+  const drivers: Array<{ prompts: string[]; disposed: boolean; endCalls: number; cb: DriverCallbacks }> = [];
+  const factory = (_driver: unknown, _launch: unknown, cb: DriverCallbacks) => {
+    const driver = { prompts: [] as string[], disposed: false, endCalls: 0, cb };
+    drivers.push(driver);
+    return {
+      pid: drivers.length, initialize: async () => {}, newSession: async () => "provider-1",
+      prompt: async (text: string) => {
+        driver.prompts.push(text);
+        await options.onPrompt?.(text);
+        return "end_turn" as const;
+      },
+      cancel: () => {}, dispose: () => { driver.disposed = true; },
+      setConfig: () => {}, resolvePermission: () => false,
+      agentSessionId: () => options.noResume ? null : "provider-1",
+      ...(options.handoffWaitMaxMs ? {
+        handoffWaitMaxMs: options.handoffWaitMaxMs,
+        endBackgroundWork: async (): Promise<DriverBackgroundWorkEndResult> => {
+          driver.endCalls += 1;
+          const terminalAt = Date.now();
+          const jobs: DriverBackgroundTerminalJob[] = [...live.values()].map((job) => ({
+            ...job, status: "killed", terminalAt, continuationRequired: false, endedByRunner: true,
+          }));
+          live.clear();
+          if (!jobs.length) return { status: "none" };
+          cb.onBackgroundWork?.({ state: null, pendingTaskIds: [], terminalJobs: jobs });
+          return { status: "ended", jobs };
+        },
+      } : {}),
+    };
+  };
+  const manager = new SessionManager(
+    (message) => { sent.push(message); }, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 1,
+    undefined, undefined, { agentLimits: {}, agentWeights: {} },
+    { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) => {
+      observed.push(state);
+      return resolveExecutionIsolation(policy, context, {
+        platform: "linux", uid: () => 1000, nativeEnvironment: () => ({ HOME: home }),
+        resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+      }, state);
+    },
+    async () => {}, async () => {}, async () => {},
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const internals = manager as any;
+  internals.verifySelectedWorktreeBeforeLaunch = async () => true;
+  assert.equal(await internals.acquireAdmission("s1"), true);
+  assert.equal(await internals.launch(store.readMeta("s1")), true);
+  assert.deepEqual(observed.at(-1)?.protectedWorktree?.ownedWorktrees?.map((owned) => owned.path), [first]);
+  assert.deepEqual(internals.active.get("s1").boundOwnedWorktrees, [first]);
+  return {
+    manager, store, internals, observed, sent, live, drivers, first, second,
+    /** The deferred retirement completes while the provider lives: the tree is removed and its row
+     * forgotten through the same step a completed cleanup takes. */
+    retire: async () => {
+      execFileSync("git", ["-C", repoPath, "worktree", "remove", "--force", first]);
+      assert.ok(await internals.forgetRemovedWorktree({
+        sessionId: "s1", worktreeId: "legacy", repoPath, worktreePath: first, context: { kind: "native" },
+        branch: "agent/s1", source: "legacy", worktreeRemovedAt: Date.now(),
+      }));
+    },
+    /** The worktree vanishes without its row being forgotten. */
+    remove: () => execFileSync("git", ["-C", repoPath, "worktree", "remove", "--force", first]),
+    /** Let every drain the retirement scheduled run to completion. */
+    settle: () => new Promise((done) => setTimeout(done, 100)),
+    errors: () => store.readEvents("s1").filter((event) => event.payload.kind === "error")
+      .map((event) => (event.payload as { message: string }).message),
+    waitFor: async (predicate: () => boolean, message: string) => {
+      const deadline = Date.now() + 10_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) assert.fail(message);
+        await new Promise((done) => setTimeout(done, 10));
+      }
+    },
+    /** The relaunch resumes in the selected worktree, with no bind for the retired one. */
+    assertRelaunched: () => {
+      const relaunched = observed.at(-1);
+      assert.equal(relaunched?.cwd, second, "the relaunch resumes in the selected worktree");
+      assert.equal(relaunched?.protectedWorktree?.ownedWorktrees, undefined);
+      assert.equal(JSON.stringify(relaunched?.protectedWorktree ?? {}).includes(first), false,
+        "the retired worktree is in no bind list");
+      assert.equal(internals.active.get("s1").boundOwnedWorktrees, undefined);
+    },
+    cleanup: () => {
+      manager.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    },
+  };
+}
+
+test("a session whose first worktree is retired while it works in a second relaunches there (#3402)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await retiredWorktreeFixture();
+  try {
+    await f.retire();
+    // The completed retirement itself hands the live provider to a rebind, before any prompt.
+    await f.waitFor(() => f.drivers.length === 2 && f.internals.active.get("s1")?.client?.pid === 2,
+      "the provider was not relaunched after its bound worktree was retired");
+    assert.ok(f.drivers[0]!.disposed);
+    f.assertRelaunched();
+
+    f.manager.prompt("s1", "continue");
+    await f.waitFor(() => f.drivers[1]!.prompts.length === 1, "the next turn did not run");
+    assert.deepEqual(f.drivers[0]!.prompts, [], "the stale process never ran a turn");
+    assert.equal(f.drivers.length, 2);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a bound worktree that vanishes without being forgotten is rebound before the next turn (#3402)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await retiredWorktreeFixture();
+  try {
+    f.remove();
+    f.manager.prompt("s1", "continue");
+    await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the next turn did not run in a relaunched provider");
+    assert.deepEqual(f.drivers[0]!.prompts, []);
+    // Its row remains, but a launch binds only owned worktrees that still exist.
+    f.assertRelaunched();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a retirement during a runner turn waits for the turn, then rebinds before the next one (#3402)", async () => {
+  if (process.platform !== "linux") return;
+  let release!: () => void;
+  const held = new Promise<void>((done) => { release = done; });
+  const f = await retiredWorktreeFixture({ onPrompt: (text) => text === "long turn" ? held : undefined });
+  try {
+    f.manager.prompt("s1", "long turn");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 1, "the first turn did not start");
+    await f.retire();
+    f.manager.prompt("s1", "next turn");
+    await f.settle();
+    assert.equal(f.drivers.length, 1, "nothing is relaunched while the runner turn runs");
+    assert.equal(f.drivers[0]!.disposed, false);
+
+    release();
+    await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the next turn did not run in a relaunched provider");
+    assert.deepEqual(f.drivers[0]!.prompts, ["long turn"]);
+    assert.deepEqual(f.drivers[1]!.prompts, ["next turn"]);
+    f.assertRelaunched();
+  } finally {
+    release();
+    f.cleanup();
+  }
+});
+
+for (const ask of [false, true]) {
+  test(`a retirement during a provider-initiated turn${ask ? " with a provider-owned ask" : ""} waits for it to settle (#3402)`, async () => {
+    if (process.platform !== "linux") return;
+    const f = await retiredWorktreeFixture();
+    try {
+      f.drivers[0]!.cb.onProviderInitiatedTurn?.("started", "provider-turn-1");
+      if (ask) {
+        f.drivers[0]!.cb.onEvent({
+          kind: "permission_request", requestId: "provider-ask", title: "Run Command",
+          options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+        });
+        assert.ok(f.store.readMeta("s1")?.pendingApproval);
+      }
+      await f.retire();
+      await f.settle();
+      f.manager.prompt("s1", "continue");
+      await f.settle();
+      assert.equal(f.drivers.length, 1, "the provider-initiated turn is never retired mid-turn");
+      assert.equal(f.drivers[0]!.disposed, false);
+
+      // It settles normally: no interruption and no further background update.
+      f.drivers[0]!.cb.onProviderInitiatedTurn?.("settled", "provider-turn-1");
+      await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the queued prompt was stranded");
+      assert.deepEqual(f.drivers[0]!.prompts, []);
+      assert.ok(f.drivers[0]!.disposed);
+      f.assertRelaunched();
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test("background work holding a retirement rebind is bounded like any worktree handoff (#3402)", async () => {
+  if (process.platform !== "linux") return;
+  const bound = 300;
+  const f = await retiredWorktreeFixture({ handoffWaitMaxMs: bound });
+  try {
+    const startedAt = Date.now();
+    f.live.set("monitor-1", { id: "monitor-1", launchType: "monitor", startedAt });
+    f.drivers[0]!.cb.onBackgroundWork?.({
+      state: "running", pendingTaskIds: ["monitor-1"],
+      jobs: [{ id: "monitor-1", launchType: "monitor", startedAt }], observedTaskIds: ["monitor-1"],
+    });
+    assert.equal(f.store.readMeta("s1")?.backgroundWorkState, "running");
+    await f.retire();
+    f.manager.prompt("s1", "continue");
+    const holds = () => f.sent.filter((message) => message.type === "session_runtime_updated")
+      .map((message) => (message as { snapshot: { queueHold?: SessionQueueHoldView | null } }).snapshot.queueHold);
+    await f.waitFor(() => holds().some((hold) => hold?.kind === "worktree_rebind" && hold.endsAt !== undefined),
+      "the waiting prompt got no bounded handoff hold");
+    const hold = holds().find((candidate) => candidate?.kind === "worktree_rebind")!;
+    assert.equal(hold.endsAt, hold.since + bound);
+    assert.equal(hold.target, f.second);
+    assert.equal(f.drivers.length, 1, "the rebind waits for the background work");
+
+    await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the bound did not release the queued prompt");
+    assert.equal(f.drivers[0]!.endCalls, 1, "the work is ended once, at the bound");
+    assert.deepEqual(f.drivers[0]!.prompts, []);
+    assert.equal(f.store.readMeta("s1")?.backgroundJobs?.find((job) => job.id === "monitor-1")?.terminalStatus, "killed");
+    f.assertRelaunched();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a retirement rebind that cannot resume fails once and the live provider keeps serving (#3402)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await retiredWorktreeFixture({ noResume: true });
+  try {
+    // A conversation exists but the provider never reported an id it could resume.
+    f.manager.prompt("s1", "first");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 1 && f.store.readMeta("s1")?.status === "idle",
+      "the first turn did not finish");
+    await f.retire();
+    await f.settle();
+    f.manager.prompt("s1", "second");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 2, "the queued prompt never ran");
+    f.manager.prompt("s1", "third");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 3, "a later prompt never ran");
+    await f.settle();
+    assert.equal(f.drivers.length, 1, "an impossible rebind is not attempted");
+    const failures = f.errors().filter((message) => message.includes("cannot resume"));
+    assert.equal(failures.length, 1, "the failure is reported exactly once");
+    assert.match(failures[0]!, /restart the session/);
+    assert.equal(f.internals.active.get("s1").pendingWorktreeRebind, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a retirement rebind blocked by another runner's lock fails once (#3402)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await retiredWorktreeFixture();
+  try {
+    assert.equal(f.store.acquireLock("s1", "another-runner"), true);
+    await f.retire();
+    await f.settle();
+    const lockErrors = () => f.errors().filter((message) => message.includes("driven by another dashboard"));
+    assert.equal(lockErrors().length, 1);
+    f.store.releaseLock("s1", "another-runner");
+
+    f.manager.prompt("s1", "continue");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 1, "the prompt did not run on the live provider");
+    await f.settle();
+    assert.equal(f.drivers.length, 1, "the failed rebind is not requested again");
+    assert.equal(lockErrors().length, 1, "the failure is reported exactly once");
+  } finally {
+    f.cleanup();
   }
 });
