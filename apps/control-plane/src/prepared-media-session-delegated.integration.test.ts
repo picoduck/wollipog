@@ -158,7 +158,23 @@ async function harness(t: { after(fn: () => void): void }, options: { proof?: bo
   return { db, video, sessions, sent, owner, request, dispatches, runner, review, snapshot, timers, human, principal,
     revokeProof: () => assert.ok(video.liveValidation.revoke(human, proofId!)),
     readbacks: () => sent.filter((m): m is Extract<ControlPlaneToRunner, { type: "media_review_readback" }> => m.type === "media_review_readback"),
-    advance: (ms: number) => { now += ms; }, now: () => now };
+    advance: (ms: number) => { now += ms; }, now: () => now,
+    /** Fires the next scheduled backoff timer through the coordinator's own callback (so its
+     * bookkeeping runs exactly as in production), then waits, bounded, for that retry to settle the
+     * subject: dispatched, refused or queued again. Fails if no timer was scheduled. */
+    runScheduledRetry: async () => {
+      const timer = timers.shift();
+      assert.ok(timer, "the coordinator scheduled a backoff timer");
+      const before = sent.length;
+      timer.run();
+      const state = () => (db.raw().prepare("SELECT json_extract(record,'$.state') AS state FROM delegated_video_reviews")
+        .get() as { state: string } | undefined)?.state;
+      for (const deadline = Date.now() + 60_000; Date.now() < deadline;) {
+        if (state() !== "preparing" && (sent.length > before || state() === "refused")) return;
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      assert.fail(`the scheduled retry did not settle (state ${state()})`);
+    } };
 }
 
 test("an owned video decision is reviewed, priced, approved with delegated provenance and consumed", async (t) => {
@@ -257,8 +273,7 @@ test("a busy host requeues fresh identities with bounded backoff, reserving noth
     assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_members WHERE active=1 AND session_id NOT IN ('root','child')")
       .get()!.n, 0, "nothing is reserved while queued");
     h.advance([30_000, 120_000, 480_000][attempt]!);
-    h.timers.shift();
-    await h.video.delegated.retry("original-gate", "original-video");
+    await h.runScheduledRetry();
   }
   assert.equal(new Set(reviewers).size, 4, "each attempt is a new reviewer Session and identity");
 });
@@ -279,8 +294,7 @@ test("the busy-host cap survives a non-busy refusal and a fresh owner preparatio
   const h = await harness(t);
   await h.video.delegated.prepare(h.owner, h.request);
   assert.equal(await h.video.delegated.onNeverDispatched("r", h.runner.neverDispatched(h.dispatches().at(-1)!), "host_busy"), true);
-  h.advance(30_000); h.timers.shift();
-  await h.video.delegated.retry("original-gate", "original-video");
+  h.advance(30_000); await h.runScheduledRetry();
   assert.equal(h.dispatches().length, 2);
   assert.equal(await h.video.delegated.onNeverDispatched("r", h.runner.neverDispatched(h.dispatches().at(-1)!)), true);
   assert.equal((await h.video.delegated.prepare(h.owner, h.request) as { status: string }).status, "dispatched");
@@ -407,8 +421,7 @@ test("a busy retry that runs past the deadline refuses without reserving or disp
   const members = () => h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_members").get()!.n;
   const before = members();
   h.advance(21 * 60_000); // The process was suspended or down past the 20-minute limit.
-  h.timers.shift();
-  await h.video.delegated.retry("original-gate", "original-video");
+  await h.runScheduledRetry();
   assert.equal(h.dispatches().length, 1);
   assert.equal(members(), before, "no new reviewer Session or reservation");
   assert.deepEqual(await h.video.delegated.prepare(h.owner, h.request), { ok: false, code: "reviewer_busy_exhausted",
@@ -792,8 +805,7 @@ test("busy deadline x requeues and a restart: later busy refusals keep the first
   await h.video.delegated.prepare(h.owner, h.request);
   assert.equal(await h.video.delegated.onNeverDispatched("r", h.runner.neverDispatched(h.dispatches().at(-1)!), "host_busy"), true);
   const first = h.now();
-  h.advance(30_000); h.timers.shift();
-  await h.video.delegated.retry("original-gate", "original-video");
+  h.advance(30_000); await h.runScheduledRetry();
   // A restart in between: a fresh composition over the same database resumes the subject.
   const restarted = composeHostingVideoEvidence(h.db, { clock: () => h.now(), schedule: () => setTimeout(() => {}, 0) });
   restarted.attach(h.sessions, { sendToRunner: () => true, isRunnerOnline: () => true, sessionChangedById: () => {} });
