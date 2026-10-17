@@ -20,7 +20,6 @@ import {
   type WslBwrapPrepareRequest,
 } from "./wsl-bwrap-launcher.js";
 import { WSL_AGENT_CONTROL_PRIVATE_DIR } from "./wsl-agent-control.js";
-import { RELOCATED_PACKED_REFS_DIRECTORY } from "./packed-refs-relocation.js";
 
 interface IsolationDeps {
   platform: NodeJS.Platform;
@@ -293,15 +292,14 @@ async function canonicalManagedWritableRoot(
 }
 
 async function managedGitBoundary(roots: readonly string[], protectedChild: string, runtime: IsolationDeps): Promise<string> {
-  const [worktreeAdmin, objects, refs, logs, packedRefs] = roots;
-  if (!worktreeAdmin || !objects || !refs || !logs || (roots.length !== 4 && roots.length !== 5)) {
+  const [worktreeAdmin, objects, refs, logs] = roots;
+  if (!worktreeAdmin || !objects || !refs || !logs || roots.length !== 4) {
     throw new Error("managed worktree writable Git administration roots are incomplete");
   }
   const commonGitDir = dirname(dirname(worktreeAdmin));
   if (dirname(worktreeAdmin) !== posix.join(commonGitDir, "worktrees") ||
       objects !== posix.join(commonGitDir, "objects") ||
       refs !== posix.join(commonGitDir, "refs") || logs !== posix.join(commonGitDir, "logs") ||
-      (packedRefs !== undefined && packedRefs !== posix.join(commonGitDir, RELOCATED_PACKED_REFS_DIRECTORY)) ||
       pathsOverlap(commonGitDir, protectedChild) ||
       await runtime.realpathNative(commonGitDir) !== commonGitDir) {
     throw new Error("managed worktree writable Git administration roots are ambiguous");

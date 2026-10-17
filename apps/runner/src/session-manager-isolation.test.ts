@@ -1529,7 +1529,7 @@ test("provider mode passes no hook state mask at all (#1336)", async () => {
   }
 });
 
-test("a managed launch relocates packed refs and binds only this session's other worktrees (#3316)", async () => {
+test("a managed launch binds only this session's other worktrees (#3316)", async () => {
   if (process.platform !== "linux") return;
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-owned-worktrees-")));
   const home = mkdtempSync(join(tmpdir(), "wollipog-managed-owned-home-"));
@@ -1540,7 +1540,6 @@ test("a managed launch relocates packed refs and binds only this session's other
     const other = join(root, "other");
     execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "stacked", second]);
     execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "agent/s2", other]);
-    execFileSync("git", ["-C", repoPath, "pack-refs", "--all"]);
     const store = new SessionStore(join(root, "sessions"));
     store.create({
       ...meta(), repoPath, worktreePath, worktreeBranch: "agent/s1", env: { HOME: home },
@@ -1580,8 +1579,7 @@ test("a managed launch relocates packed refs and binds only this session's other
     const common = realpathSync(join(repoPath, ".git"));
     const adminOf = (path: string) => realpathSync(join(common, "worktrees", readFileSync(join(path, ".git"), "utf8")
       .trim().split("/").at(-1)!));
-    assert.ok(lstatSync(join(common, "packed-refs")).isSymbolicLink());
-    assert.equal(observed?.protectedWorktree?.gitWritableRoots.at(-1), join(common, "wollipog-refs"));
+    assert.equal(observed?.protectedWorktree?.gitWritableRoots.length, 4);
     assert.deepEqual(observed?.protectedWorktree?.ownedWorktrees, [{ path: second, gitAdmin: adminOf(second) }]);
     assert.ok(observed?.protectedWorktree?.requiredReadOnlyPaths.includes(join(adminOf(second), "config.worktree")));
     const mentioned = JSON.stringify(observed);

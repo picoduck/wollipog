@@ -1,7 +1,6 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
-import { relocatedPackedRefsDirectory } from "./packed-refs-relocation.js";
 
 /**
  * Entries inside a runner-owned worktree that belong to the runner rather than to the provider.
@@ -103,9 +102,6 @@ export function managedWorktreeReadOnlyPaths(
  * read-only `.git` link into the repository's shared administrative directory for the index,
  * objects, refs, and logs.
  *
- * When the runner has relocated `packed-refs` (packed-refs-relocation.ts), its dedicated directory
- * is the optional fifth root, so ref deletion can take Git's packed-refs lock.
- *
  * Codex also derives a more-specific read-only rule for the `.git` pointer's target, so reopening
  * the whole common directory is both broader than necessary and insufficient. Grant only the
  * exact linked-worktree admin directory plus the common objects, refs, and logs descendants used
@@ -135,10 +131,6 @@ export function managedWorktreeGitWritableRoots(
         if (!childOf(commonGitDir, path)) throw new Error("Git metadata path escapes its common directory");
         candidateRoots.push(path);
       }
-      // Ref deletion locks `packed-refs` (#3316). Only a relocated layout can offer that lock
-      // without the common root, and only its dedicated directory is ever added.
-      const packedRefs = relocatedPackedRefsDirectory(commonGitDir);
-      if (packedRefs) candidateRoots.push(packedRefs);
       for (const path of candidateRoots) roots.add(path);
     } catch {
       // Missing, malformed, or escaping Git metadata is not a reason to broaden sandbox access.
