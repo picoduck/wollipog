@@ -3259,12 +3259,15 @@ export class SessionManager {
   }
 
   /** `requireDelivered` callers (archive retirement) also probe a live upstream: a pushed,
-   * squash-merged branch is published but not delivered until the forge proves its exact head. */
+   * squash-merged branch is published but not delivered until the forge proves its exact head.
+   * That proof is returned as `deliveredHead` for the current retirement only and never persisted
+   * as the worktree's link, so it cannot later admit the tree to pull-request reconciliation,
+   * which would retire a pushed but undelivered successor head. */
   private async discoverUnlinkedMergedWorktree(
     sessionId: string,
     path: string,
     options: { requireDelivered?: boolean } = {},
-  ): Promise<{ forgeUnavailable: boolean }> {
+  ): Promise<{ forgeUnavailable: boolean; deliveredHead?: string }> {
     const initial = this.store.readMeta(sessionId);
     if (!initial) return { forgeUnavailable: false };
     const worktree = this.attributedWorktrees(initial)
@@ -3273,16 +3276,26 @@ export class SessionManager {
     const checkedOutBranch = await this.readWorktreeBranch(worktree.path, { context: initial.context });
     if (!checkedOutBranch) return { forgeUnavailable: false };
     let forgeUnavailable = false;
+    let liveUpstream = false;
     const discovered = await this.discoverMergedWorktreePullRequest(
       worktree.path,
       checkedOutBranch,
       {
         context: initial.context,
         onForgeUnavailable: () => { forgeUnavailable = true; },
-        ...(options.requireDelivered ? { includeLiveUpstream: true } : {}),
+        ...(options.requireDelivered
+          ? {
+            includeLiveUpstream: true,
+            onForgeAttempt: (identity: MissingUpstreamPullRequestIdentity) => {
+              liveUpstream = identity.liveUpstream === true;
+              return true;
+            },
+          }
+          : {}),
       },
     );
     if (!discovered) return { forgeUnavailable };
+    if (liveUpstream) return { forgeUnavailable: false, deliveredHead: discovered.headOid };
     this.worktreePullRequestDiscoveryRetryAt.delete(JSON.stringify([sessionId, worktree.path]));
     this.persistDiscoveredMergedWorktree(sessionId, path, worktree.branch, discovered);
     return { forgeUnavailable: false };
@@ -3957,10 +3970,11 @@ export class SessionManager {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
     let unlinkedForgeUnavailable = false;
+    let deliveredHead: string | undefined;
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
-      unlinkedForgeUnavailable = (await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path, {
-        requireDelivered: options.trigger === "archive_retirement",
-      })).forgeUnavailable;
+      ({ forgeUnavailable: unlinkedForgeUnavailable, deliveredHead } = await this.discoverUnlinkedMergedWorktree(
+        sessionId, worktree.path, { requireDelivered: options.trigger === "archive_retirement" },
+      ));
       const latest = this.store.readMeta(sessionId);
       if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
       const current = this.attributedWorktrees(latest)
@@ -4078,6 +4092,8 @@ export class SessionManager {
         options.trigger ?? "explicit_discard",
         "safe",
       );
+      // Safe removal still compares this exact head with the tree's current head.
+      if (deliveredHead && !cleanup.verifiedMergedHead) cleanup.verifiedMergedHead = deliveredHead;
       if (teardownIdentityError) {
         const now = Date.now();
         cleanup.teardown = {
@@ -15626,12 +15642,19 @@ export class SessionManager {
     if (!meta || !worktree || worktree.source === "attached") return "unavailable";
     let unlinkedForgeUnavailable = false;
     if (!worktree.pullRequest) {
-      unlinkedForgeUnavailable = (await this.discoverUnlinkedMergedWorktree(
+      const discovery = await this.discoverUnlinkedMergedWorktree(
         record.sessionId, record.worktreePath,
-        { requireDelivered: record.trigger === "archive_retirement" })).forgeUnavailable;
+        { requireDelivered: record.trigger === "archive_retirement" });
+      unlinkedForgeUnavailable = discovery.forgeUnavailable;
       meta = this.store.readMeta(record.sessionId);
       worktree = locate(meta);
       if (!meta || !worktree || worktree.source === "attached") return "unavailable";
+      if (discovery.deliveredHead && !worktree.pullRequest) {
+        this.deferredMergedHeadRetryAt.delete(backoffKey);
+        record.verifiedMergedHead = discovery.deliveredHead;
+        this.cleanupJournal.add(record);
+        return "merged";
+      }
     }
     const linked = worktree.pullRequest;
     if (!linked) {

@@ -1444,6 +1444,8 @@ export type MissingUpstreamPullRequestIdentity = {
   remote: string;
   merge: string;
   headOid: string;
+  /** The upstream tracking ref still exists; only `includeLiveUpstream` callers see this. */
+  liveUpstream?: true;
 };
 
 export interface MergedWorktreePullRequestDiscoveryOptions extends WorktreeOptions {
@@ -1600,12 +1602,12 @@ export async function mergedWorktreePullRequestForBranch(
       ["config", "--get", "--default", "", `branch.${branch}.merge`],
       preflightTimeoutMs,
     )).trim();
+    let liveUpstream = false;
     if (remote || merge) {
       if (!remote || remote === "." || !/^refs\/heads\/./u.test(merge)) {
         options.onIneligible?.();
         return null;
       }
-      let liveUpstream = false;
       try {
         await command(context, worktreePath, ["rev-parse", "--verify", `${branch}@{upstream}`], preflightTimeoutMs);
         liveUpstream = true;
@@ -1624,7 +1626,9 @@ export async function mergedWorktreePullRequestForBranch(
       options.onIneligible?.();
       return null;
     }
-    const identity = { remote, merge, headOid: head };
+    const identity: MissingUpstreamPullRequestIdentity = {
+      remote, merge, headOid: head, ...(liveUpstream ? { liveUpstream: true as const } : {}),
+    };
     if (!options.runForgeCommand) {
       const remoteUrl = (await command(
         context, worktreePath, ["remote", "get-url", remote || "origin"], preflightTimeoutMs,

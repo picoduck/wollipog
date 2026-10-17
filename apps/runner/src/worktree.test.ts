@@ -909,6 +909,30 @@ test("archive retirement proves delivery of a -u pushed squash-merged worktree w
     forgeOutput = [{
       url: "https://github.com/picoduck/wollipog/pull/3305", state: "MERGED", headRefOid: head, headRefName: "feat/3305-live",
     }];
+    const linkedPullRequest = () => store.readMeta("s_archive_live")?.worktrees
+      ?.find((item) => item.path === created.worktree.path)?.pullRequest;
+
+    // A proof found through a live upstream serves only the retirement that asked for it. If it
+    // were persisted as the worktree's link, pull-request reconciliation could later retire a
+    // pushed but undelivered successor head without any delivery check.
+    writeFileSync(join(created.worktree.path, "followup.txt"), "not yet committed\n");
+    await assert.rejects(manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }),
+      /the worktree has uncommitted changes/);
+    assert.equal(linkedPullRequest(), undefined, "live-upstream delivery proof is not persisted as a link");
+    execFileSync("git", ["-C", created.worktree.path, "add", "followup.txt"]);
+    execFileSync("git", ["-C", created.worktree.path, "commit", "-m", "follow-up"]);
+    execFileSync("git", ["-C", created.worktree.path, "push", "origin", "HEAD:feat/3305-live"]);
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(created.worktree.path), true,
+      "reconciliation does not retire a pushed successor head that no merged PR delivered");
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${created.worktree.branch}`]);
+    await assert.rejects(manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }),
+      /not on the default branch or a verified merged pull request/,
+      "the earlier merged head cannot prove delivery of its successor");
+    assert.equal(existsSync(created.worktree.path), true);
+
+    execFileSync("git", ["-C", created.worktree.path, "reset", "--hard", head]);
+    execFileSync("git", ["-C", created.worktree.path, "push", "--force", "origin", "HEAD:feat/3305-live"]);
     assert.equal((await manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }))
       .retirement.status, "removed", "the exact merged head proves delivery for archive retirement");
     assert.equal(existsSync(created.worktree.path), false);
