@@ -701,7 +701,7 @@ export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export type {
-  CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, PreparedCampaignLaunch,
+  CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, FullControlEnableRequest, PreparedCampaignLaunch,
   CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
   CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary,
 } from "./campaign-control-launch.js";
@@ -2542,9 +2542,25 @@ export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults 
 export interface OrchestratorDefaults {
   /** Future-campaign UI preference only. Omission means Custom; never a human authority grant. */
   controlMode?: import("./campaign-authority.js").CampaignControlMode;
+  /** Saved Full Control campaign envelope the launch summary proposes. A default only: each launch
+   * still needs its own Human authorization. On update, omission keeps the saved value; null clears it. */
+  campaignBudget?: OrchestratorCampaignBudgetDefault | null;
   behavior: OrchestratorBehaviorDefaults;
   delegation: OrchestratorDelegationDefaults;
   execution: OrchestratorExecutionDefaults;
+}
+
+export interface OrchestratorCampaignBudgetDefault {
+  costUsd: number;
+  toolCalls: number;
+}
+
+export function validOrchestratorCampaignBudgetDefault(value: unknown): value is OrchestratorCampaignBudgetDefault {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const budget = value as Record<string, unknown>;
+  return Object.keys(budget).every((key) => key === "costUsd" || key === "toolCalls") &&
+    typeof budget.costUsd === "number" && Number.isFinite(budget.costUsd) && budget.costUsd > 0 && budget.costUsd <= 1_000_000 &&
+    Number.isSafeInteger(budget.toolCalls) && (budget.toolCalls as number) > 0 && (budget.toolCalls as number) <= 10_000_000;
 }
 
 export const DEFAULT_ORCHESTRATOR_DEFAULTS: OrchestratorDefaults = {

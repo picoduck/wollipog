@@ -13,7 +13,8 @@ import type { EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { authorizeFullControl } from "./campaign-authority.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
-import { campaignLaunchPreflight, launchSessionRequest, parseFullControlLaunchRequest } from "./campaign-launch-admission.js";
+import { campaignLaunchDigest, campaignLaunchPreflight, launchSessionRequest, parseFullControlEnableRequest,
+  parseFullControlLaunchRequest } from "./campaign-launch-admission.js";
 
 export const CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS = 60_000;
 
@@ -136,6 +137,9 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     // and admission below creates the root synchronously from these same facts.
     const runnerNow = currentRunner();
     if (!runnerNow) return reply.code(404).send({ error: "runner workspace not found" });
+    // Re-read the Human's defaults too: the saved campaign budget never enters campaign policy,
+    // so a change to it is visible to the digest only through this fresh snapshot.
+    creationContext.orchestratorDefaults = settings.view(principal);
     const current = prepare();
     if (!current.plan) return reply.code(current.status).send({ error: current.error ?? "launch preparation failed" });
     const plan = current.plan;
@@ -152,6 +156,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
         driver: plan.driver, model: plan.config.model ?? null }, "orchestrator")),
       pacedVideoPeer: supportsPacedVideoReviewPeer(runnerNow.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
       disclosuresAvailable: dependencies.evidenceDisclosures !== undefined,
+      savedBudget: creationContext.orchestratorDefaults.defaults.campaignBudget ?? null,
     });
     request.log.info({ event: "full_control_launch_preflight", requestId: request.id,
       entryPoint: admit ? "human_launch_admission" : "human_launch_preflight", ready: preflight.ready,
@@ -188,5 +193,94 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
       return reply.code(created.status).send({ error: created.error ?? "the campaign was not created", ...(created.errorDetails ? { details: created.errorDetails } : {}) });
     }
     return reply.code(created.status ?? 201).send(created.data);
+  });
+
+  registerFullControlEnableRoutes(app, dependencies);
+}
+
+/** Human-only enable on an existing live root campaign. The preflight reuses the launch
+ * evaluation with the campaign's own Human-established scope in place of the inspection; enabling
+ * recomputes it and requires the exact reviewed digest and policy revision before the existing
+ * `setCampaignControl` operation runs. Revoke keeps using the ordinary control endpoint. */
+function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Parameters<typeof registerFullControlLaunchRoutes>[1]): void {
+  const { db, sessions, settings, requestPrincipal } = dependencies;
+  for (const enable of [false, true]) app.post(enable ? "/api/sessions/:id/orchestrator-campaign/full-control"
+    : "/api/sessions/:id/orchestrator-campaign/full-control/preflight", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated Human authorization is required" });
+    const id = (request.params as { id: string }).id;
+    const body = parseFullControlEnableRequest(request.body ?? {}, enable);
+    if (!body) return reply.code(400).send({ error: enable ? "the exact preflight digest and policy revision are required" : "invalid Full Control overrides" });
+    const session = db.getSession(id);
+    if (!session || !db.isSessionOwner(principal, id)) return reply.code(404).send({ error: "campaign not found" });
+    const policy = session.orchestratorPolicy;
+    if (!policy || session.parentSessionId || !session.workspaceId || !session.agentId ||
+        ["completed", "failed", "stopped"].includes(session.status)) return reply.code(409).send({ error: "only a live root campaign can enable Full Control" });
+    const runner = db.listRunnersForPrincipal(principal).find((candidate) => candidate.runnerId === session.runnerId);
+    const scope = db.sessionScope(id);
+    if (!runner || !scope) return reply.code(409).send({ error: "the campaign's runner or ownership is unavailable" });
+    const limits = (sessionId: string) => {
+      const member = db.campaignBudgets.userLimits(sessionId), view = db.getSession(sessionId);
+      return member ?? { costBudgetUsd: view?.costBudgetUsd ?? null, maxToolCalls: view?.maxToolCalls ?? null };
+    };
+    const ceiling = (value: { costBudgetUsd: number | null; maxToolCalls: number | null }) => (value.costBudgetUsd ?? 0) > 0 || (value.maxToolCalls ?? 0) > 0;
+    const rootLimits = limits(id);
+    const plan: PreparedCampaignLaunch = { runnerId: session.runnerId, workspaceId: session.workspaceId,
+      ...(session.projectId !== undefined ? { projectId: session.projectId } : {}),
+      ...(session.projectLocationId !== undefined ? { projectLocationId: session.projectLocationId } : {}),
+      agentId: session.agentId, driver: session.driver, ...(session.providerAccountId ? { providerAccountId: session.providerAccountId } : {}),
+      config: { ...(session.resolvedModel ?? session.model ? { model: (session.resolvedModel ?? session.model)! } : {}),
+        ...(session.effort ? { effort: session.effort } : {}), ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}),
+        ...(rootLimits.costBudgetUsd != null ? { costBudgetUsd: rootLimits.costBudgetUsd } : {}),
+        ...(rootLimits.maxToolCalls != null ? { maxToolCalls: rootLimits.maxToolCalls } : {}) },
+      useWorktree: session.useWorktree, executionTarget: (session.executionTarget ?? { adapter: "host" }) as PreparedCampaignLaunch["executionTarget"], policy, scope };
+    const issueScope = policy.issueScope;
+    const agent = runner.agents.find((candidate) => candidate.id === session.agentId);
+    const revision = session.parentControlPolicy?.revision ?? 0;
+    const { preflight: evaluated, proposal } = campaignLaunchPreflight({
+      request: { runnerId: session.runnerId, workspaceId: session.workspaceId, task: session.title, overrides: body.overrides },
+      plan, runner, organizationId: principal.organizationId,
+      campaignScope: issueScope ? { repository: issueScope.repository, issueNumbers: issueScope.issueNumbers,
+        authorizedByCaller: issueScope.authorizedByUserId === principal.userId } : { repository: "", issueNumbers: [], authorizedByCaller: true },
+      participantCeiling: db.campaignDescendantIds(id).some((childId) => {
+        const child = db.getSession(childId);
+        return Boolean(child && !["completed", "failed", "stopped"].includes(child.status) && ceiling(limits(childId)));
+      }),
+      projectDefaults: session.projectId ? db.projectChildSessionDefaults(session.projectId) : null,
+      accountingError: db.campaignBudgetAccountingError(session.driver, plan.config.model, true),
+      dailyLimit: db.getUsageDailyBudget(scope.organizationId).perUserUsd !== null,
+      invalidPolicyIds: (body.overrides?.delegatablePolicyIds ?? []).filter((policyId) => !sessions.governancePolicies().some((rule) =>
+        rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),
+      imageReview: evaluateUiEvidenceReviewClient(db.uiEvidenceReviewClient({ runnerId: session.runnerId, agentId: session.agentId,
+        driver: session.driver, model: plan.config.model ?? null }, "orchestrator")),
+      pacedVideoPeer: supportsPacedVideoReviewPeer(runner.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
+      disclosuresAvailable: dependencies.evidenceDisclosures !== undefined,
+      savedBudget: settings.view(principal).defaults.campaignBudget ?? null,
+    });
+    // The reviewed digest also binds this campaign and its current policy revision.
+    const preflight = { ...evaluated, digest: campaignLaunchDigest({ launch: evaluated.digest, sessionId: id, revision }) };
+    reply.header("cache-control", "private, no-store");
+    request.log.info({ event: "full_control_enable_preflight", requestId: request.id, sessionId: id,
+      entryPoint: enable ? "human_enable" : "human_enable_preflight", ready: preflight.ready,
+      missingCapabilities: preflight.capabilities.filter((item) => item.state === "unsupported").map((item) => item.id),
+      preflightDigest: preflight.digest }, "Full Control enable preflight evaluated");
+    if (!enable) return { preflight, expectedRevision: revision };
+    if (body.expectedRevision !== revision || body.preflightDigest !== preflight.digest) {
+      return reply.code(409).send({ error: "the campaign or its preflight changed; refresh and review the exact proposal again", preflight, expectedRevision: revision });
+    }
+    if (!preflight.ready || !proposal) {
+      return reply.code(409).send({ error: `Full Control cannot be enabled: ${preflight.summary.blockers.map((item) => item.reason).join(" ")}`, preflight, expectedRevision: revision });
+    }
+    const evidence = preflight.summary.evidence;
+    const result = sessions.setCampaignControl(id, { mode: "full_control", objective: proposal.objective, operations: proposal.operations,
+      delegatablePolicyIds: proposal.delegatablePolicyIds, issueAuthority: proposal.issueAuthority, budgetAuthority: proposal.budgetAuthority,
+      ...(evidence.envelope && evidence.provider?.reviewer.model ? { evidenceAuthority: {
+        destinationConfigurationId: evidence.destination.configurationId,
+        destinationDisclosureRevision: evidence.destination.disclosureRevision,
+        providers: [{ providerId: evidence.provider.providerId, disclosureRevision: evidence.provider.disclosureRevision,
+          reviewers: [{ driver: evidence.provider.reviewer.driver as "claude-code" | "codex-app-server", modelId: evidence.provider.reviewer.model }] }],
+      } } : {}) }, revision, principal);
+    if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
+    return result.data;
   });
 }

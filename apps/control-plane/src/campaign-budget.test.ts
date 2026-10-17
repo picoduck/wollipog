@@ -825,3 +825,62 @@ test("supported native reconnect cancels after human revocation without new admi
     assert.equal(h.db.campaignBudgets.active(command.jobId),true);
   } finally {h.db.close();}
 });
+
+test("a review-required campaign refuses child ceilings at creation, so every admitted child can get its review (#2940)",()=>{
+  const h=harness();
+  try {
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    h.metadata.runtime={dataDir:"/runner",worktreeRoot:"/runner/worktrees",maxConcurrentSessions:4,campaignReview:profile};
+    h.db.registerRunner(h.metadata,10,PROTOCOL_VERSION);
+    assert.ok(h.enable(allowance({costUsd:100,toolCalls:1000,controlledReview:profile})).ok);
+    const child=(config:{costBudgetUsd?:number;maxToolCalls?:number})=>h.svc.createSession({runnerId:"r",workspaceId:"w",agentId:"claude",
+      config:{model:"claude-opus-5-5",...config},prompt:"Implement authorized #2936"},undefined,undefined,false,false,false,{parentSessionId:"root"});
+    const members=()=>h.db.campaignBudgets.members("root").length;
+    const before=members();
+    for (const ceiling of [{costBudgetUsd:5},{maxToolCalls:30},{costBudgetUsd:5,maxToolCalls:30}]) {
+      const refused=child(ceiling);
+      assert.equal(refused.ok,false,JSON.stringify(ceiling));
+      assert.equal(refused.status,409);
+      assert.match(refused.error!,/controlled cross-model review, which cannot run under a per-session cost or tool-call limit/);
+      assert.match(refused.error!,/without costBudgetUsd or maxToolCalls/);
+    }
+    assert.equal(members(),before,"a refused child leaves no reservation");
+    const runRefused=h.svc.createRun({runnerId:"r",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5",costBudgetUsd:5}},{parentSessionId:"root"});
+    assert.equal(runRefused.ok,false,"run workers follow the same rule");
+
+    // Project child-session defaults would become the same ceiling; they are refused with the same reason.
+    const project=h.db.createProject({name:"Ceilings",scope:{organizationId:h.principal.organizationId,owner:{kind:"organization",organizationId:h.principal.organizationId}}});
+    const location=h.db.addProjectLocation(project.id,{runnerId:"r",workspaceId:"w"});
+    h.db.setSessionProject("root",project.id,location.id);
+    h.db.updateProject(project.id,{childSessionDefaults:{costBudgetUsd:5,maxToolCalls:30}});
+    const projectRefused=child({});
+    assert.equal(projectRefused.ok,false);
+    assert.match(projectRefused.error!,/clear them for this campaign's Project/);
+    h.db.updateProject(project.id,{childSessionDefaults:null});
+
+    const admitted=child({});
+    assert.ok(admitted.ok,admitted.error??"an unconstrained child is admitted");
+    const worker=admitted.data!.id;
+    assert.deepEqual(h.db.campaignBudgets.userLimits(worker),{costBudgetUsd:null,maxToolCalls:null});
+    h.db.updateSessionStatus(worker,"running",5);
+    h.db.setWorktreePath(worker,"/runner/worktrees/worker");
+    const plan=h.svc.recordCampaignPlan("root",{planComplete:true,items:[{key:"picoduck/wollipog#2936",issue:{repository:"picoduck/wollipog",number:2936}}]});
+    assert.ok(plan.ok,plan.error??"plan refused");
+    const workItemId=plan.data!.items[0]!.workItemId;
+    assert.ok(h.svc.assignCampaignWorkItem("root",{workItemId,childSessionId:worker}).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
+    const review=h.svc.requestCampaignReviewJob("root",{requestId:"child-review",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},
+      baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."});
+    assert.ok(review.ok,review.error??"the admitted child's required review is admissible");
+  } finally {h.db.close();}
+});
+
+test("campaigns without required controlled review keep accepting child ceilings",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:100,toolCalls:1000})).ok);
+    const result=h.svc.createSession({runnerId:"r",workspaceId:"w",agentId:"claude",config:{model:"claude-opus-5-5",costBudgetUsd:5,maxToolCalls:30},
+      prompt:"Implement authorized #2936"},undefined,undefined,false,false,false,{parentSessionId:"root"});
+    assert.ok(result.ok,result.error??"ceilings remain valid without required review");
+  } finally {h.db.close();}
+});
