@@ -222,6 +222,29 @@ test("Seatbelt profile escapes paths and limits its writable surface", async () 
   }
 });
 
+test("Seatbelt atomic write rules reject unsafe paths and accept an ordinary path", async (t) => {
+  const resolveAtomicWrite = (path: string) => resolveExecutionIsolation(
+    { mode: "seatbelt", network: "deny" }, { kind: "native" }, nativeMacSeatbeltRuntime, {
+      driver: "codex-app-server", dataDir: "/data", env: {}, sessionId: "s1", cwd: "/repo",
+      guardStateMask: {
+        directory: "/data/hooks",
+        readable: [],
+        managerTransport: { readable: [], atomicWritable: [path], writable: [] },
+      },
+    },
+  );
+  for (const [name, path] of [
+    ["quote", '/data/hooks/s1."circuit.json'],
+    ["backslash", "/data/hooks/s1.\\circuit.json"],
+  ] as const) await t.test(name, async () => {
+    await assert.rejects(() => resolveAtomicWrite(path), /cannot express a write rule/);
+  });
+  await t.test("ordinary path", async () => {
+    const resolved = await resolveAtomicWrite("/data/hooks/s1.circuit.json");
+    assert.equal(resolved?.backend, "seatbelt");
+  });
+});
+
 test("Orchestrator Seatbelt grants writes only to scratch and provider transcripts", async () => {
   const isolation = await resolveExecutionIsolation(
     { mode: "seatbelt", network: "inherit" }, { kind: "native" }, nativeMacSeatbeltRuntime, {
