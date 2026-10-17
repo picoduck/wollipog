@@ -50,6 +50,17 @@ test("Install Manually's first workspace is optional and named from its folder w
   assert.deepEqual(firstWorkspace("C:\\code\\api", "API Server"), { id: "api-server", name: "API Server", path: "C:\\code\\api" });
 });
 
+test("a generated workspace id is never a URL dot segment, which would change its API routes", () => {
+  for (const [folder, name] of [[".", ""], ["..", ""], ["./", ""], ["/srv/..", ""], ["/srv/repo", "."], ["/srv/repo", ".."]] as const) {
+    const workspace = firstWorkspace(folder, name)!;
+    assert.equal(workspace.id, "workspace", `${folder} ${name}`);
+    const route = `/api/runners/r/workspaces/${encodeURIComponent(workspace.id)}/rename`;
+    assert.equal(new URL(route, "http://localhost").pathname, route, `${folder} ${name}`);
+  }
+  assert.equal(firstWorkspace(".", "")!.name, "workspace", "a dot folder is not a name either");
+  assert.equal(firstWorkspace("/srv/.config", "")!.id, ".config", "a name that merely starts with a dot is kept");
+});
+
 test("the host choices read in words", () => {
   assert.equal(runnerHostLabel("127.0.0.1"), "This computer (127.0.0.1)");
   assert.equal(runnerHostLabel("192.0.2.10"), "192.0.2.10 (local network)");

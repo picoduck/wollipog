@@ -58,13 +58,16 @@ export function withHost(wsUrl: string, host: string): string {
 /**
  * The first workspace from Install Manually's optional folder and name, or null when the folder is
  * blank. A blank name falls back to the folder's last segment; the id is the name in lowercase with
- * every run of other characters turned into one dash.
+ * every run of other characters turned into one dash. An id of only dots ("." or "..", from a folder
+ * such as `.`) would be a URL dot segment in the workspace's API routes, so it becomes "workspace".
  */
 export function firstWorkspace(folder: string, name: string): RunnerConfigWorkspaceOption | null {
   const path = folder.trim();
   if (!path) return null;
-  const label = name.trim() || path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
-  const id = label.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
+  const segment = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+  const label = name.trim() || (/^\.+$/.test(segment) ? "workspace" : segment);
+  const slug = label.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const id = !slug || /^\.+$/.test(slug) ? "workspace" : slug;
   return { id, name: label, path };
 }
 
