@@ -21,6 +21,8 @@ import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import type { SpawnIsolation } from "./spawn.js";
 import { readLeaseIoSnapshot, applyLeaseIoPlan, ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError, type LeaseIoSnapshot, type LeaseIoEntry, type LeaseIoJob } from "./provider-home-lease-io.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS, type LeaseCheckpointProof, type LeaseRetirementEntry } from "./provider-home-lease-checkpoint.js";
+import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
+import { decideProviderProfileAccess, ProviderProfileChangeError, readProviderProfileMarker, retireProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileAccess, type ProviderProfileChangeRefusal, type ProviderProfileDenial, type ProviderProfileMarker, type ProviderProfileRead } from "./provider-profile.js";
 
 const OWNER_HASH = /^[a-f0-9]{64}$/u;
 const PROVIDER_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/u;
@@ -131,6 +133,8 @@ export interface ProviderHomeLeaseOptions {
   onCheckpointFailureForTest?: (error: unknown) => void;
   disableCompactionForTest?: boolean;
   onDiagnostic?: (diagnostic: { event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished"; leaseId: string; message: string }) => void;
+  /** The attested control-plane instance this registry acquires for; checked against profile grants. */
+  controlPlaneInstanceId?: string;
 }
 
 function boundedEntries(path: string): string[] {
@@ -287,8 +291,9 @@ function unexpectedEntries(lockDir: string): Error {
 /** Why a lease was refused, independent of the operator-facing text. `busy` is a lease whose
  * recorded process is alive; `foreign_owner` is a lease from another runner or control plane whose
  * recorded process is gone; `foreign_host` is a lease recorded on another host; `unverifiable` is
- * everything the registry cannot prove. */
-export type ProviderHomeLeaseRefusalKind = "busy" | "foreign_owner" | "foreign_host" | "unverifiable";
+ * everything the registry cannot prove. The `profile_*` kinds are pre-acquisition provider-profile
+ * refusals (#3239), decided before any lease journal I/O. */
+export type ProviderHomeLeaseRefusalKind = "busy" | "foreign_owner" | "foreign_host" | "unverifiable" | ProviderProfileDenial | ProviderProfileChangeRefusal;
 
 class ProviderHomeLeaseRefusal extends Error {
   constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind) { super(message); }
@@ -296,8 +301,13 @@ class ProviderHomeLeaseRefusal extends Error {
 
 /** The typed refusal kind, or null when `error` is not a registry refusal. */
 export function providerHomeLeaseRefusalKind(error: unknown): ProviderHomeLeaseRefusalKind | null {
+  if (error instanceof ProviderProfileChangeError) return error.code;
   return error instanceof ProviderHomeLeaseRefusal ? error.kind : null;
 }
+
+/** Marker changes take the lease without the grant check; see `changeProfileMarkerWhileHeld`. */
+const PROFILE_CHANGE = Symbol("provider profile change");
+type ProfileContext = ProviderProfileAccess | typeof PROFILE_CHANGE | undefined;
 
 function refusal(
   lockDir: string,
@@ -681,6 +691,7 @@ export class ProviderHomeLeaseRegistry {
   private readonly disableCompactionForTest: boolean;
   private readonly diagnostics: string[] = [];
   private readonly onDiagnostic?: ProviderHomeLeaseOptions["onDiagnostic"];
+  private readonly controlPlaneInstanceId?: string;
   private lastAcquisitionHome?: string;
 
   constructor(private readonly ownerHash: string, options: ProviderHomeLeaseOptions = {}) {
@@ -698,28 +709,39 @@ export class ProviderHomeLeaseRegistry {
     this.onDiagnostic = options.onDiagnostic;
     this.helperDataDir = options.helperDataDir;
     this.afterTransitionPublishForTest = options.afterTransitionPublishForTest;
+    this.controlPlaneInstanceId = options.controlPlaneInstanceId;
   }
 
   getDiagnostics(): readonly string[] { return this.diagnostics; }
 
-  acquire(request: ProviderHomeLeaseRequest): void {
+  acquire(request: ProviderHomeLeaseRequest, profile?: ProviderProfileAccess): void {
     const target = providerHomeLeaseTarget(request);
-    if (target) this.acquireHome(target.home, target.provider);
+    if (target) this.acquireHome(target.home, target.provider, profile);
   }
 
-  /** Acquire the whole mutable HOME for a non-launch mutation such as managed skill links. */
-  acquireHome(requestedHome: string, provider = "skills"): boolean {
+  /** Acquire the whole mutable HOME for a non-launch mutation such as managed skill links.
+   * `profile` omitted means an older caller: marker-less homes behave as before, and a home with a
+   * provider-profile marker is refused as needing a newer control plane. */
+  acquireHome(requestedHome: string, provider = "skills", profile?: ProviderProfileAccess): boolean {
+    return this.acquireHomeFor(requestedHome, provider, profile);
+  }
+
+  private acquireHomeFor(requestedHome: string, provider: string, profile: ProfileContext): boolean {
     let providerHome = resolve(requestedHome);
     try { providerHome = realpathSync(requestedHome); } catch { /* A fresh HOME must not be created before probing. */ }
     return withLeaseIoOptions({ helperDataDir: this.helperDataDir, providerHome }, () => {
       ensureLeaseIoAvailable();
-      return this.acquireHomeAvailable(requestedHome, provider);
+      return this.acquireHomeAvailable(requestedHome, provider, profile);
     });
   }
 
   /** A worker-private reference receipt. Cancellation never re-resolves a mutable HOME alias. */
-  acquireHomeWithReceipt(requestedHome: string, provider = "skills"): { first: boolean; cancel: () => boolean } {
-    const first = this.acquireHome(requestedHome, provider);
+  acquireHomeWithReceipt(requestedHome: string, provider = "skills", profile?: ProviderProfileAccess): { first: boolean; cancel: () => boolean } {
+    return this.acquireReceiptFor(requestedHome, provider, profile);
+  }
+
+  private acquireReceiptFor(requestedHome: string, provider: string, profile: ProfileContext): { first: boolean; cancel: () => boolean } {
+    const first = this.acquireHomeFor(requestedHome, provider, profile);
     const home = this.lastAcquisitionHome!;
     const held = this.held.get(home);
     if (!held) throw new Error("acquisition has no private reference proof");
@@ -734,7 +756,73 @@ export class ProviderHomeLeaseRegistry {
     } };
   }
 
-  private acquireHomeAvailable(requestedHome: string, provider: string): boolean {
+  /** Worker-internal: replace the profile marker of a HOME whose lease this registry holds. */
+  writeProfileMarkerWhileHeld(requestedHome: string, marker: ProviderProfileMarker): void {
+    let home: string;
+    try { home = realpathSync(requestedHome); } catch { throw new Error("provider credential home is unavailable"); }
+    if (!this.held.has(home) || this.pendingCompletions.has(home)) throw new Error("provider profile marker writes require this registry's completed HOME lease");
+    writeProviderProfileMarker(home, marker);
+  }
+
+  /**
+   * Worker-internal (#3239): adoption and revocation. Take this HOME's lease without the grant
+   * check (they are how grants change), read the marker while held, write `change`'s result when it
+   * reports a change, and drop the reference taken here, which releases the lease only when this
+   * was its first reference. A HOME another owner holds is refused exactly like an acquisition.
+   */
+  changeProfileMarkerWhileHeld<T extends { marker?: ProviderProfileMarker; changed: boolean }>(
+    requestedHome: string, provider: "claude" | "codex", change: (read: ProviderProfileRead) => T,
+  ): T {
+    const receipt = this.acquireReceiptFor(requestedHome, provider, PROFILE_CHANGE);
+    const home = this.lastAcquisitionHome!;
+    let result: T;
+    try {
+      result = change(readProviderProfileMarker(home, { provider }));
+      if (result.changed && result.marker) this.writeProfileMarkerWhileHeld(home, result.marker);
+    } catch (error) {
+      if (!receipt.cancel()) throw new Error("provider profile change could not drop its HOME reference", { cause: error });
+      throw error;
+    }
+    if (!receipt.cancel()) throw new Error("provider profile change could not drop its HOME reference");
+    return result;
+  }
+
+  /**
+   * Worker-internal (#3239): decide whether a removed account's HOME may be deleted while holding
+   * its lease. Like a marker change it skips the grant check (this control plane's grant may already
+   * be revoked), drops every grant of `controlPlaneInstanceId` from the marker, and then drops the
+   * reference taken here. True only when that released the lease (no other reference was held here)
+   * and the marker grants no other control plane; an unverifiable marker is kept.
+   */
+  retireProfileHomeWhileHeld(requestedHome: string, provider: "claude" | "codex", controlPlaneInstanceId: string): boolean {
+    const receipt = this.acquireReceiptFor(requestedHome, provider, PROFILE_CHANGE);
+    const home = this.lastAcquisitionHome!;
+    let shared: boolean;
+    try {
+      const result = retireProviderProfileMarker(readProviderProfileMarker(home, { provider }), { controlPlaneInstanceId });
+      if (result.changed && result.marker) this.writeProfileMarkerWhileHeld(home, result.marker);
+      shared = result.shared;
+    } catch (error) {
+      if (!receipt.cancel()) throw new Error("provider HOME retirement could not drop its HOME reference", { cause: error });
+      throw error;
+    }
+    if (!receipt.cancel()) throw new Error("provider HOME retirement could not drop its HOME reference");
+    return !shared && !this.held.has(home);
+  }
+
+  /** Profile grants are checked against the canonical HOME before any lease journal I/O, and again
+   * on every re-entrant reference, so a revoked grant stops new references to a held HOME. */
+  private assertProfileAccess(home: string, lockDir: string, profile: ProfileContext): void {
+    const read = readProviderProfileMarker(home);
+    // An unsafe `.agent-manager` was refused by the ancestry check before profiles existed; keep
+    // that exact refusal so marker-less homes behave as before.
+    if (read.state === "unverifiable" && read.cause === "ancestry") throw refusal(lockDir, "has unsafe metadata directory ancestry");
+    if (profile === PROFILE_CHANGE) return;
+    const decision = decideProviderProfileAccess(read, profile, this.controlPlaneInstanceId);
+    if (!decision.allowed) throw new ProviderHomeLeaseRefusal(decision.reason, LEASE_WORKER_ERRORS[decision.reason], decision.reason);
+  }
+
+  private acquireHomeAvailable(requestedHome: string, provider: string, profile: ProfileContext): boolean {
     if (!PROVIDER_KEY.test(provider)) throw new Error("provider home lease key is invalid");
     if (!isAbsolute(requestedHome)) throw new Error("provider HOME must be absolute");
     let home: string;
@@ -753,6 +841,7 @@ export class ProviderHomeLeaseRegistry {
     // HOME. Lease the whole effective home rather than pretending those mutations are disjoint.
     const lockDir = join(root, "mutable-home.lock");
     const key = home;
+    this.assertProfileAccess(home, lockDir, profile);
     const borrowed = this.held.get(key);
     if (borrowed) {
       const pending = this.pendingCompletions.get(key);

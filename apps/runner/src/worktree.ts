@@ -1444,6 +1444,8 @@ export type MissingUpstreamPullRequestIdentity = {
   remote: string;
   merge: string;
   headOid: string;
+  /** The upstream tracking ref still exists; only `includeLiveUpstream` callers see this. */
+  liveUpstream?: true;
 };
 
 export interface MergedWorktreePullRequestDiscoveryOptions extends WorktreeOptions {
@@ -1457,6 +1459,9 @@ export interface MergedWorktreePullRequestDiscoveryOptions extends WorktreeOptio
   onIneligible?: () => void;
   /** Distinguishes transport/auth/tool failure from an authoritative empty forge response. */
   onForgeUnavailable?: () => void;
+  /** Also probe a branch whose upstream tracking ref still exists. Archive retirement needs
+   * delivery proof even when publication is already proven by a live upstream. */
+  includeLiveUpstream?: boolean;
 }
 type LinkedChangeRequest = {
   provider: ForgeProvider;
@@ -1513,12 +1518,12 @@ export function parseWorktreePullRequestState(
   }
 }
 
-/** Accept branch discovery only when GitHub reports a merged pull request for the exact local
- * branch head. Any matching merged request is sufficient delivery proof; malformed or stale
- * results remain indistinguishable from no proof. */
-export function parseMergedWorktreePullRequestForBranch(
+/** Accept discovery only when GitHub reports a merged pull request whose head is exactly the local
+ * branch tip. The head branch name is not evidence: children push `agent/s_<id>` under a
+ * conventional PR branch name, and a same-name PR that merged a different head proves nothing.
+ * Malformed or stale results remain indistinguishable from no proof. */
+export function parseMergedWorktreePullRequestForHead(
   raw: string,
-  expectedBranch: string,
   expectedHead: string,
 ): DiscoveredMergedPullRequest | null {
   if (!/^[a-f0-9]{40,64}$/iu.test(expectedHead)) return null;
@@ -1528,7 +1533,7 @@ export function parseMergedWorktreePullRequestForBranch(
     for (const value of parsed) {
       if (!value || typeof value !== "object") continue;
       const item = value as Record<string, unknown>;
-      if (item.state !== "MERGED" || item.headRefName !== expectedBranch ||
+      if (item.state !== "MERGED" ||
           typeof item.headRefOid !== "string" || item.headRefOid.toLowerCase() !== expectedHead.toLowerCase() ||
           typeof item.url !== "string") continue;
       const request = linkedChangeRequest(item.url);
@@ -1575,8 +1580,10 @@ export async function worktreePullRequestState(
 }
 
 /** Recover the merged change-request link for a branch pushed by an external workflow. A missing
- * upstream is eligible only for exact local-head proof from a merged same-name PR; partial or
- * differently named upstream configuration is not evidence for this branch. */
+ * upstream, or a configured one whose tracking ref vanished, is eligible only for exact local-head
+ * proof from a merged PR, whatever its head branch is named. Partial or local upstream
+ * configuration is not evidence for this branch. A live upstream already proves publication, so
+ * only callers that also need delivery proof (archive retirement) opt into probing it. */
 export async function mergedWorktreePullRequestForBranch(
   worktreePath: string,
   branch: string,
@@ -1595,17 +1602,21 @@ export async function mergedWorktreePullRequestForBranch(
       ["config", "--get", "--default", "", `branch.${branch}.merge`],
       preflightTimeoutMs,
     )).trim();
+    let liveUpstream = false;
     if (remote || merge) {
-      if (!remote || remote === "." || merge !== `refs/heads/${branch}`) {
+      if (!remote || remote === "." || !/^refs\/heads\/./u.test(merge)) {
         options.onIneligible?.();
         return null;
       }
       try {
         await command(context, worktreePath, ["rev-parse", "--verify", `${branch}@{upstream}`], preflightTimeoutMs);
-        options.onIneligible?.();
-        return null;
+        liveUpstream = true;
       } catch {
         // A configured upstream whose tracking ref vanished also needs exact forge proof.
+      }
+      if (liveUpstream && !options.includeLiveUpstream) {
+        options.onIneligible?.();
+        return null;
       }
     }
     const head = (await command(
@@ -1615,7 +1626,9 @@ export async function mergedWorktreePullRequestForBranch(
       options.onIneligible?.();
       return null;
     }
-    const identity = { remote, merge, headOid: head };
+    const identity: MissingUpstreamPullRequestIdentity = {
+      remote, merge, headOid: head, ...(liveUpstream ? { liveUpstream: true as const } : {}),
+    };
     if (!options.runForgeCommand) {
       const remoteUrl = (await command(
         context, worktreePath, ["remote", "get-url", remote || "origin"], preflightTimeoutMs,
@@ -1635,12 +1648,12 @@ export async function mergedWorktreePullRequestForBranch(
         context,
         "gh",
         [
-          "pr", "list", "--head", branch, "--state", "merged", "--limit", "100",
-          "--json", "url,state,headRefOid,headRefName",
+          "pr", "list", "--search", head, "--state", "merged", "--limit", "100",
+          "--json", "url,state,headRefOid",
         ],
         { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
       );
-      return parseMergedWorktreePullRequestForBranch(result.stdout, branch, head);
+      return parseMergedWorktreePullRequestForHead(result.stdout, head);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") options.onIneligible?.();
       else options.onForgeUnavailable?.();

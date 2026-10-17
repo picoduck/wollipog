@@ -69,6 +69,33 @@ test("SSH-box and managed-desktop issuers share the canonical hash-only credenti
   db.close();
 });
 
+test("managed-desktop issuer refuses another organization's runner without adding a credential", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  t.after(() => db.close());
+  const organizationId = "org_other";
+  db.raw().prepare(
+    "INSERT INTO identity_organizations (organization_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+  ).run(organizationId, "Other organization", 1_000, 1_000);
+  const runnerId = "shared-runner";
+  issueRunnerCredential(db, {
+    runnerId,
+    scope: { organizationId, owner: { kind: "organization", organizationId } },
+    now: 1_000,
+  });
+  const rows = () => db.raw().prepare(
+    "SELECT credential_id FROM runner_credentials WHERE runner_id=? ORDER BY credential_id",
+  ).all(runnerId);
+  const before = rows();
+  const issueManagedDesktop = makeManagedDesktopRunnerCredentialIssuer(db, () => 2_000);
+
+  await t.test("rejects the foreign organization", () => {
+    assert.throws(() => issueManagedDesktop(runnerId), /runner belongs to another organization/);
+  });
+  await t.test("does not add a credential row", () => {
+    assert.deepEqual(rows(), before);
+  });
+});
+
 test("plaintext is returned once while SQLite stores only its SHA-256 digest", () => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-runner-credential-"));
   const path = join(dir, "control-plane.db");

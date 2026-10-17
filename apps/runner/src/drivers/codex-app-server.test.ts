@@ -2810,6 +2810,42 @@ test("managed-worktree command approvals are refused before automatic or human a
   assert.deepEqual(argvResponse, { decision: "decline" });
 });
 
+test("Orchestrator command approvals protect another session's worktree from an unrelated cwd", async () => {
+  const repoPath = "/projects/repo";
+  const worktreePath = "/runner/worktrees/child-session/managed";
+  const cwd = "/projects/orchestrator";
+  const h = makeHarness({
+    cwd,
+    config: cfg("orchestrator"),
+    orchestrator: { strictProjectIsolation: false },
+    managedWorktreeProtections: () => [
+      { worktreePath: "/runner/worktrees/another-session/managed", repoPath },
+      { worktreePath, repoPath },
+    ],
+  });
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) =>
+      requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const approve = requests.get("item/commandExecution/requestApproval")!;
+
+  const removal = approve({
+    command: `git -C ${repoPath} worktree remove ${worktreePath}`,
+    cwd,
+  }, "other-session-remove");
+  assert.equal(h.events.length, 0, "the veto must run before an approval card can be created");
+  assert.deepEqual(await removal, { decision: "decline" });
+  assert.match(h.stderr.at(-1) ?? "", /Use discard_worktree/);
+
+  const readOnly = approve({ command: `git -C ${repoPath} status --short`, cwd }, "repo-status");
+  const event = h.events.at(-1);
+  assert.equal(event?.kind, "permission_request", "read-only access must reach ordinary approval");
+  assert.equal(h.driver.resolvePermission("repo-status", "accept"), true);
+  assert.deepEqual(await readOnly, { decision: "accept" });
+});
+
 test("Codex tool user input keeps the provider request id and returns native answers", async () => {
   const h = makeHarness();
   const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();

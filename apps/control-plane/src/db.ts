@@ -356,12 +356,21 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullabl
         !["authenticated", "unauthenticated", "unknown"].includes(account.authStatus)) {
       throw new Error("runner provider account inventory is invalid");
     }
+    // Protocol v225 (#3239): the HOME's profile identity and this control plane's access to it.
+    const profile: unknown = account.profile;
+    if (profile !== undefined && (!profile || typeof profile !== "object" || Array.isArray(profile) ||
+        typeof (profile as { id?: unknown }).id !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test((profile as { id: string }).id) ||
+        !["granted", "not_granted", "pending"].includes((profile as { access?: unknown }).access as string))) {
+      throw new Error("runner provider account inventory is invalid");
+    }
     ids.add(account.id);
     return {
       id: account.id,
       label: account.label.trim(),
       provider: account.provider,
       authStatus: account.authStatus,
+      ...(account.profile ? { profile: { id: account.profile.id, access: account.profile.access } } : {}),
     };
   });
 }
@@ -2268,6 +2277,45 @@ CREATE INDEX IF NOT EXISTS idx_runner_credentials_org
 CREATE INDEX IF NOT EXISTS idx_runner_credentials_auth
   ON runner_credentials(runner_id, token_hash) WHERE status IN ('pending','active');
 
+-- Provider profile grants (#3239): the authoritative, audited record that this control-plane
+-- instance may use one host-local provider profile within one organization/owner scope. Access is
+-- by profile id + instance + scope, never by runner, so a replacement runner in the same scope keeps
+-- the grant; runner_id/provider_account_id only record where the grant was made. A pending row is an
+-- Owner/Admin authorization the runner has not yet confirmed with the profile id it wrote.
+CREATE TABLE IF NOT EXISTS provider_profile_grants (
+  grant_id                  TEXT PRIMARY KEY,
+  profile_id                TEXT,
+  control_plane_instance_id TEXT NOT NULL,
+  organization_id           TEXT NOT NULL,
+  owner_kind                TEXT NOT NULL CHECK (owner_kind IN ('organization','user','team')),
+  owner_id                  TEXT NOT NULL,
+  scope                     TEXT NOT NULL CHECK (scope IN ('provider_home')),
+  runner_id                 TEXT NOT NULL,
+  provider_account_id       TEXT NOT NULL,
+  provider                  TEXT NOT NULL CHECK (provider IN ('claude','codex')),
+  origin                    TEXT NOT NULL CHECK (origin IN ('adopted','created')),
+  status                    TEXT NOT NULL CHECK (status IN ('pending','active','revoked')),
+  granted_by                TEXT NOT NULL,
+  -- Adoption and revocation are Owner/Admin only; a grant created by Add Account (#3239) records
+  -- the creating person's role, which may be any role that can manage the Machine.
+  granted_role              TEXT NOT NULL CHECK (granted_role IN ('owner','admin','operator','viewer')),
+  created_at                INTEGER NOT NULL,
+  activated_at              INTEGER,
+  revoked_at                INTEGER,
+  revoked_by                TEXT,
+  revoked_role              TEXT CHECK (revoked_role IS NULL OR revoked_role IN ('owner','admin','operator','viewer')),
+  CHECK (status != 'active' OR (profile_id IS NOT NULL AND activated_at IS NOT NULL)),
+  CHECK (status != 'revoked' OR revoked_at IS NOT NULL),
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_profile_grants_one_active
+  ON provider_profile_grants(profile_id, control_plane_instance_id) WHERE status='active';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_profile_grants_one_pending
+  ON provider_profile_grants(runner_id, provider_account_id) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS idx_provider_profile_grants_scope
+  ON provider_profile_grants(control_plane_instance_id, organization_id, owner_kind, owner_id, scope)
+  WHERE status IN ('pending','active');
+
 CREATE TABLE IF NOT EXISTS workspace_ownership (
   runner_id       TEXT NOT NULL,
   workspace_id    TEXT NOT NULL,
@@ -3188,6 +3236,40 @@ interface SessionStopIntentRow {
   failed_at: number | null;
   failure_code: string | null;
   failure_message: string | null;
+}
+
+/** One audited provider-profile grant (#3239); see the provider_profile_grants schema. */
+export interface ProviderProfileGrantRecord {
+  grantId: string;
+  profileId: string | null;
+  controlPlaneInstanceId: string;
+  scope: ResourceScope;
+  grantScope: "provider_home";
+  runnerId: string;
+  providerAccountId: string;
+  provider: "claude" | "codex";
+  origin: "adopted" | "created";
+  status: "pending" | "active" | "revoked";
+  grantedBy: string;
+  grantedRole: OrganizationRole;
+  createdAt: number;
+  activatedAt: number | null;
+  revokedAt: number | null;
+  revokedBy: string | null;
+  revokedRole: string | null;
+}
+
+/** Bound on the grants one runner registration lists: at most one active grant per reported
+ * profile and one pending grant per runner account, so 32 + 32 for a runner's 32 accounts. A larger
+ * result omits the list rather than truncating it (#3239). */
+export const PROVIDER_PROFILE_REGISTRATION_GRANT_LIMIT = 64;
+
+interface ProviderProfileGrantRow {
+  grant_id: string; profile_id: string | null; control_plane_instance_id: string;
+  organization_id: string; owner_kind: "organization" | "user" | "team"; owner_id: string; scope: "provider_home";
+  runner_id: string; provider_account_id: string; provider: "claude" | "codex"; origin: "adopted" | "created";
+  status: "pending" | "active" | "revoked"; granted_by: string; granted_role: OrganizationRole;
+  created_at: number; activated_at: number | null; revoked_at: number | null; revoked_by: string | null; revoked_role: string | null;
 }
 
 /** The path that wrote a session's current `stopped` status (#1466). Kept when the stop is later
@@ -12670,6 +12752,168 @@ export class ControlPlaneDb {
     }
   }
 
+  /* ------------------------ Provider profile grants ----------------------- */
+
+  private providerProfileGrantRecord(row: ProviderProfileGrantRow): ProviderProfileGrantRecord {
+    return {
+      grantId: row.grant_id, profileId: row.profile_id, controlPlaneInstanceId: row.control_plane_instance_id,
+      scope: this.scopeFromRow(row), grantScope: row.scope, runnerId: row.runner_id, providerAccountId: row.provider_account_id,
+      provider: row.provider, origin: row.origin, status: row.status, grantedBy: row.granted_by, grantedRole: row.granted_role,
+      createdAt: row.created_at, activatedAt: row.activated_at, revokedAt: row.revoked_at, revokedBy: row.revoked_by,
+      revokedRole: row.revoked_role,
+    };
+  }
+
+  getProviderProfileGrant(grantId: string): ProviderProfileGrantRecord | null {
+    const row = this.stmt("SELECT * FROM provider_profile_grants WHERE grant_id=?").get(grantId) as ProviderProfileGrantRow | undefined;
+    return row ? this.providerProfileGrantRecord(row) : null;
+  }
+
+  /**
+   * Record an Owner/Admin authorization for this control plane to use the profile an account's HOME
+   * holds (or will hold), in the runner's organization/owner scope. One pending authorization exists
+   * per runner account; a repeat returns it, so a retried adoption reuses the same grant id. Returns
+   * null when the runner has no recorded scope.
+   */
+  authorizeProviderProfileGrant(input: {
+    grantId: string;
+    runnerId: string;
+    providerAccountId: string;
+    provider: "claude" | "codex";
+    origin: "adopted" | "created";
+    grantedBy: string;
+    grantedRole: OrganizationRole;
+    now: number;
+  }): { grant: ProviderProfileGrantRecord; created: boolean } | null {
+    return this.atomic(() => {
+      const pending = this.stmt(
+        "SELECT * FROM provider_profile_grants WHERE runner_id=? AND provider_account_id=? AND status='pending'",
+      ).get(input.runnerId, input.providerAccountId) as ProviderProfileGrantRow | undefined;
+      if (pending) return { grant: this.providerProfileGrantRecord(pending), created: false };
+      const ownership = this.stmt(
+        "SELECT organization_id, owner_kind, owner_id FROM runner_ownership WHERE runner_id=?",
+      ).get(input.runnerId) as { organization_id: string; owner_kind: string; owner_id: string } | undefined;
+      if (!ownership) return null;
+      this.stmt(
+        `INSERT INTO provider_profile_grants
+           (grant_id, profile_id, control_plane_instance_id, organization_id, owner_kind, owner_id, scope,
+            runner_id, provider_account_id, provider, origin, status, granted_by, granted_role, created_at)
+         VALUES (?, NULL, ?, ?, ?, ?, 'provider_home', ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      ).run(input.grantId, this.controlPlaneInstanceId, ownership.organization_id, ownership.owner_kind, ownership.owner_id,
+        input.runnerId, input.providerAccountId, input.provider, input.origin, input.grantedBy, input.grantedRole, input.now);
+      return { grant: this.getProviderProfileGrant(input.grantId)!, created: true };
+    });
+  }
+
+  /**
+   * Activate a pending grant with the profile id the runner wrote into the marker. Idempotent for
+   * the same profile. The marker holds one grant per control plane, so an older active grant of
+   * this control plane to the same profile is superseded (revoked) in the same transaction.
+   * Returns false for an unknown, revoked, or differently-bound grant.
+   */
+  completeProviderProfileGrant(grantId: string, profileId: string, now: number): boolean {
+    return this.atomic(() => {
+      const row = this.stmt("SELECT * FROM provider_profile_grants WHERE grant_id=?").get(grantId) as ProviderProfileGrantRow | undefined;
+      if (!row || row.status === "revoked") return false;
+      if (row.status === "active") return row.profile_id === profileId;
+      this.stmt(
+        `UPDATE provider_profile_grants
+            SET status='revoked', revoked_at=?, revoked_by=?, revoked_role=?
+          WHERE profile_id=? AND control_plane_instance_id=? AND status='active' AND grant_id<>?`,
+      ).run(now, row.granted_by, row.granted_role, profileId, row.control_plane_instance_id, grantId);
+      return this.stmt(
+        `UPDATE provider_profile_grants SET status='active', profile_id=?, activated_at=?
+          WHERE grant_id=? AND status='pending'`,
+      ).run(profileId, now, grantId).changes === 1;
+    });
+  }
+
+  /** Revoke one pending or active grant. Returns the revoked record, or null when it was not live. */
+  revokeProviderProfileGrant(input: {
+    grantId: string;
+    revokedBy: string;
+    revokedRole: string | null;
+    now: number;
+  }): ProviderProfileGrantRecord | null {
+    const changed = this.stmt(
+      `UPDATE provider_profile_grants SET status='revoked', revoked_at=?, revoked_by=?, revoked_role=?
+        WHERE grant_id=? AND status IN ('pending','active')`,
+    ).run(input.now, input.revokedBy, input.revokedRole, input.grantId).changes;
+    return changed === 1 ? this.getProviderProfileGrant(input.grantId) : null;
+  }
+
+  /**
+   * This control plane's live (active and pending) provider-home grants in exactly one
+   * organization/owner scope. Unbounded and never sent to a runner as a whole; registration uses
+   * `providerProfileGrantsForRunnerProfiles`.
+   */
+  activeProviderProfileGrants(scope: ResourceScope): ProviderProfileGrantRecord[] {
+    const ownerId = scope.owner.kind === "organization" ? scope.owner.organizationId
+      : scope.owner.kind === "user" ? scope.owner.userId : scope.owner.teamId;
+    const rows = this.stmt(
+      `SELECT * FROM provider_profile_grants
+        WHERE control_plane_instance_id=? AND organization_id=? AND owner_kind=? AND owner_id=?
+          AND scope='provider_home' AND status IN ('pending','active')
+        ORDER BY status, created_at, grant_id`,
+    ).all(this.controlPlaneInstanceId, scope.organizationId, scope.owner.kind, ownerId) as unknown as ProviderProfileGrantRow[];
+    return rows.map((row) => this.providerProfileGrantRecord(row));
+  }
+
+  /**
+   * The grants one runner is told at registration (#3239), in its scope: every active grant of this
+   * control plane for a profile id the runner reports, and every pending grant recorded for one of
+   * the runner's accounts. The runner treats an omitted marker grant as stale, so a result above
+   * `limit` returns null (omit the list) and is never truncated.
+   */
+  providerProfileGrantsForRunnerProfiles(
+    runnerId: string,
+    scope: ResourceScope,
+    profileIds: readonly string[],
+    limit = PROVIDER_PROFILE_REGISTRATION_GRANT_LIMIT,
+  ): ProviderProfileGrantRecord[] | null {
+    const ownerId = scope.owner.kind === "organization" ? scope.owner.organizationId
+      : scope.owner.kind === "user" ? scope.owner.userId : scope.owner.teamId;
+    const rows = this.stmt(
+      `SELECT * FROM provider_profile_grants
+        WHERE control_plane_instance_id=? AND organization_id=? AND owner_kind=? AND owner_id=?
+          AND scope='provider_home'
+          AND ((status='active' AND profile_id IN (SELECT value FROM json_each(?)))
+            OR (status='pending' AND runner_id=?))
+        ORDER BY status, created_at, grant_id LIMIT ?`,
+    ).all(this.controlPlaneInstanceId, scope.organizationId, scope.owner.kind, ownerId, JSON.stringify([...new Set(profileIds)]),
+      runnerId, limit + 1) as unknown as ProviderProfileGrantRow[];
+    if (rows.length > limit) return null;
+    return rows.map((row) => this.providerProfileGrantRecord(row));
+  }
+
+  /** Live grants of this control plane that one runner account made, or that name its profile. */
+  liveProviderProfileGrantsForAccount(runnerId: string, providerAccountId: string, profileId?: string): ProviderProfileGrantRecord[] {
+    const rows = this.stmt(
+      `SELECT * FROM provider_profile_grants
+        WHERE control_plane_instance_id=? AND status IN ('pending','active')
+          AND ((runner_id=? AND provider_account_id=?) OR (? IS NOT NULL AND profile_id=?))
+        ORDER BY created_at, grant_id`,
+    ).all(this.controlPlaneInstanceId, runnerId, providerAccountId, profileId ?? null, profileId ?? null) as unknown as ProviderProfileGrantRow[];
+    return rows.map((row) => this.providerProfileGrantRecord(row));
+  }
+
+  /**
+   * This control plane's most recently revoked grant that a runner account's HOME may still record:
+   * one the account made (for this profile, or before it named one), else the latest naming the
+   * profile. Inventory reconciliation sends it when a runner reports access without a live grant.
+   */
+  latestRevokedProviderProfileGrant(runnerId: string, providerAccountId: string, profileId: string): ProviderProfileGrantRecord | null {
+    const row = this.stmt(
+      `SELECT * FROM provider_profile_grants
+        WHERE control_plane_instance_id=? AND status='revoked'
+          AND ((runner_id=? AND provider_account_id=? AND (profile_id IS NULL OR profile_id=?)) OR profile_id=?)
+        ORDER BY (runner_id=? AND provider_account_id=?) DESC, revoked_at DESC, created_at DESC, grant_id DESC
+        LIMIT 1`,
+    ).get(this.controlPlaneInstanceId, runnerId, providerAccountId, profileId, profileId, runnerId, providerAccountId) as
+      ProviderProfileGrantRow | undefined;
+    return row ? this.providerProfileGrantRecord(row) : null;
+  }
+
   boxHasPendingLegacyDataAdoption(boxId: string): boolean {
     return Boolean(this.stmt(
       "SELECT 1 FROM legacy_ssh_account_adoptions WHERE adopter_box_id=? AND status='pending'",
@@ -14989,6 +15233,14 @@ export class ControlPlaneDb {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  /** The committed launch for one Human request identity, so a lost response can be recovered
+   * without re-evaluating readiness against facts that legitimately changed after commit. */
+  humanCampaignLaunchIdentity(userId: string, requestId: string): { digest: string; sessionId: string } | null {
+    const row = this.stmt("SELECT digest,session_id FROM human_campaign_launches WHERE user_id=? AND request_id=?")
+      .get(userId, requestId) as { digest: string; session_id: string } | undefined;
+    return row ? { digest: row.digest, sessionId: row.session_id } : null;
+  }
+
   /** Internal Human admission, never an HTTP/agent-provided grant. All resources and initial
    * reservation commit together; callers may send a provider command only after this returns. */
   createHumanCampaignLaunch(input: NewSessionInput, principal: HumanPrincipal, requestId: string, digest: string): { session: SessionView; created: boolean } {
@@ -15002,7 +15254,7 @@ export class ControlPlaneDb {
         scope.authorizedByUserId !== principal.userId || scope.repository !== boundary.repository ||
         scope.revision !== 1 || boundary.issueScopeRevision !== 1 || boundary.revision !== 1 ||
         scope.authorizedAt !== boundary.authorizedAt || !boundary.budgetAuthority ||
-        !boundary.issueAuthority || scope.issueNumbers.length < 1 || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
+        !boundary.issueAuthority || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
         scope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(scope.issueNumbers).size !== scope.issueNumbers.length ||
         JSON.stringify(policy?.issueNumbers) !== JSON.stringify(scope.issueNumbers) ||
         boundary.budgetAuthority.costUsd === undefined || boundary.budgetAuthority.toolCalls === undefined ||

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RunnerView } from "@wollipog/protocol";
+import type { ExecutionTargetDefinition, RunnerView } from "@wollipog/protocol";
 import {
   executionTargetRef,
   executionTargetsForRunner,
@@ -19,6 +19,122 @@ function runner(overrides: Partial<RunnerView> = {}): RunnerView {
       executionIsolation: { mode: "bwrap", network: "deny" } },
     ...overrides,
   };
+}
+
+function containerTarget(): ExecutionTargetDefinition {
+  return {
+    id: "runner:dev%20box%2F1:container:offline-tools",
+    runnerId: "dev box/1",
+    name: "builder · Offline tools",
+    kind: "container",
+    workspaceStrategy: "worktree",
+    adapter: "container",
+    boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+    environment: { id: "offline-tools", revision: 1, image: `example/agent@sha256:${"e".repeat(64)}`, setupCheckDigest: "f".repeat(64) },
+    compatibleAgentIds: ["codex"],
+    available: true,
+  };
+}
+
+function cloudTarget(): ExecutionTargetDefinition {
+  return {
+    id: "runner:dev%20box%2F1:cloud:metered-tools",
+    runnerId: "dev box/1",
+    name: "builder · Metered tools",
+    kind: "cloud",
+    workspaceStrategy: "snapshot",
+    adapter: "cloud",
+    boundaries: { filesystem: "snapshot", network: "policy", secrets: "references", billing: "target_metered" },
+    environment: {
+      id: "metered-tools", revision: 2, image: `example/cloud@sha256:${"a".repeat(64)}`,
+      setupCheckDigest: "b".repeat(64),
+    },
+    policy: {
+      cost: { currency: "USD", estimatedHourlyRateUsd: 1.25, minimumBudgetUsd: 0.5, maximumBudgetUsd: 10 },
+      admission: { maxConcurrentSessions: 2, queue: "fifo" },
+    },
+    compatibleAgentIds: ["codex"],
+    available: true,
+  };
+}
+
+const invalidTargetCases = [
+  { guard: "identity", name: "a different runner", mutate: (target) => { target.runnerId = "another-runner"; } },
+  { guard: "identity", name: "a different derived id", mutate: (target) => { target.id += "-wrong"; } },
+  { guard: "placement", name: "an unsupported kind", mutate: (target) => { target.kind = "local"; } },
+  { guard: "placement", name: "an unsupported adapter", mutate: (target) => { target.adapter = "host"; } },
+  { guard: "placement", name: "an unsupported workspace strategy", mutate: (target) => { target.workspaceStrategy = "in_place"; } },
+  { guard: "boundary", name: "an unsupported filesystem", mutate: (target) => { target.boundaries.filesystem = "unsupported" as never; } },
+  { guard: "boundary", name: "an unsupported network", mutate: (target) => { target.boundaries.network = "unsupported" as never; } },
+  { guard: "boundary", name: "unsupported secrets", mutate: (target) => { target.boundaries.secrets = "unsupported" as never; } },
+  { guard: "boundary", name: "unsupported billing", mutate: (target) => { target.boundaries.billing = "unsupported" as never; } },
+  { guard: "environment", name: "a missing template", mutate: (target) => {
+    target.environment = undefined;
+    // Match the identity guard's empty-template sentinel to reach environment validation.
+    target.id = "";
+  } },
+  { guard: "environment", name: "a non-slug template id", mutate: (target) => {
+    target.environment!.id = "Bad Template";
+    // Keep the derived identity coherent so the environment guard must reject the slug.
+    target.id = `runner:${encodeURIComponent(target.runnerId)}:${target.kind}:${encodeURIComponent(target.environment!.id)}`;
+  } },
+  { guard: "environment", name: "revision zero", mutate: (target) => { target.environment!.revision = 0; } },
+  { guard: "environment", name: "revision above the limit", mutate: (target) => { target.environment!.revision = 1_000_001; } },
+  { guard: "environment", name: "an image without a digest", mutate: (target) => { target.environment!.image = "example/agent:latest"; } },
+  { guard: "environment", name: "a non-hex setup digest", mutate: (target) => { target.environment!.setupCheckDigest = "g".repeat(64); } },
+  { guard: "name", name: "an empty name", mutate: (target) => { target.name = ""; } },
+  { guard: "name", name: "a whitespace-only name", mutate: (target) => { target.name = " \t "; } },
+  { guard: "name", name: "a name above 180 characters", mutate: (target) => { target.name = "n".repeat(181); } },
+  { guard: "name", name: "a control character in the name", mutate: (target) => { target.name = "bad\0name"; } },
+  { guard: "compatibility", name: "an empty agent list", mutate: (target) => { target.compatibleAgentIds = []; } },
+  { guard: "compatibility", name: "more than 32 agents", mutate: (target) => {
+    target.compatibleAgentIds = Array.from({ length: 33 }, (_, index) => `agent-${index}`);
+  } },
+  { guard: "compatibility", name: "a malformed agent id", mutate: (target) => { target.compatibleAgentIds = ["bad/agent"]; } },
+  { guard: "compatibility", name: "a duplicate agent id", mutate: (target) => { target.compatibleAgentIds = ["codex", "codex"]; } },
+] satisfies Array<{
+  guard: "identity" | "placement" | "boundary" | "environment" | "name" | "compatibility";
+  name: string;
+  mutate: (target: ExecutionTargetDefinition) => void;
+}>;
+
+for (const { kind, fixture, validate } of [
+  { kind: "container", fixture: containerTarget, validate: validateRunnerContainerTargets },
+  { kind: "cloud", fixture: cloudTarget, validate: validateRunnerCloudTargets },
+]) {
+  const messages = {
+    identity: new RegExp(`invalid or duplicate ${kind} target identity`),
+    placement: new RegExp(`unsupported ${kind} placement semantics`),
+    boundary: new RegExp(`unsupported ${kind} boundary claims`),
+    environment: new RegExp(`invalid ${kind} environment template`),
+    name: new RegExp(`invalid ${kind} target name`),
+    compatibility: new RegExp(`invalid ${kind} agent compatibility`),
+  };
+  for (const { guard, name, mutate } of invalidTargetCases) {
+    test(`rejects ${kind} ${guard}: ${name}`, () => {
+      const target = fixture();
+      mutate(target);
+      assert.throws(() => validate("dev box/1", [target]), messages[guard]);
+    });
+  }
+  test(`rejects ${kind} identity: duplicate target ids`, () => {
+    assert.throws(() => validate("dev box/1", [fixture(), fixture()]), messages.identity);
+  });
+  test(`rejects ${kind} list: seventeen targets`, () => {
+    const targets = Array.from({ length: 17 }, (_, index) => {
+      const target = fixture();
+      target.environment!.id = `tools-${index}`;
+      target.id = `runner:dev%20box%2F1:${kind}:tools-${index}`;
+      return target;
+    });
+    assert.throws(() => validate("dev box/1", targets), new RegExp(`too many ${kind} targets`));
+  });
+  test(`rejects ${kind} list: a non-array value`, () => {
+    assert.throws(() => validate("dev box/1", {} as ExecutionTargetDefinition[]), new RegExp(`too many ${kind} targets`));
+  });
+  test(`returns no ${kind} targets for undefined`, () => {
+    assert.deepEqual(validate("dev box/1", undefined), []);
+  });
 }
 
 test("projects local and SSH placements independently from agent drivers", () => {
@@ -57,19 +173,7 @@ test("offline placements remain visible but fail closed", () => {
 });
 
 test("validates runner-owned container templates and resolves only compatible agents", () => {
-  const image = `example/agent@sha256:${"e".repeat(64)}`;
-  const advertised = validateRunnerContainerTargets("dev box/1", [{
-    id: "runner:dev%20box%2F1:container:offline-tools",
-    runnerId: "dev box/1",
-    name: "builder · Offline tools",
-    kind: "container",
-    workspaceStrategy: "worktree",
-    adapter: "container",
-    boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
-    environment: { id: "offline-tools", revision: 1, image, setupCheckDigest: "f".repeat(64) },
-    compatibleAgentIds: ["codex"],
-    available: true,
-  }]);
+  const advertised = validateRunnerContainerTargets("dev box/1", [containerTarget()]);
   const r = runner({ executionTargets: [...executionTargetsForRunner(runner(), false), ...advertised] });
   const selected = resolveExecutionTarget(r, false, {
     executionTargetId: advertised[0]!.id, useWorktree: true, agentId: "codex",
@@ -128,25 +232,7 @@ test("target probe claims require matching target-local evidence and never trust
 });
 
 test("validates metered cloud targets, snapshot selection, policy refs, and handoff receipts", () => {
-  const target = validateRunnerCloudTargets("dev box/1", [{
-    id: "runner:dev%20box%2F1:cloud:metered-tools",
-    runnerId: "dev box/1",
-    name: "builder · Metered tools",
-    kind: "cloud",
-    workspaceStrategy: "snapshot",
-    adapter: "cloud",
-    boundaries: { filesystem: "snapshot", network: "policy", secrets: "references", billing: "target_metered" },
-    environment: {
-      id: "metered-tools", revision: 2, image: `example/cloud@sha256:${"a".repeat(64)}`,
-      setupCheckDigest: "b".repeat(64),
-    },
-    policy: {
-      cost: { currency: "USD", estimatedHourlyRateUsd: 1.25, minimumBudgetUsd: 0.5, maximumBudgetUsd: 10 },
-      admission: { maxConcurrentSessions: 2, queue: "fifo" },
-    },
-    compatibleAgentIds: ["codex"],
-    available: true,
-  }])[0]!;
+  const target = validateRunnerCloudTargets("dev box/1", [cloudTarget()])[0]!;
   const r = runner({ executionTargets: [...executionTargetsForRunner(runner(), false), target] });
   assert.deepEqual(resolveExecutionTarget(r, false, {
     executionTargetId: target.id, useWorktree: true, agentId: "codex", agentContext: { kind: "native" },

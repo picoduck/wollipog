@@ -1404,6 +1404,20 @@ export function createApiClient(transport: ApiTransport) {
       { method: "DELETE" },
     ),
 
+  /** Owner/Admin: adopt the account's HOME as a provider profile granted to this control plane. */
+  adoptProviderProfile: (runnerId: string, accountId: string) =>
+    req<{ status: "active"; profileId: string; grantId: string }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-accounts/${encodeURIComponent(accountId)}/adopt-profile`,
+      { method: "POST", body: JSON.stringify({ acknowledgeProfileAdoption: true }) },
+    ),
+
+  /** Owner/Admin: revoke this control plane's access to the account's provider profile. */
+  revokeProviderProfileAccess: (runnerId: string, accountId: string, force = false) =>
+    req<{ revoked: true; grantIds: string[]; markerUpdated: boolean; runnerNotified: boolean; forced: boolean }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-accounts/${encodeURIComponent(accountId)}/revoke-profile-access`,
+      { method: "POST", body: JSON.stringify({ force }) },
+    ),
+
   submitProviderLoginCode: (runnerId: string, operationId: string, code: string) =>
     req<{ login: ProviderLoginView }>(
       `/api/runners/${encodeURIComponent(runnerId)}/provider-logins/${encodeURIComponent(operationId)}/code`,

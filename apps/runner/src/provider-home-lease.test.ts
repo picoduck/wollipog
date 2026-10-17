@@ -21,6 +21,8 @@ const previousMask = process.umask(0o077);
 after(() => process.umask(previousMask));
 import { providerHomeLeaseRefusalKind, providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { killTreeAndWait, type AgentProcess, type SpawnIsolation } from "./spawn.js";
+import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
+import { adoptProviderProfileMarker, readProviderProfileMarker, revokeProviderProfileMarkerGrant, writeProviderProfileMarker, type ProviderProfileMarker } from "./provider-profile.js";
 
 const OWNER_A = "a".repeat(64);
 const OWNER_B = "b".repeat(64);
@@ -590,6 +592,24 @@ test("a same-owner lease with an unprobeable pid fails closed instead of reading
   const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 202, hostname: "host-a" });
   assert.throws(() => registry.acquire(request(home)), /already in use/);
   assert.deepEqual(readdirSync(leasePaths(home).lock), ["lease.json"]);
+});
+
+test("a version-2 released legacy marker is rejected as fabricated handoff state", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-released-legacy-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lock = writeLegacyLease(home, {
+    version: 2,
+    state: "released",
+    ownerHash: OWNER_B,
+    hostname: "host-b",
+    previousLeaseId: null,
+    previousRecordHash: null,
+  });
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 202, hostname: "host-a", isProcessAlive: () => true,
+  });
+  assert.throws(() => registry.acquire(request(home)), /unexpected entries/);
+  assert.deepEqual(readdirSync(lock), ["lease.json"]);
 });
 
 test("a released genesis record is rejected as fabricated handoff state", (t) => {
@@ -1380,4 +1400,162 @@ test("an initial publication failure unwinds only the empty lock created by that
   });
   assert.throws(() => registry.acquire(request(home)), /disk full/);
   assert.equal(existsSync(leasePaths(home).lock), false);
+});
+
+const PROFILE_ID = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+const OTHER_PROFILE_ID = "7f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+const INSTANCE_ID = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+const OTHER_INSTANCE_ID = "1a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+const GRANTED = { controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE_ID] };
+
+function profileMarker(profileId = PROFILE_ID, instances = [INSTANCE_ID]): ProviderProfileMarker {
+  return {
+    version: 1, kind: "wollipog-provider-profile", profileId, provider: "claude", createdAt: "2026-10-16T00:00:00.000Z",
+    grants: instances.map((controlPlaneInstanceId) => ({
+      controlPlaneInstanceId, grantId: "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", grantedAt: "2026-10-16T00:00:01.000Z",
+    })),
+  };
+}
+
+function refusalKind(action: () => unknown): string | null {
+  try { action(); } catch (error) { return providerHomeLeaseRefusalKind(error); }
+  return "acquired";
+}
+
+test("a non-granted or unnegotiated profile is refused before any lease journal I/O", { skip: process.platform === "win32" }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-profile-refused-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writeProviderProfileMarker(home, profileMarker(PROFILE_ID, [OTHER_INSTANCE_ID]));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID });
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", GRANTED)), "profile_not_granted");
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude")), "profile_unsupported_control_plane", "older callers send no profile context");
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", { controlPlaneSupportsProfiles: false, activeProfileIds: [] })),
+    "profile_unsupported_control_plane");
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", { controlPlaneSupportsProfiles: true, activeProfileIds: [] })),
+    "profile_not_granted", "the control plane's own grant is required too");
+  const thrown = (() => { try { registry.acquireHome(home, "claude", GRANTED); } catch (error) { return error as Error; } })();
+  assert.equal(thrown?.message, LEASE_WORKER_ERRORS.profile_not_granted, "the refusal carries only the fixed, path-free text");
+  assert.equal(existsSync(leasePaths(home).root), false, "no lease root or lock was created for a refused profile");
+  assert.equal(registry.releaseAll(), true);
+
+  writeProviderProfileMarker(home, profileMarker(PROFILE_ID, [OTHER_INSTANCE_ID, INSTANCE_ID]));
+  assert.equal(registry.acquireHome(home, "claude", { ...GRANTED, expectedId: PROFILE_ID }), true);
+  assert.equal(existsSync(leasePaths(home).lock), true);
+  assert.equal(registry.releaseAll(), true);
+});
+
+test("a marker-less home behaves exactly as before with or without profile context", (t) => {
+  for (const profile of [undefined, { controlPlaneSupportsProfiles: false, activeProfileIds: [] }, GRANTED]) {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-profile-legacy-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID });
+    assert.equal(registry.acquireHome(home, "claude", profile), true);
+    assert.equal(registry.acquireHome(home, "claude", profile), false);
+    assert.equal(registry.releaseHome(home), false);
+    assert.equal(registry.releaseHome(home), true);
+    assert.deepEqual(journalRecords(home).map((record) => record.state).sort(), ["active", "released"]);
+    assert.equal(existsSync(join(home, ".agent-manager", "profile-v1.json")), false, "acquisition never creates a marker");
+  }
+  if (process.platform === "win32") return;
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-profile-ancestry-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, "elsewhere"));
+  symlinkSync(join(home, "elsewhere"), join(home, ".agent-manager"));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID });
+  assert.throws(() => registry.acquireHome(home, "claude", GRANTED), /has unsafe metadata directory ancestry/u);
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude")), "unverifiable", "unsafe ancestry keeps its existing refusal");
+  assert.deepEqual(readdirSync(join(home, "elsewhere")), []);
+});
+
+test("a substituted provider HOME is refused as a changed profile", { skip: process.platform === "win32" }, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-home-profile-substituted-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "account");
+  mkdirSync(home);
+  writeProviderProfileMarker(home, profileMarker());
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID });
+  const recorded = { ...GRANTED, activeProfileIds: [PROFILE_ID, OTHER_PROFILE_ID], expectedId: PROFILE_ID };
+  assert.equal(registry.acquireHome(home, "claude", recorded), true);
+  assert.equal(registry.releaseAll(), true);
+
+  renameSync(home, join(root, "original"));
+  mkdirSync(home);
+  writeProviderProfileMarker(home, profileMarker(OTHER_PROFILE_ID));
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", recorded)), "profile_changed", "a different granted profile");
+  rmSync(join(home, ".agent-manager"), { recursive: true });
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", recorded)), "profile_changed", "an empty replacement directory");
+  assert.equal(existsSync(leasePaths(home).root), false);
+  mkdirSync(join(home, ".agent-manager"));
+  writeFileSync(join(home, ".agent-manager", "profile-v1.json"), "{\"version\":2}\n", { mode: 0o600 });
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", recorded)), "profile_unverifiable", "a newer marker format");
+  assert.equal(existsSync(leasePaths(home).root), false);
+});
+
+test("a re-entrant reference re-checks the profile so a revoked grant stops new references", { skip: process.platform === "win32" }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-profile-borrowed-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writeProviderProfileMarker(home, profileMarker());
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID });
+  assert.equal(registry.acquireHome(home, "claude", GRANTED), true);
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", { controlPlaneSupportsProfiles: true, activeProfileIds: [] })),
+    "profile_not_granted", "the control plane revoked its grant");
+  registry.writeProfileMarkerWhileHeld(home, profileMarker(PROFILE_ID, []));
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", GRANTED)), "profile_not_granted", "the host-local grant was removed");
+  assert.equal(registry.releaseHome(home), true, "refused borrows added no reference");
+  assert.throws(() => registry.writeProfileMarkerWhileHeld(home, profileMarker()), /require this registry's completed HOME lease/u);
+  assert.deepEqual(journalRecords(home).map((record) => record.state).sort(), ["active", "released"]);
+});
+
+const NEW_GRANT_ID = "3a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+
+test("a marker change takes the lease without the grant check and releases what it took", { skip: process.platform === "win32" }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-profile-change-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writeProviderProfileMarker(home, profileMarker(PROFILE_ID, [OTHER_INSTANCE_ID]));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID });
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", GRANTED)), "profile_not_granted");
+  const grant = { controlPlaneInstanceId: INSTANCE_ID, grantId: NEW_GRANT_ID, grantedAt: "2026-10-16T00:00:02.000Z" };
+  const adopted = registry.changeProfileMarkerWhileHeld(home, "claude", (read) => adoptProviderProfileMarker(read, { provider: "claude", grant }));
+  assert.equal(adopted.marker.profileId, PROFILE_ID, "an existing identity is kept");
+  const read = readProviderProfileMarker(home);
+  assert.equal(read.state, "present");
+  assert.deepEqual(read.state === "present" && read.marker.grants.map((candidate) => candidate.controlPlaneInstanceId), [OTHER_INSTANCE_ID, INSTANCE_ID]);
+  assert.deepEqual(journalRecords(home).map((record) => record.state).sort(), ["active", "released"], "the first reference was released");
+  assert.equal(registry.acquireHome(home, "claude", { ...GRANTED, expectedId: PROFILE_ID }), true, "the new grant is usable");
+
+  // While a session holds the HOME, the change joins its reference and leaves it held.
+  const revoked = registry.changeProfileMarkerWhileHeld(home, "claude", (current) =>
+    revokeProviderProfileMarkerGrant(current, { profileId: PROFILE_ID, controlPlaneInstanceId: INSTANCE_ID, grantId: NEW_GRANT_ID }));
+  assert.equal(revoked.changed, true);
+  assert.equal(refusalKind(() => registry.acquireHome(home, "claude", GRANTED)), "profile_not_granted", "the revoked grant stops new references");
+  assert.equal(registry.releaseHome(home), true, "the session's own reference is the only one left");
+  assert.equal(readProviderProfileMarker(home).state, "present");
+});
+
+test("a marker change refuses a HOME another live owner holds and an unprovable marker", { skip: process.platform === "win32" }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-profile-change-busy-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const owner = new ProviderHomeLeaseRegistry(OWNER_B, { pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 202 });
+  assert.equal(owner.acquireHome(home, "claude"), true);
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+    controlPlaneInstanceId: INSTANCE_ID });
+  const grant = { controlPlaneInstanceId: INSTANCE_ID, grantId: NEW_GRANT_ID, grantedAt: "2026-10-16T00:00:02.000Z" };
+  let called = false;
+  assert.throws(() => registry.changeProfileMarkerWhileHeld(home, "claude", (read) => { called = true; return adoptProviderProfileMarker(read, { provider: "claude", grant }); }),
+    /already in use/u);
+  assert.equal(called, false, "nothing is read or written without the lease");
+  assert.equal(readProviderProfileMarker(home).state, "absent");
+  assert.equal(owner.releaseAll(), true);
+
+  writeFileSync(join(home, ".agent-manager", "profile-v1.json"), "{\"version\":2}\n", { mode: 0o600 });
+  assert.equal(providerHomeLeaseRefusalKind((() => {
+    try { registry.changeProfileMarkerWhileHeld(home, "claude", (read) => adoptProviderProfileMarker(read, { provider: "claude", grant })); } catch (error) { return error; }
+  })()), "profile_unverifiable");
+  assert.equal(readFileSync(join(home, ".agent-manager", "profile-v1.json"), "utf8"), "{\"version\":2}\n", "an unprovable marker is never replaced");
+  // A peer that treats every recorded process as alive can acquire only an orderly released lease.
+  const peer = new ProviderHomeLeaseRegistry(OWNER_B, { pid: 303, hostname: "host-a", isProcessAlive: () => true });
+  rmSync(join(home, ".agent-manager", "profile-v1.json"));
+  assert.equal(peer.acquireHome(home, "claude"), true, "a refused change released the lease it took");
+  assert.equal(peer.releaseAll(), true);
+  assert.equal(registry.releaseAll(), true);
 });

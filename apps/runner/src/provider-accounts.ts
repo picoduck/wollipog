@@ -14,6 +14,8 @@ export interface BoundProviderAccount {
   label: string;
   provider: "claude" | "codex";
   credentialHome: string;
+  /** The configured account's provider profile identity (#3239), when it has been adopted. */
+  profileId?: string;
 }
 
 export function bindSessionProviderAccount(
@@ -100,13 +102,16 @@ export function skillReconciliationProviderAccountPlan(
   agents: AgentDefinition[],
   accounts: RunnerProviderAccount[],
   exposeAccountScope: boolean,
+  /** Provider profiles (#3239): an account whose HOME this control plane may not use is skipped,
+   * so one refused HOME does not fail the whole pass. Its provider still has no base scope. */
+  usable: (account: RunnerProviderAccount) => boolean = () => true,
 ): {
   baseAgents: AgentDefinition[];
   accountScopes: Array<{ account: RunnerProviderAccount; providerAccountId?: string }>;
 } {
   return {
     baseAgents: agentsWithoutConfiguredProviderAccounts(agents, accounts),
-    accountScopes: accounts.map((account) => ({
+    accountScopes: accounts.filter((account) => usable(account)).map((account) => ({
       account,
       ...(exposeAccountScope ? { providerAccountId: account.id } : {}),
     })),
@@ -164,6 +169,7 @@ export function selectProviderAccount(
     label: selected.label,
     provider: selected.provider,
     credentialHome: selected.directory,
+    ...(selected.profileId !== undefined ? { profileId: selected.profileId } : {}),
   };
 }
 

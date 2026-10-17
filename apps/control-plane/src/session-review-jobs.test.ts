@@ -9,7 +9,6 @@ import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 
 const HEAD = "a".repeat(40);
-const SESSION_REVIEW_FLOOR = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob;
 const CAPABILITY: SessionReviewCapability = { controllerDigest: "d".repeat(64), reviewers: ["claude-code", "codex"] };
 const request = (extra: Partial<SessionReviewJobRequest> = {}): SessionReviewJobRequest => ({
   pullRequest: { repository: "picoduck/wollipog", number: 3306 }, headSha: HEAD, brief: "Intent and acceptance criteria.", ...extra,
@@ -99,11 +98,11 @@ test("malformed review requests are refused before anything is recorded or sent"
 });
 
 test("an unsupported runner, a missing installation or an unavailable reviewer is refused", () => {
-  const old = harness({ protocol: SESSION_REVIEW_FLOOR - 1 });
+  const old = harness({ protocol: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob - 1 });
   try {
     const refused = old.svc.requestSessionReviewJob("s1", request());
     assert.equal(refused.status, 409);
-    assert.equal(refused.capabilityRequirement?.requiredRunnerProtocolVersion, SESSION_REVIEW_FLOOR);
+    assert.equal(refused.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob);
     assert.equal(old.sent.length, 0);
   } finally { old.db.close(); }
   const missing = harness({ sessionReview: null });
@@ -259,7 +258,7 @@ test("a runner that lost support cannot report, so its unfinished jobs finish on
   const h = harness();
   try {
     const job = h.svc.requestSessionReviewJob("s1", request()).data!;
-    h.db.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "old", workspaces: [], agents: [] }, 1, SESSION_REVIEW_FLOOR - 1);
+    h.db.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "old", workspaces: [], agents: [] }, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob - 1);
     h.sent.length = 0;
     h.svc.recoverSessionReviewJobs("r");
     assert.equal(h.sent.length, 0);

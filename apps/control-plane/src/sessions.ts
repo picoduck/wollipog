@@ -3827,6 +3827,9 @@ export class SessionsService {
         principal: HumanPrincipal; requestId: string; digest: string;
         control: Extract<import("@wollipog/protocol").CampaignControl, { mode: "full_control" }>;
         issueScope: import("@wollipog/protocol").CampaignIssueScope;
+        /** Minted against the new root id only when every launch peer declares the private
+         * media contract; screenshot review never depends on it. */
+        evidenceAuthority?: EvidenceAuthorityProposal;
       };
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
@@ -4633,23 +4636,34 @@ export class SessionsService {
           effectiveSessionScope?.owner.kind !== "user" || effectiveSessionScope.owner.userId !== humanLaunch.principal.userId) {
         return fail("atomic Human launch requires the exact Human-owned managed root", 409);
       }
-      const authoritySupport = campaignAuthorityPreflight(humanLaunch.control, launch.driver, runner.protocolVersion);
+      const control = structuredClone(humanLaunch.control);
+      if (humanLaunch.evidenceAuthority !== undefined) {
+        if (!this.evidenceAuthorityDisclosures || !control.boundary.operations.includes("ui_evidence_approval")) {
+          return fail("Evidence authority requires an available private destination/provider disclosure and the existing UI evidence operation", 409);
+        }
+        const evidence = mintCampaignEvidenceAuthority(humanLaunch.principal, control.boundary, id,
+          humanLaunch.evidenceAuthority, this.evidenceAuthorityDisclosures);
+        if (!evidence) return fail("Evidence destination/provider disclosure is unknown, public, stale or outside the authenticated human boundary", 409);
+        control.boundary.evidenceAuthority = evidence;
+      }
+      const authoritySupport = campaignAuthorityPreflight(control, launch.driver, runner.protocolVersion,
+        this.pacedVideoInstallationContract(req.runnerId, req.agentId));
       if (!authoritySupport.supported) return fail(authoritySupport.reason ?? "campaign authority is unsupported", 409);
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, true);
       if (accountingError) return fail(accountingError, 409);
-      const nativeReview = humanLaunch.control.boundary.budgetAuthority?.controlledReview;
+      const nativeReview = control.boundary.budgetAuthority?.controlledReview;
       if (nativeReview && (!runner.runtime?.campaignReview || controlledReviewCapabilityKey(nativeReview) !== controlledReviewCapabilityKey(runner.runtime.campaignReview))) {
         return fail("the required native reviewer does not match current runner discovery", 409);
       }
-      if (humanLaunch.control.boundary.delegatablePolicyIds.some((policyId) => !this.governancePolicies().some((rule) =>
+      if (control.boundary.delegatablePolicyIds.some((policyId) => !this.governancePolicies().some((rule) =>
           rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired))) {
         return fail("unknown, disabled or Human Required policy asks cannot enter the launch boundary", 400);
       }
-      orchestratorPolicy.control = structuredClone(humanLaunch.control);
+      orchestratorPolicy.control = control;
       orchestratorPolicy.issueScope = structuredClone(humanLaunch.issueScope);
       orchestratorPolicy.issueNumbers = [...humanLaunch.issueScope.issueNumbers];
       parentControlPolicy = { decisions: structuredClone(orchestratorPolicy.delegation.decisions) };
-      text = requestedText || humanLaunch.control.boundary.objective;
+      text = requestedText || control.boundary.objective;
     }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,

@@ -122,7 +122,9 @@ import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
-import { managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
+import {
+  managedWorktreeAdminMatches, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths,
+} from "./managed-worktree-sandbox.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundJobStopResult,
@@ -198,7 +200,7 @@ import {
   usageWindowRejection,
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
-import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference } from "./provider-home-lease-async.js";
+import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference, type ProviderProfileAccessSource } from "./provider-home-lease-async.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
 import type { ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
@@ -1573,6 +1575,10 @@ export class SessionManager {
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: AsyncProviderHomeLeaseRegistry;
+  /** Provider profiles (#3239): until the runner learns the control plane's grants, a HOME holding
+   * a profile marker is refused as needing a newer control plane; marker-less homes are unaffected. */
+  private providerProfileAccess: ProviderProfileAccessSource = () => ({ controlPlaneSupportsProfiles: false, activeProfileIds: [] });
+  private providerProfileExpectation: (home: string) => string | undefined = () => undefined;
   /** The provider-HOME reference each live driver instance took at launch (see
    * settleDriverProviderHome). An instance launched past the handle budget has no entry. */
   private readonly driverProviderHomes = new Map<Driver, ProviderHomeReference>();
@@ -1666,6 +1672,8 @@ export class SessionManager {
     private readonly resolveProviderCredentialHome?: (meta: SessionMeta) => string | undefined,
     private readonly providerAccounts: () => ProviderAccountDefinition[] = () => [],
     private readonly subscriptionUsageInventory: () => SubscriptionUsageSnapshot[] = () => [],
+    /** The attested control-plane instance; the provider-HOME lease worker checks profile grants against it. */
+    controlPlaneInstanceId?: string,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     // Every worktree creation, activation, attach, and discard lands as a `worktrees` patch. The
@@ -1688,6 +1696,9 @@ export class SessionManager {
     this.providerHomeLeases = runnerOwnerHash ? new AsyncProviderHomeLeaseRegistry(runnerOwnerHash, {
       onDiagnostic: (diagnostic) => this.log(JSON.stringify(diagnostic)),
       helperDataDir: dataDir ?? join(store.rootPath(), ".runner-data"),
+      ...(controlPlaneInstanceId ? { controlPlaneInstanceId } : {}),
+      profileAccess: () => this.providerProfileAccess(),
+      expectedProfileIdForHome: (home) => this.providerProfileExpectation(home),
     }) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
@@ -3410,10 +3421,16 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  /** `requireDelivered` callers (archive retirement) also probe a live upstream: a pushed,
+   * squash-merged branch is published but not delivered until the forge proves its exact head.
+   * That proof is returned as `deliveredHead` for the current retirement only and never persisted
+   * as the worktree's link, so it cannot later admit the tree to pull-request reconciliation,
+   * which would retire a pushed but undelivered successor head. */
   private async discoverUnlinkedMergedWorktree(
     sessionId: string,
     path: string,
-  ): Promise<{ forgeUnavailable: boolean }> {
+    options: { requireDelivered?: boolean } = {},
+  ): Promise<{ forgeUnavailable: boolean; deliveredHead?: string }> {
     const initial = this.store.readMeta(sessionId);
     if (!initial) return { forgeUnavailable: false };
     const worktree = this.attributedWorktrees(initial)
@@ -3422,12 +3439,26 @@ export class SessionManager {
     const checkedOutBranch = await this.readWorktreeBranch(worktree.path, { context: initial.context });
     if (!checkedOutBranch) return { forgeUnavailable: false };
     let forgeUnavailable = false;
+    let liveUpstream = false;
     const discovered = await this.discoverMergedWorktreePullRequest(
       worktree.path,
       checkedOutBranch,
-      { context: initial.context, onForgeUnavailable: () => { forgeUnavailable = true; } },
+      {
+        context: initial.context,
+        onForgeUnavailable: () => { forgeUnavailable = true; },
+        ...(options.requireDelivered
+          ? {
+            includeLiveUpstream: true,
+            onForgeAttempt: (identity: MissingUpstreamPullRequestIdentity) => {
+              liveUpstream = identity.liveUpstream === true;
+              return true;
+            },
+          }
+          : {}),
+      },
     );
     if (!discovered) return { forgeUnavailable };
+    if (liveUpstream) return { forgeUnavailable: false, deliveredHead: discovered.headOid };
     this.worktreePullRequestDiscoveryRetryAt.delete(JSON.stringify([sessionId, worktree.path]));
     this.persistDiscoveredMergedWorktree(sessionId, path, worktree.branch, discovered);
     return { forgeUnavailable: false };
@@ -4102,8 +4133,11 @@ export class SessionManager {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
     let unlinkedForgeUnavailable = false;
+    let deliveredHead: string | undefined;
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
-      unlinkedForgeUnavailable = (await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path)).forgeUnavailable;
+      ({ forgeUnavailable: unlinkedForgeUnavailable, deliveredHead } = await this.discoverUnlinkedMergedWorktree(
+        sessionId, worktree.path, { requireDelivered: options.trigger === "archive_retirement" },
+      ));
       const latest = this.store.readMeta(sessionId);
       if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
       const current = this.attributedWorktrees(latest)
@@ -4221,6 +4255,8 @@ export class SessionManager {
         options.trigger ?? "explicit_discard",
         "safe",
       );
+      // Safe removal still compares this exact head with the tree's current head.
+      if (deliveredHead && !cleanup.verifiedMergedHead) cleanup.verifiedMergedHead = deliveredHead;
       if (teardownIdentityError) {
         const now = Date.now();
         cleanup.teardown = {
@@ -4783,6 +4819,35 @@ export class SessionManager {
     return error instanceof Error && [LEASE_WORKER_ERRORS.cancelled,
       "provider-home acquisition was cancelled", "provider launch preparation was cancelled",
       "authentication preparation was cancelled"].includes(error.message);
+  }
+
+  /** Provider profiles (#3239): the control plane's negotiated capability and active grants, read
+   * at each acquisition's dispatch, and the profile id a configured account recorded per HOME. */
+  configureProviderProfiles(options: {
+    access: ProviderProfileAccessSource;
+    expectedProfileIdForHome: (home: string) => string | undefined;
+  }): void {
+    this.providerProfileAccess = options.access;
+    this.providerProfileExpectation = options.expectedProfileIdForHome;
+  }
+
+  /** Record this control plane's grant in one account HOME's profile marker under its lease. */
+  async adoptProviderProfile(home: string, provider: "claude" | "codex", grantId: string): Promise<{ profileId: string }> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    if (this.shuttingDown) throw new Error("provider profile adoption was cancelled by shutdown");
+    return this.providerHomeLeases.adoptProfile(home, provider, grantId);
+  }
+
+  /** Drop one exact grant of this control plane from a HOME's profile marker under its lease. */
+  async revokeProviderProfileGrant(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<boolean> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    return this.providerHomeLeases.revokeProfileGrant(home, provider, profileId, grantId);
+  }
+
+  /** The retain-or-delete decision for a removed account's HOME under its lease (#3239). */
+  async retireProviderAccountHome(home: string, provider: "claude" | "codex"): Promise<boolean> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    return this.providerHomeLeases.retireProfileHome(home, provider);
   }
 
   /** Provider sign-in is a short-lived supervised mutation of one exact credential home. */
@@ -8849,15 +8914,35 @@ export class SessionManager {
       : [];
     let gitWritableRoots: string[] = [];
     let requiredReadOnlyPaths: string[] = [];
+    const ownedWorktrees: Array<{ path: string; gitAdmin: string }> = [];
     if (protectedWorktree) {
-      requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath: protectedWorktree, repoPath: meta.repoPath }], true);
+      const selected = { worktreePath: protectedWorktree, repoPath: meta.repoPath };
+      const gitLink = join(protectedWorktree, ".git");
+      gitWritableRoots = managedWorktreeGitWritableRoots(protectedWorktree, [selected]);
+      // The session's other runner-created worktrees of this repository stay usable (#3316): each
+      // root and its own admin directory are writable, with registration files read-only. Another
+      // session's worktree is never in this list, and a missing or foreign one is skipped.
+      for (const protection of this.managedWorktreeProtections(meta)) {
+        if (protection.worktreePath === protectedWorktree || protection.worktreePath === meta.repoPath) continue;
+        const roots = managedWorktreeGitWritableRoots(protection.worktreePath, [protection]);
+        if (roots.length !== gitWritableRoots.length ||
+            roots.slice(1).some((root, index) => root !== gitWritableRoots[index + 1]) ||
+            !managedWorktreeAdminMatches(protection.worktreePath, roots[0]!)) continue;
+        try {
+          if (realpathSync.native(protection.worktreePath) !== protection.worktreePath ||
+              !lstatSync(protection.worktreePath).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        ownedWorktrees.push({ path: protection.worktreePath, gitAdmin: roots[0]! });
+      }
+      requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([
+        selected,
+        ...ownedWorktrees.map((owned) => ({ worktreePath: owned.path, repoPath: meta.repoPath })),
+      ], true);
       for (const path of requiredReadOnlyPaths) {
         if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
       }
-      const gitLink = join(protectedWorktree, ".git");
-      gitWritableRoots = managedWorktreeGitWritableRoots(protectedWorktree, [{
-        worktreePath: protectedWorktree, repoPath: meta.repoPath,
-      }]);
       if (requiredReadOnlyPaths.length < 4 || gitWritableRoots.length !== 4 ||
           !lstatSync(gitLink).isFile() || realpathSync.native(gitLink) !== gitLink ||
           !requiredReadOnlyPaths.every((path) => readOnlyPaths.includes(path))) {
@@ -8879,7 +8964,10 @@ export class SessionManager {
       sessionId: meta.sessionId,
       cwd,
       ...(projectMemoryDirectory ? { projectMemoryDirectory } : {}),
-      ...(protectedWorktree ? { protectedWorktree: { path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths } } : {}),
+      ...(protectedWorktree ? { protectedWorktree: {
+        path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
+        ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
+      } } : {}),
       ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
@@ -15816,11 +15904,19 @@ export class SessionManager {
     if (!meta || !worktree || worktree.source === "attached") return "unavailable";
     let unlinkedForgeUnavailable = false;
     if (!worktree.pullRequest) {
-      unlinkedForgeUnavailable = (await this.discoverUnlinkedMergedWorktree(
-        record.sessionId, record.worktreePath)).forgeUnavailable;
+      const discovery = await this.discoverUnlinkedMergedWorktree(
+        record.sessionId, record.worktreePath,
+        { requireDelivered: record.trigger === "archive_retirement" });
+      unlinkedForgeUnavailable = discovery.forgeUnavailable;
       meta = this.store.readMeta(record.sessionId);
       worktree = locate(meta);
       if (!meta || !worktree || worktree.source === "attached") return "unavailable";
+      if (discovery.deliveredHead && !worktree.pullRequest) {
+        this.deferredMergedHeadRetryAt.delete(backoffKey);
+        record.verifiedMergedHead = discovery.deliveredHead;
+        this.cleanupJournal.add(record);
+        return "merged";
+      }
     }
     const linked = worktree.pullRequest;
     if (!linked) {

@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -81,22 +81,24 @@ test("change-request lifecycle parsing requires an exact forge URL and terminal 
     "https://token@gitlab.example.test/team/sub/repo/-/merge_requests/19"), null);
 });
 
-test("merged branch discovery requires the exact branch and head", () => {
-  const branch = "fix/external-pr";
+test("merged head discovery requires the exact head whatever the PR branch is named", () => {
   const head = "a".repeat(40);
-  const exact = { url: "https://github.com/picoduck/wollipog/pull/983", state: "MERGED", headRefOid: head.toUpperCase(), headRefName: branch };
-  assert.deepEqual(parseMergedWorktreePullRequestForBranch(JSON.stringify([exact]), branch, head), {
+  const exact = { url: "https://github.com/picoduck/wollipog/pull/983", state: "MERGED", headRefOid: head.toUpperCase(), headRefName: "feat/983-renamed" };
+  const proof = {
     url: exact.url,
     state: "merged",
     headOid: head,
     provider: "github",
     kind: "pull_request",
-  });
-  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, state: "CLOSED" }]), branch, head), null);
-  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, headRefName: "fix/other" }]), branch, head), null);
-  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, headRefOid: "b".repeat(40) }]), branch, head), null);
-  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, url: "https://example.test/pull/983" }]), branch, head), null);
-  assert.equal(parseMergedWorktreePullRequestForBranch("{}", branch, head), null);
+  };
+  assert.deepEqual(parseMergedWorktreePullRequestForHead(JSON.stringify([exact]), head), proof);
+  assert.deepEqual(parseMergedWorktreePullRequestForHead(JSON.stringify([{ ...exact, headRefName: undefined }]), head), proof,
+    "the head branch name is not part of the proof");
+  assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([{ ...exact, state: "CLOSED" }]), head), null);
+  assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([{ ...exact, headRefOid: "b".repeat(40) }]), head), null);
+  assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([{ ...exact, url: "https://example.test/pull/983" }]), head), null);
+  assert.equal(parseMergedWorktreePullRequestForHead("{}", head), null);
+  assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([exact]), "a".repeat(39)), null);
 });
 
 test("missing-upstream discovery exercises every production Git gate before the forge", { skip: !haveGit() }, async () => {
@@ -132,6 +134,8 @@ test("missing-upstream discovery exercises every production Git gate before the 
     };
     forgeOutput = JSON.stringify([{ ...exact, headRefOid: "b".repeat(40) }]);
     assert.equal(await discover(), null, "a same-name PR with an unrelated head cannot prove delivery");
+    forgeOutput = JSON.stringify([{ ...exact, headRefName: "feat/1020-renamed", headRefOid: "b".repeat(40) }]);
+    assert.equal(await discover(), null, "a differently named PR with an unrelated head cannot prove delivery");
     forgeOutput = JSON.stringify([exact]);
     assert.equal(execFileSync("git", ["-C", repo, "config", "--get", "--default", "", `branch.${branch}.remote`], { encoding: "utf8" }).trim(), "");
     assert.deepEqual(await discover(), {
@@ -144,7 +148,15 @@ test("missing-upstream discovery exercises every production Git gate before the 
 
     execFileSync("git", ["-C", repo, "push", "-u", "origin", branch]);
     assert.equal(await discover(), null, "a live upstream is ineligible");
-    assert.equal(forgeCalls.length, 3);
+    assert.equal(forgeCalls.length, 4);
+    assert.deepEqual(await discover({ includeLiveUpstream: true }), {
+      url: exact.url,
+      state: "merged",
+      headOid: head,
+      provider: "github",
+      kind: "pull_request",
+    }, "a delivery-proof caller may probe a live upstream for the exact merged head");
+    assert.equal(forgeCalls.length, 5);
 
     execFileSync("git", ["-C", repo, "push", "origin", "--delete", branch]);
     assert.deepEqual(await discover(), {
@@ -154,20 +166,19 @@ test("missing-upstream discovery exercises every production Git gate before the 
       provider: "github",
       kind: "pull_request",
     });
-    assert.equal(forgeCalls.length, 4);
-    assert.equal(forgeCalls[3]?.command, "gh");
-    assert.deepEqual(forgeCalls[3]?.args, [
-      "pr", "list", "--head", branch, "--state", "merged", "--limit", "100",
-      "--json", "url,state,headRefOid,headRefName",
-    ]);
-    assert.equal(forgeCalls[3]?.timeoutMs, 30_000, "a stuck forge has a fixed deadline");
+    assert.equal(forgeCalls.length, 6);
+    assert.equal(forgeCalls[5]?.command, "gh");
+    assert.deepEqual(forgeCalls[5]?.args, [
+      "pr", "list", "--search", head, "--state", "merged", "--limit", "100",
+      "--json", "url,state,headRefOid",
+    ], "the forge is queried by the exact head, never by the local branch name");
+    assert.equal(forgeCalls[5]?.timeoutMs, 30_000, "a stuck forge has a fixed deadline");
 
     assert.equal(await discover({ onForgeAttempt: () => false }), null,
       "the reconciliation governor can stop before spawning the forge");
-    assert.equal(forgeCalls.length, 4);
+    assert.equal(forgeCalls.length, 6);
 
     for (const rejected of [
-      [{ ...exact, headRefName: "fix/other" }],
       [{ ...exact, headRefOid: "b".repeat(40) }],
       [{ ...exact, state: "CLOSED" }],
       { malformed: true },
@@ -185,10 +196,22 @@ test("missing-upstream discovery exercises every production Git gate before the 
     execFileSync("git", ["-C", repo, "config", `branch.${branch}.remote`, "."]);
     assert.equal(await discover(), null, "a local remote is ineligible");
     assert.equal(forgeCalls.length, callsBeforeLocalRemote);
+    execFileSync("git", ["-C", repo, "config", `branch.${branch}.merge`, "refs/tags/v1"]);
     execFileSync("git", ["-C", repo, "config", `branch.${branch}.remote`, "origin"]);
-    execFileSync("git", ["-C", repo, "config", `branch.${branch}.merge`, "refs/heads/fix/other"]);
-    assert.equal(await discover(), null, "a differently named merge ref is ineligible");
+    assert.equal(await discover(), null, "a non-branch merge ref is ineligible");
+    execFileSync("git", ["-C", repo, "config", "--unset", `branch.${branch}.merge`]);
+    assert.equal(await discover(), null, "partial upstream configuration is ineligible");
     assert.equal(forgeCalls.length, callsBeforeLocalRemote);
+    forgeOutput = JSON.stringify([{ ...exact, headRefName: "fix/other" }]);
+    execFileSync("git", ["-C", repo, "config", `branch.${branch}.merge`, "refs/heads/fix/other"]);
+    assert.deepEqual(await discover(), {
+      url: exact.url,
+      state: "merged",
+      headOid: head,
+      provider: "github",
+      kind: "pull_request",
+    }, "a renamed -u push whose remote branch was deleted is recovered by exact merged-head proof");
+    assert.equal(forgeCalls.length, callsBeforeLocalRemote + 1);
 
     let transientGitFailureReportedIneligible = 0;
     assert.equal(await mergedWorktreePullRequestForBranch(join(repo, "missing"), branch, {
@@ -729,6 +752,190 @@ test("archive retirement keeps an unlinked no-upstream worktree pending through 
     await waitForCondition(() => !existsSync(created.worktree.path) &&
       new WorktreeCleanupJournal(dataDir).list().every((item) => item.worktreeId !== created.worktree.id),
     "retirement did not resume after exact merged-head proof became available");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a renamed no-upstream push retires only by exact squash-merged head proof (#3299)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-renamed-push-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_renamed_push", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "renamed push",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    // Each child commits on agent/<id>, pushes it as feat/<n>-<slug> without -u, the PR is
+    // squash-merged into main, and the remote branch is deleted.
+    const pullRequests: Array<{ url: string; state: string; headRefOid: string; headRefName: string }> = [];
+    const deliver = async (name: string, number: number) => {
+      const created = await manager!.requestWorktree("s_renamed_push",
+        { baseRef: "HEAD", branch: `agent/s_renamed_${name}` });
+      writeFileSync(join(created.worktree.path, `${name}.txt`), `${name}\n`);
+      execFileSync("git", ["-C", created.worktree.path, "add", `${name}.txt`]);
+      execFileSync("git", ["-C", created.worktree.path, "commit", "-m", name]);
+      const head = execFileSync("git", ["-C", created.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const prBranch = `feat/${number}-${name}`;
+      execFileSync("git", ["-C", created.worktree.path, "push", "origin", `HEAD:${prBranch}`]);
+      execFileSync("git", ["-C", repo, "merge", "--squash", created.worktree.branch]);
+      execFileSync("git", ["-C", repo, "commit", "-m", `${name} (#${number})`]);
+      execFileSync("git", ["-C", repo, "push", "origin", "main"]);
+      execFileSync("git", ["-C", repo, "push", "origin", "--delete", prBranch]);
+      assert.equal(execFileSync("git", ["-C", created.worktree.path, "config", "--get", "--default", "",
+        `branch.${created.worktree.branch}.remote`], { encoding: "utf8" }).trim(), "", "the push set no upstream");
+      return { worktree: created.worktree, head, prBranch, number };
+    };
+    const explicit = await deliver("explicit", 3301);
+    const deferred = await deliver("deferred", 3302);
+    const periodic = await deliver("periodic", 3303);
+    const unrelated = await deliver("unrelated", 3304);
+    const url = (number: number) => `https://github.com/picoduck/wollipog/pull/${number}`;
+    // Merged PRs that share a branch name with the kept worktree but merged a different head (#995).
+    pullRequests.push(
+      { url: url(3400), state: "MERGED", headRefOid: "b".repeat(40), headRefName: unrelated.worktree.branch },
+      { url: url(3401), state: "MERGED", headRefOid: "c".repeat(40), headRefName: unrelated.prBranch },
+    );
+    const searched: string[] = [];
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+    }).discoverMergedWorktreePullRequest = (path, branch, options) =>
+      mergedWorktreePullRequestForBranch(path, branch, {
+        ...options,
+        runForgeCommand: async (_context, _command, args) => {
+          searched.push(args[args.indexOf("--search") + 1]!);
+          // Search noise: the forge may return unrelated merged PRs; only the exact head counts.
+          return { stdout: JSON.stringify(pullRequests), stderr: "" };
+        },
+      });
+
+    await assert.rejects(manager.discardWorktree("s_renamed_push", explicit.worktree.path),
+      /the branch has no upstream/, "no merged PR head equals the tip yet");
+    assert.equal(existsSync(explicit.worktree.path), true);
+    pullRequests.push({ url: url(explicit.number), state: "MERGED", headRefOid: explicit.head, headRefName: explicit.prBranch });
+    assert.equal((await manager.discardWorktree("s_renamed_push", explicit.worktree.path)).retirement.status, "removed",
+      "explicit discard retires the renamed push by exact merged-head proof");
+    assert.equal(existsSync(explicit.worktree.path), false);
+    assert.ok(searched.includes(explicit.head), "the forge was searched by the exact local tip");
+
+    const providerOwner = "runner:provider:renamed-deferred";
+    assert.equal(store.acquireWorktreeLease("s_renamed_push", providerOwner), true);
+    const activeEntry = { sessionId: "s_renamed_push", context: { kind: "native" },
+      cwd: deferred.worktree.path, worktree: deferred.worktree, worktreeLeaseOwner: providerOwner,
+      queue: [], client: { dispose: () => {} } };
+    const internals = manager as unknown as {
+      active: Map<string, unknown>;
+      deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+    };
+    internals.active.set("s_renamed_push", activeEntry);
+    assert.deepEqual((await manager.discardWorktree("s_renamed_push", deferred.worktree.path)).retirement,
+      { status: "deferred", reason: "provider_active" });
+    pullRequests.push({ url: url(deferred.number), state: "MERGED", headRefOid: deferred.head, headRefName: deferred.prBranch });
+    assert.equal(internals.deleteActiveSession("s_renamed_push", activeEntry), true);
+    await waitForCondition(() => !existsSync(deferred.worktree.path),
+      "deferred replay did not retire the renamed push after its exact head merged");
+
+    pullRequests.push({ url: url(periodic.number), state: "MERGED", headRefOid: periodic.head, headRefName: periodic.prBranch });
+    await manager.reconcileWorktreePullRequests();
+    await waitForCondition(() => !existsSync(periodic.worktree.path),
+      "periodic discovery did not retire the renamed push after its exact head merged");
+
+    assert.equal(existsSync(unrelated.worktree.path), true,
+      "same- and different-name PRs that merged a different head cannot grant deletion");
+    await assert.rejects(manager.discardWorktree("s_renamed_push", unrelated.worktree.path),
+      /the branch has no upstream/);
+    assert.equal(existsSync(unrelated.worktree.path), true);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("archive retirement proves delivery of a -u pushed squash-merged worktree with a live upstream (#3299)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-archive-live-upstream-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_archive_live", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "archive live upstream",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const created = await manager.requestWorktree("s_archive_live",
+      { baseRef: "HEAD", branch: "agent/s_archive_live" });
+    writeFileSync(join(created.worktree.path, "change.txt"), "squashed\n");
+    execFileSync("git", ["-C", created.worktree.path, "add", "change.txt"]);
+    execFileSync("git", ["-C", created.worktree.path, "commit", "-m", "change"]);
+    // The remote branch stays, so its tracking ref is live and publication alone is proven.
+    execFileSync("git", ["-C", created.worktree.path, "push", "-u", "origin", "HEAD:feat/3305-live"]);
+    execFileSync("git", ["-C", repo, "merge", "--squash", created.worktree.branch]);
+    execFileSync("git", ["-C", repo, "commit", "-m", "change (#3305)"]);
+    execFileSync("git", ["-C", repo, "push", "origin", "main"]);
+    const head = execFileSync("git", ["-C", created.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    let forgeOutput: unknown[] = [{
+      url: "https://github.com/picoduck/wollipog/pull/3399", state: "MERGED",
+      headRefOid: "b".repeat(40), headRefName: "feat/3305-live",
+    }];
+    let forgeCalls = 0;
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+    }).discoverMergedWorktreePullRequest = (path, branch, options) =>
+      mergedWorktreePullRequestForBranch(path, branch, {
+        ...options,
+        runForgeCommand: async () => {
+          forgeCalls++;
+          return { stdout: JSON.stringify(forgeOutput), stderr: "" };
+        },
+      });
+    await assert.rejects(manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }),
+      /not on the default branch or a verified merged pull request/,
+      "a same-name PR that merged a different head proves no delivery");
+    assert.equal(forgeCalls, 1, "archive retirement probes the forge despite the live upstream");
+    assert.equal(existsSync(created.worktree.path), true);
+    forgeOutput = [{
+      url: "https://github.com/picoduck/wollipog/pull/3305", state: "MERGED", headRefOid: head, headRefName: "feat/3305-live",
+    }];
+    const linkedPullRequest = () => store.readMeta("s_archive_live")?.worktrees
+      ?.find((item) => item.path === created.worktree.path)?.pullRequest;
+
+    // A proof found through a live upstream serves only the retirement that asked for it. If it
+    // were persisted as the worktree's link, pull-request reconciliation could later retire a
+    // pushed but undelivered successor head without any delivery check.
+    writeFileSync(join(created.worktree.path, "followup.txt"), "not yet committed\n");
+    await assert.rejects(manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }),
+      /the worktree has uncommitted changes/);
+    assert.equal(linkedPullRequest(), undefined, "live-upstream delivery proof is not persisted as a link");
+    execFileSync("git", ["-C", created.worktree.path, "add", "followup.txt"]);
+    execFileSync("git", ["-C", created.worktree.path, "commit", "-m", "follow-up"]);
+    execFileSync("git", ["-C", created.worktree.path, "push", "origin", "HEAD:feat/3305-live"]);
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(created.worktree.path), true,
+      "reconciliation does not retire a pushed successor head that no merged PR delivered");
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${created.worktree.branch}`]);
+    await assert.rejects(manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }),
+      /not on the default branch or a verified merged pull request/,
+      "the earlier merged head cannot prove delivery of its successor");
+    assert.equal(existsSync(created.worktree.path), true);
+
+    execFileSync("git", ["-C", created.worktree.path, "reset", "--hard", head]);
+    execFileSync("git", ["-C", created.worktree.path, "push", "--force", "origin", "HEAD:feat/3305-live"]);
+    assert.equal((await manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }))
+      .retirement.status, "removed", "the exact merged head proves delivery for archive retirement");
+    assert.equal(existsSync(created.worktree.path), false);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

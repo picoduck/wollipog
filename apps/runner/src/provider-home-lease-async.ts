@@ -4,7 +4,7 @@ import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerOperation, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
+import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerOperation, validLeaseWorkerProfileAccess, validLeaseWorkerReplyProfileId, type LeaseWorkerOperation, type LeaseWorkerProfileAccess, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** One acquired provider-HOME reference. Settle it exactly once: `release` drops exactly this
  * reference; `retain` keeps the reference until shutdown and frees only the worker-side handle.
@@ -29,8 +29,19 @@ interface WorkerPort {
   unref(): unknown;
   terminate(): Promise<number>;
 }
+/** The control plane's provider-profile capability and active grants, read at dispatch time. */
+export type ProviderProfileAccessSource = () => { controlPlaneSupportsProfiles: boolean; activeProfileIds: string[] };
+/** Per-acquisition profile binding: the profile id the account or session recorded, if any. */
+export interface LeaseProfileBinding { expectedProfileId?: string }
 export interface AsyncLeaseOptions {
   helperDataDir?: string;
+  /** The attested control-plane instance; the worker checks it against a profile marker's grants. */
+  controlPlaneInstanceId?: string;
+  /** Omitted: acquisitions carry no profile context unless one names an expected profile id. */
+  profileAccess?: ProviderProfileAccessSource;
+  /** The profile id a configured account recorded for this exact HOME path, used as the expected
+   * id of an acquisition that names none, so a substituted account HOME is refused. */
+  expectedProfileIdForHome?: (home: string) => string | undefined;
   onDiagnostic?: (diagnostic: WorkerDiagnostic) => void;
   /** Private test seams; no configuration or agent RPC can select code or enlarge a budget. */
   workerFactoryForTest?: (data: Record<string, unknown>) => WorkerPort;
@@ -42,6 +53,7 @@ export interface LeaseCancellation { signal?: AbortSignal; isCurrent?: () => boo
 interface Pending {
   id: string;
   operation: LeaseWorkerOperation;
+  expectedProfileId?: string;
   deadline: number;
   enqueuedAt: number;
   startedAt?: number;
@@ -54,7 +66,7 @@ interface Pending {
   compensation: boolean;
   phase: "queued" | "executing" | "accepting";
   receipt?: Extract<LeaseWorkerReply, { kind: "receipt" | "done" }>;
-  resolve: (value: boolean) => void;
+  resolve: (value: boolean, profileId?: string) => void;
   reject: (error: Error) => void;
 }
 const unavailable = (reason: string) => new Error(`Provider-HOME lease worker unavailable (${reason}); preserve all evidence and retry only after runner lifecycle recovery.`);
@@ -81,29 +93,29 @@ export class AsyncProviderHomeLeaseRegistry {
         !Number.isSafeInteger(this.pendingLimit) || this.pendingLimit < 1 || this.pendingLimit > LEASE_WORKER_LIMITS.pending) throw new Error("invalid lease worker test budget");
   }
 
-  async acquire(request: ProviderHomeLeaseRequest, cancellation: LeaseCancellation = {}): Promise<void> {
+  async acquire(request: ProviderHomeLeaseRequest, cancellation: LeaseCancellation = {}, profile: LeaseProfileBinding = {}): Promise<void> {
     const target = providerHomeLeaseTarget(request);
-    if (target) await this.acquireHome(target.home, target.provider, cancellation);
+    if (target) await this.acquireHome(target.home, target.provider, cancellation, profile);
   }
 
   /** Like `acquire`, but returns a handle that releases exactly this reference, or null when the
    * request needs no lease. */
-  async acquireReference(request: ProviderHomeLeaseRequest, cancellation: LeaseCancellation = {}): Promise<ProviderHomeReference | null> {
+  async acquireReference(request: ProviderHomeLeaseRequest, cancellation: LeaseCancellation = {}, profile: LeaseProfileBinding = {}): Promise<ProviderHomeReference | null> {
     const target = providerHomeLeaseTarget(request);
-    return target ? this.acquireHomeReference(target.home, target.provider, cancellation) : null;
+    return target ? this.acquireHomeReference(target.home, target.provider, cancellation, profile) : null;
   }
 
-  acquireHome(home: string, provider = "skills", cancellation: LeaseCancellation = {}): Promise<boolean> {
+  acquireHome(home: string, provider = "skills", cancellation: LeaseCancellation = {}, profile: LeaseProfileBinding = {}): Promise<boolean> {
     if (this.closing) return Promise.reject(unavailable("shutdown admission closed"));
-    return this.enqueue({ method: "acquire", home, provider }, cancellation).then(({ value }) => value);
+    return this.enqueue({ method: "acquire", home, provider }, cancellation, profile).then(({ value }) => value);
   }
 
   /** Acquire one reference whose release is bound in the worker to the exact registry entry it
    * joined. Releasing through `home` instead would re-resolve the path, so a symlinked HOME
    * retargeted in between could drop another HOME's reference. Release is idempotent. */
-  async acquireHomeReference(home: string, provider = "skills", cancellation: LeaseCancellation = {}): Promise<ProviderHomeReference> {
+  async acquireHomeReference(home: string, provider = "skills", cancellation: LeaseCancellation = {}, profile: LeaseProfileBinding = {}): Promise<ProviderHomeReference> {
     if (this.closing) throw unavailable("shutdown admission closed");
-    const { value, id } = await this.enqueue({ method: "acquire_reference", home, provider }, cancellation);
+    const { value, id } = await this.enqueue({ method: "acquire_reference", home, provider }, cancellation, profile);
     // The first of release() and retain() settles the handle; later calls share its outcome.
     let settled: Promise<boolean> | undefined;
     const settle = (method: "release_reference" | "retain_reference") => settled ??= this.closePromise || this.closed
@@ -114,6 +126,31 @@ export class AsyncProviderHomeLeaseRegistry {
       release: () => settle("release_reference"),
       retain: async () => { await settle("retain_reference"); },
     };
+  }
+
+  /** #3239: record this control plane's grant in the HOME's profile marker, creating the profile
+   * identity when the HOME has none, while the worker holds the HOME's lease. Resolves with the
+   * profile id; a HOME another owner holds is refused with the acquisition's typed code. */
+  async adoptProfile(home: string, provider: "claude" | "codex", grantId: string): Promise<{ profileId: string }> {
+    if (this.closing) throw unavailable("shutdown admission closed");
+    const { profileId } = await this.enqueue({ method: "profile_adopt", home, provider, grantId });
+    if (!profileId) throw unavailable("adoption completed without a profile id");
+    return { profileId };
+  }
+
+  /** #3239: drop one exact grant of this control plane from the HOME's profile marker while the
+   * worker holds the HOME's lease. Resolves true when the marker changed. */
+  revokeProfileGrant(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<boolean> {
+    if (this.closing) return Promise.reject(unavailable("shutdown admission closed"));
+    return this.enqueue({ method: "profile_revoke", home, provider, profileId, grantId }).then(({ value }) => value);
+  }
+
+  /** #3239: the retain-or-delete decision for a removed account's HOME, taken while the worker
+   * holds its lease: drops every grant of this control plane from the marker, then releases.
+   * Resolves true only when the lease was released and no other control plane is granted. */
+  retireProfileHome(home: string, provider: "claude" | "codex"): Promise<boolean> {
+    if (this.closing) return Promise.reject(unavailable("shutdown admission closed"));
+    return this.enqueue({ method: "profile_retire", home, provider }).then(({ value }) => value);
   }
 
   releaseHome(home: string): Promise<boolean> {
@@ -143,19 +180,28 @@ export class AsyncProviderHomeLeaseRegistry {
   }
 
   /** Resolves with the operation's value and the id of the request that completed it. */
-  private enqueue(operation: LeaseWorkerOperation, cancellation: LeaseCancellation = {}): Promise<{ value: boolean; id: string }> {
+  private enqueue(operation: LeaseWorkerOperation, cancellation: LeaseCancellation = {}, profile: LeaseProfileBinding = {}): Promise<{ value: boolean; id: string; profileId?: string }> {
     const { signal, isCurrent } = cancellation;
+    let expectedProfileId = profile.expectedProfileId;
+    if (expectedProfileId === undefined && this.options.expectedProfileIdForHome && (operation.method === "acquire" || operation.method === "acquire_reference")) {
+      try { expectedProfileId = this.options.expectedProfileIdForHome(operation.home); } catch {
+        return Promise.reject(new Error("Provider-HOME lease profile context is unavailable; retry later."));
+      }
+    }
     if (this.poisonReason || this.closed) return Promise.reject(unavailable(this.poisonReason ?? "closed"));
-    if (!validLeaseWorkerOperation(operation) || !boundedLeaseWorkerFrame(operation, LEASE_WORKER_LIMITS.requestBytes - 512)) return Promise.reject(new Error("invalid or oversized provider-HOME lease request"));
+    if (!validLeaseWorkerOperation(operation) || !boundedLeaseWorkerFrame(operation, LEASE_WORKER_LIMITS.requestBytes - 512) ||
+        (expectedProfileId !== undefined && (!isLeaseWorkerAcquisition(operation.method) ||
+          !validLeaseWorkerProfileAccess({ expectedId: expectedProfileId, controlPlaneSupportsProfiles: false, activeProfileIds: [] })))) return Promise.reject(new Error("invalid or oversized provider-HOME lease request"));
     try {
       if (signal?.aborted || (isCurrent && !isCurrent())) return Promise.reject(new Error(LEASE_WORKER_ERRORS.cancelled));
     } catch { return Promise.reject(new Error(LEASE_WORKER_ERRORS.cancelled)); }
     if (this.queue.length + (this.active ? 1 : 0) >= this.pendingLimit) return Promise.reject(new Error("Provider-HOME lease queue is full; retry later."));
     return new Promise((resolve, reject) => {
-      const pending: Pending = { id: randomUUID(), operation, deadline: Date.now() + this.deadlineMs, timer: undefined!, signal, isCurrent,
+      const pending: Pending = { id: randomUUID(), operation, ...(expectedProfileId === undefined ? {} : { expectedProfileId }),
+        deadline: Date.now() + this.deadlineMs, timer: undefined!, signal, isCurrent,
         enqueuedAt: performance.now(),
         cancelled: false, acceptedCancel: false, compensation: false, phase: "queued",
-        resolve: (value) => resolve({ value, id: pending.id }), reject };
+        resolve: (value, profileId) => resolve({ value, id: pending.id, ...(profileId === undefined ? {} : { profileId }) }), reject };
       pending.timer = setTimeout(() => {
         if (pending === this.active) this.poison("active deadline or ambiguous completion");
         else { this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); }
@@ -169,7 +215,8 @@ export class AsyncProviderHomeLeaseRegistry {
 
   private startWorker(): void {
     if (this.worker) return;
-    const data = { epoch: this.epoch, ownerHash: this.ownerHash, helperDataDir: this.options.helperDataDir, tests: this.options.engineOptionsForTest };
+    const data = { epoch: this.epoch, ownerHash: this.ownerHash, helperDataDir: this.options.helperDataDir, tests: this.options.engineOptionsForTest,
+      ...(this.options.controlPlaneInstanceId === undefined ? {} : { controlPlaneInstanceId: this.options.controlPlaneInstanceId }) };
     if (this.options.workerFactoryForTest) this.worker = this.options.workerFactoryForTest(data);
     else {
       let code: string;
@@ -198,9 +245,29 @@ export class AsyncProviderHomeLeaseRegistry {
     if (pending.deadline <= Date.now()) {
       this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); this.pump(); return;
     }
+    let operation: LeaseWorkerOperation;
+    try { operation = this.dispatched(pending); } catch {
+      this.remove(pending); pending.reject(new Error("Provider-HOME lease profile context is unavailable; retry later.")); this.pump(); return;
+    }
     this.active = pending; pending.phase = "executing";
     pending.startedAt = performance.now();
-    this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline, operation: pending.operation });
+    this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline, operation });
+  }
+
+  /** Attach the profile context at dispatch, not enqueue, so a grant revoked while this request
+   * waited in the queue is not carried into the worker. */
+  private dispatched(pending: Pending): LeaseWorkerOperation {
+    const operation = pending.operation;
+    if (operation.method !== "acquire" && operation.method !== "acquire_reference") return operation;
+    if (!this.options.profileAccess && pending.expectedProfileId === undefined) return operation;
+    const access = this.options.profileAccess?.() ?? { controlPlaneSupportsProfiles: false, activeProfileIds: [] };
+    const profile: LeaseWorkerProfileAccess = {
+      ...(pending.expectedProfileId === undefined ? {} : { expectedId: pending.expectedProfileId }),
+      controlPlaneSupportsProfiles: access.controlPlaneSupportsProfiles, activeProfileIds: [...access.activeProfileIds],
+    };
+    const profiled = { ...operation, profile };
+    if (!validLeaseWorkerOperation(profiled) || !boundedLeaseWorkerFrame(profiled, LEASE_WORKER_LIMITS.requestBytes - 512)) throw new Error("invalid profile context");
+    return profiled;
   }
 
   private post(message: unknown): void {
@@ -212,7 +279,7 @@ export class AsyncProviderHomeLeaseRegistry {
     if (!value || typeof value !== "object" || !boundedLeaseWorkerFrame(value, LEASE_WORKER_LIMITS.responseBytes)) return this.poison("invalid response");
     const reply = value as LeaseWorkerReply;
     const keys = reply.kind === "ready" ? ["kind", "epoch", "pid"] : reply.kind === "diagnostic"
-      ? ["kind", "epoch", "event", "leaseId", "message"] : ["kind", "epoch", "id", "ok", "value", "error"];
+      ? ["kind", "epoch", "event", "leaseId", "message"] : ["kind", "epoch", "id", "ok", "value", "error", "profileId"];
     if (!leaseWorkerFrameKeys(reply, keys)) return this.poison("unexpected response fields");
     if (reply.epoch !== this.epoch) return this.poison("wrong worker epoch");
     if (reply.kind === "ready") {
@@ -227,6 +294,9 @@ export class AsyncProviderHomeLeaseRegistry {
     const pending = this.active;
     if (!pending || reply.id !== pending.id || typeof reply.ok !== "boolean" || typeof reply.value !== "boolean" ||
         (reply.ok ? reply.error !== undefined : typeof reply.error !== "string" || !Object.hasOwn(LEASE_WORKER_ERRORS, reply.error))) return this.poison("unmatched completion receipt");
+    // Only a successful adoption names a profile, and it must name exactly one valid id.
+    if (Object.hasOwn(reply, "profileId") !== (reply.ok && pending.operation.method === "profile_adopt") ||
+        (Object.hasOwn(reply, "profileId") && !validLeaseWorkerReplyProfileId(reply.profileId))) return this.poison("unexpected profile id");
     if (pending.deadline <= Date.now()) return this.poison("late completion receipt");
     if (reply.kind === "receipt" && pending.phase === "executing") {
       if (!this.current(pending)) pending.cancelled = true;
@@ -238,7 +308,7 @@ export class AsyncProviderHomeLeaseRegistry {
     const receipt = pending.receipt;
     if (pending.acceptedCancel && receipt.ok) {
       if (reply.ok || reply.value || !["cancelled", "cancel_release_failed"].includes(reply.error ?? "")) return this.poison("unproved cancellation completion");
-    } else if (reply.ok !== receipt.ok || reply.value !== receipt.value || reply.error !== receipt.error) return this.poison("changed completion receipt");
+    } else if (reply.ok !== receipt.ok || reply.value !== receipt.value || reply.error !== receipt.error || reply.profileId !== receipt.profileId) return this.poison("changed completion receipt");
     if (reply.error === "cancel_release_failed") return this.poison("unproved cancelled reference release");
     if (!this.current(pending)) pending.cancelled = true;
     // An abort can arrive after accept was sent. Compensate before dispatching any other work.
@@ -258,7 +328,7 @@ export class AsyncProviderHomeLeaseRegistry {
       outcome: pending.cancelled ? "cancelled" : reply.ok ? "completed" : "refused" });
     if (pending.cancelled) pending.reject(new Error(LEASE_WORKER_ERRORS.cancelled));
     else if (!reply.ok) pending.reject(new ProviderHomeLeaseError(reply.error!));
-    else pending.resolve(reply.value);
+    else pending.resolve(reply.value, reply.profileId);
     this.pump();
   }
 

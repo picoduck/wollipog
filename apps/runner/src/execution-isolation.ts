@@ -1,7 +1,7 @@
 import type { AgentContext } from "@wollipog/protocol";
 import type { AgentDriverKind } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, open, opendir, realpath, rm, stat } from "node:fs/promises";
+import { cp, lstat, mkdir, open, opendir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import type { RunnerExecutionIsolation } from "./config.js";
@@ -141,8 +141,15 @@ export interface IsolationStateOptions {
   env: Record<string, string>;
   sessionId: string;
   cwd: string;
-  /** Native Linux runner-created worktree selected for a filesystem-protected launch. */
-  protectedWorktree?: { path: string; gitWritableRoots: string[]; requiredReadOnlyPaths: string[] };
+  /** Native Linux runner-created worktree selected for a filesystem-protected launch.
+   * `ownedWorktrees` are the session's other runner-created worktrees of the same repository,
+   * bound writable with their own admin directories (#3316). */
+  protectedWorktree?: {
+    path: string;
+    gitWritableRoots: string[];
+    requiredReadOnlyPaths: string[];
+    ownedWorktrees?: Array<{ path: string; gitAdmin: string }>;
+  };
   /** Preserve the installed provider's real transcript and credential directory when a managed
    * Linux worktree forces bwrap over a runner configured for provider isolation. */
   preserveProviderHome?: boolean;
@@ -303,6 +310,43 @@ async function managedGitBoundary(roots: readonly string[], protectedChild: stri
     }
   }
   return commonGitDir;
+}
+
+/** Another runner-created worktree of the same session and repository (#3316). Its root and its
+ * own admin directory become writable; its registration files stay read-only like the selected
+ * one's. It must already exist: a launch never creates or adopts a worktree. */
+async function managedOwnedWorktree(
+  owned: { path: string; gitAdmin: string },
+  protectedWorktree: { parent: string; path: string; gitWritableRoots: readonly string[] },
+  commonGitDir: string,
+  runtime: IsolationDeps,
+): Promise<void> {
+  const canonical = async (path: string) => {
+    try {
+      return await runtime.realpathNative(path) === path;
+    } catch {
+      return false;
+    }
+  };
+  if (!posix.isAbsolute(owned.path) || dirname(owned.gitAdmin) !== posix.join(commonGitDir, "worktrees") ||
+      protectedWorktree.gitWritableRoots.includes(owned.gitAdmin) ||
+      pathsOverlap(owned.path, protectedWorktree.path) || pathsOverlap(owned.path, commonGitDir) ||
+      pathWithinOrEqual(owned.path, protectedWorktree.parent) ||
+      !await canonical(owned.path) || !await canonical(owned.gitAdmin)) {
+    throw new Error("another managed worktree of this session cannot be bound without widening its boundary");
+  }
+  // The pair comes from the worktree's `.git` link. Git writes the admin directory's `gitdir`
+  // back-pointer itself and the sandbox keeps it read-only, so a link retargeted at another
+  // session's admin directory fails here instead of binding that directory.
+  let backPointer: string;
+  try {
+    backPointer = (await readFile(posix.join(owned.gitAdmin, "gitdir"), "utf8")).replace(/\r?\n$/u, "");
+  } catch {
+    backPointer = "";
+  }
+  if (posix.resolve(owned.gitAdmin, backPointer) !== posix.join(owned.path, ".git")) {
+    throw new Error("another managed worktree of this session cannot be bound without widening its boundary");
+  }
 }
 
 async function reserveManagedWorktreeConfig(
@@ -849,9 +893,22 @@ export async function resolveExecutionIsolation(
   const commonGitDir = protectedWorktree
     ? await managedGitBoundary(protectedWorktree.gitWritableRoots, protectedWorktree.path, runtime)
     : undefined;
-  if (protectedWorktree) {
-    await reserveManagedWorktreeConfig(protectedWorktree.gitWritableRoots[0]!,
-      state!.protectedWorktree!.requiredReadOnlyPaths, state!.readOnlyPaths ?? [], runtime);
+  const ownedWorktrees = state?.protectedWorktree?.ownedWorktrees ?? [];
+  if (protectedWorktree && commonGitDir) {
+    for (const owned of ownedWorktrees) {
+      await managedOwnedWorktree(owned, protectedWorktree, commonGitDir, runtime);
+    }
+    if (new Set(ownedWorktrees.map((owned) => owned.gitAdmin)).size !== ownedWorktrees.length) {
+      throw new Error("another managed worktree of this session cannot be bound without widening its boundary");
+    }
+    for (const admin of [protectedWorktree.gitWritableRoots[0]!, ...ownedWorktrees.map((owned) => owned.gitAdmin)]) {
+      await reserveManagedWorktreeConfig(admin,
+        state!.protectedWorktree!.requiredReadOnlyPaths, state!.readOnlyPaths ?? [], runtime);
+    }
+    protectedWorktree.gitWritableRoots = [
+      ...protectedWorktree.gitWritableRoots,
+      ...ownedWorktrees.map((owned) => owned.gitAdmin),
+    ];
   }
   const mapping = state && statePath(state.driver);
   let writableBinds: Array<{ source: string; target: string }> = [];
@@ -891,6 +948,7 @@ export async function resolveExecutionIsolation(
     if (protectedWorktree && root === protectedWorktree.path) continue; // already bound as the selected cwd
     writableBinds.push({ source: root, target: root });
   }
+  for (const owned of ownedWorktrees) writableBinds.push({ source: owned.path, target: owned.path });
   if (protectedWorktree && commonGitDir) {
     const additional = new Set(state?.additionalWritableRoots ?? []);
     const checked: typeof writableBinds = [];

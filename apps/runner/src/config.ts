@@ -16,6 +16,7 @@ import { dirname, posix, resolve, win32 } from "node:path";
 import { homedir } from "node:os";
 import type { AcpEnvironmentReference, AcpMcpServerConfig, AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
+import { isProviderProfileId } from "./provider-profile.js";
 
 export interface RunnerConfigAgent {
   id: string;
@@ -42,6 +43,9 @@ export interface RunnerProviderAccount {
   provider: "claude" | "codex";
   /** Runner-local credential/config home; never advertised to the control plane. */
   directory: string;
+  /** Host-local provider profile identity (#3239) recorded once this account is adopted as a
+   * profile. Optional: accounts configured before profiles keep their legacy binding. */
+  profileId?: string;
 }
 
 export interface RunnerConfigWorkspace {
@@ -407,7 +411,13 @@ export function validateProviderAccounts(raw: unknown): RunnerProviderAccount[] 
       throw new Error("runner config: provider account directories must be distinct");
     }
     providerAccountDirectories.add(comparableDirectoryKey);
-    return { id: account.id, label, provider: account.provider, directory: account.directory };
+    if (account.profileId !== undefined && !isProviderProfileId(account.profileId)) {
+      throw new Error(`runner config: provider account '${account.id}' profileId must be a lowercase UUID v4`);
+    }
+    return {
+      id: account.id, label, provider: account.provider, directory: account.directory,
+      ...(account.profileId !== undefined ? { profileId: account.profileId } : {}),
+    };
   });
 }
 

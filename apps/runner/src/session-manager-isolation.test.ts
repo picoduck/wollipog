@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriverOptions } from "./drivers/driver.js";
@@ -1526,5 +1526,77 @@ test("provider mode passes no hook state mask at all (#1336)", async () => {
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a managed launch binds only this session's other worktrees (#3316)", async () => {
+  if (process.platform !== "linux") return;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-owned-worktrees-")));
+  const home = mkdtempSync(join(tmpdir(), "wollipog-managed-owned-home-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repoPath, worktreePath } = hostWorktree(root, "s1");
+    const second = join(root, "second");
+    const other = join(root, "other");
+    execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "stacked", second]);
+    execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "agent/s2", other]);
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta(), repoPath, worktreePath, worktreeBranch: "agent/s1", env: { HOME: home },
+      worktrees: [
+        { id: "legacy", path: worktreePath, branch: "agent/s1", source: "legacy" },
+        { id: "stacked", path: second, branch: "stacked", source: "created" },
+      ],
+    });
+    store.create({
+      ...meta(), sessionId: "s2", title: "s2", repoPath, worktreePath: other, worktreeBranch: "agent/s2",
+      worktrees: [{ id: "legacy", path: other, branch: "agent/s2", source: "legacy" }],
+    });
+    let observed: Parameters<typeof resolveExecutionIsolation>[3];
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+      prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+    });
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) => {
+        observed = state;
+        return resolveExecutionIsolation(policy, context, {
+          platform: "linux", uid: () => 1000, nativeEnvironment: () => ({ HOME: home }),
+          resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+        }, state);
+      },
+      async () => {}, async () => {}, async () => {},
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.verifySelectedWorktreeBeforeLaunch = async () => true;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+
+    const common = realpathSync(join(repoPath, ".git"));
+    const adminOf = (path: string) => realpathSync(join(common, "worktrees", readFileSync(join(path, ".git"), "utf8")
+      .trim().split("/").at(-1)!));
+    assert.equal(observed?.protectedWorktree?.gitWritableRoots.length, 4);
+    assert.deepEqual(observed?.protectedWorktree?.ownedWorktrees, [{ path: second, gitAdmin: adminOf(second) }]);
+    assert.ok(observed?.protectedWorktree?.requiredReadOnlyPaths.includes(join(adminOf(second), "config.worktree")));
+    const mentioned = JSON.stringify(observed);
+    assert.equal(mentioned.includes(other), false, "another session's worktree is never bound or named");
+    assert.equal(mentioned.includes(adminOf(other)), false);
+
+    // A rewritten link cannot claim another session's admin directory: its back-pointer disagrees.
+    const foreignAdmin = adminOf(other);
+    writeFileSync(join(second, ".git"), `gitdir: ${foreignAdmin}\n`);
+    await internals.resolveLaunchIsolation(store.readMeta("s1"), worktreePath);
+    assert.equal(observed?.protectedWorktree?.ownedWorktrees, undefined);
+    // The foreign registration files may only gain read-only rules; nothing of it becomes writable.
+    assert.equal(observed?.protectedWorktree?.gitWritableRoots.includes(foreignAdmin), false);
+    assert.equal(JSON.stringify(observed?.additionalWritableRoots ?? []).includes(foreignAdmin), false);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });

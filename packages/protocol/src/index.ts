@@ -683,11 +683,17 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `cancel_session_review_job` commands, the `session_review_job_update` reply, and
 //      `RunnerRuntimeInfo.sessionReview`. The control plane sends a job only to a v223+ runner that
 //      advertises the capability, and the session tools refuse against an older control plane.
-// 224: review sessions (#3368): `SessionLaunchSpec.review`, `SessionView.kind`/`review`,
+// 225: provider profile grants (#3239): `adopt_provider_profile` / `revoke_provider_profile_grant`
+//      and their results, `RegisterMessage.providerProfileIds`, `RegisteredMessage.providerProfileGrants`
+//      (the complete active grants for the profiles this runner reports, plus its own accounts'
+//      pending grants), and `ProviderAccountDefinition.profile`. The control plane sends
+//      profile commands only to a v225+ runner; a runner projects profiles, and uses a HOME holding
+//      a profile marker, only for a v225+ control plane that lists an active grant for it.
+// 226: review sessions (#3368): `SessionLaunchSpec.review`, `SessionView.kind`/`review`,
 //      `RunnerRuntimeInfo.reviewSession` and the `review_session_update` reply. The control plane
-//      creates a review session only on a v224+ runner that advertises the reviewer, and the
+//      creates a review session only on a v226+ runner that advertises the reviewer, and the
 //      session tools refuse against an older control plane.
-export const PROTOCOL_VERSION = 224;
+export const PROTOCOL_VERSION = 226;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -700,8 +706,13 @@ export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export type {
-  CampaignLaunchProposal, FullControlLaunchRequest, PreparedCampaignLaunch,
-  CampaignLaunchInspectionMessage, CampaignLaunchInspectionResult, CampaignLaunchPreflight,
+  CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, PreparedCampaignLaunch,
+  CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
+  CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary,
+} from "./campaign-control-launch.js";
+export {
+  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION,
+  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -920,9 +931,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v223 runner runs a session's own cross-model review outside its sandbox (#3306); the session
    * tools check the same floor against the connected control plane. */
   sessionReviewJob: 223,
-  /** v224 runner launches typed, read-only review sessions (#3368); the session tools check the
+  /** v225 provider profile adoption and per-control-plane grants (#3239). */
+  providerProfiles: 225,
+  /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
    * same floor against the connected control plane. */
-  reviewSession: 224,
+  reviewSession: 226,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -3093,6 +3106,25 @@ export interface ProviderAccountDefinition {
   label: string;
   provider: "claude" | "codex";
   authStatus: "authenticated" | "unauthenticated" | "unknown";
+  /** Protocol v225: the account HOME's stable provider profile identity and whether this control
+   * plane may use it. Absent means a legacy, unadopted HOME. Older control planes never receive
+   * it, nor any profile-bearing account they are not granted. */
+  profile?: ProviderAccountProfileView;
+}
+
+/** `pending`: the runner holds this control plane's grant but the control plane has not yet
+ * recorded its completion; `not_granted`: the profile belongs to other control planes only. */
+export interface ProviderAccountProfileView {
+  id: string;
+  access: "granted" | "not_granted" | "pending";
+}
+
+/** Protocol v225: one control-plane grant to a provider profile in a runner's scope. A pending
+ * grant has no profile id until the runner reports the adopted identity. */
+export interface ProviderProfileGrantView {
+  profileId?: string;
+  grantId: string;
+  status: "active" | "pending";
 }
 
 /** Explicit, content-free failure from a requested account handoff. The old provider process is
@@ -3331,8 +3363,9 @@ export interface RunnerMetadata {
 export interface RunnerRuntimeInfo {
   /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
-  /** Exact read-only workspace inspection path only; never Full Control readiness. */
-  campaignLaunchInspection?: { version: 1 };
+  /** Exact read-only workspace inspection path only; never Full Control readiness. Version 2
+   * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection. */
+  campaignLaunchInspection?: { version: 1 | 2 };
   /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Review sessions (#3368): the reviewer harnesses this runner can launch. Missing is unsupported. */
@@ -7170,9 +7203,9 @@ export interface SessionView {
   /** Current session role. Omitted by control planes predating v160; use `sessionRole()` to read
    * it so the legacy coupled preset in `permissionMode` still resolves to the Orchestrator role. */
   role?: SessionRole;
-  /** v224: immutable session kind. Omitted for ordinary sessions and by older control planes. */
+  /** v226: immutable session kind. Omitted for ordinary sessions and by older control planes. */
   kind?: import("./review-session.js").SessionKind;
-  /** v224: present on a review session (#3368): what it reviews and for whom. */
+  /** v226: present on a review session (#3368): what it reviews and for whom. */
   review?: import("./review-session.js").ReviewSessionLink;
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
@@ -8470,6 +8503,11 @@ export interface RegisterMessage {
   /** Phase 2: full metadata for every session in the box's on-disk store, so any dashboard that
    * connects can hydrate sessions it didn't create. The control plane upserts these. */
   sessionSnapshots?: SessionSnapshot[];
+  /** Protocol v225+ (#3239). The provider-profile id of every configured account HOME, at most 32,
+   * including accounts this frame hides because the peer's version is not yet known. A v225 control
+   * plane lists the grants for exactly these in `registered`, and omits that list when this is
+   * absent or invalid. */
+  providerProfileIds?: string[];
 }
 
 export interface HeartbeatMessage {
@@ -9097,6 +9135,8 @@ export type RunnerToControlPlane =
   | ProviderLoginsUpdatedMessage
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
+  | AdoptProviderProfileResultMessage
+  | RevokeProviderProfileGrantResultMessage
   | RunnerCapacityStatusMessage
   | SubscriptionUsageUpdatedMessage
   | SubscriptionUsageInventoryMessage
@@ -9161,6 +9201,14 @@ export interface RegisteredMessage {
   /** Protocol v209+. At most 64 pending admissions, scoped to this authenticated runner.
    * Resume requires a retained local ticket; omission/empty clears old connection candidates. */
   pendingSkillRequests?: PendingSkillReportRequest[];
+  /** Protocol v225+. The complete set of this control plane's provider-profile grants, in this
+   * runner's scope, for the profiles this runner reports: every active grant for a profile id it
+   * reported (`RegisterMessage.providerProfileIds` or its accounts) and every pending grant recorded
+   * for this runner's accounts; at most 64. Absent never means "none": the control plane omits the
+   * list rather than send a partial one, and a runner removes a grant from a profile marker only
+   * when a present list omits it and the marker's profile id is one the answered register frame's
+   * `providerProfileIds` reported. */
+  providerProfileGrants?: ProviderProfileGrantView[];
 }
 
 export interface ConfigureHarnessInstallationChoicesMessage {
@@ -9213,7 +9261,7 @@ export interface SessionLaunchSpec {
   config?: SessionConfig;
   /** Runner-enforced Orchestrator restrictions. Missing on legacy peers means strict isolation. */
   orchestrator?: OrchestratorLaunchPolicy;
-  /** v224: present only on a control-plane-created review session (#3368). The runner launches it
+  /** v226: present only on a control-plane-created review session (#3368). The runner launches it
    * read-only, outside every sandbox, against its own checkout of the exact pushed head. */
   review?: import("./review-session.js").ReviewLaunchPolicy;
   /** ACP-only, additive in protocol v38. Contains references, never resolved secret values. */
@@ -9957,6 +10005,46 @@ export interface RemoveProviderAccountMessage {
   requestId: string;
   runnerId: string;
   accountId: string;
+}
+
+/** Protocol v225: record this control plane's grant in one account HOME's provider profile marker,
+ * creating the profile identity when the HOME has none. Sent only after an Owner or Admin
+ * authorized the grant; the grant id is the control plane's audited grant row. */
+export interface AdoptProviderProfileMessage {
+  type: "adopt_provider_profile";
+  requestId: string;
+  accountId: string;
+  grantId: string;
+}
+
+/** Protocol v225: `PROFILE_EXISTS` means the HOME already holds a profile that cannot accept this
+ * grant; `HOME_IN_USE` means another runner or control plane holds the HOME's lease;
+ * `UNSUPPORTED_HOME` means the account's context or platform cannot hold a verified marker. */
+export interface AdoptProviderProfileResultMessage {
+  type: "adopt_provider_profile_result";
+  requestId: string;
+  ok: boolean;
+  profileId?: string;
+  code?: "PROFILE_EXISTS" | "HOME_IN_USE" | "UNSUPPORTED_HOME";
+  error?: string;
+}
+
+/** Protocol v225: drop one revoked grant from the profile marker. The control plane has already
+ * recorded the revocation, so the runner stops using the profile even if the marker update fails. */
+export interface RevokeProviderProfileGrantMessage {
+  type: "revoke_provider_profile_grant";
+  requestId: string;
+  profileId: string;
+  grantId: string;
+}
+
+export interface RevokeProviderProfileGrantResultMessage {
+  type: "revoke_provider_profile_grant_result";
+  requestId: string;
+  ok: boolean;
+  /** True when this grant was found in a configured HOME's marker and taken out of it. */
+  markerUpdated: boolean;
+  error?: string;
 }
 
 export type AcpRegistryApprovalAction = "approve" | "revoke";
@@ -10843,6 +10931,7 @@ export interface GitActionResultMessage {
 export type ControlPlaneToRunner =
   | { type: "media_review_stop"; request: import("./media-active-stop.js").MediaActiveStopRequest }
   | import("./campaign-control-launch.js").CampaignLaunchInspectionMessage
+  | import("./campaign-control-launch.js").CampaignLaunchInspectionCancelMessage
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
   | import("./session-review-job.js").SessionReviewJobCommand
@@ -10899,6 +10988,8 @@ export type ControlPlaneToRunner =
   | SubmitProviderLoginCodeMessage
   | CancelProviderLoginMessage
   | RemoveProviderAccountMessage
+  | AdoptProviderProfileMessage
+  | RevokeProviderProfileGrantMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
   | SkillSnapshotMessage

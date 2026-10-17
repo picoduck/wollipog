@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -57,6 +57,43 @@ test("an invocation deduplicates by id and digest but a changed payload fails cl
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const state of ["accepted", "queued", "started"] as const) {
+  test(`a live foreign owner preserves ${state} work without handing out a second handle`, () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-session-command-live-owner-"));
+    let now = 1;
+    try {
+      const first = new SessionCommandReceiptStore(root, {
+        ownerId: "runner-a", now: () => now, ownerStaleMs: 10,
+      });
+      const claimed = first.claim(message());
+      assert.equal(claimed.kind, "new");
+      if (claimed.kind !== "new") return assert.fail("initial invocation was not claimed");
+      if (state === "queued") claimed.handle.queued();
+      if (state === "started") claimed.handle.started(42);
+      const digest = createHash("sha256").update("inv_1", "utf8").digest("hex");
+      const record = join(root, digest.slice(0, 2), `${digest}.json`);
+      const before = readFileSync(record, "utf8");
+
+      now = 2;
+      const second = new SessionCommandReceiptStore(root, {
+        ownerId: "runner-b", now: () => now, ownerStaleMs: 10,
+      });
+      const duplicate = second.claim(message());
+      assert.equal(duplicate.kind, "duplicate");
+      assert.equal("handle" in duplicate, false, "a live foreign owner cannot be given a second execution handle");
+      if (duplicate.kind !== "duplicate") return assert.fail("live foreign ownership was not respected");
+      assert.equal(duplicate.receipt.state, state);
+      const after = readFileSync(record, "utf8");
+      assert.equal(after, before, "the live owner's on-disk receipt remains unchanged");
+      const persisted = JSON.parse(after) as { ownerId: string; state: string };
+      assert.equal(persisted.ownerId, "runner-a");
+      assert.equal(persisted.state, state);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("queued work is durably reclaimable after restart but started work becomes uncertain", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-command-restart-"));
