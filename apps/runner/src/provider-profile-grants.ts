@@ -18,6 +18,8 @@ import {
 
 /** Bound on the grant list one registration may carry; larger lists are ignored as a whole. */
 export const PROVIDER_PROFILE_GRANT_LIST_LIMIT = 256;
+/** A runner configures at most 32 provider accounts, so it reports at most 32 profile ids. */
+const PROVIDER_PROFILE_ID_REPORT_LIMIT = 32;
 
 /** One of this control plane's grants still recorded in a configured HOME's marker after the
  * control plane stopped listing it, so the runner removes it under the HOME's lease. */
@@ -84,6 +86,18 @@ export class ProviderProfileGrants {
       if (known.status === "pending" && known.profileId === undefined) known.profileId = read.marker.profileId;
     }
     return stale;
+  }
+
+  /** The registration's `providerProfileIds`: each configured HOME's marker id, or the id its
+   * account recorded, deduplicated. The control plane lists exactly the grants for these. */
+  reportedProfileIds(): string[] {
+    const ids = new Set<string>();
+    for (const account of this.deps.accounts()) {
+      const read = this.safeRead(account);
+      const id = read.state === "present" ? read.marker.profileId : account.profileId;
+      if (id && isProviderProfileId(id)) ids.add(id);
+    }
+    return [...ids].slice(0, PROVIDER_PROFILE_ID_REPORT_LIMIT);
   }
 
   supportsProfiles(): boolean {

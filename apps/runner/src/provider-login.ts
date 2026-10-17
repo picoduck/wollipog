@@ -126,6 +126,17 @@ interface ActiveLogin {
   completion: Promise<"completed" | "cancelled" | "failed">;
 }
 
+/** How `removeAccount` decides a runner-created HOME's fate when provider profiles apply (#3239). */
+export interface ProviderAccountRemovalOptions {
+  /** Keep the HOME without attempting deletion (an early decision that can only keep it). */
+  retainCredentialHome?: boolean;
+  /** Replaces the plain acquire/release exclusivity check: decides under the HOME's lease, from the
+   * profile marker, whether the HOME may be deleted, and drops this control plane's grant. */
+  retireCredentialHome?: (account: RunnerProviderAccount) => Promise<boolean>;
+  /** Re-checked immediately before the HOME is deleted; true keeps it. */
+  retainCredentialHomeIf?: (account: RunnerProviderAccount) => boolean;
+}
+
 export interface ProviderLoginSupervisorOptions {
   dataDir: string;
   configPath: string;
@@ -565,8 +576,8 @@ export class ProviderLoginSupervisor {
   /** Forget one configured account. The runner-created credential home is deleted only when no
    * session or process on this Machine still depends on it; otherwise it is kept so those sessions
    * continue to authenticate. Operator-configured homes are never deleted, nor is a home whose
-   * provider profile other control planes are still granted (`retainCredentialHome`, #3239). */
-  async removeAccount(accountId: string, options: { retainCredentialHome?: boolean } = {}): Promise<{ credentialsRetained: boolean }> {
+   * provider profile other control planes are still granted (#3239, see `ProviderAccountRemovalOptions`). */
+  async removeAccount(accountId: string, options: ProviderAccountRemovalOptions = {}): Promise<{ credentialsRetained: boolean }> {
     const account = this.options.accounts.find((candidate) => candidate.id === accountId);
     if (!account) throw new Error("Provider account is not configured on this Machine.");
     if (this.pending.has(accountId) || [...this.active.values()].some((operation) => operation.resolved.accountId === accountId)) {
@@ -580,7 +591,7 @@ export class ProviderLoginSupervisor {
       throw new Error("The runner configuration could not be updated.");
     }
     this.options.accounts.splice(this.options.accounts.indexOf(account), 1);
-    const retire = () => this.deleteRemovedCredentialHome(account);
+    const retire = () => this.deleteRemovedCredentialHome(account, options);
     const credentialsRetained = options.retainCredentialHome === true ||
       !await (this.options.serializeHomeRetirement?.(retire) ?? retire());
     await this.options.onAccountRemoved?.(account);
@@ -972,21 +983,34 @@ export class ProviderLoginSupervisor {
 
   /** Delete a removed account's credential home only when Wollipog created it and nothing on this
    * Machine still depends on it. Returns whether the home is gone. */
-  private async deleteRemovedCredentialHome(account: RunnerProviderAccount): Promise<boolean> {
+  private async deleteRemovedCredentialHome(account: RunnerProviderAccount, options: ProviderAccountRemovalOptions): Promise<boolean> {
     const managedRoot = resolve(this.options.dataDir, "provider-accounts");
     if (dirname(resolve(account.directory)) !== managedRoot) return false;
     if (!existsSync(account.directory)) return true;
     if (this.options.credentialHomeInUse?.(account)) return false;
     let exclusive: boolean;
     try {
-      // The lease is reference-counted per runner and exclusive across runners. Releasing the
-      // reference taken here reports true only when no session or probe was holding the home.
-      await this.options.acquireLease(account.directory, account.provider);
-      exclusive = await this.options.releaseLease(account.directory);
+      if (options.retireCredentialHome) {
+        // #3239: the same exclusivity proof, plus the profile marker's verdict, under one lease.
+        exclusive = await options.retireCredentialHome(account);
+      } else {
+        // The lease is reference-counted per runner and exclusive across runners. Releasing the
+        // reference taken here reports true only when no session or probe was holding the home.
+        await this.options.acquireLease(account.directory, account.provider);
+        exclusive = await this.options.releaseLease(account.directory);
+      }
     } catch {
       return false;
     }
-    return exclusive && !this.options.credentialHomeInUse?.(account) && this.removeDirectory(account.directory);
+    if (!exclusive || this.options.credentialHomeInUse?.(account)) return false;
+    // The lease journal lives inside the HOME, so deletion follows the release; re-read the verdict
+    // last so a grant another runner recorded after the release still keeps the HOME.
+    try {
+      if (options.retainCredentialHomeIf?.(account)) return false;
+    } catch {
+      return false;
+    }
+    return this.removeDirectory(account.directory);
   }
 
   private async release(directory: string): Promise<boolean> {

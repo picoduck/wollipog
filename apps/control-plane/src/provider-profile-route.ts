@@ -35,13 +35,29 @@ export function parseProviderProfileAdoption(body: unknown): { ok: true } | { ok
   return { ok: true };
 }
 
-/** The `registered` list for a v225+ runner: this control plane's complete live grants in the
- * runner's scope. Undefined (omit the field) when the runner has no recorded scope, because an
- * empty list would tell the runner that every grant was revoked. */
-export function providerProfileGrantsForRunner(db: ControlPlaneDb, runnerId: string): ProviderProfileGrantView[] | undefined {
+/** A runner configures at most 32 provider accounts, so it reports at most 32 profile ids. */
+const REPORTED_PROFILE_ID_LIMIT = 32;
+
+/**
+ * The `registered` list for a v225+ runner: the complete set of this control plane's grants, in
+ * the runner's scope, for the profiles this runner reports (`reportedProfileIds` from its register
+ * frame, and its accounts' profiles), plus the pending grants recorded for its accounts. The runner
+ * removes every marker grant of this control plane that a present list omits, so this fails closed:
+ * undefined (omit the field) when the runner's scope, accounts or reported profile ids are unknown,
+ * or when the relevant grants exceed their bound. Never a partial list.
+ */
+export function providerProfileGrantsForRunner(
+  db: ControlPlaneDb,
+  runnerId: string,
+  reportedProfileIds: unknown,
+): ProviderProfileGrantView[] | undefined {
   const scope = db.runnerScope(runnerId);
-  if (!scope) return undefined;
-  return db.activeProviderProfileGrants(scope).map((grant) => ({
+  const accounts = db.getRunner(runnerId)?.providerAccounts;
+  if (!scope || !accounts || !Array.isArray(reportedProfileIds) || reportedProfileIds.length > REPORTED_PROFILE_ID_LIMIT ||
+      !reportedProfileIds.every((id) => typeof id === "string" && PROFILE_ID.test(id))) return undefined;
+  const profileIds = [...reportedProfileIds as string[], ...accounts.flatMap((account) => account.profile ? [account.profile.id] : [])];
+  const grants = db.providerProfileGrantsForRunnerProfiles(runnerId, scope, profileIds);
+  return grants?.map((grant) => ({
     grantId: grant.grantId,
     status: grant.status === "active" ? "active" : "pending",
     ...(grant.profileId ? { profileId: grant.profileId } : {}),
@@ -70,7 +86,8 @@ export function reconcileProviderProfileGrants(
 
 /** Account removal revokes only this control plane's grants for the account's profile; the runner
  * keeps a HOME whose marker still grants another control plane. Recorded before the runner is
- * told, so a lost reply can never leave the grant usable. */
+ * told, so a lost reply can never leave the grant usable. See also
+ * `revokeProviderProfileAccessForAccountRemoval`, which also tells the runner. */
 export function revokeProviderProfileGrantsForAccountRemoval(
   db: ControlPlaneDb,
   runnerId: string,
@@ -80,6 +97,53 @@ export function revokeProviderProfileGrantsForAccountRemoval(
 ): ProviderProfileGrantRecord[] {
   if (!account) return [];
   return revokeLiveGrants(db, db.liveProviderProfileGrantsForAccount(runnerId, account.id, account.profile?.id), principal, now);
+}
+
+/**
+ * The DELETE account route's profile step (#3239): revoke this control plane's grants for the
+ * account, then tell the runner about each one with `revoke_provider_profile_grant` before
+ * `remove_provider_account` is sent, so the grant stops on the runner even when the removal itself
+ * is refused (an agent default, a running sign-in). A lost reply is harmless: the row is revoked,
+ * and the runner also drops the grant while handling the removal.
+ */
+export async function revokeProviderProfileAccessForAccountRemoval(
+  deps: { db: ControlPlaneDb; hub: Pick<Hub, "isRunnerOnline" | "requestFromRunner" | "runnerChanged"> },
+  runnerId: string,
+  account: Pick<ProviderAccountDefinition, "id" | "profile"> | undefined,
+  principal: AuthPrincipal,
+  now: number,
+): Promise<ProviderProfileGrantRecord[]> {
+  const revoked = revokeProviderProfileGrantsForAccountRemoval(deps.db, runnerId, account, principal, now);
+  if (revoked.length === 0) return revoked;
+  deps.hub.runnerChanged(runnerId);
+  const runner = deps.db.getRunner(runnerId);
+  if (!runner || !deps.hub.isRunnerOnline(runnerId) || !runnerSupportsProtocol(runner.protocolVersion, "providerProfiles")) return revoked;
+  for (const grant of revoked) {
+    // A pending grant has no profile id yet; the account's reported profile names the marker.
+    const profileId = grant.profileId ?? account?.profile?.id;
+    if (!profileId) continue;
+    await notifyRunnerOfRevocation(deps.hub, runnerId, profileId, grant.grantId);
+  }
+  return revoked;
+}
+
+/** Send one `revoke_provider_profile_grant`; the result is advisory because the row already holds. */
+async function notifyRunnerOfRevocation(
+  hub: Pick<Hub, "requestFromRunner">,
+  runnerId: string,
+  profileId: string,
+  grantId: string,
+): Promise<{ notified: boolean; markerUpdated: boolean }> {
+  const requestId = `provider_profile_revoke_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(runnerId, requestId, { type: "revoke_provider_profile_grant", requestId, profileId, grantId });
+    return result.type === "revoke_provider_profile_grant_result"
+      ? { notified: true, markerUpdated: result.markerUpdated === true }
+      : { notified: false, markerUpdated: false };
+  } catch {
+    // Revocation already holds; the runner drops the grant from the marker at registration.
+    return { notified: false, markerUpdated: false };
+  }
 }
 
 function revokeLiveGrants(db: ControlPlaneDb, grants: readonly ProviderProfileGrantRecord[], principal: AuthPrincipal, now: number): ProviderProfileGrantRecord[] {
@@ -162,7 +226,10 @@ export function registerProviderProfileRoutes(
       return reply.code(502).send({ error: "unexpected runner reply" });
     }
     if (!deps.db.completeProviderProfileGrant(grantId, result.profileId, now())) {
-      // Revoked while the runner wrote it; the runner drops it from the marker at registration.
+      // Revoked (or otherwise no longer pending) while the runner wrote it. The runner already
+      // recorded the grant and uses it, and a pending revocation could not name the profile, so
+      // tell the runner now with the profile id it returned.
+      await notifyRunnerOfRevocation(deps.hub, id, result.profileId, grantId);
       return reply.code(409).send({ error: "This profile grant was revoked before adoption completed.", code: "PROVIDER_PROFILE_GRANT_REVOKED" });
     }
     deps.hub.runnerChanged(id);
@@ -215,19 +282,14 @@ export function registerProviderProfileRoutes(
       const target = runnerId === id ? runner : deps.db.getRunner(runnerId);
       if (!target || !deps.hub.isRunnerOnline(runnerId) || !runnerSupportsProtocol(target.protocolVersion, "providerProfiles")) continue;
       for (const grant of revoked) {
-        if (!grant.profileId) continue;
-        const requestId = `provider_profile_revoke_${randomUUID()}`;
-        try {
-          const result = await deps.hub.requestFromRunner(runnerId, requestId, {
-            type: "revoke_provider_profile_grant", requestId, profileId: grant.profileId, grantId: grant.grantId,
-          });
-          if (result.type === "revoke_provider_profile_grant_result") {
-            if (runnerId === id) runnerNotified = true;
-            markerUpdated ||= result.markerUpdated === true;
-          }
-        } catch {
-          // Revocation already holds; the runner drops the grant from the marker at registration.
-        }
+        // A pending grant names no profile yet; when the account already reports one (a lost
+        // adoption reply), that is the marker to drop it from. Otherwise the adoption route tells
+        // the runner if the adoption it is waiting for still succeeds.
+        const grantProfileId = grant.profileId ?? profileId;
+        if (!grantProfileId) continue;
+        const notice = await notifyRunnerOfRevocation(deps.hub, runnerId, grantProfileId, grant.grantId);
+        if (notice.notified && runnerId === id) runnerNotified = true;
+        markerUpdated ||= notice.markerUpdated;
       }
     }
     return { revoked: true, grantIds: revoked.map((grant) => grant.grantId), markerUpdated, runnerNotified, forced: parsed.force };

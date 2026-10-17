@@ -694,6 +694,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       { ...sessionSnapshot("session-history"), status: "stopped", seq: 3, historyEpoch: 9 },
       { ...sessionSnapshot("session-agent-parent"), status: "running" },
     ],
+    providerProfileIds: [],
   }));
   const registeredRunner = await runnerInbox.take((message) => message.type === "registered");
   assert.deepEqual(registeredRunner.runnerCapacity, { configuredUnits: 20, revision: 1 },
@@ -959,8 +960,8 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "the saved provider account default in the Machine view",
   );
   assert.equal(projectedDefaults?.length, 1);
-  // Provider profiles (#3239): registration carries the scope's complete grant list, and adoption
-  // runs behind the central auth gate and the mutation audit.
+  // Provider profiles (#3239): registration carries the complete grant list for the profiles the
+  // runner reports, and adoption runs behind the central auth gate and the mutation audit.
   assert.deepEqual(registeredRunner.providerProfileGrants, [], "a v225 runner is told its scope holds no grants yet");
   const adoptProfileUrl = `${httpBase}/api/runners/runner-ui-route/provider-accounts/work/adopt-profile`;
   const adoptProfileInit = {
@@ -1003,6 +1004,13 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     ownerToken,
     { method: "DELETE" },
   );
+  // The adopted grant is revoked, and the runner told to stop using it, before removal is sent; the
+  // removal is only sent once that reply arrives, so a refused removal still revokes.
+  const removalRevocation = await runnerInbox.take((message) => message.type === "revoke_provider_profile_grant");
+  assert.deepEqual([removalRevocation.profileId, removalRevocation.grantId], ["6f1c2d3e-4a5b-4c6d-8e7f-001122334455", adoption.grantId]);
+  runner.send(JSON.stringify({
+    type: "revoke_provider_profile_grant_result", requestId: removalRevocation.requestId, ok: true, markerUpdated: true,
+  }));
   const refusedRemoval = await runnerInbox.take((message) => message.type === "remove_provider_account");
   runner.send(JSON.stringify({
     type: "remove_provider_account_result",

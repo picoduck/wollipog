@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -8,6 +8,8 @@ import type { RunnerProviderAccount } from "./config.js";
 import { writeProviderAccountsConfig } from "./config.js";
 import { providerAccountDefinition, skillReconciliationProviderAccountPlan } from "./provider-accounts.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
+import { ProviderLoginSupervisor } from "./provider-login.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import {
   adoptProviderProfileCommand,
@@ -55,7 +57,7 @@ function fixture(t: TestContext) {
   const registry = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: process.pid, hostname: "host-a", controlPlaneInstanceId: INSTANCE });
   t.after(() => { registry.releaseAll(); });
   const published: number[] = [];
-  const removals: Array<{ accountId: string; retainCredentialHome?: boolean }> = [];
+  const removals: Array<{ accountId: string; retainCredentialHome?: boolean; retired?: boolean }> = [];
   const deps: ProviderProfileCommandDeps = {
     controlPlaneInstanceId: INSTANCE,
     accounts: () => accounts,
@@ -66,11 +68,17 @@ function fixture(t: TestContext) {
     },
     revoke: async (home, provider, profileId, grantId) => registry.changeProfileMarkerWhileHeld(home, provider, (read) =>
       revokeProviderProfileMarkerGrant(read, { profileId, controlPlaneInstanceId: INSTANCE, grantId })).changed,
+    retire: async (home, provider) => registry.retireProfileHomeWhileHeld(home, provider, INSTANCE),
     persistAccounts: (next) => writeProviderAccountsConfig(configPath, next),
     removeAccount: async (accountId, options) => {
-      removals.push({ accountId, ...options });
-      accounts.splice(accounts.findIndex((account) => account.id === accountId), 1);
-      return { credentialsRetained: options.retainCredentialHome === true };
+      const account = accounts.find((candidate) => candidate.id === accountId)!;
+      removals.push({ accountId, ...(options.retainCredentialHome ? { retainCredentialHome: true } : {}),
+        ...(options.retireCredentialHome ? { retired: true } : {}) });
+      accounts.splice(accounts.indexOf(account), 1);
+      // The HOME is left in place; only the supervisor's verdict is modelled here.
+      const deletable = options.retainCredentialHome !== true && (await options.retireCredentialHome?.(account) ?? true) &&
+        options.retainCredentialHomeIf?.(account) !== true;
+      return { credentialsRetained: !deletable };
     },
     publish: () => { published.push(Date.now()); },
     log: () => {},
@@ -176,6 +184,9 @@ test("v225 control planes see each account's profile; older ones never see a pro
   const f = fixture(t);
   const [work] = f.accounts as [RunnerProviderAccount];
   writeProviderProfileMarker(work.directory, marker([[INSTANCE, GRANT]]));
+  assert.deepEqual(f.grants.project(f.accounts, definition).map((account) => account.id), ["legacy"],
+    "before any registration the peer's version is unknown, so the profile-bearing account is hidden");
+  assert.deepEqual(f.grants.reportedProfileIds(), [PROFILE], "but registration still reports its profile id");
   f.grants.synchronize(223, undefined);
   assert.deepEqual(f.grants.project(f.accounts, definition).map((account) => account.id), ["legacy"]);
   f.grants.synchronize(225, [{ grantId: GRANT, profileId: PROFILE, status: "active" }]);
@@ -227,6 +238,112 @@ test("removing a shared profile's account keeps the HOME and drops only this gra
   const [solo] = g.accounts as [RunnerProviderAccount];
   writeProviderProfileMarker(solo.directory, marker([[INSTANCE, GRANT]]));
   g.grants.synchronize(225, [{ grantId: GRANT, profileId: PROFILE, status: "active" }]);
-  await removeProviderAccountWithProfile(g.deps, "work");
-  assert.deepEqual(g.removals, [{ accountId: "work" }]);
+  assert.deepEqual(await removeProviderAccountWithProfile(g.deps, "work"), { credentialsRetained: false });
+  assert.deepEqual(g.removals, [{ accountId: "work", retired: true }], "the verdict is taken under the HOME's lease");
+  assert.equal(g.registry.releaseAll(), true, "the decision released the lease it took");
+});
+
+test("a revocation that follows a completed adoption stops use without a reconnect", posixOnly, async (t) => {
+  const f = fixture(t);
+  const [work] = f.accounts as [RunnerProviderAccount];
+  f.grants.synchronize(225, []);
+  const adopted = await adoptProviderProfileCommand(f.deps, { type: "adopt_provider_profile", requestId: "r1", accountId: "work", grantId: GRANT });
+  assert.equal(adopted.ok, true);
+  const profileId = adopted.profileId!;
+  assert.equal(f.grants.usable(work), true, "the runner uses the grant as soon as it wrote it");
+  // The control plane found the pending grant revoked and names the profile the runner returned.
+  const revoked = await revokeProviderProfileGrantCommand(f.deps, { type: "revoke_provider_profile_grant", requestId: "r2", profileId, grantId: GRANT });
+  assert.deepEqual(revoked, { type: "revoke_provider_profile_grant_result", requestId: "r2", ok: true, markerUpdated: true });
+  assert.equal(f.grants.usable(work), false);
+  assert.throws(() => f.registry.acquireHome(work.directory, "claude", { expectedId: profileId, ...f.grants.access() }),
+    (error: unknown) => error instanceof Error && /not granted to this control plane/u.test(error.message));
+});
+
+test("a refused account removal still revokes this control plane's grant on the runner", posixOnly, async (t) => {
+  const f = fixture(t);
+  const [work] = f.accounts as [RunnerProviderAccount];
+  writeProviderProfileMarker(work.directory, marker([[INSTANCE, GRANT]]));
+  work.profileId = PROFILE;
+  f.grants.synchronize(225, [{ grantId: GRANT, profileId: PROFILE, status: "active" }]);
+  assert.equal(f.grants.usable(work), true);
+  const supervisor = new ProviderLoginSupervisor({
+    dataDir: f.root, configPath: f.configPath, accounts: f.accounts, agents: () => [], resolveEnv: () => ({}),
+    acquireLease: () => true, releaseLease: () => true, onUpdate: () => {}, onAccountAdded: () => {},
+    removalBlocker: () => "Agent 'claude' uses this account as its default in the runner configuration. Change that setting before removing the account.",
+  });
+  const deps: ProviderProfileCommandDeps = { ...f.deps, removeAccount: (accountId, options) => supervisor.removeAccount(accountId, options) };
+  await assert.rejects(removeProviderAccountWithProfile(deps, "work"), /uses this account as its default/u, "the removal returns its error");
+  assert.equal(f.accounts.includes(work), true, "the account stays configured");
+  assert.equal(f.grants.usable(work), false, "but this control plane may no longer use its HOME");
+  assert.deepEqual(f.grants.access().activeProfileIds, []);
+  const read = readProviderProfileMarker(work.directory);
+  assert.deepEqual(read.state === "present" && read.marker.grants, [], "and the marker no longer grants it");
+  assert.throws(() => f.registry.acquireHome(work.directory, "claude", { expectedId: PROFILE, ...f.grants.access() }),
+    (error: unknown) => error instanceof Error && /not granted to this control plane/u.test(error.message));
+});
+
+test("a grant another control plane records while removal waits keeps the HOME, decided under the real lease", posixOnly, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-profile-retire-"));
+  const managed = join(root, "provider-accounts");
+  mkdirSync(managed);
+  const accounts: RunnerProviderAccount[] = [
+    { id: "work", label: "Work", provider: "claude", directory: join(managed, "work") },
+    { id: "solo", label: "Solo", provider: "claude", directory: join(managed, "solo") },
+  ];
+  for (const account of accounts) mkdirSync(account.directory);
+  const configPath = join(root, "runner.json");
+  writeFileSync(configPath, `${JSON.stringify({ runnerId: "runner-1", providerAccounts: accounts })}\n`);
+  const grants = new ProviderProfileGrants({ controlPlaneInstanceId: INSTANCE, accounts: () => accounts });
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), { controlPlaneInstanceId: INSTANCE,
+    profileAccess: () => grants.access(), expectedProfileIdForHome: (home) => grants.expectedProfileIdForHome(home) });
+  // Another runner on the same OS account, connected to another control plane.
+  const other = new AsyncProviderHomeLeaseRegistry("b".repeat(64), { controlPlaneInstanceId: OTHER_INSTANCE });
+  t.after(async () => { await registry.close(); await other.close(); rmSync(root, { recursive: true, force: true }); });
+
+  grants.synchronize(225, []);
+  const work = (await registry.adoptProfile(accounts[0]!.directory, "claude", GRANT)).profileId;
+  const solo = (await registry.adoptProfile(accounts[1]!.directory, "claude", STALE_GRANT)).profileId;
+  accounts[0]!.profileId = work; accounts[1]!.profileId = solo;
+  grants.synchronize(225, [{ grantId: GRANT, profileId: work, status: "active" }, { grantId: STALE_GRANT, profileId: solo, status: "active" }]);
+
+  let releaseRetirement!: () => void;
+  let retirementWaiting!: () => void;
+  const waiting = new Promise<void>((resolve) => { retirementWaiting = resolve; });
+  let hold = false;
+  const supervisor = new ProviderLoginSupervisor({
+    dataDir: root, configPath, accounts, agents: () => [], resolveEnv: () => ({}),
+    acquireLease: (directory, provider) => registry.acquireHome(directory, provider),
+    releaseLease: (directory) => registry.releaseHome(directory),
+    onUpdate: () => {}, onAccountAdded: () => {},
+    serializeHomeRetirement: async (work) => {
+      if (hold) await new Promise<void>((resolve) => { releaseRetirement = resolve; retirementWaiting(); });
+      return work();
+    },
+  });
+  const deps: ProviderProfileCommandDeps = {
+    controlPlaneInstanceId: INSTANCE, accounts: () => accounts, grants,
+    adopt: (home, provider, grantId) => registry.adoptProfile(home, provider, grantId),
+    revoke: (home, provider, profileId, grantId) => registry.revokeProfileGrant(home, provider, profileId, grantId),
+    retire: (home, provider) => registry.retireProfileHome(home, provider),
+    persistAccounts: (next) => writeProviderAccountsConfig(configPath, next),
+    removeAccount: (accountId, options) => supervisor.removeAccount(accountId, options),
+    publish: () => {}, log: () => {},
+  };
+
+  // A HOME only this control plane was granted is still deleted.
+  assert.deepEqual(await removeProviderAccountWithProfile(deps, "solo"), { credentialsRetained: false });
+  assert.equal(existsSync(join(managed, "solo")), false);
+
+  // Removal reads the marker (only this grant), then waits; meanwhile another control plane adopts.
+  hold = true;
+  const removal = removeProviderAccountWithProfile(deps, "work");
+  await waiting;
+  assert.deepEqual(await other.adoptProfile(join(managed, "work"), "claude", OTHER_GRANT), { profileId: work });
+  releaseRetirement();
+  assert.deepEqual(await removal, { credentialsRetained: true });
+  const read = readProviderProfileMarker(join(managed, "work"));
+  assert.equal(read.state, "present", "the HOME survives");
+  assert.deepEqual(read.state === "present" && read.marker.grants.map((grant) => [grant.controlPlaneInstanceId, grant.grantId]),
+    [[OTHER_INSTANCE, OTHER_GRANT]], "with the other control plane's grant, and without this one");
+  assert.deepEqual(grants.access().activeProfileIds, []);
 });

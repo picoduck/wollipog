@@ -684,8 +684,9 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `RunnerRuntimeInfo.sessionReview`. The control plane sends a job only to a v223+ runner that
 //      advertises the capability, and the session tools refuse against an older control plane.
 // 225: provider profile grants (#3239): `adopt_provider_profile` / `revoke_provider_profile_grant`
-//      and their results, `RegisteredMessage.providerProfileGrants` (this runner scope's complete
-//      active and pending grants), and `ProviderAccountDefinition.profile`. The control plane sends
+//      and their results, `RegisterMessage.providerProfileIds`, `RegisteredMessage.providerProfileGrants`
+//      (the complete active grants for the profiles this runner reports, plus its own accounts'
+//      pending grants), and `ProviderAccountDefinition.profile`. The control plane sends
 //      profile commands only to a v225+ runner; a runner projects profiles, and uses a HOME holding
 //      a profile marker, only for a v225+ control plane that lists an active grant for it.
 export const PROTOCOL_VERSION = 225;
@@ -8482,6 +8483,11 @@ export interface RegisterMessage {
   /** Phase 2: full metadata for every session in the box's on-disk store, so any dashboard that
    * connects can hydrate sessions it didn't create. The control plane upserts these. */
   sessionSnapshots?: SessionSnapshot[];
+  /** Protocol v225+ (#3239). The provider-profile id of every configured account HOME, at most 32,
+   * including accounts this frame hides because the peer's version is not yet known. A v225 control
+   * plane lists the grants for exactly these in `registered`, and omits that list when this is
+   * absent or invalid. */
+  providerProfileIds?: string[];
 }
 
 export interface HeartbeatMessage {
@@ -9174,9 +9180,12 @@ export interface RegisteredMessage {
   /** Protocol v209+. At most 64 pending admissions, scoped to this authenticated runner.
    * Resume requires a retained local ticket; omission/empty clears old connection candidates. */
   pendingSkillRequests?: PendingSkillReportRequest[];
-  /** Protocol v225+. The complete set of this control plane's active and pending provider-profile
-   * grants in this runner's scope. Absent never means "none": a runner removes a grant from a
-   * profile marker only when a present list omits it. */
+  /** Protocol v225+. The complete set of this control plane's provider-profile grants, in this
+   * runner's scope, for the profiles this runner reports: every active grant for a profile id it
+   * reported (`RegisterMessage.providerProfileIds` or its accounts) and every pending grant recorded
+   * for this runner's accounts; at most 64. Absent never means "none": the control plane omits the
+   * list rather than send a partial one, and a runner removes a grant from a profile marker only
+   * when a present list omits it. */
   providerProfileGrants?: ProviderProfileGrantView[];
 }
 

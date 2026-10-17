@@ -186,7 +186,7 @@ import {
   providerProfileGrantsForRunner,
   reconcileProviderProfileGrants,
   registerProviderProfileRoutes,
-  revokeProviderProfileGrantsForAccountRemoval,
+  revokeProviderProfileAccessForAccountRemoval,
 } from "./provider-profile-route.js";
 import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
@@ -1328,9 +1328,10 @@ app.register(async (instance) => {
           ...(runnerSupportsProtocol(msg.protocolVersion, "skillRequestResumption")
             ? { pendingSkillRequests: hub.pendingSkillRequests(runnerId) }
             : {}),
-          // An unknown runner scope omits the list: an empty one would revoke every grant (#3239).
+          // The complete grants for the profiles this runner reports, or no list at all when they
+          // are unknown or exceed the bound: a partial list would revoke the omitted grants (#3239).
           ...(runnerSupportsProtocol(msg.protocolVersion, "providerProfiles")
-            ? { providerProfileGrants: providerProfileGrantsForRunner(db, runnerId) }
+            ? { providerProfileGrants: providerProfileGrantsForRunner(db, runnerId, msg.providerProfileIds) }
             : {}),
           ...(runnerSupportsProtocol(msg.protocolVersion, "machineRunnerCapacity")
             ? { runnerCapacity: db.machineRunnerCapacityConfiguration(runnerId) ?? undefined }
@@ -3081,10 +3082,11 @@ app.delete("/api/runners/:id/provider-accounts/:accountId", async (req, reply) =
   if (!removedAccount) {
     return reply.code(404).send({ error: "The provider account is not available on this Machine." });
   }
-  // Provider profiles (#3239): removing the account revokes only this control plane's grant, before
-  // the runner is told. The runner keeps a HOME whose marker still grants another control plane.
+  // Provider profiles (#3239): removing the account revokes only this control plane's grant, and the
+  // runner is told to stop using it before the removal is sent, so a refused removal still revokes.
+  // The runner keeps a HOME whose marker still grants another control plane.
   if (runnerSupportsProtocol(runner.protocolVersion, "providerProfiles")) {
-    if (revokeProviderProfileGrantsForAccountRemoval(db, id, removedAccount, principal, Date.now()).length > 0) hub.runnerChanged(id);
+    await revokeProviderProfileAccessForAccountRemoval({ db, hub }, id, removedAccount, principal, Date.now());
   }
   const requestId = `provider_account_remove_${randomUUID()}`;
   try {

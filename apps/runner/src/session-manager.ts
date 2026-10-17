@@ -4665,6 +4665,12 @@ export class SessionManager {
     return this.providerHomeLeases.revokeProfileGrant(home, provider, profileId, grantId);
   }
 
+  /** The retain-or-delete decision for a removed account's HOME under its lease (#3239). */
+  async retireProviderAccountHome(home: string, provider: "claude" | "codex"): Promise<boolean> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    return this.providerHomeLeases.retireProfileHome(home, provider);
+  }
+
   /** Provider sign-in is a short-lived supervised mutation of one exact credential home. */
   async acquireProviderLoginHome(home: string, provider: "claude" | "codex", cancellation: LeaseCancellation = {}): Promise<boolean> {
     if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");

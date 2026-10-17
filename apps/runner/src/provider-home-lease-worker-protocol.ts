@@ -26,7 +26,11 @@ export type LeaseWorkerOperation =
    * the HOME's lease. These take the lease without the grant check (they are how grants change)
    * and drop the reference they took before replying. */
   | { method: "profile_adopt"; home: string; provider: "claude" | "codex"; grantId: string }
-  | { method: "profile_revoke"; home: string; provider: "claude" | "codex"; profileId: string; grantId: string };
+  | { method: "profile_revoke"; home: string; provider: "claude" | "codex"; profileId: string; grantId: string }
+  /** #3239: the retain-or-delete decision for a removed account's HOME, under its lease. Drops every
+   * grant of this control plane from the marker; `value` is true only when the lease was released
+   * (no other reference here) and no other control plane is granted, so the caller may delete it. */
+  | { method: "profile_retire"; home: string; provider: "claude" | "codex" };
 export function isLeaseWorkerAcquisition(method: LeaseWorkerOperation["method"]): method is "acquire" | "acquire_reference" {
   return method === "acquire" || method === "acquire_reference";
 }
@@ -88,6 +92,7 @@ export function validLeaseWorkerOperation(value: unknown): value is LeaseWorkerO
   if (v.method === "release") return Object.keys(v).length === 2;
   if (v.method === "cancel") return typeof v.completedId === "string" && /^[a-f0-9-]{36}$/u.test(v.completedId) && Object.keys(v).length === 3;
   if (v.method === "release_reference" || v.method === "retain_reference") return typeof v.referenceId === "string" && /^[a-f0-9-]{36}$/u.test(v.referenceId) && Object.keys(v).length === 3;
+  if (v.method === "profile_retire") return (v.provider === "claude" || v.provider === "codex") && Object.keys(v).length === 3;
   if (v.method === "profile_adopt" || v.method === "profile_revoke") {
     if (v.provider !== "claude" && v.provider !== "codex") return false;
     if (typeof v.grantId !== "string" || !GRANT_ID.test(v.grantId)) return false;

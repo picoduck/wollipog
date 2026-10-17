@@ -219,7 +219,11 @@ test("profile change frames are exact: provider, grant id and, for revocation, t
     ["revoke without profile", { method: "profile_revoke", home: "/private/home", provider: "codex", grantId: GRANT }],
     ["revoke with malformed profile", { ...revoke, profileId: "../profile" }],
     ["revoke with extra key", { ...revoke, extra: true }],
+    ["retire for a non-provider lease key", { method: "profile_retire", home: "/private/home", provider: "skills" }],
+    ["retire naming a grant", { method: "profile_retire", home: "/private/home", provider: "claude", grantId: GRANT }],
+    ["retire without home", { method: "profile_retire", provider: "claude" }],
   ];
+  assert.equal(validLeaseWorkerOperation({ method: "profile_retire", home: "/private/home", provider: "codex" }), true);
   for (const [name, value] of invalid) assert.equal(validLeaseWorkerOperation(value), false, name);
 });
 

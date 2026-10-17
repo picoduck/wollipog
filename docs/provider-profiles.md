@@ -67,6 +67,12 @@ next account report shows the profile as `granted` or `pending`, and the control
 grant from it. The runner treats a pending grant its marker already records as usable, because an
 Owner or Admin authorized it.
 
+A pending grant can be revoked while the runner is writing it. Its row names no profile yet, so the
+revocation cannot reach the runner then. If the adoption still succeeds, the grant cannot be
+activated; the control plane returns 409 `PROVIDER_PROFILE_GRANT_REVOKED` and at once sends that
+runner `revoke_provider_profile_grant` with the profile id it returned, so the runner stops using
+the grant and drops it from the marker without waiting for its next registration.
+
 Adoption is strict. After adoption only explicitly granted control planes may use the HOME; grants are
 never reconstructed from lease-journal owners. Sessions created after adoption that use the account
 are checked against its recorded profile id. Session-level `providerProfileId` binding, the adoption
@@ -75,9 +81,15 @@ paths are later parts of #3239.
 
 ## Registration and Use
 
-Every `registered` frame to a v225 runner carries `providerProfileGrants`: the complete set of this
-control plane's active and pending grants in the runner's scope (`{ profileId?, grantId, status }`).
-The runner:
+A v225 runner's `register` frame carries `providerProfileIds`: the profile id of every configured
+account HOME, at most 32, including accounts the frame hides from a peer whose version it does not
+know yet. Every `registered` frame to a v225 runner carries `providerProfileGrants`: the complete
+set of this control plane's grants, in the runner's scope, for the profiles this runner reports
+(`{ profileId?, grantId, status }`). That is every active grant for a profile id in
+`providerProfileIds` or on the runner's accounts, and every pending grant recorded for one of the
+runner's accounts: at most one active grant per profile and one pending grant per account, so at
+most 64. The list is never truncated. When the runner's scope, accounts or reported profile ids are
+unknown, or the relevant grants exceed 64, the field is omitted. The runner:
 
 - uses a profile only when this list (or its own just-completed adoption) holds a grant for it and the
   marker lists this control-plane instance;
@@ -107,11 +119,20 @@ marker change also stops other runners on the same host. Other control planes' g
 touched.
 
 Removing an account (`DELETE /api/runners/:id/provider-accounts/:accountId`) revokes only this
-control plane's grants for it, before the runner is told. A profile that other control planes are
-still granted keeps its HOME, and the runner drops this control plane's grant from the marker. When
-this control plane holds the only grant, the existing deletion rules apply unchanged: a runner-created
-HOME is deleted only when nothing on the Machine still uses it, and a retained HOME also loses this
-control plane's grant.
+control plane's grants for it, before the runner is told. For each revoked grant the control plane
+sends `revoke_provider_profile_grant` (a pending grant is named by the profile the account reports)
+and only then `remove_provider_account`. The runner's removal handler also stops using this control
+plane's grant and drops it from the marker before it attempts the removal, so the revocation holds
+even when the runner refuses the removal (an agent default names the account, a sign-in is running,
+or the configuration cannot be written).
+
+Whether the HOME is kept is decided at deletion time, under the HOME's lease: the runner takes the
+lease without the grant check, drops every grant of this control plane from the marker, and keeps
+the HOME when the marker still grants another control plane (or cannot be read), so a grant another
+runner recorded while the removal waited is never deleted with the directory. The runner re-reads
+the marker once more immediately before deleting, after the lease is released, because the lease
+journal lives inside the HOME. When no other control plane is granted, the existing deletion rules
+apply unchanged: a runner-created HOME is deleted only when nothing on the Machine still uses it.
 
 ## Mixed Versions
 
@@ -133,5 +154,8 @@ credential routes. Agent credentials are refused. Grant rows record `granted_by`
 - Runners in different scopes of the same control plane that share one OS account and HOME share
   that control plane's single marker grant. A registration lists only its own scope's grants, so it
   would remove the other scope's grant from the marker. Use separate HOMEs per scope.
+- A pending grant is listed only to the runner that recorded it. Another runner of the same control
+  plane that shares the HOME before the grant is confirmed removes it from the marker at its
+  registration; the adoption then has to be repeated.
 - A grant activated on one runner reaches another online runner sharing the profile at its next
   registration.

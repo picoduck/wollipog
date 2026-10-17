@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { ControlPlaneDb } from "./db.js";
 import type { ResourceScope } from "@wollipog/protocol";
@@ -105,6 +106,41 @@ test("the schema refuses scopes, roles, and states outside the grant model", () 
          provider_account_id, provider, origin, status, granted_by, granted_role, created_at)
        VALUES ('x', 'i', ?, 'organization', ?, 'provider_home', 'runner-a', 'work', 'claude', 'adopted', 'pending', 'u', 'owner', 1)`,
     ).run(PERSONAL_ORGANIZATION_ID, PERSONAL_ORGANIZATION_ID), /UNIQUE constraint failed/u, "one pending grant per runner account");
+  } finally {
+    db.close();
+  }
+});
+
+test("a runner's registration list holds every grant for its profiles, however many the scope has, and overflow omits it", () => {
+  const { db, register } = open();
+  try {
+    const runners = Array.from({ length: 17 }, (_, index) => `runner-${index}`);
+    for (const runnerId of runners) register(runnerId);
+    // 257 active grants across 17 runners in one scope, more than any single list could carry.
+    const active: Array<{ runnerId: string; grantId: string; profileId: string }> = [];
+    for (let index = 0; index < 257; index++) {
+      const runnerId = runners[index % runners.length]!;
+      const grantId = randomUUID(), profileId = randomUUID();
+      authorize(db, grantId, runnerId);
+      assert.equal(db.completeProviderProfileGrant(grantId, profileId, 100 + index), true);
+      active.push({ runnerId, grantId, profileId });
+    }
+    assert.equal(db.activeProviderProfileGrants(PERSONAL).length, 257);
+    const late = active.at(-1)!;
+    const pending = authorize(db, randomUUID(), late.runnerId, "fresh")!.grant.grantId;
+    // A replacement runner whose marker holds one of the latest grants sees exactly the grant for it.
+    register("runner-replacement");
+    assert.deepEqual(db.providerProfileGrantsForRunnerProfiles("runner-replacement", PERSONAL, [late.profileId])?.map((row) => row.grantId),
+      [late.grantId]);
+    assert.deepEqual(db.providerProfileGrantsForRunnerProfiles(late.runnerId, PERSONAL, [late.profileId, late.profileId])?.map((row) => row.grantId),
+      [late.grantId, pending], "and the runner that made a pending grant sees that too");
+    // Never a partial list: one row more than the bound omits the list.
+    const three = active.slice(0, 3).map((grant) => grant.profileId);
+    assert.equal(db.providerProfileGrantsForRunnerProfiles("runner-replacement", PERSONAL, three, 3)?.length, 3);
+    assert.equal(db.providerProfileGrantsForRunnerProfiles("runner-replacement", PERSONAL, three, 2), null);
+    const team = { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "team" as const, teamId: "team-1" } };
+    assert.deepEqual(db.providerProfileGrantsForRunnerProfiles("runner-replacement", team, [late.profileId]), [],
+      "another scope's grant for the same profile is never listed");
   } finally {
     db.close();
   }

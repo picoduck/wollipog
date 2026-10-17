@@ -304,6 +304,32 @@ export function revokeProviderProfileMarkerGrant(
   return { marker: { ...marker, grants }, changed: true };
 }
 
+/**
+ * The retain-or-delete decision for a removed account's HOME (#3239), taken while its lease is held:
+ * every grant of this instance is dropped, and the HOME is `shared` (kept) when the marker still
+ * grants another control plane or cannot be verified. A marker-less HOME is not shared.
+ */
+export function retireProviderProfileMarker(
+  read: ProviderProfileRead,
+  input: { controlPlaneInstanceId: string },
+): { marker?: ProviderProfileMarker; changed: boolean; shared: boolean } {
+  if (read.state === "absent") return { changed: false, shared: false };
+  if (read.state === "unverifiable") return { changed: false, shared: true };
+  const { marker } = read;
+  const instance = input.controlPlaneInstanceId.toLowerCase();
+  const grants = marker.grants.filter((grant) => grant.controlPlaneInstanceId !== instance);
+  return { marker: { ...marker, grants }, changed: grants.length !== marker.grants.length, shared: grants.length > 0 };
+}
+
+/** Whether a HOME must be kept for another control plane: its marker grants one, or it cannot be
+ * verified. Re-checked immediately before a removed account's HOME is deleted. */
+export function providerProfileHomeShared(read: ProviderProfileRead, controlPlaneInstanceId: string | undefined): boolean {
+  if (read.state === "absent") return false;
+  if (read.state === "unverifiable") return true;
+  const instance = controlPlaneInstanceId?.toLowerCase();
+  return read.marker.grants.some((grant) => grant.controlPlaneInstanceId !== instance);
+}
+
 /** This control-plane instance's grant in a marker, if any. */
 export function providerProfileGrantFor(marker: ProviderProfileMarker, controlPlaneInstanceId: string | undefined): ProviderProfileGrant | undefined {
   const instance = controlPlaneInstanceId?.toLowerCase();

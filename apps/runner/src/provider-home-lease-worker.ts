@@ -53,7 +53,7 @@ export function runProviderHomeLeaseWorker(): void {
             const acquisition = registry.acquireHomeWithReceipt(op.home, op.provider, op.profile);
             reply.value = acquisition.first; prepared.cancel = acquisition.cancel;
           }
-        } else if (op.method === "profile_adopt" || op.method === "profile_revoke") {
+        } else if (op.method === "profile_adopt" || op.method === "profile_revoke" || op.method === "profile_retire") {
           // Grants name the attested instance this worker was started for, never a frame value.
           const controlPlaneInstanceId = options.controlPlaneInstanceId;
           if (!controlPlaneInstanceId) throw new Error("provider profile changes require an attested control-plane instance");
@@ -62,6 +62,8 @@ export function runProviderHomeLeaseWorker(): void {
             const { marker } = registry.changeProfileMarkerWhileHeld(op.home, op.provider,
               read => adoptProviderProfileMarker(read, { provider: op.provider, grant }));
             reply.value = true; reply.profileId = marker.profileId;
+          } else if (op.method === "profile_retire") {
+            reply.value = registry.retireProfileHomeWhileHeld(op.home, op.provider, controlPlaneInstanceId);
           } else {
             reply.value = registry.changeProfileMarkerWhileHeld(op.home, op.provider, read =>
               revokeProviderProfileMarkerGrant(read, { profileId: op.profileId, controlPlaneInstanceId, grantId: op.grantId })).changed;

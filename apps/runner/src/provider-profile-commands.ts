@@ -6,11 +6,13 @@ import type {
 } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
+import type { ProviderAccountRemovalOptions } from "./provider-login.js";
 import type { ProviderProfileGrants, StaleProviderProfileGrant } from "./provider-profile-grants.js";
 import {
   isProviderProfileGrantId,
   isProviderProfileId,
   providerProfileGrantFor,
+  providerProfileHomeShared,
   readProviderProfileMarker,
   type ProviderProfileRead,
 } from "./provider-profile.js";
@@ -26,9 +28,12 @@ export interface ProviderProfileCommandDeps {
   adopt(home: string, provider: "claude" | "codex", grantId: string): Promise<{ profileId: string }>;
   /** Drop one exact grant of this control plane from the HOME's marker under the HOME's lease. */
   revoke(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<boolean>;
+  /** Under a removed account HOME's lease: drop this control plane's grants and report whether the
+   * HOME may be deleted (no other reference here, no other control plane granted). */
+  retire(home: string, provider: "claude" | "codex"): Promise<boolean>;
   /** Atomically replace the configured accounts (writeProviderAccountsConfig). */
   persistAccounts(accounts: RunnerProviderAccount[]): void;
-  removeAccount(accountId: string, options: { retainCredentialHome?: boolean }): Promise<{ credentialsRetained: boolean }>;
+  removeAccount(accountId: string, options: ProviderAccountRemovalOptions): Promise<{ credentialsRetained: boolean }>;
   readMarker?: (account: RunnerProviderAccount) => ProviderProfileRead;
   /** Re-send the account inventory so the control plane sees the new profile state. */
   publish(): void;
@@ -115,9 +120,11 @@ export async function revokeProviderProfileGrantCommand(
   return failures.length ? result(false, markerUpdated, failures[0]) : result(true, markerUpdated);
 }
 
-/** `remove_provider_account` against a v225 control plane. A profile other control planes are
- * still granted keeps its HOME; this control plane's grant is dropped from the marker either way
- * once the account is gone. A HOME only this control plane is granted keeps today's deletion. */
+/** `remove_provider_account` against a v225 control plane. This control plane's grant stops at
+ * once and leaves the marker before removal is attempted, so it holds even when the removal is
+ * refused (an agent default, a running sign-in, a configuration write). Whether the HOME is kept for
+ * other control planes is decided under its lease at deletion time; reading the marker here only
+ * skips deletion early. A HOME only this control plane was granted keeps today's deletion. */
 export async function removeProviderAccountWithProfile(
   deps: ProviderProfileCommandDeps,
   accountId: string,
@@ -126,20 +133,32 @@ export async function removeProviderAccountWithProfile(
   const marker = account ? read(deps, account) : { state: "absent" as const };
   const present = marker.state === "present" ? marker.marker : undefined;
   const mine = present ? providerProfileGrantFor(present, deps.controlPlaneInstanceId) : undefined;
-  const shared = present ? present.grants.some((grant) => grant !== mine) : false;
-  const removed = await deps.removeAccount(accountId, shared ? { retainCredentialHome: true } : {});
+  let markerRevoked = true;
   if (account && present && mine) {
     deps.grants.recordRevoked(present.profileId, mine.grantId);
-    // A deleted HOME took its marker with it; a retained one must stop granting this control plane.
-    if (removed.credentialsRetained) {
-      try {
-        await deps.revoke(account.directory, account.provider, present.profileId, mine.grantId);
-      } catch (error) {
-        deps.log(`provider profile grant could not be dropped from a removed account's HOME: ${error instanceof Error ? error.message : "unknown error"}`);
-      }
-    }
+    markerRevoked = await dropGrant(deps, account, present.profileId, mine.grantId);
+  }
+  // Only an optimisation: a grant another runner records later is caught under the lease below.
+  const shared = providerProfileHomeShared(marker, deps.controlPlaneInstanceId);
+  const removed = await deps.removeAccount(accountId, shared ? { retainCredentialHome: true } : {
+    retireCredentialHome: (removedAccount) => deps.retire(removedAccount.directory, removedAccount.provider),
+    retainCredentialHomeIf: (removedAccount) => providerProfileHomeShared(read(deps, removedAccount), deps.controlPlaneInstanceId),
+  });
+  // A retained HOME must stop granting this control plane; retry a marker update that failed above.
+  if (account && present && mine && !markerRevoked && removed.credentialsRetained) {
+    await dropGrant(deps, account, present.profileId, mine.grantId);
   }
   return removed;
+}
+
+async function dropGrant(deps: ProviderProfileCommandDeps, account: RunnerProviderAccount, profileId: string, grantId: string): Promise<boolean> {
+  try {
+    await deps.revoke(account.directory, account.provider, profileId, grantId);
+    return true;
+  } catch (error) {
+    deps.log(`provider profile grant could not be dropped from a removed account's HOME: ${error instanceof Error ? error.message : "unknown error"}`);
+    return false;
+  }
 }
 
 /** After `registered`: drop grants of this control plane that it no longer lists. */

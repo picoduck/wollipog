@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import Fastify from "fastify";
 import type { ControlPlaneToRunner, ProviderAccountDefinition } from "@wollipog/protocol";
@@ -9,6 +10,7 @@ import {
   providerProfileGrantsForRunner,
   reconcileProviderProfileGrants,
   registerProviderProfileRoutes,
+  revokeProviderProfileAccessForAccountRemoval,
   revokeProviderProfileGrantsForAccountRemoval,
 } from "./provider-profile-route.js";
 
@@ -53,12 +55,14 @@ async function fixture(options: { protocolVersion?: number; handler?: Handler; a
   registerProviderProfileRoutes(app, { db, hub, requestHuman: () => caller, now: () => 100 });
   await app.ready();
   return {
-    db, app, sent, online, register,
+    db, app, sent, online, register, hub,
     setHandler(next: Handler) { handler = next; },
     as(next: HumanPrincipal | null) { caller = next; },
     async close() { await app.close(); db.close(); },
   };
 }
+
+const hubOf = (f: { hub: Pick<Hub, "isRunnerOnline" | "requestFromRunner" | "runnerChanged"> }) => f.hub;
 
 const adopted = (profileId = PROFILE): Handler => (_runnerId, message) => ({
   type: "adopt_provider_profile_result", requestId: (message as { requestId: string }).requestId, ok: true, profileId,
@@ -131,7 +135,8 @@ test("adoption is pending until the runner confirms, idempotent across retries, 
     const repeated = await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
     assert.deepEqual(repeated.json(), { status: "active", profileId: PROFILE, grantId });
     assert.equal(f.sent.length, 2, "no third adoption was sent");
-    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a"), [{ grantId, status: "active", profileId: PROFILE }]);
+    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a", []), [{ grantId, status: "active", profileId: PROFILE }],
+      "the account's reported profile selects its grant");
   } finally {
     await f.close();
   }
@@ -163,13 +168,15 @@ test("a lost adoption reply is completed from the runner's account report", asyn
   try {
     const lost = await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
     const { grantId } = lost.json() as { grantId: string };
-    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a"), [{ grantId, status: "pending" }]);
+    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a", []), [{ grantId, status: "pending" }]);
     assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", [account("work", { id: PROFILE, access: "not_granted" })], 5), [],
       "a profile the runner may not use completes nothing");
     assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", [account("work", { id: PROFILE, access: "pending" })], 5), [grantId]);
     assert.equal(f.db.getProviderProfileGrant(grantId)?.profileId, PROFILE);
-    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a"), [{ grantId, status: "active", profileId: PROFILE }]);
-    assert.equal(providerProfileGrantsForRunner(f.db, "unregistered"), undefined, "an unknown scope omits the list, never empties it");
+    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a", [PROFILE]), [{ grantId, status: "active", profileId: PROFILE }]);
+    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a", []), [],
+      "an active grant for a profile the runner does not report is not its concern");
+    assert.equal(providerProfileGrantsForRunner(f.db, "unregistered", [PROFILE]), undefined, "an unknown scope omits the list, never empties it");
   } finally {
     await f.close();
   }
@@ -201,7 +208,7 @@ test("revocation refuses active sessions without force and records revocation be
       requestId: (f.sent.at(-1)?.message as { requestId: string }).requestId, profileId: PROFILE, grantId });
     const grant = f.db.getProviderProfileGrant(grantId);
     assert.deepEqual([grant?.status, grant?.revokedAt, grant?.revokedBy, grant?.revokedRole], ["revoked", 100, "user-1", "owner"]);
-    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a"), []);
+    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a", [PROFILE]), []);
     assert.equal((await f.app.inject({ method: "POST", url: REVOKE, payload: { force: true } })).statusCode, 404, "nothing left to revoke");
 
     // An offline runner still loses access: the revocation stands and registration drops the grant.
@@ -232,6 +239,123 @@ test("account removal revokes only this account's grant from this control plane"
     assert.equal(f.db.getProviderProfileGrant(other.grantId)?.status, "active", "another account's grant is untouched");
     assert.deepEqual(revokeProviderProfileGrantsForAccountRemoval(f.db, "runner-a", account("legacy"), principal(), 8), [],
       "a legacy account has no grant to revoke");
+  } finally {
+    await f.close();
+  }
+});
+
+test("a pending grant revoked while the runner adopts is revoked on the runner with the profile it returned", async () => {
+  const f = await fixture();
+  try {
+    let replyToAdoption!: (result: RunnerRequestResult) => void;
+    f.setHandler((_runnerId, message) => {
+      if (message.type === "adopt_provider_profile") return new Promise<RunnerRequestResult>((resolve) => { replyToAdoption = resolve; });
+      return { type: "revoke_provider_profile_grant_result", requestId: (message as { requestId: string }).requestId, ok: true, markerUpdated: true };
+    });
+    const adoption = f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
+    while (f.sent.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    const { grantId, requestId } = f.sent[0]!.message as { grantId: string; requestId: string };
+    // The revocation lands while the runner is still writing the marker: a pending grant names no
+    // profile, so nothing can be sent to the runner yet.
+    const revoked = await f.app.inject({ method: "POST", url: REVOKE, payload: {} });
+    assert.equal(revoked.statusCode, 200);
+    assert.equal(revoked.json().runnerNotified, false);
+    assert.equal(f.db.getProviderProfileGrant(grantId)?.status, "revoked");
+    assert.equal(f.sent.length, 1);
+
+    replyToAdoption({ type: "adopt_provider_profile_result", requestId, ok: true, profileId: PROFILE });
+    const response = await adoption;
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().code, "PROVIDER_PROFILE_GRANT_REVOKED");
+    assert.equal(f.db.getProviderProfileGrant(grantId)?.status, "revoked", "the revocation stands");
+    assert.deepEqual(f.sent.slice(1).map(({ runnerId, message }) => [runnerId, message.type, (message as { profileId?: string }).profileId,
+      (message as { grantId?: string }).grantId]), [["runner-a", "revoke_provider_profile_grant", PROFILE, grantId]],
+      "the runner that recorded the grant is told at once, with the profile id it returned");
+  } finally {
+    await f.close();
+  }
+});
+
+test("account removal tells the runner to stop using each revoked grant before removal is attempted", async () => {
+  const f = await fixture({ handler: adopted() });
+  try {
+    const work = (await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } })).json() as { grantId: string };
+    f.setHandler((_runnerId, message) => {
+      assert.equal(f.db.getProviderProfileGrant((message as { grantId: string }).grantId)?.status, "revoked", "recorded before the runner hears");
+      return { type: "revoke_provider_profile_grant_result", requestId: (message as { requestId: string }).requestId, ok: true, markerUpdated: true };
+    });
+    const before = f.sent.length;
+    const revoked = await revokeProviderProfileAccessForAccountRemoval({ db: f.db, hub: hubOf(f) }, "runner-a",
+      account("work", { id: PROFILE, access: "granted" }), principal("admin"), 9);
+    assert.deepEqual(revoked.map((grant) => grant.grantId), [work.grantId]);
+    assert.deepEqual(f.sent.slice(before).map(({ message }) => [message.type, (message as { profileId?: string }).profileId,
+      (message as { grantId?: string }).grantId]), [["revoke_provider_profile_grant", PROFILE, work.grantId]]);
+
+    // A pending grant is named by the profile the account reports.
+    f.setHandler(() => { throw new Error("runner request timed out"); });
+    const pending = (await f.app.inject({ method: "POST", url: "/api/runners/runner-a/provider-accounts/other/adopt-profile",
+      payload: { acknowledgeProfileAdoption: true } })).json() as { grantId: string };
+    f.setHandler((_runnerId, message) => ({ type: "revoke_provider_profile_grant_result", requestId: (message as { requestId: string }).requestId,
+      ok: true, markerUpdated: false }));
+    const sentBefore = f.sent.length;
+    await revokeProviderProfileAccessForAccountRemoval({ db: f.db, hub: hubOf(f) }, "runner-a",
+      account("other", { id: OTHER_PROFILE, access: "pending" }), principal(), 10);
+    assert.deepEqual(f.sent.slice(sentBefore).map(({ message }) => [(message as { profileId?: string }).profileId, (message as { grantId?: string }).grantId]),
+      [[OTHER_PROFILE, pending.grantId]]);
+    assert.equal(f.db.getProviderProfileGrant(pending.grantId)?.status, "revoked");
+    assert.deepEqual(await revokeProviderProfileAccessForAccountRemoval({ db: f.db, hub: hubOf(f) }, "runner-a", account("legacy"), principal(), 11), [],
+      "a legacy account has nothing to revoke");
+
+    // An offline runner is not asked; the revoked row and its next registration's list suffice.
+    f.setHandler(() => { throw new Error("runner request timed out"); });
+    const offline = (await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } })).json() as { grantId: string };
+    f.online.delete("runner-a");
+    const sentOffline = f.sent.length;
+    assert.deepEqual((await revokeProviderProfileAccessForAccountRemoval({ db: f.db, hub: hubOf(f) }, "runner-a",
+      account("work", { id: PROFILE, access: "pending" }), principal(), 12)).map((grant) => grant.grantId), [offline.grantId]);
+    assert.equal(f.sent.length, sentOffline);
+    assert.equal(f.db.getProviderProfileGrant(offline.grantId)?.status, "revoked");
+  } finally {
+    await f.close();
+  }
+});
+
+test("registration omits the list when the runner's reported profiles are unknown or its relevant grants overflow", async () => {
+  const f = await fixture();
+  try {
+    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a", []), []);
+    for (const reported of [undefined, "x", [PROFILE.toUpperCase()], Array.from({ length: 33 }, () => PROFILE)]) {
+      assert.equal(providerProfileGrantsForRunner(f.db, "runner-a", reported), undefined, JSON.stringify(reported));
+    }
+    // 65 pending grants recorded for this runner exceed the 64-row bound: never a partial list.
+    for (let index = 0; index < 65; index++) {
+      assert.ok(f.db.authorizeProviderProfileGrant({ grantId: randomUUID(), runnerId: "runner-a", providerAccountId: `account-${index}`,
+        provider: "claude", origin: "adopted", grantedBy: "user-1", grantedRole: "owner", now: index }));
+    }
+    assert.equal(providerProfileGrantsForRunner(f.db, "runner-a", []), undefined);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a runner whose marker holds one of the later of 257 grants in its scope is listed that grant", async () => {
+  const f = await fixture();
+  try {
+    let late: { grantId: string; profileId: string } | undefined;
+    for (let index = 0; index < 257; index++) {
+      const runnerId = `runner-${index % 17}`;
+      if (index < 17) f.register(runnerId, [account("work")]);
+      const grantId = randomUUID(), profileId = randomUUID();
+      assert.ok(f.db.authorizeProviderProfileGrant({ grantId, runnerId, providerAccountId: "work", provider: "claude", origin: "adopted",
+        grantedBy: "user-1", grantedRole: "owner", now: index }));
+      assert.equal(f.db.completeProviderProfileGrant(grantId, profileId, 1_000 + index), true);
+      late = { grantId, profileId };
+    }
+    // The replacement runner's HOME records the latest grant; its registration reports that profile.
+    f.register("runner-replacement", [account("work")]);
+    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-replacement", [late!.profileId]),
+      [{ grantId: late!.grantId, status: "active", profileId: late!.profileId }],
+      "the grant is listed, so the runner neither treats it as stale nor removes it from the marker");
   } finally {
     await f.close();
   }

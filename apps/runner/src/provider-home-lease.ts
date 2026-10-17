@@ -22,7 +22,7 @@ import type { SpawnIsolation } from "./spawn.js";
 import { readLeaseIoSnapshot, applyLeaseIoPlan, ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError, type LeaseIoSnapshot, type LeaseIoEntry, type LeaseIoJob } from "./provider-home-lease-io.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS, type LeaseCheckpointProof, type LeaseRetirementEntry } from "./provider-home-lease-checkpoint.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
-import { decideProviderProfileAccess, ProviderProfileChangeError, readProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileAccess, type ProviderProfileChangeRefusal, type ProviderProfileDenial, type ProviderProfileMarker, type ProviderProfileRead } from "./provider-profile.js";
+import { decideProviderProfileAccess, ProviderProfileChangeError, readProviderProfileMarker, retireProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileAccess, type ProviderProfileChangeRefusal, type ProviderProfileDenial, type ProviderProfileMarker, type ProviderProfileRead } from "./provider-profile.js";
 
 const OWNER_HASH = /^[a-f0-9]{64}$/u;
 const PROVIDER_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/u;
@@ -785,6 +785,29 @@ export class ProviderHomeLeaseRegistry {
     }
     if (!receipt.cancel()) throw new Error("provider profile change could not drop its HOME reference");
     return result;
+  }
+
+  /**
+   * Worker-internal (#3239): decide whether a removed account's HOME may be deleted while holding
+   * its lease. Like a marker change it skips the grant check (this control plane's grant may already
+   * be revoked), drops every grant of `controlPlaneInstanceId` from the marker, and then drops the
+   * reference taken here. True only when that released the lease (no other reference was held here)
+   * and the marker grants no other control plane; an unverifiable marker is kept.
+   */
+  retireProfileHomeWhileHeld(requestedHome: string, provider: "claude" | "codex", controlPlaneInstanceId: string): boolean {
+    const receipt = this.acquireReceiptFor(requestedHome, provider, PROFILE_CHANGE);
+    const home = this.lastAcquisitionHome!;
+    let shared: boolean;
+    try {
+      const result = retireProviderProfileMarker(readProviderProfileMarker(home, { provider }), { controlPlaneInstanceId });
+      if (result.changed && result.marker) this.writeProfileMarkerWhileHeld(home, result.marker);
+      shared = result.shared;
+    } catch (error) {
+      if (!receipt.cancel()) throw new Error("provider HOME retirement could not drop its HOME reference", { cause: error });
+      throw error;
+    }
+    if (!receipt.cancel()) throw new Error("provider HOME retirement could not drop its HOME reference");
+    return !shared && !this.held.has(home);
   }
 
   /** Profile grants are checked against the canonical HOME before any lease journal I/O, and again

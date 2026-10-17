@@ -1137,6 +1137,7 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   grants: providerProfileGrants,
   adopt: (home, provider, grantId) => sessions.adoptProviderProfile(home, provider, grantId),
   revoke: (home, provider, profileId, grantId) => sessions.revokeProviderProfileGrant(home, provider, profileId, grantId),
+  retire: (home, provider) => sessions.retireProviderAccountHome(home, provider),
   persistAccounts: (accounts) => writeProviderAccountsConfig(parsed.configPath, accounts),
   removeAccount: (accountId, options) => providerLoginSupervisor.removeAccount(accountId, options),
   publish: () => publishProviderAccountInventory(),
@@ -3960,6 +3961,9 @@ function connect(): void {
       // Lets the dashboard flag this runner as outdated when its own PROTOCOL_VERSION is newer.
       protocolVersion: PROTOCOL_VERSION,
       liveSessions: sessions.liveSessionIds(),
+      // Provider profiles (#3239): every configured HOME's profile id, even where this frame hides a
+      // profile-bearing account from a not-yet-negotiated peer, so `registered` lists their grants.
+      providerProfileIds: providerProfileGrants.reportedProfileIds(),
       // Phase 2: full metadata for every session in the box store, so this dashboard hydrates
       // sessions it didn't create (and ones from before a runner restart).
       // The peer profile is unknown until `registered`. Advertise complete metadata but no history

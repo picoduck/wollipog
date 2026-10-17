@@ -75,6 +75,7 @@ function fixture(t: TestContext) {
     config: { runnerId: "fixture", controlPlaneUrl: "inert", token: "", providerAccounts: [] }, metadata: { agents: [] },
     WebSocket: InertSocket, validateControlPlaneUrl: (url: string) => url, allowInsecureTransport: false,
     agentsForControlPlane: () => [], providerAccountsForControlPlane: () => [], registrationSessionSnapshots: () => [],
+    providerProfileGrants: { reportedProfileIds: () => [] },
     PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol,
     projectMessageForCurrentProtocol: (message: SkillsStateMessage) => message,
     stagedRunnerCredential: { promote() {} }, backoff: 99, INITIAL_BACKOFF_MS: 1,

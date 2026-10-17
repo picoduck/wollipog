@@ -3256,8 +3256,10 @@ export interface ProviderProfileGrantRecord {
   revokedRole: string | null;
 }
 
-/** Bound on the grants one runner registration lists. */
-export const PROVIDER_PROFILE_GRANT_LIST_LIMIT = 256;
+/** Bound on the grants one runner registration lists: at most one active grant per reported
+ * profile and one pending grant per runner account, so 32 + 32 for a runner's 32 accounts. A larger
+ * result omits the list rather than truncating it (#3239). */
+export const PROVIDER_PROFILE_REGISTRATION_GRANT_LIMIT = 64;
 
 interface ProviderProfileGrantRow {
   grant_id: string; profile_id: string | null; control_plane_instance_id: string;
@@ -12831,7 +12833,8 @@ export class ControlPlaneDb {
 
   /**
    * This control plane's live (active and pending) provider-home grants in exactly one
-   * organization/owner scope: the complete set a runner in that scope is told at registration.
+   * organization/owner scope. Unbounded and never sent to a runner as a whole; registration uses
+   * `providerProfileGrantsForRunnerProfiles`.
    */
   activeProviderProfileGrants(scope: ResourceScope): ProviderProfileGrantRecord[] {
     const ownerId = scope.owner.kind === "organization" ? scope.owner.organizationId
@@ -12840,8 +12843,35 @@ export class ControlPlaneDb {
       `SELECT * FROM provider_profile_grants
         WHERE control_plane_instance_id=? AND organization_id=? AND owner_kind=? AND owner_id=?
           AND scope='provider_home' AND status IN ('pending','active')
+        ORDER BY status, created_at, grant_id`,
+    ).all(this.controlPlaneInstanceId, scope.organizationId, scope.owner.kind, ownerId) as unknown as ProviderProfileGrantRow[];
+    return rows.map((row) => this.providerProfileGrantRecord(row));
+  }
+
+  /**
+   * The grants one runner is told at registration (#3239), in its scope: every active grant of this
+   * control plane for a profile id the runner reports, and every pending grant recorded for one of
+   * the runner's accounts. The runner treats an omitted marker grant as stale, so a result above
+   * `limit` returns null (omit the list) and is never truncated.
+   */
+  providerProfileGrantsForRunnerProfiles(
+    runnerId: string,
+    scope: ResourceScope,
+    profileIds: readonly string[],
+    limit = PROVIDER_PROFILE_REGISTRATION_GRANT_LIMIT,
+  ): ProviderProfileGrantRecord[] | null {
+    const ownerId = scope.owner.kind === "organization" ? scope.owner.organizationId
+      : scope.owner.kind === "user" ? scope.owner.userId : scope.owner.teamId;
+    const rows = this.stmt(
+      `SELECT * FROM provider_profile_grants
+        WHERE control_plane_instance_id=? AND organization_id=? AND owner_kind=? AND owner_id=?
+          AND scope='provider_home'
+          AND ((status='active' AND profile_id IN (SELECT value FROM json_each(?)))
+            OR (status='pending' AND runner_id=?))
         ORDER BY status, created_at, grant_id LIMIT ?`,
-    ).all(this.controlPlaneInstanceId, scope.organizationId, scope.owner.kind, ownerId, PROVIDER_PROFILE_GRANT_LIST_LIMIT) as unknown as ProviderProfileGrantRow[];
+    ).all(this.controlPlaneInstanceId, scope.organizationId, scope.owner.kind, ownerId, JSON.stringify([...new Set(profileIds)]),
+      runnerId, limit + 1) as unknown as ProviderProfileGrantRow[];
+    if (rows.length > limit) return null;
     return rows.map((row) => this.providerProfileGrantRecord(row));
   }
 
