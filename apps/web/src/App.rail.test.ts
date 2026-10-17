@@ -29,6 +29,7 @@ const detail = readFileSync(new URL("./components/SessionDetail.tsx", import.met
 const sessionHeader = readFileSync(new URL("./components/SessionHeader.tsx", import.meta.url), "utf8");
 const shortcuts = readFileSync(new URL("./shortcuts.ts", import.meta.url), "utf8");
 const newSessionShortcut = readFileSync(new URL("./useNewSessionShortcut.ts", import.meta.url), "utf8");
+const newSessionDialog = readFileSync(new URL("./components/NewSessionDialog.tsx", import.meta.url), "utf8");
 
 test("the application shell is rail-first and the legacy sidebar is fully retired", () => {
   const combined = [app, rail, inbox, shortcuts, css].join("\n");
@@ -366,6 +367,11 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   for (const label of ["New Project", "Add Location", "Make Default", "Archive Sessions", "Delete Project"]) {
     assert.equal(projectsView.includes(label), true, label);
   }
+  // #2957 retired the Projects list's compact empty state; New Session's no-locations state still
+  // uses it, and without its own rule it took the 260px placeholder minimum.
+  assert.match(newSessionDialog, /className="project-manager-empty compact"/);
+  assert.match(css, /\.project-manager-empty\.compact\s*\{[^}]*min-height:\s*140px;/,
+    "New Session's compact empty state keeps its own height");
   assert.match(projectsView, /its sessions move to No Project[\s\S]*Sessions and files are not deleted/,
     "Project deletion states its non-destructive consequences");
   // #2220: a group whose authoritative count says sessions are coming shows skeleton rows, never a

@@ -12630,6 +12630,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   color: var(--text-dim);
   text-align: center;
 }
+.project-manager-empty.compact { min-height: 140px; padding: 14px; font-size: 12px; }
 .project-manager-empty.location-empty { min-height: 180px; border: 1px dashed var(--border); border-radius: 9px; }
 .project-manager-empty > div { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .project-location-picker { display: grid; gap: 14px; }
