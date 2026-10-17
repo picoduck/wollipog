@@ -1609,7 +1609,13 @@ test("a managed launch binds only this session's other worktrees (#3316)", async
 });
 
 /** A protected launch in a session's second worktree that also binds its first, legacy one. */
-async function retiredWorktreeFixture(options: { handoffWaitMaxMs?: number } = {}) {
+async function retiredWorktreeFixture(options: {
+  handoffWaitMaxMs?: number;
+  /** A provider that never reports a resumable conversation id. */
+  noResume?: boolean;
+  /** Awaited inside each provider turn, so a test can hold one open. */
+  onPrompt?: (text: string) => Promise<void> | void;
+} = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-retired-worktree-")));
   const home = mkdtempSync(join(tmpdir(), "wollipog-managed-retired-home-"));
   const { repoPath, worktreePath: first } = hostWorktree(root, "s1");
@@ -1632,9 +1638,14 @@ async function retiredWorktreeFixture(options: { handoffWaitMaxMs?: number } = {
     drivers.push(driver);
     return {
       pid: drivers.length, initialize: async () => {}, newSession: async () => "provider-1",
-      prompt: async (text: string) => { driver.prompts.push(text); return "end_turn" as const; },
+      prompt: async (text: string) => {
+        driver.prompts.push(text);
+        await options.onPrompt?.(text);
+        return "end_turn" as const;
+      },
       cancel: () => {}, dispose: () => { driver.disposed = true; },
-      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+      setConfig: () => {}, resolvePermission: () => false,
+      agentSessionId: () => options.noResume ? null : "provider-1",
       ...(options.handoffWaitMaxMs ? {
         handoffWaitMaxMs: options.handoffWaitMaxMs,
         endBackgroundWork: async (): Promise<DriverBackgroundWorkEndResult> => {
@@ -1683,6 +1694,10 @@ async function retiredWorktreeFixture(options: { handoffWaitMaxMs?: number } = {
     },
     /** The worktree vanishes without its row being forgotten. */
     remove: () => execFileSync("git", ["-C", repoPath, "worktree", "remove", "--force", first]),
+    /** Let every drain the retirement scheduled run to completion. */
+    settle: () => new Promise((done) => setTimeout(done, 100)),
+    errors: () => store.readEvents("s1").filter((event) => event.payload.kind === "error")
+      .map((event) => (event.payload as { message: string }).message),
     waitFor: async (predicate: () => boolean, message: string) => {
       const deadline = Date.now() + 10_000;
       while (!predicate()) {
@@ -1742,22 +1757,62 @@ test("a bound worktree that vanishes without being forgotten is rebound before t
   }
 });
 
-test("a retirement during a provider-initiated turn still delivers the queued prompt (#3402)", async () => {
+test("a retirement during a runner turn waits for the turn, then rebinds before the next one (#3402)", async () => {
   if (process.platform !== "linux") return;
-  const f = await retiredWorktreeFixture();
+  let release!: () => void;
+  const held = new Promise<void>((done) => { release = done; });
+  const f = await retiredWorktreeFixture({ onPrompt: (text) => text === "long turn" ? held : undefined });
   try {
-    f.drivers[0]!.cb.onProviderInitiatedTurn?.("started", "provider-turn-1");
+    f.manager.prompt("s1", "long turn");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 1, "the first turn did not start");
     await f.retire();
-    f.manager.prompt("s1", "continue");
-    // The provider turn settles normally, with no interruption and no further background update.
-    f.drivers[0]!.cb.onProviderInitiatedTurn?.("settled", "provider-turn-1");
-    await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the queued prompt was stranded");
-    assert.deepEqual(f.drivers[0]!.prompts, []);
+    f.manager.prompt("s1", "next turn");
+    await f.settle();
+    assert.equal(f.drivers.length, 1, "nothing is relaunched while the runner turn runs");
+    assert.equal(f.drivers[0]!.disposed, false);
+
+    release();
+    await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the next turn did not run in a relaunched provider");
+    assert.deepEqual(f.drivers[0]!.prompts, ["long turn"]);
+    assert.deepEqual(f.drivers[1]!.prompts, ["next turn"]);
     f.assertRelaunched();
   } finally {
+    release();
     f.cleanup();
   }
 });
+
+for (const ask of [false, true]) {
+  test(`a retirement during a provider-initiated turn${ask ? " with a provider-owned ask" : ""} waits for it to settle (#3402)`, async () => {
+    if (process.platform !== "linux") return;
+    const f = await retiredWorktreeFixture();
+    try {
+      f.drivers[0]!.cb.onProviderInitiatedTurn?.("started", "provider-turn-1");
+      if (ask) {
+        f.drivers[0]!.cb.onEvent({
+          kind: "permission_request", requestId: "provider-ask", title: "Run Command",
+          options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+        });
+        assert.ok(f.store.readMeta("s1")?.pendingApproval);
+      }
+      await f.retire();
+      await f.settle();
+      f.manager.prompt("s1", "continue");
+      await f.settle();
+      assert.equal(f.drivers.length, 1, "the provider-initiated turn is never retired mid-turn");
+      assert.equal(f.drivers[0]!.disposed, false);
+
+      // It settles normally: no interruption and no further background update.
+      f.drivers[0]!.cb.onProviderInitiatedTurn?.("settled", "provider-turn-1");
+      await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the queued prompt was stranded");
+      assert.deepEqual(f.drivers[0]!.prompts, []);
+      assert.ok(f.drivers[0]!.disposed);
+      f.assertRelaunched();
+    } finally {
+      f.cleanup();
+    }
+  });
+}
 
 test("background work holding a retirement rebind is bounded like any worktree handoff (#3402)", async () => {
   if (process.platform !== "linux") return;
@@ -1787,6 +1842,52 @@ test("background work holding a retirement rebind is bounded like any worktree h
     assert.deepEqual(f.drivers[0]!.prompts, []);
     assert.equal(f.store.readMeta("s1")?.backgroundJobs?.find((job) => job.id === "monitor-1")?.terminalStatus, "killed");
     f.assertRelaunched();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a retirement rebind that cannot resume fails once and the live provider keeps serving (#3402)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await retiredWorktreeFixture({ noResume: true });
+  try {
+    // A conversation exists but the provider never reported an id it could resume.
+    f.manager.prompt("s1", "first");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 1 && f.store.readMeta("s1")?.status === "idle",
+      "the first turn did not finish");
+    await f.retire();
+    await f.settle();
+    f.manager.prompt("s1", "second");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 2, "the queued prompt never ran");
+    f.manager.prompt("s1", "third");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 3, "a later prompt never ran");
+    await f.settle();
+    assert.equal(f.drivers.length, 1, "an impossible rebind is not attempted");
+    const failures = f.errors().filter((message) => message.includes("cannot resume"));
+    assert.equal(failures.length, 1, "the failure is reported exactly once");
+    assert.match(failures[0]!, /restart the session/);
+    assert.equal(f.internals.active.get("s1").pendingWorktreeRebind, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a retirement rebind blocked by another runner's lock fails once (#3402)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await retiredWorktreeFixture();
+  try {
+    assert.equal(f.store.acquireLock("s1", "another-runner"), true);
+    await f.retire();
+    await f.settle();
+    const lockErrors = () => f.errors().filter((message) => message.includes("driven by another dashboard"));
+    assert.equal(lockErrors().length, 1);
+    f.store.releaseLock("s1", "another-runner");
+
+    f.manager.prompt("s1", "continue");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 1, "the prompt did not run on the live provider");
+    await f.settle();
+    assert.equal(f.drivers.length, 1, "the failed rebind is not requested again");
+    assert.equal(lockErrors().length, 1, "the failure is reported exactly once");
   } finally {
     f.cleanup();
   }

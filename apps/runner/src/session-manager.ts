@@ -789,6 +789,11 @@ interface ActiveSession {
    * resume probe — so once one of them is retired the provider is rebound into its selected
    * worktree before its next turn instead of failing on a bind source that no longer exists. */
   boundOwnedWorktrees?: readonly string[];
+  /** The selected worktree a retirement rebind targets, while that rebind is the pending one. Unlike
+   * a selection change, it waits for provider-initiated work instead of retiring it (#3402). */
+  retiredWorktreeRebind?: string;
+  /** A retirement rebind that could not run; this process is never handed to another one. */
+  retiredWorktreeRebindFailed?: true;
 }
 
 interface ProviderRetirement {
@@ -11683,14 +11688,36 @@ export class SessionManager {
   /** Hand a provider whose bound worktree was retired to the same deferred rebind a selection change
    * uses, targeting the selected worktree. The rebind resumes the conversation in a fresh process
    * whose launch binds only the worktrees that still exist, and it keeps that handoff's queue hold,
-   * background-work bound, and wakeups. Returns whether a rebind is now pending. */
+   * background-work bound, and wakeups. Returns whether a rebind is now pending.
+   *
+   * | Provider state when the rebind is due           | Outcome                                     |
+   * | ----------------------------------------------- | ------------------------------------------- |
+   * | Idle                                            | Rebind at once                              |
+   * | Runner turn running                             | Wait; rebind when the turn ends             |
+   * | Provider-initiated turn, with or without an ask | Wait; its settlement wakes the rebind       |
+   * | Unfinished background work                      | Bounded handoff hold, then rebind           |
+   * | Worktree gone but its row still recorded        | Requested by the next drain, then as above  |
+   * | Conversation cannot resume, or lock is held     | Fail once: one error, never requested again | */
   private requestRetiredWorktreeRebind(sessionId: string, entry: ActiveSession): boolean {
     if (entry.pendingWorktreeRebind) return true;
-    if (!this.boundWorktreeRetired(sessionId, entry)) return false;
+    if (entry.retiredWorktreeRebindFailed || !this.boundWorktreeRetired(sessionId, entry)) return false;
     const selection = this.store.readMeta(sessionId)?.worktreePath;
     if (!selection) return false;
     entry.pendingWorktreeRebind = selection;
+    entry.retiredWorktreeRebind = selection;
     return true;
+  }
+
+  private retirementRebindPending(entry: ActiveSession): boolean {
+    return !!entry.retiredWorktreeRebind && entry.retiredWorktreeRebind === entry.pendingWorktreeRebind;
+  }
+
+  /** A retirement rebind that cannot run stops here, so later drains do not request it again. */
+  private failRetirementRebind(entry: ActiveSession): void {
+    if (!this.retirementRebindPending(entry)) return;
+    entry.pendingWorktreeRebind = undefined;
+    entry.retiredWorktreeRebind = undefined;
+    entry.retiredWorktreeRebindFailed = true;
   }
 
   /** Persist turn configuration without presenting a model resolved under an older alias. The
@@ -11937,6 +11964,7 @@ export class SessionManager {
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
       !meta?.orphanedWork?.recoveryAttemptedAt;
     return !entry.running &&
+      !(entry.providerInitiatedTurnActive && this.retirementRebindPending(entry)) &&
       this.active.get(sessionId) === entry &&
       !backgroundWorkBlocksRebind &&
       !this.rewinding.has(sessionId) &&
@@ -12989,10 +13017,15 @@ export class SessionManager {
     // normal stopped-session path and prevents a failed first conversation from becoming fresh.
     const hasConversation = (resumable?.seq ?? 0) > 0;
     if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
+      const retirement = this.retirementRebindPending(entry);
+      this.failRetirementRebind(entry);
       entry.pendingWorktreeRebind = undefined;
       this.emitEvent(sessionId, {
         kind: "error",
-        message: "the selected worktree cannot resume this provider conversation",
+        message: retirement
+          ? "this provider conversation cannot resume, so the provider keeps its launch sandbox after one of " +
+            "its worktrees was retired; restart the session to drop it"
+          : "the selected worktree cannot resume this provider conversation",
       });
       if (entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
       return;
@@ -13001,6 +13034,7 @@ export class SessionManager {
     let rebindLockHeld = false;
     if (resumeId) {
       if (!this.store.acquireLock(sessionId, this.lockOwner)) {
+        this.failRetirementRebind(entry);
         if (!this.emitEvent(sessionId, {
           kind: "error",
           message: "this session is being driven by another dashboard",
@@ -18813,6 +18847,10 @@ export class SessionManager {
         ? "input_required" : state === "started" ? "running" : "idle");
       if (interrupted &&
           (live.queue.length || live.pendingProviderAccountSwitch || live.pendingWorktreeRebind)) {
+        setImmediate(() => this.scheduleDrain(sessionId));
+      } else if (state === "settled" && this.requestRetiredWorktreeRebind(sessionId, live) &&
+          this.retirementRebindPending(live)) {
+        // A retirement rebind waited for this turn (#3402); nothing else wakes it on normal settlement.
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
