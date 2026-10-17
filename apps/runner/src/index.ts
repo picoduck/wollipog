@@ -11,7 +11,7 @@ import { homedir, hostname } from "node:os";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { inspectCampaignLaunch } from "./campaign-launch-inspection.js";
+import { CampaignLaunchInspections } from "./campaign-launch-inspection.js";
 import WebSocket from "ws";
 import {
   parseMessage,
@@ -545,7 +545,7 @@ const metadata: RunnerMetadata = {
       : {}),
   })),
   runtime: {
-    campaignLaunchInspection: { version: 1 },
+    campaignLaunchInspection: { version: 2 },
     dataDir: config.dataDir,
     worktreeRoot: resolve(config.dataDir, "worktrees"),
     worktreePorts: {
@@ -2065,6 +2065,8 @@ function scheduleReconnect(): void {
 // (e.g. `git_action` with no `action`) rejects AFTER handleCommand's synchronous try/catch has
 // returned, so without this the rejection reaches the process-level unhandledRejection net and
 // shuts the runner down — defeating the whole point of isolating a bad frame. Log and drop instead.
+const campaignLaunchInspections = new CampaignLaunchInspections();
+
 function runCommandTask(kind: string, task: Promise<void>): void {
   void task.catch((error) => log(`dropping unhandled control-plane frame (${kind}): ${errText(error)}`));
 }
@@ -2222,7 +2224,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "campaign_launch_inspect": {
-      runCommandTask("campaign_launch_inspect", inspectCampaignLaunch(msg, config.workspaces).then(sendUp));
+      runCommandTask("campaign_launch_inspect", campaignLaunchInspections.run(msg, config.workspaces).then(sendUp));
+      break;
+    }
+    case "campaign_launch_inspect_cancel": {
+      campaignLaunchInspections.cancel(msg.requestId);
       break;
     }
     case "campaign_issue_scope": {

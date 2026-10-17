@@ -975,9 +975,11 @@ test("the exact launch preflight preserves configuration and a blocked server ne
   const fixture = await mountFixture({ runners: [enabledRunner] }, undefined, undefined, undefined, undefined, undefined, {
     fullControlLaunchPreflight: async (input) => {
       preflights.push(structuredClone(input));
-      return { preflight: { supported: false, digest: "a".repeat(64), proposal: input.proposal,
-        plan: { config: { model: "gpt-6.1-sol", effort: "high", permissionMode: "orchestrator" } },
-        capabilities: [{ capability: "Complete Execution Enforcement", state: "unsupported", reason: "Complete enforcement is not proven." }], humanRequired: [],
+      return { preflight: { ready: false, digest: "a".repeat(64), inspectionCancellation: "supported",
+        summary: { repository: "owner/repo", evidence: { statement: "Screenshots are reviewed by the Orchestrator.", provider: null } },
+        advanced: { proposal: null, plan: { config: { model: "gpt-6.1-sol", effort: "high", permissionMode: "orchestrator" } } },
+        capabilities: [{ id: "native_review", capability: "Controlled Cross-Model Review", state: "unsupported", mandatory: true,
+          reason: "This runner does not advertise the controlled native reviewer." }],
       } as unknown as import("@wollipog/protocol").CampaignLaunchPreflight };
     },
     createFullControlCampaign: async () => { admissions++; throw new Error("must stay blocked"); },
@@ -986,7 +988,7 @@ test("the exact launch preflight preserves configuration and a blocked server ne
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
     await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
-    const fields: Record<string, string> = { Repository: "owner/repo", "Issue Numbers": "12", Objective: "Deliver #12",
+    const fields: Record<string, string> = { "Issue Numbers": "12", Objective: "Deliver #12",
       "Campaign Cost Limit (USD)": "20", "Campaign Tool Call Limit": "200", "Campaign Concurrency Limit": "2", "Maximum Authorized Issues": "10" };
     for (const [label, value] of Object.entries(fields)) {
       const input = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")].find((node) => node.querySelector("span")?.textContent === label)!.querySelector("input")!;
@@ -1003,10 +1005,14 @@ test("the exact launch preflight preserves configuration and a blocked server ne
     assert.equal(check.disabled, false);
     await act(async () => check.click());
     assert.equal(preflights.length, 1);
-    assert.equal(preflights[0]!.session.config!.permissionMode, "orchestrator");
-    assert.equal(preflights[0]!.session.projectId, project.id);
-    assert.equal(preflights[0]!.proposal.budgetAuthority.acceptedFollowUps, 0);
-    assert.equal(preflights[0]!.proposal.issueAuthority.relatedFollowUps, true);
+    assert.equal(preflights[0]!.overrides!.session!.config!.permissionMode, "orchestrator");
+    assert.equal(preflights[0]!.projectId, project.id);
+    assert.deepEqual(preflights[0]!.issueNumbers, [12]);
+    assert.equal(preflights[0]!.task, "Deliver #12");
+    assert.equal(Object.hasOwn(preflights[0]!, "repository"), false, "the server derives the repository");
+    assert.equal(preflights[0]!.overrides!.budget!.acceptedFollowUps, 0);
+    assert.equal(preflights[0]!.overrides!.issues!.relatedFollowUps, true);
+    assert.match(fixture.container.textContent ?? "", /Resolved Repository/);
     assert.match(fixture.container.textContent ?? "", /Full Control Launch Blocked/);
     const authorize = [...fixture.container.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent === "Authorize and Create Session")!;
     assert.equal(authorize.disabled, true);
@@ -1018,7 +1024,7 @@ test("the exact launch preflight preserves configuration and a blocked server ne
     assert.equal(authorize.disabled, true, "changing the proposal cannot authorize a stale preflight");
     await act(async () => check.click());
     assert.equal(preflights.length, 2);
-    assert.equal(preflights[1]!.proposal.issueAuthority.relatedFollowUps, false);
+    assert.equal(preflights[1]!.overrides!.issues!.relatedFollowUps, false);
     assert.equal(authorize.disabled, true);
     assert.equal(admissions, 0);
     assert.equal(fixture.requests.length, 0);
