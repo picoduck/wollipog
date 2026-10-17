@@ -162,6 +162,7 @@ import {
 import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { ProviderLoginSupervisor } from "./provider-login.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
+import { managedProviderProfileRoot } from "./provider-profile-home.js";
 import {
   adoptProviderProfileCommand,
   removeProviderAccountWithProfile,
@@ -876,6 +877,24 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
   credentialHomeInUse: (account) => store.listSessions().some((meta) =>
     meta.providerAccountId === account.id || meta.providerCredentialHome === account.directory),
   serializeHomeRetirement: (work) => onSkillsQueue(work),
+  // #3239: Add Account with this control plane's grant creates a managed profile HOME.
+  profiles: {
+    root: managedProviderProfileRoot(),
+    create: async (home, provider, profileId, grantId) => {
+      if (!attestation.instanceId || !providerProfileGrants.supportsProfiles()) {
+        throw new Error("This control plane did not negotiate provider profiles.");
+      }
+      await sessions.createProviderProfile(home, provider, profileId, grantId);
+      providerProfileGrants.recordCreated(profileId, grantId);
+    },
+    settle: async ({ home, provider, profileId, grantId, recorded, homeRemoved }) => {
+      providerProfileGrants.settleCreated(profileId, grantId, recorded);
+      if (recorded || homeRemoved) return;
+      // The provider wrote credentials, so the HOME is kept for inspection, without this grant.
+      await sessions.revokeProviderProfileGrant(home, provider, profileId, grantId)
+        .catch((error) => log(`a discarded provider profile's grant could not be removed from its marker: ${errText(error)}`));
+    },
+  },
   onAccountRemoved: (account) => {
     providerAccountAuthStatus.delete(account.id);
     sendUp({
@@ -1164,7 +1183,8 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   grants: providerProfileGrants,
   adopt: (home, provider, grantId) => sessions.adoptProviderProfile(home, provider, grantId),
   revoke: (home, provider, profileId, grantId) => sessions.revokeProviderProfileGrant(home, provider, profileId, grantId),
-  retire: (home, provider) => sessions.retireProviderAccountHome(home, provider),
+  retire: (home, provider, expectedProfileId) => sessions.retireProviderAccountHome(home, provider, expectedProfileId),
+  profileRoot: managedProviderProfileRoot(),
   persistAccounts: (accounts) => writeProviderAccountsConfig(parsed.configPath, accounts),
   removeAccount: (accountId, options) => providerLoginSupervisor.removeAccount(accountId, options),
   publish: () => publishProviderAccountInventory(),
@@ -3013,7 +3033,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         break;
       }
       runCommandTask("start_provider_login", providerLoginSupervisor.startAccount(
-        msg.accountId ? { accountId: msg.accountId } : { provider: msg.provider!, label: msg.label! },
+        msg.accountId ? { accountId: msg.accountId } : {
+          provider: msg.provider!, label: msg.label!,
+          // A managed profile needs a v225 control plane's grant; anything else keeps today's HOME.
+          ...(typeof msg.profileGrantId === "string" && runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")
+            ? { profileGrantId: msg.profileGrantId } : {}),
+        },
         msg.installationSelections,
       ).then((login) => sendUp({
         type: "provider_login_result",

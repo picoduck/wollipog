@@ -103,8 +103,14 @@ refused as `profile_changed` for sessions, Agent TUIs, probes, sign-in and skill
 
 ### Profile Marker Operations
 
-Three operations change a marker, and only these do; see [Provider Profiles](./provider-profiles.md)
+Four operations change a marker, and only these do; see [Provider Profiles](./provider-profiles.md)
 for the grant model:
+
+- `profile_create { home, provider, profileId, grantId }` writes the first marker of a new managed
+  profile HOME (Add Account): identity `profileId` with only this instance's `grantId`. A HOME that
+  already holds a marker is refused as `profile_changed`, and an unreadable one as
+  `profile_unverifiable`, so a creation never replaces or merges an identity. The reply adds no
+  field.
 
 - `profile_adopt { home, provider, grantId }` records the worker's attested control-plane instance
   with `grantId` in the marker, creating a new random identity when the HOME has none. An existing
@@ -113,17 +119,19 @@ for the grant model:
 - `profile_revoke { home, provider, profileId, grantId }` removes exactly that grant of this
   instance. The reply's `value` is true when the marker changed; a HOME without a marker has nothing
   to revoke, and a marker holding another profile is refused as `profile_changed`.
-- `profile_retire { home, provider }` is the retain-or-delete decision for a removed account's
-  HOME. It removes every grant of this instance and replies `value: true` only when dropping its
-  reference released the lease (nothing else on this runner held the HOME) and the marker grants no
-  other instance. A marker-less HOME is not shared; an unreadable marker is kept (`value: false`),
-  never replaced. The caller deletes the HOME only on `true`, after a last marker read.
+- `profile_retire { home, provider, profileId? }` is the retain-or-delete decision for a removed
+  account's HOME. It removes every grant of this instance and replies `value: true` only when
+  dropping its reference released the lease (nothing else on this runner held the HOME) and the
+  marker grants no other instance. A marker-less HOME is not shared; an unreadable marker is kept
+  (`value: false`), never replaced. For a managed profile HOME the caller sends the account's
+  recorded `profileId`: a marker holding another identity, or none, is kept unchanged
+  (`value: false`). The caller deletes the HOME only on `true`, after a last marker read.
 
-All three take the HOME's lease the same way an acquisition does, but skip the grant check, since
+All four take the HOME's lease the same way an acquisition does, but skip the grant check, since
 they are how grants change. A HOME another live owner holds is refused with the acquisition's code
 (`busy`, `foreign_owner`, `foreign_host`). The marker is read with the operation's provider while
-the lease is held; an unreadable marker, or one for the other provider, is never replaced: adoption
-and revocation refuse it as `profile_unverifiable`, and retirement keeps the HOME. A marker already
+the lease is held; an unreadable marker, or one for the other provider, is never replaced: creation,
+adoption and revocation refuse it as `profile_unverifiable`, and retirement keeps the HOME. A marker already
 holding 16 other grants is `profile_grant_limit`. The write
 uses the same atomic replacement as acquisitions' marker checks expect, then the operation drops
 the reference it took: the lease is released when it was the first reference and kept when a

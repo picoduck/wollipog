@@ -4879,6 +4879,13 @@ export class SessionManager {
     return this.providerHomeLeases.adoptProfile(home, provider, grantId);
   }
 
+  /** Write a new managed profile HOME's first marker (Add Account) under its lease. */
+  async createProviderProfile(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<void> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    if (this.shuttingDown) throw new Error("provider profile creation was cancelled by shutdown");
+    await this.providerHomeLeases.createProfile(home, provider, profileId, grantId);
+  }
+
   /** Drop one exact grant of this control plane from a HOME's profile marker under its lease. */
   async revokeProviderProfileGrant(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<boolean> {
     if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
@@ -4886,9 +4893,9 @@ export class SessionManager {
   }
 
   /** The retain-or-delete decision for a removed account's HOME under its lease (#3239). */
-  async retireProviderAccountHome(home: string, provider: "claude" | "codex"): Promise<boolean> {
+  async retireProviderAccountHome(home: string, provider: "claude" | "codex", expectedProfileId?: string): Promise<boolean> {
     if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
-    return this.providerHomeLeases.retireProfileHome(home, provider);
+    return this.providerHomeLeases.retireProfileHome(home, provider, expectedProfileId);
   }
 
   /** Provider sign-in is a short-lived supervised mutation of one exact credential home. */

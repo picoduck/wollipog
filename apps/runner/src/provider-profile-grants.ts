@@ -46,6 +46,10 @@ export class ProviderProfileGrants {
   /** The exact profile ids the most recent register frame reported. The control plane lists grants
    * only for those, so only a marker holding one of them can carry a grant the list omitted. */
   private reportedSnapshot: ReadonlySet<string> = new Set();
+  /** Grants this runner wrote into the marker of a managed profile it is creating (Add Account),
+   * keyed by grant id, until the sign-in settles. The HOME is not a configured account yet, so a
+   * registration's marker scan cannot find it; this keeps the grant usable across a reconnect. */
+  private readonly creations = new Map<string, string>();
   private readonly readMarker: (account: RunnerProviderAccount) => ProviderProfileRead;
 
   constructor(private readonly deps: {
@@ -74,7 +78,8 @@ export class ProviderProfileGrants {
     if (!parsed) return [];
     this.grants.clear();
     for (const grant of parsed) {
-      this.grants.set(grant.grantId, { status: grant.status, ...(grant.profileId ? { profileId: grant.profileId } : {}) });
+      const profileId = grant.profileId ?? (grant.status === "pending" ? this.creations.get(grant.grantId) : undefined);
+      this.grants.set(grant.grantId, { status: grant.status, ...(profileId ? { profileId } : {}) });
     }
     const stale: StaleProviderProfileGrant[] = [];
     for (const account of this.deps.accounts()) {
@@ -126,6 +131,24 @@ export class ProviderProfileGrants {
   recordAdopted(profileId: string, grantId: string): void {
     if (!this.supported) return;
     this.grants.set(grantId, { status: "active", profileId });
+  }
+
+  /** Record the grant a new managed profile's marker was just created with (Add Account). The
+   * control plane recorded it as pending for this sign-in, so the sign-in may use the HOME. */
+  recordCreated(profileId: string, grantId: string): void {
+    if (!this.supported) return;
+    this.creations.set(grantId, profileId);
+    this.grants.set(grantId, { status: "pending", profileId });
+  }
+
+  /** The sign-in that created a managed profile settled. A recorded account counts its grant as
+   * active: the account report carrying the profile id is what activates the control plane's row,
+   * as an adoption's reply does. Otherwise the grant is never used again. */
+  settleCreated(profileId: string, grantId: string, recorded: boolean): void {
+    this.creations.delete(grantId);
+    if (!recorded) { this.grants.delete(grantId); return; }
+    // A registration while the sign-in ran drops a grant the control plane no longer lists.
+    if (this.grants.has(grantId)) this.grants.set(grantId, { status: "active", profileId });
   }
 
   /** Forget a revoked grant at once, before its marker update, so no new reference uses it. A

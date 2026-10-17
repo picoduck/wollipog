@@ -8,6 +8,7 @@ import type { RunnerProviderAccount } from "./config.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import type { ProviderAccountRemovalOptions } from "./provider-login.js";
 import type { ProviderProfileGrants, StaleProviderProfileGrant } from "./provider-profile-grants.js";
+import { managedProviderProfileIdFor } from "./provider-profile-home.js";
 import {
   isProviderProfileGrantId,
   isProviderProfileId,
@@ -29,8 +30,12 @@ export interface ProviderProfileCommandDeps {
   /** Drop one exact grant of this control plane from the HOME's marker under the HOME's lease. */
   revoke(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<boolean>;
   /** Under a removed account HOME's lease: drop this control plane's grants and report whether the
-   * HOME may be deleted (no other reference here, no other control plane granted). */
-  retire(home: string, provider: "claude" | "codex"): Promise<boolean>;
+   * HOME may be deleted (no other reference here, no other control plane granted). With
+   * `expectedProfileId` a marker holding another identity, or none, is kept unchanged (false). */
+  retire(home: string, provider: "claude" | "codex", expectedProfileId?: string): Promise<boolean>;
+  /** The managed profile root (`~/.agent-manager/profiles`); accounts at `<root>/<profileId>` are
+   * managed profile HOMEs whose removal requires the marker to still hold that identity. */
+  profileRoot?: string;
   /** Atomically replace the configured accounts (writeProviderAccountsConfig). */
   persistAccounts(accounts: RunnerProviderAccount[]): void;
   removeAccount(accountId: string, options: ProviderAccountRemovalOptions): Promise<{ credentialsRetained: boolean }>;
@@ -139,7 +144,11 @@ export async function revokeProviderProfileGrantCommand(
  * once and leaves the marker before removal is attempted, so it holds even when the removal is
  * refused (an agent default, a running sign-in, a configuration write). Whether the HOME is kept for
  * other control planes is decided under its lease at deletion time; reading the marker here only
- * skips deletion early. A HOME only this control plane was granted keeps today's deletion. */
+ * skips deletion early. A HOME only this control plane was granted keeps today's deletion.
+ *
+ * A managed profile HOME (`<root>/<profileId>`) must still hold the identity its account recorded.
+ * When the directory holds another profile (or no readable marker) it is no longer this account's
+ * HOME: its grants are left alone and it is kept, and retirement and deletion re-check the identity. */
 export async function removeProviderAccountWithProfile(
   deps: ProviderProfileCommandDeps,
   accountId: string,
@@ -147,16 +156,18 @@ export async function removeProviderAccountWithProfile(
   const account = deps.accounts().find((candidate) => candidate.id === accountId);
   const marker = account ? read(deps, account) : { state: "absent" as const };
   const present = marker.state === "present" ? marker.marker : undefined;
-  const mine = present ? providerProfileGrantFor(present, deps.controlPlaneInstanceId) : undefined;
+  const expectedProfileId = account ? managedProviderProfileIdFor(deps.profileRoot, account) : undefined;
+  const substituted = expectedProfileId !== undefined && present?.profileId !== expectedProfileId;
+  const mine = present && !substituted ? providerProfileGrantFor(present, deps.controlPlaneInstanceId) : undefined;
   let markerRevoked = true;
   if (account && present && mine) {
     deps.grants.recordRevoked(present.profileId, mine.grantId);
     markerRevoked = await dropGrant(deps, account, present.profileId, mine.grantId);
   }
   // Only an optimisation: a grant another runner records later is caught under the lease below.
-  const shared = providerProfileHomeShared(marker, deps.controlPlaneInstanceId);
+  const shared = substituted || providerProfileHomeShared(marker, deps.controlPlaneInstanceId);
   const removed = await deps.removeAccount(accountId, shared ? { retainCredentialHome: true } : {
-    retireCredentialHome: (removedAccount) => deps.retire(removedAccount.directory, removedAccount.provider),
+    retireCredentialHome: (removedAccount) => deps.retire(removedAccount.directory, removedAccount.provider, expectedProfileId),
     retainCredentialHomeIf: (removedAccount) => providerProfileHomeShared(read(deps, removedAccount), deps.controlPlaneInstanceId),
   });
   // A retained HOME must stop granting this control plane; retry a marker update that failed above.

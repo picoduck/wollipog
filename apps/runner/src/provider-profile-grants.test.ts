@@ -197,6 +197,31 @@ test("v225 control planes see each account's profile; older ones never see a pro
   assert.deepEqual(f.grants.project(f.accounts, definition)[0]?.profile, { id: PROFILE, access: "not_granted" });
 });
 
+test("an Add Account grant stays usable across a reconnect during the sign-in and is active once recorded", posixOnly, (t) => {
+  const f = fixture(t);
+  f.grants.synchronize(225, []);
+  f.grants.recordCreated(PROFILE, GRANT);
+  assert.deepEqual(f.grants.access().activeProfileIds, [PROFILE]);
+  // The new HOME is not a configured account yet, so only the in-flight creation names its profile.
+  f.grants.synchronize(225, [{ grantId: GRANT, status: "pending" }]);
+  assert.deepEqual(f.grants.access().activeProfileIds, [PROFILE], "the control plane still lists the pending grant");
+  const [work] = f.accounts as [RunnerProviderAccount];
+  writeProviderProfileMarker(work.directory, marker([[INSTANCE, GRANT]]));
+  work.profileId = PROFILE;
+  f.grants.settleCreated(PROFILE, GRANT, true);
+  assert.deepEqual(f.grants.accountProfile(work), { id: PROFILE, access: "granted" });
+
+  const revokedCreation = "7f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  f.grants.recordCreated(revokedCreation, OTHER_GRANT);
+  f.grants.synchronize(225, [{ grantId: GRANT, status: "active", profileId: PROFILE }]);
+  f.grants.settleCreated(revokedCreation, OTHER_GRANT, true);
+  assert.deepEqual(f.grants.access().activeProfileIds, [PROFILE], "a grant the control plane stopped listing is not revived");
+  f.grants.recordCreated(PROFILE, STALE_GRANT);
+  f.grants.settleCreated(PROFILE, STALE_GRANT, false);
+  f.grants.synchronize(225, [{ grantId: STALE_GRANT, status: "pending" }]);
+  assert.deepEqual(f.grants.access().activeProfileIds, [], "a discarded creation's grant is never used again");
+});
+
 test("skill reconciliation skips an account this control plane may not use", posixOnly, (t) => {
   const f = fixture(t);
   const [work] = f.accounts as [RunnerProviderAccount];
