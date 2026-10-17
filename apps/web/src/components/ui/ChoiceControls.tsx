@@ -1023,10 +1023,18 @@ function NoMatchRow({ noun, query }: { noun: string; query: string }) {
   );
 }
 
-function CreateOptionRow({ id, label, active, onSelect, onActive }: {
+/**
+ * What `aria-selected` means on a list's action rows, which are never its value: in the combobox's
+ * list it follows the highlight, as its options' does; in Select's it marks the chosen value, so an
+ * action row there is never selected, or a single-select list would announce two values.
+ */
+type ActionRowSelection = "active" | "value";
+
+function CreateOptionRow({ id, label, active, selection, onSelect, onActive }: {
   id: string;
   label: string;
   active: boolean;
+  selection: ActionRowSelection;
   onSelect: () => void;
   onActive?: () => void;
 }) {
@@ -1035,7 +1043,7 @@ function CreateOptionRow({ id, label, active, onSelect, onActive }: {
       type="button"
       role="option"
       id={id}
-      aria-selected={active}
+      aria-selected={selection === "active" && active}
       tabIndex={-1}
       className={`ui-select-option${active ? " is-active" : ""}`}
       onMouseDown={(event) => event.preventDefault()}
@@ -1049,10 +1057,11 @@ function CreateOptionRow({ id, label, active, onSelect, onActive }: {
 }
 
 /** The footer action and the separator above it, as the list's last row. */
-function FooterActionRow({ id, action, active, onSelect, onActive }: {
+function FooterActionRow({ id, action, active, selection, onSelect, onActive }: {
   id: string;
   action: PickerFooterAction;
   active: boolean;
+  selection: ActionRowSelection;
   onSelect: () => void;
   onActive: () => void;
 }) {
@@ -1063,7 +1072,7 @@ function FooterActionRow({ id, action, active, onSelect, onActive }: {
         type="button"
         role="option"
         id={id}
-        aria-selected={active}
+        aria-selected={selection === "active" && active}
         tabIndex={-1}
         className={`ui-select-option${active ? " is-active" : ""}`}
         onMouseDown={(event) => event.preventDefault()}
@@ -1195,6 +1204,7 @@ export function SearchableCombobox<T extends string>({
   };
   const openAll = () => {
     const selectedIndex = options.findIndex((option) => option.value === value);
+    revealActive.current = true;
     setSearching(false);
     setActive(Math.max(0, selectedIndex));
     setOpen(true);
@@ -1258,6 +1268,20 @@ export function SearchableCombobox<T extends string>({
   const activeDescendant = activeRow === "create" ? createId
     : activeRow === "footer" ? footerId
       : activeOption ? `${listboxId}-${activeRow}` : undefined;
+  /*
+   * DOM focus stays in the field, so nothing scrolls the list to the row `aria-activedescendant`
+   * names: End in a list that group labels and the footer push past its cap highlighted a footer
+   * below the fold. Keep the highlighted row in view as Select does — after a keyboard move or
+   * opening, not while the pointer moves it, and whenever the list is placed again.
+   */
+  const revealActive = useRef(false);
+  const reveal = () => {
+    if (open && activeDescendant) document.getElementById(activeDescendant)?.scrollIntoView?.({ block: "nearest" });
+  };
+  useLayoutEffect(() => {
+    if (revealActive.current) reveal();
+  }, [open, activeDescendant]);
+  useLayoutEffect(reveal, [listStyle]);
 
   return (
     <div
@@ -1301,6 +1325,7 @@ export function SearchableCombobox<T extends string>({
           const shown = selected?.label ?? "";
           const startsQuery = !openOnFocus && !open && !searching && shown !== "" && typed.startsWith(shown);
           setQuery(startsQuery ? typed.slice(shown.length) : typed);
+          revealActive.current = true;
           setSearching(true);
           setActive(0);
           setOpen(true);
@@ -1333,11 +1358,13 @@ export function SearchableCombobox<T extends string>({
               openAll();
               return;
             }
+            revealActive.current = true;
             setActive(stepPickerRow(rows, activeRow, event.key === "ArrowDown" ? 1 : -1));
             return;
           }
           if (open && (event.key === "Home" || event.key === "End")) {
             event.preventDefault();
+            revealActive.current = true;
             setActive(boundaryPickerRow(rows, event.key === "Home" ? "first" : "last", unavailable));
             return;
           }
@@ -1364,7 +1391,7 @@ export function SearchableCombobox<T extends string>({
           options={results}
           activeIndex={typeof activeRow === "number" ? activeRow : -1}
           getKey={(option) => option.value}
-          onActiveChange={setActive}
+          onActiveChange={(index) => { revealActive.current = false; setActive(index); }}
           isOptionDisabled={(option) => Boolean(option.disabled)}
           isOptionChosen={(option) => option.value === value}
           getGroup={(option) => option.group}
@@ -1382,8 +1409,9 @@ export function SearchableCombobox<T extends string>({
                 id={createId}
                 label={createOption.label}
                 active={activeRow === "create"}
+                selection="active"
                 onSelect={create}
-                onActive={() => setActive("create")}
+                onActive={() => { revealActive.current = false; setActive("create"); }}
               />
             )}
             {footerAction && (
@@ -1391,8 +1419,9 @@ export function SearchableCombobox<T extends string>({
                 id={footerId}
                 action={footerAction}
                 active={activeRow === "footer"}
+                selection="active"
                 onSelect={runFooter}
-                onActive={() => setActive("footer")}
+                onActive={() => { revealActive.current = false; setActive("footer"); }}
               />
             )}
           </>}
@@ -2051,6 +2080,7 @@ export function Select<T extends string>({
           id={createId}
           label={createOption.label}
           active={activeRow === "create"}
+          selection="value"
           onSelect={create}
           onActive={() => { revealActive.current = false; setActive("create"); }}
         />
@@ -2060,6 +2090,7 @@ export function Select<T extends string>({
           id={footerId}
           action={footerAction}
           active={activeRow === "footer"}
+          selection="value"
           onSelect={runFooter}
           onActive={() => { revealActive.current = false; setActive("footer"); }}
         />

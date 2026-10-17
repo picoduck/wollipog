@@ -250,6 +250,33 @@ test("Arrow Down from a combobox's last option reaches the footer action, and En
   }
 });
 
+test("the combobox scrolls a row the keyboard highlights into view, footer action included, but not a hovered one", () => {
+  const revealed: string[] = [];
+  const prototype = domWindow.HTMLElement.prototype as unknown as { scrollIntoView?: (options?: unknown) => void };
+  const original = prototype.scrollIntoView;
+  prototype.scrollIntoView = function (this: HTMLElement) { revealed.push(this.id); };
+  const { action } = footerProbe();
+  const view = mountCombobox({ footerAction: action });
+  try {
+    act(() => view.input.focus());
+    assert.equal(revealed.at(-1), view.options()[1]!.id, "opening reveals the highlighted value");
+    press(view.input, "End");
+    const footer = view.options().at(-1)!;
+    assert.equal(view.input.getAttribute("aria-activedescendant"), footer.id);
+    assert.equal(revealed.at(-1), footer.id, "End reveals the footer action it highlights");
+    press(view.input, "Home");
+    assert.equal(revealed.at(-1), view.options()[0]!.id);
+
+    const before = revealed.length;
+    act(() => { view.options()[2]!.dispatchEvent(new domWindow.MouseEvent("mousemove", { bubbles: true }) as never); });
+    assert.equal(view.input.getAttribute("aria-activedescendant"), view.options()[2]!.id, "the pointer moves the highlight");
+    assert.equal(revealed.length, before, "but the list does not scroll under the pointer");
+  } finally {
+    view.unmount();
+    prototype.scrollIntoView = original;
+  }
+});
+
 test("a click on a combobox's footer action closes the list and runs it once", () => {
   const { action, runs } = footerProbe();
   const view = mountCombobox({ footerAction: action });
@@ -373,6 +400,26 @@ for (const searchable of [false, true]) {
       assert.ok(runs[0]!.activeElement === view.trigger, "focus is back on the trigger when it runs");
       assert.equal(view.trigger.getAttribute("aria-expanded"), "false");
       assert.deepEqual(view.chosen, [], "it is never the chosen value");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test(`${name} still announces one selected value while its footer action is highlighted`, () => {
+    const { action } = footerProbe("New Project…");
+    const view = mountSelect(searchable, action);
+    try {
+      const keys = view.open();
+      press(keys, "End");
+      const footer = view.options().at(-1)!;
+      assert.equal(keys.getAttribute("aria-activedescendant"), footer.id, "the footer is highlighted");
+      assert.equal(footer.getAttribute("aria-selected"), "false", "an action is never a selected value");
+      assert.deepEqual(
+        view.options().filter((option) => option.getAttribute("aria-selected") === "true")
+          .map((option) => ariaReferencedText(option, "aria-labelledby")),
+        ["Alpha"],
+        "the single-select list keeps exactly one selected option, its value",
+      );
     } finally {
       view.unmount();
     }

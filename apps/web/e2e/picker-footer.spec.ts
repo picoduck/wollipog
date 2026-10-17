@@ -117,6 +117,39 @@ for (const theme of THEMES) {
     });
   });
 
+  test.describe(`in a short window (${theme})`, () => {
+    test.use({ viewport: { width: 1440, height: 220 } });
+
+    test("End in a combobox list that scrolls brings its footer action into view", async ({ page }) => {
+      await page.goto(`/picker-footer-e2e.html?theme=${theme}`);
+      const agent = page.getByRole("combobox", { name: "Agent" });
+      await agent.click();
+      const list = page.getByRole("listbox", { name: "Agent Options" });
+      expect((await listLayout(list)).scrolls, "the list is shorter than its rows here").toBe(true);
+      await page.keyboard.press("End");
+      const footer = list.getByRole("option", { name: "Set Up Agents in Connections" });
+      await expect(agent).toHaveAttribute("aria-activedescendant", (await footer.getAttribute("id"))!);
+      await expect.poll(() => list.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const row = element.querySelector('[id$="-footer"]')!.getBoundingClientRect();
+        return row.top >= box.top && row.bottom <= box.bottom;
+      })).toBe(true);
+    });
+  });
+
+  test.describe(`at 1440px, a Select's selection (${theme})`, () => {
+    test.use({ viewport: { width: 1440, height: 1000 } });
+
+    test("highlighting a Select's footer action leaves one selected option, its value", async ({ page }) => {
+      await page.goto(`/picker-footer-e2e.html?theme=${theme}`);
+      await page.getByRole("button", { name: "Location: Studio Mac" }).click();
+      const list = page.getByRole("listbox", { name: "Location" });
+      await expect(list).toBeFocused();
+      await page.keyboard.press("End");
+      await expect(list.locator('[role="option"][aria-selected="true"]')).toHaveText(["Studio MacOnline · ~/dev/wollipog"]);
+    });
+  });
+
   test.describe(`at 390px with a coarse pointer (${theme})`, () => {
     test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
 
