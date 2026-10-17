@@ -11642,7 +11642,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 /* The Keyboard Shortcuts reference (§7.1, §11.5). A filter, then the groups in two columns that
    ShortcutReference balances (one column at or below the tablet breakpoint, where it renders
    one). Each row is one line at the control height: the label left, the keycap right. */
-.shortcut-filter { width: 100%; }
+.shortcut-filter { width: 100%; flex-shrink: 0; }
 .shortcut-columns {
   display: grid;
   grid-auto-columns: minmax(0, 1fr);
