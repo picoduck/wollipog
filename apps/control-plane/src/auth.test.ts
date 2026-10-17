@@ -287,3 +287,16 @@ test("a session's own cross-model review routes are open to general sessions, no
   }
   assert.equal(isAgentControlApiRouteAllowed("DELETE", "/api/sessions/:id/cross-model-reviews/:jobId"), false);
 });
+
+test("a session's own review session routes are open to general sessions, not Orchestrators (#3368)", () => {
+  for (const [method, route] of [
+    ["POST", "/api/sessions/:id/review-sessions"],
+    ["GET", "/api/sessions/:id/review-sessions"],
+    ["GET", "/api/sessions/:id/review-sessions/:reviewSessionId"],
+    ["POST", "/api/sessions/:id/review-sessions/:reviewSessionId/cancel"],
+  ] as const) {
+    assert.equal(isAgentControlApiRouteAllowed(method, route), true, `${method} ${route}`);
+    assert.equal(isAgentControlApiRouteAllowed(method, route, "orchestrator"), false, `${method} ${route}`);
+  }
+  assert.equal(isAgentControlApiRouteAllowed("DELETE", "/api/sessions/:id/review-sessions/:reviewSessionId"), false);
+});

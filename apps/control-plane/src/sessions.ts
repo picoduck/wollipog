@@ -21,6 +21,10 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compat
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
+import {
+  REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
+  type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
+} from "@wollipog/protocol";
 import { SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewHarness, type SessionReviewJobArtifacts,
   type SessionReviewJobCommand, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
@@ -3824,6 +3828,8 @@ export class SessionsService {
         control: Extract<import("@wollipog/protocol").CampaignControl, { mode: "full_control" }>;
         issueScope: import("@wollipog/protocol").CampaignIssueScope;
       };
+      /** Internal only (#3368): this session is a review of the requester's pull request. */
+      review?: { policy: ReviewLaunchPolicy };
     },
   ): ServiceResult<SessionView> {
     // Attribution is supplied only by the authenticated route, never by the request payload.
@@ -3833,6 +3839,10 @@ export class SessionsService {
     const configInputError = sessionGuardrailConfigError(req.config);
     if (configInputError) return fail(configInputError, 400);
     const parentSessionId = creationContext?.parentSessionId;
+    if (parentSessionId) {
+      const reviewRefusal = this.reviewSessionRefusal(parentSessionId, "creates no sessions");
+      if (reviewRefusal) return fail(reviewRefusal, 409);
+    }
     const parsedOrchestratorOverrides = parseOrchestratorOverrides(req.orchestrator);
     if (req.orchestrator !== undefined && !parsedOrchestratorOverrides) {
       return fail("orchestrator overrides are invalid", 400);
@@ -4668,6 +4678,7 @@ export class SessionsService {
         ...(orchestratorPolicy.control ? { control: orchestratorPolicy.control } : {}),
       } } : {}),
       acpSessionContext,
+      ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
     };
     const command: DurableSessionCommand = snapshotCommand ?? {
       type: "start_session",
@@ -4755,6 +4766,14 @@ export class SessionsService {
       if (budgetRoot || humanLaunch) return fail((error as Error).message, 409);
       throw error;
     }
+    // The review row is what makes this session a review, so it exists before anything is sent.
+    if (creationContext?.review) {
+      const policy = creationContext.review.policy;
+      this.db.reviewSessions.record({
+        reviewSessionId: id, requesterSessionId: policy.requesterSessionId, runnerId: req.runnerId,
+        pullRequest: policy.pullRequest, headSha: policy.headSha, reviewer: policy.harness,
+      }, now);
+    }
     if (!humanLaunch && config.costBudgetUsd && config.costBudgetUsd > 0) {
       this.db.updateSessionCostBudget(id, config.costBudgetUsd, now);
     }
@@ -4810,6 +4829,7 @@ export class SessionsService {
         ...(orchestratorPolicy.control ? { control: orchestratorPolicy.control } : {}),
       } } : {}),
       acpSessionContext,
+      ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
     };
     if (capture) {
       if (command.type !== "start_session") throw new Error("Prepared media command is malformed.");
@@ -4866,6 +4886,8 @@ export class SessionsService {
     config?: SessionConfig,
     reviewedResultRevision?: string,
   ): ServiceResult<PromptAdmissionView> {
+    const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
+    if (reviewRefusal) return fail(reviewRefusal, 409);
     // Capture the exact fired row before admission. If another client snoozes again while the
     // prompt is being delivered, its revision or identity changes and the acknowledgment cannot
     // remove that newer intent.
@@ -4931,6 +4953,8 @@ export class SessionsService {
     config?: SessionConfig,
     holdReader?: HoldAdviceReader,
   ): Promise<ServiceResult<PromptAdmissionView>> {
+    const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
+    if (reviewRefusal) return fail(reviewRefusal, 409);
     const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config);
     return steered ??
       this.prompt(sessionId, text, images, slashCommand, config, undefined, "session", false, undefined, holdReader);
@@ -5044,6 +5068,8 @@ export class SessionsService {
     // its refusal or delivery report names only tools it can call (#1863).
     holdReader?: HoldAdviceReader,
   ): ServiceResult<PromptAdmissionView> {
+    const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
+    if (reviewRefusal) return fail(reviewRefusal, 409);
     const snapshotCommand = delivery?.commandSnapshots?.[0];
     if (delivery?.commandSnapshots &&
         (delivery.commandSnapshots.length !== 1 || snapshotCommand?.type !== "prompt_session" ||
@@ -5797,6 +5823,8 @@ export class SessionsService {
     config: SessionConfig,
     actor: GovernanceActor = { kind: "human", id: "local" },
   ): ServiceResult<SessionView> {
+    const reviewRefusal = this.reviewSessionRefusal(sessionId, "keeps its launch configuration");
+    if (reviewRefusal) return fail(reviewRefusal, 409);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before changing configuration", 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -5987,6 +6015,8 @@ export class SessionsService {
     sessionId: string,
     request: InvokeSessionCommandRequest,
   ): ServiceResult<SessionCommandInvocationView> {
+    const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs no commands");
+    if (reviewRefusal) return fail(reviewRefusal, 409);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish", 409);
     const allowed = new Set(["submissionId", "providerCommandId", "catalogRevision", "argumentText"]);
     if (!request || typeof request !== "object" || Array.isArray(request) ||
@@ -6255,6 +6285,8 @@ export class SessionsService {
 
   async steer(sessionId: string, request: SteerRequest): Promise<ServiceResult<SteeringAttemptView>> {
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
+    if (reviewRefusal) return fail(reviewRefusal, 409);
     this.db.compactSteeringAttempts(Date.now());
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -6966,6 +6998,8 @@ export class SessionsService {
    * restart preflight runs while the session is still archived, and the archive flag is cleared only
    * after the launch is handed to the runner, so a refusal leaves it archived and untouched. */
   unarchiveAndRestart(sessionId: string): ServiceResult<SessionView> {
+    const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs once and cannot be restarted");
+    if (reviewRefusal) return fail(reviewRefusal, 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     // No session state is evidence that THIS request was the one that restored the session: an
@@ -6981,6 +7015,8 @@ export class SessionsService {
   }
 
   restart(sessionId: string, options: { unarchive?: boolean } = {}): ServiceResult<SessionView> {
+    const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs once and cannot be restarted");
+    if (reviewRefusal) return fail(reviewRefusal, 409);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
     let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -8451,6 +8487,157 @@ export class SessionsService {
       }
       if (!this.hub.sendToRunner(runnerId, job.command)) return;
       if (job.cancelRequested) this.hub.sendToRunner(runnerId, { type: "cancel_session_review_job", jobId: job.command.jobId, nonce: job.command.nonce });
+    }
+  }
+
+  /** Why a review session (#3368) refuses an action, or null for any other session. A review
+   * session is created only by its requester's review request and runs its one review. */
+  reviewSessionRefusal(sessionId: string, action: string): string | null {
+    return this.db.reviewSessions.isReviewSession(sessionId) ? `A review session ${action}.` : null;
+  }
+
+  /**
+   * #3368: a session requests a review session of its own pull request at its pushed head. The
+   * reviewer is the other model family, launched by the session's runner outside the session's
+   * sandbox, read-only, against the runner's own checkout of that head. The runner proves the scope
+   * again against the session's worktree. A review session takes no session slot or child
+   * capacity; a requester has at most one active review.
+   */
+  requestReviewSession(callerSessionId: string, request: ReviewSessionRequest,
+    canAccess: (id: string) => boolean = () => true): ServiceResult<ReviewSessionView> {
+    const session = this.db.getSession(callerSessionId);
+    if (!session || !canAccess(session.id)) return fail("session not found", 404);
+    if (this.db.reviewSessions.isReviewSession(session.id)) return fail("A review session cannot request a review.", 409);
+    const pullRequest = request?.pullRequest;
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+        Object.keys(request).some((key) => !["pullRequest", "headSha", "brief"].includes(key)) ||
+        !pullRequest || typeof pullRequest !== "object" || Object.keys(pullRequest).some((key) => !["repository", "number"].includes(key)) ||
+        typeof pullRequest.repository !== "string" || !/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(pullRequest.repository) ||
+        !Number.isSafeInteger(pullRequest.number) || pullRequest.number <= 0) {
+      return fail("a review needs pullRequest {repository: \"owner/name\", number: a positive integer}", 400);
+    }
+    if (typeof request.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(request.headSha)) {
+      return fail("headSha must be the pull request's full 40-character lowercase head commit", 400);
+    }
+    if (typeof request.brief !== "string" || !request.brief.trim()) return fail("a review needs a non-empty brief", 400);
+    if (Buffer.byteLength(request.brief) > REVIEW_SESSION_BRIEF_LIMIT_BYTES) {
+      return fail(`the brief exceeds its ${REVIEW_SESSION_BRIEF_LIMIT_BYTES / 1024} KiB limit`, 400);
+    }
+    if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
+    // As with the #3330 bridge: a campaign allowance accounts for its reviews through the campaign's
+    // controlled review job until review sessions are charged to campaigns (#3371).
+    if (this.db.campaignBudgets.root(session.id) !== null) {
+      return fail("This session is part of a campaign with an allowance, so its cross-model reviews run through the campaign's controlled review job (run_campaign_review_job, dispatched by the campaign's Orchestrator), which accounts for their cost. Ask the Orchestrator for that review.", 409);
+    }
+    const runner = this.db.getRunner(session.runnerId);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "reviewSession")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "reviewSession", "review sessions"));
+    }
+    const harness = reviewerHarnessFor(session.driver);
+    if (!harness) return fail("this session's harness has no cross-model reviewer; reviews cover Claude Code and Codex sessions", 409);
+    const capability = runner?.runtime?.reviewSession;
+    const reviewer = capability?.reviewers.find((entry) => entry.harness === harness);
+    const label = harness === "codex" ? "Codex" : "Claude Code";
+    if (!reviewer) {
+      const why = (capability?.unavailable?.[harness] ?? capability?.unavailable?.tools ?? "").slice(0, 300);
+      return fail(`The ${label} reviewer is unavailable on this session's runner${why ? `: ${why}` : ""}.`, 409);
+    }
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("this session's runner is offline; request the review again once it reconnects", 409);
+    const active = this.db.reviewSessions.activeFor(session.id);
+    if (active) return fail(`This session already has an active review session (${active}); wait for it, or cancel it with cancel_review_session.`, 409);
+    // The requester's guardrails: a review spends from what remains of its cost budget.
+    let costBudgetUsd: number | undefined;
+    if (session.costBudgetUsd != null && session.costBudgetUsd > 0) {
+      costBudgetUsd = session.costBudgetUsd - (session.costUsd ?? 0);
+      if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
+    }
+    const policy: ReviewLaunchPolicy = {
+      requesterSessionId: session.id,
+      pullRequest: { repository: pullRequest.repository, number: pullRequest.number },
+      headSha: request.headSha,
+      harness,
+    };
+    const workspacePath = this.db.getAdHocWorkspacePath(session.id) ?? undefined;
+    const created = this.createSession({
+      runnerId: session.runnerId,
+      workspaceId: session.workspaceId ?? "",
+      ...(workspacePath ? { workspacePath } : {}),
+      agentId: reviewer.agentId,
+      title: `${label} Review of ${pullRequest.repository}#${pullRequest.number}`,
+      prompt: request.brief,
+      useWorktree: false,
+      config: {
+        permissionMode: harness === "claude-code" ? "dontAsk" : "read-only",
+        effort: "high",
+        ...(costBudgetUsd !== undefined ? { costBudgetUsd } : {}),
+      },
+    }, undefined, this.db.sessionScope(session.id) ?? undefined, true, false, true, { review: { policy } });
+    if (!created.ok || !created.data) return failAs(created, "the review session could not be created");
+    this.hub.sessionChangedById(session.id);
+    this.log.info(JSON.stringify({ event: "review_session_requested", sessionId: session.id, reviewSessionId: created.data.id,
+      reviewer: harness, repository: pullRequest.repository, number: pullRequest.number, headSha: request.headSha }));
+    return ok(this.db.reviewSessions.view(created.data.id)!, 201);
+  }
+
+  reviewSessionView(requesterSessionId: string, reviewSessionId: string): ServiceResult<ReviewSessionView> {
+    const view = typeof reviewSessionId === "string" ? this.db.reviewSessions.view(reviewSessionId) : null;
+    return view && view.requesterSessionId === requesterSessionId ? ok(view) : fail("review session not found", 404);
+  }
+
+  reviewSessionsPage(requesterSessionId: string, query: { limit?: number; afterReviewSessionId?: string }): ServiceResult<ReviewSessionsPage> {
+    if (query.limit !== undefined && (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 100) ||
+        query.afterReviewSessionId !== undefined && typeof query.afterReviewSessionId !== "string") {
+      return fail("invalid review session page: limit is 1-100 and afterReviewSessionId a review session id", 400);
+    }
+    const page = this.db.reviewSessions.page(requesterSessionId, query.afterReviewSessionId, query.limit ?? 25);
+    return page ? ok(page) : fail("review session not found", 404);
+  }
+
+  /** Cancel an unfinished review by stopping its session; the runner reports the cancellation. */
+  cancelReviewSession(requesterSessionId: string, reviewSessionId: string): ServiceResult<ReviewSessionView> {
+    const view = this.reviewSessionView(requesterSessionId, reviewSessionId);
+    if (!view.ok || !view.data) return view;
+    if (view.data.terminal) return ok(view.data);
+    this.db.reviewSessions.requestCancel(reviewSessionId, Date.now());
+    const stopped = this.stop(reviewSessionId);
+    // A review whose session is already gone cannot report: it ends here.
+    if (!stopped.ok && this.db.reviewSessions.abandon(reviewSessionId, "the review was cancelled", Date.now())) {
+      this.log.info(JSON.stringify({ event: "review_session_abandoned", reviewSessionId, reason: "cancelled without a session" }));
+    }
+    this.hub.sessionChangedById(requesterSessionId);
+    return ok(this.db.reviewSessions.view(reviewSessionId)!, 202);
+  }
+
+  onReviewSessionUpdate(runnerId: string, update: ReviewSessionUpdate): void {
+    if (!update || typeof update.sessionId !== "string" || !this.db.reviewSessions.accept(runnerId, update, Date.now())) return;
+    const view = this.db.reviewSessions.view(update.sessionId)!;
+    this.hub.sessionChangedById(view.requesterSessionId);
+    this.hub.sessionChangedById(view.reviewSessionId);
+    this.log.info(JSON.stringify({ event: "review_session_update", reviewSessionId: view.reviewSessionId,
+      requesterSessionId: view.requesterSessionId, state: view.state, reviewer: view.reviewer, reason: view.reason,
+      outputTruncated: view.outputTruncated }));
+  }
+
+  /** A review session's own status moves its review: launched is running, and a session that ends
+   * without its runner's report has failed. The runner reports before it stops the session. */
+  private reconcileReviewSessionStatus(sessionId: string, status: SessionStatus): void {
+    if (!this.db.reviewSessions.isReviewSession(sessionId)) return;
+    const now = Date.now();
+    const changed = status === "starting" || status === "running"
+      ? this.db.reviewSessions.markRunning(sessionId, now)
+      : isTerminal(status) && this.db.reviewSessions.abandon(sessionId, "the review ended without a result", now);
+    if (!changed) return;
+    const view = this.db.reviewSessions.view(sessionId)!;
+    this.hub.sessionChangedById(view.requesterSessionId);
+  }
+
+  /** On registration: a runner without review sessions can no longer report its reviews. */
+  recoverReviewSessions(runnerId: string): void {
+    if (runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "reviewSession")) return;
+    for (const reviewSessionId of this.db.reviewSessions.unfinished(runnerId)) {
+      if (!this.db.reviewSessions.abandon(reviewSessionId, "the review session's runner no longer supports review sessions", Date.now())) continue;
+      const view = this.db.reviewSessions.view(reviewSessionId)!;
+      this.hub.sessionChangedById(view.requesterSessionId);
     }
   }
 
@@ -12148,6 +12335,8 @@ export class SessionsService {
    * addressable by its own session id. Replacing a live child is refused; stop it first.
    */
   createSideChat(parentSessionId: string, replaceEnded = false): ServiceResult<SideChatView> {
+    const reviewRefusal = this.reviewSessionRefusal(parentSessionId, "has no side chats");
+    if (reviewRefusal) return fail(reviewRefusal, 409);
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
     if (this.db.sideChatParent(parentSessionId)) return fail("nested side chats are not supported", 409);
@@ -12428,6 +12617,10 @@ export class SessionsService {
     creationContext?: { parentSessionId?: string },
   ): ServiceResult<CreateWorkflowRunResult> {
     const parentSessionId = creationContext?.parentSessionId;
+    if (parentSessionId) {
+      const reviewRefusal = this.reviewSessionRefusal(parentSessionId, "creates no sessions");
+      if (reviewRefusal) return fail(reviewRefusal, 409);
+    }
     if (parentSessionId && delivery) return fail("agent-created workflow runs cannot use automation delivery snapshots", 409);
     if (!req || typeof req !== "object" || Array.isArray(req)) return fail("workflow run request is malformed", 400);
     const allowed = new Set([
@@ -13576,6 +13769,10 @@ export class SessionsService {
 
   createRun(req: CreateRunRequest, creationContext?: { parentSessionId?: string }): ServiceResult<{ run: RunView; sessions: SessionView[] }> {
     const parentSessionId = creationContext?.parentSessionId;
+    if (parentSessionId) {
+      const reviewRefusal = this.reviewSessionRefusal(parentSessionId, "creates no sessions");
+      if (reviewRefusal) return fail(reviewRefusal, 409);
+    }
     if (!req.agentIds?.length) return fail("at least one agent is required");
     if (req.agentIds.length > MAX_UI_SESSION_SUBSCRIPTIONS) {
       return fail(`at most ${MAX_UI_SESSION_SUBSCRIPTIONS} agents are allowed in one run`);
@@ -13844,6 +14041,7 @@ export class SessionsService {
     // already have one. Existing control-plane cards remain sticky across the trailing idle.
     if (status === "idle") this.gateOnPolicy(sessionId, Date.now());
     this.reconcileWorkflowSessionStatus(sessionId, status, Date.now());
+    this.reconcileReviewSessionStatus(sessionId, status);
     if (detail && status === "failed") {
       const ev = this.db.appendEvent(sessionId, { kind: "error", message: detail }, Date.now());
       this.hub.sessionEvent(ev);
