@@ -133,10 +133,22 @@ test("agent session discovery is a progressive modal instead of an inline runner
   assert.doesNotMatch(view, /function ExternalSessions/);
   assert.doesNotMatch(view, /<ul className="ext-session-list">/);
   assert.match(discovery, /title="Find Agent Sessions"/);
-  assert.match(discovery, /<legend>Select an Agent<\/legend>/);
+  assert.match(discovery, /<ChoiceRows\s+label="Agent"/);
   assert.match(discovery, /api\.listExternalSessions\(runner\.runnerId, selectedAgent\.id\)/);
   assert.match(discovery, /response\.sessions\.filter\(\(session\) => sessionMatchesAgent/);
   assert.match(discovery, /driver === "codex-app-server"/);
+});
+
+test("Find Agent Sessions sizes to its content and sets no uppercase text (#2994)", () => {
+  const rules = [...css.matchAll(/([^{}]*\.agent-session-[^{}]*)\{([^}]*)\}/g)];
+  assert.ok(rules.length > 0);
+  for (const [, selector, body] of rules) {
+    for (const [, px] of body!.matchAll(/min-height:\s*(\d+(?:\.\d+)?)px/g)) {
+      assert.ok(Number(px) <= 44, `${selector!.trim()} holds a ${px}px minimum height`);
+    }
+    assert.doesNotMatch(body!, /text-transform:\s*uppercase/, selector!.trim());
+  }
+  assert.doesNotMatch(discovery, /className="(?:[^"]*\s)?(?:ext-|atag)/, "results are §5.2 rows, not chips");
 });
 
 test("a Codex exec agent reads as no longer supported, never as a fallback (#3224, #3259)", () => {

@@ -11,7 +11,6 @@ import {
   type RunnerView,
   type RunnerRuntimeInfo,
 } from "@wollipog/protocol";
-import { driverKindLabel } from "./agent-presentation.js";
 import { formatHarnessLaunchCommand } from "./harness-command.js";
 
 export function machineSettingsMutationError(cause: unknown): string {
@@ -130,20 +129,26 @@ export function outdatedBoxHint(): string {
   return "Update this connection to enable the latest features.";
 }
 
-/** Button label + tooltip for adopting an external session. `resumable === false` means the runner
- * found no agent for the descriptor's driver+context, so the adopt lands as read-only history;
- * absent (pre-v15 runner) keeps the optimistic default. */
+/** The family a found session belongs to, as the read-only reason names it ("No Codex agent…"). */
+function sessionAgentFamily(driver: ExternalSessionDescriptor["driver"]): string {
+  if (driver === "claude-code") return "Claude Code";
+  if (driver === "codex" || driver === "codex-app-server") return "Codex";
+  if (driver === "pi") return "Pi";
+  return "ACP";
+}
+
+/** A found session's one action. `resumable === false` means the runner found no agent for the
+ * descriptor's driver and context, so it lands as read-only history, and `reason` says so as the
+ * row's visible line; absent (a pre-v15 runner) keeps the optimistic default. */
 export function adoptAction(d: Pick<ExternalSessionDescriptor, "driver" | "context" | "resumable">): {
   label: string;
-  title?: string;
+  reason?: string;
 } {
-  if (d.resumable !== false) return { label: "Adopt & Continue" };
-  const ctx = d.context.kind === "wsl" ? `WSL: ${d.context.distro}` : "native";
+  if (d.resumable !== false) return { label: "Continue Here" };
+  const where = d.context.kind === "wsl" ? `in WSL (${d.context.distro}) on this machine` : "on this machine";
   return {
-    label: "Adopt as Read-Only",
-    title:
-      `No ${driverKindLabel(d.driver)} agent exists on this box for its context (${ctx}), so the session ` +
-      `can't be continued — adopting imports the transcript as read-only history.`,
+    label: "Import as Read-Only",
+    reason: `No ${sessionAgentFamily(d.driver)} agent ${where} can continue it, so it opens as read-only history.`,
   };
 }
 

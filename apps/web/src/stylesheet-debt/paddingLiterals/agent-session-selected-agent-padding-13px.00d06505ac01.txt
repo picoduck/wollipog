@@ -1,1 +1,0 @@
-|.agent-session-selected-agent|padding|13px

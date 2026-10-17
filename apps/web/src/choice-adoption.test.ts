@@ -89,7 +89,6 @@ type Pattern = keyof typeof PATTERNS;
  * one in `SessionPanelToggles.tsx` fails here instead of hiding behind a whole-file exemption.
  */
 const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
-  ["components/AgentSessionDiscoveryDialog.tsx", "agent-pick", 1],
   ["components/AutomationsView.tsx", "native-select", 12],
   ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
@@ -125,7 +124,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
      It is gone: Appearance's three settings are SegmentedRow and SelectRow now, and both own their
      semantics inside the primitives file. The entry came off with the control, which is the
      ratchet working rather than an exemption being granted. */
-  ["components/AgentSessionDiscoveryDialog.tsx", "raw-radiogroup", 1],
   /* ReviewPanel's findings selector and GitDiffViewer's line selectors became `Checkbox` with
      #2044, which took both files' last raw-choice entries off. The question card's options became
      ChoiceRows with #2196, which took SessionApproval's raw radios and `.question-option` off. */

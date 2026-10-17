@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AgentContext,
   type AgentDefinition,
@@ -8,16 +7,16 @@ import {
   type RunnerView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import {
-  agentDriverDescription,
-  agentDriverLabel,
-  driverKindLabel,
-} from "../agent-presentation.js";
+import { agentDriverLabel } from "../agent-presentation.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { adoptAction, externalSessionKey } from "../runners.js";
-import { Modal, Spinner } from "./common.js";
+import { Modal } from "./common.js";
 import { RefreshIcon, SearchIcon } from "./Icons.js";
-import { agentOptions } from "./agent-options.js";
+import { Notice } from "./Notice.js";
+import { State } from "./State.js";
+import { agentOptions, type AgentOption } from "./agent-options.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { ChoiceRows, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 
 type DiscoveryState = "selecting" | "loading" | "loaded" | "error";
 
@@ -38,24 +37,17 @@ export function agentSupportsSessionDiscovery(agent: AgentDefinition): boolean {
   return driver === "acp" && agent.acp?.sessionList !== false;
 }
 
+/** Why the runner cannot scan this agent yet, as the visible second line of its row (§8.4): the
+ * runner predates the agent's session discovery. Null when it can. */
 export function agentSessionDiscoveryUnavailableReason(
   agent: AgentDefinition,
   protocolVersion: number | null | undefined,
 ): string | null {
-  if (agent.driver === "pi" && !runnerSupportsProtocol(protocolVersion, "piExternalSessions")) {
-    return runnerCapabilityRequirement(
-      protocolVersion,
-      "piExternalSessions",
-      "Pi session discovery",
-    );
-  }
-  if (agent.driver !== "codex-app-server"
-    || runnerSupportsProtocol(protocolVersion, "codexAppServerExternalSessions")) return null;
-  return runnerCapabilityRequirement(
-    protocolVersion,
-    "codexAppServerExternalSessions",
-    "Codex app server session discovery",
-  );
+  const unsupported = agent.driver === "pi"
+    ? !runnerSupportsProtocol(protocolVersion, "piExternalSessions")
+    : agent.driver === "codex-app-server"
+      && !runnerSupportsProtocol(protocolVersion, "codexAppServerExternalSessions");
+  return unsupported ? "Update this machine's runner to find this agent's sessions." : null;
 }
 
 export function sessionMatchesAgent(session: ExternalSessionDescriptor, agent: AgentDefinition): boolean {
@@ -64,11 +56,33 @@ export function sessionMatchesAgent(session: ExternalSessionDescriptor, agent: A
   return !session.agentId && session.driver === driver && sameContext(agent.context, session.context);
 }
 
+/** The agent's integration, where it runs and its version: one meta line (§11.3). The integration
+ * is left out when the agent's name already says it ("Pi RPC" over "Pi RPC"). */
+function agentMetaLine(option: AgentOption): string {
+  const integration = titleCaseLabel(agentDriverLabel(option.agent));
+  return [
+    option.label.includes(integration) ? null : integration,
+    contextLabel(option.agent.context),
+    option.agent.version ? `v${option.agent.version}` : null,
+  ].filter(Boolean).join(" · ");
+}
+
+/** The agent a fresh dialog selects: the one it was opened for, else the only one it can scan. */
+function initialSelection(scannable: readonly AgentDefinition[], initialAgentId: string | undefined): string {
+  if (initialAgentId && scannable.some((agent) => agent.id === initialAgentId)) return initialAgentId;
+  return scannable.length === 1 ? scannable[0]!.id : "";
+}
+
+const SKELETON_ROWS = 3;
+
 export function AgentSessionDiscoveryDialog({
   runner,
+  initialAgentId,
   onClose,
 }: {
   runner: RunnerView;
+  /** Preselects this agent, as Agent Details' Find Sessions… does, when it can be scanned. */
+  initialAgentId?: string;
   onClose: () => void;
 }) {
   const api = useApi();
@@ -77,20 +91,32 @@ export function AgentSessionDiscoveryDialog({
       .filter((option) => agentSupportsSessionDiscovery(option.agent)),
     [runner.agents],
   );
-  const agents = useMemo(() => agentEntries.map((option) => option.agent), [agentEntries]);
-  const [selectedAgentId, setSelectedAgentId] = useState("");
+  const unavailableReasons = useMemo(
+    () => new Map(agentEntries.map(({ agent }) => [
+      agent.id,
+      agentSessionDiscoveryUnavailableReason(agent, runner.protocolVersion),
+    ])),
+    [agentEntries, runner.protocolVersion],
+  );
+  const scannable = useMemo(
+    () => agentEntries.map((option) => option.agent).filter((agent) => !unavailableReasons.get(agent.id)),
+    [agentEntries, unavailableReasons],
+  );
+  const [selectedAgentId, setSelectedAgentId] = useState(() => initialSelection(scannable, initialAgentId));
   const [state, setState] = useState<DiscoveryState>("selecting");
   const [sessions, setSessions] = useState<ExternalSessionDescriptor[]>([]);
   const [error, setError] = useState("");
+  const [adoptError, setAdoptError] = useState("");
   const [adopting, setAdopting] = useState<Record<string, boolean>>({});
+  // Rescan from the results header keeps that button (busy) through the scan, so focus stays on it.
+  const [rescanningInPlace, setRescanningInPlace] = useState(false);
   const requestGeneration = useRef(0);
   const selectionStepRef = useRef<HTMLDivElement>(null);
   const resultsStepRef = useRef<HTMLDivElement>(null);
-  const rescanButtonRef = useRef<HTMLButtonElement>(null);
-  const restoreRescanFocusRef = useRef(false);
   const previousStepRef = useRef<"selecting" | "results">("selecting");
-  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? null;
+  const selectedAgent = scannable.find((agent) => agent.id === selectedAgentId) ?? null;
   const selectedAgentLabel = agentEntries.find((option) => option.agent.id === selectedAgentId)?.label ?? "";
+  const machineName = runner.displayName || runner.hostname || runner.runnerId;
 
   useEffect(() => () => {
     requestGeneration.current += 1;
@@ -104,24 +130,16 @@ export function AgentSessionDiscoveryDialog({
     previousStepRef.current = nextStep;
   }, [state]);
 
-  useEffect(() => {
-    if (state === "loaded" && restoreRescanFocusRef.current) {
-      restoreRescanFocusRef.current = false;
-      rescanButtonRef.current?.focus();
-    } else if (state === "error" && restoreRescanFocusRef.current) {
-      restoreRescanFocusRef.current = false;
-      resultsStepRef.current?.focus();
-    }
-  }, [state]);
-
-  const load = async () => {
+  const load = async ({ inPlace = false }: { inPlace?: boolean } = {}) => {
     if (!selectedAgent) return;
-    restoreRescanFocusRef.current = state === "loaded"
-      && document.activeElement === rescanButtonRef.current;
     const generation = ++requestGeneration.current;
-    if (state === "error") resultsStepRef.current?.focus();
+    // A recovery action (Try Again, the no-results Rescan) unmounts with its state, so focus moves
+    // to the results step rather than falling to the document.
+    if (!inPlace && state !== "selecting") resultsStepRef.current?.focus();
+    setRescanningInPlace(inPlace);
     setState("loading");
     setError("");
+    setAdoptError("");
     try {
       const response = await api.listExternalSessions(runner.runnerId, selectedAgent.id);
       if (generation !== requestGeneration.current) return;
@@ -131,15 +149,18 @@ export function AgentSessionDiscoveryDialog({
       if (generation !== requestGeneration.current) return;
       setError((caught as Error).message);
       setState("error");
+    } finally {
+      if (generation === requestGeneration.current) setRescanningInPlace(false);
     }
   };
 
-  const chooseAnotherAgent = () => {
+  const changeAgent = () => {
     requestGeneration.current += 1;
-    restoreRescanFocusRef.current = false;
+    setRescanningInPlace(false);
     setState("selecting");
     setSessions([]);
     setError("");
+    setAdoptError("");
     setAdopting({});
   };
 
@@ -147,14 +168,14 @@ export function AgentSessionDiscoveryDialog({
     const generation = requestGeneration.current;
     const key = externalSessionKey(descriptor);
     setAdopting((current) => ({ ...current, [key]: true }));
-    setError("");
+    setAdoptError("");
     try {
       await api.adoptSession(runner.runnerId, descriptor, true);
       if (generation !== requestGeneration.current) return;
       setSessions((current) => current.filter((session) => externalSessionKey(session) !== key));
     } catch (caught) {
       if (generation !== requestGeneration.current) return;
-      setError((caught as Error).message);
+      setAdoptError((caught as Error).message);
     } finally {
       if (generation === requestGeneration.current) {
         setAdopting((current) => ({ ...current, [key]: false }));
@@ -162,7 +183,19 @@ export function AgentSessionDiscoveryDialog({
     }
   };
 
+  const agentChoices: ChoiceRowOption<string>[] = agentEntries.map((option) => {
+    const reason = unavailableReasons.get(option.agent.id) ?? null;
+    return {
+      value: option.agent.id,
+      title: option.label,
+      description: agentMetaLine(option),
+      inputData: { "data-agent-id": option.agent.id },
+      ...(reason ? { disabled: true, disabledReason: reason } : {}),
+    };
+  });
+
   const selecting = state === "selecting";
+  const showHeaderRescan = (state === "loaded" && sessions.length > 0) || (state === "loading" && rescanningInPlace);
   return (
     <Modal
       title="Find Agent Sessions"
@@ -171,11 +204,15 @@ export function AgentSessionDiscoveryDialog({
       describedBy={selecting ? "agent-session-dialog-description" : undefined}
       footer={selecting ? (
         <>
+          {!selectedAgent && scannable.length > 0 && (
+            <p className="agent-session-find-reason" id="agent-session-find-reason">Choose an agent to scan.</p>
+          )}
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button
             type="button"
             className="btn primary"
             disabled={!selectedAgent}
+            aria-describedby={!selectedAgent && scannable.length > 0 ? "agent-session-find-reason" : undefined}
             onClick={() => void load()}
           >
             <SearchIcon />
@@ -183,7 +220,7 @@ export function AgentSessionDiscoveryDialog({
           </button>
         </>
       ) : (
-        <button type="button" className="btn" onClick={onClose}>Close</button>
+        <button type="button" className="btn" onClick={onClose}>Done</button>
       )}
     >
       {selecting ? (
@@ -194,49 +231,19 @@ export function AgentSessionDiscoveryDialog({
           aria-label="Agent Selection"
         >
           <p id="agent-session-dialog-description" className="agent-session-intro">
-            Select the agent that created the sessions. Wollipog will scan only that agent and execution context.
+            Choose the agent that started the sessions. Wollipog scans only that agent, where it runs.
           </p>
-          {agents.length === 0 ? (
-            <div className="agent-session-empty" role="status">
-              No available agents on this machine support session discovery.
-            </div>
+          {agentEntries.length === 0 ? (
+            <State compact title="No Agents Can List Sessions">
+              No agent on {machineName} can list the sessions it started.
+            </State>
           ) : (
-            <fieldset className="agent-session-agent-picker">
-              <legend>Select an Agent</legend>
-              <div className="agent-session-agent-list">
-                {agentEntries.map(({ agent, label }) => {
-                  const unavailableReason = agentSessionDiscoveryUnavailableReason(agent, runner.protocolVersion);
-                  return (
-                    <label
-                      key={agent.id}
-                      className={`agent-session-agent-option ${selectedAgentId === agent.id ? "selected" : ""} ${unavailableReason ? "unavailable" : ""}`}
-                    >
-                      <input
-                        type="radio"
-                        name="agent-session-agent"
-                        value={agent.id}
-                        checked={selectedAgentId === agent.id}
-                        disabled={!!unavailableReason}
-                        onChange={() => setSelectedAgentId(agent.id)}
-                      />
-                      <span className="agent-session-agent-copy">
-                        <span className="agent-session-agent-name">
-                          {label}
-                          {unavailableReason && <span className="agent-session-update-badge">Runner Update Required</span>}
-                        </span>
-                        <span className="agent-session-agent-meta">
-                          {titleCaseLabel(agentDriverLabel(agent))} · {contextLabel(agent.context)}
-                          {agent.version ? ` · v${agent.version}` : ""}
-                        </span>
-                        <span className="agent-session-agent-description">
-                          {unavailableReason ?? agentDriverDescription(agent)}
-                        </span>
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            </fieldset>
+            <ChoiceRows
+              label="Agent"
+              options={agentChoices}
+              value={selectedAgent ? selectedAgentId : null}
+              onChange={setSelectedAgentId}
+            />
           )}
         </div>
       ) : (
@@ -246,105 +253,116 @@ export function AgentSessionDiscoveryDialog({
           tabIndex={-1}
           aria-label="Agent Session Discovery Results"
         >
-          <div className="agent-session-selected-agent">
-            <div>
-              <span className="agent-session-selection-label">Selected Agent</span>
-              <strong>{selectedAgentLabel}</strong>
-              <span>
-                {selectedAgent
-                  ? `${titleCaseLabel(agentDriverLabel(selectedAgent))} · ${contextLabel(selectedAgent.context)}`
-                  : ""}
-              </span>
-            </div>
-            <button type="button" className="btn ghost sm" onClick={chooseAnotherAgent}>
-              Choose Another Agent
-            </button>
+          <div className="agent-session-results-head">
+            <strong className="agent-session-results-agent">{selectedAgentLabel}</strong>
+            <button type="button" className="btn sm ghost" onClick={changeAgent}>Change Agent</button>
+            {showHeaderRescan && (
+              <BusyButton
+                className="btn sm ghost"
+                busy={state === "loading"}
+                progress={`Scanning ${selectedAgentLabel} sessions on ${machineName}…`}
+                icon={<RefreshIcon />}
+                onClick={() => void load({ inPlace: true })}
+              >
+                Rescan
+              </BusyButton>
+            )}
           </div>
 
-          {(state === "loading" || state === "loaded") && (
-            <div className="agent-session-results-head">
-              <div>
-                <strong>Sessions</strong>
-                <span>{state === "loading" ? "Scanning…" : `${sessions.length} Found`}</span>
-              </div>
-              <button
-                ref={rescanButtonRef}
-                type="button"
-                className="btn ghost sm"
-                disabled={state === "loading"}
-                onClick={() => void load()}
-              >
-                <RefreshIcon />
-                <span>{state === "loading" ? "Scanning…" : "Rescan"}</span>
-              </button>
-            </div>
-          )}
-
           {state === "loading" && (
-            <div className="agent-session-loading" role="status" aria-live="polite">
-              <Spinner />
-              <div>
-                <strong>Scanning {selectedAgentLabel}</strong>
-                <span>This can take a few seconds while the runner checks local session history.</span>
+            <div className="agent-session-scanning" role="status" aria-live="polite">
+              <p className="agent-session-scanning-text">
+                Scanning {selectedAgentLabel} sessions on {machineName}…
+              </p>
+              <div className="surface" aria-hidden="true">
+                {Array.from({ length: SKELETON_ROWS }, (_, index) => (
+                  <div className="row row-2 agent-session-result-skeleton" key={index}>
+                    <span className="row-body">
+                      <span className="skeleton-bar title" />
+                      <span className="skeleton-bar" />
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           )}
 
           {state === "error" && (
-            <div className="agent-session-error" role="alert">
-              <strong>Sessions Could Not Be Loaded</strong>
-              <span>{error}</span>
-              <button type="button" className="btn sm" onClick={() => void load()}>
-                <RefreshIcon />
-                <span>Try Again</span>
-              </button>
-            </div>
+            <State
+              variant="error"
+              compact
+              title="Couldn't Load Sessions"
+              actions={(
+                <button type="button" className="btn sm" onClick={() => void load()}>
+                  <RefreshIcon />
+                  <span>Try Again</span>
+                </button>
+              )}
+              details={<code className="agent-session-error-detail">{error}</code>}
+            >
+              The runner on {machineName} couldn't list {selectedAgentLabel} sessions.
+            </State>
           )}
 
-          {state === "loaded" && (
-            <>
-              {sessions.length === 0 ? (
-                <div className="agent-session-empty" role="status">
-                  No unmanaged sessions were found for this agent.
-                </div>
-              ) : (
-                <ul className="ext-session-list agent-session-results">
-                  {sessions.map((descriptor) => {
-                    const action = adoptAction(descriptor);
-                    const key = externalSessionKey(descriptor);
-                    return (
-                      <li key={key} className="ext-session">
-                        <span className="ext-title" title={descriptor.title || undefined}>
-                          {descriptor.title || "(Untitled Session)"}
-                        </span>
-                        <div className="ext-badges">
-                          <span className={`atag driver-${descriptor.driver}`}>
-                            {titleCaseLabel(driverKindLabel(descriptor.driver))}
-                          </span>
-                          <span className="atag ctx">{contextLabel(descriptor.context)}</span>
-                        </div>
-                        <span className="ws-path" title={descriptor.cwd}>{descriptor.cwd}</span>
-                        <div className="ext-foot">
-                          <span className="muted">
-                            {relativeTime(descriptor.updatedAt)} · {descriptor.messageCount} Messages
-                          </span>
-                          <button
-                            type="button"
-                            className="btn sm"
-                            onClick={() => void adopt(descriptor)}
-                            disabled={adopting[key]}
-                            title={action.title}
-                          >
-                            {adopting[key] ? "Adopting…" : action.label}
-                          </button>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
+          {state === "loaded" && sessions.length === 0 && (
+            <State
+              variant="no-results"
+              compact
+              title="No Sessions Found"
+              actions={(
+                <button type="button" className="btn sm" onClick={() => void load()}>
+                  <RefreshIcon />
+                  <span>Rescan</span>
+                </button>
               )}
-              {error && <div className="agent-session-inline-error" role="alert">{error}</div>}
-            </>
+            >
+              {selectedAgentLabel} has no sessions on this machine that Wollipog isn't already showing.
+            </State>
+          )}
+
+          {state === "loaded" && sessions.length > 0 && (
+            <ul className="surface agent-session-results" aria-label={`${selectedAgentLabel} Sessions`}>
+              {sessions.map((descriptor) => {
+                const action = adoptAction(descriptor);
+                const key = externalSessionKey(descriptor);
+                return (
+                  <li key={key} className={`row row-2${action.reason ? " read-only" : ""}`}>
+                    <span className="row-body">
+                      <span className="row-line">
+                        {descriptor.title ? (
+                          <span className="row-title" title={descriptor.title}>{descriptor.title}</span>
+                        ) : (
+                          <span className="row-title agent-session-untitled">Untitled Session</span>
+                        )}
+                      </span>
+                      <span className="row-line">
+                        <span className="row-sub agent-session-path" title={descriptor.cwd}>
+                          <bdi>{descriptor.cwd}</bdi>
+                        </span>
+                        <span className="row-trail">
+                          {relativeTime(descriptor.updatedAt)} · {descriptor.messageCount} Messages
+                        </span>
+                      </span>
+                      {action.reason && <span className="row-sub agent-session-reason">{action.reason}</span>}
+                    </span>
+                    <BusyButton
+                      className="btn sm"
+                      busy={adopting[key] === true}
+                      progress={action.reason ? "Importing the session…" : "Continuing the session here…"}
+                      onClick={() => void adopt(descriptor)}
+                    >
+                      {action.label}
+                    </BusyButton>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          {adoptError && (
+            <Notice tone="danger" role="alert" title="Couldn't Open Session" details={<code>{adoptError}</code>}>
+              The session stays where it is. Try again, or rescan if it changed.
+            </Notice>
           )}
         </div>
       )}

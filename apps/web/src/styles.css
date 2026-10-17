@@ -308,8 +308,6 @@
   --agent-row-pad-x: 12px;
   --finding-row-pad-y: 12px;
   --finding-row-pad-x: 11px;
-  --ext-row-pad-y: 11px;
-  --ext-row-pad-x: 12px;
   --runner-card-pad-y: 19px;
   --runner-card-pad-x: 21px;
   --ws-row-pad-y: 10px;
@@ -404,8 +402,6 @@
   --agent-row-pad-x: 10px;
   --finding-row-pad-y: 9px;
   --finding-row-pad-x: 9px;
-  --ext-row-pad-y: 8px;
-  --ext-row-pad-x: 10px;
   --runner-card-pad-y: 16px;
   --runner-card-pad-x: 18px;
   --ws-row-pad-y: 7px;
@@ -7299,7 +7295,7 @@ body.shell-dock-dragging * {
    (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." Open
    Pull Request (#2847) says why it can't open the request: offline, a Viewer's refusal, or a partial
    stage ("Commit the staged changes first."). */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason) {
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -7310,7 +7306,7 @@ body.shell-dock-dragging * {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > .snooze-blocked-reason { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -14356,285 +14352,88 @@ button.review-finding-location {
 .agent-session-intro {
   margin: 0;
   color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.55;
+  font: var(--type-body);
 }
+/* Find Agent Sessions (#2994) is as tall as its content (§7.1): no step, state or option holds a
+   minimum height. */
 .agent-session-agent-step,
 .agent-session-results-step {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--space-4);
 }
 .agent-session-agent-step:focus,
 .agent-session-results-step:focus {
   outline: none;
 }
-.agent-session-agent-picker {
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.agent-session-agent-picker legend {
-  margin-bottom: 9px;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 650;
-}
-.agent-session-agent-list {
-  display: grid;
-  gap: 8px;
-}
-.agent-session-agent-option {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-  min-height: 64px;
-  padding: 11px 13px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--bg-elev-2) 55%, transparent);
-  cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
-}
-.agent-session-agent-option:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg-elev-2));
-}
-.agent-session-agent-option.unavailable {
-  /* De-emphasised by token, not by subtree opacity. `cursor: not-allowed` alone does not make this
-     an inactive CONTROL for contrast purposes — the option still has to be readable to explain why
-     it is unavailable — and 0.72 faded its label along with everything else. */
-  cursor: not-allowed;
-  color: var(--text-dim);
-  border-style: dashed;
-}
-.agent-session-agent-option.unavailable:hover {
-  border-color: var(--border);
-  background: color-mix(in srgb, var(--bg-elev-2) 55%, transparent);
-}
-.agent-session-agent-option:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 24%, transparent);
-}
-.agent-session-agent-option.selected {
-  border-color: color-mix(in srgb, var(--accent) 70%, var(--border-strong));
-  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev-2));
-}
-.agent-session-agent-option input {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--accent);
-}
-.agent-session-agent-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.agent-session-agent-name {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 7px;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 650;
-}
-.agent-session-update-badge {
-  padding: 2px 6px;
-  border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border));
-  border-radius: 999px;
-  color: var(--warning);
-  font-size: 9.5px;
-  font-weight: 700;
-  line-height: 1.2;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-}
-.agent-session-agent-meta {
-  overflow: hidden;
-  color: var(--text-faint);
-  font-size: 11.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.agent-session-agent-description {
-  color: var(--text-dim);
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-.agent-session-selected-agent {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 13px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--bg-elev-2);
-}
-.agent-session-selected-agent > div {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 3px;
-}
-.agent-session-selected-agent strong {
-  color: var(--text);
-  font-size: 13px;
-}
-.agent-session-selected-agent > div > span:last-child {
-  color: var(--text-faint);
-  font-size: 11.5px;
-}
-.agent-session-selection-label {
-  color: var(--text-faint);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.7px;
-  text-transform: uppercase;
-}
-.agent-session-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 13px;
-  min-height: 190px;
-  color: var(--text-dim);
-}
-.agent-session-loading > div {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.agent-session-loading strong {
-  color: var(--text);
-  font-size: 13px;
-}
-.agent-session-loading span:last-child {
-  color: var(--text-faint);
-  font-size: 12px;
-}
-.agent-session-error,
-.agent-session-empty {
-  display: flex;
-  min-height: 150px;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 8px;
-  padding: 22px;
-  border: 1px dashed var(--border-strong);
-  border-radius: 9px;
-  color: var(--text-faint);
-  text-align: center;
-}
-.agent-session-error {
-  border-style: solid;
-  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
-  color: var(--text-dim);
-}
-.agent-session-error strong {
-  color: var(--text);
-}
-.agent-session-error .btn {
-  margin-top: 5px;
-}
+/* One line: the agent, then Change Agent and Rescan. */
 .agent-session-results-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-2);
+  min-width: 0;
 }
-.agent-session-results-head > div {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.agent-session-results-head strong {
-  font-size: 13px;
-}
-.agent-session-results-head > div span {
-  color: var(--text-faint);
-  font-size: 11.5px;
-}
-.agent-session-results {
-  gap: 8px;
-}
-.ext-session-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.ext-session {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: var(--ext-row-pad-y) var(--ext-row-pad-x);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--bg-elev-2) 42%, transparent);
-}
-/* Title leads and gets the full width — show more of the prompt (up to 2 lines, then ellipsis). */
-.ext-title {
-  font-weight: 500;
-  font-size: 13px;
-  line-height: 1.35;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.ext-badges {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-/* Footer: time · msg on the left, a compact Adopt button on the right, same line. */
-.ext-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 1px;
-}
-.ext-foot .muted {
-  font-size: 12px;
+.agent-session-results-agent {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
+  font: var(--type-body-strong);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ext-foot .btn {
-  flex: none;
+.agent-session-scanning {
+  display: grid;
+  gap: var(--space-3);
 }
-.agent-session-inline-error {
-  padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--red) 45%, var(--border));
-  border-radius: 7px;
+.agent-session-scanning-text {
+  margin: 0;
   color: var(--text-dim);
-  font-size: 12px;
+  font: var(--type-small);
+}
+.agent-session-result-skeleton > .row-body { gap: var(--space-2); }
+.agent-session-results {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.agent-session-results > .row > .btn { flex: none; }
+/* The time and count are short and stay whole; the path, which loses its start, gives way. */
+.agent-session-results .row-trail {
+  flex: none;
+  max-width: none;
+}
+/* A read-only result carries its reason as a third line, so it grows past the two-line height. */
+.agent-session-results > .row.read-only {
+  height: auto;
+  min-height: var(--row-h-2);
+  padding-block: var(--space-2);
+}
+.agent-session-untitled {
+  color: var(--text-faint);
+  font-weight: var(--weight-normal);
+}
+/* A long path loses its start, so the folder it ends in stays: the box runs right to left and the
+   `<bdi>` keeps the path itself left to right. */
+.agent-session-path {
+  direction: rtl;
+  font-family: var(--font-mono);
+  text-align: left;
+}
+.agent-session-reason {
+  white-space: normal;
+}
+.agent-session-error-detail {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 620px) {
-  .runner-agent-sessions-action,
-  .agent-session-selected-agent {
+  .runner-agent-sessions-action {
     align-items: stretch;
     flex-direction: column;
   }
-  .runner-agent-sessions-action .btn-rediscover,
-  .agent-session-selected-agent .btn {
+  .runner-agent-sessions-action .btn-rediscover {
     width: 100%;
-  }
-  .agent-session-agent-meta {
-    white-space: normal;
   }
 }
 
