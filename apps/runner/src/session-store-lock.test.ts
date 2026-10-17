@@ -172,6 +172,11 @@ class LockRace {
     return this.children.get(name)!.process.pid!;
   }
 
+  exitOf(name: string): { code: number | null; signal: NodeJS.Signals | null } {
+    const child = this.children.get(name)!.process;
+    return { code: child.exitCode, signal: child.signalCode };
+  }
+
   result(name: string): unknown {
     if (!this.readPublishedResult(name)) throw this.failure("result", name, "unpublished");
     return this.results.get(name);
@@ -407,6 +412,7 @@ test("cleanup lets a published child finish before removing its files", async (t
     assert.equal(existsSync(race.root), true, "the child's files remain until close");
     writeFileSync(join(race.signalDir, "exit.go"), "");
     await disposing;
+    assert.deepEqual(race.exitOf("a"), { code: 0, signal: null }, "the child must exit normally, not be killed");
     assert.throws(() => process.kill(pid, 0), /ESRCH/);
     assert.equal(existsSync(race.root), false);
   } finally {
