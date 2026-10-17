@@ -175,6 +175,17 @@ test("a PR that was never a draft uses creation as its admission boundary", asyn
   assert.equal(result.summary.outcome, "checks_passed");
 });
 
+test("required skip job identity accepts canonical repository casing and redirects", async () => {
+  const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance())]))], {
+    jobs: ok({ total_count: 1, jobs: [{ name: AGGREGATOR, run_attempt: 1,
+      check_run_url: "https://api.github.com/repos/canonical-owner/renamed-repo/check-runs/200",
+      status: "completed", conclusion: "skipped" }] }),
+  });
+  const result = await waitForPullRequest({ repository: "O/R", number: 7, timeoutMs: 1_000 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+});
+
 test("a completed rerun skip must belong to the exact current attempt", async () => {
   const metadata = provenance();
   metadata.checkSuite.workflowRun.runAttempt = 2;

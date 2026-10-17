@@ -573,8 +573,13 @@ async function admittedSkippedRuns(
       const jobs = jobsBody?.jobs;
       attempts.set(key, Array.isArray(jobs) && jobsBody?.total_count === jobs.length && jobs.length <= 100 ? jobs : []);
     }
-    const exactJob = attempts.get(key)!.map(record).find((job) =>
-      job?.check_run_url === `https://api.github.com/repos/${repository}/check-runs/${check.id}`);
+    // This job list already came from the requested repository/run/attempt. Check ids are global;
+    // canonical owner/name casing or a repository redirect must not invalidate that identity.
+    const exactJob = attempts.get(key)!.map(record).find((job) => {
+      const match = typeof job?.check_run_url === "string"
+        ? /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/check-runs\/(\d+)$/u.exec(job.check_run_url) : null;
+      return Number(match?.[1]) === check.id;
+    });
     if (exactJob?.run_attempt === candidate.attempt && exactJob.status === "completed" &&
         exactJob.conclusion === "skipped" && exactJob.name === check.name) admitted.add(check.id!);
   }
