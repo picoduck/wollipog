@@ -357,10 +357,15 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   orchestratorSettings: () => req<OrchestratorSettingsView>("/api/orchestrator-settings"),
-  fullControlLaunchPreflight: (input: import("@wollipog/protocol").FullControlLaunchRequest) =>
+  fullControlLaunchPreflight: (input: import("@wollipog/protocol").FullControlLaunchRequest, signal?: AbortSignal) =>
     req<{ preflight: import("@wollipog/protocol").CampaignLaunchPreflight }>("/api/full-control-campaigns/preflight", {
-      method: "POST", body: JSON.stringify(input),
+      method: "POST", body: JSON.stringify(input), signal,
     }),
+  fullControlEnablePreflight: (id: string, input: import("@wollipog/protocol").FullControlEnableRequest, signal?: AbortSignal) =>
+    req<{ preflight: import("@wollipog/protocol").CampaignLaunchPreflight; expectedRevision: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/full-control/preflight`, { method: "POST", body: JSON.stringify(input), signal }),
+  enableFullControl: (id: string, input: import("@wollipog/protocol").FullControlEnableRequest) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/full-control`, { method: "POST", body: JSON.stringify(input) }),
   createFullControlCampaign: (input: import("@wollipog/protocol").FullControlLaunchRequest) =>
     req<SessionView>("/api/full-control-campaigns", { method: "POST", body: JSON.stringify(input) }),
 

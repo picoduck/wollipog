@@ -383,6 +383,7 @@ export function NumberRow({
   disabled,
   error,
   inputId,
+  textEntry = false,
   busy,
   busyLabel,
   saved,
@@ -402,6 +403,10 @@ export function NumberRow({
   error?: string | null;
   /** The field's id, for a link or a label elsewhere that has to reach it. */
   inputId?: string;
+  /** A text field with a numeric keyboard instead of `type="number"`. A number input reports text it
+   * cannot read, such as `1e`, as "", so a caller that gives "" a meaning (cleared, or the default)
+   * uses this and validates the text itself: `onChange` then always receives exactly what is shown. */
+  textEntry?: boolean;
 }) {
   const id = useId();
   const titleId = `${id}-title`;
@@ -425,11 +430,12 @@ export function NumberRow({
           <span className="input-affix w-xs">
             <input
               id={inputId ?? `${id}-input`}
-              type="number"
-              inputMode="numeric"
-              min={min}
-              max={max}
-              step={step}
+              type={textEntry ? "text" : "number"}
+              inputMode={textEntry && step !== undefined && !Number.isInteger(step) ? "decimal" : "numeric"}
+              autoComplete={textEntry ? "off" : undefined}
+              min={textEntry ? undefined : min}
+              max={textEntry ? undefined : max}
+              step={textEntry ? undefined : step}
               value={value}
               disabled={disabled}
               aria-labelledby={unit ? `${titleId} ${unitId}` : titleId}
