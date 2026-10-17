@@ -43,7 +43,9 @@ const call = async (name, input) => {
 const result = (text) => {
   cost += 0.01;
   emit({ type: "result", subtype: "success", session_id: sessionId, is_error: false, result: text, total_cost_usd: cost,
-    modelUsage: { [model]: { inputTokens: 1000 * turn, outputTokens: 100, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: cost } } });
+    // unpriced-then-priced: the first result omits per-model usage, a later one is fully priced.
+    modelUsage: mode === "unpriced-then-priced" && turn === 1 ? {}
+      : { [model]: { inputTokens: 1000 * turn, outputTokens: 100, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: cost } } });
 };
 
 const input = readline.createInterface({ input: process.stdin });
@@ -63,7 +65,8 @@ for await (const line of input) {
     if (mode === "use-bash") {
       emit({ type: "assistant", session_id: sessionId, message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_bash", name: "Bash", input: { command: "cat /etc/passwd" } }] } });
     }
-    let index = first;
+    // skip-overlap: a later window starts after its overlap frame, relying on the earlier receipt.
+    let index = mode === "skip-overlap" && first > 0 ? first + 1 : first;
     while (index < end) {
       const reply = await call("review_video_evidence_frame", { index });
       if (reply.isError) { record({ refusedAt: index, text: reply.content[0].text }); break; }
@@ -84,7 +87,7 @@ for await (const line of input) {
   const notes = { window: { firstIndex: first, endIndex: end },
     observations: [{ fromIndex: first, toIndex: end - 1, description: "synthetic frames advance steadily" }],
     transients: [], defects: [] };
-  const invalid = mode === "bad-notes" || mode === "bad-notes-once" && turn === 1;
+  const invalid = mode === "bad-notes" || (mode === "bad-notes-once" || mode === "unpriced-then-priced") && turn === 1;
   result(invalid ? "Notes: everything looked fine." : JSON.stringify(notes));
 }
 socket.end();

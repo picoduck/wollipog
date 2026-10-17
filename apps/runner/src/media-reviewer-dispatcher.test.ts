@@ -194,6 +194,31 @@ test("a tool outside the media set, a skipped frame or invalid notes fail the wi
   }
 });
 
+test("a later window must receive its own overlap frame; an earlier window's receipt does not count", async (t) => {
+  if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace preparation required"); return; }
+  const h = await harness(t, { mode: "skip-overlap" });
+  await h.dispatcher.dispatch(h.dispatch);
+  const [result] = finished(h.sent);
+  assert.equal(result.outcome, "failed");
+  assert.match(result.reason, /before every frame/u);
+  assert.equal(result.verdictConfirmed, false);
+  assert.equal(h.cp.verdict(), false, "the verdict route is never reached without the fresh overlap acknowledgement");
+  assert.deepEqual(h.records().filter((r) => r.verdict).map((r) => r.verdict), ["refused"]);
+});
+
+test("an unpriced turn keeps its window unpriced and buys no correction turn", async (t) => {
+  if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace preparation required"); return; }
+  const h = await harness(t, { mode: "unpriced-then-priced" });
+  await h.dispatcher.dispatch(h.dispatch);
+  const [result] = finished(h.sent);
+  assert.equal(result.outcome, "failed");
+  assert.match(result.reason, /not priced/u);
+  assert.equal(result.priced, false);
+  assert.equal(result.costUsd, undefined);
+  assert.equal(h.records().filter((r) => r.prompt).length, 1, "no correction is sent after unknown spend");
+  assert.equal(h.spawned.length, 1, "no later window is launched");
+});
+
 test("one same-conversation correction repairs invalid notes or a missing verdict", async (t) => {
   if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace preparation required"); return; }
   for (const mode of ["bad-notes-once", "no-verdict-once"]) {

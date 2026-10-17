@@ -65,6 +65,12 @@ test("the provider stream refuses non-media tool use and re-verifies every per-t
   unpriced.push(line(init));
   unpriced.push(line({ type: "result", session_id: "s1", total_cost_usd: 0.2, modelUsage: { "claude-haiku-5-5": { costUSD: 0.2 } } }));
   assert.equal(unpriced.result.priced, false, "usage attributed to another model is not this reviewer's priced usage");
+  // A later fully priced turn cannot restore pricing lost earlier in the same process.
+  unpriced.push(line(init));
+  unpriced.push(line({ type: "result", session_id: "s1", total_cost_usd: 0.4, is_error: false,
+    modelUsage: { "claude-opus-5-5": { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.4 } } }));
+  assert.equal(unpriced.result.turns, 2);
+  assert.equal(unpriced.result.priced, false, "pricing failure is latched for the whole window");
 });
 
 test("provider argv disables built-in tools and loads only the relay, with no credential", () => {

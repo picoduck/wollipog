@@ -227,6 +227,7 @@ export class MediaReviewerDispatcher {
   /** HTTP transport authenticated as the reviewer Session itself, bounded to the current window. */
   private transport(grant: PacedVideoTransportGrant, token: string, window: { current: PacedVideoReviewWindow },
     seen: { acknowledged: Set<number>; verdict: boolean; pending: Map<string, number> }): VideoReviewTransport {
+    // `seen.acknowledged` is replaced per window, so every read below goes through `seen`.
     const base = this.deps.controlPlaneHttpUrl().replace(/\/+$/u, "");
     const post = async (action: string, body: Record<string, unknown>): Promise<unknown> => {
       const response = await this.deps.fetch(`${base}/api/sessions/${encodeURIComponent(grant.reviewerSessionId)}/video-evidence-review/${action}`, {
@@ -299,6 +300,9 @@ export class MediaReviewerDispatcher {
     try {
       for (const current of plan.windows) {
         window.current = current;
+        // Acknowledgements count only within the window's own conversation: an earlier window's
+        // receipt for the overlap frame never stands in for this conversation having seen it.
+        seen.acknowledged = new Set<number>(); seen.pending.clear();
         if (running.stopRequested) { reason = "stop requested"; break; }
         const remaining = budget === undefined ? undefined : budget - costUsd;
         if (remaining !== undefined && !(remaining > 0)) { reason = "cost budget exhausted"; break; }
@@ -358,6 +362,8 @@ export class MediaReviewerDispatcher {
       let turns = 0;
       const afterTurn = () => {
         if (failure) return;
+        // Unknown spend makes any further turn unaccountable; no correction is ever paid for.
+        if (!stream.result.priced) return fail("window usage was not priced");
         if (!complete()) return fail("window ended before every frame was delivered");
         if (window.final) {
           if (seen.verdict) { child.stdin?.end(); return; }

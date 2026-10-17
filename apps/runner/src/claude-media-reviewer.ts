@@ -196,7 +196,8 @@ export class ClaudeMediaReviewerStream {
       // Cumulative totals never refund; an unpriced final result keeps the window unpriced.
       if (this.result.costUsd !== undefined && (event.total_cost_usd as number) < this.result.costUsd) return "provider cost regressed";
       this.result.costUsd = event.total_cost_usd as number;
-      this.result.priced = priced && event.is_error !== true;
+      // Latched: one unpriced result keeps the whole process unpriced, whatever later turns report.
+      this.result.priced = (this.result.turns === 0 || this.result.priced) && priced && event.is_error !== true;
       this.result.finalText = typeof event.result === "string" ? event.result.slice(0, 64 * 1024) : undefined;
       this.result.turns++;
     }
