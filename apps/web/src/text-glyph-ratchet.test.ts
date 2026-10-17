@@ -43,10 +43,8 @@ const PODS = "Pods epic (not yet filed)";
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/AutomationsView.tsx", "▸", "▸", AUTOMATIONS],
   ["components/AutomationsView.tsx", "×", "×", AUTOMATIONS],
+  // The local readiness icon's mark, which Set Up This Machine (#2993) replaces.
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
-  ["components/OnboardRunnerDialog.tsx", "△", "△", CONNECTIONS],
-  ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
-  ["components/OnboardRunnerDialog.tsx", "↻", "↻ Retry", CONNECTIONS],
   ["components/PodsView.tsx", "→", "→", PODS],
   ["components/PodsView.tsx", "→", "→", PODS],
 ];

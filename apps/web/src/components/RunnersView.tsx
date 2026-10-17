@@ -40,7 +40,9 @@ import { CopyButton, Modal, Spinner } from "./common.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
+import { InstallManuallyDialog } from "./InstallManuallyDialog.js";
 import { OnboardRunnerDialog } from "./OnboardRunnerDialog.js";
+import { RepairConnectionDialog } from "./RepairConnectionDialog.js";
 import { AddBoxDialog } from "./AddBoxDialog.js";
 import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
 import { agentDisplayName, agentDriverDescription, agentDriverLabel } from "../agent-presentation.js";
@@ -575,7 +577,7 @@ function NativeRunnerHealth({
   if (runner.status === "offline") {
     return (
       <Notice tone="warning" role="status" ariaLabel="Connection Offline" title="Connection Offline"
-        actions={canRepair && <button className="btn sm" type="button" onClick={onRepair}>Repair Credentials</button>}>
+        actions={canRepair && <button className="btn sm" type="button" onClick={onRepair}>Repair Connection…</button>}>
         <p>The runner process may be stopped or its saved credential may no longer be active.</p>
         {!canRepair && <p>Ask an organization owner or admin to repair this connection.</p>}
       </Notice>
@@ -1654,15 +1656,12 @@ export function RunnersView() {
   };
   const dialogs = (
     <>
-      {onboarding && (
-        <OnboardRunnerDialog
-          mode={onboarding}
-          onClose={() => setOnboarding(null)}
-          onLocalRunnerChanged={setLocalRunnerStatus}
-        />
+      {onboarding === "local" && (
+        <OnboardRunnerDialog onClose={() => setOnboarding(null)} onLocalRunnerChanged={setLocalRunnerStatus} />
       )}
+      {onboarding === "manual" && <InstallManuallyDialog onClose={() => setOnboarding(null)} />}
       {repairRunnerId && (
-        <OnboardRunnerDialog initialRunnerId={repairRunnerId} onClose={() => setRepairRunnerId(null)} />
+        <RepairConnectionDialog runnerId={repairRunnerId} onClose={() => setRepairRunnerId(null)} />
       )}
       {addingBox && <AddBoxDialog onClose={() => setAddingBox(false)} />}
       {settingsRunnerId && runners.get(settingsRunnerId) && (

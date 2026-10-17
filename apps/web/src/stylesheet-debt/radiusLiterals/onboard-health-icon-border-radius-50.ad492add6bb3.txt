@@ -1,1 +1,0 @@
-|.onboard-health-icon|border-radius|50
