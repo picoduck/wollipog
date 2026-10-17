@@ -141,12 +141,29 @@ test("impact wording follows the direction and the counts, including one and zer
   });
   assert.deepEqual(accessScopeImpact(preview(me, team, { totalSessionCount: 2 }), admin), {
     kind: "broadening",
-    text: "Everyone on Builders (1 person) will see this project and its 2 sessions.",
+    text: "Everyone on Builders (1 person) will see this project, and its 2 sessions keep their current access.",
   }, "a member's private resource moving to their team broadens it");
   assert.deepEqual(accessScopeImpact(preview(team, org), admin), {
     kind: "broadening",
     text: "Everyone in your organization will see this project.",
   });
+  // CR-1.1: broadening shares the resource, never its sessions. The server leaves a session whose
+  // access already fits as it is, so the sentence never says the sessions become visible.
+  assert.deepEqual(accessScopeImpact(preview(me, org, { resource: "workspace", totalSessionCount: 1 }), admin), {
+    kind: "broadening",
+    text: "Everyone in your organization will see this location, and its session keeps its current access.",
+  });
+  assert.deepEqual(accessScopeImpact(preview(me, team, { totalSessionCount: 4, sessionsToNarrow: 1 }), admin), {
+    kind: "broadening",
+    text: "Everyone on Builders (1 person) will see this project, and 1 of its 4 sessions is narrowed to match.",
+  }, "a session wider than the new access is the only one that changes");
+  for (const impact of [
+    accessScopeImpact(preview(me, org, { totalSessionCount: 5 }), admin),
+    accessScopeImpact(preview(me, org, { resource: "workspace", totalSessionCount: 5 }), admin),
+  ]) {
+    assert.equal(impact.kind, "broadening");
+    assert.doesNotMatch(impact.kind === "broadening" ? impact.text : "", /see this (project|location) and its/u);
+  }
 });
 
 test("server refusals are reworded, and only a narrower Location offers to change it", () => {

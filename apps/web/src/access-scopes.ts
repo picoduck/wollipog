@@ -186,7 +186,8 @@ function incompatibleImpact(preview: AccessScopeChangePreview): AccessScopeImpac
 /**
  * What a previewed access change does, worded by who loses or gains access. The counts are the
  * preview's, and a team's size is its member count; no member is named. Once the server allows a
- * change, every session of the resource is inside the new access, so the count is the total.
+ * narrowing, every session of the resource is inside the new access, so its count is the total.
+ * Broadening shares only the resource: sessions keep their own access.
  */
 export function accessScopeImpact(
   preview: AccessScopeChangePreview,
@@ -200,7 +201,15 @@ export function accessScopeImpact(
   const itsSessions = total > 0 ? ` and its ${sessions(total)}` : "";
   if (target.owner.kind === "organization" ||
       scopeAudienceContainedForIdentity(identity, preview.currentScope, target)) {
-    return { kind: "broadening", text: `${audience(target, identity)} will see this ${noun}${itsSessions}.` };
+    // Broadening shares the resource, never its sessions: the server leaves every session whose
+    // access already fits inside the new one as it is, so a private session stays private. Only a
+    // session wider than the new access is narrowed (`sessionsToNarrow`).
+    const narrowed = preview.sessionsToNarrow;
+    const sessionsClause = total === 0 ? ""
+      : narrowed > 0 ? `, and ${narrowed} of its ${sessions(total)} ${narrowed === 1 ? "is" : "are"} narrowed to match`
+        : total === 1 ? ", and its session keeps its current access"
+          : `, and its ${sessions(total)} keep their current access`;
+    return { kind: "broadening", text: `${audience(target, identity)} will see this ${noun}${sessionsClause}.` };
   }
   if (target.owner.kind === "user") {
     return {

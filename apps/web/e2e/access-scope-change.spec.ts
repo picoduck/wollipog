@@ -43,7 +43,7 @@ test.describe("at desktop widths", () => {
     await dialog.getByRole("radio", { name: /Team: Ghosts/ }).check();
     await expect(dialog.locator(".notice.t-warning .notice-title")).toHaveText("Ghosts Has No Members");
     await dialog.getByRole("radio", { name: /Organization-Wide/ }).check();
-    await expect(dialog.locator(".access-change-sentence")).toHaveText("Everyone in your organization will see this project and its 5 sessions.");
+    await expect(dialog.locator(".access-change-sentence")).toHaveText("Everyone in your organization will see this project, and its 5 sessions keep their current access.");
     await expect(dialog.locator(".notice")).toHaveCount(0);
 
     await apply.click();
@@ -69,7 +69,7 @@ test.describe("at desktop widths", () => {
     await location.getByRole("button", { name: "Change Access" }).click();
     await expect(location).toHaveCount(0);
 
-    await expect(dialog.locator(".access-change-sentence")).toHaveText("Everyone in your organization will see this project and its 3 sessions.");
+    await expect(dialog.locator(".access-change-sentence")).toHaveText("Everyone in your organization will see this project, and its 3 sessions keep their current access.");
     await dialog.getByRole("button", { name: "Change Access" }).click();
     await expect(dialog).toHaveCount(0);
     await expect(page.locator(".access-scope-readout .setting-row-title")).toHaveText(["Organization-Wide", "Organization-Wide"]);

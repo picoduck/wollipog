@@ -267,7 +267,7 @@ test("broadening is one dim sentence, with no warning", async () => {
   await settle();
   assert.equal(dialog()?.querySelectorAll(".notice").length, 0);
   assert.equal(text(dialog()?.querySelector(".access-change-sentence")),
-    "Everyone in your organization will see this project and its 5 sessions.");
+    "Everyone in your organization will see this project, and its 5 sessions keep their current access.");
   assert.equal(changeAccess()?.disabled, false);
 });
 
