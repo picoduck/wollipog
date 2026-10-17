@@ -63,11 +63,14 @@ type ChildSpec = {
   resultPause?: { name: string; bytes: number };
   /** Simulate incomplete exit or malformed publication without exposing payloads in diagnostics. */
   resultFault?: "exit" | "invalid";
+  /** Hold after publication to model work (including coverage flushing) before process exit. */
+  exitPause?: string;
 };
 
 type RaceChild = {
   process: ChildProcess;
   closed: Promise<void>;
+  stayAlive: boolean;
   stderrBytes: number;
   spawnError: boolean;
 };
@@ -104,6 +107,7 @@ class LockRace {
     });
     const state: RaceChild = {
       process: child, closed: new Promise<void>((resolve) => child.once("close", () => resolve())),
+      stayAlive: spec.stayAlive === true,
       stderrBytes: 0, spawnError: false,
     };
     child.stderr!.on("data", (chunk: Buffer) => { state.stderrBytes += chunk.length; });
@@ -146,6 +150,11 @@ class LockRace {
   async kill(name: string): Promise<void> {
     const child = this.children.get(name)!;
     if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGKILL");
+    await this.waitForClose(name);
+  }
+
+  private async waitForClose(name: string): Promise<void> {
+    const child = this.children.get(name)!;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
@@ -211,7 +220,20 @@ class LockRace {
   async dispose(): Promise<void> {
     this.disposed = true;
     // Await owned handles before removing files: Windows can refuse removal while a child uses them.
-    await Promise.all([...this.children.keys()].map((name) => this.kill(name)));
+    const outcomes = await Promise.allSettled([...this.children].map(async ([name, child]) => {
+      // Publication precedes exit and V8's native coverage flush. Killing a successful child here
+      // can leave permanently truncated JSON (#3373). Paused and intentionally live children still
+      // need forced cleanup; a published child expected to exit gets the same bounded close wait.
+      if (child.stayAlive || !this.has(name, "result")) return this.kill(name);
+      try {
+        await this.waitForClose(name);
+      } catch (error) {
+        await this.kill(name);
+        throw error;
+      }
+    }));
+    const failed = outcomes.find((outcome) => outcome.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
     rmSync(this.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
 
@@ -367,6 +389,47 @@ test("result publication times out and cancellation cleans only fixture-owned ch
     }
   } finally {
     await other.dispose();
+  }
+});
+
+test("cleanup lets a published child finish before removing its files", async (t) => {
+  const race = new LockRace(t.signal);
+  let disposing: Promise<void> | undefined;
+  try {
+    await race.start({ name: "a", op: "acquire", owner: "runner-a", exitPause: "exit" });
+    await race.waitForPause("a", "exit");
+    const pid = race.pidOf("a");
+    let settled = false;
+    disposing = race.dispose().finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(settled, false, "result publication is not process exit; cleanup must wait");
+    assert.doesNotThrow(() => process.kill(pid, 0), "the child must remain alive to finish flushing");
+    assert.equal(existsSync(race.root), true, "the child's files remain until close");
+    writeFileSync(join(race.signalDir, "exit.go"), "");
+    await disposing;
+    assert.throws(() => process.kill(pid, 0), /ESRCH/);
+    assert.equal(existsSync(race.root), false);
+  } finally {
+    if (existsSync(race.signalDir)) writeFileSync(join(race.signalDir, "exit.go"), "");
+    await (disposing ?? race.dispose());
+  }
+});
+
+test("cleanup kills a published child that exceeds the close bound and reports the timeout", { timeout: 60_000 }, async (t) => {
+  const race = new LockRace(t.signal);
+  try {
+    await race.start({ name: "a", op: "acquire", owner: "runner-a", exitPause: "exit" });
+    await race.waitForPause("a", "exit");
+    const pid = race.pidOf("a");
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const rejected = assert.rejects(race.dispose(), /phase=cleanup .*parse=close-timeout/);
+    t.mock.timers.tick(30_000);
+    await rejected;
+    assert.throws(() => process.kill(pid, 0), /ESRCH/, "the timeout still reaps the owned child");
+  } finally {
+    t.mock.timers.reset();
+    await race.dispose();
+    assert.equal(existsSync(race.root), false);
   }
 });
 
