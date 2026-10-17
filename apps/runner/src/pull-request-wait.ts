@@ -22,6 +22,8 @@ export const PULL_REQUEST_WAIT_MAX_INTERVAL_MS = 600_000;
  * own merge state to confirm it. */
 const CONTEXTS_PER_COMMIT = 100;
 const MAX_CONTEXT_PAGES = 10;
+/** At most one run list, ten check lookups, and ten attempt job lists per special-path poll. */
+const MAX_SKIP_PROVENANCE_CHECKS = 10;
 const MAX_LISTED_CHECKS = 30;
 const MAX_FAILED_JOBS = 20;
 const MAX_NAME = 120;
@@ -262,7 +264,7 @@ export async function requiredCheckNames(
 
 const contextFields = (after: string) => `contexts(first:${CONTEXTS_PER_COMMIT}${after}){pageInfo{hasNextPage endCursor} nodes{
   __typename
-  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId} workflowRun{databaseId runAttempt event createdAt workflow{databaseId}}} isRequired(pullRequestNumber:$number)}
+  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId}} isRequired(pullRequestNumber:$number)}
   ... on StatusContext{context state createdAt targetUrl isRequired(pullRequestNumber:$number)}
 }}`;
 const CONTEXT_FIELDS = contextFields("");
@@ -300,7 +302,6 @@ interface CheckNode {
   appId?: number;
   url?: string;
   isRequired: boolean;
-  workflowRun?: { id: number; workflowId: number; attempt: number; event: string; createdAt: string };
 }
 
 function positiveId(value: unknown): value is number {
@@ -319,10 +320,7 @@ function checkNode(raw: unknown): CheckNode | null {
   if (node.__typename === "CheckRun" && typeof node.name === "string") {
     const completed = node.status === "COMPLETED";
     const conclusion = typeof node.conclusion === "string" ? node.conclusion : "";
-    const suite = record(node.checkSuite);
-    const appId = record(suite?.app)?.databaseId;
-    const run = record(suite?.workflowRun);
-    const workflowId = record(run?.workflow)?.databaseId;
+    const appId = record(record(node.checkSuite)?.app)?.databaseId;
     return {
       kind: "CheckRun",
       name: node.name,
@@ -333,10 +331,6 @@ function checkNode(raw: unknown): CheckNode | null {
       ...(Number.isSafeInteger(appId) ? { appId: appId as number } : {}),
       url: httpsUrl(node.detailsUrl),
       isRequired: node.isRequired === true,
-      ...(run && positiveId(run.databaseId) && positiveId(workflowId) && positiveId(run.runAttempt) &&
-        typeof run.event === "string" && timestamp(run.createdAt) !== null ? { workflowRun: {
-          id: run.databaseId, workflowId, attempt: run.runAttempt, event: run.event, createdAt: run.createdAt as string,
-        } } : {}),
     };
   }
   if (node.__typename === "StatusContext" && typeof node.context === "string") {
@@ -524,6 +518,17 @@ function observation(data: unknown): Observation | null {
   };
 }
 
+/** Optional provenance must never turn an otherwise usable PR observation into an error. */
+async function provenanceRead(gh: GhRunner, path: string): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await gh(["api", "--hostname", "github.com", path]);
+    const body = response.code === null && !response.timedOut ? record(parseJson(response.stdout)) : null;
+    return body && (body.errors === undefined || (Array.isArray(body.errors) && body.errors.length === 0)) ? body : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Only conditional skips with complete, current Actions provenance can pass independently of
  * aggregate merge state. A bounded REST read sees newer runs before they create any jobs, and
  * per-attempt job reads bind each skipped check to that attempt rather than a suite's latest one.
@@ -537,39 +542,47 @@ async function admittedSkippedRuns(
       seen.rollupSha !== seen.headSha) return admitted;
   const contexts = record(record(seen.rollup)?.contexts);
   const nodes = (Array.isArray(contexts?.nodes) ? contexts.nodes : []).map(checkNode);
-  const candidates = nodes.flatMap((node) => node?.conclusion === "SKIPPED" && positiveId(node.id) && node.workflowRun &&
-    timestamp(node.workflowRun.createdAt)! > seen.admittedAfter! ? [{ check: node, run: node.workflowRun }] : []);
-  if (candidates.length === 0) return admitted;
-  const possible = new Set(candidates.map(({ check }) => check.id!));
+  const latest = new Map<string, CheckNode>();
+  for (const node of nodes) {
+    if (!node || node.kind !== "CheckRun" || (!required.names.includes(node.name) && !node.isRequired)) continue;
+    const apps = Object.hasOwn(required.apps, node.name) ? required.apps[node.name] : undefined;
+    if (apps && (node.appId === undefined || !apps.includes(node.appId))) continue;
+    const key = `${apps ? node.appId : ""}\0${node.name}`;
+    const previous = latest.get(key);
+    if (!previous || newer(node, previous)) latest.set(key, node);
+  }
+  const candidates = [...latest.values()].filter((node) => node.conclusion === "SKIPPED" && positiveId(node.id));
+  if (candidates.length === 0 || candidates.length > MAX_SKIP_PROVENANCE_CHECKS) return admitted;
+  const possible = new Set(candidates.map((check) => check.id!));
   const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus, possible);
   if (!checks.complete || checks.requiredState !== "passed") return admitted;
   // The common success/failure/missing-check/optional-skip paths never need this extra request.
-  const response = await gh(["api", "--hostname", "github.com",
-    `repos/${repository}/actions/runs?head_sha=${seen.headSha}&per_page=100`]);
-  if (response.code !== null) return admitted;
-  const body = record(parseJson(response.stdout));
+  const body = await provenanceRead(gh, `repos/${repository}/actions/runs?head_sha=${seen.headSha}&per_page=100`);
   const runs = body?.workflow_runs;
   if (!Array.isArray(runs) || body?.total_count !== runs.length || runs.length > 100) return admitted;
   const records = runs.map(record);
-  if (records.some((run) => !run || !positiveId(run.id) || !positiveId(run.workflow_id) ||
+  if (records.some((run) => !run || !positiveId(run.id) || !positiveId(run.workflow_id) || !positiveId(run.check_suite_id) ||
       !positiveId(run.run_attempt) || run.head_sha !== seen.headSha || timestamp(run.created_at) === null ||
       typeof run.event !== "string" || typeof run.status !== "string")) return admitted;
   const eligibleEvents = new Set(["push", "pull_request", "pull_request_target", "pull_request_review", "deployment", "deployment_status"]);
   const attempts = new Map<string, unknown[]>();
-  for (const { check, run: candidate } of candidates) {
-    const current = records.find((run) => run!.id === candidate.id);
-    if (!current || current.workflow_id !== candidate.workflowId || current.run_attempt !== candidate.attempt ||
-        current.event !== candidate.event || !eligibleEvents.has(candidate.event) ||
-        current.created_at !== candidate.createdAt || current.status !== "completed") continue;
-    if (records.some((run) => run!.workflow_id === candidate.workflowId && run!.id !== candidate.id &&
-        ((run!.id as number) > candidate.id || timestamp(run!.created_at)! >= timestamp(candidate.createdAt)!))) continue;
-    const key = `${candidate.id}:${candidate.attempt}`;
+  for (const check of candidates) {
+    const detail = await provenanceRead(gh, `repos/${repository}/check-runs/${check.id}`);
+    const suiteId = record(detail?.check_suite)?.id;
+    if (detail?.id !== check.id || detail?.head_sha !== seen.headSha || detail?.name !== check.name ||
+        detail?.status !== "completed" || detail?.conclusion !== "skipped" || !positiveId(suiteId)) continue;
+    const matching = records.filter((run) => run!.check_suite_id === suiteId);
+    const current = matching.length === 1 ? matching[0] : null;
+    if (!current || !eligibleEvents.has(current.event as string) || current.status !== "completed" ||
+        timestamp(current.created_at)! <= seen.admittedAfter) continue;
+    if (records.some((run) => run!.workflow_id === current.workflow_id && run!.id !== current.id &&
+        ((run!.id as number) > (current.id as number) || timestamp(run!.created_at)! >= timestamp(current.created_at)!))) continue;
+    const key = `${current.id}:${current.run_attempt}`;
     if (!attempts.has(key)) {
       // Bound total extra reads even when many required workflows report skips.
-      if (attempts.size >= 10) return new Set();
-      const jobsResponse = await gh(["api", "--hostname", "github.com",
-        `repos/${repository}/actions/runs/${candidate.id}/attempts/${candidate.attempt}/jobs?per_page=100`]);
-      const jobsBody = jobsResponse.code === null ? record(parseJson(jobsResponse.stdout)) : null;
+      if (attempts.size >= MAX_SKIP_PROVENANCE_CHECKS) return new Set();
+      const jobsBody = await provenanceRead(gh,
+        `repos/${repository}/actions/runs/${current.id}/attempts/${current.run_attempt}/jobs?per_page=100`);
       const jobs = jobsBody?.jobs;
       attempts.set(key, Array.isArray(jobs) && jobsBody?.total_count === jobs.length && jobs.length <= 100 ? jobs : []);
     }
@@ -580,7 +593,7 @@ async function admittedSkippedRuns(
         ? /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/check-runs\/(\d+)$/u.exec(job.check_run_url) : null;
       return Number(match?.[1]) === check.id;
     });
-    if (exactJob?.run_attempt === candidate.attempt && exactJob.status === "completed" &&
+    if (exactJob && exactJob.run_attempt === current.run_attempt && exactJob.status === "completed" &&
         exactJob.conclusion === "skipped" && exactJob.name === check.name) admitted.add(check.id!);
   }
   return admitted;
@@ -695,7 +708,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   const stopAt = deadline + (deps.readGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS);
   const gh: GhRunner = async (args) => {
     const budget = stopAt - now();
-    if (budget <= 0) return BUDGET_SPENT;
+    if (deps.signal?.aborted || budget <= 0) return BUDGET_SPENT;
     const read = new AbortController();
     const cancel = () => read.abort();
     deps.signal?.addEventListener("abort", cancel, { once: true });

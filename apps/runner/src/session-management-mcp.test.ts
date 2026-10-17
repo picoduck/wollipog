@@ -808,8 +808,7 @@ test("wait_pull_request reads GitHub through gh, never the control plane, and re
         createdAt: "2026-10-11T10:00:00Z", timelineItems: { nodes: [{ createdAt: "2026-10-12T09:00:00Z" }] },
         commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [
           { __typename: "CheckRun", name: "Typecheck, Test & Sidecar Bundle", status: "COMPLETED", conclusion, startedAt: "t", isRequired: true,
-            ...(admitted ? { databaseId: 200, checkSuite: { workflowRun: { databaseId: 20, runAttempt: 1, event: "pull_request",
-              createdAt: "2026-10-12T10:00:00Z", workflow: { databaseId: 30 } } } } : {}),
+            ...(admitted ? { databaseId: 200 } : {}),
           },
           ...(conclusion === "SKIPPED" && !admitted ? [{ __typename: "CheckRun", name: "Browser", status: "QUEUED", conclusion: null }] : []),
         ] } } } }] },
@@ -818,12 +817,15 @@ test("wait_pull_request reads GitHub through gh, never the control plane, and re
     if (args.some((arg) => arg.includes("/rules/branches/"))) {
       return json([{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "Typecheck, Test & Sidecar Bundle" }] } }]);
     }
+    if (args.some((arg) => arg.includes("/check-runs/"))) return json({
+      id: 200, head_sha: head, name: "Typecheck, Test & Sidecar Bundle", status: "completed", conclusion: "skipped", check_suite: { id: 100 },
+    });
     if (args.some((arg) => arg.includes("/attempts/"))) return json({ total_count: 1, jobs: [{
       name: "Typecheck, Test & Sidecar Bundle", check_run_url: "https://api.github.com/repos/picoduck/wollipog/check-runs/200",
       run_attempt: 1, status: "completed", conclusion: "skipped",
     }] });
     if (args.some((arg) => arg.includes("/actions/runs?"))) return json({ total_count: 1, workflow_runs: [{
-      id: 20, workflow_id: 30, head_sha: head, event: "pull_request", run_attempt: 1,
+      id: 20, workflow_id: 30, check_suite_id: 100, head_sha: head, event: "pull_request", run_attempt: 1,
       created_at: "2026-10-12T10:00:00Z", status: "completed",
     }] });
     return json({ protection: { enabled: true } });
