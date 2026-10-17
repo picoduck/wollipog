@@ -122,7 +122,9 @@ import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
-import { managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
+import {
+  managedWorktreeAdminMatches, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths,
+} from "./managed-worktree-sandbox.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundJobStopResult,
@@ -8665,15 +8667,35 @@ export class SessionManager {
       : [];
     let gitWritableRoots: string[] = [];
     let requiredReadOnlyPaths: string[] = [];
+    const ownedWorktrees: Array<{ path: string; gitAdmin: string }> = [];
     if (protectedWorktree) {
-      requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath: protectedWorktree, repoPath: meta.repoPath }], true);
+      const selected = { worktreePath: protectedWorktree, repoPath: meta.repoPath };
+      const gitLink = join(protectedWorktree, ".git");
+      gitWritableRoots = managedWorktreeGitWritableRoots(protectedWorktree, [selected]);
+      // The session's other runner-created worktrees of this repository stay usable (#3316): each
+      // root and its own admin directory are writable, with registration files read-only. Another
+      // session's worktree is never in this list, and a missing or foreign one is skipped.
+      for (const protection of this.managedWorktreeProtections(meta)) {
+        if (protection.worktreePath === protectedWorktree || protection.worktreePath === meta.repoPath) continue;
+        const roots = managedWorktreeGitWritableRoots(protection.worktreePath, [protection]);
+        if (roots.length !== gitWritableRoots.length ||
+            roots.slice(1).some((root, index) => root !== gitWritableRoots[index + 1]) ||
+            !managedWorktreeAdminMatches(protection.worktreePath, roots[0]!)) continue;
+        try {
+          if (realpathSync.native(protection.worktreePath) !== protection.worktreePath ||
+              !lstatSync(protection.worktreePath).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        ownedWorktrees.push({ path: protection.worktreePath, gitAdmin: roots[0]! });
+      }
+      requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([
+        selected,
+        ...ownedWorktrees.map((owned) => ({ worktreePath: owned.path, repoPath: meta.repoPath })),
+      ], true);
       for (const path of requiredReadOnlyPaths) {
         if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
       }
-      const gitLink = join(protectedWorktree, ".git");
-      gitWritableRoots = managedWorktreeGitWritableRoots(protectedWorktree, [{
-        worktreePath: protectedWorktree, repoPath: meta.repoPath,
-      }]);
       if (requiredReadOnlyPaths.length < 4 || gitWritableRoots.length !== 4 ||
           !lstatSync(gitLink).isFile() || realpathSync.native(gitLink) !== gitLink ||
           !requiredReadOnlyPaths.every((path) => readOnlyPaths.includes(path))) {
@@ -8695,7 +8717,10 @@ export class SessionManager {
       sessionId: meta.sessionId,
       cwd,
       ...(projectMemoryDirectory ? { projectMemoryDirectory } : {}),
-      ...(protectedWorktree ? { protectedWorktree: { path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths } } : {}),
+      ...(protectedWorktree ? { protectedWorktree: {
+        path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
+        ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
+      } } : {}),
       ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),

@@ -42,6 +42,20 @@ function linkedWorktreeGitLayout(
 }
 
 /**
+ * Whether a linked worktree's admin directory names that worktree in its `gitdir` back-pointer.
+ * Git writes the back-pointer itself and the sandbox keeps it read-only, while a worktree's own
+ * `.git` link can be rewritten before its next relaunch; only an agreeing pair proves identity.
+ */
+export function managedWorktreeAdminMatches(worktreePath: string, worktreeGitDir: string): boolean {
+  try {
+    const backPointer = readFileSync(join(worktreeGitDir, "gitdir"), "utf8").replace(/\r?\n$/u, "");
+    return samePath(resolve(worktreeGitDir, backPointer), join(worktreePath, ".git"));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Absolute paths a sandbox should present read-only while the rest of each managed worktree stays
  * writable. Attached operator worktrees never reach this list: the caller derives `protections`
  * from runner-created identities only, exactly as the command-approval boundary does.

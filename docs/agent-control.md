@@ -581,7 +581,8 @@ builds to write inside the worktree or another authorized scratch path.
 An ACP provider in a selected managed Linux worktree cannot launch under `provider` mode because
 the runner does not know which provider state root to preserve. Git commands that write shared
 administration outside `objects`, `refs`, and `logs` can also fail inside this boundary. These
-include repository config changes, setting an upstream with `git push -u`, and creating a worktree
+include deleting a ref (so a rebase or cherry-pick leaves `CHERRY_PICK_HEAD` behind; #3316),
+repository config changes, setting an upstream with `git push -u`, and creating a worktree
 directly with Git; use the runner's managed worktree operation for the latter. Git layouts that
 cannot supply canonical linked-worktree administration and all four narrow writable Git roots fail
 before provider launch, including a linked-worktree Project Location, missing Git logs, and
@@ -600,6 +601,17 @@ For a native Linux provider already launched in a *selected requested worktree*,
 worktree boundary is the read-only parent of that selected child. A newly requested sibling is
 therefore not writable during the current turn. Select it and relaunch before editing it. This
 keeps the selected root and Git registration intact; it does not preserve writable file contents.
+
+### Other Managed Worktrees of the Session
+
+A protected launch also binds every other runner-created worktree the session owns in the same
+repository (#3316), as it existed at launch: its root and its own admin directory are writable, so
+the session can commit in it and fast-forward it, and its `.git` link and `gitdir`, `commondir`, and
+`config.worktree` registration files stay read-only like the selected worktree's. Each root is a
+mount point, so it cannot be renamed or removed from inside. A worktree is bound only when its admin
+directory's `gitdir` back-pointer names it, so a rewritten `.git` link cannot claim another
+session's admin directory. Attached worktrees and every other session's worktrees are never bound.
+Codex's own workspace sandbox still grants only the selected worktree.
 
 ## Runner Hook State at the Sandbox Boundary
 
