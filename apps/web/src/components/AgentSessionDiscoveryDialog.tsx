@@ -7,8 +7,8 @@ import {
   type RunnerView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { agentDriverLabel } from "../agent-presentation.js";
-import { relativeTime, titleCaseLabel } from "../format.js";
+import { agentHarnessDriverLabel } from "../agent-presentation.js";
+import { relativeTime } from "../format.js";
 import { adoptAction, externalSessionKey } from "../runners.js";
 import { Modal } from "./common.js";
 import { RefreshIcon, SearchIcon } from "./Icons.js";
@@ -57,9 +57,10 @@ export function sessionMatchesAgent(session: ExternalSessionDescriptor, agent: A
 }
 
 /** The agent's integration, where it runs and its version: one meta line (§11.3). The integration
- * is left out when the agent's name already says it ("Pi RPC" over "Pi RPC"). */
+ * is left out when the agent's name already says it: "Claude Code" reads "Native · v2.1.4", not
+ * "Claude Code Native · Native · v2.1.4". */
 function agentMetaLine(option: AgentOption): string {
-  const integration = titleCaseLabel(agentDriverLabel(option.agent));
+  const integration = agentHarnessDriverLabel(option.agent.driver ?? "acp");
   return [
     option.label.includes(integration) ? null : integration,
     contextLabel(option.agent.context),
@@ -114,6 +115,7 @@ export function AgentSessionDiscoveryDialog({
   const selectionStepRef = useRef<HTMLDivElement>(null);
   const resultsStepRef = useRef<HTMLDivElement>(null);
   const previousStepRef = useRef<"selecting" | "results">("selecting");
+  const actionOriginRef = useRef<HTMLElement | null>(null);
   const selectedAgent = scannable.find((agent) => agent.id === selectedAgentId) ?? null;
   const selectedAgentLabel = agentEntries.find((option) => option.agent.id === selectedAgentId)?.label ?? "";
   const machineName = runner.displayName || runner.hostname || runner.runnerId;
@@ -130,9 +132,25 @@ export function AgentSessionDiscoveryDialog({
     previousStepRef.current = nextStep;
   }, [state]);
 
+  // The control a scan or an import started from can leave with what it finishes in: the header
+  // Rescan once nothing is listed, Continue Here with its row. Focus then moves to the results
+  // step rather than falling to the document, outside the dialog's focus trap.
+  useEffect(() => {
+    const origin = actionOriginRef.current;
+    if (state === "loading" || !origin || origin.isConnected) return;
+    actionOriginRef.current = null;
+    if (state !== "selecting") resultsStepRef.current?.focus();
+  }, [state, sessions]);
+
+  const rememberActionOrigin = () => {
+    const active = document.activeElement;
+    actionOriginRef.current = active instanceof HTMLElement && resultsStepRef.current?.contains(active) ? active : null;
+  };
+
   const load = async ({ inPlace = false }: { inPlace?: boolean } = {}) => {
     if (!selectedAgent) return;
     const generation = ++requestGeneration.current;
+    rememberActionOrigin();
     // A recovery action (Try Again, the no-results Rescan) unmounts with its state, so focus moves
     // to the results step rather than falling to the document.
     if (!inPlace && state !== "selecting") resultsStepRef.current?.focus();
@@ -167,6 +185,7 @@ export function AgentSessionDiscoveryDialog({
   const adopt = async (descriptor: ExternalSessionDescriptor) => {
     const generation = requestGeneration.current;
     const key = externalSessionKey(descriptor);
+    rememberActionOrigin();
     setAdopting((current) => ({ ...current, [key]: true }));
     setAdoptError("");
     try {

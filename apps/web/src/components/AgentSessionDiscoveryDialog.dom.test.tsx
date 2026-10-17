@@ -426,6 +426,22 @@ test("the only agent that can be scanned is selected on open, so Find Sessions i
   }
 });
 
+test("each agent's meta line names its integration only when its name does not (#2994)", async () => {
+  const view = await renderDialog(<AgentSessionDiscoveryDialog runner={runner} onClose={() => {}} />);
+  try {
+    const meta = (id: string) => {
+      const row = view.container.querySelector(`input[data-agent-id="${id}"]`)!.closest(".choice-row")!;
+      return row.querySelector(".choice-row-desc")?.textContent;
+    };
+    assert.equal(meta("claude"), "Native");
+    assert.equal(meta("codex-app"), "Native");
+    assert.equal(meta("pi"), "Native");
+    assert.equal(meta("gemini"), "ACP · Native");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("initialAgentId selects that agent among several (#2994)", async () => {
   const view = await renderDialog(<AgentSessionDiscoveryDialog runner={runner} initialAgentId="gemini" onClose={() => {}} />);
   try {
@@ -518,5 +534,60 @@ test("a failed scan is a danger notice with Try Again and the raw error behind S
   } finally {
     await view.unmount();
     api.listExternalSessions = priorList;
+  }
+});
+
+const RESULTS_STEP = "Agent Session Discovery Results";
+const focusedLabel = () => (domWindow.document.activeElement as unknown as HTMLElement).getAttribute("aria-label");
+
+for (const outcome of ["empty", "error"] as const) {
+  test(`a header Rescan that ends ${outcome === "empty" ? "with no sessions" : "in an error"} keeps focus in the dialog (CR-1.1)`, async () => {
+    const priorList = api.listExternalSessions;
+    let calls = 0;
+    api.listExternalSessions = async () => {
+      calls += 1;
+      if (calls === 1) return { sessions: [matchingSession] };
+      if (outcome === "error") throw new Error("scan failed");
+      return { sessions: [] };
+    };
+    const view = await renderDialog(<AgentSessionDiscoveryDialog runner={claudeOnly} onClose={() => {}} />);
+    try {
+      await act(async () => { view.button("Find Sessions")!.click(); });
+      const rescan = view.button("Rescan")!;
+      rescan.focus();
+      await act(async () => {
+        rescan.click();
+        await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+      });
+      assert.equal(calls, 2);
+      assert.equal(rescan.isConnected, false, "the header Rescan is gone once nothing is listed");
+      assert.equal(focusedLabel(), RESULTS_STEP);
+    } finally {
+      await view.unmount();
+      api.listExternalSessions = priorList;
+    }
+  });
+}
+
+test("continuing the last listed session keeps focus in the dialog (CR-1.1)", async () => {
+  const priorList = api.listExternalSessions;
+  const priorAdopt = api.adoptSession;
+  api.listExternalSessions = async () => ({ sessions: [matchingSession] });
+  api.adoptSession = (async () => ({})) as unknown as typeof api.adoptSession;
+  const view = await renderDialog(<AgentSessionDiscoveryDialog runner={claudeOnly} onClose={() => {}} />);
+  try {
+    await act(async () => { view.button("Find Sessions")!.click(); });
+    const continueHere = view.button("Continue Here")!;
+    continueHere.focus();
+    await act(async () => {
+      continueHere.click();
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+    assert.match(view.container.textContent ?? "", /No Sessions Found/);
+    assert.equal(focusedLabel(), RESULTS_STEP);
+  } finally {
+    await view.unmount();
+    api.listExternalSessions = priorList;
+    api.adoptSession = priorAdopt;
   }
 });

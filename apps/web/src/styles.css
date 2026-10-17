@@ -14397,11 +14397,6 @@ button.review-finding-location {
   list-style: none;
 }
 .agent-session-results > .row > .btn { flex: none; }
-/* The time and count are short and stay whole; the path, which loses its start, gives way. */
-.agent-session-results .row-trail {
-  flex: none;
-  max-width: none;
-}
 /* A read-only result carries its reason as a third line, so it grows past the two-line height. */
 .agent-session-results > .row.read-only {
   height: auto;
@@ -14413,8 +14408,11 @@ button.review-finding-location {
   font-weight: var(--weight-normal);
 }
 /* A long path loses its start, so the folder it ends in stays: the box runs right to left and the
-   `<bdi>` keeps the path itself left to right. */
+   `<bdi>` keeps the path itself left to right. It takes the room the time and count leave (they
+   keep `.row-trail`'s half-row cap and truncate too), so on a narrow row the path gives way first
+   and nothing reaches past the row's body into its action. */
 .agent-session-path {
+  flex: 1 1 0;
   direction: rtl;
   font-family: var(--font-mono);
   text-align: left;

@@ -21,6 +21,23 @@ test("a verified Pi agent discovers and adopts its external session", async ({ p
   expect(await page.evaluate(() => (window as unknown as { __piAdopted?: boolean }).__piAdopted)).toBe(true);
 });
 
+test("a result's metadata stays inside its row on a 320px phone (CR-1.2)", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto("/pi-session-adoption-e2e.html?theme=dark");
+  await page.getByRole("button", { name: "Find Sessions" }).click();
+  await page.getByRole("button", { name: "Continue Here" }).waitFor();
+  const box = await page.locator(".agent-session-results > li").evaluate((row) => {
+    const body = row.querySelector(".row-body")!.getBoundingClientRect();
+    const trail = row.querySelector(".row-trail")!.getBoundingClientRect();
+    const path = row.querySelector(".agent-session-path")!.getBoundingClientRect();
+    const action = row.querySelector("button")!.getBoundingClientRect();
+    return { bodyRight: body.right, trailRight: trail.right, actionLeft: action.left, pathWidth: path.width };
+  });
+  expect(box.trailRight).toBeLessThanOrEqual(box.bodyRight + 1);
+  expect(box.trailRight).toBeLessThanOrEqual(box.actionLeft);
+  expect(box.pathWidth, "the path keeps some room beside the time and count").toBeGreaterThan(24);
+});
+
 test("a protocol v155 runner explains why Pi adoption is unavailable", async ({ page }) => {
   await page.goto("/pi-session-adoption-e2e.html?legacy=1");
   const pi = page.getByRole("radio", { name: /Pi/ });
