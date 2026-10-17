@@ -8879,6 +8879,10 @@ export class SessionsService {
         response = await this.hub.requestFromRunner(root.runnerId, fallbackId, { type: "campaign_issue_scope", operation: "inspect", requestId: fallbackId, sessionId: root.id }, 30_000);
         candidateMessage = "Could not resolve the epic's members within the bounded inspection. Check GitHub access and the member list, or enter an explicit set of repository-qualified issues below.";
       }
+      if (response.type === "campaign_issue_scope_result" && response.sessionId === root.id && !response.ok &&
+          response.failure === "unsupported_execution_target") {
+        return fail("Campaign scope requires a valid local or SSH host execution target belonging to its runner. Container and cloud targets are not supported.", 409);
+      }
       if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id || !response.ok ||
           !response.repository || !/^[\w.-]+\/[\w.-]+$/u.test(response.repository) ||
           stored && stored.repository.toLowerCase() !== response.repository.toLowerCase()) return fail("Cannot verify the campaign repository and members. Check the runner's GitHub origin and gh authentication, then retry.", 409);

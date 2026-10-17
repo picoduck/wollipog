@@ -6,7 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { ExecutionTargetRef, GithubIssueClosureSnapshot } from "@wollipog/protocol";
+import type { CampaignIssueScopeMessage, ExecutionTargetRef, GithubIssueClosureSnapshot } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
@@ -15,6 +15,8 @@ const issue = 123;
 const connection = () => ({ nodes: [], pageInfo: { hasNextPage: false } });
 type CloseMode = "closed" | "lost_receipt" | "still_open";
 type Command = { file: string; args: string[]; cwd: string | undefined; persistedAttempts?: Record<string, string> };
+type ScopeOperation<T = CampaignIssueScopeMessage> = T extends CampaignIssueScopeMessage
+  ? Omit<T, "type" | "requestId" | "sessionId"> : never;
 
 function fixture(t: TestContext, mode: CloseMode = "closed") {
   const root = mkdtempSync(join(tmpdir(), "wollipog-issue-closure-recovery-"));
@@ -49,6 +51,9 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
     let error: ExecFileException | null = null;
     if (file === "git" && args.join(" ") === "remote get-url origin") {
       stdout = `git@github.com:${origin}.git`;
+    } else if (file === "gh" && args[0] === "api" && args.at(-1) === `repos/${origin}/issues/${issue}`) {
+      stdout = JSON.stringify({ number: issue, title: repository.issue.title, body: repository.issue.body,
+        html_url: repository.issue.url });
     } else if (file === "gh" && args[0] === "api" && args[1] === "graphql") {
       const before = beforeNextInspection;
       beforeNextInspection = undefined;
@@ -100,7 +105,7 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
     manager = new SessionManager(() => {}, (line) => { logs.push(line); }, store, "test-runner");
     return store;
   };
-  return { root, repository, commands, logs, inspect, execute, snapshot, restart, diskMeta, scope: (message: Omit<Extract<import("@wollipog/protocol").CampaignIssueScopeMessage, {operation:"synchronize"}>, "sessionId" | "requestId" | "type">) => manager.campaignIssueScope({ type: "campaign_issue_scope", requestId: "scope", sessionId, ...message } as import("@wollipog/protocol").CampaignIssueScopeMessage),
+  return { root, repository, commands, logs, inspect, execute, snapshot, restart, diskMeta, scope: (message: ScopeOperation) => manager.campaignIssueScope({ type: "campaign_issue_scope", requestId: "scope", sessionId, ...message }),
     setOrigin: (value: string) => { origin=value; },
     beforeNextInspection: (callback: () => void) => { beforeNextInspection=callback; },
     manager: () => manager, store: () => store, mutations: () => commands.filter((command) => command.file === "gh" && command.args[0] === "issue") };
@@ -230,10 +235,10 @@ test("an already-closed issue never posts a comment or records a mutation attemp
   assert.equal(f.diskMeta().githubIssueClosureAttempts, undefined);
 });
 
-function target(kind: ExecutionTargetRef["kind"]): ExecutionTargetRef {
-  return { id: `target-${kind}`, runnerId: "test-runner", kind, workspaceStrategy: "in_place",
+function target(kind: ExecutionTargetRef["kind"], strategy: "in_place" | "worktree" = "in_place"): ExecutionTargetRef {
+  return { id: `runner:test-runner:host:${strategy}`, runnerId: "test-runner", kind, workspaceStrategy: strategy,
     adapter: kind === "cloud" ? "cloud" : kind === "container" ? "container" : "host",
-    boundaries: { filesystem: "host", network: "inherit", secrets: "none", billing: "none" } };
+    boundaries: { filesystem: strategy === "worktree" ? "worktree" : "host", network: "inherit", secrets: "runner_local", billing: "agent_account" } };
 }
 
 const refusedSessions: Array<{ name: string; patch: Partial<SessionMeta>; error: string }> = [
@@ -241,9 +246,13 @@ const refusedSessions: Array<{ name: string; patch: Partial<SessionMeta>; error:
   { name: "missing repository", patch: { repoPath: "" }, error: "runner-local Orchestrator" },
   { name: "issue outside campaign scope", patch: { orchestrator: { strictProjectIsolation: true, issueNumbers: [456] } }, error: "outside the human-authorized campaign scope" },
   { name: "missing campaign scope", patch: { orchestrator: { strictProjectIsolation: true } }, error: "outside the human-authorized campaign scope" },
-  ...(["ssh", "container", "cloud"] as const).map((kind) => ({
-    name: `${kind} execution target`, patch: { executionTarget: target(kind) }, error: "runner-local Orchestrator",
+  ...(["container", "cloud"] as const).map((kind) => ({
+    name: `${kind} execution target`, patch: { executionTarget: target(kind) }, error: "host execution target",
   })),
+  { name: "foreign runner", patch: { executionTarget: { ...target("ssh"), runnerId: "other-runner" } }, error: "host execution target" },
+  { name: "mismatched target identity", patch: { executionTarget: { ...target("ssh"), id: "runner:other:host:in_place" } }, error: "host execution target" },
+  { name: "mismatched host adapter", patch: { executionTarget: { ...target("ssh"), adapter: "container" } }, error: "host execution target" },
+  { name: "mismatched filesystem boundary", patch: { executionTarget: { ...target("ssh"), boundaries: { ...target("ssh").boundaries, filesystem: "container" } } }, error: "host execution target" },
 ];
 
 for (const { name, patch, error } of refusedSessions) {
@@ -260,19 +269,71 @@ for (const { name, patch, error } of refusedSessions) {
       assert.equal(f.commands.length, 0, `${operation} must refuse before external inspection or mutation`);
       assert.equal(f.diskMeta().githubIssueClosureAttempts, undefined);
     }
+    if (!patch.executionTarget) return;
+    const scope = { repository: "example/project", issueNumbers: [issue], revision: 1,
+      authorizedByUserId: "human", authorizedAt: 1000 };
+    for (const message of [
+      { operation: "inspect" as const },
+      { operation: "synchronize" as const, scope },
+      { operation: "publication_inspect" as const, sanitizedTitle: "Repair", sanitizedBody: "Sanitized body", labels: [] },
+    ]) {
+      const result = await f.manager().campaignIssueScope({ type: "campaign_issue_scope", sessionId, requestId: message.operation, ...message });
+      assert.equal(result.ok, false);
+      assert.equal(result.failure, "unsupported_execution_target");
+    }
+    let forgeCalls = 0;
+    const observed = await f.manager().campaignForgeObserve({ type: "campaign_forge_observe", requestId: "forge", sessionId,
+      pullRequests: [{ repository: "example/project", number: 1 }] }, { gh: async () => {
+        forgeCalls++;
+        throw new Error("A refused target must never reach GitHub");
+      } });
+    assert.equal(observed.ok, false);
+    assert.equal(forgeCalls, 0);
+    assert.equal(f.commands.length, 0, "scope and forge refusals run no commands");
+    const refusal = f.logs.map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((entry) => entry?.event === "campaign_issue_scope_refused");
+    assert.deepEqual(refusal, { event: "campaign_issue_scope_refused", entryPoint: "inspect", requestId: "inspect",
+      sessionId, failure: "unsupported_execution_target" });
   });
 }
 
-test("an explicitly local target can inspect and execute a scoped closure", async (t) => {
-  const f = fixture(t);
-  f.store().patchMeta(sessionId, { executionTarget: target("local") });
-  f.restart();
-  const snapshot = await f.snapshot();
-  const result = await f.execute(snapshot);
-  assert.equal(result.ok, true, result.error ?? "Expected a successful runner response");
-  assert.equal(result.result?.outcome, "closed");
-  assert.equal(f.mutations().length, 1);
-});
+for (const kind of ["local", "ssh"] as const) {
+  for (const strategy of ["in_place", "worktree"] as const) {
+    test(`a ${kind} ${strategy} host target inspects scope, synchronizes it across recreation, observes forge status and closes an authorized issue`, async (t) => {
+      const f = fixture(t);
+      f.store().patchMeta(sessionId, { executionTarget: target(kind, strategy) });
+      const inspected = await f.scope({ operation: "inspect", issues: [issue] });
+      assert.equal(inspected.ok, true, inspected.error ?? "Expected scope inspection");
+      assert.equal(inspected.repository, "example/project");
+      assert.equal(inspected.candidates?.[0]?.issue.number, issue);
+      const snapshot = { ...await f.snapshot(), scopeRevision: 1 };
+      const scope = { repository: "example/project", issueNumbers: [issue], revision: 1,
+        authorizedByUserId: "human", authorizedAt: 1000 };
+      const synchronized = await f.manager().campaignIssueScope({ type: "campaign_issue_scope", operation: "synchronize",
+        requestId: "sync", sessionId, scope });
+      assert.equal(synchronized.ok, true, synchronized.error ?? "Expected scope synchronization");
+      f.restart();
+      assert.deepEqual(f.diskMeta().orchestrator!.issueScope, scope);
+      assert.equal((await f.scope({ operation: "inspect" })).ok, true);
+      let forgeCalls = 0;
+      const observed = await f.manager().campaignForgeObserve({ type: "campaign_forge_observe", requestId: "forge", sessionId,
+        pullRequests: [{ repository: "example/project", number: 1 }] }, { gh: async () => {
+          forgeCalls++;
+          return { stdout: JSON.stringify({ data: { r0: { pullRequest: { state: "OPEN", isDraft: false,
+            headRefOid: "a".repeat(40), baseRefName: "main", reviewDecision: null, mergeStateStatus: "CLEAN",
+            mergeCommit: null, mergeQueueEntry: null, commits: { nodes: [] } } } } }),
+            stderr: "", code: null, timedOut: false };
+        } });
+      assert.equal(observed.ok, true);
+      assert.equal(forgeCalls, 1);
+      assert.equal(observed.results?.[0]?.ok, true);
+      const result = await f.execute(snapshot);
+      assert.equal(result.ok, true, result.error ?? "Expected a successful runner response");
+      assert.equal(result.result?.outcome, "closed");
+      assert.equal(f.mutations().length, 1);
+    });
+  }
+}
 
 
 test("runner scope synchronization persists across recreation and refuses stale revisions and repositories", async (t) => {
