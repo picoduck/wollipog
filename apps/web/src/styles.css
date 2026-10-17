@@ -18326,7 +18326,8 @@ a.tab { text-decoration: none; }
 }
 .ui-select-option:hover,
 .ui-searchable-combobox-list .ui-inline-listbox-option:hover { background: var(--bg-elev-3); }
-.ui-select-option.is-selected { color: var(--accent-on-tint); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.ui-select-option.is-selected,
+.ui-searchable-combobox-list .ui-inline-listbox-option.is-selected { color: var(--accent-on-tint); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .ui-select-option-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .ui-select-option-desc { color: var(--text-dim); font-size: var(--text-xs); line-height: 16px; }
 
