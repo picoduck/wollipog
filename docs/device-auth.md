@@ -81,8 +81,9 @@ valid.
 
 ## Pairing Other Devices
 
-In **Machines → People & Devices** (owner/admin only), choose an active member and name the device.
-The control plane mints a 256-bit token, stores only its SHA-256 hash, and shows the plaintext once:
+In **Connections › People and Devices** (owner/admin only), choose an active member and name the
+device. The control plane mints a 256-bit token, stores only its SHA-256 hash, and shows the
+plaintext once:
 
 ```
 http://<host>:<port>/#pair=<token>

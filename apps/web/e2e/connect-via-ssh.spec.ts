@@ -11,7 +11,7 @@ async function open(page: Page, width: number) {
   await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
   await page.goto("/machine-management-e2e.html");
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
-  await choosePageAction(page, "Connect via SSH");
+  await choosePageAction(page, "Connect via SSH…", "Add Machine");
   const dialog = page.getByRole("dialog", { name: "Connect via SSH" });
   await expect(dialog.getByRole("button", { name: /^Choose from SSH Config:/ })).toBeVisible();
   // Measure the settled dialog, not its scale-in or the sheet's slide-up.

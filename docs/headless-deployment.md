@@ -197,7 +197,7 @@ Manual setup remains available:
 
 Keep the control plane bound to loopback and expose it through Tailscale or an HTTPS reverse proxy.
 Set `--public-origin https://...` so pairing links embed the address remote clients reach: both
-`wollipog admin device create` and the dashboard's People & Devices card then hand out
+`wollipog admin device create` and the dashboard's People and Devices tab then hand out
 `<public origin>/#pair=<token>` instead of guessing from the bind address, which is the only link
 that works for a loopback-bound control plane behind a proxy. A bind
 beyond loopback without an HTTPS public origin, or a plain-HTTP public origin beyond loopback, is

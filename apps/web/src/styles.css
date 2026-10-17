@@ -1510,8 +1510,9 @@ kbd {
 }
 
 /* Phones (§15.1): the page header is the 48px app bar. Title at --type-title, truncating; no
-   description; the primary is a `+` icon button whose accessible name stays its label; every
-   secondary is in ⋯. The bar sits below the top safe area, as the phone top bar did. */
+   description; the primary is a `+` icon button whose accessible name stays its label (a menu
+   primary drops its caret and opens a sheet); every secondary is in ⋯. The bar sits below the top
+   safe area, as the phone top bar did. */
 @media (max-width: 760px) {
   :root { --page-gutter: 16px; --tl-gutter: 16px; }
   .page-header {
@@ -1537,7 +1538,8 @@ kbd {
     padding: 0;
     justify-content: center;
   }
-  .page-primary-key { display: none; }
+  .page-primary-key,
+  .page-primary-caret { display: none; }
   .page-primary-label {
     position: absolute;
     width: 1px;
@@ -9786,6 +9788,28 @@ textarea {
 .connections-panel {
   min-width: 0;
 }
+/* A notice above the tab's content, such as a permission load failure. */
+.connections-panel > .notice { margin-bottom: var(--space-4); }
+/* The empty Machines tab (§12.1): the state's actions are its methods, 16px under the sentence and
+   at the form measure, so a method's one-line description fits beside its button. */
+.state.connections-empty { max-width: var(--page-max-form); }
+.connections-empty > .actions { margin-top: var(--space-4); }
+.connections-empty > .actions > .surface { flex: 1 1 100%; }
+/* On a phone a method's title and description take the row's width and wrap, and its button drops
+   below at its natural width, indented to the text column. */
+@media (max-width: 760px) {
+  /* Two classes, so the wrapped row outgrows `.row.row-2`'s fixed height. */
+  .row.add-machine-method {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+    height: auto;
+    padding-top: var(--space-3);
+    padding-bottom: var(--space-3);
+  }
+  .add-machine-method > .row-body { flex: 1 1 calc(100% - var(--icon) - var(--space-3)); }
+  .add-machine-method .row-sub { white-space: normal; }
+  .add-machine-method > .btn { margin-left: calc(var(--icon) + var(--space-3)); }
+}
 .instances-page {
   min-width: 0;
 }
@@ -12233,8 +12257,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 
 /* ---- View toolbar (Runners "Add a runner", etc.) ---- */
-/* The Machines and Instances pages: page-level actions above the list. */
-:is(.connections-panel, .instances-page) > .toolbar {
+/* The Instances page: page-level actions above the list. */
+.instances-page > .toolbar {
   justify-content: space-between;
   margin-bottom: var(--space-4);
 }
