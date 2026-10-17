@@ -225,3 +225,87 @@ test("a FIFO in place of the relocated file is quarantined without blocking", ()
   assert.throws(() => verifyRelocatedPackedRefs(common), PackedRefsViolationError);
   assert.equal(existsSync(relocated), false);
 });
+
+test("a Git rewrite between open and fstat is verified again, never quarantined", () => {
+  const { repoPath, common } = repository();
+  git(repoPath, ["branch", "packed-only"]);
+  git(repoPath, ["pack-refs", "--all"]);
+  assert.equal(relocatePackedRefs(common).status, "relocated");
+  const file = join(common, RELOCATED_PACKED_REFS_DIRECTORY, "packed-refs");
+  const rewritten = `${readFileSync(file, "utf8")}`;
+  const fstat = fs.fstatSync;
+  let rewrites = 0;
+  // Exactly what Git does under its lock: write packed-refs.lock, then rename it over the name.
+  const spy = mock.method(fs, "fstatSync", (fd: number) => {
+    if (rewrites++ === 0) {
+      writeFileSync(`${file}.lock`, rewritten);
+      fs.renameSync(`${file}.lock`, file);
+    }
+    return fstat(fd);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(verifyRelocatedPackedRefs(common), join(common, RELOCATED_PACKED_REFS_DIRECTORY));
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.ok(rewrites >= 2, "the replacement was examined again");
+  assert.equal(existsSync(join(common, PACKED_REFS_QUARANTINE_DIRECTORY)), false);
+  assert.equal(readFileSync(file, "utf8"), rewritten);
+  assert.match(git(repoPath, ["for-each-ref", "refs/heads/packed-only"]), /packed-only/);
+});
+
+test("a violation is not quarantined while Git holds the packed-refs lock", () => {
+  const { root, common } = repository();
+  assert.equal(relocatePackedRefs(common).status, "relocated");
+  const file = join(common, RELOCATED_PACKED_REFS_DIRECTORY, "packed-refs");
+  const victim = join(root, "victim");
+  symlinkSync(victim, file);
+  writeFileSync(`${file}.lock`, "");
+  assert.throws(() => verifyRelocatedPackedRefs(common), (error: unknown) =>
+    error instanceof PackedRefsViolationError && error.quarantinedAt === undefined && /Git holds/.test(error.message));
+  assert.ok(lstatSync(file).isSymbolicLink(), "nothing was moved while another writer held the lock");
+  assert.ok(existsSync(`${file}.lock`), "the other writer's lock is untouched");
+  assert.equal(existsSync(victim), false);
+});
+
+test("migration publishes only a complete copy, however the writes are split", () => {
+  const { repoPath, common } = repository();
+  for (let index = 0; index < 50; index++) git(repoPath, ["branch", `packed-${index}`]);
+  git(repoPath, ["pack-refs", "--all"]);
+  const original = readFileSync(join(common, "packed-refs"));
+  const write = fs.writeSync;
+  // A short write is legal: it reports fewer bytes and does not throw.
+  const spy = mock.method(fs, "writeSync", (fd: number, buffer: Buffer, offset: number, length: number) =>
+    write(fd, buffer, offset, Math.min(length, 7)));
+  syncBuiltinESMExports();
+  try {
+    assert.equal(relocatePackedRefs(common).status, "relocated");
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.ok(spy.mock.callCount() > 1);
+  assert.deepEqual(readFileSync(join(common, RELOCATED_PACKED_REFS_DIRECTORY, "packed-refs")), original);
+});
+
+test("a copy that stops making progress leaves the original packed-refs in place", () => {
+  const { repoPath, common } = repository();
+  git(repoPath, ["branch", "packed-only"]);
+  git(repoPath, ["pack-refs", "--all"]);
+  const original = readFileSync(join(common, "packed-refs"));
+  const spy = mock.method(fs, "writeSync", () => 0);
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => relocatePackedRefs(common), /no progress/);
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.ok(lstatSync(join(common, "packed-refs")).isFile(), "the stock file was never replaced by a link");
+  assert.deepEqual(readFileSync(join(common, "packed-refs")), original);
+  assert.equal(existsSync(join(common, "packed-refs.lock")), false);
+  assert.deepEqual(readdirSync(join(common, RELOCATED_PACKED_REFS_DIRECTORY)), [], "no lock or staged copy is left");
+  assert.match(git(repoPath, ["for-each-ref", "refs/heads/packed-only"]), /packed-only/);
+});
