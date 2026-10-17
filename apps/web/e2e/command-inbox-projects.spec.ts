@@ -1860,7 +1860,8 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await openProjectManager(page);
   // `radio`, not `button`: the visibility filter is one choice of three, and it used to announce
   // itself as three independent toggles. That the query had to change is the point of the change.
-  await page.getByRole("radio", { name: "Hidden", exact: true }).click();
+  // Its plain count is part of its name (#2957).
+  await page.getByRole("radio", { name: /^Hidden \d+$/ }).click();
   await expect(page.getByRole("button", { name: /Durable Empty/ })).toBeVisible();
   await page.getByRole("button", { name: /Durable Empty/ }).click();
   await page.getByRole("button", { name: "Show Project" }).click();

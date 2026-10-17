@@ -12565,60 +12565,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 
 /* Project management --------------------------------------------------- */
-.projects-view { min-height: 100%; }
-.project-manager-grid {
+/* ProjectList.tsx (#2957): the shared master-detail list pane (§6), its head the search field over
+   the full-width Sessions Tabs filter (§8.4, §10.2). */
+.project-list-head {
   display: grid;
-  min-height: min(720px, calc(100vh - 150px));
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--bg-elev);
-  grid-template-columns: 310px minmax(0, 1fr);
+  gap: var(--space-2);
 }
-/* The compact tier's list pane (§2.10, §15.2), measured on the main column rather than the
-   viewport: the labelled rail takes width the viewport query could not see. Phones stack the two
-   below. */
-@container app (max-width: 1099px) {
-  .project-manager-grid { grid-template-columns: 280px minmax(0, 1fr); }
-}
-.project-manager-list {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  border-right: 1px solid var(--border);
-  background: color-mix(in srgb, var(--bg-elev-2) 68%, var(--bg));
-}
-/* The bordered label is the field (its input is borderless), so it is one control height. */
-.project-manager-search {
-  display: flex;
-  align-items: center;
-  height: var(--control-h);
-  gap: 8px;
-  margin: 14px 14px 10px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text-faint);
-  background: var(--bg);
-}
-/* The visibility filter keeps the search field's inset rather than running edge to edge, where it
-   met the list/detail divider (#1969). The column stretches it, so `.seg.block`'s 100% gives way. */
-.project-manager-list > .seg.block {
-  width: auto;
-  margin: 0 14px 10px;
-}
-.project-manager-search input {
-  width: 100%;
-  min-width: 0;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  outline: 0;
-  color: var(--text);
-  background: transparent;
-}
-.project-manager-items { min-height: 0; flex: 1; overflow-y: auto; padding: 0 8px 12px; }
-.project-hidden-badge,
 .project-default-badge,
 .project-visibility-state {
   display: inline-flex;
@@ -12635,7 +12587,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .project-default-badge,
 .project-visibility-state { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); color: var(--accent); }
 .project-visibility-state.is-hidden { border-color: var(--border); color: var(--text-dim); }
-.project-manager-detail { min-width: 0; overflow-y: auto; padding: 22px; }
 .project-detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 18px; }
 .project-detail-heading h2 { margin: 0 0 3px; font-size: 20px; }
 .project-detail-meta { display: block; }
@@ -12692,8 +12643,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .project-location-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-location-actions { display: flex; max-width: 430px; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .project-danger-zone { border-color: color-mix(in srgb, var(--danger-text) 30%, var(--border)); }
-.project-manager-empty,
-.project-manager-unavailable {
+.project-manager-empty {
   display: flex;
   min-height: 260px;
   align-items: center;
@@ -12789,11 +12739,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .project-location-actions { max-width: none; justify-content: flex-start; }
 }
 @media (max-width: 760px) {
-  .project-manager-grid { display: block; min-height: calc(100dvh - 190px); }
-  .project-manager-list { min-height: calc(100dvh - 190px); border-right: 0; }
-  .project-manager-list.has-selection { display: none; }
-  .project-manager-detail { display: none; padding: 14px; }
-  .project-manager-detail.is-open { display: block; }
   .project-detail-heading,
   .project-section-heading { align-items: stretch; flex-direction: column; }
   .project-name-form { align-items: stretch; flex-direction: column; }
@@ -15813,18 +15758,20 @@ button.review-finding-location {
 .skill-row-status { margin-left: auto; }
 .skill-row .row-sub.is-empty { color: var(--text-faint); }
 /* No results (§12.2), inline in the list at the rows' inset: the icon beside its sentence. */
-.state.skill-list-no-results { padding: var(--space-3) var(--space-3) 0; }
-.skill-list-no-results .state-body {
+/* The Projects list's no-match row is the same (#2957). */
+.state:is(.skill-list-no-results, .project-list-no-results) { padding: var(--space-3) var(--space-3) 0; }
+:is(.skill-list-no-results, .project-list-no-results) .state-body {
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
-.skill-list-no-results .state-body > svg { flex: none; }
+:is(.skill-list-no-results, .project-list-no-results) .state-body > svg { flex: none; }
 /* The foot's Orphaned Copies entry is one line in the foot's --text-dim (§5.6). */
 .list-foot > .skill-list-orphans { color: inherit; }
 .skill-list-orphans > .row-title { font: var(--type-body); }
 /* Skeleton rows are the row itself, holding a title bar over a meta bar (§12.3). */
-.skill-row-skeleton > .row-body { gap: var(--space-2); }
+/* The Projects list's are the same (#2957). */
+:is(.skill-row-skeleton, .project-row-skeleton) > .row-body { gap: var(--space-2); }
 /* The phone's first row (#1971): it opens the Library Overview, a step apart from the groups. */
 .skill-list-overview { margin-bottom: var(--space-2); }
 /* The Library Overview (#1971, §6.1): the default detail, top-aligned at the pane's leading edge.
@@ -17715,10 +17662,6 @@ button.setting-row { cursor: pointer; }
      INSIDE the container the content will fill — see the Projects grid below. */
   min-height: 100%;
 }
-/* The placeholder occupies the whole grid, not its list-pane column. */
-.project-manager-grid > .skeleton {
-  grid-column: 1 / -1;
-}
 /* A detail pane's placeholder (§12.3): a title bar over two section blocks, in the pane's own
    padding. */
 .skeleton.detail-skeleton {
@@ -17965,6 +17908,12 @@ a.tab { text-decoration: none; }
 .seg-option[aria-disabled="true"] {
   color: var(--text-faint);
   cursor: not-allowed;
+}
+/* A plain count after the option's label (§10.2, §11.4). */
+.seg-count {
+  color: var(--text-faint);
+  font: var(--type-micro);
+  font-variant-numeric: tabular-nums;
 }
 /* A group whose options are all unavailable, each for its own reason, prints the reason under the
    label; that track grows rather than clipping the sentence. */

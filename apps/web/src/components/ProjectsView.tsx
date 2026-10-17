@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { StatusBadge } from "./StatusBadge.js";
 import {
   runnerCapabilityRequirement,
@@ -19,6 +19,7 @@ import {
   projectAfterRemoval,
   projectAvailabilityLabel,
   projectAvailabilityMeta,
+  type LocationMachineName,
   type ProjectLocationCandidate,
   type ProjectVisibilityFilter,
 } from "../project-management.js";
@@ -27,15 +28,17 @@ import { useStoreActions, useStoreSelector } from "../store.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { AccessScopeSettings, useAccessScopeIdentity } from "./AccessScopeControls.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { PlusIcon, SearchIcon } from "./Icons.js";
+import { PlusIcon, ProjectsIcon } from "./Icons.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
 import { backLabel, destination } from "../navigation.js";
 import { useIsMobile } from "./useIsMobile.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
-import { Modal, Skeleton } from "./common.js";
-import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { DetailSkeleton, Modal } from "./common.js";
+import { Notice } from "./Notice.js";
+import { ProjectList } from "./ProjectList.js";
+import { State } from "./State.js";
 
 type DialogState =
   | { kind: "create" }
@@ -174,10 +177,14 @@ export function ProjectsView({
     for (const id of deletedIds) map.delete(id);
     return map;
   }, [deletedIds, overrides, storedProjects]);
-  const allProjects = useMemo(() => filterManagedProjects(projectMap.values(), "", "all"), [projectMap]);
-  const visibleProjects = useMemo(() => filterManagedProjects(projectMap.values(), query, visibility), [projectMap, query, visibility]);
-  const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
   const boxByRunner = useMemo(() => new Map([...boxes.values()].map((box: BoxView) => [box.runnerId, box])), [boxes]);
+  const machineName = useCallback<LocationMachineName>((location) =>
+    runnerDisplay(runners.get(location.runnerId), boxByRunner.get(location.runnerId), location.runnerId).name,
+  [boxByRunner, runners]);
+  const allProjects = useMemo(() => filterManagedProjects(projectMap.values(), "", "all"), [projectMap]);
+  const visibleProjects = useMemo(() => filterManagedProjects(projectMap.values(), query, visibility, machineName),
+    [machineName, projectMap, query, visibility]);
+  const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
   const selectedStopsRuntime = selected ? [...sessions.values()].some((session) =>
     session.projectId === selected.id && !session.archived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)
   ) : false;
@@ -188,6 +195,24 @@ export function ProjectsView({
       navigate(fallback ? { name: "projects", id: fallback.id } : { name: "projects" });
     }
   }, [allProjects, navigate, selected, selectedProjectId, snapshotLoaded, visibleProjects]);
+  // Each pane scrolls on its own (§6). A new selection starts the detail at its top; on a phone, where
+  // the route swaps the whole screen, focus moves to the new page title, which shows no ring (§16.1).
+  const listBodyRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const previousSelection = useRef(selectedProjectId);
+  useLayoutEffect(() => {
+    if (previousSelection.current === selectedProjectId) return;
+    previousSelection.current = selectedProjectId;
+    if (detailRef.current) detailRef.current.scrollTop = 0;
+    if (isMobile) document.getElementById("page-title")?.focus({ preventScroll: true });
+  }, [selectedProjectId, isMobile]);
+  // A phone hides the list while a project is open, which loses its scroll position; Back puts the
+  // list back where it was (§6.2). Recorded only while the list is on screen.
+  const listScrollTop = useRef(0);
+  const detailOpen = Boolean(selectedProjectId);
+  useLayoutEffect(() => {
+    if (!detailOpen && listBodyRef.current) listBodyRef.current.scrollTop = listScrollTop.current;
+  }, [detailOpen]);
   useEffect(() => {
     setRenameDraft(selected?.name ?? "");
     setError(null);
@@ -327,122 +352,105 @@ export function ProjectsView({
     }
   };
 
-  if (!snapshotLoaded) {
-    // The placeholder renders the REAL intro and the REAL grid shell, because neither depends on
-    // the snapshot — the intro is static copy and the grid's minimum height is its own. Sizing a
-    // standalone Skeleton to match instead needs a number copied from the stylesheet, and the
-    // copy was wrong: six 44px rows reserved ~296px for a layout whose grid alone has a 720px
-    // minimum, so the load finished with a ~500px jump. `.skeleton { flex: 1 }` did not save it —
-    // `.main-body` is a flex ITEM, not a flex container, so the rule never applied.
+  const header = (primary: boolean) => (
+    <PageHeader
+      title={PROJECTS.name}
+      description={PROJECTS.description}
+      // Disabled while loading rather than omitted: it holds its own width, and there is nothing to
+      // create a project against until the snapshot says which machines are connected.
+      primary={primary ? {
+        label: "New Project",
+        buttonRef: createButtonRef,
+        disabled: !snapshotLoaded,
+        onClick: () => openDialog({ kind: "create" }),
+      } : undefined}
+    />
+  );
+
+  if (snapshotLoaded && !projectsSupported) {
     return (
-      <div className="page full projects-view">
-        {/* Disabled rather than omitted: it holds its own width, and there is nothing to create
-            a Project against until the snapshot says which machines are connected. */}
-        <PageHeader
-          title={PROJECTS.name}
-          description={PROJECTS.description}
-          primary={{ label: "Create Project", onClick: () => undefined, disabled: true }}
-        />
-        <div className="project-manager-grid">
-          <Skeleton rows={6} announce="Loading projects" />
+      <section className="page full fill">
+        <PageHeader title={PROJECTS.name} description={PROJECTS.description} />
+        <div className="master-detail-state">
+          <Notice tone="warning" title="Projects Need an Update" headingLevel={2}>
+            Update Wollipog to manage projects and locations. Your sessions aren’t affected.
+          </Notice>
         </div>
-      </div>
-    );
-  }
-  if (!projectsSupported) {
-    return (
-      <div className="page full projects-view">
-        <PageHeader title={PROJECTS.name} />
-        <div className="project-manager-unavailable">
-          <strong>Project Management Unavailable</strong>
-          <span>Wollipog on the server needs an update to manage Projects and Locations.</span>
-        </div>
-      </div>
+      </section>
     );
   }
 
-  // On a phone the list and the detail are two routes, so the open Project takes the detail bar
-  // and its back control (§4.3, §6.2). The bar is full-bleed like every detail bar, so it sits
-  // outside the padded page container; on wider screens both panes share the page header.
-  const phoneDetail = isMobile && selected;
+  // No projects is one state across both panes (§6.1, §12.1), and that state offers creation, so the
+  // header's primary steps aside while it shows.
+  const spanningEmpty = snapshotLoaded && allProjects.length === 0;
+  // On a phone the list and the open project are two routes, so the open project takes the detail
+  // bar and its Back (§4.3, §6.2). The bar sits inside the fill page, where it is full-bleed like
+  // every detail bar and shares the column's height with the panes.
+  const phoneDetail = isMobile && detailOpen && !spanningEmpty;
+  const noMatch = snapshotLoaded && allProjects.length > 0 && visibleProjects.length === 0;
   return (
-    <>
-    {phoneDetail && (
-      <DetailBar
-        title={selected.name}
-        backLabel={backLabel("projects")}
-        onBack={() => navigate({ name: "projects" })}
-      />
-    )}
-    <div className="page full projects-view">
-      {!phoneDetail && (
-        <PageHeader
-          title={PROJECTS.name}
-          description={PROJECTS.description}
-          primary={{ label: "Create Project", buttonRef: createButtonRef, onClick: () => openDialog({ kind: "create" }) }}
+    <section className="page full fill">
+      {phoneDetail && (
+        <DetailBar
+          title={selected?.name ?? "Project"}
+          backLabel={backLabel("projects")}
+          onBack={() => navigate({ name: "projects" })}
         />
       )}
-      <div className="project-manager-grid">
-        <aside className={`project-manager-list${selected ? " has-selection" : ""}`} aria-label="Projects" data-focus-zone="list" tabIndex={-1}>
-          <label className="project-manager-search">
-            <span className="sr-only">Search Projects</span>
-            <SearchIcon />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects" />
-          </label>
-          {/* Was `role="group"` with `aria-pressed`, which describes three independent toggles
-              rather than one choice of three. */}
-          <SegmentedControl
-            className="block"
-            label="Sessions Visibility"
-            value={visibility}
-            options={[
-              { value: "all", label: "All" },
-              { value: "visible", label: "Visible" },
-              { value: "hidden", label: "Hidden" },
-            ]}
-            onChange={setVisibility}
-          />
-          <div className="project-manager-items clip-focus">
-            {visibleProjects.map((project) => {
-              const active = project.id === selected?.id;
-              const available = project.locations.filter((location) => location.availability === "available").length;
-              return (
-                <button
-                  type="button"
-                  key={project.id}
-                  className={`row row-2${active ? " is-selected" : ""}`}
-                  aria-current={active ? "true" : undefined}
-                  onClick={() => navigate({ name: "projects", id: project.id })}
-                >
-                  <span className="row-body">
-                    <span className="row-line">
-                      <span className="row-title">{project.name}</span>
-                      {project.hidden && <span className="project-hidden-badge">Hidden</span>}
-                    </span>
-                    <span className="row-sub">
-                      {project.unarchivedSessionCount} Session{project.unarchivedSessionCount === 1 ? "" : "s"} · {project.locations.length} Location{project.locations.length === 1 ? "" : "s"} · {available > 0 ? `${available} Available` : project.locations.length ? "No Locations Available" : "No Locations"}
-                    </span>
-                  </span>
+      {!phoneDetail && header(!spanningEmpty)}
+      {spanningEmpty ? (
+        <div className="master-detail-state">
+          <State
+            icon={<ProjectsIcon />}
+            title={`No ${PROJECTS.name} Yet`}
+            headingLevel={2}
+            actions={
+              <>
+                <button type="button" className="btn primary lg" onClick={() => openDialog({ kind: "create" })}>
+                  <PlusIcon />
+                  New Project
                 </button>
-              );
-            })}
-            {visibleProjects.length === 0 && (
-              <div className="project-manager-empty compact">
-                <strong>{`No ${PROJECTS.name} Found`}</strong>
-                <span>{allProjects.length ? "Try another search or Sessions visibility filter." : "Create a Project to organize related sessions."}</span>
+                <button type="button" className="btn" onClick={manageConnections}>Connect a Machine</button>
+              </>
+            }
+          >
+            A project is a repository on one or more of your machines. Sessions start inside a project.
+          </State>
+        </div>
+      ) : (
+      <div className="master-detail" data-detail-open={detailOpen ? "" : undefined}>
+        <ProjectList
+          projects={snapshotLoaded ? allProjects : null}
+          shown={visibleProjects}
+          query={query}
+          onQueryChange={setQuery}
+          visibility={visibility}
+          onVisibilityChange={setVisibility}
+          machineName={machineName}
+          selectedId={selected?.id ?? null}
+          onSelect={(projectId) => navigate({ name: "projects", id: projectId })}
+          bodyRef={listBodyRef}
+          onBodyScroll={(event) => {
+            // A hidden list reports 0; that is not where the person left it.
+            if (event.currentTarget.clientHeight > 0) listScrollTop.current = event.currentTarget.scrollTop;
+          }}
+        />
+        <div ref={detailRef} className="master-detail-detail" data-focus-zone="main" tabIndex={-1}>
+          {!snapshotLoaded ? (
+            // While the snapshot loads, the list's skeleton is the one announcement.
+            <DetailSkeleton />
+          ) : !selected ? (
+            // Until the Projects Overview (#2958), a desktop with no selection keeps this placeholder.
+            // A search with no match is answered in the list alone, so it steps aside then (§12.2).
+            noMatch ? null : (
+              <div className="project-manager-empty">
+                <strong>Select a Project</strong>
+                <span>Choose a Project to manage its Locations and sessions.</span>
               </div>
-            )}
-          </div>
-        </aside>
-        <main className={`project-manager-detail${selected ? " is-open" : ""}`} data-focus-zone="main" tabIndex={-1}>
-          {!selected ? (
-            <div className="project-manager-empty">
-              <strong>{allProjects.length ? "Select a Project" : "Create Your First Project"}</strong>
-              <span>{allProjects.length ? "Choose a Project to manage its Locations and sessions." : "Projects remain available even when they have no sessions or every machine is offline."}</span>
-              {!allProjects.length && <button type="button" className="btn primary" onClick={() => openDialog({ kind: "create" })}>Create Project</button>}
-            </div>
+            )
           ) : (
-            <>
+            // One grid item, so the detail keeps its own flow until its header and sections (#2959).
+            <div>
               <div className="project-detail-heading">
                 <div>
                   <h2>{selected.name}</h2>
@@ -614,10 +622,11 @@ export function ProjectsView({
                 <div className="project-section-heading"><div><h3 id="project-danger-heading">Danger Zone</h3><p>Deleting removes only Project metadata. Sessions and files are retained.</p></div></div>
                 <button type="button" className="btn ghost danger" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "delete" })}>Delete Project</button>
               </section>
-            </>
+            </div>
           )}
-        </main>
+        </div>
       </div>
+      )}
       {dialog?.kind === "create" && (
         <CreateProjectDialog
           accessScopeManagementSupported={accessScopeManagementSupported}
@@ -675,7 +684,6 @@ export function ProjectsView({
       {dialog?.kind === "delete" && selected && (
         <DeleteProjectDialog project={selected} busy={busy === "delete"} error={error} onClose={() => setDialog(null)} onDelete={deleteProject} />
       )}
-    </div>
-    </>
+    </section>
   );
 }

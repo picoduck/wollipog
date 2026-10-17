@@ -18,6 +18,7 @@ const inboxRow = readFileSync(new URL("./components/InboxRow.tsx", import.meta.u
 const projectSplitMenu = readFileSync(new URL("./components/ProjectSplitMenu.tsx", import.meta.url), "utf8");
 const menuSurface = readFileSync(new URL("./components/Menu.tsx", import.meta.url), "utf8");
 const projectsView = readFileSync(new URL("./components/ProjectsView.tsx", import.meta.url), "utf8");
+const projectList = readFileSync(new URL("./components/ProjectList.tsx", import.meta.url), "utf8");
 const pageHeader = readFileSync(new URL("./components/PageHeader.tsx", import.meta.url), "utf8");
 const runsView = readFileSync(new URL("./components/RunsView.tsx", import.meta.url), "utf8");
 const podsView = readFileSync(new URL("./components/PodsView.tsx", import.meta.url), "utf8");
@@ -28,6 +29,7 @@ const detail = readFileSync(new URL("./components/SessionDetail.tsx", import.met
 const sessionHeader = readFileSync(new URL("./components/SessionHeader.tsx", import.meta.url), "utf8");
 const shortcuts = readFileSync(new URL("./shortcuts.ts", import.meta.url), "utf8");
 const newSessionShortcut = readFileSync(new URL("./useNewSessionShortcut.ts", import.meta.url), "utf8");
+const newSessionDialog = readFileSync(new URL("./components/NewSessionDialog.tsx", import.meta.url), "utf8");
 
 test("the application shell is rail-first and the legacy sidebar is fully retired", () => {
   const combined = [app, rail, inbox, shortcuts, css].join("\n");
@@ -359,11 +361,17 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   assert.match(projectsView, /className="muted project-detail-meta">\{projectAudienceVisibilitySummary/);
   assert.match(css, /\.project-detail-meta\s*\{\s*display:\s*block;/,
     "Project identity and audience metadata render on distinct lines");
-  assert.match(projectsView, /label="Sessions Visibility"/,
+  // The list's filter says whether a project has a Sessions tab (#2957), not who can see it.
+  assert.match(projectList, /label="Sessions Tabs"/,
     "the Sessions show-or-hide filter does not reuse the Project audience label");
-  for (const label of ["Create Project", "Add Location", "Make Default", "Archive Sessions", "Delete Project"]) {
+  for (const label of ["New Project", "Add Location", "Make Default", "Archive Sessions", "Delete Project"]) {
     assert.equal(projectsView.includes(label), true, label);
   }
+  // #2957 retired the Projects list's compact empty state; New Session's no-locations state still
+  // uses it, and without its own rule it took the 260px placeholder minimum.
+  assert.match(newSessionDialog, /className="project-manager-empty compact"/);
+  assert.match(css, /\.project-manager-empty\.compact\s*\{[^}]*min-height:\s*140px;/,
+    "New Session's compact empty state keeps its own height");
   assert.match(projectsView, /its sessions move to No Project[\s\S]*Sessions and files are not deleted/,
     "Project deletion states its non-destructive consequences");
   // #2220: a group whose authoritative count says sessions are coming shows skeleton rows, never a
@@ -403,7 +411,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "the collapsed creation disclosure remains a full-width readable target");
   // The phone Projects back control is the detail bar's (#1801): an `.icon-btn` named "Back to
   // Projects", one control height, which a touch screen makes 44px.
-  assert.match(projectsView, /const phoneDetail = isMobile && selected;[\s\S]*?\{phoneDetail && \(\s*<DetailBar[\s\S]*?backLabel=\{backLabel\("projects"\)\}/,
+  assert.match(projectsView, /const phoneDetail = isMobile && detailOpen && !spanningEmpty;[\s\S]*?\{phoneDetail && \(\s*<DetailBar[\s\S]*?backLabel=\{backLabel\("projects"\)\}/,
     "the mobile Projects back target is the detail bar's");
   assert.doesNotMatch(projectsView, /project-manager-back|← Back to Projects/);
   assert.match(pageHeader, /className="icon-btn detail-bar-back"[^>]*aria-label=\{backLabel\}/);

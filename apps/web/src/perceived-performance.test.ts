@@ -205,20 +205,18 @@ test("the virtualized inbox exposes ONE structure", () => {
 
 test("the Projects placeholder reserves the layout it replaces", () => {
   const projects = src("./components/ProjectsView.tsx");
-  // Six 44px rows reserved ~296px for a layout whose grid alone has a 720px minimum, so the load
-  // ended in a ~500px jump — the exact thing a skeleton exists to prevent. Mounting it inside the
-  // real grid makes the reservation exact by construction rather than by a copied number.
-  // The guard must BE the placeholder, not sit in front of one. Slicing a region and looking for
-  // the right markup inside it passed happily when an early `return <Skeleton />` was put ahead of
-  // the block — the region still contained the good markup, now unreachable.
-  assert.doesNotMatch(projects, /if \(!snapshotLoaded\) return/,
-    "a one-line return cannot render the intro and the grid the placeholder has to reserve");
-  const guards = projects.match(/!snapshotLoaded/g) ?? [];
-  assert.equal(guards.length, 1, "one loading guard, so there is no second unreachable branch");
-  const loading = projects.slice(projects.indexOf("if (!snapshotLoaded)"), projects.indexOf("if (!projectsSupported)"));
-  assert.match(loading, /project-manager-grid/,
-    "the placeholder must occupy the container the content will fill");
-  assert.match(loading, /<PageHeader[\s\S]*?title=\{PROJECTS\.name\}[\s\S]*?description=\{PROJECTS\.description\}/,
+  // Six 44px rows reserved ~296px for a layout whose grid alone had a 720px minimum, so the load
+  // ended in a ~500px jump — the exact thing a skeleton exists to prevent. Since #2957 the page
+  // loads IN the real shell: the header, the list pane with skeleton rows at the row's height, and
+  // the detail's skeleton, so the reservation is exact by construction rather than by a copied
+  // number. An early return of its own is exactly what this forbids: it rendered a second layout.
+  assert.doesNotMatch(projects, /if \(!snapshotLoaded\)/,
+    "no early return while loading: the shell the content fills is the placeholder");
+  assert.match(projects, /<ProjectList\b[^>]*?projects=\{snapshotLoaded \? allProjects : null\}/,
+    "the list pane draws its skeleton rows until the snapshot lands");
+  assert.match(projects, /\{!snapshotLoaded \? \([\s\S]{0,160}?<DetailSkeleton \/>/,
+    "the detail pane draws the detail skeleton until the snapshot lands");
+  assert.match(projects, /<PageHeader[\s\S]*?title=\{PROJECTS\.name\}[\s\S]*?description=\{PROJECTS\.description\}/,
     "the page header is static copy; withholding it is a jump with no reason behind it");
 
   // `.skeleton { flex: 1 }` claimed to reserve the space and could not: `.main-body` is a flex

@@ -55,7 +55,7 @@ async function measureChrome(page: Page) {
       return { height: outer.height, escape, overlapping, stacked };
     };
     const rail = document.querySelector(".app-rail")!;
-    const pane = document.querySelector(".project-manager-list");
+    const pane = document.querySelector('.master-detail-list[aria-label="Projects"]');
     return {
       pageScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       mainScroll: (() => {
@@ -76,7 +76,7 @@ async function measureChrome(page: Page) {
         scroll: pane.scrollWidth - pane.clientWidth,
         // The visibility filter keeps the search field's inset on both sides.
         filterInset: (() => {
-          const search = box(pane.querySelector(".project-manager-search")!);
+          const search = box(pane.querySelector(".input-affix")!);
           const filter = box(pane.querySelector(".seg")!);
           return [filter.left - search.left, search.right - filter.right];
         })(),
@@ -331,7 +331,7 @@ test.describe("the Archived Sessions table from 1100px", () => {
 });
 
 test.describe("either side of the tier", () => {
-  test("the Projects list pane is 310px once the main column is 1100px, its filter inset like the search field", async ({ page }) => {
+  test("the Projects list pane is 320px once the main column is 1100px, its filter inset like the search field", async ({ page }) => {
     // The pane answers to the main column (`@container app`, #2105), so the tier ends where the
     // column, not the window, reaches 1100px: the window is 1100px plus the rail.
     await page.setViewportSize({ width: 1440, height: 860 });
@@ -341,7 +341,7 @@ test.describe("either side of the tier", () => {
     await expect.poll(() => page.locator(".main").evaluate((main) => main.getBoundingClientRect().width))
       .toBeGreaterThanOrEqual(1100);
     const chrome = await measureChrome(page);
-    expect(chrome.pane!.width).toBe(310);
+    expect(chrome.pane!.width).toBe(320);
     expect(chrome.pane!.filterInset).toEqual([0, 0]);
   });
 

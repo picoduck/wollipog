@@ -67,7 +67,7 @@ for (const route of ROUTES) {
 test("Agent Skills and Projects land on their pane roots with no ring", async ({ page }) => {
   for (const [path, list, detail] of [
     ["/skills", ".master-detail-list", ".master-detail-detail"],
-    ["/projects", ".project-manager-list", ".project-manager-detail"],
+    ["/projects", ".master-detail-list", ".master-detail-detail"],
   ] as const) {
     await openShell(page, shell(path));
     await page.keyboard.press("F6");
@@ -158,13 +158,18 @@ test("any other key puts the zone line out, including a digit that changes the r
 });
 
 test("the zone line follows its zone when landing focus scrolls the page, and on scroll or resize", async ({ page }) => {
-  // Projects, whose panes grow with the page: Agent Skills' panes each scroll on their own (#1947), so
-  // landing focus there never scrolls the page.
+  // The list and detail panes each scroll on their own (#1947, #2957), so landing focus in them never
+  // scrolls the page by itself. Here the page is let grow with its panes, as pages without the
+  // shared shell do, and the list pane gets a long tail: focusing its last control scrolls the page,
+  // and F6 into the detail scrolls it back.
   await openShell(page, shell("/projects"));
-  // A long list: focusing its last control scrolls the page, and F6 into the detail scrolls it back.
-  await page.locator(".project-manager-list").evaluate((list) => {
+  await page.locator(".master-detail-list").evaluate((list) => {
+    // The page and the panes take their content's height instead of the column's.
+    (list.closest(".page") as HTMLElement).style.height = "auto";
+    (list.closest(".master-detail") as HTMLElement).style.flex = "none";
     const spacer = document.createElement("div");
     spacer.style.height = "2400px";
+    spacer.style.flex = "none";
     const last = document.createElement("button");
     last.type = "button";
     last.textContent = "Last Row";
@@ -173,7 +178,7 @@ test("the zone line follows its zone when landing focus scrolls the page, and on
   await page.getByRole("button", { name: "Last Row" }).focus();
   expect(await page.locator(".main-body").evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await page.keyboard.press("F6");
-  await expect(page.locator(".project-manager-detail")).toBeFocused();
+  await expect(page.locator(".master-detail-detail")).toBeFocused();
   await expect.poll(() => zoneLine(page)).toMatchObject({ count: 1, top: 0, left: 0, width: 0 });
 
   await page.locator(".main-body").evaluate((element) => { element.scrollTop = 300; });
