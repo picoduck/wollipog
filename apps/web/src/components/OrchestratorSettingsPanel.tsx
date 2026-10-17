@@ -107,7 +107,9 @@ interface LimitEntryText { cost: string; tools: string }
 
 function entryFromDefaults(defaults: OrchestratorDefaults): LimitEntryText {
   return {
-    cost: defaults.campaignBudget ? String(defaults.campaignBudget.costUsd) : "",
+    // Plain decimals: `String` writes a tiny saved cost as `1e-7`, which the field would then reject.
+    cost: defaults.campaignBudget
+      ? defaults.campaignBudget.costUsd.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 }) : "",
     tools: defaults.campaignBudget ? String(defaults.campaignBudget.toolCalls) : "",
   };
 }

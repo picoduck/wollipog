@@ -753,6 +753,24 @@ test("L1: every default limit mounts as a text entry showing the saved value, or
   }
 });
 
+test("L1: a tiny saved cost shows as a plain decimal, so the saved budget stays valid and other defaults still save", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  initial.defaults = { ...initial.defaults, controlMode: "full_control", campaignBudget: { costUsd: 0.0000001, toolCalls: 100 } };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    assert.equal(limitFields(view.container).cost!.value, "0.0000001");
+    assert.doesNotMatch(view.container.textContent ?? "", BUDGET_ERROR);
+    assertNoDomNode(view.container.querySelector(".save-bar"));
+    await act(async () => fireDomEvent.change(limitFields(view.container).children, { target: { value: "8" } }));
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    await settle();
+    assert.deepEqual(writes[0]!.defaults.campaignBudget, { costUsd: 0.0000001, toolCalls: 100 });
+    assert.equal(limitFields(view.container).cost!.value, "0.0000001", "the adopted response shows the same plain decimal");
+    assertNoDomNode(view.container.querySelector(".save-bar"));
+  } finally { await view.cleanup(); }
+});
+
 test("L2: an entry survives its field unmounting, Discard after unmounting restores a clean editor, and unrelated defaults still save", async () => {
   const initial = { ...settings(), controlModeSupported: true };
   const { transport, writes } = server(initial);
