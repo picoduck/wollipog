@@ -786,8 +786,8 @@ interface ActiveSession {
   seatbeltWritableRoots?: readonly string[];
   /** The session's other managed worktrees this live process's bwrap boundary binds (#3316). The
    * driver renders the same bind list for every later spawn — a persistent transport restart or a
-   * resume probe — so once one of them is retired the provider is relaunched before its next turn
-   * instead of failing on a bind source that no longer exists. */
+   * resume probe — so once one of them is retired the provider is rebound into its selected
+   * worktree before its next turn instead of failing on a bind source that no longer exists. */
   boundOwnedWorktrees?: readonly string[];
 }
 
@@ -4249,6 +4249,11 @@ export class SessionManager {
     }).catch(() => false);
     const snapshot = this.snapshot(updated);
     this.send({ type: "session_runtime_updated", snapshot });
+    // A live provider whose sandbox binds the removed worktree would fail its next spawn (#3402).
+    const live = this.active.get(record.sessionId);
+    if (live && this.requestRetiredWorktreeRebind(record.sessionId, live) && !live.running) {
+      setImmediate(() => this.scheduleDrain(record.sessionId));
+    }
     return snapshot;
   }
 
@@ -11675,23 +11680,17 @@ export class SessionManager {
     });
   }
 
-  /** Resume the same conversation in a fresh provider process, whose launch derives its bind list
-   * from the worktrees that still exist, so the queued turn runs in the selected worktree. */
-  private async rebindRetiredWorktrees(sessionId: string, entry: ActiveSession): Promise<void> {
-    const result = await this.replaceProviderProcess(sessionId, entry, {
-      replacementMeta: () => this.store.readMeta(sessionId) ?? undefined,
-      queueFailureReason: () => "provider could not resume after one of its worktrees was retired",
-    });
-    if (result.status === "launched") {
-      if (!result.queuedWork) this.emitStatus(sessionId, "idle");
-      if (result.entry.pendingProviderAccountSwitch) setImmediate(() => this.scheduleDrain(sessionId));
-    } else if (result.status !== "stopped" && result.status !== "superseded") {
-      this.log(JSON.stringify({ event: "retired_worktree_rebind_failed", sessionId, reason: result.status }));
-      this.rejectQueued(entry.queue.splice(0), "Could not relaunch the provider after one of its worktrees was retired. Restart this session to retry.");
-      this.emitQueue(sessionId);
-      this.emitEvent(sessionId, { kind: "error", message: "Could not relaunch the provider after one of its worktrees was retired. Restart this session to retry." });
-      this.emitStatus(sessionId, "failed");
-    }
+  /** Hand a provider whose bound worktree was retired to the same deferred rebind a selection change
+   * uses, targeting the selected worktree. The rebind resumes the conversation in a fresh process
+   * whose launch binds only the worktrees that still exist, and it keeps that handoff's queue hold,
+   * background-work bound, and wakeups. Returns whether a rebind is now pending. */
+  private requestRetiredWorktreeRebind(sessionId: string, entry: ActiveSession): boolean {
+    if (entry.pendingWorktreeRebind) return true;
+    if (!this.boundWorktreeRetired(sessionId, entry)) return false;
+    const selection = this.store.readMeta(sessionId)?.worktreePath;
+    if (!selection) return false;
+    entry.pendingWorktreeRebind = selection;
+    return true;
   }
 
   /** Persist turn configuration without presenting a model resolved under an older alias. The
@@ -11733,7 +11732,7 @@ export class SessionManager {
         return;
       }
     }
-    if (entry.pendingWorktreeRebind) {
+    if (this.requestRetiredWorktreeRebind(sessionId, entry)) {
       if (this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
         return;
@@ -11760,14 +11759,6 @@ export class SessionManager {
     // Schedulers may race with cancellation or interruption and leave an empty generation. Do not
     // claim—or queue for—an active-work permit when there is no provider work to dispatch.
     if (entry.queue.length === 0) return;
-    // Only queued work needs a fresh process: an idle one never respawns under its stale binds.
-    if (this.boundWorktreeRetired(sessionId, entry)) {
-      if (this.providerAccountSwitchCanProceed(sessionId, entry)) {
-        await this.rebindRetiredWorktrees(sessionId, entry);
-        return;
-      }
-      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) return;
-    }
     if (!this.promotePromptPastRejectionHold(sessionId, entry)) {
       // Admission may have reported the held automatic turn as running; restore the blocker.
       this.emitStatus(sessionId, "input_required",
@@ -11882,8 +11873,8 @@ export class SessionManager {
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
         }
-        if (entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind || this.projectMemoryChanged(sessionId, entry) ||
-            this.boundWorktreeRetired(sessionId, entry)) break;
+        if (entry.pendingProviderAccountSwitch || this.requestRetiredWorktreeRebind(sessionId, entry) ||
+            this.projectMemoryChanged(sessionId, entry)) break;
         if (entry.authenticationBlocked || entry.historyQuarantined) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
@@ -12948,9 +12939,7 @@ export class SessionManager {
 
   private resumeDeferredHandoff(sessionId: string): void {
     const entry = this.active.get(sessionId);
-    if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch ||
-        entry && (this.projectMemoryChanged(sessionId, entry) || entry.queue.length && this.boundWorktreeRetired(sessionId, entry))) &&
-        !entry.running) {
+    if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch || entry && this.projectMemoryChanged(sessionId, entry)) && !entry.running) {
       setImmediate(() => this.scheduleDrain(sessionId));
     }
   }
