@@ -727,6 +727,12 @@ may also use the ghost variant (`variant: "ghost"`) for destination-level config
 Manage Groups…. A menu button takes one slot like any secondary. When it folds into ⋯, its items
 appear there individually and in order, never as a nested menu (#1947).
 
+The primary may be a menu button too, when the one thing a destination creates has several ways in
+(Connections' **Add Machine**, #2984): its `+`, its label and a 14px caret open the same two-line
+menu. It never folds, so on phones the app bar's 44px `+`, still named by the label, opens the items
+as a menu sheet with the grabber (§9.2). A destination with tabs supplies its header actions per
+tab (`PageHeaderActions`), so each tab brings its own primary to the one header.
+
 ### 4.3 Detail Bar (Entity Pages and the Session)
 
 Every entity view (Session, Run, Pod, Project, a Skill or Automation on phone) uses the same bar,

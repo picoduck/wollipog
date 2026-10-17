@@ -226,21 +226,29 @@ test.describe("page header actions follow the width tiers", () => {
     await expect(page.getByRole("menu", { name: "More Actions" })).toHaveCount(0);
     await expect(page.locator(".page-header").getByRole("button", { name: "Manage Groups…", exact: true })).toBeFocused();
 
-    // Connections has one secondary, so ⋯ exists only while that button is hidden: widening past
-    // the phone tier hides ⋯ itself, and its menu and backdrop must go with it.
+    // Connections' one action is its primary, which never folds: on a phone its `+` opens the
+    // methods as a docked sheet, and widened past the phone tier the same menu stays open, placed
+    // under Add Machine, with one backdrop and no ⋯ (#2984).
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(shell("/connections"));
     await expect(page.getByRole("heading", { level: 1, name: "Connections" })).toBeVisible();
-    await expect(page.locator(".page-header .page-action")).toHaveText(["Add Native Runner"]);
-    await page.locator(".page-header").getByRole("button", { name: "More Actions", exact: true }).focus();
+    const addMachine = page.locator(".page-header").getByRole("button", { name: "Add Machine", exact: true });
+    await expect(page.locator(".page-header .page-action, .page-header .page-more")).toHaveCount(0);
+    await addMachine.focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem")).toHaveText(["Add Native Runner"]);
-    await expect(page.getByRole("menuitem", { name: "Add Native Runner" })).toBeFocused();
+    const methods = page.getByRole("menu", { name: "Add Machine" });
+    await expect(methods.locator(".menu-text")).toHaveText(["Connect via SSH…", "Install Manually…"]);
+    await expect(methods.locator(".sheet-grabber")).toBeVisible();
+    await expect(methods.getByRole("menuitem").first()).toBeFocused();
     await page.setViewportSize({ width: 1440, height: 900 });
-    await expect(page.getByRole("menu", { name: "More Actions" })).toHaveCount(0);
-    await expect(page.locator(".menu-backdrop")).toHaveCount(0);
-    // Keyboard focus moves to the button that now stands for the item it was on.
-    await expect(page.locator(".page-header").getByRole("button", { name: "Add Native Runner", exact: true })).toBeFocused();
+    await expect(methods.locator(".sheet-grabber")).toBeHidden();
+    await expect(page.locator(".menu-backdrop")).toHaveCount(1);
+    const [button, menu] = await Promise.all([addMachine.boundingBox(), methods.boundingBox()]);
+    expect(menu!.y).toBeGreaterThanOrEqual(button!.y + button!.height);
+    expect(menu!.x + menu!.width).toBeCloseTo(button!.x + button!.width, 0);
+    await page.keyboard.press("Escape");
+    await expect(methods).toHaveCount(0);
+    await expect(addMachine).toBeFocused();
   });
 
   test.describe("on a phone", () => {

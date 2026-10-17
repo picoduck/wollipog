@@ -22,11 +22,24 @@ export interface PageAction {
   title?: string;
 }
 
-export interface PagePrimaryAction extends PageAction {
-  buttonRef?: Ref<HTMLButtonElement>;
-  /** The bare key that also runs it, shown as a keycap on fine pointers (§11.5). */
-  shortcut?: string;
-}
+/**
+ * The page header's one primary. With `items` it is a menu button: its label and a 14px caret open
+ * the shared menu, one two-line item per way to create (§9.1); on phones its `+`, still named by the
+ * label, opens the same items as a menu sheet (§15.1).
+ */
+export type PagePrimaryAction =
+  | (PageAction & {
+    buttonRef?: Ref<HTMLButtonElement>;
+    /** The bare key that also runs it, shown as a keycap on fine pointers (§11.5). */
+    shortcut?: string;
+    items?: undefined;
+  })
+  | (Omit<PageAction, "onClick"> & {
+    buttonRef?: undefined;
+    shortcut?: undefined;
+    items: PageMenuButtonItem[];
+    onClick?: undefined;
+  });
 
 /** What ⋯ hands the item chosen from it (§7.5). */
 export interface ActionsMenuChoice {
@@ -111,21 +124,11 @@ function AppBarSearch({ onSearch }: { onSearch: () => void }) {
   );
 }
 
-/** The number of secondaries the widest header shows beside its primary (§3.3). */
-export const PAGE_HEADER_VISIBLE_SECONDARIES = 2;
-
-export function PageHeader({
-  title,
-  description,
-  controls,
-  primary,
-  secondary = [],
-  menu = [],
-  tabs,
-}: {
-  title: string;
-  /** One line, at most 80 characters, in user terms (§4.2, §17.2). Hidden on phones. */
-  description?: string;
+/**
+ * A header's actions, apart from its title and tabs: what a destination with tabs supplies per tab,
+ * so each tab brings its own primary and secondaries to the one header (§3.3, §10.1).
+ */
+export interface PageHeaderActions {
   /**
    * A view switch (a segmented control) drawn before the secondaries. It never folds into ⋯, and
    * it takes one of the secondaries' visible slots, so one fewer secondary shows beside it.
@@ -140,6 +143,23 @@ export function PageHeader({
   secondary?: PageSecondaryAction[];
   /** Actions that only ever appear in ⋯. */
   menu?: PageMenuAction[];
+}
+
+/** The number of secondaries the widest header shows beside its primary (§3.3). */
+export const PAGE_HEADER_VISIBLE_SECONDARIES = 2;
+
+export function PageHeader({
+  title,
+  description,
+  controls,
+  primary,
+  secondary = [],
+  menu = [],
+  tabs,
+}: PageHeaderActions & {
+  title: string;
+  /** One line, at most 80 characters, in user terms (§4.2, §17.2). Hidden on phones. */
+  description?: string;
   /** Optional underline tabs, drawn as the header's last row. */
   tabs?: ReactNode;
 }) {
@@ -163,7 +183,7 @@ export function PageHeader({
             {onSearch && <AppBarSearch onSearch={onSearch} />}
             {controls && <div className="page-controls">{controls}</div>}
             {slots.filter(({ slot }) => slot <= PAGE_HEADER_VISIBLE_SECONDARIES).map(({ action, slot }) => action.items ? (
-              <PageMenuButton key={action.label} action={action} items={action.items} slot={slot} />
+              <PageMenuButton key={action.label} action={action} items={action.items} slot={slot} variant={action.variant} />
             ) : (
               <button
                 key={action.label}
@@ -204,7 +224,9 @@ export function PageHeader({
                 ]}
               />
             )}
-            {primary && (
+            {primary?.items ? (
+              <PageMenuButton action={primary} items={primary.items} variant="primary" />
+            ) : primary && (
               <button
                 ref={primary.buttonRef}
                 type="button"
@@ -343,11 +365,17 @@ interface ActionsMenuItem extends PageMenuAction {
 }
 
 /**
- * A menu-button secondary (§3.2, §9.1): its label and a caret open the shared MenuSurface with
- * one item per choice. It is a direct child of `.page-actions`, so the priority+ rules hide it by
- * slot like any other secondary; while hidden, ⋯ lists its items instead.
+ * A menu button (§3.2, §9.1): its label and a caret open the shared MenuSurface with one item per
+ * choice. A secondary is a direct child of `.page-actions` with a slot, so the priority+ rules hide
+ * it like any other secondary; while hidden, ⋯ lists its items instead. The primary never folds: on
+ * phones it is the `+`, its label clipped but still its name, and the menu is a sheet (§15.1).
  */
-function PageMenuButton({ action, items, slot }: { action: PageSecondaryAction; items: PageMenuButtonItem[]; slot: number }) {
+function PageMenuButton({ action, items, slot, variant }: {
+  action: Pick<PageAction, "label" | "disabled" | "title">;
+  items: PageMenuButtonItem[];
+  slot?: number;
+  variant?: "ghost" | "primary";
+}) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "page-action-menu");
   const { close, triggerRef } = menu;
@@ -375,7 +403,7 @@ function PageMenuButton({ action, items, slot }: { action: PageSecondaryAction; 
       <button
         ref={menu.triggerRef}
         type="button"
-        className={`btn${action.variant === "ghost" ? " ghost" : ""} page-action`}
+        className={variant === "primary" ? "btn primary page-primary" : `btn${variant === "ghost" ? " ghost" : ""} page-action`}
         data-slot={slot}
         disabled={action.disabled}
         title={action.title}
@@ -385,8 +413,18 @@ function PageMenuButton({ action, items, slot }: { action: PageSecondaryAction; 
         aria-expanded={open}
         aria-controls={open ? menu.menuId : undefined}
       >
-        {action.label}
-        <ChevronDownIcon size={14} />
+        {variant === "primary" ? (
+          <>
+            <PlusIcon />
+            <span className="page-primary-label">{action.label}</span>
+            <ChevronDownIcon size={14} className="page-primary-caret" />
+          </>
+        ) : (
+          <>
+            {action.label}
+            <ChevronDownIcon size={14} />
+          </>
+        )}
       </button>
       {open && (
         <MenuSurface

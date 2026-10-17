@@ -633,11 +633,15 @@ test("Machine settings expose deletion with an explicit history warning", async 
   const confirmation = page.getByRole("dialog", { name: "Delete Machine" });
   await expect(confirmation).toContainText("its sessions and its multi-agent runs are permanently deleted");
   await confirmation.getByRole("button", { name: "Delete Machine" }).click();
-  await expect(page.getByText("No Machines Connected")).toBeVisible();
+  await expect(page.getByText("No Machines Yet")).toBeVisible();
+  // The empty tab owns the create actions, so the header no longer offers Add Machine (#2984).
+  await expect(page.locator(".page-header").getByRole("button", { name: "Add Machine" })).toHaveCount(0);
+  await expect(page.locator(".connections-empty .row button")).toHaveText(["Connect via SSH", "Install Manually"]);
 });
 
 test("SSH config import keeps the selected Host and auto-populates an editable Machine Name", async ({ page }) => {
-  await page.getByRole("button", { name: "Connect via SSH" }).click();
+  await page.locator(".page-header").getByRole("button", { name: "Add Machine", exact: true }).click();
+  await page.getByRole("menu", { name: "Add Machine" }).getByRole("menuitem", { name: "Connect via SSH…" }).click();
   const dialog = page.getByRole("dialog", { name: "Connect via SSH" });
   const hosts = dialog.getByRole("button", { name: /^Choose from SSH Config:/ });
   const choose = async (host: string) => {
@@ -665,4 +669,65 @@ test("SSH config import keeps the selected Host and auto-populates an editable M
       sshTarget: "build-box",
       sshPort: 22,
     });
+});
+
+test("a failed permission load is a danger notice whose Retry recovers the Machines tab (#2984)", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?identity=fail");
+  const notice = page.getByRole("alert").filter({ hasText: "Couldn't Load Machine Permissions" });
+  await expect(notice).toBeVisible();
+  await expect(notice).not.toContainText("503 Service Unavailable");
+  await notice.getByRole("button", { name: "Show Details" }).click();
+  await expect(notice).toContainText("503 Service Unavailable");
+  await expect(page.locator(".page-header").getByRole("button", { name: "Add Machine" })).toHaveCount(0);
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.restoreIdentity());
+  await notice.getByRole("button", { name: "Retry" }).click();
+  await expect(notice).toHaveCount(0);
+  await expect(page.locator(".page-header").getByRole("button", { name: "Add Machine", exact: true })).toBeVisible();
+});
+
+test("the empty Machines tab leads with SSH in the web app and This Machine in the desktop app (#2984)", async ({ page }) => {
+  const buttons = page.locator(".connections-empty .add-machine-method .btn");
+  await page.goto("/machine-management-e2e.html?machines=0");
+  await expect(buttons).toHaveText(["Connect via SSH", "Install Manually"]);
+  await expect(buttons.first()).toHaveClass("btn primary");
+
+  await page.goto("/machine-management-e2e.html?machines=0&local=setup");
+  await expect(buttons).toHaveText(["Set Up This Machine", "Connect via SSH", "Install Manually"]);
+  await expect(buttons.first()).toHaveClass("btn primary");
+  await expect(buttons.nth(1)).toHaveClass("btn");
+  await buttons.first().click();
+  await expect(page.getByRole("dialog", { name: "Set Up This Machine" })).toBeVisible();
+});
+
+test("a viewer's empty Machines tab says whom to ask and offers no methods (#2984)", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?machines=0&role=viewer");
+  await expect(page.getByText("No Machines Yet")).toBeVisible();
+  await expect(page.getByText("Ask an organization owner or admin to connect a machine.")).toBeVisible();
+  await expect(page.locator(".connections-empty .surface")).toHaveCount(0);
+});
+
+test.describe("the empty Machines tab on a touch phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("each method wraps, and its button keeps its natural width, 44px tall, under the text (#2984)", async ({ page }) => {
+    await page.goto("/machine-management-e2e.html?machines=0");
+    await expect(page.getByText("No Machines Yet")).toBeVisible();
+    await expect(page.locator(".page-header .page-primary")).toHaveCount(0);
+    const rows = page.locator(".connections-empty .add-machine-method");
+    await expect(rows).toHaveCount(2);
+    const geometry = await rows.evaluateAll((elements) => elements.map((row) => {
+      const box = (selector: string) => row.querySelector(selector)!.getBoundingClientRect();
+      return { row: row.getBoundingClientRect(), body: box(".row-body"), button: box(".btn"), page: document.documentElement.clientWidth };
+    }));
+    for (const [index, { row, body, button, page: width }] of geometry.entries()) {
+      // The row grows to hold its wrapped button, so no button reaches into the next method.
+      expect(button.bottom).toBeLessThanOrEqual(row.bottom);
+      if (index > 0) expect(row.top).toBeGreaterThanOrEqual(geometry[index - 1]!.row.bottom - 0.5);
+      expect(button.top).toBeGreaterThanOrEqual(body.bottom);
+      expect(Math.abs(button.left - body.left)).toBeLessThanOrEqual(0.5);
+      expect(button.width).toBeLessThan(row.width - (body.left - row.left));
+      expect(button.height).toBeGreaterThanOrEqual(44);
+      expect(row.right).toBeLessThanOrEqual(width);
+    }
+  });
 });
