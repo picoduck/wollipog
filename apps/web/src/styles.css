@@ -12458,13 +12458,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font-family: var(--mono);
   font-size: var(--text-sm);
 }
-.tick {
-  margin: 0;
-  padding-left: 18px;
-  color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.7;
-}
 .code-block {
   background: var(--bg);
   border: 1px solid var(--border);
