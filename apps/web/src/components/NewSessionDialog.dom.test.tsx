@@ -1124,6 +1124,121 @@ test("Full Control authorizes exactly what is shown: issue-only work, the derive
   } finally { await unmountFixture(fixture); }
 });
 
+/** The limit-entry lifecycle (L1-L8 in the review brief): every Full Control limit is a text entry
+ * whose typed text is its only state, so what is shown is what is checked and authorized. */
+test("Full Control limits keep exactly what was typed through mount, remount, outside changes, edits, clearing, blur and submit", async () => {
+  const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
+  const admissions: Array<Record<string, unknown>> = [];
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => {
+      preflights.push(structuredClone(input));
+      return { preflight: launchPreflight(input.task !== "Full Control readiness check", input) };
+    },
+    createFullControlCampaign: async (input) => { admissions.push(structuredClone(input) as unknown as Record<string, unknown>); return { id: "campaign-1" } as SessionView; },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await settlePreflight();
+    const field = (label: string, advanced: boolean) => [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
+      .find((node) => node.querySelector("span")?.textContent === label && Boolean(node.closest("details")) === advanced)
+      ?.querySelector("input, textarea") as HTMLInputElement | undefined;
+    const type = (input: HTMLInputElement | undefined, value: string) => act(async () => fireDomEvent.change(input!, { target: { value } }));
+    const advancedLabels = ["Concurrent Children", "Accepted Follow-Ups", "Maximum Issues"];
+
+    // L1 initial mount: every limit is an empty text entry that means "use the derived value".
+    for (const input of [field("Cost Limit (USD)", false), field("Tool Call Limit", false), ...advancedLabels.map((label) => field(label, true))]) {
+      assert.equal(input!.type, "text");
+      assert.equal(input!.value, "");
+      assert.equal(input!.getAttribute("aria-invalid"), "false");
+    }
+    await type(field("Task", false), "Deliver the fixture");
+    await settlePreflight();
+    assert.equal(authorizeButton(fixture.container).disabled, false, "empty limits are the derived values");
+
+    // L4 typing invalid -> valid -> invalid.
+    const children = () => field("Concurrent Children", true)!;
+    await type(children(), "1e");
+    await settlePreflight();
+    assert.equal(children().getAttribute("aria-invalid"), "true");
+    assert.equal(authorizeButton(fixture.container).disabled, true);
+    await type(children(), "6");
+    await settlePreflight();
+    assert.equal(authorizeButton(fixture.container).disabled, false);
+    assert.equal(preflights.at(-1)!.overrides!.budget!.concurrency, 6);
+    await type(children(), "6e");
+    await settlePreflight();
+    assert.equal(authorizeButton(fixture.container).disabled, true);
+    const checked = preflights.length;
+
+    // L2 remount within the panel: collapsing and expanding Advanced keeps the entry and its error.
+    const details = fixture.container.querySelector<HTMLDetailsElement>("section[aria-label='Full Control Launch'] details")!;
+    await act(async () => { details.open = true; details.open = false; });
+    assert.match(fixture.container.textContent ?? "", /Correct the highlighted limits to check readiness\./, "the error shows with Advanced collapsed");
+    await act(async () => { details.open = true; });
+    assert.equal(children().value, "6e");
+    assert.equal(children().getAttribute("aria-invalid"), "true");
+
+    // L3 outside changes: a new readiness input never rewrites the entry. (New Session renders this
+    // panel only after the saved defaults load, so they cannot change under it; campaign enable,
+    // which can, is covered in the browser test.)
+    await type(field("Task", false), "Deliver the fixture again");
+    await settlePreflight();
+    assert.equal(children().value, "6e");
+    assert.equal(preflights.length, checked, "no readiness check runs while an entry is invalid");
+    await type(field("Cost Limit (USD)", false), "20");
+    await type(field("Tool Call Limit", false), "200");
+
+    // L6 blur changes nothing.
+    await act(async () => { children().focus(); children().blur(); });
+    assert.equal(children().value, "6e");
+    assert.equal(children().getAttribute("aria-invalid"), "true");
+
+    // L8 submit with an invalid entry starts nothing, by the footer or by Enter.
+    await act(async () => authorizeButton(fixture.container).click());
+    await act(async () => submitWithEnter(fixture.container));
+    assert.equal(admissions.length, 0);
+    assert.equal(fixture.requests.length, 0);
+
+    // L5 clearing and L7 reset to the default: an empty entry is the derived value again.
+    await type(children(), "");
+    await settlePreflight();
+    assert.equal(children().getAttribute("aria-invalid"), "false");
+    assert.equal(authorizeButton(fixture.container).disabled, false);
+    const shown = preflights.at(-1)!;
+    assert.equal(shown.overrides!.budget!.concurrency, undefined);
+    assert.deepEqual([shown.overrides!.budget!.costUsd, shown.overrides!.budget!.toolCalls], [20, 200]);
+    assert.match(fixture.container.textContent ?? "", /\$20 · 200 tool calls/, "the summary shows the amounts that will be authorized");
+    await act(async () => authorizeButton(fixture.container).click());
+    assert.equal(admissions.length, 1);
+    assert.deepEqual(admissions[0]!.overrides && (admissions[0]!.overrides as { budget: unknown }).budget, { costUsd: 20, toolCalls: 200 });
+  } finally { await unmountFixture(fixture); }
+});
+
+test("switching away from Full Control and back starts its limits fresh", async () => {
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => ({ preflight: launchPreflight(false, input) }),
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const choose = (mode: string) => act(async () => fixture.container.querySelector<HTMLInputElement>(`[data-control-mode="${mode}"]`)!.click());
+    const children = () => [...fixture.container.querySelectorAll<HTMLLabelElement>("details label")]
+      .find((node) => node.querySelector("span")?.textContent === "Concurrent Children")!.querySelector("input")!;
+    await choose("full_control");
+    await act(async () => fireDomEvent.change(children(), { target: { value: "1e" } }));
+    assert.equal(children().getAttribute("aria-invalid"), "true");
+    // L2 remount through a surface switch: a new panel has no entries and no stale errors.
+    await choose("custom");
+    await choose("full_control");
+    await settlePreflight();
+    assert.equal(children().value, "");
+    assert.equal(children().getAttribute("aria-invalid"), "false");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Correct the highlighted limits/);
+  } finally { await unmountFixture(fixture); }
+});
+
 test("new Orchestrator sessions send only explicit overrides after showing effective defaults", async () => {
   const enabledRunner: RunnerView = {
     ...runner,

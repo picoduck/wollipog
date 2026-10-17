@@ -727,34 +727,133 @@ test("runner discovery keeps a typed campaign budget, complete or not, and saves
   }
 });
 
-test("a budget field holding text it cannot read is an error, never a cleared budget", async () => {
+/** The limit-entry lifecycle (L1-L8 in the review brief) for the saved defaults: each limit is a
+ * text entry whose typed text is its only state, replaced only where the draft is. */
+function limitFields(container: Element) {
+  return {
+    cost: container.querySelector<HTMLInputElement>("#orchestrator-campaign-cost"),
+    tools: container.querySelector<HTMLInputElement>("#orchestrator-campaign-tools"),
+    children: container.querySelector<HTMLInputElement>("#orchestrator-max-children")!,
+  };
+}
+const BUDGET_ERROR = /Enter both a cost limit and a whole number of tool calls, or clear both\./;
+
+test("L1: every default limit mounts as a text entry showing the saved value, or empty, without an error", async () => {
+  for (const campaignBudget of [{ costUsd: 30, toolCalls: 300 }, undefined]) {
+    const initial = { ...settings(), controlModeSupported: true };
+    initial.defaults = { ...initial.defaults, controlMode: "full_control", ...(campaignBudget ? { campaignBudget } : {}) };
+    const view = await mount(panel(server(initial).transport));
+    try {
+      const fields = limitFields(view.container);
+      assert.deepEqual([fields.cost!.type, fields.tools!.type, fields.children.type], ["text", "text", "number"]);
+      assert.deepEqual([fields.cost!.value, fields.tools!.value, fields.children.value], campaignBudget ? ["30", "300", "4"] : ["", "", "4"]);
+      assert.doesNotMatch(view.container.textContent ?? "", BUDGET_ERROR);
+      assertNoDomNode(view.container.querySelector(".save-bar"));
+    } finally { await view.cleanup(); }
+  }
+});
+
+test("L2: an entry survives its field unmounting, Discard after unmounting restores a clean editor, and unrelated defaults still save", async () => {
   const initial = { ...settings(), controlModeSupported: true };
-  initial.defaults = { ...initial.defaults, controlMode: "full_control" };
   const { transport, writes } = server(initial);
   const view = await mount(panel(transport));
   try {
-    for (const id of ["#orchestrator-campaign-cost", "#orchestrator-campaign-tools"]) {
-      const input = view.container.querySelector<HTMLInputElement>(id)!;
-      // A browser number input showing `1e` reports value "" with validity.badInput. The empty field's
-      // value does not change, so React reports no change and only the input event can tell.
-      let bad = true;
-      Object.defineProperty(input, "validity", { configurable: true, get: () => ({ badInput: bad }) });
-      await act(async () => { fireDomEvent.change(input, { target: { value: "" } }); });
-      assert.match(view.container.textContent ?? "", /Enter both a cost limit and a whole number of tool calls, or clear both\./);
-      assert.equal(button(view.container, "Save Defaults")!.getAttribute("aria-disabled"), "true", `${id} cannot save as a cleared budget`);
-      bad = false;
-      await act(async () => button(view.container, "Discard")!.click());
-      assertNoDomNode(view.container.querySelector(".save-bar"));
-      assert.doesNotMatch(view.container.textContent ?? "", /Enter both a cost limit/, "a field readable again after Discard clears the error");
+    const { container } = view;
+    await act(async () => controlMode(container, "Full Control").click());
+    await act(async () => fireDomEvent.change(limitFields(container).cost!, { target: { value: "e" } }));
+    assert.match(container.textContent ?? "", BUDGET_ERROR);
+    await act(async () => controlMode(container, "Custom").click());
+    assertNoDomNode(limitFields(container).cost);
+    assert.equal(button(container, "Save Defaults")!.getAttribute("aria-disabled"), "true", "the hidden entry still blocks saving");
+    await act(async () => controlMode(container, "Full Control").click());
+    assert.equal(limitFields(container).cost!.value, "e", "remounting shows what was typed, with its error");
+    assert.match(container.textContent ?? "", BUDGET_ERROR);
+    await act(async () => controlMode(container, "Custom").click());
+    await act(async () => button(container, "Discard")!.click());
+    assertNoDomNode(container.querySelector(".save-bar"));
+    await act(async () => controlMode(container, "Full Control").click());
+    assert.equal(limitFields(container).cost!.value, "");
+    assert.doesNotMatch(container.textContent ?? "", BUDGET_ERROR, "a remounted empty field has no stale error");
+    await act(async () => controlMode(container, "Custom").click());
+    await act(async () => fireDomEvent.change(limitFields(container).children, { target: { value: "8" } }));
+    await act(async () => button(container, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.defaults.behavior.maximumConcurrentChildren, 8);
+    assert.equal(Object.hasOwn(writes[0]!.defaults, "campaignBudget"), false, "the discarded entry is not saved");
+  } finally { await view.cleanup(); }
+});
+
+test("L3: outside changes keep a typed entry and its error, and a clean editor takes the server's new values", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  initial.defaults = { ...initial.defaults, controlMode: "full_control" };
+  const { transport, state } = server(initial);
+  const view = await mount(panel(transport, { revision: 1 }));
+  try {
+    state.set({ ...state.current(), defaults: { ...state.current().defaults, campaignBudget: { costUsd: 50, toolCalls: 500 } } });
+    await act(async () => view.root.render(panel(transport, { revision: 2 })));
+    await settle();
+    assert.deepEqual([limitFields(view.container).cost!.value, limitFields(view.container).tools!.value], ["50", "500"]);
+    await act(async () => fireDomEvent.change(limitFields(view.container).cost!, { target: { value: "5e" } }));
+    state.set({ ...state.current(), defaults: { ...state.current().defaults, campaignBudget: { costUsd: 60, toolCalls: 600 } } });
+    await act(async () => view.root.render(panel(transport, { revision: 3 })));
+    await settle();
+    assert.equal(limitFields(view.container).cost!.value, "5e");
+    assert.match(view.container.textContent ?? "", BUDGET_ERROR);
+  } finally { await view.cleanup(); }
+});
+
+test("L4-L8: typing invalid, valid and invalid again, clearing, blur, Discard and Save all follow the typed text", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  initial.defaults = { ...initial.defaults, controlMode: "full_control", campaignBudget: { costUsd: 30, toolCalls: 300 } };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    const fields = () => limitFields(container);
+    const type = (input: HTMLInputElement, value: string) => act(async () => fireDomEvent.change(input, { target: { value } }));
+    const save = () => button(container, "Save Defaults")!;
+    // L4 for each field: forms `Number` accepts (`1e1`, `0x10`) are budget errors like unreadable
+    // text; the child limit's native number field reports unreadable text as "", which is invalid.
+    for (const [key, bad, good] of [["cost", "1e1", "40"], ["tools", "0x10", "400"], ["children", "", "6"]] as const) {
+      await type(fields()[key]!, bad);
+      assert.equal(save().getAttribute("aria-disabled"), "true", `${key}=${bad} cannot save`);
+      await type(fields()[key]!, good);
+      assert.equal(save().getAttribute("aria-disabled"), null, `${key}=${good} can save`);
+      await type(fields()[key]!, `${good}e`);
+      assert.equal(save().getAttribute("aria-disabled"), "true");
+      await type(fields()[key]!, good);
     }
-    // The saved Maximum Concurrent Children already treats "" as invalid, so `1e` there is an error too.
-    const children = view.container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
-    await act(async () => { fireDomEvent.change(children, { target: { value: "" } }); });
-    assert.equal(button(view.container, "Save Defaults")!.getAttribute("aria-disabled"), "true");
-    assert.equal(writes.length, 0);
-  } finally {
-    await view.cleanup();
-  }
+    // L6 blur changes nothing.
+    await type(fields().cost!, "7e");
+    await act(async () => { fields().cost!.focus(); fields().cost!.blur(); });
+    assert.equal(fields().cost!.value, "7e");
+    assert.equal(save().getAttribute("aria-disabled"), "true");
+    // L7 reset to the saved defaults restores every entry.
+    await act(async () => button(container, "Discard")!.click());
+    assert.deepEqual([fields().cost!.value, fields().tools!.value, fields().children.value], ["30", "300", "4"]);
+    assertNoDomNode(container.querySelector(".save-bar"));
+    // L5 clearing: the budget pair clears as a pair; an empty child limit is an error, never 0.
+    await type(fields().children, "");
+    assert.equal(save().getAttribute("aria-disabled"), "true");
+    await type(fields().children, "4");
+    await type(fields().cost!, "");
+    assert.equal(save().getAttribute("aria-disabled"), "true", "half a budget cannot save");
+    await type(fields().tools!, "");
+    // L8 submit saves exactly what is shown.
+    await act(async () => save().click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.defaults.campaignBudget, null);
+    await type(fields().cost!, "12.5");
+    await type(fields().tools!, "125");
+    await type(fields().children, "9");
+    await act(async () => save().click());
+    await settle();
+    assert.deepEqual(writes[1]!.defaults.campaignBudget, { costUsd: 12.5, toolCalls: 125 });
+    assert.equal(writes[1]!.defaults.behavior.maximumConcurrentChildren, 9);
+    assert.deepEqual([fields().cost!.value, fields().tools!.value, fields().children.value], ["12.5", "125", "9"]);
+  } finally { await view.cleanup(); }
 });
 
 test("isolation is Off | On, and Strict Project Isolation On includes Integration Isolation", async () => {

@@ -34,9 +34,10 @@ function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean,
     pacedVideoPeer: false, disclosuresAvailable: true, savedBudget: null }).preflight;
 }
 
-async function routeSettings(page: Page, writes: unknown[]) {
-  let saved = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+async function routeSettings(page: Page, writes: unknown[], options: { answered?: Promise<void>; campaignBudget?: { costUsd: number; toolCalls: number } } = {}) {
+  let saved = { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), ...(options.campaignBudget ? { campaignBudget: options.campaignBudget } : {}) };
   await page.route("**/api/orchestrator-settings", async (route) => {
+    await options.answered;
     if (route.request().method() !== "GET") { writes.push(route.request().postDataJSON()); saved = route.request().postDataJSON().defaults; }
     const defaults = structuredClone(saved);
     defaults.behavior.childHarness = null; defaults.behavior.childModel = null; defaults.behavior.childEffort = null;
@@ -240,3 +241,162 @@ for (const viewport of viewports) {
     await shoot(page, page.getByRole("heading", { name: "Orchestrator Control", exact: true }), `${captures}/legacy-${viewport.name}-${theme}-unknown.png`);
   });
 }
+
+/** The limit-entry lifecycle (L1-L8 in the review brief), typed for real in the browser on each
+ * surface. Every limit is a text entry whose typed text is its only state. */
+test.describe("limit entry lifecycle", () => {
+  test.use({ viewport: { width: 1440, height: 1000 } });
+  const invalidNotice = (page: Page) => page.getByText("Correct the highlighted limits to check readiness.", { exact: true });
+
+  test("New Session: an entry survives collapse and blur, blocks submit, clears to the default, and a surface switch starts fresh", async ({ page }) => {
+    await routeSettings(page, []);
+    const admissions: unknown[] = [];
+    await page.route("**/api/full-control-campaigns/preflight", async (route) => {
+      await route.fulfill({ json: { preflight: serverPreflight(route.request().postDataJSON() as FullControlLaunchRequest, true) } });
+    });
+    await page.route("**/api/full-control-campaigns", async (route) => {
+      admissions.push(route.request().postDataJSON());
+      await route.fulfill({ status: 201, json: { id: "session-full-control" } });
+    });
+    await page.goto("/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=light");
+    await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+    const start = page.getByRole("button", { name: "Authorize and Start", exact: true });
+    const children = page.getByLabel("Concurrent Children", { exact: true });
+    // L1: empty entries are the derived values.
+    await expect(children).toHaveValue("");
+    await page.getByLabel("Task", { exact: true }).fill("Review the source fixture");
+    await page.getByLabel("Cost Limit (USD)", { exact: true }).first().fill("20");
+    await page.getByLabel("Tool Call Limit", { exact: true }).first().fill("200");
+    await expect(start).toBeEnabled();
+    const advanced = page.locator("summary").filter({ hasText: "Advanced" });
+    await advanced.click();
+    // L4: invalid, valid, invalid again.
+    await children.pressSequentially("1e");
+    await expect(children).toHaveAttribute("aria-invalid", "true");
+    await expect(start).toBeDisabled();
+    await children.fill("6");
+    await expect(start).toBeEnabled();
+    await children.pressSequentially("e");
+    await expect(children).toHaveValue("6e");
+    await expect(start).toBeDisabled();
+    // L6: blur changes nothing.
+    await children.press("Tab");
+    await expect(children).toHaveValue("6e");
+    await expect(children).toHaveAttribute("aria-invalid", "true");
+    // L2: collapsing Advanced keeps the entry and its error.
+    await advanced.click();
+    await expect(invalidNotice(page)).toBeVisible();
+    await expect(start).toBeDisabled();
+    await advanced.click();
+    await expect(children).toHaveValue("6e");
+    // L8: submitting by Enter starts nothing.
+    await page.getByLabel("Issue Numbers", { exact: true }).press("Enter");
+    await expect(page.getByText(/Full Control isn't ready yet/)).toBeVisible();
+    // L5 and L7: clearing returns to the derived value.
+    await children.fill("");
+    await expect(children).toHaveAttribute("aria-invalid", "false");
+    await expect(start).toBeEnabled();
+    // L2: a surface switch mounts a fresh panel without stale entries or errors.
+    await children.fill("1e");
+    await expect(start).toBeDisabled();
+    await page.getByRole("radio", { name: "Custom", exact: true }).click();
+    await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+    await expect(page.getByLabel("Concurrent Children", { exact: true })).toHaveValue("");
+    await expect(invalidNotice(page)).toHaveCount(0);
+    expect(admissions).toHaveLength(0);
+  });
+
+  test("Campaign enable: a late saved default keeps typed amounts, an entry survives collapse and blur, and reopening starts fresh", async ({ page }) => {
+    let answerSettings: () => void = () => undefined;
+    await routeSettings(page, [], { answered: new Promise<void>((resolve) => { answerSettings = resolve; }), campaignBudget: { costUsd: 50, toolCalls: 500 } });
+    await page.route("**/orchestrator-campaign/full-control/preflight", async (route) => {
+      const body = route.request().postDataJSON() as { overrides?: FullControlLaunchRequest["overrides"] };
+      await route.fulfill({ json: { preflight: serverPreflight({ runnerId: "runner-1", workspaceId: "w", task: "Review the source fixture",
+        overrides: body.overrides }, true, true), expectedRevision: 3 } });
+    });
+    await page.goto("/session-usage-e2e.html?width=1440&height=1000&composer=orchestrator&fullControlFixture=enable");
+    const open = async () => {
+      await page.getByRole("button", { name: "Attach and Settings" }).click();
+      await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
+      await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+    };
+    await open();
+    const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
+    // L1 and L3: amounts typed before the saved default arrives stay this campaign's override.
+    await page.getByLabel("Cost Limit (USD)", { exact: true }).first().fill("30");
+    await page.getByLabel("Tool Call Limit", { exact: true }).first().fill("300");
+    await expect(enable).toBeEnabled();
+    answerSettings();
+    const advanced = page.locator("summary").filter({ hasText: "Advanced" });
+    await advanced.click();
+    await expect(page.locator("details").getByLabel("Cost Limit (USD)", { exact: true })).toHaveValue("30");
+    await expect(page.getByText(/\$30 · 300 tool calls/)).toBeVisible();
+    await expect(page.getByText(/Saved Default/)).toHaveCount(0);
+    // L4, L6 and L2: invalid, blur, collapse, expand.
+    const children = page.getByLabel("Concurrent Children", { exact: true });
+    await children.pressSequentially("1e");
+    await expect(enable).toBeDisabled();
+    await children.press("Tab");
+    await advanced.click();
+    await expect(invalidNotice(page)).toBeVisible();
+    await advanced.click();
+    await expect(children).toHaveValue("1e");
+    await expect(enable).toBeDisabled();
+    // L5: clearing returns to the derived value.
+    await children.fill("");
+    await expect(enable).toBeEnabled();
+    // L2: closing and reopening the dialog starts fresh.
+    await children.fill("1e");
+    await page.keyboard.press("Escape");
+    await expect(enable).toHaveCount(0);
+    await open();
+    await expect(page.getByLabel("Concurrent Children", { exact: true })).toHaveValue("");
+    await expect(invalidNotice(page)).toHaveCount(0);
+  });
+
+  test("Defaults: an entry survives unmounting, Discard after unmounting leaves a clean editor, and Save takes the typed text", async ({ page }) => {
+    await page.goto("/settings-rows-e2e.html?section=orchestrator&fullControlFixture=1&theme=light");
+    const save = page.getByRole("button", { name: "Save Defaults", exact: true });
+    const cost = page.locator("#orchestrator-campaign-cost");
+    const children = page.locator("#orchestrator-max-children");
+    await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+    // L1: the saved values, or empty, with no error.
+    await expect(cost).toHaveValue("");
+    await expect(children).toHaveValue("4");
+    // L4 and L6: a lone `e` is an error, kept through blur.
+    await cost.pressSequentially("e");
+    await expect(cost).toHaveValue("e");
+    await expect(save).toHaveAttribute("aria-disabled", "true");
+    await cost.press("Tab");
+    await expect(save).toHaveAttribute("aria-disabled", "true");
+    // L2: unmounting keeps the entry; Discard after unmounting leaves a clean editor.
+    await page.getByRole("radio", { name: "Custom", exact: true }).click();
+    await expect(cost).toHaveCount(0);
+    await expect(save).toHaveAttribute("aria-disabled", "true");
+    await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+    await expect(cost).toHaveValue("e");
+    await page.getByRole("radio", { name: "Custom", exact: true }).click();
+    await page.getByRole("button", { name: "Discard", exact: true }).click();
+    await expect(page.locator(".save-bar")).toHaveCount(0);
+    await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+    await expect(cost).toHaveValue("");
+    await expect(page.getByText(/Enter both a cost limit/)).toHaveCount(0);
+    // L4 and L5 on the child limit: unreadable and empty are errors, never 0.
+    await children.fill("");
+    await children.pressSequentially("1e");
+    await expect(save).toHaveAttribute("aria-disabled", "true");
+    await children.fill("");
+    await expect(save).toHaveAttribute("aria-disabled", "true");
+    // L8: Save takes exactly the typed text.
+    await children.fill("6");
+    await cost.fill("40");
+    await page.locator("#orchestrator-campaign-tools").fill("400");
+    await expect(save).not.toHaveAttribute("aria-disabled", "true");
+    await save.click();
+    await expect.poll(() => page.evaluate(() => JSON.parse(document.documentElement.dataset.fullControlFixtureWrites ?? "[]").length)).toBe(1);
+    const written = JSON.parse((await page.evaluate(() => JSON.parse(document.documentElement.dataset.fullControlFixtureWrites ?? "[]") as string[]))[0]!);
+    expect(written.defaults.behavior.maximumConcurrentChildren).toBe(6);
+    expect(written.defaults.campaignBudget).toEqual({ costUsd: 40, toolCalls: 400 });
+    await expect(cost).toHaveValue("40");
+  });
+});

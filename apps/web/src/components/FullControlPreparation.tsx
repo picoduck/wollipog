@@ -97,6 +97,13 @@ type DraftErrors = Partial<Record<DraftField, string>>;
 const whole = (n: number, min: number, max: number) => Number.isSafeInteger(n) && n >= min && n <= max;
 // Plain digits only: `Number` alone would also accept forms such as `1e1` or `0x10`.
 const DECIMAL = /^(?:\d+(?:\.\d*)?|\.\d+)$/, WHOLE = /^\d+$/;
+
+/** The number a limit field's typed text states, or null when it is not plain digits. Limit fields
+ * are text entries, so this reads exactly what the person sees; there is no hidden browser state. */
+export function readLimitText(text: string, kind: "decimal" | "whole"): number | null {
+  const trimmed = text.trim();
+  return (kind === "decimal" ? DECIMAL : WHOLE).test(trimmed) ? Number(trimmed) : null;
+}
 const DRAFT_RULES: Record<DraftField, { pattern: RegExp; valid: (n: number) => boolean; message: string }> = {
   cost: { pattern: DECIMAL, valid: (n) => n > 0 && n <= 1_000_000, message: "Enter an amount above 0, up to 1,000,000." },
   tools: { pattern: WHOLE, valid: (n) => whole(n, 1, 10_000_000), message: "Enter a whole number from 1 to 10,000,000." },

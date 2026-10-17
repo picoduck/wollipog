@@ -383,7 +383,7 @@ export function NumberRow({
   disabled,
   error,
   inputId,
-  onBadInput,
+  textEntry = false,
   busy,
   busyLabel,
   saved,
@@ -403,21 +403,12 @@ export function NumberRow({
   error?: string | null;
   /** The field's id, for a link or a label elsewhere that has to reach it. */
   inputId?: string;
-  /** Whether the field holds text the browser cannot read as a number (`validity.badInput`), such as
-   * `1e`. Such a field reports "" as its value, so a caller that reads "" as cleared needs this. */
-  onBadInput?: (bad: boolean) => void;
+  /** A text field with a numeric keyboard instead of `type="number"`. A number input reports text it
+   * cannot read, such as `1e`, as "", so a caller that gives "" a meaning (cleared, or the default)
+   * uses this and validates the text itself: `onChange` then always receives exactly what is shown. */
+  textEntry?: boolean;
 }) {
   const id = useId();
-  const inputRef = useRef<HTMLInputElement>(null);
-  const reportedBad = useRef(false);
-  const reportBadInput = () => {
-    const bad = inputRef.current?.validity?.badInput ?? false;
-    if (!onBadInput || bad === reportedBad.current) return;
-    reportedBad.current = bad;
-    onBadInput(bad);
-  };
-  // Text set from outside (a save or Discard) can make the field readable again without an input event.
-  useLayoutEffect(reportBadInput);
   const titleId = `${id}-title`;
   const unitId = `${id}-unit`;
   const descriptionId = `${id}-desc`;
@@ -438,21 +429,19 @@ export function NumberRow({
         <span className="field">
           <span className="input-affix w-xs">
             <input
-              ref={inputRef}
               id={inputId ?? `${id}-input`}
-              type="number"
-              inputMode="numeric"
-              min={min}
-              max={max}
-              step={step}
+              type={textEntry ? "text" : "number"}
+              inputMode={textEntry && step !== undefined && !Number.isInteger(step) ? "decimal" : "numeric"}
+              autoComplete={textEntry ? "off" : undefined}
+              min={textEntry ? undefined : min}
+              max={textEntry ? undefined : max}
+              step={textEntry ? undefined : step}
               value={value}
               disabled={disabled}
               aria-labelledby={unit ? `${titleId} ${unitId}` : titleId}
               aria-describedby={describedBy}
               aria-invalid={error ? true : undefined}
               onChange={(event) => onChange(event.currentTarget.value)}
-              // React reports no change when unreadable text keeps the value "", so check every edit.
-              onInput={reportBadInput}
               onBlur={onBlur}
             />
             {unit && <span className="input-affix-text" id={unitId} ref={affixSuffixRef}>{unit}</span>}
