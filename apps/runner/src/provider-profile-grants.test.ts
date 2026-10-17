@@ -161,6 +161,7 @@ test("registration removes grants the control plane no longer lists, and an abse
   const [work, legacy] = f.accounts as [RunnerProviderAccount, RunnerProviderAccount];
   writeProviderProfileMarker(work.directory, marker([[INSTANCE, STALE_GRANT], [OTHER_INSTANCE, OTHER_GRANT]]));
   writeProviderProfileMarker(legacy.directory, marker([[INSTANCE, GRANT]], "7f1c2d3e-4a5b-4c6d-8e7f-001122334455"));
+  f.grants.reportedProfileIds(); // the register frame these `registered` lists answer
   assert.deepEqual(f.grants.synchronize(225, undefined), [], "an absent list never means revoke all");
   assert.deepEqual(f.grants.synchronize(225, [{ grantId: "not-a-grant", status: "active" }]), [], "a malformed list is ignored as a whole");
   assert.equal(readProviderProfileMarker(work.directory).state, "present");
@@ -257,6 +258,57 @@ test("a revocation that follows a completed adoption stops use without a reconne
   assert.equal(f.grants.usable(work), false);
   assert.throws(() => f.registry.acquireHome(work.directory, "claude", { expectedId: profileId, ...f.grants.access() }),
     (error: unknown) => error instanceof Error && /not granted to this control plane/u.test(error.message));
+});
+
+test("an adoption whose configuration write fails after the marker write never uses the grant and removes it", posixOnly, async (t) => {
+  const f = fixture(t);
+  const [work] = f.accounts as [RunnerProviderAccount];
+  f.grants.synchronize(225, []);
+  // An Owner or Admin revoked the pending grant while this adoption ran. The control plane could not
+  // name a profile then, and the uncoded failure below makes its adoption route send nothing either.
+  const deps: ProviderProfileCommandDeps = { ...f.deps, persistAccounts: () => { throw new Error("EROFS: read-only file system"); } };
+  const result = await adoptProviderProfileCommand(deps, { type: "adopt_provider_profile", requestId: "r1", accountId: "work", grantId: GRANT });
+  assert.deepEqual(result, { type: "adopt_provider_profile_result", requestId: "r1", ok: false, error: "The runner configuration could not be updated." });
+  const read = readProviderProfileMarker(work.directory);
+  assert.equal(read.state, "present", "the identity the adoption created stays");
+  assert.deepEqual(read.state === "present" && read.marker.grants, [], "but the grant it wrote is back out of the marker");
+  assert.equal(work.profileId, undefined, "and the account records no profile");
+  assert.equal(f.grants.usable(work), false, "the grant was never usable, with no reconnect");
+  assert.deepEqual(f.grants.access().activeProfileIds, []);
+  assert.deepEqual(f.grants.accountProfile(work), { id: read.state === "present" ? read.marker.profileId : "", access: "not_granted" },
+    "so the account report neither completes nor keeps the grant");
+  assert.throws(() => f.registry.acquireHome(work.directory, "claude", f.grants.access()),
+    (error: unknown) => error instanceof Error && /not granted to this control plane/u.test(error.message));
+  assert.equal(f.published.length, 1);
+});
+
+test("registration cleanup is limited to the profiles its register frame reported", posixOnly, async (t) => {
+  const f = fixture(t); // runner B
+  const [work, legacy] = f.accounts as [RunnerProviderAccount, RunnerProviderAccount];
+  const legacyProfile = "7f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  writeProviderProfileMarker(legacy.directory, marker([[INSTANCE, STALE_GRANT]], legacyProfile));
+  // B's register frame: the shared work HOME has no marker yet.
+  assert.deepEqual(f.grants.reportedProfileIds(), [legacyProfile]);
+  // Before the control plane answers, runner A on the same OS account adopts that HOME (a real marker
+  // write under A's lease), and the control plane activates A's grant.
+  const runnerA = new ProviderHomeLeaseRegistry("b".repeat(64), { pid: process.pid, hostname: "host-a", controlPlaneInstanceId: INSTANCE });
+  t.after(() => { runnerA.releaseAll(); });
+  const adoptedByA = runnerA.changeProfileMarkerWhileHeld(work.directory, "claude", (read) => adoptProviderProfileMarker(read,
+    { provider: "claude", grant: { controlPlaneInstanceId: INSTANCE, grantId: GRANT, grantedAt: "2026-10-16T00:00:03.000Z" } })).marker.profileId;
+  // B's `registered` list was built for B's snapshot: neither A's grant nor the revoked STALE_GRANT.
+  const stale = f.grants.synchronize(225, []);
+  assert.deepEqual(stale.map((entry) => [entry.account.id, entry.profileId, entry.grantId]), [["legacy", legacyProfile, STALE_GRANT]],
+    "only the reported profile's omitted grant is stale");
+  await revokeStaleProviderProfileGrants(f.deps, [...stale, { account: work, profileId: adoptedByA, grantId: GRANT }]);
+  const shared = readProviderProfileMarker(work.directory);
+  assert.deepEqual(shared.state === "present" && shared.marker.grants.map((grant) => [grant.controlPlaneInstanceId, grant.grantId]),
+    [[INSTANCE, GRANT]], "A's active grant survives, even when named to the removal");
+  const omitted = readProviderProfileMarker(legacy.directory);
+  assert.deepEqual(omitted.state === "present" && omitted.marker.grants, [], "the reported profile's omitted grant is removed");
+  // The next registration reports the shared profile, and its list carries A's grant.
+  assert.deepEqual(f.grants.reportedProfileIds(), [adoptedByA, legacyProfile]);
+  assert.deepEqual(f.grants.synchronize(225, [{ grantId: GRANT, profileId: adoptedByA, status: "active" }]), []);
+  assert.equal(f.grants.usable(work), true);
 });
 
 test("a refused account removal still revokes this control plane's grant on the runner", posixOnly, async (t) => {

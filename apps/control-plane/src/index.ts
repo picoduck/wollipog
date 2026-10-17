@@ -183,6 +183,7 @@ import {
 } from "./box-lifecycle.js";
 import { registerBoxLegacyAdoptionRoute } from "./box-legacy-adoption-route.js";
 import {
+  ProviderProfileInventoryRevocations,
   providerProfileGrantsForRunner,
   reconcileProviderProfileGrants,
   registerProviderProfileRoutes,
@@ -430,6 +431,7 @@ if (legacyCredentialMigration.blocked > 0) {
 }
 db.scrubLegacyAgentSecrets(Date.now());
 const hub = new Hub(db);
+const providerProfileInventoryRevocations = new ProviderProfileInventoryRevocations({ db, hub });
 const worktreeCreates = new WorktreeCreateCoordinator();
 const shellRegistry = new ShellRegistry(db);
 // Larger body limit so pasted screenshots (base64) fit comfortably.
@@ -1550,6 +1552,8 @@ app.register(async (instance) => {
           db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors, msg.providerAccounts, msg.executionTargets);
           if (runnerSupportsProtocol(db.getRunner(msg.runnerId)?.protocolVersion, "providerProfiles")) {
             reconcileProviderProfileGrants(db, msg.runnerId, db.getRunner(msg.runnerId)?.providerAccounts, Date.now());
+            // A reported grant with no live row here was revoked while the runner adopted it.
+            void providerProfileInventoryRevocations.reconcile(msg.runnerId, db.getRunner(msg.runnerId)?.providerAccounts);
           }
           hub.runnerChanged(msg.runnerId);
           // A runner may register with an empty or stale agent list and only discover its

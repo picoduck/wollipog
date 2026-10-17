@@ -60,18 +60,32 @@ an account:
 3. The runner persists `profileId` on the account in its configuration, starts using the grant, and
    replies `adopt_provider_profile_result { ok, profileId }`. The control plane activates the grant.
 
+Adoption is atomic from the runner's point of view: the grant becomes usable only after the
+configuration write succeeds. If anything fails after the marker write, the runner takes this grant
+back out of the marker under the HOME's lease, never records it, and only then replies with the
+error (without a code). The HOME keeps the identity the adoption created, so the account is not usable
+through this control plane until an adoption succeeds; a retry reuses the pending grant.
+
 A retry while the grant is pending reuses it, so the runner sees the same grant id; once active, a
 repeat returns the active grant. A coded refusal happens before the marker changes and spends the
-pending grant. A lost reply (timeout, or a failure without a code) leaves it pending; the runner's
-next account report shows the profile as `granted` or `pending`, and the control plane completes the
-grant from it. The runner treats a pending grant its marker already records as usable, because an
-Owner or Admin authorized it.
+pending grant. A failure without a code leaves it pending. A lost reply (a timeout) also leaves it
+pending; the runner's next account report shows the profile as `granted` or `pending`, and the
+control plane completes the grant from it. The runner treats a pending grant its marker already
+records as usable, because an Owner or Admin authorized it.
 
 A pending grant can be revoked while the runner is writing it. Its row names no profile yet, so the
 revocation cannot reach the runner then. If the adoption still succeeds, the grant cannot be
 activated; the control plane returns 409 `PROVIDER_PROFILE_GRANT_REVOKED` and at once sends that
 runner `revoke_provider_profile_grant` with the profile id it returned, so the runner stops using
 the grant and drops it from the marker without waiting for its next registration.
+
+When the reply never reaches the adoption route (it arrives after the request timeout), the account
+report closes the gap instead. Whenever a runner reports an account whose profile it may use here
+(`granted` or `pending`) but no live (pending or active) grant of this control plane covers that
+runner account or that profile, the control plane sends `revoke_provider_profile_grant` with the
+reported profile id and the most recently revoked grant for that runner account (else the latest one
+naming the profile). Each (runner, account, grant) is sent at most once per five minutes, so repeated
+account reports do not repeat it. No reconnect is needed.
 
 Adoption is strict. After adoption only explicitly granted control planes may use the HOME; grants are
 never reconstructed from lease-journal owners. Sessions created after adoption that use the account
@@ -94,7 +108,11 @@ unknown, or the relevant grants exceed 64, the field is omitted. The runner:
 - uses a profile only when this list (or its own just-completed adoption) holds a grant for it and the
   marker lists this control-plane instance;
 - removes from each configured HOME's marker any grant of this instance that the list no longer
-  contains, under the HOME's lease;
+  contains, under the HOME's lease, but only for a marker whose profile id was in the
+  `providerProfileIds` snapshot of the register frame this `registered` answers (a reconnect sends a
+  new frame and replaces the snapshot). A profile that appeared after that frame, for example a
+  marker-less shared HOME another runner adopted before the control plane answered, holds grants the
+  control plane could not list, so it is left alone until the next registration;
 - never treats an absent or malformed list as "revoke all"; it changes nothing.
 
 An account's recorded `profileId` is the expected id of every acquisition of that HOME path, so a
@@ -157,5 +175,9 @@ credential routes. Agent credentials are refused. Grant rows record `granted_by`
 - A pending grant is listed only to the runner that recorded it. Another runner of the same control
   plane that shares the HOME before the grant is confirmed removes it from the marker at its
   registration; the adoption then has to be repeated.
+- The snapshot rule protects only profiles a registration did not report. When another runner
+  replaces this control plane's grant on a profile the registering runner did report, after the
+  control plane built that runner's list and before the runner applied it, the new grant is removed
+  from the marker; the adoption then has to be repeated.
 - A grant activated on one runner reaches another online runner sharing the profile at its next
   registration.

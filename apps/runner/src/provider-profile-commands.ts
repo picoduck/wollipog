@@ -78,20 +78,35 @@ export async function adoptProviderProfileCommand(
     if (error instanceof ProviderHomeLeaseError && PROFILE_EXISTS.has(error.code)) return fail(error.message, "PROFILE_EXISTS");
     return fail(error instanceof Error ? error.message : "The provider profile could not be adopted.");
   }
-  // The marker now grants this control plane. Use it at once, before the configuration write, so
-  // the control plane's lost-reply reconciliation and this runner agree.
-  deps.grants.recordAdopted(profileId, msg.grantId);
+  // The marker now grants this control plane, but the grant becomes usable only once the whole
+  // adoption has succeeded. An uncoded failure leaves the control plane's row pending (or revoked by
+  // an Owner or Admin meanwhile, which it could not tell this runner), so anything failing after the
+  // marker write takes this grant back out of the marker and never records it.
   if (account.profileId !== profileId) {
     try {
       deps.persistAccounts(deps.accounts().map((candidate) => candidate === account ? { ...candidate, profileId } : candidate));
     } catch {
+      await rollBackAdoption(deps, account, profileId, msg.grantId);
       deps.publish();
       return fail("The runner configuration could not be updated.");
     }
     account.profileId = profileId;
   }
+  deps.grants.recordAdopted(profileId, msg.grantId);
   deps.publish();
   return { type: "adopt_provider_profile_result", requestId: msg.requestId, ok: true, profileId };
+}
+
+/** Undo a failed adoption's marker write under the HOME's lease. The grant was never recorded as
+ * usable; if the marker update fails too, the grant stays unusable here and the next registration
+ * removes it once the control plane no longer lists it. */
+async function rollBackAdoption(deps: ProviderProfileCommandDeps, account: RunnerProviderAccount, profileId: string, grantId: string): Promise<void> {
+  deps.grants.recordRevoked(undefined, grantId);
+  try {
+    await deps.revoke(account.directory, account.provider, profileId, grantId);
+  } catch (error) {
+    deps.log(`a failed provider profile adoption could not be removed from the HOME's marker: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
 }
 
 /** `revoke_provider_profile_grant`: stop using the grant at once, then drop it from every
@@ -161,13 +176,15 @@ async function dropGrant(deps: ProviderProfileCommandDeps, account: RunnerProvid
   }
 }
 
-/** After `registered`: drop grants of this control plane that it no longer lists. */
+/** After `registered`: drop grants of this control plane that it no longer lists. Only grants for
+ * a profile the answered register frame reported, and still unknown when the removal runs. */
 export async function revokeStaleProviderProfileGrants(
   deps: ProviderProfileCommandDeps,
   stale: readonly StaleProviderProfileGrant[],
 ): Promise<void> {
   if (stale.length === 0) return;
   for (const { account, profileId, grantId } of stale) {
+    if (!deps.grants.stillStale(profileId, grantId)) continue;
     try {
       await deps.revoke(account.directory, account.provider, profileId, grantId);
     } catch (error) {

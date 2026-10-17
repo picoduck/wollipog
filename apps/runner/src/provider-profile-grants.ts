@@ -43,6 +43,9 @@ interface KnownGrant {
 export class ProviderProfileGrants {
   private supported = false;
   private readonly grants = new Map<string, KnownGrant>();
+  /** The exact profile ids the most recent register frame reported. The control plane lists grants
+   * only for those, so only a marker holding one of them can carry a grant the list omitted. */
+  private reportedSnapshot: ReadonlySet<string> = new Set();
   private readonly readMarker: (account: RunnerProviderAccount) => ProviderProfileRead;
 
   constructor(private readonly deps: {
@@ -56,7 +59,10 @@ export class ProviderProfileGrants {
   /**
    * Apply a `registered` frame. Below v225 nothing is granted. A present list replaces the known
    * grants and names the stale grants to remove from markers; an absent or malformed list never
-   * means "revoke all", so it changes nothing.
+   * means "revoke all", so it changes nothing. Only a marker whose profile id the answered register
+   * frame reported can be stale: a HOME adopted after that frame (by another runner on this OS
+   * account, say) holds a grant the control plane could not list yet, so it is left alone until the
+   * next registration.
    */
   synchronize(protocolVersion: number | null, list: unknown): StaleProviderProfileGrant[] {
     this.supported = runnerSupportsProtocol(protocolVersion, "providerProfiles");
@@ -78,6 +84,7 @@ export class ProviderProfileGrants {
       if (!mine) continue;
       const known = this.grants.get(mine.grantId);
       if (!known) {
+        if (!this.reportedSnapshot.has(read.marker.profileId)) continue;
         stale.push({ account, profileId: read.marker.profileId, grantId: mine.grantId });
         continue;
       }
@@ -89,7 +96,9 @@ export class ProviderProfileGrants {
   }
 
   /** The registration's `providerProfileIds`: each configured HOME's marker id, or the id its
-   * account recorded, deduplicated. The control plane lists exactly the grants for these. */
+   * account recorded, deduplicated. The control plane lists exactly the grants for these. Call once
+   * per register frame sent: the result replaces the snapshot that the answering `registered` list
+   * is compared against. */
   reportedProfileIds(): string[] {
     const ids = new Set<string>();
     for (const account of this.deps.accounts()) {
@@ -97,7 +106,15 @@ export class ProviderProfileGrants {
       const id = read.state === "present" ? read.marker.profileId : account.profileId;
       if (id && isProviderProfileId(id)) ids.add(id);
     }
-    return [...ids].slice(0, PROVIDER_PROFILE_ID_REPORT_LIMIT);
+    const reported = [...ids].slice(0, PROVIDER_PROFILE_ID_REPORT_LIMIT);
+    this.reportedSnapshot = new Set(reported);
+    return reported;
+  }
+
+  /** Whether a grant `synchronize` named stale still is when its removal runs: its profile is in the
+   * registration's snapshot and no grant with that id has become known since. */
+  stillStale(profileId: string, grantId: string): boolean {
+    return this.supported && this.reportedSnapshot.has(profileId) && !this.grants.has(grantId);
   }
 
   supportsProfiles(): boolean {

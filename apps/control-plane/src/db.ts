@@ -12886,6 +12886,23 @@ export class ControlPlaneDb {
     return rows.map((row) => this.providerProfileGrantRecord(row));
   }
 
+  /**
+   * This control plane's most recently revoked grant that a runner account's HOME may still record:
+   * one the account made (for this profile, or before it named one), else the latest naming the
+   * profile. Inventory reconciliation sends it when a runner reports access without a live grant.
+   */
+  latestRevokedProviderProfileGrant(runnerId: string, providerAccountId: string, profileId: string): ProviderProfileGrantRecord | null {
+    const row = this.stmt(
+      `SELECT * FROM provider_profile_grants
+        WHERE control_plane_instance_id=? AND status='revoked'
+          AND ((runner_id=? AND provider_account_id=? AND (profile_id IS NULL OR profile_id=?)) OR profile_id=?)
+        ORDER BY (runner_id=? AND provider_account_id=?) DESC, revoked_at DESC, created_at DESC, grant_id DESC
+        LIMIT 1`,
+    ).get(this.controlPlaneInstanceId, runnerId, providerAccountId, profileId, profileId, runnerId, providerAccountId) as
+      ProviderProfileGrantRow | undefined;
+    return row ? this.providerProfileGrantRecord(row) : null;
+  }
+
   boxHasPendingLegacyDataAdoption(boxId: string): boolean {
     return Boolean(this.stmt(
       "SELECT 1 FROM legacy_ssh_account_adoptions WHERE adopter_box_id=? AND status='pending'",

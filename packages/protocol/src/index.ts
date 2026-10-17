@@ -9185,7 +9185,8 @@ export interface RegisteredMessage {
    * reported (`RegisterMessage.providerProfileIds` or its accounts) and every pending grant recorded
    * for this runner's accounts; at most 64. Absent never means "none": the control plane omits the
    * list rather than send a partial one, and a runner removes a grant from a profile marker only
-   * when a present list omits it. */
+   * when a present list omits it and the marker's profile id is one the answered register frame's
+   * `providerProfileIds` reported. */
   providerProfileGrants?: ProviderProfileGrantView[];
 }
 

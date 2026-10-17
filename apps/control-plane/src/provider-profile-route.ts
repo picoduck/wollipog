@@ -65,7 +65,8 @@ export function providerProfileGrantsForRunner(
 }
 
 /** The lost-reply path: a runner reports an account whose HOME records this control plane's grant
- * (`granted` or `pending`) while the account's authorization is still pending here. */
+ * (`granted` or `pending`) while the account's authorization is still pending here. A report with
+ * no live grant at all is `ProviderProfileInventoryRevocations`'s concern. */
 export function reconcileProviderProfileGrants(
   db: ControlPlaneDb,
   runnerId: string,
@@ -82,6 +83,61 @@ export function reconcileProviderProfileGrants(
     }
   }
   return completed;
+}
+
+/** How long one inventory-driven revocation notice suppresses an identical one. */
+const INVENTORY_REVOCATION_RESEND_MS = 5 * 60_000;
+
+/**
+ * The inventory side of revocation (#3239): a runner reports an account whose HOME it may use
+ * through this control plane (`granted` or `pending`), but no live grant here covers that runner
+ * account or profile. The runner still holds a revoked grant, typically one revoked while its
+ * adoption ran whose reply was lost, arrived after the request timeout, or failed without a code, so
+ * it is told with `revoke_provider_profile_grant` and the most recent revoked grant id, without
+ * waiting for a reconnect. Each (runner, account, grant) is told at most once per resend window, so
+ * every account report does not repeat it.
+ */
+export class ProviderProfileInventoryRevocations {
+  private readonly notified = new Map<string, number>();
+  private readonly now: () => number;
+  private readonly resendAfterMs: number;
+
+  constructor(private readonly deps: {
+    db: ControlPlaneDb;
+    hub: Pick<Hub, "isRunnerOnline" | "requestFromRunner">;
+    now?: () => number;
+    resendAfterMs?: number;
+  }) {
+    this.now = deps.now ?? Date.now;
+    this.resendAfterMs = deps.resendAfterMs ?? INVENTORY_REVOCATION_RESEND_MS;
+  }
+
+  /** Run after `reconcileProviderProfileGrants`, so a lost reply completes before this looks.
+   * Resolves to the grant ids sent; it never rejects. */
+  async reconcile(runnerId: string, accounts: readonly ProviderAccountDefinition[] | undefined): Promise<string[]> {
+    const sent: string[] = [];
+    try {
+      const runner = this.deps.db.getRunner(runnerId);
+      if (!runner || !this.deps.hub.isRunnerOnline(runnerId) || !runnerSupportsProtocol(runner.protocolVersion, "providerProfiles")) return sent;
+      const now = this.now();
+      for (const [key, at] of this.notified) if (now - at >= this.resendAfterMs) this.notified.delete(key);
+      for (const account of accounts ?? []) {
+        const profile = account.profile;
+        if (!profile || profile.access === "not_granted" || !PROFILE_ID.test(profile.id)) continue;
+        if (this.deps.db.liveProviderProfileGrantsForAccount(runnerId, account.id, profile.id).length > 0) continue;
+        const revoked = this.deps.db.latestRevokedProviderProfileGrant(runnerId, account.id, profile.id);
+        if (!revoked) continue;
+        const key = `${runnerId}\u0000${account.id}\u0000${revoked.grantId}`;
+        if (this.notified.has(key)) continue;
+        this.notified.set(key, now);
+        sent.push(revoked.grantId);
+        await notifyRunnerOfRevocation(this.deps.hub, runnerId, profile.id, revoked.grantId);
+      }
+    } catch {
+      // Advisory: the revoked row already holds, and the runner's next registration drops the grant.
+    }
+    return sent;
+  }
 }
 
 /** Account removal revokes only this control plane's grants for the account's profile; the runner

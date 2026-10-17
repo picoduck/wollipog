@@ -7,6 +7,7 @@ import { ControlPlaneDb } from "./db.js";
 import type { Hub, RunnerRequestResult } from "./hub.js";
 import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import {
+  ProviderProfileInventoryRevocations,
   providerProfileGrantsForRunner,
   reconcileProviderProfileGrants,
   registerProviderProfileRoutes,
@@ -271,6 +272,48 @@ test("a pending grant revoked while the runner adopts is revoked on the runner w
     assert.deepEqual(f.sent.slice(1).map(({ runnerId, message }) => [runnerId, message.type, (message as { profileId?: string }).profileId,
       (message as { grantId?: string }).grantId]), [["runner-a", "revoke_provider_profile_grant", PROFILE, grantId]],
       "the runner that recorded the grant is told at once, with the profile id it returned");
+  } finally {
+    await f.close();
+  }
+});
+
+test("an adoption reply after the request timeout for a since-revoked grant is revoked from the account report", async () => {
+  const f = await fixture();
+  try {
+    const lost = await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
+    assert.equal(lost.statusCode, 504);
+    const { grantId } = lost.json() as { grantId: string };
+    // Revoked while still pending: the grant names no profile, so the runner cannot be told yet.
+    const revoked = await f.app.inject({ method: "POST", url: REVOKE, payload: {} });
+    assert.equal(revoked.json().runnerNotified, false);
+    assert.equal(f.sent.length, 1);
+
+    // The runner finishes the adoption after the timeout, uses the grant and reports the account.
+    f.setHandler((_runnerId, message) => ({ type: "revoke_provider_profile_grant_result",
+      requestId: (message as { requestId: string }).requestId, ok: true, markerUpdated: true }));
+    const reported = [account("work", { id: PROFILE, access: "granted" }), account("other")];
+    f.db.updateRunnerAgents("runner-a", [], 2, undefined, reported);
+    assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", reported, 5), [], "a revoked grant is never completed");
+    let clock = 1_000;
+    const revocations = new ProviderProfileInventoryRevocations({ db: f.db, hub: hubOf(f), now: () => clock, resendAfterMs: 60_000 });
+    assert.deepEqual(await revocations.reconcile("runner-a", reported), [grantId]);
+    assert.deepEqual(f.sent.slice(1).map(({ runnerId, message }) => [runnerId, message.type, (message as { profileId?: string }).profileId,
+      (message as { grantId?: string }).grantId]), [["runner-a", "revoke_provider_profile_grant", PROFILE, grantId]],
+      "the runner is told with the profile it reports and the revoked grant, without a reconnect");
+    assert.deepEqual(await revocations.reconcile("runner-a", reported), [], "the next report does not repeat it");
+    clock += 60_000;
+    assert.deepEqual(await revocations.reconcile("runner-a", reported), [grantId], "until the resend window passes");
+
+    // A live grant, a profile reported as not granted, or an offline runner sends nothing.
+    f.setHandler(adopted(OTHER_PROFILE));
+    await f.app.inject({ method: "POST", url: "/api/runners/runner-a/provider-accounts/other/adopt-profile", payload: { acknowledgeProfileAdoption: true } });
+    const sent = f.sent.length;
+    clock += 60_000;
+    assert.deepEqual(await revocations.reconcile("runner-a", [account("other", { id: OTHER_PROFILE, access: "granted" })]), []);
+    assert.deepEqual(await revocations.reconcile("runner-a", [account("work", { id: PROFILE, access: "not_granted" })]), []);
+    f.online.delete("runner-a");
+    assert.deepEqual(await revocations.reconcile("runner-a", reported), []);
+    assert.equal(f.sent.length, sent);
   } finally {
     await f.close();
   }
