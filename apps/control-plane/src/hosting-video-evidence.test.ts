@@ -140,6 +140,25 @@ test("readiness advances only through a paced peer and a Human proof, and still 
   assert.equal(h.video.readiness().code, "no_paced_video_peer", "removing the contract withdraws readiness at once");
 });
 
+test("recording matches the advertised contract by field, whatever its key order", async (t) => {
+  const h = await harness(t);
+  h.register(true);
+  const peer = h.video.pacedPeers()[0]!;
+  const reversed = { revision: contract.revision, id: contract.id };
+  assert.notEqual(JSON.stringify(reversed), JSON.stringify(peer.contract));
+  const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", contract: reversed });
+  const recorded = await h.call("owner", "POST", "/api/video-evidence/live-validations",
+    { target, runs: syntheticInspectedVideoRuns(target, h.owner.userId) });
+  assert.equal(recorded.status, 201, JSON.stringify(recorded.body));
+  assert.equal(h.video.readiness().code, "reviewer_unavailable");
+  for (const invalid of [{ ...contract, extra: true }, { id: contract.id }, null]) {
+    const changed = { ...target, pacedVideoReviewContract: invalid };
+    const refused = await h.call("owner", "POST", "/api/video-evidence/live-validations",
+      { target: changed, runs: syntheticInspectedVideoRuns(changed, h.owner.userId) });
+    assert.deepEqual([refused.status, refused.body.code], [409, "no_paced_video_peer"], JSON.stringify(invalid));
+  }
+});
+
 test("the composed pieces are inert: no gate, binding, source or owned Stop handle is available", async (t) => {
   const h = await harness(t);
   h.register(true);

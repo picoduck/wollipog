@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { supportsPacedVideoReviewPeer } from "@wollipog/protocol";
+import { supportsPacedVideoReviewPeer, type PacedVideoReviewPeerContract } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { EvidenceReviewService } from "./evidence-review-service.js";
 import type { EvidenceReviewerTarget } from "./evidence-review-worker.js";
@@ -24,7 +24,7 @@ export interface PacedVideoPeer {
   driver: string;
   models: string[];
   protocolVersion: number;
-  contract: unknown;
+  contract: PacedVideoReviewPeerContract;
 }
 
 const REASONS: Record<VideoReviewUnavailableCode, string> = {
@@ -60,7 +60,7 @@ export function composeHostingVideoEvidence(db: ControlPlaneDb) {
     .filter((agent) => supportsPacedVideoReviewPeer(runner.protocolVersion, agent.capabilities?.pacedVideoReviewContract))
     .map((agent) => ({ runnerId: runner.runnerId, agentId: agent.id, driver: agent.driver ?? "acp",
       models: (agent.capabilities?.models ?? []).map((model) => model.id), protocolVersion: runner.protocolVersion!,
-      contract: agent.capabilities?.pacedVideoReviewContract })));
+      contract: agent.capabilities!.pacedVideoReviewContract as PacedVideoReviewPeerContract })));
 
   const readiness = (now = Date.now()): VideoReviewReadiness => {
     const peers = pacedPeers();
@@ -108,9 +108,12 @@ export function registerHostingVideoEvidenceRoutes(app: FastifyInstance, deps: {
     }
     const target = body.target;
     // The proof may name only an installation that currently advertises the contract it certifies.
-    if (!video.pacedPeers().some((peer) => peer.runnerId === target.runnerId && peer.agentId === target.agentId &&
+    // Contracts compare by validated field, never by serialization, so key order cannot matter.
+    const contract = supportsPacedVideoReviewPeer(target.runnerProtocolVersion, target.pacedVideoReviewContract)
+      ? target.pacedVideoReviewContract as PacedVideoReviewPeerContract : null;
+    if (!contract || !video.pacedPeers().some((peer) => peer.runnerId === target.runnerId && peer.agentId === target.agentId &&
       peer.driver === target.driver && peer.models.includes(target.modelId) && peer.protocolVersion === target.runnerProtocolVersion &&
-      JSON.stringify(peer.contract) === JSON.stringify(target.pacedVideoReviewContract))) {
+      peer.contract.id === contract.id && peer.contract.revision === contract.revision)) {
       return reply.code(409).send({ code: "no_paced_video_peer",
         error: "No registered installation advertises the paced video review contract for this exact reviewer target." });
     }
