@@ -244,6 +244,57 @@ test("a typed path that lists closes the field, and a row clears the failure", a
   }
 });
 
+test("opening a folder from a focused crumb or row keeps focus in the list (CR-1.1)", async () => {
+  const view = await mount();
+  try {
+    const chooser = await view.open();
+    const firstRow = () => chooser.querySelector<HTMLElement>(".folder-picker-list > .row");
+    const focusAndPress = async (element: HTMLElement | undefined) => {
+      assert.ok(element);
+      await act(async () => { element.focus(); });
+      await view.press(element);
+    };
+
+    await focusAndPress(view.button(chooser, "repos"));
+    assert.deepEqual(view.crumbs(chooser), ["Home", "repos"]);
+    assertSameDomNode(document.activeElement, firstRow(), "the opened folder's first row takes focus from the row that unmounted");
+
+    await focusAndPress(view.button(chooser, "Home"));
+    assert.deepEqual(view.crumbs(chooser), ["Home"], "the ancestor crumb became the current folder");
+    assertSameDomNode(document.activeElement, firstRow(), "the crumb that became plain text hands focus to the list");
+
+    // A press outside the picker leaves focus where the person put it.
+    const browse = view.button(view.host, "Browse…")!;
+    await act(async () => { browse.focus(); });
+    await act(async () => { view.button(chooser, "notes")!.click(); });
+    await view.settle();
+    assertSameDomNode(document.activeElement, browse);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a slow folder opened from a focused row keeps focus inside the picker through its skeleton", async () => {
+  let release!: () => void;
+  let held = false;
+  const gate = { get promise() { return held ? new Promise<void>((resolve) => { release = resolve; }) : Promise.resolve(); } };
+  const view = await mount({ hold: gate });
+  try {
+    const chooser = await view.open();
+    held = true;
+    const repos = view.button(chooser, "repos")!;
+    await act(async () => { repos.focus(); repos.click(); });
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, FOLDER_PICKER_SKELETON_DELAY_MS + 20)); });
+    assert.ok(chooser.querySelector(".folder-picker-skeleton"), "the skeleton replaced the rows");
+    assert.equal(chooser.contains(document.activeElement), true, "focus is still inside Choose Folder while it loads");
+    await act(async () => { release(); });
+    await view.settle();
+    assertSameDomNode(document.activeElement, chooser.querySelector(".folder-picker-list > .row"), "and lands on the new first row");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("an empty folder says it can still be used", async () => {
   const view = await mount();
   try {

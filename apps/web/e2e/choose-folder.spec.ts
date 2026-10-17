@@ -66,6 +66,21 @@ for (const { name, viewport, coarse, rowHeight } of VIEWPORTS) {
   });
 }
 
+test("opening a folder from the keyboard keeps focus inside Choose Folder (CR-1.1)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/choose-folder-e2e.html?open=1");
+  const chooser = page.getByRole("dialog", { name: "Choose Folder" });
+  const upOneLevel = chooser.getByRole("button", { name: "Up One Level" });
+  await chooser.getByRole("button", { name: "repos", exact: true }).press("Enter");
+  await expect(chooser.locator(".crumbs .crumb")).toHaveText(["Home", "repos"]);
+  await expect(upOneLevel).toBeFocused();
+  await chooser.getByRole("button", { name: "Home", exact: true }).press("Enter");
+  await expect(chooser.locator(".crumb.is-current")).toHaveText("Home");
+  await expect(upOneLevel).toBeFocused();
+  await page.keyboard.press("Tab");
+  expect(await chooser.evaluate((element) => element.contains(document.activeElement)), "Tab stays in the dialog").toBe(true);
+});
+
 test("a long trail wraps on a phone, so the current folder stays in view", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/choose-folder-e2e.html?open=1");

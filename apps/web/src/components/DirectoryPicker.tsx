@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { runnerSupportsProtocol, type DirectoryEntry } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { folderCrumbs } from "../folder-crumbs.js";
@@ -79,6 +79,7 @@ function FolderBrowser({
   const pathFieldId = useId();
   const editButtonRef = useRef<HTMLButtonElement>(null);
   const pathInputRef = useRef<HTMLInputElement>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!supported) return;
@@ -124,8 +125,29 @@ function FolderBrowser({
     wasEditing.current = editing;
   }, [editing]);
 
+  // A crumb that becomes the current folder turns into plain text, and a row is replaced by the
+  // next folder's rows or the skeleton, so a keyboard press that opens a folder would leave focus
+  // on <body>, outside the host dialog's Tab trap. The opened folder's first row takes it instead,
+  // with Edit Path holding it while skeleton rows show. Set by a press inside the picker; cleared
+  // once that folder has settled.
+  const keepFocus = useRef<{ holder: HTMLElement | null } | null>(null);
+  useLayoutEffect(() => {
+    const pending = keepFocus.current;
+    if (!pending) return;
+    const active = document.activeElement;
+    if (!active || active === document.body || !active.isConnected || active === pending.holder) {
+      const row = pickerRef.current?.querySelector<HTMLElement>(".folder-picker-list > .row") ?? null;
+      const target = row ?? editButtonRef.current;
+      if (target && target !== active) target.focus();
+      pending.holder = row ? null : target;
+    }
+    if (!loading) keepFocus.current = null;
+  });
+
   const open = (path: string, fromField = false) => {
     if (!fromField) setEditing(false);
+    // A typed path's field hands focus back to Edit Path itself (above).
+    keepFocus.current = !fromField && pickerRef.current?.contains(document.activeElement) ? { holder: null } : null;
     setRequest((current) => ({ id: current.id + 1, path, fromField }));
   };
   const go = () => {
@@ -177,7 +199,7 @@ function FolderBrowser({
 
   const crumbs = listing ? folderCrumbs(listing.path, home) : [];
   return (
-    <div className="folder-picker">
+    <div className="folder-picker" ref={pickerRef}>
       <div className="folder-picker-bar">
         {fieldOpen ? (
           <>
