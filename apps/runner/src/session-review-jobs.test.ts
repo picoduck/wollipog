@@ -438,9 +438,12 @@ test("the runner advertises session review on Linux only and wires its commands 
   assert.deepEqual(advertisedRuntime("linux", () => { throw new Error("boom"); }, base), base);
 
   const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-  assert.match(index, /new SessionReviewJobs\(resolve\(config\.dataDir, "session-review-jobs"\), store, sendUp,/u);
-  assert.match(index, /defaultSessionReviewDependencies\(config\.dataDir, log, \(\) => configuredSessionWritablePaths\(\{\s+workspaces: config\.workspaces, providerAccounts: config\.providerAccounts, agents: config\.agents,\s+sessions: store\.listSessions\(\), hostEnv: process\.env,/u,
+  assert.match(index, /new SessionReviewJobs\(resolve\(config\.dataDir, "session-review-jobs"\), store, sendUp,\s+sessionReviewDependencies, undefined, reviewSnapshots\);/u);
+  assert.match(index, /const sessionWritablePaths = \(\) => configuredSessionWritablePaths\(\{\s+workspaces: config\.workspaces, providerAccounts: config\.providerAccounts, agents: config\.agents,\s+sessions: store\.listSessions\(\), hostEnv: process\.env,/u,
     "discovery treats every configured and persisted provider home as session-writable");
+  assert.match(index, /defaultSessionReviewDependencies\(config\.dataDir, log, sessionWritablePaths\)/u);
+  assert.match(index, /defaultReviewSessionDependencies\(config\.dataDir, log, sessionWritablePaths\)/u,
+    "review sessions trust their reviewer CLI against the same session-writable roots");
   assert.match(index, /case "session_review_job":\s+runCommandTask\("session_review_job", sessionReviewJobs\.dispatch\(msg\)\);/u);
   assert.match(index, /case "cancel_session_review_job":\s+sessionReviewJobs\.cancel\(msg\.jobId, msg\.nonce\);/u);
   assert.match(index, /runtime: withSessionReviewRuntime\(metadata\.runtime\)/u);

@@ -683,7 +683,11 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `cancel_session_review_job` commands, the `session_review_job_update` reply, and
 //      `RunnerRuntimeInfo.sessionReview`. The control plane sends a job only to a v223+ runner that
 //      advertises the capability, and the session tools refuse against an older control plane.
-export const PROTOCOL_VERSION = 223;
+// 224: review sessions (#3368): `SessionLaunchSpec.review`, `SessionView.kind`/`review`,
+//      `RunnerRuntimeInfo.reviewSession` and the `review_session_update` reply. The control plane
+//      creates a review session only on a v224+ runner that advertises the reviewer, and the
+//      session tools refuse against an older control plane.
+export const PROTOCOL_VERSION = 224;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -691,6 +695,7 @@ export * from "./campaign-evidence-authority.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
+export * from "./review-session.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
@@ -915,6 +920,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v223 runner runs a session's own cross-model review outside its sandbox (#3306); the session
    * tools check the same floor against the connected control plane. */
   sessionReviewJob: 223,
+  /** v224 runner launches typed, read-only review sessions (#3368); the session tools check the
+   * same floor against the connected control plane. */
+  reviewSession: 224,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -3327,6 +3335,8 @@ export interface RunnerRuntimeInfo {
   campaignLaunchInspection?: { version: 1 };
   /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
+  /** Review sessions (#3368): the reviewer harnesses this runner can launch. Missing is unsupported. */
+  reviewSession?: import("./review-session.js").ReviewSessionCapability;
   /** Native-host runner data root. WSL contexts use the same `.agent-manager` layout in-distro. */
   dataDir: string;
   worktreeRoot: string;
@@ -7160,6 +7170,10 @@ export interface SessionView {
   /** Current session role. Omitted by control planes predating v160; use `sessionRole()` to read
    * it so the legacy coupled preset in `permissionMode` still resolves to the Orchestrator role. */
   role?: SessionRole;
+  /** v224: immutable session kind. Omitted for ordinary sessions and by older control planes. */
+  kind?: import("./review-session.js").SessionKind;
+  /** v224: present on a review session (#3368): what it reviews and for whom. */
+  review?: import("./review-session.js").ReviewSessionLink;
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
@@ -9046,6 +9060,7 @@ export type RunnerToControlPlane =
   | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | import("./session-review-job.js").SessionReviewJobUpdate
+  | import("./review-session.js").ReviewSessionUpdate
   | RegisterMessage
   | HeartbeatMessage
   | SessionStatusMessage
@@ -9198,6 +9213,9 @@ export interface SessionLaunchSpec {
   config?: SessionConfig;
   /** Runner-enforced Orchestrator restrictions. Missing on legacy peers means strict isolation. */
   orchestrator?: OrchestratorLaunchPolicy;
+  /** v224: present only on a control-plane-created review session (#3368). The runner launches it
+   * read-only, outside every sandbox, against its own checkout of the exact pushed head. */
+  review?: import("./review-session.js").ReviewLaunchPolicy;
   /** ACP-only, additive in protocol v38. Contains references, never resolved secret values. */
   acpSessionContext?: AcpSessionContextConfig;
 }
