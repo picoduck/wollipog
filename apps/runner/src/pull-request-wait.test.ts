@@ -57,8 +57,23 @@ const failed = (stderr: string, code: number | string = 1): GhOutcome => ({ stdo
 
 const RULESET = [{ type: "pull_request" }, { type: "required_status_checks", parameters: { required_status_checks: [{ context: AGGREGATOR }] } }];
 
+const READY_AT = "2026-10-12T09:00:00Z";
+const RUN_AT = "2026-10-12T10:00:00Z";
+function admission(readyAt = READY_AT) {
+  return { createdAt: "2026-10-11T10:00:00Z", timelineItems: { nodes: [{ createdAt: readyAt }] } };
+}
+function provenance(checkId = 200) {
+  return { databaseId: checkId, checkSuite: { app: { databaseId: 15368 } } };
+}
+function actionRuns(overrides: Record<string, unknown> = {}, additional: Record<string, unknown>[] = []) {
+  return { total_count: 1 + additional.length, workflow_runs: [{
+    id: 20, workflow_id: 30, check_suite_id: 100, head_sha: HEAD, event: "pull_request", run_attempt: 1,
+    created_at: RUN_AT, status: "completed", ...overrides,
+  }, ...additional.map((run, index) => ({ check_suite_id: 101 + index, ...run }))] };
+}
+
 /** A scripted `gh`: each GraphQL read takes the next entry (the last one repeats). */
-function fakeGh(reads: GhOutcome[], options: { rules?: GhOutcome; branch?: GhOutcome; pages?: GhOutcome[] } = {}) {
+function fakeGh(reads: GhOutcome[], options: { rules?: GhOutcome; branch?: GhOutcome; pages?: GhOutcome[]; runs?: GhOutcome; jobs?: GhOutcome; check?: GhOutcome } = {}) {
   const calls: string[][] = [];
   let index = 0;
   let page = 0;
@@ -67,6 +82,14 @@ function fakeGh(reads: GhOutcome[], options: { rules?: GhOutcome; branch?: GhOut
     if (args.includes(`query=${PULL_REQUEST_CONTEXTS_QUERY}`)) return options.pages![Math.min(page++, options.pages!.length - 1)]!;
     if (args.includes("graphql")) return reads[Math.min(index++, reads.length - 1)]!;
     const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
+    if (path.includes("/check-runs/")) return options.check ?? ok({
+      id: Number(path.split("/").at(-1)), head_sha: HEAD, name: options.rules ? "Conditional CI" : AGGREGATOR,
+      status: "completed", conclusion: "skipped", check_suite: { id: 100 },
+    });
+    if (path.includes("/attempts/")) return options.jobs ?? ok({ total_count: 1, jobs: [{
+      name: options.rules ? "Conditional CI" : AGGREGATOR, check_run_url: "https://api.github.com/repos/o/r/check-runs/200", run_attempt: 1, status: "completed", conclusion: "skipped",
+    }] });
+    if (path.includes("/actions/runs?")) return options.runs ?? ok(actionRuns());
     if (path.includes("/rules/branches/")) return options.rules ?? ok(RULESET);
     if (path.includes("/branches/")) return options.branch ?? ok({ name: "main", protected: true, protection: { enabled: true } });
     throw new Error(`unexpected gh ${args.join(" ")}`);
@@ -126,6 +149,233 @@ for (const conclusion of ["SUCCESS", "FAILURE"]) {
     assert.deepEqual(time.sleeps, [30_000, 30_000]);
     assert.equal(result.summary.headSha, HEAD);
     assert.equal(result.summary.checks.required[0]!.state, conclusion === "SUCCESS" ? "passed" : "failed");
+  });
+}
+
+test("a current admitted required skip passes behind an outstanding review", async () => {
+  const fake = fakeGh([ok(pr({ reviewDecision: "REVIEW_REQUIRED", ...admission() }, [
+    run("Conditional CI", "SKIPPED", { isRequired: true, ...provenance() }),
+  ]))], { rules: ok([{ type: "pull_request" }, { type: "required_status_checks", parameters: {
+    required_status_checks: [{ context: "Conditional CI" }],
+  } }]), runs: ok(actionRuns()) });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, headSha: HEAD, timeoutMs: 1_000 },
+    { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.equal(result.summary.merged, false);
+  assert.equal(result.summary.mergeStateStatus, "BLOCKED");
+  assert.deepEqual(result.summary.checks.required, [{ name: "Conditional CI", state: "passed", reported: true }]);
+  assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs"))).length, 2);
+});
+
+test("a PR that was never a draft uses creation as its admission boundary", async () => {
+  const fake = fakeGh([ok(pr({ createdAt: READY_AT, timelineItems: { nodes: [] } }, [
+    run(AGGREGATOR, "SKIPPED", provenance()),
+  ]))]);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+});
+
+test("required skip job identity accepts canonical repository casing and redirects", async () => {
+  const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance())]))], {
+    jobs: ok({ total_count: 1, jobs: [{ name: AGGREGATOR, run_attempt: 1,
+      check_run_url: "https://api.github.com/repos/canonical-owner/renamed-repo/check-runs/200",
+      status: "completed", conclusion: "skipped" }] }),
+  });
+  const result = await waitForPullRequest({ repository: "O/R", number: 7, timeoutMs: 1_000 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+});
+
+test("a completed rerun skip must belong to the exact current attempt", async () => {
+  const metadata = provenance();
+  const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", metadata)]))], {
+    runs: ok(actionRuns({ run_attempt: 2 })),
+    jobs: ok({ total_count: 1, jobs: [{ name: AGGREGATOR, run_attempt: 2,
+      check_run_url: "https://api.github.com/repos/o/r/check-runs/200", status: "completed", conclusion: "skipped" }] }),
+  });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.ok(fake.calls.some((args) => args.some((arg) => arg.includes("/attempts/2/jobs"))));
+});
+
+for (const [label, overrides] of [
+  ["missing timeline", { createdAt: READY_AT }],
+  ["missing creation and empty timeline", { timelineItems: { nodes: [] } }],
+  ["malformed ready event", { ...admission(), timelineItems: { nodes: [null] } }],
+  ["currently draft PR", { ...admission(), isDraft: true }],
+] as const) {
+  test(`required skip stays pending with ${label}`, async () => {
+    const fake = fakeGh([ok(pr(overrides, [run(AGGREGATOR, "SKIPPED", provenance())]))]);
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "timeout");
+    assert.equal(fake.calls.some((args) => args.some((arg) => arg.includes("/actions/runs"))), false);
+  });
+}
+
+for (const [label, jobs] of [
+  ["old job absent from current attempt", ok({ total_count: 0, jobs: [] })],
+  ["wrong job attempt", ok({ total_count: 1, jobs: [{ name: AGGREGATOR, run_attempt: 2,
+    check_run_url: "https://api.github.com/repos/o/r/check-runs/200", status: "completed", conclusion: "skipped" }] })],
+  ["incomplete jobs list", ok({ total_count: 101, jobs: [] })],
+  ["unreadable jobs", failed("gh: Forbidden (HTTP 403)")],
+] as const) {
+  test(`a required skip stays pending with ${label}`, async () => {
+    const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance())]))], { jobs });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "timeout");
+  });
+}
+
+test("required skip provenance preserves every required app restriction", async () => {
+  const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance())]))], {
+    rules: ok([{ type: "required_status_checks", parameters: { required_status_checks: [
+      { context: AGGREGATOR, integration_id: 15368 }, { context: AGGREGATOR, integration_id: 99 },
+    ] } }]),
+  });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "timeout");
+  assert.equal(result.summary.checks.required[0]!.reported, false);
+  assert.equal(fake.calls.some((args) => args.some((arg) => arg.includes("/actions/runs"))), false);
+});
+
+test("ordinary check outcomes add no Actions provenance requests", async () => {
+  for (const nodes of [
+    [run(AGGREGATOR, "SUCCESS"), run("Optional", "SKIPPED", provenance())],
+    [run(AGGREGATOR, "FAILURE"), run("Optional", "SKIPPED", provenance())],
+    [run("Optional", "SKIPPED", provenance())],
+    [run(AGGREGATOR, null)],
+  ]) {
+    const fake = fakeGh([ok(pr(admission(), nodes))]);
+    await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 }, { gh: fake.gh, ...clock() });
+    assert.equal(fake.calls.some((args) => args.some((arg) => arg.includes("/actions/runs"))), false);
+  }
+});
+
+for (const conclusion of ["SUCCESS", "FAILURE", "SKIPPED"]) {
+  test(`restricted Actions access preserves ${conclusion} waiter semantics`, async () => {
+    const response = pr(admission(), [run(AGGREGATOR, conclusion, provenance())]);
+    const fake = fakeGh([ok(response)], { runs: failed("gh: Resource not accessible by token (HTTP 403)") });
+    const gh: GhRunner = async (args, signal) => {
+      if (args.some((arg) => arg.startsWith("query=") && arg.includes("workflowRun"))) {
+        return ok({ ...response, errors: [{ type: "FORBIDDEN", message: "Actions read access denied" }] });
+      }
+      return fake.gh(args, signal);
+    };
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 }, { gh, ...clock() });
+    assert.ok(result.ok, "Actions permissions must never make common PR observations fail");
+    assert.equal(result.summary.outcome, conclusion === "SUCCESS" ? "checks_passed" : conclusion === "FAILURE" ? "checks_failed" : "timeout");
+    if (conclusion !== "SKIPPED") {
+      assert.equal(fake.calls.some((args) => args.some((arg) => arg.includes("/actions/"))), false);
+    } else {
+      assert.deepEqual(result.summary.checks.required, [{ name: AGGREGATOR, state: "pending", reported: true }]);
+    }
+  });
+}
+
+test("common query fields never require workflow-run access, including queue and pagination observations", () => {
+  assert.doesNotMatch(PULL_REQUEST_WAIT_QUERY, /workflowRun/u);
+  assert.doesNotMatch(PULL_REQUEST_CONTEXTS_QUERY, /workflowRun/u);
+});
+
+for (const [label, reads] of [
+  ["denied check lookup", { check: failed("gh: Forbidden (HTTP 403)") }],
+  ["failed Actions lookup", { runs: failed("gh: Bad Gateway (HTTP 502)") }],
+  ["partial Actions lookup", { runs: ok({ ...actionRuns(), errors: [{ message: "Actions unavailable" }] }) }],
+  ["partial check lookup", { check: ok({ id: 200, check_suite: { id: 100 } }) }],
+  ["unmatched check suite", { runs: ok(actionRuns({ check_suite_id: 999 })) }],
+] as const) {
+  test(`${label} leaves a required skip pending without failing the wait`, async () => {
+    const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance())]))], reads);
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "timeout");
+    assert.deepEqual(result.summary.checks.required, [{ name: AGGREGATOR, state: "pending", reported: true }]);
+  });
+}
+
+test("a thrown provenance transport failure leaves a skip pending", async () => {
+  const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance())]))]);
+  const gh: GhRunner = (args, signal) => {
+    if (args.some((arg) => arg.includes("/actions/runs?"))) throw new Error("transport unavailable");
+    return fake.gh(args, signal);
+  };
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 }, { gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "timeout");
+});
+
+test("optional skips do not consume the required-skip provenance budget", async () => {
+  const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance()),
+    ...Array.from({ length: 20 }, (_, i) => run(`Optional ${i}`, "SKIPPED", provenance(300 + i))),
+  ]))]);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/check-runs/"))).length, 1);
+});
+
+test("cancelling provenance stops before any further GitHub read", async () => {
+  const controller = new AbortController();
+  const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance())]))]);
+  let afterCancellation = 0;
+  const gh: GhRunner = (args, signal) => {
+    if (controller.signal.aborted) afterCancellation++;
+    if (args.some((arg) => arg.includes("/check-runs/"))) controller.abort();
+    return fake.gh(args, signal);
+  };
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh, signal: controller.signal, ...clock() });
+  assert.equal(result.ok, false);
+  assert.equal(afterCancellation, 0);
+});
+
+for (const [label, metadata, runs] of [
+  ["older draft run", provenance(), actionRuns({ created_at: "2026-10-12T08:00:00Z" })],
+  ["same-second admission", provenance(), actionRuns({ created_at: READY_AT })],
+  ["newer queued run without any check nodes", provenance(), actionRuns({}, [{
+    id: 21, workflow_id: 30, head_sha: HEAD, event: "pull_request", run_attempt: 1,
+    created_at: "2026-10-12T11:00:00Z", status: "queued",
+  }])],
+  ["in-progress current run", provenance(), actionRuns({ status: "in_progress" })],
+  ["newer attempt", provenance(), actionRuns({ run_attempt: 2 })],
+  ["wrong head", provenance(), actionRuns({ head_sha: OTHER_HEAD })],
+  ["ineligible event", provenance(), actionRuns({ event: "workflow_dispatch" })],
+  ["missing run", provenance(), { total_count: 0, workflow_runs: [] }],
+  ["incomplete run list", provenance(), { ...actionRuns(), total_count: 101 }],
+  ["missing provenance", {}, actionRuns()],
+] as const) {
+  test(`a blocked required skip stays pending with ${label}`, async () => {
+    const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", metadata)]))], { runs: ok(runs) });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 },
+      { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "timeout");
+    assert.deepEqual(result.summary.checks.required, [{ name: AGGREGATOR, state: "pending", reported: true }]);
+  });
+}
+
+for (const conclusion of ["SUCCESS", "FAILURE"]) {
+  test(`provenance keeps a draft skip pending until the admitted aggregator reports ${conclusion}`, async () => {
+    const skipped = run(AGGREGATOR, "SKIPPED", { ...provenance(10) });
+    const current = provenance();
+    const fake = fakeGh([
+      ok(pr(admission(), [skipped])),
+      ok(pr(admission(), [skipped, run("Browser", null, { ...current, databaseId: 11 })])),
+      ok(pr(admission(), [skipped, run(AGGREGATOR, conclusion, { ...current, databaseId: 12 })])),
+    ], { runs: ok(actionRuns({ created_at: "2026-10-12T08:00:00Z" }, [{
+      id: 21, workflow_id: 30, head_sha: HEAD, event: "pull_request", run_attempt: 1,
+      created_at: RUN_AT, status: "in_progress",
+    }])) });
+    const time = clock();
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: fake.gh, ...time });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, conclusion === "SUCCESS" ? "checks_passed" : "checks_failed");
+    assert.equal(result.summary.polls, 3);
   });
 }
 

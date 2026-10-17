@@ -22,6 +22,8 @@ export const PULL_REQUEST_WAIT_MAX_INTERVAL_MS = 600_000;
  * own merge state to confirm it. */
 const CONTEXTS_PER_COMMIT = 100;
 const MAX_CONTEXT_PAGES = 10;
+/** At most one run list, ten check lookups, and ten attempt job lists per special-path poll. */
+const MAX_SKIP_PROVENANCE_CHECKS = 10;
 const MAX_LISTED_CHECKS = 30;
 const MAX_FAILED_JOBS = 20;
 const MAX_NAME = 120;
@@ -271,7 +273,8 @@ export const PULL_REQUEST_WAIT_QUERY = `query($owner:String!,$name:String!,$numb
   repository(owner:$owner,name:$name){
     defaultBranchRef{name}
     pullRequest(number:$number){
-      url state isDraft headRefOid baseRefName mergeStateStatus
+      url state isDraft headRefOid baseRefName mergeStateStatus createdAt
+      timelineItems(last:1,itemTypes:[READY_FOR_REVIEW_EVENT]){nodes{... on ReadyForReviewEvent{createdAt}}}
       mergeCommit{oid}
       mergeQueueEntry{position state enqueuedAt headCommit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}
       commits(last:1){nodes{commit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}}
@@ -299,6 +302,16 @@ interface CheckNode {
   appId?: number;
   url?: string;
   isRequired: boolean;
+}
+
+function positiveId(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0;
+}
+
+function timestamp(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
 }
 
 function checkNode(raw: unknown): CheckNode | null {
@@ -350,7 +363,8 @@ function newer(node: CheckNode, previous: CheckNode): boolean {
  * (a status context carries no app here, so it still matches by name). The verdict covers every
  * required check, including any cut from the bounded list; `complete` is false when GitHub had
  * more contexts than one page, so an unseen context could still change it. When the PR's merge
- * state is supplied, skipped requirements stay pending until GitHub confirms requirements are met.
+ * state is supplied, skipped requirements need either GitHub's merge-state confirmation or
+ * independently verified admission/run provenance. Unknown provenance remains pending.
  */
 export function evaluateCommitChecks(
   sha: string,
@@ -358,6 +372,7 @@ export function evaluateCommitChecks(
   requiredNames: readonly string[],
   requiredApps: Readonly<Record<string, readonly number[]>> = {},
   mergeStateStatus?: string | null,
+  admittedSkippedRuns: ReadonlySet<number> = new Set(),
 ): { summary: CommitChecksSummary; requiredState: CheckState | "none"; complete: boolean } {
   const contexts = record(record(rollup)?.contexts);
   const rawNodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
@@ -385,9 +400,10 @@ export function evaluateCommitChecks(
   for (const node of latest.values()) if (node.isRequired && !appsFor(node.name)) required.add(node.name);
   // A draft run can leave a skipped required job on the same head while a newly admitted
   // ready_for_review run has not created its aggregator yet. With a PR observation, a skip
-  // needs GitHub's confirmation; real successes and optional skips keep their normal semantics.
+  // needs confirmation or current admitted-run provenance; genuine successes and optional skips pass.
   const requiredNodeState = (node: CheckNode | undefined): CheckState | undefined =>
-    node?.conclusion === "SKIPPED" && mergeStateStatus !== undefined && !REQUIREMENTS_MET.has(mergeStateStatus ?? "")
+    node?.conclusion === "SKIPPED" && mergeStateStatus !== undefined && !REQUIREMENTS_MET.has(mergeStateStatus ?? "") &&
+      !(node.id !== undefined && admittedSkippedRuns.has(node.id))
       ? "pending" : node?.state;
   const requiredList: RequiredCheckSummary[] = [...required].sort().map((name) => {
     const named = [...latest.values()].filter((node) => node.name === name);
@@ -440,8 +456,9 @@ export function summarizeCommitChecks(
   requiredNames: readonly string[],
   requiredApps: Readonly<Record<string, readonly number[]>> = {},
   mergeStateStatus?: string | null,
+  admittedSkippedRuns?: ReadonlySet<number>,
 ): CommitChecksSummary {
-  return evaluateCommitChecks(sha, rollup, requiredNames, requiredApps, mergeStateStatus).summary;
+  return evaluateCommitChecks(sha, rollup, requiredNames, requiredApps, mergeStateStatus, admittedSkippedRuns).summary;
 }
 
 interface Observation {
@@ -457,6 +474,9 @@ interface Observation {
   rollup: unknown;
   /** The commit `rollup` belongs to. */
   rollupSha: string | null;
+  /** Latest ready event, or creation for a PR with a known empty ready-event timeline. */
+  admittedAfter: number | null;
+  admittedSkippedRuns?: ReadonlySet<number>;
 }
 
 function observation(data: unknown): Observation | null {
@@ -471,6 +491,9 @@ function observation(data: unknown): Observation | null {
   const entryHead = record(entry?.headCommit);
   const defaultBranch = record(repository?.defaultBranchRef)?.name;
   const mergeCommit = record(pr.mergeCommit)?.oid;
+  const readyEvents = record(pr.timelineItems)?.nodes;
+  const admittedAfter = Array.isArray(readyEvents)
+    ? timestamp(readyEvents.length === 0 ? pr.createdAt : record(readyEvents[0])?.createdAt) : null;
   return {
     url: clip(pr.url, MAX_URL),
     state,
@@ -491,7 +514,89 @@ function observation(data: unknown): Observation | null {
       : null,
     rollup: commit?.statusCheckRollup ?? null,
     rollupSha: typeof commit?.oid === "string" && SHA.test(commit.oid) ? commit.oid : null,
+    admittedAfter,
   };
+}
+
+/** Optional provenance must never turn an otherwise usable PR observation into an error. */
+async function provenanceRead(gh: GhRunner, path: string): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await gh(["api", "--hostname", "github.com", path]);
+    const body = response.code === null && !response.timedOut ? record(parseJson(response.stdout)) : null;
+    return body && (body.errors === undefined || (Array.isArray(body.errors) && body.errors.length === 0)) ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Only conditional skips with complete, current Actions provenance can pass independently of
+ * aggregate merge state. A bounded REST read sees newer runs before they create any jobs, and
+ * per-attempt job reads bind each skipped check to that attempt rather than a suite's latest one.
+ * A denied read, truncated list, missing timeline, or same-second admission cannot prove freshness.
+ */
+async function admittedSkippedRuns(
+  gh: GhRunner, repository: string, seen: Observation, required: RequiredChecks,
+): Promise<ReadonlySet<number>> {
+  const admitted = new Set<number>();
+  if (seen.isDraft || seen.queue || seen.mergeStateStatus !== "BLOCKED" || seen.admittedAfter === null ||
+      seen.rollupSha !== seen.headSha) return admitted;
+  const contexts = record(record(seen.rollup)?.contexts);
+  const nodes = (Array.isArray(contexts?.nodes) ? contexts.nodes : []).map(checkNode);
+  const latest = new Map<string, CheckNode>();
+  for (const node of nodes) {
+    if (!node || node.kind !== "CheckRun" || (!required.names.includes(node.name) && !node.isRequired)) continue;
+    const apps = Object.hasOwn(required.apps, node.name) ? required.apps[node.name] : undefined;
+    if (apps && (node.appId === undefined || !apps.includes(node.appId))) continue;
+    const key = `${apps ? node.appId : ""}\0${node.name}`;
+    const previous = latest.get(key);
+    if (!previous || newer(node, previous)) latest.set(key, node);
+  }
+  const candidates = [...latest.values()].filter((node) => node.conclusion === "SKIPPED" && positiveId(node.id));
+  if (candidates.length === 0 || candidates.length > MAX_SKIP_PROVENANCE_CHECKS) return admitted;
+  const possible = new Set(candidates.map((check) => check.id!));
+  const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus, possible);
+  if (!checks.complete || checks.requiredState !== "passed") return admitted;
+  // The common success/failure/missing-check/optional-skip paths never need this extra request.
+  const body = await provenanceRead(gh, `repos/${repository}/actions/runs?head_sha=${seen.headSha}&per_page=100`);
+  const runs = body?.workflow_runs;
+  if (!Array.isArray(runs) || body?.total_count !== runs.length || runs.length > 100) return admitted;
+  const records = runs.map(record);
+  if (records.some((run) => !run || !positiveId(run.id) || !positiveId(run.workflow_id) || !positiveId(run.check_suite_id) ||
+      !positiveId(run.run_attempt) || run.head_sha !== seen.headSha || timestamp(run.created_at) === null ||
+      typeof run.event !== "string" || typeof run.status !== "string")) return admitted;
+  const eligibleEvents = new Set(["push", "pull_request", "pull_request_target", "pull_request_review", "deployment", "deployment_status"]);
+  const attempts = new Map<string, unknown[]>();
+  for (const check of candidates) {
+    const detail = await provenanceRead(gh, `repos/${repository}/check-runs/${check.id}`);
+    const suiteId = record(detail?.check_suite)?.id;
+    if (detail?.id !== check.id || detail?.head_sha !== seen.headSha || detail?.name !== check.name ||
+        detail?.status !== "completed" || detail?.conclusion !== "skipped" || !positiveId(suiteId)) continue;
+    const matching = records.filter((run) => run!.check_suite_id === suiteId);
+    const current = matching.length === 1 ? matching[0] : null;
+    if (!current || !eligibleEvents.has(current.event as string) || current.status !== "completed" ||
+        timestamp(current.created_at)! <= seen.admittedAfter) continue;
+    if (records.some((run) => run!.workflow_id === current.workflow_id && run!.id !== current.id &&
+        ((run!.id as number) > (current.id as number) || timestamp(run!.created_at)! >= timestamp(current.created_at)!))) continue;
+    const key = `${current.id}:${current.run_attempt}`;
+    if (!attempts.has(key)) {
+      // Bound total extra reads even when many required workflows report skips.
+      if (attempts.size >= MAX_SKIP_PROVENANCE_CHECKS) return new Set();
+      const jobsBody = await provenanceRead(gh,
+        `repos/${repository}/actions/runs/${current.id}/attempts/${current.run_attempt}/jobs?per_page=100`);
+      const jobs = jobsBody?.jobs;
+      attempts.set(key, Array.isArray(jobs) && jobsBody?.total_count === jobs.length && jobs.length <= 100 ? jobs : []);
+    }
+    // This job list already came from the requested repository/run/attempt. Check ids are global;
+    // canonical owner/name casing or a repository redirect must not invalidate that identity.
+    const exactJob = attempts.get(key)!.map(record).find((job) => {
+      const match = typeof job?.check_run_url === "string"
+        ? /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/check-runs\/(\d+)$/u.exec(job.check_run_url) : null;
+      return Number(match?.[1]) === check.id;
+    });
+    if (exactJob && exactJob.run_attempt === current.run_attempt && exactJob.status === "completed" &&
+        exactJob.conclusion === "skipped" && exactJob.name === check.name) admitted.add(check.id!);
+  }
+  return admitted;
 }
 
 type Read<T> = { ok: true; value: T } | { ok: false; retryable: boolean; error: string };
@@ -576,7 +681,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     defaultBranch: seen.defaultBranch,
     mergeStateStatus: seen.mergeStateStatus,
     requiredCheckNames: required ? required.names.slice(0, MAX_LISTED_CHECKS).map((name) => clip(name, MAX_NAME)) : null,
-    checks: summarizeCommitChecks(seen.headSha, seen.rollup, required?.names ?? [], required?.apps, seen.mergeStateStatus),
+    checks: summarizeCommitChecks(seen.headSha, seen.rollup, required?.names ?? [], required?.apps, seen.mergeStateStatus, seen.admittedSkippedRuns),
     mergeQueue: seen.queue
       ? {
           state: seen.queue.state,
@@ -603,7 +708,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   const stopAt = deadline + (deps.readGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS);
   const gh: GhRunner = async (args) => {
     const budget = stopAt - now();
-    if (budget <= 0) return BUDGET_SPENT;
+    if (deps.signal?.aborted || budget <= 0) return BUDGET_SPENT;
     const read = new AbortController();
     const cancel = () => read.abort();
     deps.signal?.addEventListener("abort", cancel, { once: true });
@@ -717,7 +822,13 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       if (!await pause(EJECTION_CONFIRM_MS - missingFor)) return { ok: false, error: "request cancelled" };
       continue;
     } else {
-      const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus);
+      const initial = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus);
+      if (initial.requiredState === "pending" && initial.complete &&
+          !(input.returnOnAnyFailure && initial.summary.failedJobs.length > 0)) {
+        seen.admittedSkippedRuns = await admittedSkippedRuns(gh, repository, seen, required);
+        if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
+      }
+      const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus, seen.admittedSkippedRuns);
       if (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0)) {
         return { ok: true, summary: summarize("checks_failed", seen) };
       }
