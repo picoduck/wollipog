@@ -784,6 +784,11 @@ interface ActiveSession {
   usageWindowRejection?: UsageWindowRejection;
   /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
   seatbeltWritableRoots?: readonly string[];
+  /** The session's other managed worktrees this live process's bwrap boundary binds (#3316). The
+   * driver renders the same bind list for every later spawn — a persistent transport restart or a
+   * resume probe — so once one of them is retired the provider is relaunched before its next turn
+   * instead of failing on a bind source that no longer exists. */
+  boundOwnedWorktrees?: readonly string[];
 }
 
 interface ProviderRetirement {
@@ -8535,6 +8540,10 @@ export class SessionManager {
       }
     }
     const pendingProviderAccountSwitch = this.pendingProviderAccount(meta);
+    const boundOwnedWorktrees = isolation?.backend === "bwrap" && isolation.protectedWorktree
+      ? this.managedWorktreeProtections(meta).map((protection) => protection.worktreePath)
+        .filter((path) => path !== cwd && !!isolation.writableBinds?.some((bind) => bind.target === path))
+      : [];
     const entry: ActiveSession = {
       orchestratorLaunchPolicy: meta.orchestrator,
       projectMemoryKey: effectiveProjectMemoryKey(meta),
@@ -8547,6 +8556,7 @@ export class SessionManager {
       worktreeLeaseOwner,
       context: meta.context,
       ...(isolation?.backend === "seatbelt" ? { seatbeltWritableRoots: [...isolation.writableRoots] } : {}),
+      ...(boundOwnedWorktrees.length ? { boundOwnedWorktrees } : {}),
       status: "starting",
       providerReady: false,
       providerLaunchPending: true,
@@ -11648,6 +11658,42 @@ export class SessionManager {
     }
   }
 
+  /** Whether a worktree this live provider's sandbox binds has since been retired: it is no longer
+   * one of the session's managed worktrees, or its `.git` link — a bind source — is gone. */
+  private boundWorktreeRetired(sessionId: string, entry: ActiveSession): boolean {
+    if (!entry.boundOwnedWorktrees?.length) return false;
+    const meta = this.store.readMeta(sessionId);
+    if (!meta) return false;
+    const owned = this.managedWorktreeProtections(meta);
+    return entry.boundOwnedWorktrees.some((path) => {
+      if (!owned.some((protection) => sameWorktreePath(meta.context, protection.worktreePath, path))) return true;
+      try {
+        return !lstatSync(join(path, ".git")).isFile();
+      } catch {
+        return true;
+      }
+    });
+  }
+
+  /** Resume the same conversation in a fresh provider process, whose launch derives its bind list
+   * from the worktrees that still exist, so the queued turn runs in the selected worktree. */
+  private async rebindRetiredWorktrees(sessionId: string, entry: ActiveSession): Promise<void> {
+    const result = await this.replaceProviderProcess(sessionId, entry, {
+      replacementMeta: () => this.store.readMeta(sessionId) ?? undefined,
+      queueFailureReason: () => "provider could not resume after one of its worktrees was retired",
+    });
+    if (result.status === "launched") {
+      if (!result.queuedWork) this.emitStatus(sessionId, "idle");
+      if (result.entry.pendingProviderAccountSwitch) setImmediate(() => this.scheduleDrain(sessionId));
+    } else if (result.status !== "stopped" && result.status !== "superseded") {
+      this.log(JSON.stringify({ event: "retired_worktree_rebind_failed", sessionId, reason: result.status }));
+      this.rejectQueued(entry.queue.splice(0), "Could not relaunch the provider after one of its worktrees was retired. Restart this session to retry.");
+      this.emitQueue(sessionId);
+      this.emitEvent(sessionId, { kind: "error", message: "Could not relaunch the provider after one of its worktrees was retired. Restart this session to retry." });
+      this.emitStatus(sessionId, "failed");
+    }
+  }
+
   /** Persist turn configuration without presenting a model resolved under an older alias. The
    * effective context window was observed for the previous model, so a model or context-window
    * change drops it until the next turn reports what the provider actually serves. */
@@ -11714,6 +11760,14 @@ export class SessionManager {
     // Schedulers may race with cancellation or interruption and leave an empty generation. Do not
     // claim—or queue for—an active-work permit when there is no provider work to dispatch.
     if (entry.queue.length === 0) return;
+    // Only queued work needs a fresh process: an idle one never respawns under its stale binds.
+    if (this.boundWorktreeRetired(sessionId, entry)) {
+      if (this.providerAccountSwitchCanProceed(sessionId, entry)) {
+        await this.rebindRetiredWorktrees(sessionId, entry);
+        return;
+      }
+      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) return;
+    }
     if (!this.promotePromptPastRejectionHold(sessionId, entry)) {
       // Admission may have reported the held automatic turn as running; restore the blocker.
       this.emitStatus(sessionId, "input_required",
@@ -11828,7 +11882,8 @@ export class SessionManager {
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
         }
-        if (entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind || this.projectMemoryChanged(sessionId, entry)) break;
+        if (entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind || this.projectMemoryChanged(sessionId, entry) ||
+            this.boundWorktreeRetired(sessionId, entry)) break;
         if (entry.authenticationBlocked || entry.historyQuarantined) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
@@ -12893,7 +12948,9 @@ export class SessionManager {
 
   private resumeDeferredHandoff(sessionId: string): void {
     const entry = this.active.get(sessionId);
-    if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch || entry && this.projectMemoryChanged(sessionId, entry)) && !entry.running) {
+    if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch ||
+        entry && (this.projectMemoryChanged(sessionId, entry) || entry.queue.length && this.boundWorktreeRetired(sessionId, entry))) &&
+        !entry.running) {
       setImmediate(() => this.scheduleDrain(sessionId));
     }
   }

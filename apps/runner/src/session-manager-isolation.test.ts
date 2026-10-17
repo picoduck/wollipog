@@ -1600,3 +1600,76 @@ test("a managed launch binds only this session's other worktrees (#3316)", async
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("a session whose first worktree is retired while it works in a second relaunches there", async () => {
+  if (process.platform !== "linux") return;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-retired-worktree-")));
+  const home = mkdtempSync(join(tmpdir(), "wollipog-managed-retired-home-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repoPath, worktreePath: first } = hostWorktree(root, "s1");
+    const second = join(root, "second");
+    execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "stacked", second]);
+    const stacked = { id: "stacked", path: second, branch: "stacked", source: "created" as const };
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta(), repoPath, worktreePath: second, worktreeBranch: "stacked", env: { HOME: home },
+      worktrees: [{ id: "legacy", path: first, branch: "agent/s1", source: "legacy" }, stacked],
+    });
+    const observed: Array<Parameters<typeof resolveExecutionIsolation>[3]> = [];
+    const drivers: Array<{ prompts: number; disposed: boolean }> = [];
+    const factory = () => {
+      const driver = { prompts: 0, disposed: false };
+      drivers.push(driver);
+      return {
+        pid: drivers.length, initialize: async () => {}, newSession: async () => "provider-1",
+        prompt: async () => { driver.prompts += 1; return "end_turn" as const; },
+        cancel: () => {}, dispose: () => { driver.disposed = true; },
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+      };
+    };
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) => {
+        observed.push(state);
+        return resolveExecutionIsolation(policy, context, {
+          platform: "linux", uid: () => 1000, nativeEnvironment: () => ({ HOME: home }),
+          resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+        }, state);
+      },
+      async () => {}, async () => {}, async () => {},
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.verifySelectedWorktreeBeforeLaunch = async () => true;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    assert.deepEqual(observed.at(-1)?.protectedWorktree?.ownedWorktrees?.map((owned) => owned.path), [first]);
+    assert.deepEqual(internals.active.get("s1").boundOwnedWorktrees, [first]);
+
+    // The deferred retirement completes while this provider still lives: the tree is removed and
+    // its row forgotten, exactly as forgetRemovedWorktree leaves them.
+    execFileSync("git", ["-C", repoPath, "worktree", "remove", "--force", first]);
+    store.patchMeta("s1", { worktrees: [stacked] });
+    const launches = observed.length;
+    manager.prompt("s1", "continue");
+    const deadline = Date.now() + 10_000;
+    while (!drivers[1]?.prompts && Date.now() < deadline) await new Promise((done) => setTimeout(done, 20));
+
+    assert.equal(drivers.length, 2, "the provider was relaunched before the queued turn");
+    assert.equal(drivers[0]!.prompts, 0, "the stale process never ran the turn");
+    assert.ok(drivers[0]!.disposed);
+    assert.equal(drivers[1]!.prompts, 1);
+    assert.equal(observed.length, launches + 1);
+    const relaunched = observed.at(-1);
+    assert.equal(relaunched?.cwd, second, "the relaunch resumes in the selected worktree");
+    assert.equal(relaunched?.protectedWorktree?.ownedWorktrees, undefined);
+    assert.equal(JSON.stringify(relaunched).includes(first), false, "the retired worktree is in no bind list");
+    assert.equal(internals.active.get("s1").boundOwnedWorktrees, undefined);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
