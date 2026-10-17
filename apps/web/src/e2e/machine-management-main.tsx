@@ -8,7 +8,7 @@ import {
   type RunnerView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { RunnersView } from "../components/RunnersView.js";
@@ -123,6 +123,14 @@ let runner: RunnerView | null = {
     }],
   },
 };
+// Provider profiles (#3239): one account in each access state, and Codex Solo left a legacy HOME.
+if (new URLSearchParams(window.location.search).has("profiles") && runner.providerAccounts) {
+  const access = { "claude-work": "granted", "claude-personal": "pending", "codex-team": "not_granted" } as const;
+  for (const account of runner.providerAccounts) {
+    const state = access[account.id as keyof typeof access];
+    if (state) account.profile = { id: `profile-${account.id}`, access: state };
+  }
+}
 let socket: FixtureSocket | null = null;
 let box: BoxView | null = null;
 let lastRegisteredWorkspace: { name: string; path: string } | null = null;
@@ -399,6 +407,31 @@ const client = {
     runner.providerAccounts = runner.providerAccounts?.filter((account) => account.id !== accountId);
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { removed: true as const, credentialsRetained: false };
+  },
+  // Provider profiles (#3239), with `?profiles`: adoption succeeds, and the first revocation of an
+  // account with sessions is refused so the force confirmation can be exercised.
+  adoptProviderProfile: async (_runnerId: string, accountId: string) => {
+    const account = runner?.providerAccounts?.find((candidate) => candidate.id === accountId);
+    if (!runner || !account) throw new Error("runner not found");
+    account.profile = { id: account.profile?.id ?? `profile-${accountId}`, access: "granted" };
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { status: "active" as const, profileId: account.profile.id, grantId: `grant-${accountId}` };
+  },
+  revokeProviderProfileAccess: async (_runnerId: string, accountId: string, force = false) => {
+    const account = runner?.providerAccounts?.find((candidate) => candidate.id === accountId);
+    if (!runner || !account) throw new Error("runner not found");
+    if (!force && accountId === "claude-work") {
+      throw new ApiError("this provider profile has 3 active sessions", 409, "PROVIDER_PROFILE_HAS_ACTIVE_SESSIONS", {
+        activeSessions: [
+          { id: "s1", title: "Fix the half-cent rounding bug", status: "running" },
+          { id: "s2", title: "Draft the release notes", status: "idle" },
+        ],
+        activeSessionCount: 3,
+      });
+    }
+    delete account.profile;
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { revoked: true as const, grantIds: [`grant-${accountId}`], markerUpdated: true, runnerNotified: true, forced: force };
   },
   removeRunner: async () => {
     if (!runner) throw new Error("runner not found");

@@ -195,9 +195,9 @@ import {
   usageWindowRejection,
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
-import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference, type ProviderProfileAccessSource } from "./provider-home-lease-async.js";
+import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type LeaseProfileBinding, type ProviderHomeReference, type ProviderProfileAccessSource } from "./provider-home-lease-async.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
-import type { ProviderHomeLeaseRequest } from "./provider-home-lease.js";
+import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -317,6 +317,19 @@ export interface LaunchProviderHome extends ProviderProcessObserver {
   markUnprovable(): void;
 }
 
+/** Provider profiles (#3239): the profile id a session's account binding recorded is the expected id
+ * of every acquisition of that binding's credential HOME, ahead of the id the configured account
+ * now records for the path, so a HOME substituted under a renamed or re-pointed account is refused
+ * for the session. A binding without a recorded id, or another HOME, adds nothing. */
+export function sessionProviderProfileBinding(
+  session: Pick<SessionMeta, "providerProfileId" | "providerCredentialHome">,
+  home: string,
+): LeaseProfileBinding {
+  return session.providerProfileId && session.providerCredentialHome === home
+    ? { expectedProfileId: session.providerProfileId }
+    : {};
+}
+
 /** The second argument of `prepareLaunch`: lease cancellation plus the caller's launch reference. */
 export interface LaunchPreparationCancellation extends LeaseCancellation {
   providerHome?: LaunchProviderHome;
@@ -363,6 +376,8 @@ export type ProviderAccountResolver = (spec: SessionLaunchSpec) => {
   label: string;
   provider: "claude" | "codex";
   credentialHome: string;
+  /** The configured account's provider profile id (#3239), recorded by a new binding. */
+  profileId?: string;
 } | undefined;
 export type PromptImageResolver = (sessionId: string, references: PromptImageReference[]) => Promise<PromptImage[]>;
 export type SafeWslLaunchAuthorizer = (meta: Pick<SessionMeta,
@@ -4441,7 +4456,7 @@ export class SessionManager {
       context: meta.context,
       env: meta.env,
     }, { isCurrent: () => !this.shuttingDown && this.sessionCanOpen(meta.sessionId) &&
-      this.agentTuiLaunchEpoch(meta.sessionId) === epoch });
+      this.agentTuiLaunchEpoch(meta.sessionId) === epoch }, meta);
     if (this.shuttingDown || !this.sessionCanOpen(meta.sessionId) || this.agentTuiLaunchEpoch(meta.sessionId) !== epoch) {
       // No TUI process exists yet, so the reference this launch just took is safe to drop.
       if (reference) await this.releaseProviderHomeReference(reference);
@@ -4480,9 +4495,12 @@ export class SessionManager {
   async acquireLaunchProviderHome(
     home: string,
     cancellation: LaunchPreparationCancellation = {},
+    /** The session whose launch this prepares: its recorded profile id is expected of `home`. */
+    session?: Pick<SessionMeta, "providerProfileId" | "providerCredentialHome">,
   ): Promise<LaunchProviderHome | null> {
     const { providerHome, ...lease } = cancellation;
-    const reference = await this.acquireSkillReconciliationProviderHome(home, lease);
+    const reference = await this.acquireSkillReconciliationProviderHome(home, lease,
+      session ? sessionProviderProfileBinding(session, home) : {});
     if (!reference) return null;
     if (providerHome instanceof LaunchProviderHomeScope && providerHome.adopt(reference)) return providerHome;
     await this.retainProviderHomeReference(reference);
@@ -4506,11 +4524,12 @@ export class SessionManager {
   async acquireSkillReconciliationProviderHome(
     home: string,
     cancellation: LeaseCancellation = {},
+    profile: LeaseProfileBinding = {},
   ): Promise<ProviderHomeReference | null> {
     const isCurrent = () => !this.shuttingDown && !cancellation.signal?.aborted &&
       (cancellation.isCurrent?.() ?? true);
     if (!this.providerHomeLeases) return null;
-    const reference = await this.providerHomeLeases.acquireHomeReference(home, "skills", { ...cancellation, isCurrent });
+    const reference = await this.providerHomeLeases.acquireHomeReference(home, "skills", { ...cancellation, isCurrent }, profile);
     if (!isCurrent()) {
       // Cancelled after the worker granted the reference: drop it rather than leak it for the
       // rest of the runner's life.
@@ -4572,13 +4591,19 @@ export class SessionManager {
   private async acquireDriverProviderHome(
     request: ProviderHomeLeaseRequest,
     cancellation: LeaseCancellation,
+    /** The session whose provider this is: its recorded profile id is expected of the HOME. */
+    session?: Pick<SessionMeta, "providerProfileId" | "providerCredentialHome">,
   ): Promise<ProviderHomeReference | null> {
     if (!this.providerHomeLeases) return null;
+    // An unaddressable request (WSL) needs no binding: the registry refuses it with its own error.
+    let target: ReturnType<typeof providerHomeLeaseTarget> = null;
+    try { target = providerHomeLeaseTarget(request); } catch { /* refused below */ }
+    const profile = session && target ? sessionProviderProfileBinding(session, target.home) : {};
     if (this.driverProviderHomes.size + this.agentTuiProviderHomeHandles >= DRIVER_PROVIDER_HOME_HANDLE_BUDGET) {
-      await this.providerHomeLeases.acquire(request, cancellation);
+      await this.providerHomeLeases.acquire(request, cancellation, profile);
       return null;
     }
-    return this.providerHomeLeases.acquireReference(request, cancellation);
+    return this.providerHomeLeases.acquireReference(request, cancellation, profile);
   }
 
   /** Dispose one driver instance outside runner shutdown and settle its provider-HOME reference. */
@@ -6130,12 +6155,15 @@ export class SessionManager {
       providerAccountLabel: providerAccount?.label,
       providerAccountProvider: providerAccount?.provider,
       providerCredentialHome: providerAccount?.credentialHome,
+      // Recorded only for a binding made after the account was adopted (#3239).
+      providerProfileId: providerAccount?.profileId,
       providerConversationHome: priorResumeId ? prior?.providerConversationHome : undefined,
       providerUnstartedThreadId: priorResumeId ? prior?.providerUnstartedThreadId : undefined,
       pendingProviderAccountId: prior?.pendingProviderAccountId,
       pendingProviderAccountLabel: prior?.pendingProviderAccountLabel,
       pendingProviderAccountProvider: prior?.pendingProviderAccountProvider,
       pendingProviderCredentialHome: prior?.pendingProviderCredentialHome,
+      pendingProviderProfileId: prior?.pendingProviderProfileId,
       providerAccountSwitchFailure: prior?.providerAccountSwitchFailure,
       agentVersion: spec.agentVersion ?? prior?.agentVersion,
       capabilities: spec.capabilities ?? prior?.capabilities,
@@ -8180,7 +8208,7 @@ export class SessionManager {
         context: meta.context,
         env: meta.env,
         isolation,
-      }, { isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration) });
+      }, { isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration) }, meta);
       if (!this.launchIsCurrent(sessionId, launchGeneration)) throw new Error("session launch changed during provider-home acquisition");
       // The driver's reference now holds the HOME (or the launch needs no shared one), so the
       // preparation's reference covered only finished work: settle it on that work's proofs.
@@ -11881,6 +11909,7 @@ export class SessionManager {
       label: meta.pendingProviderAccountLabel,
       provider: meta.pendingProviderAccountProvider,
       credentialHome: meta.pendingProviderCredentialHome,
+      ...(meta.pendingProviderProfileId !== undefined ? { profileId: meta.pendingProviderProfileId } : {}),
     };
   }
 
@@ -11899,11 +11928,14 @@ export class SessionManager {
       providerAccountLabel: target.label,
       providerAccountProvider: target.provider,
       providerCredentialHome: target.credentialHome,
+      // A handoff is a new binding: it records the target's profile id, or none (#3239).
+      providerProfileId: target.profileId,
       providerConversationHome: meta.providerConversationHome ?? meta.providerCredentialHome,
       pendingProviderAccountId: followUp?.id,
       pendingProviderAccountLabel: followUp?.label,
       pendingProviderAccountProvider: followUp?.provider,
       pendingProviderCredentialHome: followUp?.credentialHome,
+      pendingProviderProfileId: followUp?.profileId,
       pendingProviderAccountSwitchAutomatic: followUp
         ? meta.pendingProviderAccountSwitchAutomatic
         : undefined,
@@ -11935,6 +11967,7 @@ export class SessionManager {
         pendingProviderAccountLabel: undefined,
         pendingProviderAccountProvider: undefined,
         pendingProviderCredentialHome: undefined,
+        pendingProviderProfileId: undefined,
         pendingProviderAccountSwitchAutomatic: undefined,
       });
       if (stopped) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(stopped) });
@@ -11957,6 +11990,7 @@ export class SessionManager {
       pendingProviderAccountLabel: undefined,
       pendingProviderAccountProvider: undefined,
       pendingProviderCredentialHome: undefined,
+      pendingProviderProfileId: undefined,
       pendingProviderAccountSwitchAutomatic: undefined,
       providerAccountSwitchFailure: failure,
       status: "input_required",
@@ -12006,6 +12040,7 @@ export class SessionManager {
       pendingProviderAccountLabel: target.label,
       pendingProviderAccountProvider: target.provider,
       pendingProviderCredentialHome: target.credentialHome,
+      pendingProviderProfileId: target.profileId,
       pendingProviderAccountSwitchAutomatic: false,
       providerAccountSwitchFailure: undefined,
     });
@@ -12232,6 +12267,7 @@ export class SessionManager {
       probe.providerAccountLabel = account.label;
       probe.providerAccountProvider = account.provider;
       probe.providerCredentialHome = account.credentialHome;
+      probe.providerProfileId = account.profileId;
     }
     await this.prepareLaunch?.(probe, { isCurrent, providerHome });
     if (!isCurrent()) throw new Error("authentication preparation was cancelled");
@@ -12454,11 +12490,13 @@ export class SessionManager {
         providerAccountLabel: target.label,
         providerAccountProvider: target.provider,
         providerCredentialHome: target.credentialHome,
+        providerProfileId: target.profileId,
         providerConversationHome: current.providerConversationHome ?? current.providerCredentialHome,
         pendingProviderAccountId: undefined,
         pendingProviderAccountLabel: undefined,
         pendingProviderAccountProvider: undefined,
         pendingProviderCredentialHome: undefined,
+        pendingProviderProfileId: undefined,
         pendingProviderAccountSwitchAutomatic: undefined,
         providerAccountAutomaticallySelected: false,
         providerAccountSwitchFailure: undefined,
@@ -12545,6 +12583,7 @@ export class SessionManager {
       pendingProviderAccountLabel: target.label,
       pendingProviderAccountProvider: target.provider,
       pendingProviderCredentialHome: target.credentialHome,
+      pendingProviderProfileId: target.profileId,
       pendingProviderAccountSwitchAutomatic: true,
       providerAccountSwitchFailure: undefined,
       automaticProviderAccountCooldowns: { ...cooldowns, [meta.providerAccountId]: currentCooldown },
@@ -14411,7 +14450,7 @@ export class SessionManager {
           context: source.context,
           env: source.env,
           isolation,
-        }, { isCurrent: forkIsCurrent });
+        }, { isCurrent: forkIsCurrent }, source);
         if (!forkIsCurrent()) {
           const unused = forkHome;
           forkHome = null;
@@ -14549,7 +14588,7 @@ export class SessionManager {
           context: source.context,
           env: source.env,
           isolation: forkIsolation,
-        }, { isCurrent: forkIsCurrent });
+        }, { isCurrent: forkIsCurrent }, source);
         if (!forkIsCurrent()) {
           const unused = forkHome;
           forkHome = null;
@@ -14600,7 +14639,7 @@ export class SessionManager {
           context: source.context,
           env: source.env,
           isolation: forkIsolation,
-        }, { isCurrent: forkIsCurrent });
+        }, { isCurrent: forkIsCurrent }, source);
         if (!forkIsCurrent()) throw new Error("source session changed during provider-home acquisition");
       }
       if (!client?.forkSession) throw new Error("this driver build does not support provider forks");
@@ -14693,6 +14732,7 @@ export class SessionManager {
         pendingProviderAccountLabel: undefined,
         pendingProviderAccountProvider: undefined,
         pendingProviderCredentialHome: undefined,
+        pendingProviderProfileId: undefined,
         providerAccountSwitchFailure: undefined,
         // The fork's history stops at the checkpoint, so the source's quarantine is not inherited.
         // Its provenance is, so a fork poisoned again escalates to a fresh thread.

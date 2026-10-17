@@ -706,6 +706,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_account_label TEXT,
   provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1)),
   provider_account_switch_failure TEXT,
+  provider_profile_id TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
   semantic_title INTEGER NOT NULL DEFAULT 0,
@@ -3050,6 +3051,7 @@ interface SessionRow {
   provider_account_label: string | null;
   provider_account_automatically_selected: number;
   provider_account_switch_failure: string | null;
+  provider_profile_id: string | null;
   title: string;
   title_source: string | null;
   semantic_title: number;
@@ -3262,6 +3264,8 @@ export interface ProviderProfileGrantRecord {
  * profile and one pending grant per runner account, so 32 + 32 for a runner's 32 accounts. A larger
  * result omits the list rather than truncating it (#3239). */
 export const PROVIDER_PROFILE_REGISTRATION_GRANT_LIMIT = 64;
+/** A provider profile id is a random v4 UUID (#3239). */
+const PROVIDER_PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 interface ProviderProfileGrantRow {
   grant_id: string; profile_id: string | null; control_plane_instance_id: string;
@@ -6830,6 +6834,8 @@ export class ControlPlaneDb {
       "provider_account_label TEXT",
       "provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1))",
       "provider_account_switch_failure TEXT",
+      // Provider profiles (#3239): the profile the session's account binding recorded.
+      "provider_profile_id TEXT",
     ]) {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
@@ -11467,7 +11473,7 @@ export class ControlPlaneDb {
     const authorization = principal ? this.sessionAuthorizationSql(principal) : { sql: "1", params: [] };
     const userId = principal?.kind === "human" ? principal.userId : null;
     const columns = `id runner_id workspace_id project_id project_location_id agent_id
-      provider_account_id provider_account_label provider_account_automatically_selected
+      provider_account_id provider_account_label provider_account_automatically_selected provider_profile_id
       title title_source provider_updated_at background_work_state background_work_tracking
       history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
       use_worktree worktree_path archived preview pending_approval parent_control
@@ -12744,6 +12750,15 @@ export class ControlPlaneDb {
   }
 
   /* ------------------------ Provider profile grants ----------------------- */
+
+  /** A runner snapshot's `providerProfileId` (#3239) is three-valued: undefined carries no
+   * information (an older runner, or a pre-negotiation registration snapshot) and keeps the stored
+   * value; null clears it; a well-formed id records it. Anything else is ignored. */
+  private writeSessionProviderProfileId(sessionId: string, value: string | null | undefined): void {
+    if (value === undefined) return;
+    if (value !== null && (typeof value !== "string" || !PROVIDER_PROFILE_ID.test(value))) return;
+    this.stmt("UPDATE sessions SET provider_profile_id=? WHERE id=?").run(value, sessionId);
+  }
 
   private providerProfileGrantRecord(row: ProviderProfileGrantRow): ProviderProfileGrantRecord {
     return {
@@ -15575,6 +15590,7 @@ export class ControlPlaneDb {
             ? JSON.stringify(snap.providerAccountSwitchFailure)
             : null, snap.id);
       }
+      this.writeSessionProviderProfileId(snap.id, snap.providerProfileId);
       if (snap.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(snap.executionTarget), snap.id);
@@ -15884,6 +15900,7 @@ export class ControlPlaneDb {
         .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId,
           snap.providerAccountAutomaticallySelected ? 1 : 0, id);
     }
+    this.writeSessionProviderProfileId(id, snap.providerProfileId);
     if (snap.providerAccountSwitchFailure !== undefined) {
       this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
         .run(snap.providerAccountSwitchFailure
@@ -23612,6 +23629,7 @@ export class ControlPlaneDb {
       audience: row.summary_audience, agentId: row.agent_id, agentName: row.summary_agent_name,
       providerAccountId: row.provider_account_id ?? undefined, providerAccountLabel: row.provider_account_label ?? undefined,
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
+      ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
       title: row.title, titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: row.background_work_state ? parseBackgroundWorkState(row.background_work_state) : undefined,
@@ -23762,6 +23780,7 @@ export class ControlPlaneDb {
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
       providerAccountSwitchFailure:
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
+      ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
       title: row.title,
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,

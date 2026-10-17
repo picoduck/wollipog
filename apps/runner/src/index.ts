@@ -937,8 +937,9 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       const accountHome = pluginProvider === "claude" ? meta.env.CLAUDE_CONFIG_DIR : meta.env.CODEX_HOME;
       if (meta.context.kind === "native" && accountHome &&
           (!meta.executionTarget || meta.executionTarget.adapter === "host")) {
-        // Joins the caller's launch handle, which settles it on what ran under it (#3238).
-        await sessions.acquireLaunchProviderHome(accountHome, cancellation);
+        // Joins the caller's launch handle, which settles it on what ran under it (#3238). The
+        // session's recorded profile id is expected of its account HOME (#3239).
+        await sessions.acquireLaunchProviderHome(accountHome, cancellation, meta);
       }
       assertPreparationCurrent();
       if (pluginProvider === "claude") {

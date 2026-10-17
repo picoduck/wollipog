@@ -8068,6 +8068,60 @@ test("provider account selection is capability-gated, persisted, and sent on res
   assert.equal(restart.spec.providerAccountLabel, "Personal");
 });
 
+test("session creation refuses a profiled account an old runner cannot honor, and one whose grant was revoked (#3239)", () => {
+  const { db, hub, svc } = makeHarness();
+  const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  const accountMeta = runnerMeta();
+  const accounts = (profile?: { id: string; access: "granted" | "not_granted" | "pending" }) => [
+    { id: "work", label: "Work", provider: "claude" as const, authStatus: "authenticated" as const, ...(profile ? { profile } : {}) },
+    { id: "personal", label: "Personal", provider: "claude" as const, authStatus: "authenticated" as const },
+  ];
+  const register = (version: number, profile?: Parameters<typeof accounts>[0]) => {
+    accountMeta.providerAccounts = accounts(profile);
+    db.registerRunner(accountMeta, Date.now(), version);
+  };
+  const create = (providerAccountId: string) => svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, providerAccountId,
+  });
+  register(PROTOCOL_VERSION, { id: profileId, access: "granted" });
+  const grantId = db.authorizeProviderProfileGrant({
+    grantId: "11111111-1111-4111-8111-111111111111", runnerId: RUNNER_ID, providerAccountId: "work", provider: "claude",
+    origin: "adopted", grantedBy: "user-1", grantedRole: "owner", now: 10,
+  })!.grant.grantId;
+  assert.equal(db.completeProviderProfileGrant(grantId, profileId, 20), true);
+  const granted = create("work");
+  assert.ok(granted.ok, granted.error);
+
+  // The runner was downgraded below v225: it cannot check the profile, so the CP refuses first.
+  const oldVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.providerProfiles - 1;
+  register(oldVersion);
+  const sent = hub.sentOfType("start_session").length;
+  assertRunnerRefusal(
+    create("work"),
+    "This machine needs a newer runner for provider profiles. Update and restart the runner.",
+    RUNNER_CAPABILITY_MIN_PROTOCOL.providerProfiles,
+    oldVersion,
+  );
+  assert.ok(create("personal").ok, "an account without a profile grant is unaffected");
+
+  // Revoked, with no live grant left: a specific refusal instead of the runner's lease refusal.
+  register(PROTOCOL_VERSION, { id: profileId, access: "not_granted" });
+  assert.ok(db.revokeProviderProfileGrant({ grantId, revokedBy: "user-1", revokedRole: "owner", now: 30 }));
+  const revoked = create("work");
+  assert.equal(revoked.status, 409);
+  assert.equal(revoked.error, "Access to this provider profile was revoked for this control plane.");
+  assert.equal(hub.sentOfType("start_session").length, sent + 1, "only the unprofiled account's session was sent");
+
+  // Re-adopted: a live grant lifts the refusal.
+  const again = db.authorizeProviderProfileGrant({
+    grantId: "22222222-2222-4222-8222-222222222222", runnerId: RUNNER_ID, providerAccountId: "work", provider: "claude",
+    origin: "adopted", grantedBy: "user-1", grantedRole: "owner", now: 40,
+  })!.grant.grantId;
+  assert.equal(db.completeProviderProfileGrant(again, profileId, 50), true);
+  register(PROTOCOL_VERSION, { id: profileId, access: "granted" });
+  assert.ok(create("work").ok);
+});
+
 test("saved per-provider defaults govern new sessions but explicit choices and existing sessions keep their accounts", () => {
   const { db, hub, svc } = makeHarness();
   const accountMeta = runnerMeta();

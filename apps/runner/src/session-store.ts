@@ -115,6 +115,11 @@ export interface SessionMeta {
   /** Runner-private binding captured once so config edits cannot redirect a durable session. */
   providerAccountProvider?: "claude" | "codex";
   providerCredentialHome?: string;
+  /** Provider profiles (#3239): the profile id of the account HOME when this binding was made. Only
+   * a binding made after the account was adopted records one; an earlier binding keeps its homes
+   * without it. Every acquisition of `providerCredentialHome` expects this id, so a HOME substituted
+   * under the same account (renamed or re-pointed) is refused for this session. */
+  providerProfileId?: string;
   /** Runner-private source of provider history until a credential-home transfer completes. */
   providerConversationHome?: string;
   /** A freshly allocated Codex app-server id that has never accepted provider-visible activity.
@@ -126,6 +131,8 @@ export interface SessionMeta {
   pendingProviderAccountLabel?: string;
   pendingProviderAccountProvider?: "claude" | "codex";
   pendingProviderCredentialHome?: string;
+  /** The handoff target's profile id (#3239), recorded with the pending binding. */
+  pendingProviderProfileId?: string;
   pendingProviderAccountSwitchAutomatic?: boolean;
   providerAccountAutomaticallySelected?: boolean;
   /** Per-session backoff, keyed by opaque provider-account id. */
@@ -3936,6 +3943,10 @@ export function metaToSnapshot(
       controlPlaneProtocolVersion >= RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch
       ? m.providerAccountSwitchFailure ?? null
       : undefined,
+    // Absent before version negotiation and for older control planes; null is "no profile".
+    ...(runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")
+      ? { providerProfileId: m.providerProfileId ?? null }
+      : {}),
     title: m.title,
     titleSource: m.titleSource,
     providerUpdatedAt: m.providerUpdatedAt,

@@ -6,6 +6,7 @@ import {
   TERMINAL_STATUSES,
   type ProviderAccountDefinition,
   type ProviderProfileGrantView,
+  type ResourceScope,
   type SessionStatus,
 } from "@wollipog/protocol";
 import { parseBoxLifecycleForce } from "./box-lifecycle.js";
@@ -33,6 +34,41 @@ export function parseProviderProfileAdoption(body: unknown): { ok: true } | { ok
     return { ok: false, error: "acknowledgeProfileAdoption must be true: after adoption only control planes granted this profile can use its HOME" };
   }
   return { ok: true };
+}
+
+export const PROVIDER_PROFILE_REVOKED_FOR_SESSION = "Access to this provider profile was revoked for this control plane.";
+
+function scopeKey(scope: ResourceScope): string {
+  const ownerId = scope.owner.kind === "organization" ? scope.owner.organizationId
+    : scope.owner.kind === "user" ? scope.owner.userId : scope.owner.teamId;
+  return `${scope.organizationId}\u0000${scope.owner.kind}\u0000${ownerId}`;
+}
+
+/**
+ * Session creation's profile gate (#3239), for the provider account the new session will bind:
+ * - a runner below v225 cannot honor a profile, so an account this control plane holds an active
+ *   grant for is refused with the shared capability sentence instead of failing on the runner;
+ * - an account whose reported profile this control plane's grant was revoked for, with no live
+ *   grant left, is refused with a specific sentence instead of the runner's lease refusal.
+ * Null when the session may start. Grants are read in the runner's scope only.
+ */
+export function providerProfileSessionRefusal(
+  db: ControlPlaneDb,
+  runner: { runnerId: string; protocolVersion?: number | null },
+  account: Pick<ProviderAccountDefinition, "id" | "profile">,
+): { capability: ReturnType<typeof runnerCapabilityRequirementError> } | { error: string } | null {
+  const scope = db.runnerScope(runner.runnerId);
+  const inScope = (grant: ProviderProfileGrantRecord) => !scope || scopeKey(grant.scope) === scopeKey(scope);
+  const profileId = account.profile && PROFILE_ID.test(account.profile.id) ? account.profile.id : undefined;
+  const live = db.liveProviderProfileGrantsForAccount(runner.runnerId, account.id, profileId).filter(inScope);
+  if (!runnerSupportsProtocol(runner.protocolVersion, "providerProfiles")) {
+    return live.some((grant) => grant.status === "active")
+      ? { capability: runnerCapabilityRequirementError(runner.protocolVersion, "providerProfiles", CAPABILITY_LABEL) }
+      : null;
+  }
+  if (live.length > 0 || !profileId) return null;
+  const revoked = db.latestRevokedProviderProfileGrant(runner.runnerId, account.id, profileId);
+  return revoked && inScope(revoked) ? { error: PROVIDER_PROFILE_REVOKED_FOR_SESSION } : null;
 }
 
 /** A runner configures at most 32 provider accounts, so it reports at most 32 profile ids. */

@@ -56,6 +56,7 @@ import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
 import { AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { InstancesPanel } from "./InstancesPanel.js";
 import { ProviderAccountsSection } from "./ProviderAccountsSection.js";
+import { activeSessionConflict } from "./active-session-conflict.js";
 import { MachineSkillsSection } from "./MachineSkillsSection.js";
 import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettings.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
@@ -388,7 +389,12 @@ function AgentRow({
 }
 
 /** The meta + agents + workspaces body shared by runner cards and (once online) box cards. */
-function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean }) {
+function RunnerDetails({ runner, online, canManageProfiles = false }: {
+  runner: RunnerView;
+  online: boolean;
+  /** The viewer is an organization Owner or Admin (provider profile routes are not member-scoped). */
+  canManageProfiles?: boolean;
+}) {
   const pv = runner.protocolVersion;
   const [findingSessions, setFindingSessions] = useState(false);
   const externalSessionsSupported = runnerSupportsProtocol(pv, "externalSessions");
@@ -455,7 +461,7 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
             </>
           )}
         </dl>
-        <ProviderAccountsSection runner={runner} online={online} />
+        <ProviderAccountsSection runner={runner} online={online} canManageProfiles={canManageProfiles} />
         <details className="runner-agents disclosure">
           <summary>
             <ChevronRightIcon className="disclosure-chevron" />
@@ -595,33 +601,16 @@ export interface LifecycleConflictPresentation {
   detailRowsOverflow: number;
 }
 
-function normalizedSessionTitle(value: unknown): string {
-  if (typeof value !== "string") return "Untitled Session";
-  return value.replace(/\s+/g, " ").trim() || "Untitled Session";
-}
-
 export function lifecycleConflictPresentation(
   error: ApiError,
   action: "update" | "reconnect" | "adopt",
 ): LifecycleConflictPresentation {
-  const count = typeof error.details?.activeSessionCount === "number" ? error.details.activeSessionCount : null;
-  const detailRows: ConfirmationDetailRow[] = Array.isArray(error.details?.activeSessions)
-    ? error.details.activeSessions
-        .filter((session): session is { title?: unknown; status?: unknown } => !!session && typeof session === "object")
-        .map((session) => ({
-          label: normalizedSessionTitle(session.title),
-          ...(typeof session.status === "string" ? { status: statusMeta("session", session.status) } : {}),
-        }))
-    : [];
+  const { count, detailRows, detailRowsOverflow } = activeSessionConflict(error);
   const actionLabel = action === "update" ? "Updating" : action === "reconnect" ? "Reconnecting" : "Adopting legacy data for";
   const message = count == null
     ? `${actionLabel} this runner will interrupt active work.`
     : `${actionLabel} this runner will interrupt ${count} active session${count === 1 ? "" : "s"}.`;
-  return {
-    message,
-    detailRows,
-    detailRowsOverflow: count == null ? 0 : Math.max(0, count - detailRows.length),
-  };
+  return { message, detailRows, detailRowsOverflow };
 }
 
 function updateSourceLabel(source: "staged" | "release-cache", releaseTag: string): string {
@@ -1478,7 +1467,7 @@ export function BoxCard({
       {connHint && <Notice tone="info">{connHint}</Notice>}
       <Notice tone="neutral">{sshRunnerLifecycleHint()}</Notice>
       {runner ? (
-        <RunnerDetails runner={runner} online={harnessStatusCurrent} />
+        <RunnerDetails runner={runner} online={harnessStatusCurrent} canManageProfiles={canManage} />
       ) : inProgress ? (
         <div className="empty-sub">Waiting for the runner to come online…</div>
       ) : box.status === "offline" ? (
@@ -1556,7 +1545,7 @@ export function NativeRunnerCard({
         )}
       </div>
       {removeError && <div className="empty-sub box-error" role="alert">{removeError}</div>}
-      <RunnerDetails runner={runner} online={runner.status === "online"} />
+      <RunnerDetails runner={runner} online={runner.status === "online"} canManageProfiles={canManage} />
       <NativeRunnerHealth
         runner={runner}
         canRepair={canManage}

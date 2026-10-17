@@ -1,6 +1,7 @@
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { supportsPacedVideoReviewPeer } from "@wollipog/protocol";
+import { providerProfileSessionRefusal } from "./provider-profile-route.js";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
 import { PreparedMediaReservationRelease } from "./prepared-media-reservation-release.js";
@@ -4047,6 +4048,13 @@ export class SessionsService {
         return fail("The saved default provider account is unavailable on this Machine. Choose another account or update Machine settings.", 409);
       }
       return fail(`provider account '${providerAccountId}' is not available for the selected agent`, 409);
+    }
+    if (providerAccount) {
+      // Provider profiles (#3239): refuse here, with a specific sentence, a binding the runner would
+      // refuse at its lease (an old runner and an active grant; a revoked grant).
+      const profileRefusal = providerProfileSessionRefusal(this.db, runner, providerAccount);
+      if (profileRefusal && "capability" in profileRefusal) return capabilityFail(profileRefusal.capability);
+      if (profileRefusal) return fail(profileRefusal.error, 409);
     }
     const acpSessionContext = snapshotSpec?.acpSessionContext ?? req.acpSessionContext;
     if ((executionTarget.adapter === "container" || executionTarget.adapter === "cloud") &&

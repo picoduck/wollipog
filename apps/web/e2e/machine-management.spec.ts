@@ -305,6 +305,46 @@ test("Machine owners can remove a provider account after confirming", async ({ p
   await page.screenshot({ path: "test-results/provider-accounts/remove-account-done.png", fullPage: true });
 });
 
+test("Owners adopt and revoke provider profiles, confirming active sessions; members only see the state (#3239)", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?profiles");
+  await page.getByText("Accounts", { exact: true }).click();
+  const accounts = page.locator("details.runner-agents").filter({ hasText: "Accounts" });
+  const row = (label: string) => accounts.locator(".agent-row").filter({ hasText: label });
+  await expect(row("Work").locator(".atag.ctx")).toHaveText("Profile");
+  await expect(row("Personal").locator(".atag", { hasText: "Grant Pending" })).toBeVisible();
+  await expect(row("Codex Team").locator(".atag.broken")).toHaveText("Not Granted");
+  await expect(row("Codex Solo").locator(".atag")).toHaveText(["Codex", "Logged In"]);
+  await expect(row("Work").getByRole("button", { name: "Adopt as Profile" })).toHaveCount(0);
+  await expect(row("Personal").getByRole("button", { name: "Adopt as Profile" })).toBeVisible();
+  await expect(row("Personal").getByRole("button", { name: "Revoke Access" })).toBeVisible();
+  await accounts.screenshot({ path: "test-results/provider-accounts/profile-states.png" });
+
+  await row("Codex Solo").getByRole("button", { name: "Adopt as Profile" }).click();
+  const adoption = page.getByRole("dialog", { name: "Adopt as Profile" });
+  await expect(adoption).toContainText("only control planes granted this profile can use this account's HOME");
+  await page.screenshot({ path: "test-results/provider-accounts/adopt-profile-confirm.png", fullPage: true });
+  await adoption.getByRole("button", { name: "Adopt as Profile" }).click();
+  await expect(page.getByText("Account adopted as a profile.", { exact: true })).toBeVisible();
+  await expect(row("Codex Solo").locator(".atag.ctx")).toHaveText("Profile");
+
+  await row("Work").getByRole("button", { name: "Revoke Access" }).click();
+  await page.getByRole("dialog", { name: "Revoke Access" }).getByRole("button", { name: "Revoke Access" }).click();
+  const force = page.getByRole("dialog", { name: "Revoke Access from Active Sessions" });
+  await expect(force).toContainText("3 active sessions use this account's profile.");
+  await expect(force).toContainText("Fix the half-cent rounding bug");
+  await expect(force).toContainText("and 1 more");
+  await page.screenshot({ path: "test-results/provider-accounts/revoke-profile-force-confirm.png", fullPage: true });
+  await force.getByRole("button", { name: "Revoke Access" }).click();
+  await expect(page.getByText("Access revoked.", { exact: true })).toBeVisible();
+  await expect(row("Work").locator(".atag.ctx")).toHaveCount(0);
+
+  await page.goto("/machine-management-e2e.html?profiles&role=machine-owner");
+  await page.getByText("Accounts", { exact: true }).click();
+  await expect(row("Personal").locator(".atag", { hasText: "Grant Pending" })).toBeVisible();
+  await expect(accounts.getByRole("button", { name: "Adopt as Profile" })).toHaveCount(0);
+  await expect(accounts.getByRole("button", { name: "Revoke Access" })).toHaveCount(0);
+});
+
 test("Machine owners can start both provider sign-in flow shapes", async ({ page }) => {
   await page.getByText("Accounts", { exact: true }).click();
   await page.getByRole("button", { name: "Add Account" }).click();

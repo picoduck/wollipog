@@ -28,11 +28,15 @@ export function bindSessionProviderAccount(
   // account would falsely label a credential scope that the provider process never uses.
   if (spec.executionTarget && spec.executionTarget.adapter !== "host") return undefined;
   if (prior?.providerAccountId && prior.providerCredentialHome && prior.providerAccountProvider) {
+    // The recorded binding is authoritative, including its profile id (#3239): a binding made
+    // before the account was adopted keeps its homes and gains no profile id; the account's
+    // current profile is never read here.
     return {
       id: prior.providerAccountId,
       label: prior.providerAccountLabel ?? spec.providerAccountLabel ?? prior.providerAccountId,
       provider: prior.providerAccountProvider,
       credentialHome: prior.providerCredentialHome,
+      ...(prior.providerProfileId !== undefined ? { profileId: prior.providerProfileId } : {}),
     };
   }
   // A session created before provider accounts were configured belongs to the legacy provider
