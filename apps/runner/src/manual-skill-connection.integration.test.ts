@@ -10,6 +10,7 @@ import {
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import { Hub, type Socket } from "../../control-plane/src/hub.js";
+import { providerProfileGrantsForRunner } from "../../control-plane/src/provider-profile-route.js";
 import { SkillStateReporter } from "./skill-state-reporter.js";
 import type { ReconcileSkillsResult } from "./skills.js";
 
@@ -74,6 +75,7 @@ function fixture(t: TestContext) {
     config: { runnerId: "fixture", controlPlaneUrl: "inert", token: "", providerAccounts: [] }, metadata: { agents: [] },
     WebSocket: InertSocket, validateControlPlaneUrl: (url: string) => url, allowInsecureTransport: false,
     agentsForControlPlane: () => [], providerAccountsForControlPlane: () => [], registrationSessionSnapshots: () => [],
+    providerProfileGrants: { reportedProfileIds: () => [] },
     PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol,
     projectMessageForCurrentProtocol: (message: SkillsStateMessage) => message,
     stagedRunnerCredential: { promote() {} }, backoff: 99, INITIAL_BACKOFF_MS: 1,
@@ -96,7 +98,7 @@ function fixture(t: TestContext) {
     hub.attachRunner("fixture", socket.server);
     const registeredScope: Record<string, any> = {
       hub, db, runnerId: "fixture", msg: { protocolVersion }, socket, Date, PROTOCOL_VERSION,
-      HEARTBEAT_INTERVAL_MS: 1, runnerSupportsProtocol, automaticAccountSwitchForRunner: () => undefined,
+      HEARTBEAT_INTERVAL_MS: 1, runnerSupportsProtocol, automaticAccountSwitchForRunner: () => undefined, providerProfileGrantsForRunner,
       send: (_socket: unknown, message: RegisteredMessage) => { registeredScope.result = message; },
     };
     const marker = serverSource.indexOf('          type: "registered",');

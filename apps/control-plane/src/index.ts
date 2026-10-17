@@ -182,6 +182,13 @@ import {
   parseBoxLifecycleForce,
 } from "./box-lifecycle.js";
 import { registerBoxLegacyAdoptionRoute } from "./box-legacy-adoption-route.js";
+import {
+  ProviderProfileInventoryRevocations,
+  providerProfileGrantsForRunner,
+  reconcileProviderProfileGrants,
+  registerProviderProfileRoutes,
+  revokeProviderProfileAccessForAccountRemoval,
+} from "./provider-profile-route.js";
 import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
@@ -425,6 +432,7 @@ if (legacyCredentialMigration.blocked > 0) {
 }
 db.scrubLegacyAgentSecrets(Date.now());
 const hub = new Hub(db);
+const providerProfileInventoryRevocations = new ProviderProfileInventoryRevocations({ db, hub });
 const worktreeCreates = new WorktreeCreateCoordinator();
 const shellRegistry = new ShellRegistry(db);
 // Larger body limit so pasted screenshots (base64) fit comfortably.
@@ -1315,6 +1323,11 @@ app.register(async (instance) => {
             : undefined,
         );
         hub.clearRunnerQueues(runnerId); // a fresh connection has no in-flight queues — drop stale ones
+        // The lost-reply path for provider-profile adoption: the registration's account list may
+        // already report the profile a pending grant's runner wrote (#3239).
+        if (runnerSupportsProtocol(msg.protocolVersion, "providerProfiles")) {
+          reconcileProviderProfileGrants(db, runnerId, db.getRunner(runnerId)?.providerAccounts, Date.now());
+        }
         if (Array.isArray(msg.sessionSnapshots)) frameQueue.reserveInventory(msg.sessionSnapshots.length);
         send(socket, {
           type: "registered",
@@ -1324,6 +1337,11 @@ app.register(async (instance) => {
           protocolVersion: PROTOCOL_VERSION,
           ...(runnerSupportsProtocol(msg.protocolVersion, "skillRequestResumption")
             ? { pendingSkillRequests: hub.pendingSkillRequests(runnerId) }
+            : {}),
+          // The complete grants for the profiles this runner reports, or no list at all when they
+          // are unknown or exceed the bound: a partial list would revoke the omitted grants (#3239).
+          ...(runnerSupportsProtocol(msg.protocolVersion, "providerProfiles")
+            ? { providerProfileGrants: providerProfileGrantsForRunner(db, runnerId, msg.providerProfileIds) }
             : {}),
           ...(runnerSupportsProtocol(msg.protocolVersion, "machineRunnerCapacity")
             ? { runnerCapacity: db.machineRunnerCapacityConfiguration(runnerId) ?? undefined }
@@ -1540,6 +1558,11 @@ app.register(async (instance) => {
       case "agents_updated":
         if (runnerId === msg.runnerId) {
           db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors, msg.providerAccounts, msg.executionTargets);
+          if (runnerSupportsProtocol(db.getRunner(msg.runnerId)?.protocolVersion, "providerProfiles")) {
+            reconcileProviderProfileGrants(db, msg.runnerId, db.getRunner(msg.runnerId)?.providerAccounts, Date.now());
+            // A reported grant with no live row here was revoked while the runner adopted it.
+            void providerProfileInventoryRevocations.reconcile(msg.runnerId, db.getRunner(msg.runnerId)?.providerAccounts);
+          }
           hub.runnerChanged(msg.runnerId);
           // A runner may register with an empty or stale agent list and only discover its
           // harnesses afterward — the registration-time skills_sync then resolved no targets.
@@ -1739,6 +1762,8 @@ app.register(async (instance) => {
       case "edit_queued_prompt_result":
       case "provider_login_result":
       case "remove_provider_account_result":
+      case "adopt_provider_profile_result":
+      case "revoke_provider_profile_grant_result":
         hub.resolveRunnerRequest(msg, runnerId!);
         break;
       case "skills_state": {
@@ -3065,8 +3090,15 @@ app.delete("/api/runners/:id/provider-accounts/:accountId", async (req, reply) =
   if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
   const unsupported = runnerCapabilityError(id, "providerAccountRemoval", "provider account removal");
   if (unsupported) return reply.code(409).send(failureBody(unsupported));
-  if (!runner.providerAccounts?.some((account) => account.id === accountId)) {
+  const removedAccount = runner.providerAccounts?.find((account) => account.id === accountId);
+  if (!removedAccount) {
     return reply.code(404).send({ error: "The provider account is not available on this Machine." });
+  }
+  // Provider profiles (#3239): removing the account revokes only this control plane's grant, and the
+  // runner is told to stop using it before the removal is sent, so a refused removal still revokes.
+  // The runner keeps a HOME whose marker still grants another control plane.
+  if (runnerSupportsProtocol(runner.protocolVersion, "providerProfiles")) {
+    await revokeProviderProfileAccessForAccountRemoval({ db, hub }, id, removedAccount, principal, Date.now());
   }
   const requestId = `provider_account_remove_${randomUUID()}`;
   try {
@@ -3805,6 +3837,7 @@ app.post("/api/boxes", async (req, reply) => {
 });
 
 registerBoxLegacyAdoptionRoute(app, { db, orchestrator, requestHuman });
+registerProviderProfileRoutes(app, { db, hub, requestHuman });
 
 app.post("/api/boxes/:id/reconnect", async (req, reply) => {
   const id = (req.params as { id: string }).id;

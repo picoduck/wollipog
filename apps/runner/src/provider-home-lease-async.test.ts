@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,7 @@ import fc from "fast-check";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS, LEASE_WORKER_REFERENCE_LIMIT, ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
-import { writeProviderProfileMarker } from "./provider-profile.js";
+import { readProviderProfileMarker, writeProviderProfileMarker } from "./provider-profile.js";
 
 function worker(data: Record<string, unknown>): Worker {
   return new Worker(`require(${JSON.stringify(createRequire(import.meta.url).resolve("tsx/cjs"))});require(${JSON.stringify(fileURLToPath(new URL("./provider-home-lease-worker.ts", import.meta.url)))});`,
@@ -224,4 +224,85 @@ test("an invalid control-plane instance id fails worker startup closed", async (
   const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), { controlPlaneInstanceId: "not-an-instance" });
   await assert.rejects(registry.acquireHome(join(tmpdir(), "wollipog-never-created")), /worker unavailable/);
   assert.equal(await registry.close(), false);
+});
+
+test("profile adoption and revocation run under the HOME lease in the real worker", { skip: process.platform === "win32" }, async t => {
+  const instance = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", otherInstance = "1a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+  const grant = "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", otherGrant = "3a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+  const root = mkdtempSync(join(tmpdir(), "wollipog-async-profile-adopt-")), home = join(root, "home");
+  mkdirSync(home);
+  let active: string[] = [];
+  let expected: string | undefined;
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), { controlPlaneInstanceId: instance,
+    profileAccess: () => ({ controlPlaneSupportsProfiles: true, activeProfileIds: active }), expectedProfileIdForHome: () => expected });
+  const other = new AsyncProviderHomeLeaseRegistry("b".repeat(64), { controlPlaneInstanceId: otherInstance,
+    profileAccess: () => ({ controlPlaneSupportsProfiles: true, activeProfileIds: active }) });
+  t.after(async () => { await registry.close(); await other.close(); rmSync(root, { recursive: true, force: true }); });
+
+  const { profileId } = await registry.adoptProfile(home, "claude", grant);
+  const first = readProviderProfileMarker(home);
+  assert.equal(first.state, "present");
+  assert.equal(first.state === "present" && first.marker.profileId, profileId);
+  assert.deepEqual(first.state === "present" && first.marker.grants.map(g => [g.controlPlaneInstanceId, g.grantId]), [[instance, grant]]);
+  assert.equal((await registry.adoptProfile(home, "claude", grant)).profileId, profileId, "repeating the same grant is idempotent");
+
+  // A second control plane adopting the same HOME adds its grant and keeps the identity.
+  assert.deepEqual(await other.adoptProfile(home, "claude", otherGrant), { profileId });
+  const shared = readProviderProfileMarker(home);
+  assert.deepEqual(shared.state === "present" && shared.marker.grants.map(g => g.controlPlaneInstanceId), [instance, otherInstance]);
+
+  active = [profileId]; expected = profileId;
+  const reference = await registry.acquireHomeReference(home, "claude");
+  assert.equal(reference.first, true);
+  // Revocation while this runner holds the HOME joins the held lease instead of being refused.
+  assert.equal(await registry.revokeProfileGrant(home, "claude", profileId, grant), true);
+  assert.equal(await registry.revokeProfileGrant(home, "claude", profileId, grant), false, "nothing left to revoke");
+  const revoked = readProviderProfileMarker(home);
+  assert.deepEqual(revoked.state === "present" && revoked.marker.grants.map(g => g.controlPlaneInstanceId), [otherInstance], "only this grant was removed");
+  await assert.rejects(registry.acquireHome(home, "claude"), (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === "profile_not_granted");
+  assert.equal(await reference.release(), true);
+  await assert.rejects(other.adoptProfile(home, "codex", otherGrant), (error: unknown) => error instanceof ProviderHomeLeaseError &&
+    error.code === "profile_unverifiable", "a marker for another provider is never extended");
+
+  // A substituted HOME at the account's path is refused against the account's recorded id.
+  renameSync(home, join(root, "original"));
+  mkdirSync(home);
+  await assert.rejects(registry.acquireHome(home, "claude"), (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === "profile_changed");
+  assert.equal(existsSync(join(home, ".agent-manager", "provider-home-leases-v1")), false);
+});
+
+test("removed-account HOME retirement decides under the lease in the real worker", { skip: process.platform === "win32" }, async t => {
+  const instance = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", otherInstance = "1a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+  const grant = "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", otherGrant = "3a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+  const root = mkdtempSync(join(tmpdir(), "wollipog-async-profile-retire-"));
+  const shared = join(root, "shared"), held = join(root, "held"), plain = join(root, "plain");
+  for (const home of [shared, held, plain]) mkdirSync(home);
+  let active: string[] = [];
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), { controlPlaneInstanceId: instance,
+    profileAccess: () => ({ controlPlaneSupportsProfiles: true, activeProfileIds: active }) });
+  const other = new AsyncProviderHomeLeaseRegistry("b".repeat(64), { controlPlaneInstanceId: otherInstance });
+  t.after(async () => { await registry.close(); await other.close(); rmSync(root, { recursive: true, force: true }); });
+  const grantsOf = (home: string) => {
+    const read = readProviderProfileMarker(home);
+    return read.state === "present" ? read.marker.grants.map(g => g.controlPlaneInstanceId) : read.state;
+  };
+
+  await registry.adoptProfile(shared, "claude", grant);
+  await other.adoptProfile(shared, "claude", otherGrant);
+  assert.equal(await registry.retireProfileHome(shared, "claude"), false, "another control plane's grant keeps the HOME");
+  assert.deepEqual(grantsOf(shared), [otherInstance], "and only this control plane's grant was dropped");
+
+  const { profileId } = await registry.adoptProfile(held, "claude", grant);
+  active = [profileId];
+  const reference = await registry.acquireHomeReference(held, "claude");
+  assert.equal(await registry.retireProfileHome(held, "claude"), false, "a HOME a session still holds is kept");
+  assert.deepEqual(grantsOf(held), [], "though this control plane's grant is gone");
+  assert.equal(await reference.release(), true);
+  assert.equal(await registry.retireProfileHome(held, "claude"), true, "once nothing holds it, it may be deleted");
+
+  assert.equal(await registry.retireProfileHome(plain, "claude"), true, "a marker-less HOME keeps today's rule");
+  assert.equal(grantsOf(plain), "absent", "and gains no marker");
+  // The lease was released: another runner can take the HOME now.
+  assert.equal(await other.acquireHome(plain, "claude"), true);
+  assert.equal(await other.releaseHome(plain), true);
 });

@@ -201,3 +201,85 @@ test("without a capability source an acquisition carries a profile only when it 
   const close = f.registry.close(); const shutdown = f.port.execute(2);
   f.port.reply("receipt", shutdown); f.port.reply("done", shutdown); assert.equal(await close, true);
 });
+
+const GRANT = "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+
+test("profile change frames are exact: provider, grant id and, for revocation, the profile id", () => {
+  const adopt = { method: "profile_adopt", home: "/private/home", provider: "claude", grantId: GRANT };
+  const revoke = { method: "profile_revoke", home: "/private/home", provider: "codex", profileId: PROFILE, grantId: GRANT };
+  assert.equal(validLeaseWorkerOperation(adopt), true);
+  assert.equal(validLeaseWorkerOperation(revoke), true);
+  const invalid: Array<[string, unknown]> = [
+    ["adopt without grant", { method: "profile_adopt", home: "/private/home", provider: "claude" }],
+    ["adopt with extra key", { ...adopt, profileId: PROFILE }],
+    ["adopt for a non-provider lease key", { ...adopt, provider: "skills" }],
+    ["adopt with profile context", { ...adopt, profile: { controlPlaneSupportsProfiles: true, activeProfileIds: [] } }],
+    ["adopt with uppercase grant", { ...adopt, grantId: GRANT.toUpperCase() }],
+    ["adopt without home", { method: "profile_adopt", provider: "claude", grantId: GRANT }],
+    ["revoke without profile", { method: "profile_revoke", home: "/private/home", provider: "codex", grantId: GRANT }],
+    ["revoke with malformed profile", { ...revoke, profileId: "../profile" }],
+    ["revoke with extra key", { ...revoke, extra: true }],
+    ["retire for a non-provider lease key", { method: "profile_retire", home: "/private/home", provider: "skills" }],
+    ["retire naming a grant", { method: "profile_retire", home: "/private/home", provider: "claude", grantId: GRANT }],
+    ["retire without home", { method: "profile_retire", provider: "claude" }],
+  ];
+  assert.equal(validLeaseWorkerOperation({ method: "profile_retire", home: "/private/home", provider: "codex" }), true);
+  for (const [name, value] of invalid) assert.equal(validLeaseWorkerOperation(value), false, name);
+});
+
+test("only a successful adoption reply may carry a profile id", async () => {
+  const f = fixture();
+  const adopted = f.registry.adoptProfile("/private/home", "claude", GRANT);
+  f.port.ready(); const op = f.port.execute();
+  assert.deepEqual(op.operation, { method: "profile_adopt", home: "/private/home", provider: "claude", grantId: GRANT });
+  for (const kind of ["receipt", "done"] as const) f.port.reply(kind, op, { profileId: PROFILE });
+  assert.deepEqual(await adopted, { profileId: PROFILE });
+  assert.equal((f.port.sent[1] as LeaseWorkerAccept).cancel, false, "a profile change is never cancelled after its receipt");
+
+  const revoked = f.registry.revokeProfileGrant("/private/home", "claude", PROFILE, GRANT);
+  const op2 = f.port.execute(1);
+  for (const kind of ["receipt", "done"] as const) f.port.reply(kind, op2, { value: false });
+  assert.equal(await revoked, false, "nothing to revoke");
+
+  const refused = f.registry.adoptProfile("/private/home", "claude", GRANT);
+  const op3 = f.port.execute(2);
+  for (const kind of ["receipt", "done"] as const) f.port.reply(kind, op3, { ok: false, value: false, error: "profile_grant_limit" });
+  await assert.rejects(refused, (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === "profile_grant_limit" &&
+    error.message === LEASE_WORKER_ERRORS.profile_grant_limit);
+
+  // A profile id on any other reply is a protocol violation that poisons the worker.
+  const smuggled = f.registry.revokeProfileGrant("/private/home", "claude", PROFILE, GRANT);
+  f.port.reply("receipt", f.port.execute(3), { profileId: PROFILE });
+  await assert.rejects(smuggled, /unexpected profile id/);
+});
+
+test("an adoption reply without a valid profile id poisons the worker", async () => {
+  const f = fixture();
+  const adopted = f.registry.adoptProfile("/private/home", "codex", GRANT);
+  f.port.ready();
+  f.port.reply("receipt", f.port.execute(), { profileId: "not-a-profile" });
+  await assert.rejects(adopted, /unexpected profile id/);
+});
+
+test("an account's recorded profile id is the expected id of acquisitions that name none", async () => {
+  let port!: Port;
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), {
+    profileAccess: () => ({ controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] }),
+    expectedProfileIdForHome: home => home === "/private/account" ? PROFILE : undefined,
+    workerFactoryForTest: value => port = new Port(value.epoch as string),
+  });
+  const account = registry.acquireHome("/private/account", "claude");
+  port.ready(); const op = port.execute();
+  assert.deepEqual((op.operation as { profile?: unknown }).profile, { expectedId: PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] });
+  port.reply("receipt", op); port.reply("done", op); assert.equal(await account, true);
+  const explicit = registry.acquireHome("/private/account", "claude", {}, { expectedProfileId: OTHER_PROFILE });
+  const op2 = port.execute(1);
+  assert.equal((op2.operation as { profile?: { expectedId?: string } }).profile?.expectedId, OTHER_PROFILE, "an explicit binding wins");
+  port.reply("receipt", op2); port.reply("done", op2); assert.equal(await explicit, true);
+  const other = registry.acquireHome("/private/other", "claude");
+  const op3 = port.execute(2);
+  assert.deepEqual((op3.operation as { profile?: unknown }).profile, { controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] });
+  port.reply("receipt", op3); port.reply("done", op3); assert.equal(await other, true);
+  const close = registry.close(); const shutdown = port.execute(3);
+  port.reply("receipt", shutdown); port.reply("done", shutdown); assert.equal(await close, true);
+});

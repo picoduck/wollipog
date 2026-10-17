@@ -247,6 +247,8 @@ function integratedFixture() {
     cacheContent: item => skills.cacheSkillSyncEntry(dataDir, [agent], item) });
   const context = {
     ...skills, runnerSupportsProtocol, skillReconciliationProviderAccountPlan,
+    // Marker-less fixture homes: every account is usable, as without provider profiles (#3239).
+    providerProfileGrants: { usable: () => true },
     mergeWslSkillsResult, reconcileWslSkills: async (_options: unknown): Promise<skills.ReconcileSkillsResult> => empty(),
     dataDirLease: { ownerHash: "a".repeat(64) },
     controlPlaneProtocolVersion: PROTOCOL_VERSION,

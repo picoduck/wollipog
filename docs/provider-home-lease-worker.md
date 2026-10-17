@@ -95,9 +95,41 @@ journal I/O and again on every re-entrant reference, it decides:
 
 A refused acquisition creates no lease directory, and a refused re-entrant reference adds no
 reference. An unsafe `.agent-manager` keeps its existing `refusal`. The four codes cross the boundary
-with fixed, path-free texts. Nothing creates markers yet and the control plane does not negotiate
-profiles, so only the first case is reachable today. A follow-up adds grants, adoption and the
-operations that write markers.
+with fixed, path-free texts.
+
+An acquisition that names no expected profile id takes one from the configured account whose
+directory is exactly the requested HOME path, so a directory substituted under an adopted account is
+refused as `profile_changed` for sessions, Agent TUIs, probes, sign-in and skill transactions alike.
+
+### Profile Marker Operations
+
+Three operations change a marker, and only these do; see [Provider Profiles](./provider-profiles.md)
+for the grant model:
+
+- `profile_adopt { home, provider, grantId }` records the worker's attested control-plane instance
+  with `grantId` in the marker, creating a new random identity when the HOME has none. An existing
+  marker keeps its id and the other instances' grants; this instance's older grant is replaced. The
+  successful reply carries the marker's `profileId`, the only reply field this operation adds.
+- `profile_revoke { home, provider, profileId, grantId }` removes exactly that grant of this
+  instance. The reply's `value` is true when the marker changed; a HOME without a marker has nothing
+  to revoke, and a marker holding another profile is refused as `profile_changed`.
+- `profile_retire { home, provider }` is the retain-or-delete decision for a removed account's
+  HOME. It removes every grant of this instance and replies `value: true` only when dropping its
+  reference released the lease (nothing else on this runner held the HOME) and the marker grants no
+  other instance. A marker-less HOME is not shared; an unreadable marker is kept (`value: false`),
+  never replaced. The caller deletes the HOME only on `true`, after a last marker read.
+
+All three take the HOME's lease the same way an acquisition does, but skip the grant check, since
+they are how grants change. A HOME another live owner holds is refused with the acquisition's code
+(`busy`, `foreign_owner`, `foreign_host`). The marker is read with the operation's provider while
+the lease is held; an unreadable marker, or one for the other provider, is never replaced: adoption
+and revocation refuse it as `profile_unverifiable`, and retirement keeps the HOME. A marker already
+holding 16 other grants is `profile_grant_limit`. The write
+uses the same atomic replacement as acquisitions' marker checks expect, then the operation drops
+the reference it took: the lease is released when it was the first reference and kept when a
+session already held the HOME. None of these operations is an acquisition, so none can be cancelled
+after its receipt, and the parent poisons the lane on a `profileId` in any other reply. The
+instance always comes from the worker's startup data, never from a frame.
 
 Callers that release before shutdown (skill transactions, launch preparation, and a launch or skill
 acquisition that became stale after its grant) use `acquire_reference`. The worker keeps the receipt's exact-entry

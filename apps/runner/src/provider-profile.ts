@@ -247,7 +247,101 @@ export function decideProviderProfileAccess(
   return { allowed: true, profileId: marker.profileId };
 }
 
+/** Why a marker change (#3239 adoption or revocation) was refused while the HOME was held. */
+export type ProviderProfileChangeRefusal = "profile_unverifiable" | "profile_changed" | "profile_grant_limit";
+
+export class ProviderProfileChangeError extends Error {
+  constructor(readonly code: ProviderProfileChangeRefusal) { super(`provider profile change refused: ${code}`); }
+}
+
+/**
+ * The marker after recording `grant` for its control-plane instance. A marker-less HOME gets a new
+ * identity; an existing marker keeps its id and other control planes' grants, and this instance's
+ * earlier grant is replaced, since a marker holds one grant per instance. Returns null when the
+ * marker already records exactly this grant.
+ */
+export function adoptProviderProfileMarker(
+  read: ProviderProfileRead,
+  input: { provider: "claude" | "codex"; grant: ProviderProfileGrant; newProfileId?: string; now?: string },
+): { marker: ProviderProfileMarker; changed: boolean } {
+  const grant = { ...input.grant, controlPlaneInstanceId: input.grant.controlPlaneInstanceId.toLowerCase() };
+  if (read.state === "unverifiable") throw new ProviderProfileChangeError("profile_unverifiable");
+  if (read.state === "absent") {
+    const marker: ProviderProfileMarker = {
+      version: 1, kind: "wollipog-provider-profile", profileId: input.newProfileId ?? randomUUID(), provider: input.provider,
+      createdAt: input.now ?? new Date().toISOString(), grants: [grant],
+    };
+    if (!validProviderProfileMarker(marker)) throw new ProviderProfileChangeError("profile_unverifiable");
+    return { marker, changed: true };
+  }
+  const { marker } = read;
+  if (marker.provider !== input.provider) throw new ProviderProfileChangeError("profile_unverifiable");
+  const existing = marker.grants.find((candidate) => candidate.controlPlaneInstanceId === grant.controlPlaneInstanceId);
+  if (existing?.grantId === grant.grantId) return { marker, changed: false };
+  const others = marker.grants.filter((candidate) => candidate !== existing);
+  if (others.length >= PROVIDER_PROFILE_LIMITS.grants) throw new ProviderProfileChangeError("profile_grant_limit");
+  const next = { ...marker, grants: [...others, grant] };
+  if (!validProviderProfileMarker(next)) throw new ProviderProfileChangeError("profile_unverifiable");
+  return { marker: next, changed: true };
+}
+
+/**
+ * The marker without one exact grant of one control-plane instance. Other instances' grants, and a
+ * newer grant of the same instance, are kept. A HOME without a marker has nothing to revoke; a
+ * marker holding a different profile is refused rather than edited.
+ */
+export function revokeProviderProfileMarkerGrant(
+  read: ProviderProfileRead,
+  input: { profileId: string; controlPlaneInstanceId: string; grantId: string },
+): { marker?: ProviderProfileMarker; changed: boolean } {
+  if (read.state === "absent") return { changed: false };
+  if (read.state === "unverifiable") throw new ProviderProfileChangeError("profile_unverifiable");
+  const { marker } = read;
+  if (marker.profileId !== input.profileId) throw new ProviderProfileChangeError("profile_changed");
+  const instance = input.controlPlaneInstanceId.toLowerCase();
+  const grants = marker.grants.filter((grant) => grant.controlPlaneInstanceId !== instance || grant.grantId !== input.grantId);
+  if (grants.length === marker.grants.length) return { marker, changed: false };
+  return { marker: { ...marker, grants }, changed: true };
+}
+
+/**
+ * The retain-or-delete decision for a removed account's HOME (#3239), taken while its lease is held:
+ * every grant of this instance is dropped, and the HOME is `shared` (kept) when the marker still
+ * grants another control plane or cannot be verified. A marker-less HOME is not shared.
+ */
+export function retireProviderProfileMarker(
+  read: ProviderProfileRead,
+  input: { controlPlaneInstanceId: string },
+): { marker?: ProviderProfileMarker; changed: boolean; shared: boolean } {
+  if (read.state === "absent") return { changed: false, shared: false };
+  if (read.state === "unverifiable") return { changed: false, shared: true };
+  const { marker } = read;
+  const instance = input.controlPlaneInstanceId.toLowerCase();
+  const grants = marker.grants.filter((grant) => grant.controlPlaneInstanceId !== instance);
+  return { marker: { ...marker, grants }, changed: grants.length !== marker.grants.length, shared: grants.length > 0 };
+}
+
+/** Whether a HOME must be kept for another control plane: its marker grants one, or it cannot be
+ * verified. Re-checked immediately before a removed account's HOME is deleted. */
+export function providerProfileHomeShared(read: ProviderProfileRead, controlPlaneInstanceId: string | undefined): boolean {
+  if (read.state === "absent") return false;
+  if (read.state === "unverifiable") return true;
+  const instance = controlPlaneInstanceId?.toLowerCase();
+  return read.marker.grants.some((grant) => grant.controlPlaneInstanceId !== instance);
+}
+
+/** This control-plane instance's grant in a marker, if any. */
+export function providerProfileGrantFor(marker: ProviderProfileMarker, controlPlaneInstanceId: string | undefined): ProviderProfileGrant | undefined {
+  const instance = controlPlaneInstanceId?.toLowerCase();
+  return instance ? marker.grants.find((grant) => grant.controlPlaneInstanceId === instance) : undefined;
+}
+
 /** Validation shared by the worker frame and the runner config. */
 export function isProviderProfileId(value: unknown): value is string {
   return typeof value === "string" && UUID_V4.test(value);
+}
+
+/** Grant ids are control-plane UUIDs (any RFC 4122 version), lowercase in markers and frames. */
+export function isProviderProfileGrantId(value: unknown): value is string {
+  return typeof value === "string" && UUID.test(value);
 }
