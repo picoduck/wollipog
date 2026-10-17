@@ -33,9 +33,9 @@ runner and control-plane owner and per-process holder.
 
 | Status | Meaning |
 | --- | --- |
-| `pending` | An Owner or Admin authorized the grant; the runner has not confirmed the profile id it wrote. One per runner account. |
+| `pending` | An Owner or Admin authorized the grant (adoption), or the account's creator did (Add Account, `origin = 'created'`); the runner has not confirmed the profile id it wrote. One per runner account. |
 | `active` | The runner recorded the grant in the marker and reported the profile id. One per profile and control-plane instance. |
-| `revoked` | Revoked by an Owner or Admin, by account removal, by a coded runner refusal, or superseded by a newer grant of the same control plane to the same profile. |
+| `revoked` | Revoked by an Owner or Admin, by account removal, by a coded runner refusal, spent by an Add Account sign-in that recorded no profile-bearing account, or superseded by a newer grant of the same control plane to the same profile. |
 
 The marker holds one grant per control-plane instance, so a newer grant of the same control plane to
 the same profile (for example from a second runner on the same OS account) supersedes the older row
@@ -90,8 +90,64 @@ account reports do not repeat it. No reconnect is needed.
 Adoption is strict. After adoption only explicitly granted control planes may use the HOME; grants are
 never reconstructed from lease-journal owners. Other control planes that share the Machine's OS
 account lose the implicit access they had to the HOME. Sessions created after adoption record the
-profile id (see [Sessions](#sessions)). Automatic grants for accounts created through Add Account and
-managed profile paths are a later part of #3239.
+profile id (see [Sessions](#sessions)). Accounts created through Add Account are profiles from the
+start; see [Managed Profiles](#managed-profiles).
+
+## Managed Profiles
+
+An account created through Add Account on a v225 runner connected to a v225 control plane is a
+managed profile. Its HOME is `~/.agent-manager/profiles/<profileId>`: one root per SSH account,
+outside every runner's owner-namespaced data directory, named by a fresh random profile id. Existing
+account homes keep their paths, and an older control plane (or runner) still creates new homes at
+`<dataDir>/provider-accounts/<accountId>` without a marker.
+
+The control plane that creates the account is granted it automatically:
+
+1. `POST /api/runners/:id/provider-logins` without `accountId` (anyone who can manage the Machine)
+   records a pending grant with `origin = 'created'`, `granted_by` the caller and `granted_role` the
+   caller's organization role, and sends its id as `start_provider_login.profileGrantId`. A non-human
+   caller, or a runner without a recorded scope, gets no grant and today's HOME. Adoption and
+   revocation stay Owner/Admin only.
+2. The runner creates `.agent-manager` and `profiles` (0700 when missing) and refuses either one
+   when it is a link, owned by another user, or writable by group or others. It creates
+   `<profileId>` 0700 and refuses one that already exists. Its lease worker then writes the first
+   marker, holding the HOME's lease (`profile_create`), with this identity and only this control
+   plane's grant. Only then does the sign-in take the HOME's lease and start the provider.
+3. The start reply names the new account id; the control plane binds the pending grant to it (until
+   then the row's account key is a placeholder that matches no account). When the sign-in succeeds,
+   the runner records the account with its `profileId`, counts the grant as active, and reports the
+   account with `profile.access = 'granted'`; the account report completes the pending grant, as a
+   lost adoption reply does.
+
+Windows runners (including their WSL account homes) cannot verify a marker, so they ignore the grant
+and create today's HOME; the control plane spends the grant when the account is reported without a
+profile.
+
+A sign-in that does not record the account spends the grant on both sides:
+
+| Outcome | Runner | Control plane |
+| --- | --- | --- |
+| The start is refused (no agent, the profile cannot be created, the lease is unavailable) | Removes the new HOME | Revokes the grant from the start reply |
+| Cancelled, failed or timed out | Forgets the grant and removes the HOME unless the provider wrote credentials into it; a kept HOME has the grant removed from its marker under the lease | Revokes the grant when the sign-in inventory reports the settled sign-in |
+| A duplicate of an account already on the Machine | Deletes the new HOME, credentials included | Same as failed |
+
+A lost start reply leaves the grant pending and unbound. The runner still uses it, and the account
+reports `pending` access; adopting the account replaces the grant in the marker.
+
+## Replacement Runners
+
+A grant is bound to a profile, a control-plane instance and an organization/owner scope, never to a
+runner. A replacement runner (a new runner id, so a new owner hash and data directory) for the same
+control-plane instance and the same `~/runner.config.json` reports the same profile ids at
+registration and is listed the same active grants. After the old runner released the HOME's lease in
+an orderly shutdown, the replacement acquires it, binds new sessions to the same profile, and keeps
+resumable conversations, without any filesystem change. Because a managed HOME is outside the
+owner-namespaced data directory, the replacement may also retire it when the account is removed.
+
+A runner connected to another control-plane instance is refused at the lease as
+`profile_not_granted`, and its account reports show `not_granted`, until an Owner or Admin there
+adopts the profile. A stale lease left by a crashed predecessor is not taken over; that transition is
+#3241's.
 
 ## Web Actions
 
@@ -226,12 +282,25 @@ the marker once more immediately before deleting, after the lease is released, b
 journal lives inside the HOME. When no other control plane is granted, the existing deletion rules
 apply unchanged: a runner-created HOME is deleted only when nothing on the Machine still uses it.
 
+A runner-created HOME is one of two shapes, and nothing else is ever deleted:
+
+- `<dataDir>/provider-accounts/<accountId>`, under this runner's own data directory, as before.
+- A managed profile HOME, exactly `~/.agent-manager/profiles/<profileId>` for an account that records
+  that `profileId`. `.agent-manager` and `profiles` must be private real directories, the HOME
+  must be a real directory that resolves to itself, and this is checked again immediately before
+  deletion. An operator-configured account pointing into the root under another name, a linked
+  HOME or a linked root is kept. Any runner of the SSH account may retire a managed HOME, so a
+  replacement runner can remove an account its predecessor created.
+
+Deletion still follows the lease release, as it did before profiles: #3157 tracks serializing
+managed-directory removal with a competing acquisition, and this part does not change that window.
+
 ## Mixed Versions
 
 | Peer | Behavior |
 | --- | --- |
-| Runner below v225 | Every profile route returns 409 "This machine needs a newer runner for provider profiles. Update and restart the runner." Session creation with an account this control plane holds an active grant for returns the same sentence. The web hides the profile actions. |
-| Control plane below v225 | The runner never reports a profile-bearing account to it, and a HOME holding a marker is refused as `profile_unsupported_control_plane`. Marker-less homes behave as before. Session snapshots omit `providerProfileId`. |
+| Runner below v225 | Every profile route returns 409 "This machine needs a newer runner for provider profiles. Update and restart the runner." Session creation with an account this control plane holds an active grant for returns the same sentence. The web hides the profile actions. Add Account records no grant, and the runner creates today's HOME. |
+| Control plane below v225 | The runner never reports a profile-bearing account to it, and a HOME holding a marker is refused as `profile_unsupported_control_plane`. Marker-less homes behave as before. Session snapshots omit `providerProfileId`. Add Account sends no grant, so new accounts get today's HOME and no marker. |
 | Revoked or never-granted control plane | The runner refuses the HOME as `profile_not_granted`. Session creation with a revoked account returns 409 "Access to this provider profile was revoked for this control plane." |
 
 ## Authorization and Audit
@@ -240,6 +309,11 @@ Both routes require a human Owner or Admin who can access the runner; they are n
 the central gate also confines them to the personal control-plane organization like other Machine
 credential routes. Agent credentials are refused. Grant rows record `granted_by`/`granted_role` and
 `revoked_by`/`revoked_role`, and both routes are recorded in the content-free mutation audit.
+
+An Add Account grant is recorded by the sign-in route, which any person who can manage the Machine
+may call; its row records that person and role with `origin = 'created'`. When the control plane
+spends it automatically (a sign-in that settled without an account, or an account reported without
+a profile), `revoked_by`/`revoked_role` repeat the grantor's.
 
 ## Known Limits
 
@@ -255,3 +329,12 @@ credential routes. Agent credentials are refused. Grant rows record `granted_by`
   from the marker; the adoption then has to be repeated.
 - A grant activated on one runner reaches another online runner sharing the profile at its next
   registration.
+- A managed profile's HOME is shared by every runner on the SSH account, by design. A runner of
+  another control plane cannot use it without a grant, but grants do not stop a hostile process on
+  the same OS account (see [Premise](#premise)).
+- When the start reply of an Add Account sign-in is lost, the grant stays pending without an
+  account and is never completed; the account shows **Grant Pending** until an Owner or Admin adopts
+  it.
+- A sign-in whose runner stopped before it settled leaves its pending grant bound to an account that
+  never appears (the row is listed to that runner but grants nothing), and leaves its new HOME in the
+  managed root, as an interrupted sign-in leaves its directory today.

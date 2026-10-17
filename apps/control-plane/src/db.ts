@@ -12833,6 +12833,19 @@ export class ControlPlaneDb {
   }
 
   /**
+   * Bind a pending Add Account grant (#3239, origin `created`) to the account id the runner chose
+   * for the new account. The grant is recorded before the runner names the account, under the
+   * placeholder `fromAccountId`; afterwards it is one runner account's pending grant like an
+   * adoption's. Returns false when the grant is no longer that pending placeholder.
+   */
+  bindCreatedProviderProfileGrant(grantId: string, fromAccountId: string, providerAccountId: string): boolean {
+    return this.stmt(
+      `UPDATE provider_profile_grants SET provider_account_id=?
+        WHERE grant_id=? AND status='pending' AND origin='created' AND provider_account_id=?`,
+    ).run(providerAccountId, grantId, fromAccountId).changes === 1;
+  }
+
+  /**
    * Activate a pending grant with the profile id the runner wrote into the marker. Idempotent for
    * the same profile. The marker holds one grant per control plane, so an older active grant of
    * this control plane to the same profile is superseded (revoked) in the same transaction.

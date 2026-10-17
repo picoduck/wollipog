@@ -145,6 +145,14 @@ export class AsyncProviderHomeLeaseRegistry {
     return this.enqueue({ method: "profile_revoke", home, provider, profileId, grantId }).then(({ value }) => value);
   }
 
+  /** #3239: write the first marker of a new managed profile HOME, identity `profileId` with this
+   * control plane's grant, while the worker holds the HOME's lease. Refused when the HOME already
+   * holds a marker. */
+  async createProfile(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<void> {
+    if (this.closing) throw unavailable("shutdown admission closed");
+    await this.enqueue({ method: "profile_create", home, provider, profileId, grantId });
+  }
+
   /** #3239: the retain-or-delete decision for a removed account's HOME, taken while the worker
    * holds its lease: drops every grant of this control plane from the marker, then releases.
    * Resolves true only when the lease was released and no other control plane is granted. */

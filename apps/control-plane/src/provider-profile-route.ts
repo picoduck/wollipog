@@ -71,6 +71,85 @@ export function providerProfileSessionRefusal(
   return revoked && inScope(revoked) ? { error: PROVIDER_PROFILE_REVOKED_FOR_SESSION } : null;
 }
 
+/** The account key of an Add Account grant until the runner names the new account. `:` is not
+ * valid in an account id, so it can never match a reported account. */
+function createdGrantPlaceholder(grantId: string): string {
+  return `login:${grantId}`;
+}
+
+/**
+ * Add Account's automatic grant (#3239): the control plane that creates an account on a v225
+ * runner is granted its new managed profile. The pending row records the creating person and their
+ * organization role (any role that can manage the Machine); its id goes to the runner in
+ * `start_provider_login`, which writes it into the new HOME's marker. Undefined (the account keeps
+ * today's HOME) for an older runner, a non-human caller, or a runner without a recorded scope.
+ */
+export function authorizeCreatedProviderProfileGrant(
+  db: ControlPlaneDb,
+  runner: { runnerId: string; protocolVersion?: number | null },
+  principal: AuthPrincipal | null,
+  provider: "claude" | "codex",
+  now: number,
+): string | undefined {
+  if (!runnerSupportsProtocol(runner.protocolVersion, "providerProfiles") || principal?.kind !== "human") return undefined;
+  const grantId = randomUUID();
+  const authorized = db.authorizeProviderProfileGrant({
+    grantId, runnerId: runner.runnerId, providerAccountId: createdGrantPlaceholder(grantId), provider, origin: "created",
+    grantedBy: principal.userId, grantedRole: principal.role, now,
+  });
+  return authorized?.created ? authorized.grant.grantId : undefined;
+}
+
+/**
+ * The start reply for an Add Account grant: a started sign-in names the new account, which the
+ * pending grant is bound to so the account report completes it (`reconcileProviderProfileGrants`);
+ * a refused start spends it. A lost reply leaves it pending and unbound: the account then reports
+ * `pending` access until an Owner or Admin adopts it, which supersedes this grant in the marker.
+ */
+export function settleCreatedProviderProfileGrantStart(
+  db: ControlPlaneDb,
+  grantId: string,
+  outcome: { started: true; accountId: unknown } | { started: false },
+  principal: HumanPrincipal,
+  now: number,
+): void {
+  if (outcome.started && typeof outcome.accountId === "string" && ACCOUNT_ID.test(outcome.accountId)) {
+    try {
+      if (db.bindCreatedProviderProfileGrant(grantId, createdGrantPlaceholder(grantId), outcome.accountId)) return;
+    } catch {
+      // A pending grant already exists for that account id; this one cannot be completed.
+    }
+  }
+  db.revokeProviderProfileGrant({ grantId, revokedBy: principal.userId, revokedRole: principal.role, now });
+}
+
+const SETTLED_UNRECORDED_LOGIN = new Set(["failed", "cancelled", "timed_out"]);
+
+/**
+ * A new-account sign-in that settled without recording the account (failed, cancelled or timed
+ * out) spends its Add Account grant; the runner already removed the unused HOME, or dropped the
+ * grant from a HOME it kept. Returns the revoked grant ids.
+ */
+export function revokeUnrecordedCreatedProviderProfileGrants(
+  db: ControlPlaneDb,
+  runnerId: string,
+  logins: ReadonlyArray<{ accountId: string; status: string; sessionId?: string }>,
+  now: number,
+): string[] {
+  const revoked: string[] = [];
+  for (const login of logins) {
+    if (login.sessionId || !SETTLED_UNRECORDED_LOGIN.has(login.status) || !ACCOUNT_ID.test(login.accountId)) continue;
+    for (const grant of db.liveProviderProfileGrantsForAccount(runnerId, login.accountId)) {
+      if (grant.status !== "pending" || grant.origin !== "created" || grant.runnerId !== runnerId ||
+          grant.providerAccountId !== login.accountId) continue;
+      if (db.revokeProviderProfileGrant({ grantId: grant.grantId, revokedBy: grant.grantedBy, revokedRole: grant.grantedRole, now })) {
+        revoked.push(grant.grantId);
+      }
+    }
+  }
+  return revoked;
+}
+
 /** A runner configures at most 32 provider accounts, so it reports at most 32 profile ids. */
 const REPORTED_PROFILE_ID_LIMIT = 32;
 
@@ -101,8 +180,11 @@ export function providerProfileGrantsForRunner(
 }
 
 /** The lost-reply path: a runner reports an account whose HOME records this control plane's grant
- * (`granted` or `pending`) while the account's authorization is still pending here. A report with
- * no live grant at all is `ProviderProfileInventoryRevocations`'s concern. */
+ * (`granted` or `pending`) while the account's authorization is still pending here. This is also
+ * how an Add Account grant completes: the new account is reported with the profile it was created
+ * as. An account reported without any profile spends its Add Account grant, since the runner did
+ * not create one (a Windows host, say). A report with no live grant at all is
+ * `ProviderProfileInventoryRevocations`'s concern. */
 export function reconcileProviderProfileGrants(
   db: ControlPlaneDb,
   runnerId: string,
@@ -112,7 +194,14 @@ export function reconcileProviderProfileGrants(
   const completed: string[] = [];
   for (const account of accounts ?? []) {
     const profile = account.profile;
-    if (!profile || profile.access === "not_granted" || !PROFILE_ID.test(profile.id)) continue;
+    if (!profile) {
+      for (const grant of db.liveProviderProfileGrantsForAccount(runnerId, account.id)) {
+        if (grant.status !== "pending" || grant.origin !== "created" || grant.runnerId !== runnerId || grant.providerAccountId !== account.id) continue;
+        db.revokeProviderProfileGrant({ grantId: grant.grantId, revokedBy: grant.grantedBy, revokedRole: grant.grantedRole, now });
+      }
+      continue;
+    }
+    if (profile.access === "not_granted" || !PROFILE_ID.test(profile.id)) continue;
     for (const grant of db.liveProviderProfileGrantsForAccount(runnerId, account.id)) {
       if (grant.status !== "pending" || grant.runnerId !== runnerId || grant.providerAccountId !== account.id) continue;
       if (db.completeProviderProfileGrant(grant.grantId, profile.id, now)) completed.push(grant.grantId);

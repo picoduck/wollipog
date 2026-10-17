@@ -286,6 +286,23 @@ export function adoptProviderProfileMarker(
 }
 
 /**
+ * The first marker of a new managed profile HOME (Add Account, #3239): identity `profileId` with
+ * only `grant`. The HOME must hold no marker yet; anything else is refused rather than merged, so a
+ * creation can never take over a HOME that already has an identity.
+ */
+export function createProviderProfileMarker(
+  read: ProviderProfileRead,
+  input: { provider: "claude" | "codex"; profileId: string; grant: ProviderProfileGrant; now?: string },
+): { marker: ProviderProfileMarker; changed: true } {
+  if (read.state === "unverifiable") throw new ProviderProfileChangeError("profile_unverifiable");
+  if (read.state === "present") throw new ProviderProfileChangeError("profile_changed");
+  if (!isProviderProfileId(input.profileId)) throw new ProviderProfileChangeError("profile_unverifiable");
+  const { marker } = adoptProviderProfileMarker(read, { provider: input.provider, grant: input.grant, newProfileId: input.profileId,
+    ...(input.now ? { now: input.now } : {}) });
+  return { marker, changed: true };
+}
+
+/**
  * The marker without one exact grant of one control-plane instance. Other instances' grants, and a
  * newer grant of the same instance, are kept. A HOME without a marker has nothing to revoke; a
  * marker holding a different profile is refused rather than edited.

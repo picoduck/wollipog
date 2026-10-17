@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import test from "node:test";
-import type { AgentDefinition, ProviderLoginView } from "@wollipog/protocol";
+import test, { type TestContext } from "node:test";
+import { PROTOCOL_VERSION, type AgentDefinition, type ProviderLoginView } from "@wollipog/protocol";
 import fc from "fast-check";
 import type { AgentProcess, SpawnAgentOptions } from "./spawn.js";
 import {
@@ -14,8 +14,12 @@ import {
   codexCredentialIdentity,
   parseCodexDeviceLoginOutput,
   ProviderLoginSupervisor,
+  type ProviderLoginProfileOptions,
   type ResolvedProviderLogin,
 } from "./provider-login.js";
+import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
+import { isProviderProfileId, readProviderProfileMarker } from "./provider-profile.js";
+import { ProviderProfileGrants } from "./provider-profile-grants.js";
 
 test("provider sign-in only uses the saved installation in its execution context", () => {
   const system: AgentDefinition = { id: "codex", name: "Codex", command: "/usr/bin/codex",
@@ -94,8 +98,10 @@ function fixture(options: {
   credentialHomeInUse?: () => boolean;
   removalBlocker?: () => string | undefined;
   serializeHomeRetirement?: <T>(work: () => Promise<T>) => Promise<T>;
+  profiles?: (root: string) => ProviderLoginProfileOptions;
+  platform?: NodeJS.Platform;
 } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-login-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-provider-login-")));
   const configPath = join(root, "runner.config.json");
   writeFileSync(configPath, `${JSON.stringify({ runnerId: "machine", untouched: true })}\n`);
   const children: FakeLoginChild[] = [];
@@ -104,7 +110,7 @@ function fixture(options: {
   const releases: string[] = [];
   const added: string[] = [];
   const removed: string[] = [];
-  const accounts: Array<{ id: string; label: string; provider: "claude" | "codex"; directory: string }> = [];
+  const accounts: Array<{ id: string; label: string; provider: "claude" | "codex"; directory: string; profileId?: string }> = [];
   const supervisor = new ProviderLoginSupervisor({
     dataDir: root,
     configPath,
@@ -124,6 +130,8 @@ function fixture(options: {
     ...(options.credentialHomeInUse ? { credentialHomeInUse: options.credentialHomeInUse } : {}),
     ...(options.removalBlocker ? { removalBlocker: options.removalBlocker } : {}),
     ...(options.serializeHomeRetirement ? { serializeHomeRetirement: options.serializeHomeRetirement } : {}),
+    ...(options.profiles ? { profiles: options.profiles(root) } : {}),
+    ...(options.platform ? { platform: options.platform } : {}),
     timeoutMs: options.timeoutMs,
     ceremonyTimeoutMs: options.ceremonyTimeoutMs,
     spawn: ((spawnOptions: SpawnAgentOptions) => {
@@ -1033,4 +1041,172 @@ test("removing an account is refused while it signs in, while an agent defaults 
   } finally {
     unwritable.cleanup();
   }
+});
+
+const posixOnly = { skip: process.platform === "win32" };
+const INSTANCE = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+const GRANT = "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+
+async function eventually(condition: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 500 && !condition(); attempt++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(condition(), what);
+}
+
+function entries(directory: string): string[] {
+  try { return readdirSync(directory); } catch { return []; }
+}
+
+/** A supervisor wired like the runner (#3239): the real lease worker, a v225 control plane's grants,
+ * and managed profiles created under `<root>/home/.agent-manager/profiles`. */
+function profileFixture(t: TestContext, options: Parameters<typeof fixture>[0] & { create?: ProviderLoginProfileOptions["create"] } = {}) {
+  const state: { grants?: ProviderProfileGrants; registry?: AsyncProviderHomeLeaseRegistry } = {};
+  const settled: Array<Parameters<ProviderLoginProfileOptions["settle"]>[0]> = [];
+  let profileRoot!: string;
+  const fx = fixture({
+    ...options,
+    acquireLease: (directory, provider, cancellation) => state.registry!.acquireHome(directory, provider, cancellation),
+    releaseLease: (directory) => state.registry!.releaseHome(directory),
+    profiles: (root) => ({
+      root: profileRoot = join(root, "home", ".agent-manager", "profiles"),
+      create: options.create ?? (async (home, provider, profileId, grantId) => {
+        await state.registry!.createProfile(home, provider, profileId, grantId);
+        state.grants!.recordCreated(profileId, grantId);
+      }),
+      settle: async (input) => {
+        state.grants!.settleCreated(input.profileId, input.grantId, input.recorded);
+        if (!input.recorded && !input.homeRemoved) {
+          await state.registry!.revokeProfileGrant(input.home, input.provider, input.profileId, input.grantId);
+        }
+        settled.push(input);
+      },
+    }),
+  });
+  mkdirSync(join(fx.root, "home"));
+  const grants = state.grants = new ProviderProfileGrants({ controlPlaneInstanceId: INSTANCE, accounts: () => fx.accounts });
+  state.registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), { controlPlaneInstanceId: INSTANCE,
+    profileAccess: () => grants.access(), expectedProfileIdForHome: (home) => grants.expectedProfileIdForHome(home) });
+  grants.synchronize(PROTOCOL_VERSION, []);
+  t.after(async () => { await state.registry!.close(); fx.cleanup(); });
+  return { fx, grants, registry: state.registry, settled, root: profileRoot };
+}
+
+test("Add Account with this control plane's grant creates a managed profile HOME whose marker grants it", posixOnly, async (t) => {
+  const p = profileFixture(t);
+  const started = await p.fx.supervisor.startAccount({ provider: "claude", label: "Work", profileGrantId: GRANT });
+  const home = p.fx.spawns[0]!.cwd as string;
+  const profileId = basename(home);
+  assert.equal(dirname(home), p.root, "the HOME is at the SSH-account-level root, outside the runner's data directory");
+  assert.ok(isProviderProfileId(profileId), "named by a fresh profile id");
+  for (const directory of [dirname(p.root), p.root, home]) {
+    assert.equal(statSync(directory).mode & 0o777, 0o700, `${directory} is private`);
+  }
+  const read = readProviderProfileMarker(home);
+  assert.equal(read.state, "present");
+  assert.equal(read.state === "present" && read.marker.profileId, profileId);
+  assert.deepEqual(read.state === "present" && read.marker.grants.map((grant) => [grant.controlPlaneInstanceId, grant.grantId]),
+    [[INSTANCE, GRANT]], "the marker grants exactly this control plane");
+  assert.deepEqual(p.grants.access().activeProfileIds, [profileId], "the sign-in may use its HOME");
+
+  writeFileSync(join(home, ".credentials.json"), "{}");
+  p.fx.children[0]!.close(0);
+  await eventually(() => p.settled.length === 1 && p.fx.supervisor.views()[0]?.status === "succeeded", "the sign-in completes");
+  assert.deepEqual(p.fx.accounts, [{ id: started.accountId, label: "Work", provider: "claude", directory: home, profileId }]);
+  const saved = JSON.parse(readFileSync(p.fx.configPath, "utf8")) as { providerAccounts: Array<{ directory: string; profileId?: string }> };
+  assert.deepEqual(saved.providerAccounts.map((account) => [account.directory, account.profileId]), [[home, profileId]],
+    "the configuration records the profile id");
+  assert.equal(p.settled[0]?.recorded, true);
+  assert.deepEqual(p.grants.accountProfile(p.fx.accounts[0]!), { id: profileId, access: "granted" },
+    "the account report carries the profile, which completes the control plane's pending grant");
+  assert.equal(existsSync(join(p.fx.root, "provider-accounts")), false, "nothing is created under the data directory");
+});
+
+test("without a grant, or on Windows, Add Account keeps today's HOME and writes no marker", posixOnly, async (t) => {
+  const p = profileFixture(t);
+  await p.fx.supervisor.startAccount({ provider: "claude", label: "Legacy" });
+  const home = p.fx.spawns[0]!.cwd as string;
+  assert.equal(dirname(home), join(p.fx.root, "provider-accounts"));
+  assert.equal(readProviderProfileMarker(home).state, "absent");
+  assert.equal(existsSync(p.root), false, "no managed profile root is created");
+  p.fx.children[0]!.close(0);
+  await eventually(() => p.fx.supervisor.views()[0]?.status === "succeeded", "the legacy sign-in completes");
+  assert.equal(p.fx.accounts[0]?.profileId, undefined);
+  assert.deepEqual(p.settled, []);
+
+  const windows = profileFixture(t, { platform: "win32" });
+  await windows.fx.supervisor.startAccount({ provider: "claude", label: "Windows", profileGrantId: GRANT });
+  assert.equal(dirname(windows.fx.spawns[0]!.cwd as string), join(windows.fx.root, "provider-accounts"),
+    "a marker cannot be verified on Windows, so the grant is ignored");
+  assert.equal(existsSync(windows.root), false);
+  windows.fx.supervisor.cancel(windows.fx.supervisor.views()[0]!.operationId);
+  await eventually(() => windows.fx.releases.length === 1, "the Windows sign-in settles");
+
+  await assert.rejects(p.fx.supervisor.startAccount({ provider: "claude", label: "Bad", profileGrantId: "not-a-grant" }), /grant is invalid/u);
+});
+
+test("a cancelled or failed managed-profile sign-in leaves no profile HOME and never uses its grant again", posixOnly, async (t) => {
+  const p = profileFixture(t, { probe: async () => false });
+  await p.fx.supervisor.startAccount({ provider: "claude", label: "Cancelled", profileGrantId: GRANT });
+  const cancelled = p.fx.spawns[0]!.cwd as string;
+  mkdirSync(join(cancelled, "log"));
+  p.fx.supervisor.cancel(p.fx.supervisor.views()[0]!.operationId);
+  await eventually(() => p.settled.length === 1, "the cancelled sign-in settles");
+  assert.equal(existsSync(cancelled), false, "provider scratch state and the marker go with the HOME");
+  assert.deepEqual(p.settled[0], { home: cancelled, provider: "claude", profileId: basename(cancelled), grantId: GRANT,
+    recorded: false, homeRemoved: true });
+  assert.deepEqual(p.grants.access().activeProfileIds, []);
+  assert.deepEqual(p.fx.accounts, []);
+
+  await p.fx.supervisor.startAccount({ provider: "claude", label: "Failed", profileGrantId: GRANT });
+  const failed = p.fx.spawns[1]!.cwd as string;
+  p.fx.children[1]!.close(1);
+  await eventually(() => p.settled.length === 2, "the failed sign-in settles");
+  assert.equal(existsSync(failed), false);
+  assert.equal(p.settled[1]?.recorded, false);
+
+  // A provider that already wrote credentials keeps them for inspection, but the marker no longer grants anyone.
+  await p.fx.supervisor.startAccount({ provider: "claude", label: "Credentialed", profileGrantId: GRANT });
+  const kept = p.fx.spawns[2]!.cwd as string;
+  writeFileSync(join(kept, ".credentials.json"), "{}");
+  p.fx.children[2]!.close(1);
+  await eventually(() => p.settled.length === 3, "the credentialed sign-in settles");
+  assert.equal(existsSync(join(kept, ".credentials.json")), true);
+  assert.equal(p.settled[2]?.homeRemoved, false);
+  const read = readProviderProfileMarker(kept);
+  assert.deepEqual(read.state === "present" && read.marker.grants, [], "the discarded grant is dropped under the HOME's lease");
+  assert.deepEqual(p.grants.access().activeProfileIds, []);
+});
+
+test("a duplicate sign-in's managed profile HOME is deleted with its credentials", posixOnly, async (t) => {
+  const p = profileFixture(t, { identify: async () => "same-person" });
+  const existing = join(p.fx.root, "existing");
+  mkdirSync(existing);
+  p.fx.accounts.push({ id: "existing", label: "Personal", provider: "claude", directory: existing });
+  await p.fx.supervisor.startAccount({ provider: "claude", label: "Again", profileGrantId: GRANT });
+  const home = p.fx.spawns[0]!.cwd as string;
+  writeFileSync(join(home, ".credentials.json"), "{}");
+  p.fx.children[0]!.close(0);
+  await eventually(() => p.settled.length === 1, "the duplicate sign-in settles");
+  assert.match(p.fx.supervisor.views()[0]?.error ?? "", /already on this Machine/u);
+  assert.equal(existsSync(home), false);
+  assert.equal(p.settled[0]?.recorded, false);
+  assert.deepEqual(p.fx.accounts.map((account) => account.id), ["existing"]);
+});
+
+test("a managed profile that cannot be created starts no sign-in and leaves nothing behind", posixOnly, async (t) => {
+  const refused = profileFixture(t, { create: async () => { throw new Error("marker refused"); } });
+  await assert.rejects(refused.fx.supervisor.startAccount({ provider: "claude", label: "Refused", profileGrantId: GRANT }),
+    /provider profile could not be created: marker refused/u);
+  assert.equal(refused.fx.spawns.length, 0);
+  assert.deepEqual(entries(refused.root), [], "the new HOME is removed");
+  assert.equal(refused.settled[0]?.recorded, false);
+
+  // A linked `.agent-manager` is not a private directory, so nothing is created through it.
+  const linked = profileFixture(t);
+  const elsewhere = join(linked.fx.root, "elsewhere");
+  mkdirSync(elsewhere);
+  symlinkSync(elsewhere, dirname(linked.root));
+  await assert.rejects(linked.fx.supervisor.startAccount({ provider: "claude", label: "Linked", profileGrantId: GRANT }),
+    /not a private directory/u);
+  assert.equal(linked.fx.spawns.length, 0);
+  assert.deepEqual(entries(elsewhere), []);
 });

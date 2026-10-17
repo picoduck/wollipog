@@ -17,6 +17,8 @@ import {
 } from "./provider-accounts.js";
 import { killTreeAndWait, spawnAgent, trackPendingKill, type AgentProcess } from "./spawn.js";
 import type { LeaseCancellation } from "./provider-home-lease-async.js";
+import { isProviderProfileGrantId } from "./provider-profile.js";
+import { createManagedProviderProfileHome, isManagedProviderProfileHome } from "./provider-profile-home.js";
 
 const LOGIN_OUTPUT_LIMIT = 64 * 1024;
 const LOGIN_CODE_LIMIT = 4_096;
@@ -102,6 +104,21 @@ export interface ResolvedProviderLogin {
   sessionId?: string;
   /** Discovery-verified support for the structured Codex App Server contract. */
   structuredCodex?: boolean;
+  /** #3239: the managed provider profile this new account's HOME was created as. */
+  profile?: { id: string; grantId: string };
+}
+
+/** #3239: how Add Account creates managed provider profile HOMEs. */
+export interface ProviderLoginProfileOptions {
+  /** `~/.agent-manager/profiles`: new managed HOMEs are created here, and only exact
+   * `<root>/<profileId>` HOMEs of accounts recording that id may be deleted from it. */
+  root: string;
+  /** Write the new HOME's first marker, identity `profileId` with this control plane's grant, under
+   * the HOME's lease, and make the grant usable for this sign-in. */
+  create(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<void>;
+  /** The sign-in settled. Unless the account was recorded, stop using the grant and, when the HOME
+   * was kept (the provider wrote credentials into it), drop the grant from its marker. */
+  settle(input: { home: string; provider: "claude" | "codex"; profileId: string; grantId: string; recorded: boolean; homeRemoved: boolean }): Promise<void>;
 }
 
 interface ActiveLogin {
@@ -156,6 +173,10 @@ export interface ProviderLoginSupervisorOptions {
    * their provider-HOME references when they finish, so without this a pass that captured the
    * account before removal could re-acquire the HOME between deletion's release and its removal. */
   serializeHomeRetirement?: <T>(work: () => Promise<T>) => Promise<T>;
+  /** #3239: managed provider profiles for accounts created with a control-plane grant. Without it a
+   * grant is ignored and every new account HOME is created under `dataDir` as before. */
+  profiles?: ProviderLoginProfileOptions;
+  platform?: NodeJS.Platform;
   timeoutMs?: number;
   ceremonyTimeoutMs?: number;
   spawn?: typeof spawnAgent;
@@ -311,6 +332,11 @@ export function codexCredentialIdentity(authJson: string): string | undefined {
   return user ? JSON.stringify(["codex", user, account ?? null]) : undefined;
 }
 
+/** The sign-in could not take its HOME's lease, so it never held the HOME. */
+class ProviderLoginLeaseUnavailable extends Error {
+  constructor() { super("The provider credential home is unavailable or already in use."); }
+}
+
 export class ProviderLoginSupervisor {
   private readonly active = new Map<string, ActiveLogin>();
   private readonly pending = new Map<string, { resolved: ResolvedProviderLogin; controller: AbortController }>();
@@ -336,11 +362,12 @@ export class ProviderLoginSupervisor {
   }
 
   async startAccount(
-    input: { provider: "claude" | "codex"; label: string } | { accountId: string },
+    input: { provider: "claude" | "codex"; label: string; profileGrantId?: string } | { accountId: string },
     installationSelections: Array<{ context: AgentContext; installationId: string }> = [],
   ): Promise<ProviderLoginView> {
     let account: RunnerProviderAccount;
     let persistAccount: boolean;
+    let profile: ResolvedProviderLogin["profile"];
     if ("accountId" in input) {
       const configured = this.options.accounts.find((candidate) => candidate.id === input.accountId);
       if (!configured) throw new Error("Provider account is not configured on this Machine.");
@@ -363,14 +390,22 @@ export class ProviderLoginSupervisor {
         operation.resolved.provider === input.provider && comparableLabel(operation.resolved.label) === comparable)) {
         throw new Error("A sign-in for an account with this label is already running.");
       }
+      if (input.profileGrantId !== undefined && !isProviderProfileGrantId(input.profileGrantId)) {
+        throw new Error("The profile grant is invalid.");
+      }
       let id: string;
       do id = `${accountSlug(label)}-${randomUUID().slice(0, 8)}`;
       while (this.options.accounts.some((candidate) => candidate.id === id));
+      // #3239: with this control plane's grant the account becomes a managed profile at the
+      // SSH-account-level root; markers cannot be verified on Windows, which keeps today's path.
+      const profiles = (this.options.platform ?? process.platform) !== "win32" ? this.options.profiles : undefined;
+      if (profiles && input.profileGrantId) profile = { id: randomUUID(), grantId: input.profileGrantId };
       account = {
         id,
         label,
         provider: input.provider,
-        directory: join(this.options.dataDir, "provider-accounts", id),
+        directory: profile && profiles ? join(profiles.root, profile.id) : join(this.options.dataDir, "provider-accounts", id),
+        ...(profile ? { profileId: profile.id } : {}),
       };
       persistAccount = true;
     }
@@ -390,7 +425,7 @@ export class ProviderLoginSupervisor {
     for (const name of PROVIDER_LOGIN_DESCRIPTORS[account.provider].scrubEnv) {
       delete env[name];
     }
-    return (await this.startResolved({
+    const resolved: ResolvedProviderLogin = {
       accountId: account.id,
       label: account.label,
       provider: account.provider,
@@ -402,7 +437,45 @@ export class ProviderLoginSupervisor {
       persistAccount,
       structuredCodex: account.provider === "codex" && agent.codexAppServer?.status === "supported" &&
         supportsStructuredCodexDeviceLogin(agent.codexAppServer.installedVersion),
-    })).view;
+      ...(profile ? { profile } : {}),
+    };
+    if (!resolved.profile) return (await this.startResolved(resolved)).view;
+    await this.createProfileHome(resolved, resolved.profile);
+    try {
+      return (await this.startResolved(resolved)).view;
+    } catch (error) {
+      // startResolved removed the unused HOME wherever its lease was released; a lease that was
+      // never taken leaves the fresh HOME this sign-in created and nobody else knows.
+      if (error instanceof ProviderLoginLeaseUnavailable) this.cleanupUnusedDirectory(resolved);
+      await this.settleProfile(resolved, false);
+      throw error;
+    }
+  }
+
+  /** Create a new managed profile HOME and its first marker before the sign-in takes its lease. */
+  private async createProfileHome(resolved: ResolvedProviderLogin, profile: { id: string; grantId: string }): Promise<void> {
+    const profiles = this.options.profiles!;
+    // Its refusals are path-free; the grant is not recorded yet, so the refused start is enough.
+    createManagedProviderProfileHome(profiles.root, profile.id, this.options.platform);
+    try {
+      await profiles.create(resolved.directory, resolved.provider, profile.id, profile.grantId);
+    } catch (error) {
+      // The HOME is this sign-in's own and holds no credentials; nothing may keep it.
+      this.cleanupUnusedDirectory(resolved);
+      await this.settleProfile(resolved, false);
+      throw new Error(`The provider profile could not be created: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }
+
+  /** Report a created profile's settlement; never throws, since the sign-in already has a result. */
+  private async settleProfile(resolved: ResolvedProviderLogin, recorded: boolean): Promise<void> {
+    if (!resolved.profile || !this.options.profiles) return;
+    try {
+      await this.options.profiles.settle({ home: resolved.directory, provider: resolved.provider, profileId: resolved.profile.id,
+        grantId: resolved.profile.grantId, recorded, homeRemoved: !existsSync(resolved.directory) });
+    } catch {
+      // The control plane's row is authoritative; the next registration removes a grant it no longer lists.
+    }
   }
 
   async startResolved(resolved: ResolvedProviderLogin): Promise<{ view: ProviderLoginView; completion: Promise<"completed" | "cancelled" | "failed"> }> {
@@ -420,11 +493,12 @@ export class ProviderLoginSupervisor {
       });
     } catch {
       if (this.pending.get(resolved.accountId) === pending) this.pending.delete(resolved.accountId);
-      throw new Error("The provider credential home is unavailable or already in use.");
+      throw new ProviderLoginLeaseUnavailable();
     }
     if (this.stopped || pending.controller.signal.aborted) {
       // Covers cancellation in the caller's continuation after an already accepted lease.
-      await this.release(resolved.directory);
+      const released = await this.release(resolved.directory);
+      if (released && resolved.profile) this.cleanupUnusedDirectory(resolved);
       this.pending.delete(resolved.accountId);
       throw new Error("The provider sign-in was canceled before launch.");
     }
@@ -774,6 +848,7 @@ export class ProviderLoginSupervisor {
     const reaped = await this.terminate(operation);
     let result: "completed" | "cancelled" | "failed" = "failed";
     let duplicate: RunnerProviderAccount | undefined;
+    let profileSettled = false;
     if (operation.cancelled) {
       result = "cancelled";
       this.update(operation, {
@@ -833,10 +908,15 @@ export class ProviderLoginSupervisor {
             label: operation.resolved.label,
             provider: operation.resolved.provider,
             directory: operation.resolved.directory,
+            ...(operation.resolved.profile ? { profileId: operation.resolved.profile.id } : {}),
           };
           const next = [...this.options.accounts, account];
           this.writeAccounts(this.options.configPath, next);
           this.options.accounts.push(account);
+          if (operation.resolved.profile) {
+            profileSettled = true;
+            await this.settleProfile(operation.resolved, true);
+          }
           await this.options.onAccountAdded(account);
         } else {
           await this.options.onAccountAdded({
@@ -870,6 +950,8 @@ export class ProviderLoginSupervisor {
       if (duplicate) this.removeDirectory(operation.resolved.directory);
       else this.cleanupUnusedDirectory(operation.resolved);
     }
+    // A managed profile whose account was not recorded never uses its grant again (#3239).
+    if (!profileSettled) await this.settleProfile(operation.resolved, false);
     // The async release is part of settlement. Keep the account reserved until cleanup finishes,
     // otherwise a replacement login can write into the same HOME while this one removes it.
     this.active.delete(operation.view.operationId);
@@ -985,8 +1067,16 @@ export class ProviderLoginSupervisor {
    * Machine still depends on it. Returns whether the home is gone. */
   private async deleteRemovedCredentialHome(account: RunnerProviderAccount, options: ProviderAccountRemovalOptions): Promise<boolean> {
     const managedRoot = resolve(this.options.dataDir, "provider-accounts");
-    if (dirname(resolve(account.directory)) !== managedRoot) return false;
+    // #3239: a managed profile HOME lives at the SSH-account-level root, outside this runner's
+    // owner-namespaced data directory, so a replacement runner may retire it too. Only the exact
+    // `<root>/<profileId>` of an account recording that id qualifies, re-verified before deletion.
+    const profileRoot = this.options.profiles?.root;
+    const profileHome = profileRoot !== undefined && account.profileId !== undefined &&
+      resolve(account.directory) === join(resolve(profileRoot), account.profileId);
+    const verifiedProfileHome = () => isManagedProviderProfileHome(profileRoot!, account.directory, account.profileId);
+    if (!profileHome && dirname(resolve(account.directory)) !== managedRoot) return false;
     if (!existsSync(account.directory)) return true;
+    if (profileHome && !verifiedProfileHome()) return false;
     if (this.options.credentialHomeInUse?.(account)) return false;
     let exclusive: boolean;
     try {
@@ -1010,6 +1100,7 @@ export class ProviderLoginSupervisor {
     } catch {
       return false;
     }
+    if (profileHome && !verifiedProfileHome()) return false;
     return this.removeDirectory(account.directory);
   }
 

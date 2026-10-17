@@ -687,9 +687,10 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      and their results, `RegisterMessage.providerProfileIds`, `RegisteredMessage.providerProfileGrants`
 //      (the complete active grants for the profiles this runner reports, plus its own accounts'
 //      pending grants), `ProviderAccountDefinition.profile`, and `SessionSnapshot.providerProfileId`
-//      (the profile a session's account binding recorded). The control plane sends
-//      profile commands only to a v225+ runner; a runner projects profiles, and uses a HOME holding
-//      a profile marker, only for a v225+ control plane that lists an active grant for it.
+//      (the profile a session's account binding recorded), and `StartProviderLoginMessage.profileGrantId`
+//      (the pending grant for an account created through Add Account as a managed profile). The
+//      control plane sends profile commands only to a v225+ runner; a runner projects profiles, and
+//      uses a HOME holding a profile marker, only for a v225+ control plane that lists a grant for it.
 // 226: review sessions (#3368): `SessionLaunchSpec.review`, `SessionView.kind`/`review`,
 //      `RunnerRuntimeInfo.reviewSession` and the `review_session_update` reply. The control plane
 //      creates a review session only on a v226+ runner that advertises the reviewer, and the
@@ -10015,6 +10016,11 @@ export interface StartProviderLoginMessage {
   accountId?: string;
   /** Exact Machine choices from the control plane. Missing chosen targets fail closed on runner. */
   installationSelections?: Array<{ context: AgentContext; installationId: string }>;
+  /** Protocol v225 (#3239): the pending grant the control plane recorded for a new account. The
+   * runner creates the account as a managed provider profile whose marker records this grant. Never
+   * sent with `accountId`; a runner that cannot create a profile ignores it and the account reports
+   * no profile, which spends the grant. */
+  profileGrantId?: string;
 }
 
 /** Transient paste-back input. The runner writes it to the supervised child's stdin and retains
