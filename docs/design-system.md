@@ -1140,7 +1140,11 @@ and whether their result came back. It is one list of turn groups, never a card 
     sits under the actions and the notice stays. While it shows, the group's badge is omitted, so the
     state word appears once in the group; once acknowledged the notice goes and the badge reads
     Missing Result Acknowledged (neutral).
-  - **Result Blocked** (warning): the finished job's sentence, then **Stop <job name>…** for the turn's
+  - **Result Blocked** (warning): the finished job's sentence, then **Acknowledge** to clear all
+    currently reported blocked-result alerts without confirmation. Helper: "Clears this alert from
+    session status. Background jobs and held results are kept." Acknowledged entries stay as neutral
+    **Acknowledged** notices, with their time; the session's next relevant status appears immediately.
+    New blocked results raise fresh attention. Recovery stays separate: **Stop <job name>…** for the turn's
     one unfinished job, behind Job Detail's confirmation. Unavailable, the button stays disabled,
     described by its reason as a body line; with several unfinished jobs the line says to open one.
   - **Result Pending, Transcript Delayed, Notification Pending** (compact info): one sentence ("Returning

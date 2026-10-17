@@ -24,7 +24,7 @@ import {
   type SessionView,
   type StopOperationView,
 } from "@wollipog/protocol";
-import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou, shownWatchdogDelivery } from "./background-delivery-status.js";
+import { ACKNOWLEDGE_BLOCKED_RESULT_EFFECT, BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou, shownWatchdogDelivery } from "./background-delivery-status.js";
 
 export type StatusTone = "info" | "success" | "warning" | "danger" | "neutral" | "review";
 
@@ -608,7 +608,9 @@ export function sessionStatusSummary(
       tone: backgroundDeliveryNeedsYou(deliveryState) ? "warning" : "info",
       pulse: false,
     },
-    description: BACKGROUND_DELIVERY_STATUS[deliveryState].description,
+    description: BACKGROUND_DELIVERY_STATUS[deliveryState].description +
+      (deliveryState === "continuation_blocked" && watched.blockedResultRevision
+        ? ` ${ACKNOWLEDGE_BLOCKED_RESULT_EFFECT}` : ""),
     needsYou: backgroundDeliveryNeedsYou(deliveryState),
     delivery: watched,
   } : null;

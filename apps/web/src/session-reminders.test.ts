@@ -113,6 +113,21 @@ test("pending reminders make Active and Snoozed mutually exclusive across every 
   assert.equal(sessionVisibleForReminderMode(omittedApproval, reminder(omittedApproval.id), "snoozed"), true);
 });
 
+test("acknowledged blocked results reveal other status without retaining attention or waking a snoozed session (#3408)", () => {
+  const candidate = session("acknowledged", "idle", { backgroundDeliveries: [{
+    parentTurnId: "turn-1", jobCount: 1, terminalCount: 1,
+    blockedResultRevision: "revision-1", blockedResultAcknowledgedAt: 1_000, unfinishedSiblingJobs: 1,
+  }] });
+  assert.equal(sessionStatusSummary(candidate).primary.meta.label, "Awaiting Prompt");
+  assert.equal(sessionStatusSummary(candidate).more, 0);
+  assert.equal(snoozedSessionAttentionReason(candidate), null);
+  assert.equal(sessionVisibleForReminderMode(candidate, reminder(candidate.id), "ordinary"), false);
+  candidate.backgroundDeliveries!.push({ parentTurnId: "turn-2", jobCount: 1, terminalCount: 1,
+    watchdogState: "accepted_without_result", continuationId: "missing", missingResultAt: 2_000 });
+  assert.equal(sessionStatusSummary(candidate).primary.meta.label, "Result Missing");
+  assert.equal(snoozedSessionAttentionReason(candidate)?.label, "Result Missing");
+});
+
 test("snoozed attention uses the shared delivery-watchdog presentation", () => {
   const cases = [
     ["terminal_without_continuation", "Result Pending", "pending", /returning the result automatically.*No action is needed/s],

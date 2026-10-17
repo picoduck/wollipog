@@ -1034,6 +1034,30 @@ function blockedSession(id: string, extraRunning = false): SessionView {
   });
 }
 
+test("Result Blocked can be acknowledged with an offline runner and keeps all jobs inspectable (#3408)", async () => {
+  const session = blockedSession("session-acknowledge");
+  session.backgroundDeliveries![0]!.blockedResultRevision = "snapshot-1";
+  const calls: unknown[] = [];
+  const client = { acknowledgeBackgroundBlockedResults: async (id: string, targets: unknown) => {
+    calls.push({ id, targets });
+    return { ...session, backgroundDeliveries: [{ ...session.backgroundDeliveries![0]!,
+      watchdogState: undefined, blockedResultAcknowledgedAt: Date.now() }] };
+  } } as unknown as ApiClient;
+  const panel = await mountBackgroundWork({ session, runnerOnline: false }, client);
+  try {
+    const acknowledge = [...panel.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Acknowledge")!;
+    assert.ok(acknowledge);
+    assert.match(panel.container.textContent!, /Background jobs and held results are kept/);
+    await act(async () => { acknowledge.click(); });
+    assert.equal(calls.length, 1);
+    assert.equal(panel.container.querySelector('.notice[data-state="continuation_blocked"]'), null);
+    assert.match(panel.container.textContent!, /Acknowledged/);
+    assert.equal(panel.container.querySelectorAll("button.background-job-row").length, session.backgroundJobs!.length);
+    assert.equal(session.backgroundJobs!.filter((job) => job.terminalStatus == null).length, 1);
+  } finally { await panel.dispose(); }
+});
+
 test("Result Blocked offers Stop <job name>… behind the Job Detail confirmation, and says why when it can't (#2859)", async () => {
   const stops: string[] = [];
   const confirmations: ConfirmationOptions[] = [];

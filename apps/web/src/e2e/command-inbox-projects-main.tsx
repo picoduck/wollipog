@@ -2365,6 +2365,20 @@ const client = {
     pushSession(value);
     return { sessionId: id, jobId, outcome: "stopped" as const, terminalStatus: "killed" as const };
   },
+  acknowledgeBackgroundBlockedResults: async (id, targets) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    for (const delivery of value.backgroundDeliveries ?? []) {
+      if (delivery.watchdogState === "continuation_blocked" && targets.some((target) =>
+        target.parentTurnId === delivery.parentTurnId && target.revision === delivery.blockedResultRevision)) {
+        delivery.blockedResultAcknowledgedAt = Date.now();
+        delete delivery.watchdogState;
+      }
+    }
+    value.updatedAt += 1;
+    pushSession(value);
+    return structuredClone(value);
+  },
   acknowledgeBackgroundMissingResult: async (id: string, continuationId: string) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");

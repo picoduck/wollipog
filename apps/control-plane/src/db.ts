@@ -1173,6 +1173,15 @@ CREATE TABLE IF NOT EXISTS managed_background_jobs (
 CREATE INDEX IF NOT EXISTS idx_managed_background_jobs_continuation
   ON managed_background_jobs(session_id, continuation_id);
 
+-- Dashboard acknowledgement is separate from runner facts and continuation authority.
+CREATE TABLE IF NOT EXISTS managed_background_blocked_acknowledgements (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  parent_turn_id TEXT NOT NULL,
+  result_identity TEXT NOT NULL,
+  acknowledged_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, parent_turn_id, result_identity)
+);
+
 CREATE TABLE IF NOT EXISTS managed_background_deliveries (
   session_id                 TEXT NOT NULL,
   continuation_id            TEXT NOT NULL,
@@ -5437,12 +5446,16 @@ export class ControlPlaneDb {
     unfinishedSiblings: number,
     heldSince: number,
     now: number,
-  ): Pick<BackgroundDeliveryView, "watchdogState" | "unfinishedSiblingJobs"> {
+    revision?: string,
+    acknowledgedAt?: number | null,
+  ): Pick<BackgroundDeliveryView, "watchdogState" | "unfinishedSiblingJobs" | "blockedResultRevision" | "blockedResultAcknowledgedAt"> {
     if (unfinishedSiblings <= 0) return { watchdogState: "terminal_without_continuation" };
     const liveTurn = this.liveTurnSource(sessionId);
     const parentRunning = liveTurn !== undefined && (parentTurnId === liveTurn || parentTurnId === "unknown");
     return !parentRunning && heldSince + BACKGROUND_HANDOFF_WAIT_MAX_MS <= now
-      ? { watchdogState: "continuation_blocked", unfinishedSiblingJobs: unfinishedSiblings }
+      ? { ...(acknowledgedAt != null ? { blockedResultAcknowledgedAt: acknowledgedAt }
+          : { watchdogState: "continuation_blocked" as const }),
+          ...(revision ? { blockedResultRevision: revision } : {}), unfinishedSiblingJobs: unfinishedSiblings }
       : { unfinishedSiblingJobs: unfinishedSiblings };
   }
 
@@ -11671,7 +11684,8 @@ export class ControlPlaneDb {
           WHEN SUM(job.source_present)>0 AND delivery.runner_result_persisted_at IS NOT NULL AND delivery.transcript_projected_at IS NULL
           THEN 'result_not_projected'
           WHEN delivery.notification_queued_at IS NOT NULL AND delivery.dashboard_observed_at IS NULL
-          THEN 'dashboard_observation_pending' END AS watchdog_state
+          THEN 'dashboard_observation_pending' END AS watchdog_state,
+        NULL AS blocked_result_revision,NULL AS blocked_result_acknowledged_at
       FROM managed_background_deliveries delivery
       JOIN sessions session ON session.id=delivery.session_id
       JOIN session_ownership ownership ON ownership.session_id=session.id
@@ -11683,27 +11697,37 @@ export class ControlPlaneDb {
         SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
         (SELECT COUNT(*) FROM managed_background_jobs sibling WHERE sibling.session_id=job.session_id
           AND sibling.parent_turn_id=job.parent_turn_id AND sibling.source_present=1 AND sibling.terminal_observed_at IS NULL) AS unfinished_sibling_count,
-        MIN(job.terminal_observed_at) AS held_since,NULL AS watchdog_state
+        MIN(job.terminal_observed_at) AS held_since,NULL AS watchdog_state,
+        json_group_array(json_array(job.job_id,job.registered_at) ORDER BY job.job_id) AS blocked_result_revision,
+        CASE WHEN COUNT(*)=COUNT(ack.acknowledged_at) THEN MIN(ack.acknowledged_at) END AS blocked_result_acknowledged_at
       FROM managed_background_jobs job JOIN sessions session ON session.id=job.session_id
       JOIN session_ownership ownership ON ownership.session_id=session.id
+      LEFT JOIN managed_background_blocked_acknowledgements ack
+        ON ack.session_id=job.session_id AND ack.parent_turn_id=job.parent_turn_id
+          AND ack.result_identity=json_array(job.job_id,job.registered_at)
       WHERE ${authorization.sql} AND session.status!='stopped' AND job.source_present=1
         AND job.continuation_required=1 AND job.terminal_observed_at IS NOT NULL AND job.continuation_id IS NULL
       GROUP BY job.session_id,job.parent_turn_id
-      ) SELECT * FROM (SELECT candidates.*,
-        ROW_NUMBER() OVER (PARTITION BY session_id,continuation_id IS NULL ORDER BY sort_at DESC,COALESCE(continuation_id,parent_turn_id)) AS position
-        FROM candidates) WHERE position<=32 ORDER BY session_id,continuation_id IS NULL,sort_at DESC,COALESCE(continuation_id,parent_turn_id)`).all(...authorization.params,...authorization.params) as Array<{
+      ) SELECT ranked.* FROM (SELECT candidates.*,
+        ROW_NUMBER() OVER (PARTITION BY candidates.session_id,continuation_id IS NULL
+          ORDER BY blocked_result_acknowledged_at IS NOT NULL,sort_at DESC,COALESCE(continuation_id,candidates.parent_turn_id)) AS position
+        FROM candidates) ranked
+      WHERE position<=32 ORDER BY ranked.session_id,continuation_id IS NULL,blocked_result_acknowledged_at IS NOT NULL,
+        sort_at DESC,COALESCE(continuation_id,ranked.parent_turn_id)`).all(...authorization.params,...authorization.params) as Array<{
         session_id: string; continuation_id: string | null; parent_turn_id: string; queued_at: number | null;
         accepted_at: number | null; missing_result_at: number | null; job_count: number; terminal_count: number;
         retry_exhausted_at: number | null; retry_exhaustion_acknowledged_at: number | null;
         notification_queued_at: number | null; dashboard_observed_at: number | null;
         unfinished_sibling_count: number; held_since: number | null; watchdog_state: BackgroundDeliveryWatchdogState | null;
+        blocked_result_revision: string | null; blocked_result_acknowledged_at: number | null;
       }>;
     const deliveryNow=Date.now();
     for (const entry of deliveries) {
       const items=context.backgroundDeliveries.get(entry.session_id) ?? [];
       if (items.length>=64) continue;
       const held=entry.continuation_id ? null
-        : this.heldResultState(entry.session_id,entry.parent_turn_id,entry.unfinished_sibling_count,entry.held_since ?? deliveryNow,deliveryNow);
+        : this.heldResultState(entry.session_id,entry.parent_turn_id,entry.unfinished_sibling_count,entry.held_since ?? deliveryNow,deliveryNow,
+          entry.blocked_result_revision ?? undefined,entry.blocked_result_acknowledged_at);
       items.push({ parentTurnId: entry.parent_turn_id,jobCount: entry.job_count,terminalCount: entry.terminal_count,
         ...(entry.continuation_id ? { continuationId: entry.continuation_id } : {}),
         ...(entry.queued_at!=null ? { queuedAt: entry.queued_at } : {}),
@@ -16282,6 +16306,41 @@ export class ControlPlaneDb {
     }
   }
 
+  /** Acknowledge only the exact held-result snapshots a dashboard saw. In particular, a stale click
+   * cannot mute a new result in the same parent turn. Never writes provider job or delivery facts. */
+  acknowledgeBackgroundBlockedResults(
+    sessionId: string,
+    targets: readonly import("@wollipog/protocol").BlockedResultAcknowledgementTarget[],
+    now: number,
+  ): number {
+    if (!validBackgroundIdentity(sessionId) || !Number.isSafeInteger(now) || now < 0) return 0;
+    return this.atomic(() => {
+      const session = this.stmt("SELECT status FROM sessions WHERE id=?").get(sessionId) as { status: SessionStatus } | undefined;
+      if (!session) return 0;
+      const current = this.listBackgroundDeliveries(sessionId, session.status);
+      let changed = 0;
+      for (const target of targets) {
+        const delivery = current.find((delivery) => delivery.watchdogState === "continuation_blocked" &&
+          delivery.parentTurnId === target.parentTurnId && delivery.blockedResultRevision);
+        if (!delivery) continue;
+        let requested: unknown;
+        try { requested = JSON.parse(target.revision); } catch { continue; }
+        if (!Array.isArray(requested)) continue;
+        const eligible = new Set((JSON.parse(delivery.blockedResultRevision!) as unknown[]).map((identity) => JSON.stringify(identity)));
+        let groupChanged = false;
+        for (const identity of requested) {
+          const key = JSON.stringify(identity);
+          if (!eligible.has(key)) continue;
+          groupChanged = Number(this.stmt(`INSERT OR IGNORE INTO managed_background_blocked_acknowledgements
+            (session_id,parent_turn_id,result_identity,acknowledged_at) VALUES (?,?,?,?)`)
+            .run(sessionId, target.parentTurnId, key, now).changes) > 0 || groupChanged;
+        }
+        if (groupChanged) changed++;
+      }
+      return changed;
+    });
+  }
+
   acknowledgeBackgroundDelivery(sessionId: string, continuationId: string, now: number): boolean {
     if (!validBackgroundIdentity(sessionId) || !validBackgroundIdentity(continuationId) ||
         !Number.isSafeInteger(now) || now < 0) return false;
@@ -16510,28 +16569,36 @@ export class ControlPlaneDb {
       `SELECT job.parent_turn_id, COUNT(*) AS job_count,
               SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
               MIN(job.terminal_observed_at) AS held_since,
+              json_group_array(json_array(job.job_id,job.registered_at) ORDER BY job.job_id) AS blocked_result_revision,
+              CASE WHEN COUNT(*)=COUNT(ack.acknowledged_at) THEN MIN(ack.acknowledged_at) END AS blocked_result_acknowledged_at,
               (SELECT COUNT(*) FROM managed_background_jobs sibling
                 WHERE sibling.session_id=job.session_id AND sibling.parent_turn_id=job.parent_turn_id
                   AND sibling.source_present=1 AND sibling.terminal_observed_at IS NULL) AS unfinished_sibling_count
          FROM managed_background_jobs job
+         LEFT JOIN managed_background_blocked_acknowledgements ack
+           ON ack.session_id=job.session_id AND ack.parent_turn_id=job.parent_turn_id
+             AND ack.result_identity=json_array(job.job_id,job.registered_at)
         WHERE job.session_id=? AND job.source_present=1
           AND job.continuation_required=1 AND job.terminal_observed_at IS NOT NULL
           AND job.continuation_id IS NULL
-        GROUP BY job.parent_turn_id ORDER BY job.parent_turn_id
-        LIMIT 32`,
+        GROUP BY job.parent_turn_id
+        ORDER BY blocked_result_acknowledged_at IS NOT NULL,job.parent_turn_id LIMIT 32`,
     ).all(sessionId) as unknown as Array<{
       parent_turn_id: string;
       job_count: number;
       terminal_count: number;
       held_since: number;
       unfinished_sibling_count: number;
+      blocked_result_revision: string;
+      blocked_result_acknowledged_at: number | null;
     }>;
     const now = Date.now();
     return views.concat(pending.map((row) => ({
       parentTurnId: row.parent_turn_id,
       jobCount: row.job_count,
       terminalCount: row.terminal_count,
-      ...this.heldResultState(sessionId, row.parent_turn_id, row.unfinished_sibling_count, row.held_since, now),
+      ...this.heldResultState(sessionId, row.parent_turn_id, row.unfinished_sibling_count, row.held_since, now,
+        row.blocked_result_revision, row.blocked_result_acknowledged_at),
     })));
   }
 

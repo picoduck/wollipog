@@ -14,6 +14,7 @@ import {
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type ResourceScope,
   type RunnerMetadata,
+  type SessionView,
 } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 
@@ -1371,6 +1372,49 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "snapshot",
     "a paired device can authenticate the real /ui WebSocket route",
   );
+
+  // A dashboard can clear only the exact blocked snapshots it saw, with no provider command.
+  const blockedJobs = ["turn-blocked", "unknown"].flatMap((parentTurnId) => [{
+    id: `finished-${parentTurnId}`, parentTurnId, runnerId: "runner-ui-route", workspaceId: "workspace-1",
+    context: { kind: "native" as const }, launchType: "agent" as const, registeredAt: 1_000,
+    terminalStatus: "completed" as const, terminalObservedAt: 2_000, continuationRequired: true,
+  }, {
+    id: `monitor-${parentTurnId}`, parentTurnId, runnerId: "runner-ui-route", workspaceId: "workspace-1",
+    context: { kind: "native" as const }, launchType: "monitor" as const, registeredAt: 1_000,
+  }]);
+  runner.send(JSON.stringify({ type: "session_runtime_updated", snapshot: {
+    ...sessionSnapshot("session-target"), status: "idle", backgroundWorkTracking: "managed",
+    backgroundWorkState: "running", backgroundJobs: blockedJobs,
+  } }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as SessionView | undefined)?.backgroundDeliveries?.filter((delivery) =>
+        delivery.watchdogState === "continuation_blocked").length === 2);
+  }
+  const blockedSession = (await (await ownerFetch("/api/sessions/session-target")).json() as { session: SessionView }).session;
+  const blockedTargets = blockedSession.backgroundDeliveries!.filter((delivery) => delivery.blockedResultRevision)
+    .map((delivery) => ({ parentTurnId: delivery.parentTurnId, revision: delivery.blockedResultRevision! }));
+  const blockedPath = "/api/sessions/session-target/background-deliveries/acknowledge-blocked-results";
+  const blockedRequest = { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets: blockedTargets }) };
+  assert.equal((await fetch(`${httpBase}${blockedPath}`, blockedRequest)).status, 401);
+  assert.equal((await ownerFetch(blockedPath, { ...blockedRequest, body: JSON.stringify({ targets: [{}] }) })).status, 400);
+  assert.equal((await ownerFetch(blockedPath, { ...blockedRequest,
+    body: JSON.stringify({ targets: blockedTargets.map((target) => ({ ...target, revision: "stale" })) }) })).status, 200);
+  assert.equal(((await (await ownerFetch("/api/sessions/session-target")).json()) as { session: SessionView }).session
+    .backgroundDeliveries!.filter((delivery) => delivery.watchdogState === "continuation_blocked").length, 2);
+  const blockedAckResponse = await ownerFetch(blockedPath, blockedRequest);
+  assert.equal(blockedAckResponse.status, 200, await blockedAckResponse.clone().text());
+  const blockedAckSession = await blockedAckResponse.json() as SessionView;
+  assert.equal(blockedAckSession.backgroundDeliveries!.filter((delivery) => delivery.blockedResultAcknowledgedAt).length, 2);
+  assert.ok(blockedAckSession.backgroundDeliveries!.every((delivery) => delivery.watchdogState == null));
+  assert.deepEqual(blockedAckSession.backgroundJobs, blockedSession.backgroundJobs);
+  assert.equal((await ownerFetch(blockedPath, blockedRequest)).status, 200, "repeat acknowledgement is harmless");
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as SessionView | undefined)?.backgroundDeliveries?.filter((delivery) =>
+        delivery.blockedResultAcknowledgedAt != null).length === 2);
+  }
 
   const terminalMissingJobs = Array.from({ length: 33 }, (_, index) => ({
     id: `route-missing-job-${String(index).padStart(3, "0")}`,

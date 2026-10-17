@@ -105,6 +105,7 @@ interface Harness {
   root: Root;
   stops: Array<{ sessionId: string; jobId: string; reply: Deferred<BackgroundJobStopResponse> }>;
   acknowledgements: Array<{ sessionId: string; continuationId: string; reply: Deferred<SessionView> }>;
+  blockedAcknowledgements: Array<{ sessionId: string; targets: Array<{ parentTurnId: string; revision: string }>; reply: Deferred<SessionView> }>;
   confirmations: ConfirmationOptions[];
   toasts: Array<{ message: string; tone?: ToastOptions["tone"] }>;
   opened: { background: number };
@@ -128,6 +129,7 @@ async function renderHeader(
     root: undefined as unknown as Root,
     stops: [],
     acknowledgements: [],
+    blockedAcknowledgements: [],
     confirmations: [],
     toasts: [],
     opened: { background: 0 },
@@ -137,6 +139,11 @@ async function renderHeader(
   };
   const client: ApiClient = {
     ...api,
+    acknowledgeBackgroundBlockedResults: (sessionId, targets) => {
+      const reply = deferred<SessionView>();
+      harness.blockedAcknowledgements.push({ sessionId, targets: [...targets], reply });
+      return reply.promise;
+    },
     stopBackgroundJob: (sessionId: string, jobId: string) => {
       const reply = deferred<BackgroundJobStopResponse>();
       harness.stops.push({ sessionId, jobId, reply });
@@ -232,6 +239,36 @@ function rowAction(badge: string): { name: string; button: HTMLButtonElement } {
   assert.ok(button, `the ${badge} row has an action`);
   return { name: button.getAttribute("aria-label") ?? button.textContent ?? "", button };
 }
+
+test("Result Blocked acknowledges all displayed snapshots without stopping jobs or asking for confirmation (#3408)", async () => {
+  const deliveries = ["turn-1", "unknown"].map((parentTurnId) => ({
+    parentTurnId, jobCount: 1, terminalCount: 1, watchdogState: "continuation_blocked" as const,
+    blockedResultRevision: `revision-${parentTurnId}`,
+  }));
+  const harness = await renderHeader(blocked({ backgroundDeliveries: deliveries }), { runnerOnline: false });
+  try {
+    await openPopover();
+    assert.equal(rowAction("Result Blocked").name, "Acknowledge");
+    await act(async () => { rowAction("Result Blocked").button.click(); });
+    assert.equal(harness.blockedAcknowledgements.length, 1);
+    assert.deepEqual(harness.blockedAcknowledgements[0]!.targets,
+      deliveries.map((delivery) => ({ parentTurnId: delivery.parentTurnId, revision: delivery.blockedResultRevision })));
+    assert.equal(harness.confirmations.length, 0);
+    assert.equal(harness.stops.length, 0);
+    await openPopover();
+    assert.equal(rowAction("Result Blocked").button.getAttribute("aria-disabled"), "true");
+    const acknowledged = blocked({ backgroundDeliveries: deliveries.map((delivery) => ({
+      ...delivery, watchdogState: undefined, blockedResultAcknowledgedAt: NOW,
+    })) });
+    await act(async () => { harness.blockedAcknowledgements[0]!.reply.resolve(acknowledged as SessionView); });
+    await harness.rerender(acknowledged);
+    assert.doesNotMatch(trigger().getAttribute("aria-label")!, /Result Blocked/);
+    await harness.rerender(blocked({ backgroundDeliveries: [{ ...deliveries[0]!, blockedResultRevision: "new-result" }] }));
+    assert.match(trigger().getAttribute("aria-label")!, /Result Blocked/);
+    await openPopover();
+    assert.equal(rowAction("Result Blocked").name, "Acknowledge");
+  } finally { await cleanUp(harness.root); }
+});
 
 test("Result Blocked is the bar's status and its row offers Stop Job… for the one job still running", async () => {
   const harness = await renderHeader(blocked());
