@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  MENU_LABEL_HEIGHT_PX,
+  MENU_SEPARATOR_PX,
   SELECT_LIST_CHROME_PX,
   SELECT_MENU_MAX_HEIGHT_PX,
   TOUCH_OPTION_MIN_HEIGHT_PX,
@@ -167,11 +169,8 @@ test("an option that renders a reason as well as a description is budgeted for t
 });
 
 test("the one- and two-line budgets are unchanged by the per-line rewrite", () => {
-  // The previous behaviour, restated so the refactor cannot quietly move the cases that worked.
-  assert.equal(
-    selectMenuDesiredHeight({ optionCount: 2, maxOptionLines: 1, coarsePointer: false }),
-    2 * 34 + SELECT_LIST_CHROME_PX,
-  );
+  // The previous behaviour, restated so the refactor cannot quietly move the cases that worked. The
+  // one-line case is "a mouse pointer keeps the compact estimate" above.
   assert.equal(
     selectMenuDesiredHeight({ optionCount: 2, maxOptionLines: 2, coarsePointer: false }),
     2 * 52 + SELECT_LIST_CHROME_PX,
@@ -182,6 +181,59 @@ test("the touch floor still applies to a multi-line option", () => {
   // A three-line option is already taller than 44px, so the floor must not pull it DOWN.
   const height = selectMenuDesiredHeight({ optionCount: 2, maxOptionLines: 3, coarsePointer: true });
   assert.equal(height, selectMenuDesiredHeight({ optionCount: 2, maxOptionLines: 3, coarsePointer: false }));
+});
+
+test("a section label is one 28px row and a footer action one single-line option plus its separator", () => {
+  for (const coarsePointer of [false, true]) {
+    const option = coarsePointer ? TOUCH_OPTION_MIN_HEIGHT_PX : 34;
+    const bare = selectMenuDesiredHeight({ optionCount: 3, maxOptionLines: 1, coarsePointer });
+    assert.equal(
+      selectMenuDesiredHeight({ optionCount: 3, maxOptionLines: 1, groupLabelCount: 2, coarsePointer }),
+      bare + 2 * MENU_LABEL_HEIGHT_PX,
+    );
+    assert.equal(
+      selectMenuDesiredHeight({ optionCount: 3, maxOptionLines: 1, footerAction: true, coarsePointer }),
+      bare + option + MENU_SEPARATOR_PX,
+    );
+    // The footer row is its label alone, so taller options do not make it taller.
+    assert.equal(
+      selectMenuDesiredHeight({ optionCount: 3, maxOptionLines: 3, footerAction: true, coarsePointer: false })
+        - selectMenuDesiredHeight({ optionCount: 3, maxOptionLines: 3, coarsePointer: false }),
+      34 + MENU_SEPARATOR_PX,
+    );
+  }
+  // An empty list keeps its sentence's row, and the footer follows it.
+  assert.equal(
+    selectMenuDesiredHeight({ optionCount: 0, maxOptionLines: 1, footerAction: true, coarsePointer: false }),
+    34 + 34 + MENU_SEPARATOR_PX + SELECT_LIST_CHROME_PX,
+  );
+});
+
+test("groups and a footer row never take the list past its one cap", () => {
+  for (const coarsePointer of [false, true]) {
+    for (let optionCount = 0; optionCount <= 20; optionCount += 1) {
+      const height = selectMenuDesiredHeight({
+        optionCount,
+        maxOptionLines: 2,
+        groupLabelCount: Math.ceil(optionCount / 2),
+        footerAction: true,
+        coarsePointer,
+      });
+      assert.ok(height <= SELECT_MENU_MAX_HEIGHT_PX, `${optionCount} options asked for ${height}px`);
+    }
+  }
+});
+
+test("the section label and separator budgets are the stylesheet's", () => {
+  const sheet = readFileSync(fileURLToPath(new URL("../../styles.css", import.meta.url)), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const label = /\n\.menu-label \{([^}]*)\}/.exec(sheet)?.[1] ?? "";
+  assert.match(label, new RegExp(`min-height: ${MENU_LABEL_HEIGHT_PX}px;`));
+  const separator = /\n\.menu-sep \{([^}]*)\}/.exec(sheet)?.[1] ?? "";
+  assert.match(separator, /height: 1px;/);
+  assert.match(separator, /margin: var\(--space-1\) /, "4px above and below, as MENU_SEPARATOR_PX counts");
+  assert.equal(MENU_SEPARATOR_PX, 1 + 2 * 4);
+  assert.match(sheet, /--space-1:\s*4px;/);
 });
 
 test("Select groups only consecutive options under a section, and keeps each option's list index", () => {

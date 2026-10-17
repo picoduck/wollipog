@@ -59,6 +59,11 @@ function optionTextParts(id: string, { label, description, reason }: ListboxOpti
  * Options with a label and second lines pass `optionText`, which names each option by its label
  * and describes it by the rest, as Select does. `renderOption` is for options whose whole content
  * is their name, such as a file path behind a decorative icon.
+ *
+ * `getGroup` lists consecutive options that share a section under one `.menu-label` inside a
+ * `role="group"` named by it, as Select does (§9.1). `isOptionChosen` marks the owner's current
+ * value with Select's trailing check; `aria-selected` still follows the active option, because that
+ * is where the owner's `aria-activedescendant` points.
  */
 export function InlineListbox<T>({
   id,
@@ -71,6 +76,8 @@ export function InlineListbox<T>({
   onSelect,
   onActiveChange,
   isOptionDisabled,
+  isOptionChosen,
+  getGroup,
   className,
   before,
   after,
@@ -84,6 +91,8 @@ export function InlineListbox<T>({
   onSelect: (option: T) => void;
   onActiveChange?: (index: number) => void;
   isOptionDisabled?: (option: T) => boolean;
+  isOptionChosen?: (option: T) => boolean;
+  getGroup?: (option: T) => string | undefined;
   className?: string;
   before?: ReactNode;
   after?: ReactNode;
@@ -92,6 +101,33 @@ export function InlineListbox<T>({
   | { optionText: (option: T) => ListboxOptionText; renderOption?: never }
   | { renderOption: (option: T) => ReactNode; optionText?: never }
 )) {
+  const renderOne = (option: T, index: number) => {
+    const optionDisabled = isOptionDisabled?.(option) ?? false;
+    const chosen = isOptionChosen?.(option) ?? false;
+    const optionId = `${id}-${index}`;
+    const text = optionText ? optionTextParts(optionId, optionText(option)) : null;
+    return (
+      <button
+        type="button"
+        role="option"
+        id={optionId}
+        aria-selected={index === activeIndex}
+        aria-disabled={optionDisabled || undefined}
+        aria-labelledby={text?.labelledBy}
+        aria-describedby={text?.describedBy}
+        tabIndex={-1}
+        className={`ui-inline-listbox-option${index === activeIndex ? " is-active" : ""}`
+          + `${chosen ? " is-selected" : ""}${optionDisabled ? " is-disabled" : ""}`}
+        key={getKey(option)}
+        onMouseDown={(event) => event.preventDefault()}
+        onMouseMove={() => onActiveChange?.(index)}
+        onClick={() => { if (!optionDisabled) onSelect(option); }}
+      >
+        {text ? text.body : renderOption?.(option)}
+        {chosen && <CheckIcon size={14} />}
+      </button>
+    );
+  };
   return (
     <div
       className={className}
@@ -102,31 +138,19 @@ export function InlineListbox<T>({
       onMouseDown={(event) => event.preventDefault()}
     >
       {before}
-      {options.map((option, index) => {
-        const optionDisabled = isOptionDisabled?.(option) ?? false;
-        const optionId = `${id}-${index}`;
-        const text = optionText ? optionTextParts(optionId, optionText(option)) : null;
-        return (
-          <button
-            type="button"
-            role="option"
-            id={optionId}
-            aria-selected={index === activeIndex}
-            aria-disabled={optionDisabled || undefined}
-            aria-labelledby={text?.labelledBy}
-            aria-describedby={text?.describedBy}
-            tabIndex={-1}
-            className={`ui-inline-listbox-option${index === activeIndex ? " is-active" : ""}`
-              + `${optionDisabled ? " is-disabled" : ""}`}
-            key={getKey(option)}
-            onMouseDown={(event) => event.preventDefault()}
-            onMouseMove={() => onActiveChange?.(index)}
-            onClick={() => { if (!optionDisabled) onSelect(option); }}
-          >
-            {text ? text.body : renderOption?.(option)}
-          </button>
-        );
-      })}
+      {getGroup
+        ? selectOptionRuns(options.map((option) => ({ option, group: getGroup(option) }))).map((run) => {
+          const rendered = run.options.map(({ option, index }) => renderOne(option.option, index));
+          if (run.group === undefined) return rendered;
+          const labelId = `${id}-group-${run.start}`;
+          return (
+            <div key={labelId} role="group" aria-labelledby={labelId}>
+              <div className="menu-label" id={labelId} role="presentation">{run.group}</div>
+              {rendered}
+            </div>
+          );
+        })
+        : options.map(renderOne)}
       {after}
     </div>
   );
@@ -869,6 +893,9 @@ export interface SearchableComboboxOption<T extends string> {
   label: string;
   /** Visible context that distinguishes duplicate or similarly named choices. */
   description?: string;
+  /** The Title Case section this option belongs to, as SelectOption's `group` (§9.1). A search
+   * keeps a section's label only while one of its options matches. */
+  group?: string;
   /** Additional already-authorized terms that are useful to search but need not be repeated. */
   keywords?: readonly string[];
   disabled?: boolean;
@@ -910,14 +937,85 @@ export function noMatchSentence(noun: string, query: string): string {
 
 /**
  * A row that follows the no-match sentence and turns a failed search into a next step
- * ("Create Project…"). Only this one action lives in the list; any other footer action belongs to
- * the area that owns the picker.
+ * ("Create Project…"). It shows only after a search that found nothing; the action that belongs at
+ * the end of every list is the footer action below.
  */
 export interface PickerCreateOption {
   /** Title Case, ending in an ellipsis when it opens a dialog. */
   label: string;
   /** Called with the query that found nothing, after the list has closed. */
   onSelect: (query: string) => void;
+}
+
+/**
+ * The one action at the end of a list ("New Project…", "Add Location…"), after a separator, with or
+ * without a search and after the no-match sentence (§9.1). An area adds at most one. Arrows, Home
+ * and End reach it like an option, but it is never the chosen value and draws no check.
+ */
+export interface PickerFooterAction {
+  /** Title Case, ending in an ellipsis when it opens a dialog. */
+  label: string;
+  /** A 16px leading icon. Hidden from assistive technology: the label names the row. */
+  icon?: ReactNode;
+  /** Called after the list has closed and focus is back on the field, so a dialog it opens can
+   * return focus there. */
+  onSelect: () => void;
+}
+
+/**
+ * A list's rows in arrow order: each option by its index in the list shown, then the create row,
+ * then the footer action. The active row is one of these, or none.
+ */
+type PickerRow = number | "create" | "footer";
+
+function pickerRows(optionCount: number, create: boolean, footer: boolean): PickerRow[] {
+  const rows: PickerRow[] = Array.from({ length: optionCount }, (_, index) => index);
+  if (create) rows.push("create");
+  if (footer) rows.push("footer");
+  return rows;
+}
+
+/**
+ * The row the highlight is on, given what the list shows now. Options change while a list is open
+ * (agent setup and runner availability are live) and a filter shrinks them, so an option index is
+ * clamped to the list rather than repaired in an effect. An index with no option left lands on the
+ * create row, which is the only row a failed search offers; it never lands on the footer action, so
+ * Enter after a search that found nothing does not run an action nobody highlighted.
+ */
+function resolvePickerRow(active: PickerRow | null, rows: readonly PickerRow[], optionCount: number): PickerRow | null {
+  if (typeof active === "number") {
+    if (optionCount > 0) return Math.min(Math.max(0, active), optionCount - 1);
+    return rows.includes("create") ? "create" : null;
+  }
+  return active !== null && rows.includes(active) ? active : null;
+}
+
+/** The next row in `delta`'s direction, wrapping, past the rows `skip` refuses. From no row, Down
+ * starts at the first and Up at the last. */
+function stepPickerRow(
+  rows: readonly PickerRow[],
+  current: PickerRow | null,
+  delta: 1 | -1,
+  skip: (row: PickerRow) => boolean = () => false,
+): PickerRow | null {
+  if (rows.length === 0) return current;
+  let position = current === null ? (delta > 0 ? -1 : rows.length) : rows.indexOf(current);
+  for (let hop = 0; hop < rows.length; hop += 1) {
+    position = (position + delta + rows.length) % rows.length;
+    const row = rows[position]!;
+    if (!skip(row)) return row;
+  }
+  return current;
+}
+
+/** Home and End: the first or last row `skip` allows, or none. */
+function boundaryPickerRow(
+  rows: readonly PickerRow[],
+  edge: "first" | "last",
+  skip: (row: PickerRow) => boolean,
+): PickerRow | null {
+  const allowed = rows.filter((row) => !skip(row));
+  return (edge === "first" ? allowed[0] : allowed.at(-1)) ?? null;
 }
 
 function NoMatchRow({ noun, query }: { noun: string; query: string }) {
@@ -929,10 +1027,18 @@ function NoMatchRow({ noun, query }: { noun: string; query: string }) {
   );
 }
 
-function CreateOptionRow({ id, label, active, onSelect, onActive }: {
+/**
+ * What `aria-selected` means on a list's action rows, which are never its value: in the combobox's
+ * list it follows the highlight, as its options' does; in Select's it marks the chosen value, so an
+ * action row there is never selected, or a single-select list would announce two values.
+ */
+type ActionRowSelection = "active" | "value";
+
+function CreateOptionRow({ id, label, active, selection, onSelect, onActive }: {
   id: string;
   label: string;
   active: boolean;
+  selection: ActionRowSelection;
   onSelect: () => void;
   onActive?: () => void;
 }) {
@@ -941,7 +1047,7 @@ function CreateOptionRow({ id, label, active, onSelect, onActive }: {
       type="button"
       role="option"
       id={id}
-      aria-selected={active}
+      aria-selected={selection === "active" && active}
       tabIndex={-1}
       className={`ui-select-option${active ? " is-active" : ""}`}
       onMouseDown={(event) => event.preventDefault()}
@@ -952,6 +1058,41 @@ function CreateOptionRow({ id, label, active, onSelect, onActive }: {
       <span className="ui-select-option-body"><span>{label}</span></span>
     </button>
   );
+}
+
+/** The footer action and the separator above it, as the list's last row. */
+function FooterActionRow({ id, action, active, selection, onSelect, onActive }: {
+  id: string;
+  action: PickerFooterAction;
+  active: boolean;
+  selection: ActionRowSelection;
+  onSelect: () => void;
+  onActive: () => void;
+}) {
+  return (
+    <>
+      <div className="menu-sep" aria-hidden="true" />
+      <button
+        type="button"
+        role="option"
+        id={id}
+        aria-selected={selection === "active" && active}
+        tabIndex={-1}
+        className={`ui-select-option${active ? " is-active" : ""}`}
+        onMouseDown={(event) => event.preventDefault()}
+        onMouseMove={onActive}
+        onClick={onSelect}
+      >
+        {action.icon && <span className="menu-icon" aria-hidden="true">{action.icon}</span>}
+        <span className="ui-select-option-body"><span>{action.label}</span></span>
+      </button>
+    </>
+  );
+}
+
+/** How many section labels a list draws: one per run of options that share a group. */
+function groupLabelCount(options: readonly { group?: string }[]): number {
+  return selectOptionRuns(options).filter((run) => run.group !== undefined).length;
 }
 
 /**
@@ -975,6 +1116,10 @@ function LeadingIcon({ icon }: { icon: ReactNode }) {
  * closes the list without moving the caret, and an optional brand icon inside the field. Focus opens
  * the list with the caret after the value rather than selecting it — a selection painted the value
  * in the native highlight and let the next keystroke silently replace it.
+ *
+ * `openOnFocus={false}` is for a form that focuses this field as it opens (New Session, #1143): the
+ * list stays closed until the person types, presses Arrow Down or clicks, so it never covers the form
+ * uninvited, and the first character typed starts the query instead of extending the chosen label.
  */
 export function SearchableCombobox<T extends string>({
   options,
@@ -986,11 +1131,13 @@ export function SearchableCombobox<T extends string>({
   emptyLabel = "Nothing to choose from",
   noun = "options",
   createOption,
+  footerAction,
   leadingIcon,
   disabled = false,
   className,
   inputId,
   autoFocus,
+  openOnFocus = true,
 }: {
   options: readonly SearchableComboboxOption<T>[];
   value: T | null;
@@ -1004,6 +1151,8 @@ export function SearchableCombobox<T extends string>({
   noun?: string;
   /** An optional next step after a search that found nothing. */
   createOption?: PickerCreateOption;
+  /** The one action at the end of the list, after a separator, whatever the search. */
+  footerAction?: PickerFooterAction;
   /** A 16px decoration drawn inside the field, before the value. Hidden from assistive technology. */
   leadingIcon?: ReactNode;
   disabled?: boolean;
@@ -1012,6 +1161,9 @@ export function SearchableCombobox<T extends string>({
   inputId?: string;
   /** Claim focus when the editable owner is initially mounted. */
   autoFocus?: boolean;
+  /** Whether focusing the field opens the list. `false` leaves it closed until the person types,
+   * presses Arrow Down (or Alt+Arrow Down), or clicks the field or its chevron. */
+  openOnFocus?: boolean;
 }) {
   const generatedId = useId();
   const listboxId = `${generatedId}-listbox`;
@@ -1020,27 +1172,27 @@ export function SearchableCombobox<T extends string>({
   const [open, setOpen] = useState(false);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
-  const [active, setActive] = useState(0);
+  const [active, setActive] = useState<PickerRow | null>(0);
   const coarsePointer = useTouchTargetMode();
   const selected = options.find((option) => option.value === value) ?? null;
   const results = useMemo(
     () => filterSearchableComboboxOptions(options, searching ? query : ""),
     [options, query, searching],
   );
-  // Options may change while open (agent setup and runner availability are live), and filtering can
-  // shrink the list under the previous index. Derive the safe index rather than repairing state in
-  // an effect and rendering one frame with an aria-activedescendant that names nothing.
-  const activeIndex = results.length === 0 ? 0 : Math.min(active, results.length - 1);
   const inputValue = searching ? query : selected?.label ?? "";
   const noMatch = searching && query.trim() !== "" && results.length === 0;
-  // The create row is the list's only option when it shows, so it is also the active one.
   const showCreate = noMatch && Boolean(createOption);
+  const rows = pickerRows(results.length, showCreate, Boolean(footerAction));
+  const activeRow = resolvePickerRow(active, rows, results.length);
   const createId = `${listboxId}-create`;
+  const footerId = `${listboxId}-footer`;
   const desiredHeight = selectMenuDesiredHeight({
     optionCount: results.length + (showCreate ? 1 : 0),
     maxOptionLines: results.reduce((most, option) => Math.max(most, 1
       + (option.description ? 1 : 0)
       + (option.disabled && option.disabledReason ? 1 : 0)), 1),
+    groupLabelCount: groupLabelCount(results),
+    footerAction: Boolean(footerAction),
     coarsePointer,
   });
   const listStyle = useAnchoredMenuStyle(open, inputRef, {
@@ -1056,6 +1208,7 @@ export function SearchableCombobox<T extends string>({
   };
   const openAll = () => {
     const selectedIndex = options.findIndex((option) => option.value === value);
+    revealActive.current = true;
     setSearching(false);
     setActive(Math.max(0, selectedIndex));
     setOpen(true);
@@ -1071,8 +1224,17 @@ export function SearchableCombobox<T extends string>({
     close();
     createOption.onSelect(searched.trim());
   };
+  // Every row cancels its mousedown, so focus is still in the field; focusing it again only makes
+  // that explicit before the action runs and opens whatever returns focus here.
+  const runFooter = () => {
+    if (!footerAction) return;
+    close();
+    inputRef.current?.focus();
+    footerAction.onSelect();
+  };
   // The chevron toggles the list and leaves the caret where it is: its mousedown is cancelled, so
-  // focus never leaves the field. From an unfocused field it focuses the field, whose focus opens it.
+  // focus never leaves the field. From an unfocused field it focuses the field, whose focus opens it
+  // unless the owner asked focus not to.
   const toggleFromChevron = () => {
     if (disabled) return;
     if (open) {
@@ -1080,8 +1242,11 @@ export function SearchableCombobox<T extends string>({
       return;
     }
     const input = inputRef.current;
-    if (input && document.activeElement !== input) input.focus();
-    else openAll();
+    if (input && document.activeElement !== input) {
+      input.focus();
+      if (openOnFocus) return;
+    }
+    openAll();
   };
 
   useEffect(() => {
@@ -1100,16 +1265,27 @@ export function SearchableCombobox<T extends string>({
     };
   }, [open]);
 
-  const moveActive = (delta: number) => {
-    if (results.length === 0) return;
-    setActive((activeIndex + delta + results.length) % results.length);
+  // Up/Down deliberately reach unavailable results so their reason can be inspected; Home/End retain
+  // Select's boundary shortcut to the first/last row that can be activated.
+  const unavailable = (row: PickerRow) => typeof row === "number" && Boolean(results[row]?.disabled);
+  const activeOption = typeof activeRow === "number" ? results[activeRow] : undefined;
+  const activeDescendant = activeRow === "create" ? createId
+    : activeRow === "footer" ? footerId
+      : activeOption ? `${listboxId}-${activeRow}` : undefined;
+  /*
+   * DOM focus stays in the field, so nothing scrolls the list to the row `aria-activedescendant`
+   * names: End in a list that group labels and the footer push past its cap highlighted a footer
+   * below the fold. Keep the highlighted row in view as Select does — after a keyboard move or
+   * opening, not while the pointer moves it, and whenever the list is placed again.
+   */
+  const revealActive = useRef(false);
+  const reveal = () => {
+    if (open && activeDescendant) document.getElementById(activeDescendant)?.scrollIntoView?.({ block: "nearest" });
   };
-  const activeOption = results[activeIndex];
-  const firstEnabledIndex = Math.max(0, results.findIndex((option) => !option.disabled));
-  const lastEnabledIndex = results.reduce(
-    (last, option, index) => option.disabled ? last : index,
-    0,
-  );
+  useLayoutEffect(() => {
+    if (revealActive.current) reveal();
+  }, [open, activeDescendant]);
+  useLayoutEffect(reveal, [listStyle]);
 
   return (
     <div
@@ -1129,9 +1305,7 @@ export function SearchableCombobox<T extends string>({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
-        aria-activedescendant={open
-          ? showCreate ? createId : activeOption ? `${listboxId}-${activeIndex}` : undefined
-          : undefined}
+        aria-activedescendant={open ? activeDescendant : undefined}
         aria-disabled={disabled || undefined}
         readOnly={disabled}
         autoComplete="off"
@@ -1140,7 +1314,7 @@ export function SearchableCombobox<T extends string>({
         value={inputValue}
         onFocus={(event) => {
           if (disabled) return;
-          if (!open) openAll();
+          if (!open && openOnFocus) openAll();
           // The caret goes after the value, collapsed. A pointer focus then moves it to where the
           // click landed, which is the platform's behaviour for any other text field.
           const end = event.currentTarget.value.length;
@@ -1149,7 +1323,13 @@ export function SearchableCombobox<T extends string>({
         onClick={() => { if (!disabled && !open) openAll(); }}
         onChange={(event) => {
           if (disabled) return;
-          setQuery(event.target.value);
+          const typed = event.target.value;
+          // A field focused without opening still shows the chosen label, with the caret after it.
+          // What the person typed there is the start of a search, not an edit of that label.
+          const shown = selected?.label ?? "";
+          const startsQuery = !openOnFocus && !open && !searching && shown !== "" && typed.startsWith(shown);
+          setQuery(startsQuery ? typed.slice(shown.length) : typed);
+          revealActive.current = true;
           setSearching(true);
           setActive(0);
           setOpen(true);
@@ -1158,6 +1338,14 @@ export function SearchableCombobox<T extends string>({
           if (disabled || event.nativeEvent.isComposing || event.keyCode === 229) return;
           if (event.key === "Tab") {
             if (open) close();
+            return;
+          }
+          // Alt+Arrow Down opens the list without moving the highlight, as a native select does.
+          if (event.key === "ArrowDown" && event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+            if (!open) {
+              event.preventDefault();
+              openAll();
+            }
             return;
           }
           const plainKey = !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
@@ -1174,19 +1362,20 @@ export function SearchableCombobox<T extends string>({
               openAll();
               return;
             }
-            moveActive(event.key === "ArrowDown" ? 1 : -1);
+            revealActive.current = true;
+            setActive(stepPickerRow(rows, activeRow, event.key === "ArrowDown" ? 1 : -1));
             return;
           }
           if (open && (event.key === "Home" || event.key === "End")) {
             event.preventDefault();
-            // Up/Down deliberately reach unavailable results so their reason can be inspected;
-            // Home/End retain Select's boundary shortcut to the first/last commit-capable result.
-            setActive(event.key === "Home" ? firstEnabledIndex : lastEnabledIndex);
+            revealActive.current = true;
+            setActive(boundaryPickerRow(rows, event.key === "Home" ? "first" : "last", unavailable));
             return;
           }
           if (event.key === "Enter" && open) {
             event.preventDefault();
-            if (showCreate) create();
+            if (activeRow === "create") create();
+            else if (activeRow === "footer") runFooter();
             else if (activeOption) commit(activeOption);
           }
         }}
@@ -1204,10 +1393,12 @@ export function SearchableCombobox<T extends string>({
           id={listboxId}
           label={`${label} Options`}
           options={results}
-          activeIndex={activeIndex}
+          activeIndex={typeof activeRow === "number" ? activeRow : -1}
           getKey={(option) => option.value}
-          onActiveChange={setActive}
+          onActiveChange={(index) => { revealActive.current = false; setActive(index); }}
           isOptionDisabled={(option) => Boolean(option.disabled)}
+          isOptionChosen={(option) => option.value === value}
+          getGroup={(option) => option.group}
           onSelect={commit}
           className="ui-searchable-combobox-list menu listbox"
           style={listStyle}
@@ -1216,9 +1407,28 @@ export function SearchableCombobox<T extends string>({
             : results.length === 0
               ? <p className="ui-select-empty">{emptyLabel}</p>
               : undefined}
-          after={showCreate && createOption
-            ? <CreateOptionRow id={createId} label={createOption.label} active onSelect={create} />
-            : undefined}
+          after={<>
+            {showCreate && createOption && (
+              <CreateOptionRow
+                id={createId}
+                label={createOption.label}
+                active={activeRow === "create"}
+                selection="active"
+                onSelect={create}
+                onActive={() => { revealActive.current = false; setActive("create"); }}
+              />
+            )}
+            {footerAction && (
+              <FooterActionRow
+                id={footerId}
+                action={footerAction}
+                active={activeRow === "footer"}
+                selection="active"
+                onSelect={runFooter}
+                onActive={() => { revealActive.current = false; setActive("footer"); }}
+              />
+            )}
+          </>}
           optionText={(option) => ({
             label: option.label,
             description: option.description,
@@ -1390,6 +1600,12 @@ export function selectFilterRowHeight(coarsePointer: boolean): number {
 
 /** One line of option: the label on its own, for a pointer the touch floor does not apply to. */
 const COMPACT_OPTION_HEIGHT_PX = 34;
+
+/** A section label's row (`.menu-label`, §9.1): 28px under every pointer. */
+export const MENU_LABEL_HEIGHT_PX = 28;
+
+/** A separator (`.menu-sep`): its 1px line and the 4px (`--space-1`) margin above and below it. */
+export const MENU_SEPARATOR_PX = 1 + 2 * 4;
 /**
  * What each line AFTER the first adds.
  *
@@ -1436,6 +1652,10 @@ export function selectMenuDesiredHeight(input: {
   maxOptionLines: number;
   /** A caller's row budget for content that may wrap. Raised to the touch floor, never lowered. */
   estimatedOptionHeight?: number;
+  /** How many section labels the list draws, each one {@link MENU_LABEL_HEIGHT_PX} row. */
+  groupLabelCount?: number;
+  /** Whether the list ends with a footer action: one single-line option and the separator above it. */
+  footerAction?: boolean;
   coarsePointer: boolean;
 }): number {
   const lines = Math.max(1, input.maxOptionLines);
@@ -1448,7 +1668,12 @@ export function selectMenuDesiredHeight(input: {
   // alone — the sliver a bare `optionCount` of 0 produced had nowhere to put the sentence that is
   // the whole reason an empty list stays open.
   const rows = Math.max(1, input.optionCount);
-  return Math.min(SELECT_MENU_MAX_HEIGHT_PX, rows * perOption + SELECT_LIST_CHROME_PX);
+  const labels = (input.groupLabelCount ?? 0) * MENU_LABEL_HEIGHT_PX;
+  // The footer row is its label alone, so it is one line whatever the options' estimate says.
+  const footer = input.footerAction
+    ? (input.coarsePointer ? TOUCH_OPTION_MIN_HEIGHT_PX : COMPACT_OPTION_HEIGHT_PX) + MENU_SEPARATOR_PX
+    : 0;
+  return Math.min(SELECT_MENU_MAX_HEIGHT_PX, rows * perOption + labels + footer + SELECT_LIST_CHROME_PX);
 }
 
 /**
@@ -1524,6 +1749,7 @@ export function Select<T extends string>({
   searchable = false,
   noun = "options",
   createOption,
+  footerAction,
   disabled = false,
   invalid = false,
   className,
@@ -1561,6 +1787,8 @@ export function Select<T extends string>({
   noun?: string;
   /** An optional next step after a filter that found nothing. */
   createOption?: PickerCreateOption;
+  /** The one action at the end of the list, after a separator, whatever the filter. */
+  footerAction?: PickerFooterAction;
   disabled?: boolean;
   /** The chosen value is invalid (§8.5): the trigger carries `aria-invalid`, which draws its red
    * edge inside a `.field`. Pair it with `describedBy` pointing at the field's error. */
@@ -1572,7 +1800,7 @@ export function Select<T extends string>({
   estimatedOptionHeight?: number;
 }) {
   const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(0);
+  const [active, setActive] = useState<PickerRow | null>(0);
   const [query, setQuery] = useState("");
   const coarsePointer = useTouchTargetMode();
   const popover = useDismissiblePopover(open, setOpen, "ui-select");
@@ -1584,9 +1812,11 @@ export function Select<T extends string>({
     () => searchable ? filterSearchableComboboxOptions(options, query) : [...options],
     [options, query, searchable],
   );
-  const activeIndex = Math.min(active, Math.max(0, visible.length - 1));
   const noMatch = searchable && query.trim() !== "" && visible.length === 0;
   const showCreate = noMatch && Boolean(createOption);
+  const listRows = pickerRows(visible.length, showCreate, Boolean(footerAction));
+  const activeRow = resolvePickerRow(active, listRows, visible.length);
+  const activeIndex = typeof activeRow === "number" ? activeRow : -1;
   useEffect(() => {
     if (!open) return;
     // After the controller's own focus effect, not instead of it: it focuses the first button in
@@ -1683,6 +1913,8 @@ export function Select<T extends string>({
         + (option.description ? 1 : 0)
         + (option.disabled && option.disabledReason ? 1 : 0)), 1),
       estimatedOptionHeight,
+      groupLabelCount: groupLabelCount(options),
+      footerAction: Boolean(footerAction),
       coarsePointer,
     }) + (searchable ? selectFilterRowHeight(coarsePointer) : 0)),
     // At least as wide as the trigger and at least SELECT_LIST_MIN_WIDTH_PX, so a short trigger does
@@ -1727,17 +1959,29 @@ export function Select<T extends string>({
     popover.close(true);
     createOption.onSelect(searched);
   };
+  // Focus goes back to the trigger synchronously, before the action runs, so a dialog the action
+  // opens records the trigger as the place to return to.
+  const runFooter = () => {
+    if (!footerAction) return;
+    popover.triggerRef.current?.focus();
+    popover.close(false);
+    footerAction.onSelect();
+  };
   const filter = (next: string) => {
     revealActive.current = true;
     setQuery(next);
-    // The first result a keypress can commit, as Home would choose.
+    // The first result a keypress can commit, as Home would choose. A filter that found nothing
+    // leaves the create row active, or nothing: the footer action waits to be reached.
     setActive(Math.max(0, filterSearchableComboboxOptions(options, next).findIndex((option) => !option.disabled)));
   };
 
   const optionId = (index: number) => `${popover.panelId}-option-${index}`;
   const listId = searchable ? `${popover.panelId}-list` : popover.panelId;
   const createId = `${popover.panelId}-create`;
-  const activeDescendant = showCreate ? createId : visible[activeIndex] ? optionId(activeIndex) : undefined;
+  const footerId = `${popover.panelId}-footer`;
+  const activeDescendant = activeRow === "create" ? createId
+    : activeRow === "footer" ? footerId
+      : visible[activeIndex] ? optionId(activeIndex) : undefined;
   /*
    * The highlighted option is where focus is, and the only place it shows (§9.1): the list draws no
    * ring of its own while one is highlighted (#3020). So opening the list and every keyboard move keep
@@ -1764,23 +2008,20 @@ export function Select<T extends string>({
    */
   const navigate = (event: React.KeyboardEvent<HTMLElement>, spaceCommits: boolean) => {
     revealActive.current = true;
-    const step = (delta: number) => {
+    // Unavailable options are skipped by every move here; the create row and the footer never are.
+    const unavailable = (row: PickerRow) => typeof row === "number" && Boolean(visible[row]?.disabled);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      if (visible.length === 0) return;
-      let next = activeIndex;
-      for (let hop = 0; hop < visible.length; hop += 1) {
-        next = (next + delta + visible.length) % visible.length;
-        if (!visible[next]?.disabled) break;
-      }
-      setActive(next);
-    };
-    if (event.key === "ArrowDown") return step(1);
-    if (event.key === "ArrowUp") return step(-1);
-    if (event.key === "Home") { event.preventDefault(); return setActive(visible.findIndex((o) => !o.disabled)); }
-    if (event.key === "End") { event.preventDefault(); return setActive(visible.map((o, i) => (o.disabled ? -1 : i)).filter((i) => i >= 0).pop() ?? 0); }
+      return setActive(stepPickerRow(listRows, activeRow, event.key === "ArrowDown" ? 1 : -1, unavailable));
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      return setActive(boundaryPickerRow(listRows, event.key === "Home" ? "first" : "last", unavailable));
+    }
     if (event.key === "Enter" || (spaceCommits && event.key === " ")) {
       event.preventDefault();
-      if (showCreate) return create();
+      if (activeRow === "create") return create();
+      if (activeRow === "footer") return runFooter();
       const option = visible[activeIndex];
       if (option) commit(option);
       return;
@@ -1839,7 +2080,24 @@ export function Select<T extends string>({
         );
       })}
       {showCreate && createOption && (
-        <CreateOptionRow id={createId} label={createOption.label} active onSelect={create} />
+        <CreateOptionRow
+          id={createId}
+          label={createOption.label}
+          active={activeRow === "create"}
+          selection="value"
+          onSelect={create}
+          onActive={() => { revealActive.current = false; setActive("create"); }}
+        />
+      )}
+      {footerAction && (
+        <FooterActionRow
+          id={footerId}
+          action={footerAction}
+          active={activeRow === "footer"}
+          selection="value"
+          onSelect={runFooter}
+          onActive={() => { revealActive.current = false; setActive("footer"); }}
+        />
       )}
     </>
   );
