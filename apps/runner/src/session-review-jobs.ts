@@ -32,11 +32,11 @@
 import { execFile, spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
-  closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync,
+  closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync,
   renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 import {
   SESSION_REVIEW_ARTIFACT_LIMIT_BYTES, SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_SUMMARY_LIMIT_BYTES,
@@ -44,10 +44,17 @@ import {
   type SessionReviewCapability, type SessionReviewHarness, type SessionReviewJobCommand, type SessionReviewJobUpdate,
 } from "@wollipog/protocol";
 import {
-  resolveAgentEnvironmentValue, type RunnerConfigAgent, type RunnerConfigWorkspace, type RunnerProviderAccount,
-} from "./config.js";
-import { githubSlug } from "./git-ops.js";
-import type { SessionMeta, SessionStore } from "./session-store.js";
+  bindPullRequestScope, GITHUB_REPOSITORY, helperEnvironmentBase, repositoryKey, ReviewScopeRefusal, ReviewSnapshotter,
+  refuseReview as refuse, SAFE_GIT, SESSION_IDENTITY, SESSION_REVIEW_JOB_VARIABLE, type PullRequestFacts,
+} from "./review-snapshot.js";
+import { reviewerInterpreter, sessionWritableRoots, trustedExecutable, trustedPath } from "./review-trust.js";
+import type { SessionStore } from "./session-store.js";
+
+export {
+  configuredSessionWritablePaths, homeWritableRoots, sessionWritableRoots, trustedPath, type SessionWritableSources,
+} from "./review-trust.js";
+export type { PullRequestFacts } from "./review-snapshot.js";
+const RefusedReview = ReviewScopeRefusal;
 
 const execFileAsync = promisify(execFile);
 
@@ -61,237 +68,12 @@ const CONTROLLER_STDOUT_TAIL_BYTES = 64 * 1024;
 const MAX_VALID_ROUNDS = 4;
 const MAX_CONSUMED_ATTEMPTS_PER_ROUND = 2;
 const DEFAULT_MAX_CONCURRENT = 2;
-/** Home-relative caches a protected session can write (mirrors execution-isolation's list). */
-const SESSION_WRITABLE_CACHE_PATHS = [
-  ".cache", ".npm", ".cargo/registry", ".cargo/git", ".local/share/pnpm/store", "go/pkg/mod",
-] as const;
 /** Where the controller is installed (Devbox). `~/.claude/skills/cross-model-review` usually links
  * here, but that link sits in a provider home a session can write, so it is never followed. */
 const INSTALLED_SKILL_DIRECTORY = ".devbox/skills/cross-model-review";
-/** Temporary directories every session can write. */
-const SESSION_WRITABLE_TEMPORARY_ROOTS = ["/tmp", "/var/tmp", "/dev/shm"] as const;
-/** A GitHub `owner/name`; the only form a review request may name. */
-const GITHUB_REPOSITORY = /^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u;
-const SESSION_IDENTITY = /^[A-Za-z0-9_-]{1,128}$/u;
-
-/** Flags for every git command the runner runs against a session's repository. The session can
- * write its worktree's git config, and these commands run outside its sandbox. */
-const SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"] as const;
-/** Transports a mirror fetch may use, and full object checks on everything it receives. SSH is
- * allowed only with a verified `ssh`, which every fetch then runs by its absolute path. */
-function fetchGit(ssh: boolean): string[] {
-  return [
-    "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.https.allow=always",
-    "-c", `protocol.ssh.allow=${ssh ? "always" : "never"}`, "-c", "transfer.fsckObjects=true",
-  ];
-}
-/** Names the controller's process (and the reviewer it starts) so a restarted runner can find a
- * controller it spawned but never recorded. The value is a per-launch secret in runner state. */
-const SESSION_REVIEW_JOB_VARIABLE = "WOLLIPOG_SESSION_REVIEW_JOB";
-const MIRROR_FETCH_TIMEOUT_MS = 600_000;
 
 function sha256(bytes: string | Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
-}
-
-function within(parent: string, path: string): boolean {
-  const rel = relative(parent, path);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-/** The roots below one HOME that a session using it can write: its default provider homes, the
- * runner's legacy state and the shared package caches. */
-export function homeWritableRoots(home: string): string[] {
-  return [
-    join(home, ".codex"),
-    join(home, ".claude"),
-    join(home, ".agent-manager"),
-    ...SESSION_WRITABLE_CACHE_PATHS.map((path) => join(home, path)),
-  ];
-}
-
-/**
- * Every root a session can write, so nothing the runner runs may live there. `extra` carries the
- * configured project checkouts (their git directories are writable), provider account and
- * session provider homes, and any provider homes set through the runner's environment.
- */
-export function sessionWritableRoots(
-  home: string,
-  dataDir: string,
-  extra: readonly string[] = [],
-  temporary: readonly string[] = [tmpdir(), ...SESSION_WRITABLE_TEMPORARY_ROOTS],
-): string[] {
-  const roots = [
-    ...homeWritableRoots(home),
-    dataDir,
-    ...temporary,
-    ...extra,
-  ];
-  return [...new Set(roots.flatMap((root) => {
-    try { return [root, realpathSync(root)]; } catch { return [root]; }
-  }))];
-}
-
-/** Check one resolved path: outside every session-writable root, and every component owned by
- * `uid` or root and not writable by other users. */
-function checkResolved(real: string, roots: readonly string[], uid: number, rootUid: number): void {
-  for (const root of roots) {
-    if (within(root, real)) throw new Error(`${real} is inside a directory a session can write (${root})`);
-  }
-  const components: string[] = [];
-  for (let current = real; ; current = join(current, "..")) {
-    components.push(current);
-    if (current === "/" || current === join(current, "..")) break;
-  }
-  let privateAncestor = false;
-  const ordered = components.reverse();
-  for (const [index, component] of ordered.entries()) {
-    const info = lstatSync(component);
-    if (info.uid !== uid && info.uid !== rootUid) throw new Error(`${component} is owned by another user`);
-    // A sticky directory (like /tmp, mode 1777) cannot have entries it does not own replaced by
-    // anyone, its group included, so it is a safe ancestor; the path itself never may be writable.
-    const stickyAncestor = info.isDirectory() && (info.mode & 0o1000) !== 0 && index < ordered.length - 1;
-    if ((info.mode & 0o002) && !stickyAncestor) throw new Error(`${component} is writable by every user`);
-    if ((info.mode & 0o020) && !privateAncestor && !stickyAncestor) throw new Error(`${component} is writable by its group`);
-    if (info.isDirectory() && info.uid === uid && (info.mode & 0o077) === 0) privateAncestor = true;
-  }
-}
-
-/**
- * Resolve `path` and refuse it unless no other user, and no session, could have changed it.
- * Links are followed one at a time: each must be owned by `uid` or root and sit in a directory that
- * passes the same checks, so no hop on the way can be repointed. Group-write is accepted only
- * below a directory that only `uid` can enter, which keeps other users out.
- */
-export function trustedPath(path: string, roots: readonly string[], uid: number, rootUid = 0): string {
-  if (!isAbsolute(path)) throw new Error(`${path} is not an absolute path`);
-  let resolved = "/";
-  const pending = path.split("/").filter(Boolean);
-  let hops = 0;
-  while (pending.length) {
-    const name = pending.shift()!;
-    if (name === ".") continue;
-    if (name === "..") { resolved = dirname(resolved); continue; }
-    const next = join(resolved, name);
-    let info;
-    try { info = lstatSync(next); } catch { throw new Error(`${path} does not exist`); }
-    if (!info.isSymbolicLink()) { resolved = next; continue; }
-    if (++hops > 40) throw new Error(`${path} has too many symbolic links`);
-    if (info.uid !== uid && info.uid !== rootUid) throw new Error(`${next} is owned by another user`);
-    checkResolved(resolved, roots, uid, rootUid);
-    const target = readlinkSync(next);
-    if (isAbsolute(target)) resolved = "/";
-    pending.unshift(...target.split("/").filter(Boolean));
-  }
-  checkResolved(resolved, roots, uid, rootUid);
-  return resolved;
-}
-
-/** Provider home variables a session's environment can point at a writable directory. */
-const PROVIDER_HOME_VARIABLES = ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] as const;
-
-/** Where the runner's configuration and its sessions say provider state lives. */
-export interface SessionWritableSources {
-  workspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "path" | "additionalDirectoryGrants">>;
-  providerAccounts?: ReadonlyArray<Pick<RunnerProviderAccount, "directory">>;
-  agents?: ReadonlyArray<Pick<RunnerConfigAgent, "id" | "env">>;
-  sessions?: Iterable<Pick<SessionMeta, "repoPath" | "worktreePath" | "worktrees" | "env" | "providerCredentialHome" |
-    "providerConversationHome" | "pendingProviderCredentialHome" | "adoptedProviderState">>;
-  hostEnv?: NodeJS.ProcessEnv;
-}
-
-/**
- * The session-writable directories the runner's configuration and persisted sessions name:
- * project checkouts and their directory grants, every provider account's credential directory,
- * provider homes (and HOME-derived provider directories) set in an agent's or a session's
- * environment, each session's worktrees, and each session's current, transcript-source and
- * pending provider credential homes. Relative and unresolvable values are dropped.
- */
-export function configuredSessionWritablePaths(sources: SessionWritableSources): string[] {
-  const paths: Array<string | null | undefined> = [];
-  const fromEnvironment = (read: (name: string) => string | undefined) => {
-    for (const name of PROVIDER_HOME_VARIABLES) paths.push(read(name));
-    const home = read("HOME");
-    if (home && isAbsolute(home)) paths.push(...homeWritableRoots(home));
-  };
-  const hostEnv = sources.hostEnv ?? {};
-  fromEnvironment((name) => hostEnv[name]);
-  for (const workspace of sources.workspaces ?? []) paths.push(workspace.path, ...(workspace.additionalDirectoryGrants ?? []));
-  for (const account of sources.providerAccounts ?? []) paths.push(account.directory);
-  for (const agent of sources.agents ?? []) {
-    fromEnvironment((name) => {
-      try { return resolveAgentEnvironmentValue(agent, name, hostEnv); } catch { return undefined; }
-    });
-  }
-  for (const meta of sources.sessions ?? []) {
-    paths.push(meta.providerCredentialHome, meta.providerConversationHome, meta.pendingProviderCredentialHome,
-      meta.repoPath, meta.worktreePath, ...(meta.worktrees ?? []).map((worktree) => worktree.path),
-      meta.adoptedProviderState?.sessionDir);
-    const env = meta.env ?? {};
-    fromEnvironment((name) => env[name]);
-  }
-  return [...new Set(paths.filter((path): path is string => typeof path === "string" && isAbsolute(path)))];
-}
-
-/**
- * The first `name` on `pathEnv` that passes `trustedPath`. A candidate a session could have
- * planted earlier on PATH is skipped, never run; when no candidate is trusted the first refusal
- * is reported.
- */
-function trustedExecutable(name: string, pathEnv: string | undefined, roots: readonly string[], uid: number, rootUid?: number): string {
-  let refusal: string | undefined;
-  for (const dir of (pathEnv ?? "").split(":")) {
-    if (!dir || !isAbsolute(dir)) continue;
-    const candidate = join(dir, name);
-    try {
-      const info = statSync(candidate);
-      if (!info.isFile() || !(info.mode & 0o111)) continue;
-    } catch { continue; }
-    try { return trustedPath(candidate, roots, uid, rootUid); }
-    catch (error) { refusal ??= (error as Error).message; }
-  }
-  throw new Error(refusal ?? `${name} is not installed`);
-}
-
-/** The interpreter line of a script (after `#!`), or undefined for anything else. */
-function interpreterLine(path: string): string | undefined {
-  const fd = openSync(path, "r");
-  try {
-    const head = Buffer.alloc(256);
-    const text = head.subarray(0, readSync(fd, head, 0, head.length, 0)).toString("latin1");
-    if (!text.startsWith("#!")) return undefined;
-    const end = text.indexOf("\n");
-    return (end < 0 ? text : text.slice(0, end)).slice(2).trim();
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/**
- * Verify the interpreter a reviewer script runs under. An absolute interpreter must itself be
- * trusted; `env <program>` (how npm installs Node CLIs, `#!/usr/bin/env node`) looks the program
- * up on PATH, which for the controller holds only its private links and the system directories, so
- * the program is resolved here like every other executable and returned for linking there.
- */
-function reviewerInterpreter(
-  script: string, pathEnv: string | undefined, roots: readonly string[], uid: number, rootUid?: number,
-): { name: string; path: string } | undefined {
-  const line = interpreterLine(script);
-  if (line === undefined) return undefined;
-  const words = line.split(/\s+/u).filter(Boolean);
-  const interpreter = words[0];
-  if (!interpreter || !isAbsolute(interpreter)) throw new Error(`${script} names an interpreter that is not an absolute path`);
-  trustedPath(interpreter, roots, uid, rootUid);
-  if (basename(interpreter) !== "env") return undefined;
-  const program = words.slice(1).find((word) => !word.startsWith("-") && !word.includes("="));
-  if (!program) throw new Error(`${script} names no program for env to run`);
-  if (isAbsolute(program)) { trustedPath(program, roots, uid, rootUid); return undefined; }
-  if (!/^[A-Za-z0-9_+-][A-Za-z0-9._+-]{0,63}$/u.test(program)) throw new Error(`${script} names an unsupported interpreter`);
-  try {
-    return { name: program, path: trustedExecutable(program, pathEnv, roots, uid, rootUid) };
-  } catch (error) {
-    throw new Error(`${script} runs under ${program}, which is unavailable: ${(error as Error).message}`);
-  }
 }
 
 export interface SessionReviewInstallation {
@@ -389,14 +171,6 @@ export function reviewerForDriver(driver: string): SessionReviewHarness | null {
   return null;
 }
 
-/** A case-insensitive directory name for a validated `owner/name` (`_` cannot occur in an owner). */
-function repositoryKey(repository: string): string {
-  return repository.toLowerCase().replace("/", "__");
-}
-
-class RefusedReview extends Error {}
-const refuse = (reason: string): never => { throw new RefusedReview(reason); };
-
 interface AttemptRecord {
   epoch: number;
   round: number;
@@ -485,19 +259,6 @@ function markedProcesses(marker: string): number[] {
   return found;
 }
 
-/** The runner's environment without anything that can make git or ssh run another program or
- * read another repository; the callers set PATH and the SSH command themselves. */
-function helperEnvironmentBase(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (name.startsWith("GIT_") || name.endsWith("ASKPASS") || name === SESSION_REVIEW_JOB_VARIABLE) continue;
-    env[name] = value;
-  }
-  return env;
-}
-
-const shellQuote = (value: string) => `'${value.replace(/'/gu, `'\\''`)}'`;
-
 function readBounded(path: string, limit: number, tail = false): { text: string; truncated: boolean } | undefined {
   try {
     const bytes = readFileSync(path);
@@ -505,15 +266,6 @@ function readBounded(path: string, limit: number, tail = false): { text: string;
     const slice = tail ? bytes.subarray(bytes.length - limit) : bytes.subarray(0, limit);
     return { text: slice.toString("utf8"), truncated: true };
   } catch { return undefined; }
-}
-
-export interface PullRequestFacts {
-  state: string;
-  baseRepository: string;
-  headRepository: string;
-  headRef: string;
-  headSha: string;
-  baseSha: string;
 }
 
 /**
@@ -602,8 +354,6 @@ export class SessionReviewJobs {
   private readonly active = new Set<string>();
   /** The single in-memory state of every unfinished job; cancel and poll share it. */
   private readonly states = new Map<string, JobState>();
-  /** One mirror fetch at a time per repository. */
-  private readonly mirrorQueues = new Map<string, Promise<void>>();
   /** Jobs whose controller recovery is in flight; only its completion may finish them. */
   private readonly recovering = new Set<string>();
 
@@ -613,6 +363,8 @@ export class SessionReviewJobs {
     private readonly send: (update: SessionReviewJobUpdate) => void,
     private readonly deps: SessionReviewDependencies,
     private readonly maxConcurrent = DEFAULT_MAX_CONCURRENT,
+    /** Shared with review sessions so every mirror fetch is serialized in one place. */
+    private readonly snapshots = new ReviewSnapshotter(root, deps.exec, deps.log),
   ) {
     mkdirSync(join(root, "jobs"), { recursive: true, mode: 0o700 });
     for (const name of readdirSync(join(root, "jobs"))) {
@@ -692,35 +444,9 @@ export class SessionReviewJobs {
     }
   }
 
-  /**
-   * The environment for every git, gh and recovery command the runner runs for a review. PATH
-   * holds only a runner-private directory of links to the verified git, gh and ssh, then the system
-   * directories, so no program that git or a credential helper looks up by name (`ssh` for an SSH
-   * fetch above all) can come from a directory a session can write; SSH runs by its verified path.
-   * HOME stays, so the user's own git and gh configuration and credentials keep working.
-   */
+  /** The environment for every git, gh and recovery command the runner runs for a review. */
   private helperEnvironment(install: SessionReviewInstallation): NodeJS.ProcessEnv {
-    const links: Record<string, string> = {
-      git: install.git, ...(install.gh ? { gh: install.gh } : {}), ...(install.ssh ? { ssh: install.ssh } : {}),
-    };
-    const bin = join(this.root, "tools", sha256(JSON.stringify(links)).slice(0, 24));
-    if (!existsSync(bin)) {
-      // Built aside and renamed into place, so a directory that exists is always complete.
-      const staging = `${bin}.${process.pid}.${randomBytes(6).toString("hex")}`;
-      mkdirSync(staging, { recursive: true, mode: 0o700 });
-      for (const [name, target] of Object.entries(links)) symlinkSync(target, join(staging, name));
-      try { renameSync(staging, bin); } catch (error) {
-        rmSync(staging, { recursive: true, force: true });
-        if (!existsSync(bin)) throw error;
-      }
-    }
-    return {
-      ...helperEnvironmentBase(),
-      PATH: `${bin}:/usr/bin:/bin`,
-      GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0",
-      // Overrides any `core.sshCommand`; without a verified ssh no fetch is allowed SSH at all.
-      GIT_SSH_COMMAND: install.ssh ? shellQuote(install.ssh) : "/bin/false",
-    };
+    return this.snapshots.helperEnvironment(install);
   }
 
   private jobPath(jobId: string): string {
@@ -817,35 +543,24 @@ export class SessionReviewJobs {
     const install = this.deps.installation();
     if (!install?.controller) refuse("the runner has no trusted cross-model review installation");
     const meta = this.store.readMeta(command.sessionId);
-    const worktree = meta?.worktreePath ? meta.worktrees?.find((candidate) => candidate.path === meta.worktreePath) : undefined;
-    if (!meta || !worktree || worktree.source !== "created" || meta.context?.kind !== "native" ||
-        (meta.executionTarget?.adapter && meta.executionTarget.adapter !== "host")) {
-      refuse("the review must cover the session's own native managed worktree");
-    }
-    const reviewer = reviewerForDriver(meta!.driver);
-    if (!reviewer) refuse("this session's harness has no cross-model reviewer");
-    const reviewerPath = install!.reviewers[reviewer!];
-    if (!reviewerPath) refuse("the reviewer for this session's harness is unavailable on this runner");
-    state.reviewer = reviewer!;
+    const reviewer = meta ? reviewerForDriver(meta.driver) : null;
     const helperEnv = this.helperEnvironment(install!);
 
-    // Scope: the session's own open pull request, from its own repository, at its pushed head. The
-    // repository is read from the runner-recorded project checkout, never through the worktree's
-    // own `.git` pointer, which the session can rewrite.
-    const repoPath = realpathSync(meta!.repoPath);
-    const origin = (await this.deps.exec(install!.git, [...SAFE_GIT, "-C", repoPath, "remote", "get-url", "origin"], { env: helperEnv })).trim();
+    // Scope: the session's own open pull request, from its own repository, at its pushed head.
     const repository = request.pullRequest.repository;
-    if (githubSlug(origin)?.toLowerCase() !== repository.toLowerCase()) {
-      refuse("the pull request is not this session's open, same-repository pull request");
-    }
-    const pr = await this.deps.pullRequest(install!.gh, repository, request.pullRequest.number, helperEnv);
-    if (pr.state !== "open" || pr.baseRepository.toLowerCase() !== repository.toLowerCase() ||
-        pr.headRepository.toLowerCase() !== repository.toLowerCase() || pr.headRef !== worktree!.branch) {
-      refuse("the pull request is not this session's open, same-repository pull request");
-    }
-    if (!/^[0-9a-f]{40}$/u.test(request.headSha) || pr.headSha !== request.headSha) {
-      refuse("the requested head is not the pull request's pushed head");
-    }
+    const scopeRequest = { repository, number: request.pullRequest.number, headSha: request.headSha };
+    const scope = await bindPullRequestScope({
+      meta, tools: install!, env: helperEnv, exec: this.deps.exec, pullRequest: this.deps.pullRequest,
+      request: scopeRequest,
+      // The reviewer is checked once the worktree is known to be the session's own.
+      beforeRepository: () => {
+        if (!reviewer) refuse("this session's harness has no cross-model reviewer");
+        if (!install!.reviewers[reviewer!]) refuse("the reviewer for this session's harness is unavailable on this runner");
+      },
+    });
+    const reviewerPath = install!.reviewers[reviewer!]!;
+    state.reviewer = reviewer!;
+    const pr = scope.pullRequest;
 
     // Brief: required once per pull request, kept by the runner afterwards.
     mkdirSync(state.prDir, { recursive: true, mode: 0o700 });
@@ -862,18 +577,7 @@ export class SessionReviewJobs {
     const prState: PullRequestState = existsSync(prStatePath)
       ? JSON.parse(readFileSync(prStatePath, "utf8")) as PullRequestState
       : { epoch: 1, attempts: [] };
-    // The checkout's own `.git` directory, never a gitdir file or link that could name another
-    // repository; and no `commondir` indirection inside it.
-    const commonDir = join(repoPath, ".git");
-    if (!lstatSync(commonDir, { throwIfNoEntry: false })?.isDirectory() || existsSync(join(commonDir, "commondir"))) {
-      refuse("the review snapshot could not be prepared");
-    }
-    // Built here from the verified name; the origin's spelling only chooses SSH or HTTPS, and SSH
-    // only with a verified ssh.
-    const forgeUrl = /^https:\/\//iu.test(origin) || !install!.ssh
-      ? `https://github.com/${pr.baseRepository}.git` : `git@github.com:${pr.baseRepository}.git`;
-    const mirror = join(this.root, "mirrors", `${repositoryKey(repository)}.git`);
-    await this.syncMirror(install!.git, helperEnv, Boolean(install!.ssh), mirror, commonDir, worktree!.branch, forgeUrl, [pr.baseSha, request.headSha]);
+    const mirror = await this.snapshots.syncScope(install!, helperEnv, repository, scope, request.headSha);
     let epochAttempts = prState.attempts.filter((attempt) => attempt.epoch === prState.epoch);
     // The head the epoch was reviewed at: its last valid round's, or before any valid round, its
     // most recent attempt's (valid or not).
@@ -911,8 +615,7 @@ export class SessionReviewJobs {
     // Snapshot: a checkout of the runner-owned mirror at the exact head. Nothing touches the
     // session's worktree or its git metadata, and the session may keep working during the review.
     state.checkout = join(state.prDir, `checkout-${command.jobId}`);
-    await this.deps.exec(install!.git, [...SAFE_GIT, "clone", "--quiet", "--shared", "--no-checkout", "--end-of-options", mirror, state.checkout], { timeoutMs: 120_000, env: helperEnv });
-    await this.deps.exec(install!.git, [...SAFE_GIT, "-C", state.checkout, "checkout", "--quiet", "--detach", request.headSha], { timeoutMs: 120_000, env: helperEnv });
+    await this.snapshots.checkout(install!.git, helperEnv, mirror, state.checkout, request.headSha);
 
     const ledger = join(state.prDir, "ledger.md");
     if (!existsSync(ledger)) {
@@ -1013,48 +716,6 @@ export class SessionReviewJobs {
     child.on("exit", () => this.poll(state));
     this.emit(state, { state: "running", controllerDigest: install!.controllerDigest });
     this.poll(state);
-  }
-
-  /**
-   * Bring `commits` into the runner-owned mirror. The session's object store is read over the pack
-   * protocol, which hashes everything it receives, so rewritten objects there are refused rather
-   * than reviewed; anything still missing comes from the forge.
-   */
-  private async syncMirror(
-    git: string, env: NodeJS.ProcessEnv, ssh: boolean, mirror: string, commonDir: string, branch: string, forgeUrl: string, commits: string[],
-  ): Promise<void> {
-    const previous = this.mirrorQueues.get(mirror) ?? Promise.resolve();
-    const run = previous.then(async () => {
-      if (!existsSync(join(mirror, "HEAD"))) {
-        mkdirSync(dirname(mirror), { recursive: true, mode: 0o700 });
-        await this.deps.exec(git, [...SAFE_GIT, "init", "--quiet", "--bare", "--end-of-options", mirror], { env });
-      }
-      const has = (sha: string) => this.deps.exec(git, [...SAFE_GIT, "--git-dir", mirror, "cat-file", "-e", `${sha}^{commit}`], { env })
-        .then(() => true, () => false);
-      const missing = async () => (await Promise.all(commits.map(async (sha) => (await has(sha)) ? null : sha)))
-        .filter((sha): sha is string => sha !== null);
-      if ((await missing()).length) {
-        await this.deps.exec(git, [
-          ...SAFE_GIT, ...fetchGit(ssh), "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-          // Only the session's own branch: nothing else in the checkout reaches the reviewer.
-          "--end-of-options", `file://${commonDir}`, `+refs/heads/${branch}:refs/session/heads/${branch}`,
-        ], { timeoutMs: MIRROR_FETCH_TIMEOUT_MS, env }).catch((error: Error) => this.deps.log(`session review mirror could not read the project repository: ${error.message}`));
-      }
-      const still = await missing();
-      if (still.length) {
-        await this.deps.exec(git, [
-          ...SAFE_GIT, ...fetchGit(ssh), "--git-dir", mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-          "--end-of-options", forgeUrl, ...still,
-        ], { timeoutMs: MIRROR_FETCH_TIMEOUT_MS, env });
-      }
-    });
-    const settledRun = run.then(() => {}, () => {});
-    this.mirrorQueues.set(mirror, settledRun);
-    try {
-      await run;
-    } finally {
-      if (this.mirrorQueues.get(mirror) === settledRun) this.mirrorQueues.delete(mirror);
-    }
   }
 
   private controllerAlive(state: JobState): boolean {
