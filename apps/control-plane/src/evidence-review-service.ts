@@ -167,8 +167,8 @@ export class EvidenceReviewService {
       { receiptId: delivery.receipt.receiptId, frameIndex: index });
     return delivery;
   }
-  deliverBatch(principal: AuthPrincipal, reviewId: string, index: number) {
-    const result = this.runtime.deliverBatch(reviewId, this.authenticatedReviewer(principal, reviewId), index);
+  deliverBatch(principal: AuthPrincipal, reviewId: string, index: number, end?: number) {
+    const result = this.runtime.deliverBatch(reviewId, this.authenticatedReviewer(principal, reviewId), index, end);
     for (const delivery of result.deliveries) this.audit(this.store.getReview(reviewId)!, "video_evidence_delivery", "reviewer_media",
       { receiptId: delivery.receipt.receiptId, frameIndex: delivery.receipt.videoFrame.index });
     return result;

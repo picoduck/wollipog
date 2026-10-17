@@ -281,12 +281,14 @@ export class VideoEvidenceRuntime {
 
   /** Consecutive bounded complete frames, not sampled stills. Unacknowledged redelivery may
    * replace only this exact window, never earlier provenance after a later window. */
-  deliverBatch(reviewId: string, reviewerSessionId: string, firstIndex: number): {
+  deliverBatch(reviewId: string, reviewerSessionId: string, firstIndex: number, end?: number): {
     deliveries: Array<{ receipt: TemporalVideoReceipt; bytes: Buffer; mimeType: "image/png" }>;
     nextIndex: number; frameCount: number;
   } {
     const review = this.current(reviewId, reviewerSessionId);
-    if (!Number.isSafeInteger(firstIndex) || firstIndex < 0 || firstIndex >= review.manifest.frames.length) throw new VideoReviewRefused("order");
+    if (!Number.isSafeInteger(firstIndex) || firstIndex < 0 || firstIndex >= review.manifest.frames.length ||
+      end !== undefined && (!Number.isSafeInteger(end) || end <= firstIndex)) throw new VideoReviewRefused("order");
+    const limit = Math.min(end ?? review.manifest.frames.length, review.manifest.frames.length);
     const existing = this.store.latestReceipts(reviewId);
     const bindingDigest = videoReviewBindingDigest(review.binding);
     if (this.store.getVerdict(reviewId) || review.manifest.frames.slice(0, firstIndex).some((frame) =>
@@ -294,7 +296,7 @@ export class VideoEvidenceRuntime {
     let deliveryOrder = existing.reduce((max, r) => Math.max(max, r.receipt.deliveryOrder), 0);
     const deliveries: Array<{ receipt: TemporalVideoReceipt; bytes: Buffer; mimeType: "image/png" }> = [];
     let responseBytes = 4096;
-    for (let index = firstIndex; index < review.manifest.frames.length && deliveries.length < VIDEO_REVIEW_BATCH.frames; index++) {
+    for (let index = firstIndex; index < limit && deliveries.length < VIDEO_REVIEW_BATCH.frames; index++) {
       const delivery = this.frameDelivery(review, index, ++deliveryOrder);
       const entryBytes = Buffer.byteLength(JSON.stringify({
         receipt: delivery.receipt, mimeType: delivery.mimeType, sizeBytes: delivery.bytes.length, data: "",

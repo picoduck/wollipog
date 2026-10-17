@@ -1,6 +1,8 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
 import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
 import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
+import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
+import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
 /**
  * Runner daemon: connects outbound to the control plane, advertises this host's
  * workspaces + agents, sends heartbeats, reconnects automatically, and manages
@@ -9,13 +11,16 @@ import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReview
 
 import { homedir, hostname } from "node:os";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { CampaignLaunchInspections } from "./campaign-launch-inspection.js";
 import WebSocket from "ws";
 import {
   parseMessage,
   agentContextKey,
+  PACED_VIDEO_REVIEW_CONTRACT_ID,
+  PACED_VIDEO_REVIEW_MIN_PROTOCOL,
   PROTOCOL_VERSION,
   projectRunnerMessageForProtocol,
   projectSessionEventPayloadForProtocol,
@@ -218,6 +223,7 @@ import { UnguardedAgentTuiRegistry } from "./agent-tui-guard-notice.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
 import {
+  deriveControlPlaneHttpUrl,
   publishNegotiatedSessionSnapshots,
   registrationSessionSnapshots,
   validateControlPlaneUrl,
@@ -593,7 +599,7 @@ function safeWslLaunchKey(value: Pick<AgentDefinition, "command" | "args" | "dri
 /** Never advertise secret environment data or an orchestration preset
  * to a control plane that cannot enforce its credential boundary. */
 function agentsForControlPlane() {
-  return projectOrchestratorPresetForPeer(metadata.agents.map((agent) =>
+  return withMediaReviewerCapabilities(projectOrchestratorPresetForPeer(metadata.agents.map((agent) =>
     invalidateStaleNativeInstallation(agent)), {
     controlPlaneProtocolVersion,
     isolationMode: config.executionIsolation.mode,
@@ -624,7 +630,21 @@ function agentsForControlPlane() {
           ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
           : {}),
       };
-    });
+    }));
+}
+
+/** #1321: the paced-video contract is advertised only for a native Claude Code agent whose
+ * media-only reviewer was re-proven at this registration (pinned CLI, dedicated key, namespace),
+ * and only to a control plane at the private media floor. It is never live validation. */
+function withMediaReviewerCapabilities<T extends AgentDefinition>(agents: T[]): T[] {
+  if (!controlPlaneProtocolVersion || controlPlaneProtocolVersion < PACED_VIDEO_REVIEW_MIN_PROTOCOL) return agents;
+  return agents.map((agent) => {
+    const attestation = mediaReviewerAdvertisement.attestation(agent.id);
+    return attestation && agent.driver === "claude-code" && (agent.context?.kind ?? "native") === "native" && agent.capabilities
+      ? { ...agent, capabilities: { ...agent.capabilities,
+          pacedVideoReviewContract: { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 as const }, mediaReviewerAttestation: attestation } }
+      : agent;
+  });
 }
 
 const providerAccountAuthStatus = new Map<string, ProviderAccountDefinition["authStatus"]>();
@@ -1497,6 +1517,52 @@ const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session
     workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
     sessions: store.listSessions(), hostEnv: process.env,
   })));
+// #1321: dedicated Claude Code media-only reviewers. The dispatcher's durable fences live in their
+// own private database; nothing here launches a provider until an exact prepared dispatch arrives.
+const mediaReviewRoot = resolve(config.dataDir, "media-review");
+mkdirSync(join(mediaReviewRoot, "sessions"), { recursive: true, mode: 0o700 });
+/** Operator state the reviewer namespace must never expose (it mounts none of it in any case). */
+function mediaReviewerForbiddenRoots(): string[] {
+  const roots = [...config.workspaces.map((workspace) => workspace.path), resolve(config.dataDir, "worktrees"), agentControlHost.configDir];
+  return [...new Set(roots.filter((path) => {
+    try { return existsSync(path) && statSync(path).isDirectory(); } catch { return false; }
+  }).map((path) => realpathSync(path)))].slice(0, 32);
+}
+function inspectMediaReviewer(agentId: string): ReturnType<typeof installedMediaReviewer> {
+  const agent = metadata.agents.find((candidate) => candidate.id === agentId);
+  if (!agent || agent.driver !== "claude-code" || (agent.context?.kind ?? "native") !== "native") {
+    return Promise.resolve({ refused: agent?.driver === "codex" || agent?.driver === "codex-app-server"
+      ? "builtin_tool_allowlist_unavailable" : "media_reviewer_unsupported" });
+  }
+  return installedMediaReviewer({ agentId, command: agent.command, dataDir: config.dataDir, root: join(mediaReviewRoot, "probe"),
+    nodeExecutable: process.execPath, forbiddenRoots: mediaReviewerForbiddenRoots() });
+}
+const mediaReviewerAdvertisement = new MediaReviewerAdvertisement({
+  agents: () => process.platform === "linux" ? metadata.agents : [],
+  inspect: inspectMediaReviewer,
+  canPublish: () => registered && discoveryDone,
+  publish: () => sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(),
+    providerAccounts: providerAccountsForControlPlane(), editors: metadata.editors }),
+});
+function refreshMediaReviewers(): void {
+  void mediaReviewerAdvertisement.refresh().catch((error) => log(`media reviewer discovery failed: ${errText(error)}`));
+}
+const mediaReviewers = new MediaReviewerDispatcher({
+  db: new DatabaseSync(join(mediaReviewRoot, "media-review.sqlite")),
+  root: join(mediaReviewRoot, "sessions"),
+  runnerId: () => config.runnerId,
+  controlPlaneHttpUrl: () => deriveControlPlaneHttpUrl(config.controlPlaneUrl, allowInsecureTransport),
+  fetch,
+  send: sendUp,
+  registerCredential: registerAgentControlCredentialAndWait,
+  reviewer: inspectMediaReviewer,
+  forbiddenRoots: mediaReviewerForbiddenRoots,
+  nodeExecutable: process.execPath,
+  reserve: (id, agentId) => sessions.reserveMediaReviewAdmission(id, agentId),
+  release: (id) => sessions.releaseMediaReviewAdmission(id),
+  log,
+});
+
 /** Discovery runs at every registration so an installed or removed controller is advertised. */
 function sessionReviewCapability(): SessionReviewCapability | undefined {
   if (process.platform !== "linux") return undefined;
@@ -2011,6 +2077,9 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       ...(refreshModels && metadata.executionTargets ? { executionTargets: metadata.executionTargets } : {}),
     };
     sendUp(update);
+    // The agent list may have gained a Claude Code installation (or its reviewer key) since the
+    // last proof; a changed attestation republishes agents without waiting for a reconnect.
+    refreshMediaReviewers();
     // Discovery may have changed the agent list, and harness skill dirs drift out of band: heal
     // links against the last authoritative desired list (scan-only, no removals, before the first
     // sync) and report fresh deployment + unmanaged state. Gated so a pre-v90 control plane never
@@ -2173,6 +2242,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       if (discoveryDone) {
         sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), providerAccounts: providerAccountsForControlPlane(), editors: metadata.editors });
       }
+      refreshMediaReviewers();
       publishSubscriptionUsageInventory(true);
       // The CP dropped this runner's queue overlays on register (in-memory queues are assumed
       // dead), but OURS survived the socket blip — re-report every non-empty queue or those
@@ -2641,6 +2711,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "rearm_governance":
       sessions.rearmGovernance(msg.sessionId, msg.config, msg.holdFor, msg.campaignBudgetDispatch);
+      break;
+    case "media_review_dispatch":
+      runCommandTask("media_review_dispatch", mediaReviewers.dispatch(msg.dispatch));
+      break;
+    case "media_review_readback":
+      mediaReviewers.readback(msg.identity);
+      break;
+    case "media_review_stop":
+      mediaReviewers.stop(msg.request);
       break;
     case "campaign_review_job":
       runCommandTask("campaign_review_job",campaignReviewer.dispatch(msg));

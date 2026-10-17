@@ -4,7 +4,10 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { spawn } from "node:child_process";
+import type { PacedVideoTransportGrant } from "@wollipog/protocol";
 import { mediaOnlyToolSet, prepareEvidenceReviewNamespace } from "./evidence-review-namespace.js";
+import { openMediaReviewRelay } from "./media-review-relay.js";
 
 test("actual narrowed namespace cannot read fresh operator oracle, generator, parent path or symlink", (t) => {
   if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace required"); return; }
@@ -87,4 +90,71 @@ test("an installed executable outside runtime roots uses its exact private in-na
   assert.equal(execFileSync(ns.command, [...ns.args, "--", ns.providerCommand, "--version"], {
     env: {}, encoding: "utf8", timeout: 5_000,
   }).trim(), "synthetic provider metadata");
+});
+
+const relayDeps = { transport: { grant: {} as PacedVideoTransportGrant, now: Date.now,
+  request: async () => { throw new Error("synthetic relay test serves no media"); } }, actualSessionId: "", current: () => false };
+
+test("the media relay mount is exact, private and bound into the policy digest with reviewer-only settings", async (t) => {
+  if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace required"); return; }
+  const root = mkdtempSync(join(tmpdir(), "media-relay-policy-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const state = join(root, "state"), forbidden = join(root, "operator");
+  mkdirSync(state, { mode: 0o700 }); mkdirSync(forbidden, { mode: 0o700 });
+  const relay = await openMediaReviewRelay(relayDeps, root);
+  t.after(() => relay.close());
+  const input = { stateDirectory: state, providerExecutable: realpathSync("/usr/bin/python3"), forbiddenRoots: [forbidden],
+    network: "deny" as const, relay: { directory: relay.directory, nodeExecutable: process.execPath } };
+  const bare = prepareEvidenceReviewNamespace({ ...input, relay: undefined });
+  const ns = prepareEvidenceReviewNamespace({ ...input, providerEnv: { MAX_MCP_OUTPUT_TOKENS: "100000" } });
+  assert.notEqual(ns.namespaceSha256, bare.namespaceSha256, "relay runtime and settings are part of the reviewed policy");
+  assert.notEqual(prepareEvidenceReviewNamespace(input).namespaceSha256, ns.namespaceSha256);
+  assert.deepEqual(ns.relay, { directory: "/relay", nodeCommand: "/relay-node", socket: "/relay/media.sock", mcpConfig: "/relay/mcp.json" });
+  const mount = ns.args.indexOf("/relay");
+  assert.deepEqual(ns.args.slice(mount - 2, mount + 4), ["--ro-bind", relay.directory, "/relay", "--ro-bind", process.execPath, "/relay-node"]);
+  assert.equal(ns.env.MAX_MCP_OUTPUT_TOKENS, "100000");
+  const refused: Array<Record<string, string>> = [{ ANTHROPIC_API_KEY: "x" }, { CLAUDE_CODE_OAUTH_TOKEN: "x" }, { HOME: "/" },
+    { lower: "x" }, { MAX_MCP_OUTPUT_TOKENS: "line\nbreak" }];
+  for (const providerEnv of refused) {
+    assert.throws(() => prepareEvidenceReviewNamespace({ ...input, providerEnv }), /non-secret/u, JSON.stringify(providerEnv));
+  }
+  writeFileSync(join(relay.directory, "extra.txt"), "operator state");
+  assert.throws(() => prepareEvidenceReviewNamespace(input), /exactly the private runner relay/u);
+  assert.throws(() => prepareEvidenceReviewNamespace({ ...input, relay: { directory: state, nodeExecutable: process.execPath } }), /expose forbidden/u);
+});
+
+test("inside the actual namespace the relay reaches only the scoped media server and cannot be modified", async (t) => {
+  if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace required"); return; }
+  const root = mkdtempSync(join(tmpdir(), "media-relay-namespace-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const state = join(root, "state"), forbidden = join(root, "operator");
+  mkdirSync(state, { mode: 0o700 }); mkdirSync(forbidden, { mode: 0o700 });
+  writeFileSync(join(forbidden, "expected.json"), "synthetic private test truth", { mode: 0o600 });
+  const relay = await openMediaReviewRelay(relayDeps, root);
+  t.after(() => relay.close());
+  const ns = prepareEvidenceReviewNamespace({ stateDirectory: state, providerExecutable: realpathSync("/usr/bin/python3"),
+    forbiddenRoots: [forbidden], network: "deny", relay: { directory: relay.directory, nodeExecutable: process.execPath } });
+  // Plays the provider: speaks MCP through the in-namespace relay exactly as mcp.json launches it.
+  const client = [
+    "const { spawn } = require('node:child_process'); const fs = require('node:fs');",
+    "const config = JSON.parse(fs.readFileSync('/relay/mcp.json', 'utf8')).mcpServers.media;",
+    "let writable = true; try { fs.writeFileSync('/relay/x', 'x'); } catch { writable = false; }",
+    "const hidden = [process.argv[1], '/home', '/etc/passwd'].every((p) => !fs.existsSync(p));",
+    "const relay = spawn(config.command, config.args, { stdio: ['pipe', 'pipe', 'inherit'] }); let out = '';",
+    "relay.stdout.on('data', (d) => { out += d; const lines = out.split('\\n').filter(Boolean); if (lines.length === 3) {",
+    "  const tools = JSON.parse(lines[1]).result.tools.map((t) => t.name); const call = JSON.parse(lines[2]).result;",
+    "  console.log(JSON.stringify({ tools, refused: call.isError === true, writable, hidden })); relay.stdin.end(); } });",
+    "for (const [id, method, params] of [[1, 'initialize', {}], [2, 'tools/list'], [3, 'tools/call', { name: 'review_video_evidence_frame', arguments: { index: 0 } }]])",
+    "  relay.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, ...(params ? { params } : {}) }) + '\\n');",
+  ].join("\n");
+  const output = await new Promise<string>((resolveRun, reject) => {
+    const child = spawn(ns.command, [...ns.args, "--", "/relay-node", "-e", client, join(forbidden, "expected.json")], { env: {} });
+    let stdout = "";
+    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("namespace relay timed out")); }, 10_000);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.on("close", () => { clearTimeout(timer); resolveRun(stdout.trim()); });
+  });
+  assert.deepEqual(JSON.parse(output), { tools: ["review_video_evidence_frame", "submit_video_evidence_verdict"],
+    refused: true, writable: false, hidden: true });
+  assert.equal(relay.accepted(), 1);
 });

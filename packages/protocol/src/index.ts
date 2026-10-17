@@ -2079,8 +2079,12 @@ export interface AgentCapabilities {
    */
   imageToolResults?: boolean;
   /** Private compatibility identity for this exact installation, never a runtime attestation.
-   * No current discovery path emits it. Native admission/delivery/quality proof remains separate. */
+   * Only a runner that re-proved its Claude Code media-only reviewer emits it, alongside
+   * `mediaReviewerAttestation`. Native admission/delivery/quality proof remains separate. */
   pacedVideoReviewContract?: import("./paced-video-review.js").PacedVideoReviewPeerContract;
+  /** Installed Claude Code media-only reviewer this runner can launch (#1321). Present only with
+   * the contract above and a provisioned dedicated reviewer key; never live validation. */
+  mediaReviewerAttestation?: import("./paced-video-review-windows.js").ClaudeMediaReviewerAttestation;
   /** Provider exposes a receipted primitive that incorporates input into the active turn. */
   supportsSteering?: boolean;
   /** Provider can mint an independent conversation from its current/history checkpoint. */
@@ -9097,6 +9101,8 @@ export interface SessionNamingCustomModelResultMessage {
 export type RunnerToControlPlane =
   | { type: "media_review_stop_acknowledged"; receipt: import("./media-active-stop.js").MediaActiveStopAcknowledgement }
   | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence }
+  | { type: "media_review_dispatch_receipt"; receipt: import("./paced-video-review-windows.js").MediaReviewDispatchReceipt }
+  | { type: "media_review_finished"; result: import("./paced-video-review-windows.js").MediaReviewFinished }
   | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | import("./session-review-job.js").SessionReviewJobUpdate
@@ -10928,6 +10934,8 @@ export interface GitActionResultMessage {
 
 export type ControlPlaneToRunner =
   | { type: "media_review_stop"; request: import("./media-active-stop.js").MediaActiveStopRequest }
+  | { type: "media_review_dispatch"; dispatch: import("./paced-video-review-windows.js").MediaReviewDispatch }
+  | { type: "media_review_readback"; identity: import("./media-active-stop.js").MediaActiveStopIdentity }
   | import("./campaign-control-launch.js").CampaignLaunchInspectionMessage
   | import("./campaign-control-launch.js").CampaignLaunchInspectionCancelMessage
   | import("./campaign-review-job.js").CampaignReviewJobCommand
@@ -11769,6 +11777,10 @@ export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoRevie
 export { PACED_VIDEO_REVIEW_BATCH_LIMITS, PACED_VIDEO_REVIEW_MIN_PROTOCOL, PACED_VIDEO_REVIEW_CONTRACT_ID,
   validPacedVideoReviewPeerContract, supportsPacedVideoReviewPeer } from "./paced-video-review.js";
 export type { PacedVideoReviewPeerContract } from "./paced-video-review.js";
+export { PACED_VIDEO_REVIEW_WINDOW_LIMITS, pacedVideoReviewWindowPlan, pacedVideoReviewWindowPlanBody,
+  parsePacedVideoReviewWindowNotes, validPacedVideoReviewWindowNotes } from "./paced-video-review-windows.js";
+export type { PacedVideoReviewWindow, PacedVideoReviewWindowPlan, PacedVideoReviewWindowNotes, PacedVideoReviewWindowLimits,
+  ClaudeMediaReviewerAttestation, MediaReviewDispatch, MediaReviewDispatchReceipt, MediaReviewFinished } from "./paced-video-review-windows.js";
 export type { MediaDispatchFenceIdentity, MediaNeverDispatchedFence } from "./media-dispatch-fence.js";
 export type { MediaActiveStopIdentity, MediaActiveStopRequest, MediaActiveStopAcknowledgement } from "./media-active-stop.js";
 export { mediaActiveStopIdentityBody, mediaActiveStopRequestBody, mediaActiveStopAcknowledgementBody } from "./media-active-stop.js";
