@@ -1051,7 +1051,8 @@ test("Result Blocked can be acknowledged with an offline runner and keeps all jo
     assert.match(panel.container.textContent!, /Background jobs and held results are kept/);
     await act(async () => { acknowledge.click(); });
     assert.equal(calls.length, 1);
-    assert.equal(panel.container.querySelector('.notice[data-state="continuation_blocked"]'), null);
+    assertNoDomNode(panel.container.querySelector('.notice[data-state="continuation_blocked"]'),
+      "the acknowledged blocked-result notice is removed");
     assert.match(panel.container.textContent!, /Acknowledged/);
     assert.equal(panel.container.querySelectorAll("button.background-job-row").length, session.backgroundJobs!.length);
     assert.equal(session.backgroundJobs!.filter((job) => job.terminalStatus == null).length, 1);

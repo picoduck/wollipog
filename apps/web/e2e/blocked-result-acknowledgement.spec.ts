@@ -33,8 +33,8 @@ for (const width of [390, 1440]) for (const theme of ["dark", "light"] as const)
       test.setTimeout(60_000);
       const capture = async (stage: string) => {
         if (!evidenceDir) return;
-        await page.screenshot({ path: join(evidenceDir, `${width}-${theme}-${stage}.png`) });
         await page.waitForTimeout(2_000);
+        await page.screenshot({ path: join(evidenceDir, `${width}-${theme}-${stage}.png`), animations: "disabled" });
       };
       await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
       await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
