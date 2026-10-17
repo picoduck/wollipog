@@ -150,7 +150,12 @@ export function InstallManuallyDialog({ onClose }: { onClose: () => void }) {
                     spellCheck={false}
                     aria-invalid={nameError ? true : undefined}
                     aria-describedby={`${ids}-name-help`}
-                    onChange={(event) => setRunnerId(event.target.value)}
+                    onChange={(event) => {
+                      // The credential is bound to the name it was issued for and shown once, so a
+                      // rename discards it, even if the name is later changed back.
+                      setRunnerId(event.target.value);
+                      setSecret(null);
+                    }}
                   />
                   {nameError
                     ? <FieldError id={`${ids}-name-help`}>{nameError}</FieldError>
