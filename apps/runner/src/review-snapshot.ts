@@ -249,9 +249,15 @@ export class ReviewSnapshotter {
     return mirror;
   }
 
-  /** A private checkout of the mirror at exactly `headSha`, detached. */
-  async checkout(git: string, env: NodeJS.ProcessEnv, mirror: string, destination: string, headSha: string): Promise<void> {
-    await this.exec(git, [...SAFE_GIT, "clone", "--quiet", "--shared", "--no-checkout", "--end-of-options", mirror, destination], { timeoutMs: CHECKOUT_TIMEOUT_MS, env });
-    await this.exec(git, [...SAFE_GIT, "-C", destination, "checkout", "--quiet", "--detach", headSha], { timeoutMs: CHECKOUT_TIMEOUT_MS, env });
+  /** A private checkout of the mirror at exactly `headSha`, detached. Without `symlinks`, every
+   * symbolic link is checked out as a plain file holding its target, so a reviewer limited to the
+   * checkout cannot be pointed outside it. */
+  async checkout(
+    git: string, env: NodeJS.ProcessEnv, mirror: string, destination: string, headSha: string,
+    options: { symlinks?: boolean } = {},
+  ): Promise<void> {
+    const links = options.symlinks === false ? ["-c", "core.symlinks=false"] : [];
+    await this.exec(git, [...SAFE_GIT, ...links, "clone", "--quiet", "--shared", "--no-checkout", "--end-of-options", mirror, destination], { timeoutMs: CHECKOUT_TIMEOUT_MS, env });
+    await this.exec(git, [...SAFE_GIT, ...links, "-C", destination, "checkout", "--quiet", "--detach", headSha], { timeoutMs: CHECKOUT_TIMEOUT_MS, env });
   }
 }

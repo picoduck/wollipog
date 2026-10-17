@@ -61,8 +61,12 @@ export interface ReviewSessionDependencies {
   exec: ReviewExec;
   pullRequest(gh: string, repository: string, number: number, env?: NodeJS.ProcessEnv): Promise<PullRequestFacts>;
   tools(): ReviewTools | { unavailable: string };
-  /** Throw unless `command` (as spawn would resolve it) and its interpreter are trusted. */
-  verifyCommand(command: string): void;
+  /** Throw unless `command`, as spawn would resolve it on `pathEnv`, and its interpreter are trusted. */
+  verifyCommand(command: string, pathEnv?: string): void;
+  /** The runner's current agent catalog. */
+  agents(): readonly AgentDefinition[];
+  /** The PATH a provider for `agentId` is spawned with. */
+  agentPath(agentId: string, driver: AgentDefinition["driver"]): string | undefined;
   log(message: string): void;
 }
 
@@ -71,6 +75,8 @@ export function defaultReviewSessionDependencies(
   log: (message: string) => void,
   /** Directories sessions can write (see `configuredSessionWritablePaths`), read at each use. */
   sessionWritablePaths: () => readonly string[] = () => [],
+  agents: () => readonly AgentDefinition[] = () => [],
+  agentPath: ReviewSessionDependencies["agentPath"] = () => process.env.PATH,
 ): ReviewSessionDependencies {
   const uid = process.getuid?.() ?? -1;
   const extraRoots = () => [
@@ -103,7 +109,10 @@ export function defaultReviewSessionDependencies(
       };
     },
     tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots() }),
-    verifyCommand: (command) => verifySpawnedCommand(command, process.env.PATH, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid),
+    verifyCommand: (command, pathEnv = process.env.PATH) =>
+      void verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid),
+    agents,
+    agentPath,
     log,
   };
 }
@@ -233,9 +242,22 @@ export interface PreparedReview {
   baseSha: string;
 }
 
+/** The exact launch the runner authorized for a review session. */
+export interface ReviewLaunch {
+  driver: AgentDefinition["driver"];
+  agentId: string;
+  command: string;
+}
+
+/** The agent a harness's reviews launch through: the first available native agent using its driver. */
+function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionReviewHarness): AgentDefinition | undefined {
+  return agents.find((candidate) => candidate.driver === REVIEWER_DRIVERS[harness] &&
+    (candidate.context ?? { kind: "native" }).kind === "native" && candidate.available === true);
+}
+
 /** What the session manager needs to launch and retire a review session. */
 export interface ReviewSessionHooks {
-  prepare(sessionId: string, policy: ReviewLaunchPolicy, driver: AgentDefinition["driver"], brief: string): Promise<PreparedReview>;
+  prepare(sessionId: string, policy: ReviewLaunchPolicy, launch: ReviewLaunch, brief: string): Promise<PreparedReview>;
   launchArgs(driver: AgentDefinition["driver"], checkout: string): string[];
   release(sessionId: string): void;
 }
@@ -251,18 +273,17 @@ export class ReviewSessionLauncher {
 
   /** The reviewer harnesses this runner can launch, each through its first available native agent
    * whose CLI passes the trust checks. Linux only, like the protected sessions it serves. */
-  capability(agents: readonly AgentDefinition[], platform: NodeJS.Platform = process.platform): ReviewSessionCapability | undefined {
+  capability(agents: readonly AgentDefinition[] = this.deps.agents(), platform: NodeJS.Platform = process.platform): ReviewSessionCapability | undefined {
     if (platform !== "linux") return undefined;
     const unavailable: NonNullable<ReviewSessionCapability["unavailable"]> = {};
     const tools = this.deps.tools();
     if ("unavailable" in tools) return { reviewers: [], unavailable: { tools: tools.unavailable } };
     const reviewers: ReviewSessionCapability["reviewers"] = [];
     for (const harness of ["claude-code", "codex"] as const) {
-      const agent = agents.find((candidate) => candidate.driver === REVIEWER_DRIVERS[harness] &&
-        (candidate.context ?? { kind: "native" }).kind === "native" && candidate.available === true);
+      const agent = reviewerAgent(agents, harness);
       if (!agent) { unavailable[harness] = "no available native agent uses this harness"; continue; }
       try {
-        this.deps.verifyCommand(agent.command);
+        this.deps.verifyCommand(agent.command, this.deps.agentPath(agent.id, agent.driver));
         reviewers.push({ harness, agentId: agent.id });
       } catch (error) {
         unavailable[harness] = (error as Error).message;
@@ -280,7 +301,8 @@ export class ReviewSessionLauncher {
    * Prove `policy` against the requester's own runner-recorded worktree and prepare the review
    * session's checkout and prompt. Throws `ReviewScopeRefusal` with a fixed reason on refusal.
    */
-  async prepare(sessionId: string, policy: ReviewLaunchPolicy, driver: AgentDefinition["driver"], brief: string): Promise<PreparedReview> {
+  async prepare(sessionId: string, policy: ReviewLaunchPolicy, launch: ReviewLaunch, brief: string): Promise<PreparedReview> {
+    const { driver } = launch;
     if (!SESSION_IDENTITY.test(sessionId) || !SESSION_IDENTITY.test(policy.requesterSessionId) ||
         policy.requesterSessionId === sessionId) {
       refuseReview("the review must cover the session's own native managed worktree");
@@ -292,6 +314,16 @@ export class ReviewSessionLauncher {
     if (!requester || requester.review) refuseReview("the review must cover the session's own native managed worktree");
     // The reviewer is always the other model family, and it launches through its own driver.
     if (reviewerHarnessFor(requester!.driver) !== policy.harness || REVIEWER_DRIVERS[policy.harness] !== driver) {
+      refuseReview("the runner cannot launch this reviewer");
+    }
+    // Only the advertised reviewer agent, and only while the exact command spawn will run (on the
+    // PATH that agent's provider gets) still passes the trust checks.
+    const agent = reviewerAgent(this.deps.agents(), policy.harness);
+    if (!agent || agent.id !== launch.agentId || agent.command !== launch.command) refuseReview("the runner cannot launch this reviewer");
+    try {
+      this.deps.verifyCommand(launch.command, this.deps.agentPath(launch.agentId, driver));
+    } catch (error) {
+      this.deps.log(`review session ${sessionId} reviewer is not trusted: ${(error as Error).message}`);
       refuseReview("the runner cannot launch this reviewer");
     }
     const tools = this.deps.tools();
@@ -307,7 +339,7 @@ export class ReviewSessionLauncher {
       const checkout = this.checkoutPath(sessionId);
       rmSync(checkout, { recursive: true, force: true });
       mkdirSync(join(this.root, "checkouts"), { recursive: true, mode: 0o700 });
-      await this.snapshots.checkout(verified.git, env, mirror, checkout, policy.headSha);
+      await this.snapshots.checkout(verified.git, env, mirror, checkout, policy.headSha, { symlinks: false });
       const baseSha = scope.pullRequest.baseSha;
       const range = `${baseSha}...${policy.headSha}`;
       const diff = (args: string[]) => this.deps.exec(verified.git, [

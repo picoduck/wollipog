@@ -1940,7 +1940,7 @@ export class SessionManager {
     }
     let prepared: Awaited<ReturnType<ReviewSessionHooks["prepare"]>>;
     try {
-      prepared = await this.reviewSessions.prepare(spec.sessionId, spec.review!, driver, brief);
+      prepared = await this.reviewSessions.prepare(spec.sessionId, spec.review!, { driver, agentId: spec.agentId, command: spec.command }, brief);
     } catch (error) {
       if (!(error instanceof ReviewScopeRefusal)) this.log(`review session ${spec.sessionId} preparation failed: ${errText(error)}`);
       return refuse(error instanceof ReviewScopeRefusal ? error.message : "the review snapshot could not be prepared");

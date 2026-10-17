@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,12 @@ import {
 import type { SessionMeta } from "./session-store.js";
 
 const rootUid = statSync("/").uid;
+const CODEX = { driver: "codex-app-server", agentId: "codex", command: "codex" } as const;
+const CLAUDE = { driver: "claude-code", agentId: "claude", command: "claude" } as const;
+const AGENTS = [
+  { id: "codex", name: "Codex", command: "codex", driver: "codex-app-server", available: true },
+  { id: "claude", name: "Claude", command: "claude", driver: "claude-code", available: true },
+] as unknown as AgentDefinition[];
 const GIT = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
 
 function git(cwd: string, ...args: string[]): string {
@@ -41,6 +47,8 @@ function fixture(t: { after(fn: () => void): void }, options: {
   pr?: Partial<PullRequestFacts>;
   requester?: Partial<SessionMeta>;
   tools?: ReturnType<ReviewSessionDependencies["tools"]>;
+  untrusted?: boolean;
+  agents?: AgentDefinition[];
 } = {}): Fixture {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-sessions-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -56,7 +64,8 @@ function fixture(t: { after(fn: () => void): void }, options: {
   git(repo, "worktree", "add", "--quiet", "-b", "fix/feature", worktree);
   writeFileSync(join(worktree, "app.ts"), "export const answer = 42;\n");
   writeFileSync(join(worktree, "notes.md"), "Uses ``` fences.\n");
-  git(worktree, "add", "app.ts", "notes.md");
+  symlinkSync("/etc/hostname", join(worktree, "outside"));
+  git(worktree, "add", "app.ts", "notes.md", "outside");
   git(worktree, "commit", "--quiet", "-m", "feature");
   const head = git(worktree, "rev-parse", "HEAD");
   const requester = {
@@ -75,7 +84,9 @@ function fixture(t: { after(fn: () => void): void }, options: {
       headSha: head, baseSha: base, ...options.pr,
     }),
     tools: () => options.tools ?? { git: GIT, gh: "/trusted/gh" },
-    verifyCommand: () => {},
+    verifyCommand: () => { if (options.untrusted) throw new Error("planted"); },
+    agents: () => options.agents ?? AGENTS,
+    agentPath: () => "/usr/bin:/bin",
     log: (message) => logs.push(message),
   };
   const snapshots = new ReviewSnapshotter(join(root, "snapshots"), exec, (message) => logs.push(message));
@@ -186,13 +197,16 @@ test("a spawned reviewer command must be trusted as the first PATH match, with i
 
 test("prepare checks out the exact pushed head privately and pins the patch in the prompt", async (t) => {
   const f = fixture(t);
-  const prepared = await f.launcher.prepare("s_review", f.policy(), "codex-app-server", "Intent and checks.");
+  const prepared = await f.launcher.prepare("s_review", f.policy(), CODEX, "Intent and checks.");
   assert.equal(prepared.checkout, join(f.root, "snapshots", "checkouts", "s_review"));
   assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), f.head);
   assert.equal(readFileSync(join(prepared.checkout, "app.ts"), "utf8"), "export const answer = 42;\n");
   assert.equal(prepared.baseSha, f.base);
   assert.match(prepared.prompt, /<brief>\nIntent and checks\.\n<\/brief>/u);
-  assert.match(prepared.prompt, /- `app.ts`\n- `notes.md`/u);
+  assert.match(prepared.prompt, /- `app.ts`\n- `notes.md`\n- `outside`/u);
+  // A symbolic link is checked out as a plain file, so nothing in the checkout leads outside it.
+  assert.equal(lstatSync(join(prepared.checkout, "outside")).isSymbolicLink(), false);
+  assert.equal(readFileSync(join(prepared.checkout, "outside"), "utf8"), "/etc/hostname");
   assert.match(prepared.prompt, /-export const answer = 41;\n\+export const answer = 42;/u);
   assert.match(prepared.prompt, new RegExp(`- Reviewed head: ${f.head}`, "u"));
   // Nothing was written into the requester's worktree or its repository's refs.
@@ -204,19 +218,19 @@ test("prepare checks out the exact pushed head privately and pins the patch in t
 
 test("prepare refuses every request outside the requester's own pull request at its pushed head", async (t) => {
   const f = fixture(t);
-  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ pullRequest: { repository: "acme/other", number: 7 } }), "codex-app-server", "b")),
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ pullRequest: { repository: "acme/other", number: 7 } }), CODEX, "b")),
     "the pull request is not this session's open, same-repository pull request");
-  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ headSha: f.base }), "codex-app-server", "b")),
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ headSha: f.base }), CODEX, "b")),
     "the requested head is not the pull request's pushed head");
-  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ headSha: "not-a-sha" }), "codex-app-server", "b")),
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ headSha: "not-a-sha" }), CODEX, "b")),
     "the pull request is not this session's open, same-repository pull request");
   // The reviewer is always the other model family, through its own driver.
-  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ harness: "claude-code" }), "claude-code", "b")),
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ harness: "claude-code" }), CLAUDE, "b")),
     "the runner cannot launch this reviewer");
-  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy(), "claude-code", "b")), "the runner cannot launch this reviewer");
-  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ requesterSessionId: "s_unknown" }), "codex-app-server", "b")),
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy(), CLAUDE, "b")), "the runner cannot launch this reviewer");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ requesterSessionId: "s_unknown" }), CODEX, "b")),
     "the review must cover the session's own native managed worktree");
-  assert.equal(await refusal(f.launcher.prepare("s_requester", f.policy(), "codex-app-server", "b")),
+  assert.equal(await refusal(f.launcher.prepare("s_requester", f.policy(), CODEX, "b")),
     "the review must cover the session's own native managed worktree");
 
   for (const [pr, reason] of [
@@ -225,17 +239,26 @@ test("prepare refuses every request outside the requester's own pull request at 
     [{ state: "closed" }, "the pull request is not this session's open, same-repository pull request"],
   ] as const) {
     const g = fixture(t, { pr });
-    assert.equal(await refusal(g.launcher.prepare("s_review", g.policy(), "codex-app-server", "b")), reason);
+    assert.equal(await refusal(g.launcher.prepare("s_review", g.policy(), CODEX, "b")), reason);
   }
   const attached = fixture(t, { requester: { worktrees: undefined } });
-  assert.equal(await refusal(attached.launcher.prepare("s_review", attached.policy(), "codex-app-server", "b")),
+  assert.equal(await refusal(attached.launcher.prepare("s_review", attached.policy(), CODEX, "b")),
     "the review must cover the session's own native managed worktree");
   // A review session never requests a review of its own.
   const review = fixture(t, { requester: { review: { requesterSessionId: "s_x" } as SessionMeta["review"] } });
-  assert.equal(await refusal(review.launcher.prepare("s_review", review.policy(), "codex-app-server", "b")),
+  assert.equal(await refusal(review.launcher.prepare("s_review", review.policy(), CODEX, "b")),
     "the review must cover the session's own native managed worktree");
+  // Only the advertised reviewer agent, launching its exact command, and only while it is trusted.
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy(), { ...CODEX, agentId: "codex-other" }, "b")),
+    "the runner cannot launch this reviewer");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy(), { ...CODEX, command: "/tmp/codex" }, "b")),
+    "the runner cannot launch this reviewer");
+  const planted = fixture(t, { untrusted: true });
+  assert.equal(await refusal(planted.launcher.prepare("s_review", planted.policy(), CODEX, "b")), "the runner cannot launch this reviewer");
+  const noAgent = fixture(t, { agents: [] });
+  assert.equal(await refusal(noAgent.launcher.prepare("s_review", noAgent.policy(), CODEX, "b")), "the runner cannot launch this reviewer");
   const untrusted = fixture(t, { tools: { unavailable: "gh is not installed" } });
-  assert.equal(await refusal(untrusted.launcher.prepare("s_review", untrusted.policy(), "codex-app-server", "b")),
+  assert.equal(await refusal(untrusted.launcher.prepare("s_review", untrusted.policy(), CODEX, "b")),
     "the runner cannot launch this reviewer");
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
 });
@@ -243,7 +266,7 @@ test("prepare refuses every request outside the requester's own pull request at 
 test("a snapshot that cannot be prepared is refused with a fixed reason and leaves no checkout", async (t) => {
   // The pull request names a head the repository does not have, and the forge cannot be reached.
   const f = fixture(t, { pr: { headSha: "d".repeat(40) } });
-  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ headSha: "d".repeat(40) }), "codex-app-server", "b")),
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ headSha: "d".repeat(40) }), CODEX, "b")),
     "the review snapshot could not be prepared");
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
   assert.ok(f.logs.some((line) => line.includes("snapshot failed")));
@@ -251,7 +274,7 @@ test("a snapshot that cannot be prepared is refused with a fixed reason and leav
 
 test("releaseAll removes every checkout left by an earlier runner process", async (t) => {
   const f = fixture(t);
-  const prepared = await f.launcher.prepare("s_review", f.policy(), "codex-app-server", "b");
+  const prepared = await f.launcher.prepare("s_review", f.policy(), CODEX, "b");
   assert.ok(existsSync(prepared.checkout));
   f.launcher.releaseAll();
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts")), false);

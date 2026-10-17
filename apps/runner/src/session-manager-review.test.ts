@@ -88,7 +88,8 @@ function harness(t: { after(fn: () => void): void }, options: {
   const released: string[] = [];
   const prepared: Harness["prepared"] = [];
   manager.setReviewSessions({
-    prepare: options.prepare ?? (async (sessionId, _policy, _driver, brief) => {
+    prepare: options.prepare ?? (async (sessionId, _policy, launch, brief) => {
+      assert.deepEqual(launch, { driver: "claude-code", agentId: "claude", command: "claude" }, "the authorized launch is re-verified");
       prepared.push({ sessionId, brief });
       return { checkout, prompt: "REVIEW PROMPT", baseSha: "b".repeat(40) };
     }),

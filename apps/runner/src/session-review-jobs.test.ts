@@ -442,7 +442,7 @@ test("the runner advertises session review on Linux only and wires its commands 
   assert.match(index, /const sessionWritablePaths = \(\) => configuredSessionWritablePaths\(\{\s+workspaces: config\.workspaces, providerAccounts: config\.providerAccounts, agents: config\.agents,\s+sessions: store\.listSessions\(\), hostEnv: process\.env,/u,
     "discovery treats every configured and persisted provider home as session-writable");
   assert.match(index, /defaultSessionReviewDependencies\(config\.dataDir, log, sessionWritablePaths\)/u);
-  assert.match(index, /defaultReviewSessionDependencies\(config\.dataDir, log, sessionWritablePaths\)/u,
+  assert.match(index, /defaultReviewSessionDependencies\(config\.dataDir, log, sessionWritablePaths, agentsForControlPlane,/u,
     "review sessions trust their reviewer CLI against the same session-writable roots");
   assert.match(index, /case "session_review_job":\s+runCommandTask\("session_review_job", sessionReviewJobs\.dispatch\(msg\)\);/u);
   assert.match(index, /case "cancel_session_review_job":\s+sessionReviewJobs\.cancel\(msg\.jobId, msg\.nonce\);/u);

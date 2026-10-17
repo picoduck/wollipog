@@ -1467,11 +1467,12 @@ const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session
   sessionReviewDependencies, undefined, reviewSnapshots);
 // Review sessions (#3368): a typed reviewer session launched outside the requester's sandbox.
 const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store,
-  defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths));
+  defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
+    (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
 // Startup reconciliation has already settled every review session: no checkout is in use.
 reviewSessionLauncher.releaseAll();
 sessions.setReviewSessions({
-  prepare: (sessionId, policy, driver, brief) => reviewSessionLauncher.prepare(sessionId, policy, driver, brief),
+  prepare: (sessionId, policy, launch, brief) => reviewSessionLauncher.prepare(sessionId, policy, launch, brief),
   launchArgs: reviewLaunchArgs,
   release: (sessionId) => reviewSessionLauncher.release(sessionId),
 });
@@ -1490,7 +1491,7 @@ function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]
   const sessionReview = sessionReviewCapability();
   let reviewSession: ReturnType<ReviewSessionLauncher["capability"]>;
   try {
-    reviewSession = reviewSessionLauncher.capability(agentsForControlPlane());
+    reviewSession = reviewSessionLauncher.capability();
   } catch (error) {
     log(`review session discovery failed: ${errText(error)}`);
   }
