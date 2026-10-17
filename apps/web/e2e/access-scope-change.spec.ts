@@ -14,10 +14,11 @@ async function open(page: Page, id: string, extra = "") {
   await page.goto(shell(projectPath(id), extra));
   await page.evaluate(() => localStorage.clear());
   await page.goto(shell(projectPath(id), extra));
-  await expect(page.locator(".access-scope-readout").first()).toBeVisible();
+  await expect(projectReadout(page)).toBeVisible();
 }
 
-const projectReadout = (page: Page) => page.locator(".access-scope-readout").first();
+// The project's own readout; each location row has one too.
+const projectReadout = (page: Page) => page.locator(".access-scope-readout:not(.project-location-row .access-scope-readout)");
 const dialogNamed = (page: Page, name: string) => page.getByRole("dialog", { name });
 
 test.describe("at desktop widths", () => {
