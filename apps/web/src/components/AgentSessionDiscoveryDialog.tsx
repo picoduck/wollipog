@@ -134,12 +134,15 @@ export function AgentSessionDiscoveryDialog({
 
   // The control a scan or an import started from can leave with what it finishes in: the header
   // Rescan once nothing is listed, Continue Here with its row. Focus then moves to the results
-  // step rather than falling to the document, outside the dialog's focus trap.
+  // step rather than falling to the document, outside the dialog's focus trap — but only when it
+  // did fall: a person who moved on while the action ran (to Done, say) keeps their place.
   useEffect(() => {
     const origin = actionOriginRef.current;
     if (state === "loading" || !origin || origin.isConnected) return;
     actionOriginRef.current = null;
-    if (state !== "selecting") resultsStepRef.current?.focus();
+    const active = document.activeElement;
+    const focusLost = !active || active === document.body || !active.isConnected;
+    if (focusLost && state !== "selecting") resultsStepRef.current?.focus();
   }, [state, sessions]);
 
   const rememberActionOrigin = () => {

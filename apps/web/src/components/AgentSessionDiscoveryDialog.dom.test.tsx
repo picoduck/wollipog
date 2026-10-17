@@ -569,6 +569,44 @@ for (const outcome of ["empty", "error"] as const) {
   });
 }
 
+for (const outcome of ["empty", "error", "adopt"] as const) {
+  test(`focus the user moved while ${outcome === "adopt" ? "an import" : "a rescan"} ran stays where they put it (CR-2.1, ${outcome})`, async () => {
+    const priorList = api.listExternalSessions;
+    const priorAdopt = api.adoptSession;
+    let calls = 0;
+    let settle!: () => void;
+    const pending = new Promise<void>((resolve) => { settle = resolve; });
+    api.listExternalSessions = async () => {
+      calls += 1;
+      if (calls === 1) return { sessions: [matchingSession] };
+      await pending;
+      if (outcome === "error") throw new Error("scan failed");
+      return { sessions: [] };
+    };
+    api.adoptSession = (async () => { await pending; return {}; }) as unknown as typeof api.adoptSession;
+    const view = await renderDialog(<AgentSessionDiscoveryDialog runner={claudeOnly} onClose={() => {}} />);
+    try {
+      await act(async () => { view.button("Find Sessions")!.click(); });
+      const origin = view.button(outcome === "adopt" ? "Continue Here" : "Rescan")!;
+      origin.focus();
+      await act(async () => { origin.click(); });
+      const done = view.button("Done")!;
+      done.focus();
+      await act(async () => {
+        settle();
+        await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+      });
+      assert.equal(origin.isConnected, false);
+      // assert.ok, not assert.equal: a failing equal on two happy-dom nodes exhausts memory diffing them.
+      assert.ok((domWindow.document.activeElement as unknown) === done, `the control the user moved to keeps focus (now ${focusedLabel() ?? (domWindow.document.activeElement as unknown as HTMLElement)?.tagName})`);
+    } finally {
+      await view.unmount();
+      api.listExternalSessions = priorList;
+      api.adoptSession = priorAdopt;
+    }
+  });
+}
+
 test("continuing the last listed session keeps focus in the dialog (CR-1.1)", async () => {
   const priorList = api.listExternalSessions;
   const priorAdopt = api.adoptSession;
