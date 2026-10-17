@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { AddBoxRequest } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
+import { RequestTimeoutError, TransportRequestError } from "../api-transport.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -252,9 +253,32 @@ test("choosing a host from SSH config fills SSH Target, Port and an unedited Mac
   }
 });
 
+test("a request failure is never an SSH diagnosis: no SSH runs before the control plane answers", async () => {
+  const cases: Array<[Error, string]> = [
+    [new TransportRequestError("The remote instance request failed."), "Wollipog couldn't be reached. Check the connection, then try again."],
+    [new TypeError("Failed to fetch"), "Wollipog couldn't be reached. Check the connection, then try again."],
+    [new RequestTimeoutError(45_000), "Wollipog didn't answer in time. Check the machine list before trying again."],
+    [new ApiError("displayName must be 120 characters or fewer and contain no control characters", 400),
+      "Use a machine name of 120 characters or fewer, with no control characters."],
+    [new ApiError("forbidden", 403), "Wollipog refused the request. Check that you're signed in and allowed to connect machines."],
+    [new ApiError("ssh me@devbox: Permission denied (publickey,password).", 500), "Wollipog couldn't start connecting to me@devbox. Try again."],
+  ];
+  for (const [cause, sentence] of cases) {
+    const view = await mount(async () => { throw cause; });
+    try {
+      await type(field(view.dialog, "SSH Target"), "me@devbox");
+      await connect(view.dialog);
+      assert.equal(view.dialog.querySelector(".notice-body")?.textContent, sentence, cause.message);
+      assert.doesNotMatch(sentence, /over SSH|SSH key/);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
 test("a rejected request is one danger notice above the footer, its raw text behind Show Details", async () => {
-  const raw = "ssh me@devbox: Permission denied (publickey,password).";
-  const view = await mount(async () => { throw new ApiError(raw, 502); });
+  const raw = "SQLITE_BUSY: database is locked";
+  const view = await mount(async () => { throw new ApiError(raw, 500); });
   try {
     const { dialog } = view;
     await type(field(dialog, "SSH Target"), "me@devbox");
@@ -268,8 +292,8 @@ test("a rejected request is one danger notice above the footer, its raw text beh
     assert.ok(notice.closest(".modal-body") !== null, "inside the body, above the footer");
     assert.ok(notice.parentElement?.lastElementChild === notice, "at the body's end");
     assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Connect the Machine");
-    assert.equal(notice.querySelector(".notice-body")?.textContent, "The host refused your SSH key. Load the key with ssh-add, then try again.");
-    assert.doesNotMatch(notice.textContent ?? "", /publickey/, "the raw text is hidden until asked for");
+    assert.equal(notice.querySelector(".notice-body")?.textContent, "Wollipog couldn't start connecting to me@devbox. Try again.");
+    assert.doesNotMatch(notice.textContent ?? "", /SQLITE/, "the raw text is hidden until asked for");
     await act(async () => button(notice, "Show Details").click());
     assert.equal(notice.querySelector(".notice-details-body code")?.textContent, raw);
 

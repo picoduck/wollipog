@@ -362,17 +362,38 @@ export function sshErrorHint(error: string | null | undefined): string | null {
  *
  * Connect via SSH (#2987) shows it above the dialog's footer; a machine's failure notice (#2988)
  * reuses it for a reconnect that failed.
+ *
+ * `request` says the error is a Wollipog API request's, not ssh's: `status` is the HTTP status the
+ * control plane answered with, or null when the request never reached it (a network failure, a
+ * timeout, the desktop transport's own error). Connect via SSH's request only records the machine,
+ * and no SSH runs before the control plane answers, so a request failure is never an SSH diagnosis.
  */
-export function describeSshFailure(error: string | null | undefined, target?: string): string {
+export function describeSshFailure(
+  error: string | null | undefined,
+  target?: string,
+  request?: { status: number | null },
+): string {
   const raw = (error ?? "").trim();
   const e = raw.toLowerCase();
   const host = target?.trim() || "the machine";
-  // The browser's words for a request that never reached Wollipog: nothing was tried over SSH.
-  if (/\b(failed to fetch|load failed|networkerror)\b/.test(e)) {
-    return "Wollipog couldn't be reached. Check the connection, then try again.";
+  const unreachable = "Wollipog couldn't be reached. Check the connection, then try again.";
+  // A request past its deadline may still have been applied (RequestTimeoutError), so a retry
+  // could add the machine twice.
+  if (request && /\bdid(?:n't| not) answer within\b/.test(e)) {
+    return "Wollipog didn't answer in time. Check the machine list before trying again.";
   }
-  // The control plane refused the target itself, before any SSH was attempted.
-  if (e.includes("invalid sshtarget")) return "Use an SSH target such as user@host, with no spaces or leading dash.";
+  // The browser's words for a request that never reached Wollipog: nothing was tried over SSH.
+  if (request?.status === null || /\b(failed to fetch|load failed|networkerror)\b/.test(e)) return unreachable;
+  if (request) {
+    if (request.status === 401 || request.status === 403) {
+      return "Wollipog refused the request. Check that you're signed in and allowed to connect machines.";
+    }
+    // The control plane's own field checks (POST /api/boxes), made before any SSH is attempted.
+    if (e.includes("invalid sshtarget")) return "Use an SSH target such as user@host, with no spaces or leading dash.";
+    if (e.includes("sshport")) return "Use a port from 1 to 65535.";
+    if (e.includes("displayname")) return "Use a machine name of 120 characters or fewer, with no control characters.";
+    return `Wollipog couldn't start connecting to ${host}. Try again.`;
+  }
   // An authentication rejection ("Permission denied (publickey,password).") or too many keys offered.
   // A connect-time EACCES reads "port 22: Permission denied" with no parenthesis, and is the hint's.
   if (/permission denied \(/.test(e) || e.includes("too many authentication failures")) {

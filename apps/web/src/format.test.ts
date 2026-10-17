@@ -157,8 +157,6 @@ test("describeSshFailure: one plain sentence per known failure, and the target i
     "This computer couldn't find devbx. Check the SSH target.");
   assert.equal(describeSshFailure("ssh: connect to host devbox port 2222: Connection refused", "devbox"),
     "devbox refused the connection. Check that SSH runs there and the port is right.");
-  assert.equal(describeSshFailure("invalid sshTarget (expected user@host, no leading '-' or whitespace)", "-oProxy"),
-    "Use an SSH target such as user@host, with no spaces or leading dash.");
   for (const network of ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."]) {
     assert.equal(describeSshFailure(network, "devbox"), "Wollipog couldn't be reached. Check the connection, then try again.");
   }
@@ -166,6 +164,33 @@ test("describeSshFailure: one plain sentence per known failure, and the target i
   assert.equal(describeSshFailure(null), "Wollipog couldn't reach the machine over SSH.");
   for (const sentence of [describeSshFailure(blocked), describeSshFailure("x", "devbox")]) {
     assert.doesNotMatch(sentence, /—|e\.g\.|dashboard/, "§17: no em-dash fragments, Latin abbreviations or 'dashboard'");
+  }
+});
+
+test("describeSshFailure: a Connect via SSH request failure is classified as a request, never as SSH", () => {
+  const unreachable = "Wollipog couldn't be reached. Check the connection, then try again.";
+  // No HTTP answer: the desktop transport's own words, a browser network error, a timeout.
+  assert.equal(describeSshFailure("The remote instance request failed.", "devbox", { status: null }), unreachable);
+  assert.equal(describeSshFailure("Failed to fetch", "devbox", { status: null }), unreachable);
+  assert.equal(describeSshFailure("The Wollipog server didn't answer within 45 seconds.", "devbox", { status: null }),
+    "Wollipog didn't answer in time. Check the machine list before trying again.");
+  assert.equal(describeSshFailure("The Wollipog server did not answer within 45 seconds.", "devbox", { status: null }),
+    "Wollipog didn't answer in time. Check the machine list before trying again.");
+  // The control plane's answers to POST /api/boxes.
+  assert.equal(describeSshFailure("displayName must be 120 characters or fewer and contain no control characters", "devbox", { status: 400 }),
+    "Use a machine name of 120 characters or fewer, with no control characters.");
+  assert.equal(describeSshFailure("sshPort must be an integer between 1 and 65535", "devbox", { status: 400 }), "Use a port from 1 to 65535.");
+  assert.equal(describeSshFailure("invalid sshTarget (expected user@host, no leading '-' or whitespace)", "-x", { status: 400 }),
+    "Use an SSH target such as user@host, with no spaces or leading dash.");
+  for (const status of [401, 403]) {
+    assert.equal(describeSshFailure("forbidden", "devbox", { status }),
+      "Wollipog refused the request. Check that you're signed in and allowed to connect machines.");
+  }
+  // Even text that looks like ssh's is a request failure here: no SSH runs before the answer.
+  for (const raw of ["ssh devbox: Permission denied (publickey).", "SQLITE_BUSY: database is locked", ""]) {
+    const sentence = describeSshFailure(raw, "devbox", { status: 500 });
+    assert.equal(sentence, "Wollipog couldn't start connecting to devbox. Try again.");
+    assert.doesNotMatch(sentence, /over SSH|SSH key/);
   }
 });
 

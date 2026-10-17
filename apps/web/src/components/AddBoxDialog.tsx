@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { SshConfigHost } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { describeSshFailure } from "../format.js";
 import { Modal } from "./common.js";
@@ -110,7 +111,9 @@ export function AddBoxDialog({ onClose }: { onClose: () => void }) {
       onClose(); // it now streams into the list via box_upsert
     } catch (e) {
       const raw = (e as Error).message;
-      setFailure({ message: describeSshFailure(raw, target), raw });
+      // An ApiError is the control plane's answer; anything else never reached it.
+      const status = e instanceof ApiError ? e.status : null;
+      setFailure({ message: describeSshFailure(raw, target, { status }), raw });
       submittingRef.current = false;
       setSubmitting(false);
     }
