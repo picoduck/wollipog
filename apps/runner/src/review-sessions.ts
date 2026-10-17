@@ -367,7 +367,8 @@ export class ReviewSessionLauncher {
     } catch (error) {
       if (error instanceof ReviewScopeRefusal) throw error;
       this.deps.log(`review session ${sessionId} snapshot failed: ${(error as Error).message}`);
-      this.release(sessionId);
+      // The intent stays until the caller has recorded this refusal's outcome.
+      this.removeCheckout(sessionId);
       return refuseReview("the review snapshot could not be prepared");
     }
   }
@@ -448,10 +449,16 @@ export class ReviewSessionLauncher {
     writeFileSync(join(this.root, "intents", sessionId), "", { mode: 0o600 });
   }
 
-  /** Remove the review session's checkout and intent; safe to repeat. */
+  /** Remove the review session's checkout and then its intent; safe to repeat. Called only once the
+   * review's outcome is recorded, in its session metadata or as an outcome record. */
   release(sessionId: string): void {
     if (!SESSION_IDENTITY.test(sessionId)) return;
+    this.removeCheckout(sessionId);
     rmSync(join(this.root, "intents", sessionId), { force: true });
+  }
+
+  private removeCheckout(sessionId: string): void {
+    if (!SESSION_IDENTITY.test(sessionId)) return;
     const checkout = join(this.root, "checkouts", sessionId);
     if (!existsSync(checkout)) return;
     try { rmSync(checkout, { recursive: true, force: true }); } catch (error) {

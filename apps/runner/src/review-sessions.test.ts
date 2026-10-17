@@ -274,6 +274,12 @@ test("a snapshot that cannot be prepared is refused with a fixed reason and leav
     "the review snapshot could not be prepared");
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
   assert.ok(f.logs.some((line) => line.includes("snapshot failed")));
+  // Until its outcome is recorded, a restart still finds this review and reports it.
+  const marked = fixture(t, { pr: { headSha: "d".repeat(40) } });
+  marked.launcher.markPreparing("s_review");
+  await refusal(marked.launcher.prepare("s_review", marked.policy({ headSha: "d".repeat(40) }), CODEX, "b"));
+  marked.launcher.releaseAll();
+  assert.deepEqual(marked.launcher.outcomes().map((update) => update.sessionId), ["s_review"]);
 });
 
 test("a review that ends before its session is persisted keeps a durable outcome until it was sent a week ago", (t) => {
