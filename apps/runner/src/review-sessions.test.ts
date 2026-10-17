@@ -276,21 +276,34 @@ test("a snapshot that cannot be prepared is refused with a fixed reason and leav
   assert.ok(f.logs.some((line) => line.includes("snapshot failed")));
 });
 
-test("a review accepted but lost before its session was persisted is reported once found, until pruned", (t) => {
+test("a review that ends before its session is persisted keeps a durable outcome until it was sent a week ago", (t) => {
   const f = fixture(t);
+  const failed = (sessionId: string, reason: string) => ({ type: "review_session_update" as const, sessionId, state: "failed" as const, reason });
   f.launcher.markPreparing("s_lost");
   f.launcher.markPreparing("s_review");
   f.metas.set("s_review", { sessionId: "s_review" } as SessionMeta);
-  assert.deepEqual(f.launcher.lostPreparations(), [], "nothing is lost before this process's startup sweep");
-  f.launcher.releaseAll();
-  assert.deepEqual(f.launcher.lostPreparations(), ["s_lost"], "a persisted session is settled by its own metadata");
   f.launcher.markPreparing("s_preparing");
-  assert.deepEqual(f.launcher.lostPreparations(), ["s_lost"], "a preparation in this process is never reported lost");
-  f.launcher.releaseAll(Date.now() + 8 * 24 * 60 * 60_000);
-  assert.deepEqual(f.launcher.lostPreparations(), [], "a week-old intent is pruned");
-  f.launcher.markPreparing("s_lost");
-  f.launcher.release("s_lost");
-  assert.deepEqual(f.launcher.lostPreparations(), [], "a settled review clears its intent");
+  // A refusal before the session exists is recorded before its intent is cleared.
+  f.launcher.recordOutcome(failed("s_preparing", "the review snapshot could not be prepared"));
+  // Startup: an intent without a persisted session is a lost review; one with a session is not.
+  f.launcher.releaseAll();
+  const restarted = "the review session ended when its runner restarted";
+  assert.deepEqual(f.launcher.outcomes().sort((a, b) => a.sessionId.localeCompare(b.sessionId)), [
+    failed("s_lost", restarted), failed("s_preparing", "the review snapshot could not be prepared"),
+  ]);
+  // A review this process prepares later is never among them.
+  f.launcher.markPreparing("s_new");
+  assert.equal(f.launcher.outcomes().some((update) => update.sessionId === "s_new"), false);
+  // Outcomes are re-sent until a week after they were first sent, however long the runner was down.
+  const now = Date.now();
+  f.launcher.outcomesSent(now + 30 * 24 * 60 * 60_000);
+  assert.equal(f.launcher.outcomes().length, 2, "first sent now, so kept");
+  f.launcher.outcomesSent(now + 38 * 24 * 60 * 60_000);
+  assert.deepEqual(f.launcher.outcomes(), [], "pruned a week after they were first sent");
+  // Recording again changes nothing: the first outcome stands.
+  f.launcher.recordOutcome(failed("s_x", "the review was cancelled"));
+  f.launcher.recordOutcome({ type: "review_session_update", sessionId: "s_x", state: "completed", output: "{}" });
+  assert.deepEqual(f.launcher.outcomes(), [failed("s_x", "the review was cancelled")]);
   assert.throws(() => f.launcher.markPreparing("../escape"), /invalid review session identity/u);
 });
 

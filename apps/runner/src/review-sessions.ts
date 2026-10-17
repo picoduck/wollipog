@@ -20,13 +20,14 @@
  * the bridge's reviewers, and it must be the first match on PATH, because that is what spawn runs.
  */
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import {
   REVIEW_CONTRACT, REVIEW_OUTPUT_SCHEMA, reviewerHarnessFor,
-  type AgentDefinition, type ReviewLaunchPolicy, type ReviewSessionCapability, type SessionReviewHarness,
+  type AgentDefinition, type ReviewLaunchPolicy, type ReviewSessionCapability, type ReviewSessionUpdate,
+  type SessionReviewHarness,
 } from "@wollipog/protocol";
 import {
   bindPullRequestScope, GITHUB_REPOSITORY, PUSHED_HEAD, refuseReview, ReviewScopeRefusal, SAFE_GIT, SESSION_IDENTITY,
@@ -42,8 +43,8 @@ const execFileAsync = promisify(execFile);
 /** The pinned patch is inlined up to this size; a larger change is reviewed from the checkout. */
 export const REVIEW_PATCH_LIMIT_BYTES = 400 * 1024;
 const REVIEW_DIFF_TIMEOUT_MS = 120_000;
-/** How long a lost review's intent is reported after a restart before it is pruned. */
-const INTENT_RETENTION_MS = 7 * 24 * 60 * 60_000;
+/** How long a pre-launch outcome is still re-sent after it was first sent at a registration. */
+const OUTCOME_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 /** The driver a reviewer harness launches through. */
 const REVIEWER_DRIVERS: Record<SessionReviewHarness, AgentDefinition["driver"]> = {
@@ -263,8 +264,10 @@ function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionRevie
 export interface ReviewSessionHooks {
   /** Durable intent, recorded before any slow preparation, cleared by `release`. */
   markPreparing(sessionId: string): void;
-  /** Reviews an earlier runner process accepted but lost before persisting their session. */
-  lostPreparations(): string[];
+  /** Persist the outcome of a review that ended before its session was persisted, then release it. */
+  recordOutcome(update: ReviewSessionUpdate): void;
+  /** Every such outcome not yet pruned, re-sent at each registration. */
+  outcomes(): ReviewSessionUpdate[];
   prepare(sessionId: string, policy: ReviewLaunchPolicy, launch: ReviewLaunch, brief: string): Promise<PreparedReview>;
   launchArgs(driver: AgentDefinition["driver"], checkout: string): string[];
   release(sessionId: string): void;
@@ -369,23 +372,67 @@ export class ReviewSessionLauncher {
     }
   }
 
-  /** Reviews found lost at startup; a later preparation in this process is never among them. */
-  private lostAtStartup: string[] = [];
-
-  /** Remove every checkout, and intents older than a week. Only at startup, when no review
-   * session's provider can be running. Younger intents without a persisted session are this
-   * process's record of lost reviews, reported by `lostPreparations`. */
-  releaseAll(now = Date.now()): void {
+  /** At startup, when no review session's provider can be running: remove every checkout, and turn
+   * each intent without a persisted session (a review an earlier process accepted and lost) into a
+   * failed outcome. A review with a persisted session is settled from its own metadata. */
+  releaseAll(): void {
     try { rmSync(join(this.root, "checkouts"), { recursive: true, force: true }); } catch (error) {
       this.deps.log(`review session checkouts could not be removed: ${(error as Error).message}`);
     }
     for (const sessionId of this.intents()) {
-      const path = join(this.root, "intents", sessionId);
-      try {
-        if (now - statSync(path).mtimeMs > INTENT_RETENTION_MS) rmSync(path, { force: true });
-      } catch { /* already gone */ }
+      if (this.store.readMeta(sessionId)) continue;
+      this.recordOutcome({
+        type: "review_session_update", sessionId, state: "failed", reason: "the review session ended when its runner restarted",
+      });
     }
-    this.lostAtStartup = this.intents().filter((sessionId) => !this.store.readMeta(sessionId));
+  }
+
+  /** Durable before its intent is cleared: an outcome survives a restart until it was sent at a
+   * registration and a week has passed since. The control plane keeps the first outcome. */
+  recordOutcome(update: ReviewSessionUpdate): void {
+    if (!SESSION_IDENTITY.test(update.sessionId)) return;
+    const dir = join(this.root, "outcomes");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const path = join(dir, `${update.sessionId}.json`);
+    if (!existsSync(path)) {
+      writeFileSync(`${path}.next`, JSON.stringify({ update, sentAt: null }), { mode: 0o600 });
+      renameSync(`${path}.next`, path);
+    }
+    this.release(update.sessionId);
+  }
+
+  private outcomeRecords(): Array<{ path: string; update: ReviewSessionUpdate; sentAt: number | null }> {
+    let names: string[];
+    try { names = readdirSync(join(this.root, "outcomes")); } catch { return []; }
+    return names.flatMap((name) => {
+      if (!/^[A-Za-z0-9_-]{1,128}\.json$/u.test(name)) return [];
+      const path = join(this.root, "outcomes", name);
+      try {
+        const record = JSON.parse(readFileSync(path, "utf8")) as { update: ReviewSessionUpdate; sentAt: number | null };
+        return [{ path, ...record }];
+      } catch { return []; }
+    });
+  }
+
+  outcomes(): ReviewSessionUpdate[] {
+    return this.outcomeRecords().map((record) => record.update);
+  }
+
+  /** A registration has sent every outcome: note when each was first sent, and prune those sent
+   * over a week ago. */
+  outcomesSent(now = Date.now()): void {
+    for (const record of this.outcomeRecords()) {
+      try {
+        if (record.sentAt === null) {
+          writeFileSync(`${record.path}.next`, JSON.stringify({ update: record.update, sentAt: now }), { mode: 0o600 });
+          renameSync(`${record.path}.next`, record.path);
+        } else if (now - record.sentAt > OUTCOME_RETENTION_MS) {
+          rmSync(record.path, { force: true });
+        }
+      } catch (error) {
+        this.deps.log(`review outcome ${record.update.sessionId} could not be updated: ${(error as Error).message}`);
+      }
+    }
   }
 
   private intents(): string[] {
@@ -399,13 +446,6 @@ export class ReviewSessionLauncher {
     if (!SESSION_IDENTITY.test(sessionId)) throw new Error("invalid review session identity");
     mkdirSync(join(this.root, "intents"), { recursive: true, mode: 0o700 });
     writeFileSync(join(this.root, "intents", sessionId), "", { mode: 0o600 });
-  }
-
-  /** Accepted reviews an earlier process lost before persisting their session, as found at startup
-   * and while their intent remains. */
-  lostPreparations(): string[] {
-    const intents = new Set(this.intents());
-    return this.lostAtStartup.filter((sessionId) => intents.has(sessionId) && !this.store.readMeta(sessionId));
   }
 
   /** Remove the review session's checkout and intent; safe to repeat. */

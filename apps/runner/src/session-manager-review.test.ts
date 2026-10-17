@@ -43,8 +43,8 @@ function harness(t: { after(fn: () => void): void }, options: {
   stop?: "end_turn" | "refusal";
   /** The turn finishes only when cancelled or finished explicitly. */
   hold?: boolean;
-  /** Reviews an earlier process lost before persisting their session. */
-  lost?: string[];
+  /** Outcomes recorded for reviews that ended before their session was persisted. */
+  outcomes?: ReviewSessionUpdate[];
 } = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-session-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -90,9 +90,11 @@ function harness(t: { after(fn: () => void): void }, options: {
   const released: string[] = [];
   const prepared: Harness["prepared"] = [];
   const preparing: string[] = [];
+  const recorded: ReviewSessionUpdate[] = [];
   manager.setReviewSessions({
     markPreparing: (sessionId) => { preparing.push(sessionId); },
-    lostPreparations: () => options.lost ?? [],
+    recordOutcome: (update) => { recorded.push(update); released.push(update.sessionId); },
+    outcomes: () => [...(options.outcomes ?? []), ...recorded],
     prepare: options.prepare ?? (async (sessionId, _policy, launch, brief) => {
       assert.deepEqual(launch, { driver: "claude-code", agentId: "claude", command: "claude" }, "the authorized launch is re-verified");
       prepared.push({ sessionId, brief });
@@ -157,11 +159,19 @@ test("an ordinary start never replaces a review session, and nothing else opens 
   assert.equal(h.manager.sessionCanOpen("s_review"), false, "no shell, Native TUI or worktree operation opens on it");
 });
 
-test("a review lost before its session was persisted is reported failed at registration", (t) => {
-  const h = harness(t, { lost: ["s_lost"] });
+test("outcomes recorded before a session existed are re-sent at registration", (t) => {
+  const lost = { type: "review_session_update" as const, sessionId: "s_lost", state: "failed" as const,
+    reason: "the review session ended when its runner restarted" };
+  const h = harness(t, { outcomes: [lost] });
+  assert.deepEqual(h.manager.reviewSessionUpdates(), [lost]);
+});
+
+test("a review refused before its session exists keeps a durable outcome to re-send", async (t) => {
+  const h = harness(t, { prepare: async () => { throw new ReviewScopeRefusal("the requested head is not the pull request's pushed head"); } });
+  assert.equal(await h.manager.start(reviewSpec(), "brief"), false);
   assert.deepEqual(h.manager.reviewSessionUpdates(), [{
-    type: "review_session_update", sessionId: "s_lost", state: "failed", reason: "the review session ended when its runner restarted",
-  }]);
+    type: "review_session_update", sessionId: "s_review", state: "failed", reason: "the requested head is not the pull request's pushed head",
+  }], "a lost frame is re-sent at the next registration");
 });
 
 test("a review session takes no further prompts and is never relaunched", async (t) => {

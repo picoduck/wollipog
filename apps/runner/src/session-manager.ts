@@ -1927,11 +1927,14 @@ export class SessionManager {
     authorizationError: string | undefined,
   ): Promise<{ spec: SessionLaunchSpec; prompt: string } | { error: string }> {
     // Nothing is persisted for a refused review session: its status and outcome go up directly.
-    // The outcome goes up before the terminal status, which would otherwise settle it generically.
+    // The outcome is persisted before it is sent (nothing else records a review refused before its
+    // session exists), and goes up before the terminal status, which would otherwise settle it
+    // generically.
     const refuse = (reason: string) => {
       const sanitized = sanitizedReviewSessionReason(reason);
-      this.reviewSessions?.release(spec.sessionId);
-      this.send({ type: "review_session_update", sessionId: spec.sessionId, state: "failed", reason: sanitized });
+      const update: ReviewSessionUpdate = { type: "review_session_update", sessionId: spec.sessionId, state: "failed", reason: sanitized };
+      this.reviewSessions?.recordOutcome(update);
+      this.send(update);
       this.send({ type: "session_status", sessionId: spec.sessionId, status: "failed", detail: sanitized });
       return { error: sanitized };
     };
@@ -1960,9 +1963,10 @@ export class SessionManager {
     }
     // Preparation can take minutes; a stop that arrived meanwhile wins over the launch.
     if (this.reviewsStoppedBeforeLaunch.delete(spec.sessionId)) {
-      this.reviewSessions.release(spec.sessionId);
       const reason = sanitizedReviewSessionReason("the review was cancelled");
-      this.send({ type: "review_session_update", sessionId: spec.sessionId, state: "cancelled", reason });
+      const update: ReviewSessionUpdate = { type: "review_session_update", sessionId: spec.sessionId, state: "cancelled", reason };
+      this.reviewSessions.recordOutcome(update);
+      this.send(update);
       this.send({ type: "session_status", sessionId: spec.sessionId, status: "stopped", detail: reason });
       return { error: reason };
     }
@@ -2006,13 +2010,12 @@ export class SessionManager {
   }
 
   /** Every recorded review outcome, re-sent at registration; the control plane keeps the first.
-   * A review an earlier process accepted but lost before persisting its session has failed. */
+   * That includes reviews that ended before their session was persisted, and reviews an earlier
+   * process accepted and lost (recorded as failed at startup). */
   reviewSessionUpdates(): ReviewSessionUpdate[] {
     return [
       ...this.store.listSessions().flatMap((meta) => meta.review?.update ? [meta.review.update] : []),
-      ...(this.reviewSessions?.lostPreparations() ?? []).map((sessionId): ReviewSessionUpdate => ({
-        type: "review_session_update", sessionId, state: "failed", reason: "the review session ended when its runner restarted",
-      })),
+      ...(this.reviewSessions?.outcomes() ?? []),
     ];
   }
 

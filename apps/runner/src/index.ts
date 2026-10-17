@@ -1473,7 +1473,8 @@ const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, 
 reviewSessionLauncher.releaseAll();
 sessions.setReviewSessions({
   markPreparing: (sessionId) => reviewSessionLauncher.markPreparing(sessionId),
-  lostPreparations: () => reviewSessionLauncher.lostPreparations(),
+  recordOutcome: (update) => reviewSessionLauncher.recordOutcome(update),
+  outcomes: () => reviewSessionLauncher.outcomes(),
   prepare: (sessionId, policy, launch, brief) => reviewSessionLauncher.prepare(sessionId, policy, launch, brief),
   launchArgs: reviewLaunchArgs,
   release: (sessionId) => reviewSessionLauncher.release(sessionId),
@@ -2112,6 +2113,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
       if (runnerSupportsProtocol(controlPlaneProtocolVersion, "reviewSession")) {
         for (const update of sessions.reviewSessionUpdates()) sendUp(update);
+        reviewSessionLauncher.outcomesSent();
       }
       skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
         ? msg.pendingSkillRequests : undefined);
