@@ -1,5 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { ProviderHomeLeaseRegistry, providerHomeLeaseRefusalKind, type ProviderHomeLeaseOptions } from "./provider-home-lease.js";
+import { adoptProviderProfileMarker, revokeProviderProfileMarkerGrant } from "./provider-profile.js";
 import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_LIMITS, LEASE_WORKER_REFERENCE_LIMIT, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept, type LeaseWorkerError, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** Only the fixed source/SEA entry starts this worker; there is no public RPC/CLI entry. */
@@ -26,7 +27,7 @@ export function runProviderHomeLeaseWorker(): void {
   const fail = (error: unknown): LeaseWorkerError => {
     const kind = providerHomeLeaseRefusalKind(error);
     if (kind === "busy" || kind === "foreign_owner" || kind === "foreign_host" || kind === "profile_unsupported_control_plane" ||
-        kind === "profile_unverifiable" || kind === "profile_not_granted" || kind === "profile_changed") return kind;
+        kind === "profile_unverifiable" || kind === "profile_not_granted" || kind === "profile_changed" || kind === "profile_grant_limit") return kind;
     const message = error instanceof Error ? error.message : "";
     return message.includes("helper unavailable") ? "unavailable" : /already in use|publication is in progress/u.test(message) ? "busy" : "refusal";
   };
@@ -51,6 +52,19 @@ export function runProviderHomeLeaseWorker(): void {
           else {
             const acquisition = registry.acquireHomeWithReceipt(op.home, op.provider, op.profile);
             reply.value = acquisition.first; prepared.cancel = acquisition.cancel;
+          }
+        } else if (op.method === "profile_adopt" || op.method === "profile_revoke") {
+          // Grants name the attested instance this worker was started for, never a frame value.
+          const controlPlaneInstanceId = options.controlPlaneInstanceId;
+          if (!controlPlaneInstanceId) throw new Error("provider profile changes require an attested control-plane instance");
+          if (op.method === "profile_adopt") {
+            const grant = { controlPlaneInstanceId, grantId: op.grantId, grantedAt: new Date().toISOString() };
+            const { marker } = registry.changeProfileMarkerWhileHeld(op.home, op.provider,
+              read => adoptProviderProfileMarker(read, { provider: op.provider, grant }));
+            reply.value = true; reply.profileId = marker.profileId;
+          } else {
+            reply.value = registry.changeProfileMarkerWhileHeld(op.home, op.provider, read =>
+              revokeProviderProfileMarkerGrant(read, { profileId: op.profileId, controlPlaneInstanceId, grantId: op.grantId })).changed;
           }
         } else if (op.method === "release_reference" || op.method === "retain_reference") {
           const reference = references.get(op.referenceId);

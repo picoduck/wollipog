@@ -102,13 +102,16 @@ export function skillReconciliationProviderAccountPlan(
   agents: AgentDefinition[],
   accounts: RunnerProviderAccount[],
   exposeAccountScope: boolean,
+  /** Provider profiles (#3239): an account whose HOME this control plane may not use is skipped,
+   * so one refused HOME does not fail the whole pass. Its provider still has no base scope. */
+  usable: (account: RunnerProviderAccount) => boolean = () => true,
 ): {
   baseAgents: AgentDefinition[];
   accountScopes: Array<{ account: RunnerProviderAccount; providerAccountId?: string }>;
 } {
   return {
     baseAgents: agentsWithoutConfiguredProviderAccounts(agents, accounts),
-    accountScopes: accounts.map((account) => ({
+    accountScopes: accounts.filter((account) => usable(account)).map((account) => ({
       account,
       ...(exposeAccountScope ? { providerAccountId: account.id } : {}),
     })),

@@ -4,9 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
+  adoptProviderProfileMarker,
   decideProviderProfileAccess,
+  ProviderProfileChangeError,
   PROVIDER_PROFILE_LIMITS,
   readProviderProfileMarker,
+  revokeProviderProfileMarkerGrant,
+  validProviderProfileMarker,
   writeProviderProfileMarker,
   type ProviderProfileMarker,
 } from "./provider-profile.js";
@@ -187,4 +191,59 @@ test("the access decision covers all six cases in order", () => {
   // Granted on both sides.
   assert.deepEqual(decideProviderProfileAccess(present, granted, INSTANCE), { allowed: true, profileId: PROFILE });
   assert.deepEqual(decideProviderProfileAccess(present, { ...granted, expectedId: PROFILE }, INSTANCE.toUpperCase()), { allowed: true, profileId: PROFILE });
+});
+
+const NEW_GRANT = "3a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+const changeRefusal = (code: string) => (error: unknown) => error instanceof ProviderProfileChangeError && error.code === code;
+
+test("adoption creates an identity for a marker-less HOME and only adds a grant to an existing one", () => {
+  const grant = { controlPlaneInstanceId: INSTANCE.toUpperCase(), grantId: GRANT, grantedAt: "2026-10-16T00:00:02.000Z" };
+  const created = adoptProviderProfileMarker({ state: "absent" }, { provider: "codex", grant, newProfileId: PROFILE, now: "2026-10-16T00:00:00.000Z" });
+  assert.equal(created.changed, true);
+  assert.deepEqual(created.marker, { version: 1, kind: "wollipog-provider-profile", profileId: PROFILE, provider: "codex",
+    createdAt: "2026-10-16T00:00:00.000Z", grants: [{ ...grant, controlPlaneInstanceId: INSTANCE }] });
+  const fresh = adoptProviderProfileMarker({ state: "absent" }, { provider: "claude", grant });
+  assert.equal(validProviderProfileMarker(fresh.marker), true, "a generated identity is a valid UUID v4 marker");
+
+  // Another control plane adopting the same HOME keeps the identity and the first grant.
+  const existing = marker();
+  const other = { controlPlaneInstanceId: OTHER_INSTANCE, grantId: NEW_GRANT, grantedAt: "2026-10-16T00:00:03.000Z" };
+  const shared = adoptProviderProfileMarker({ state: "present", marker: existing }, { provider: "claude", grant: other, newProfileId: OTHER_PROFILE });
+  assert.equal(shared.marker.profileId, PROFILE);
+  assert.deepEqual(shared.marker.grants, [...existing.grants, other]);
+  // The same grant again is a no-op; a newer grant of the same instance replaces the older one.
+  assert.deepEqual(adoptProviderProfileMarker({ state: "present", marker: existing }, { provider: "claude", grant: existing.grants[0]! }),
+    { marker: existing, changed: false });
+  const replaced = adoptProviderProfileMarker({ state: "present", marker: existing }, { provider: "claude",
+    grant: { controlPlaneInstanceId: INSTANCE, grantId: NEW_GRANT, grantedAt: "2026-10-16T00:00:04.000Z" } });
+  assert.deepEqual(replaced.marker.grants.map((candidate) => candidate.grantId), [NEW_GRANT]);
+});
+
+test("adoption refuses a marker it cannot extend", () => {
+  const grant = { controlPlaneInstanceId: OTHER_INSTANCE, grantId: NEW_GRANT, grantedAt: "2026-10-16T00:00:02.000Z" };
+  assert.throws(() => adoptProviderProfileMarker({ state: "unverifiable", cause: "marker" }, { provider: "claude", grant }), changeRefusal("profile_unverifiable"));
+  assert.throws(() => adoptProviderProfileMarker({ state: "present", marker: marker() }, { provider: "codex", grant }), changeRefusal("profile_unverifiable"));
+  const full = marker({ grants: Array.from({ length: PROVIDER_PROFILE_LIMITS.grants }, (_, index) => ({
+    controlPlaneInstanceId: `${index.toString(16).padStart(8, "0")}-4e5f-4a6b-8c7d-8e9fa0b1c2d3`, grantId: GRANT, grantedAt: "2026-10-16T00:00:01.000Z" })) });
+  assert.throws(() => adoptProviderProfileMarker({ state: "present", marker: full }, { provider: "claude", grant }), changeRefusal("profile_grant_limit"));
+  const mine = { ...grant, controlPlaneInstanceId: full.grants[0]!.controlPlaneInstanceId };
+  assert.equal(adoptProviderProfileMarker({ state: "present", marker: full }, { provider: "claude", grant: mine }).changed, true,
+    "replacing this instance's own grant needs no free slot");
+});
+
+test("revocation drops only one exact grant of one instance", () => {
+  const both = marker({ grants: [
+    { controlPlaneInstanceId: INSTANCE, grantId: GRANT, grantedAt: "2026-10-16T00:00:01.000Z" },
+    { controlPlaneInstanceId: OTHER_INSTANCE, grantId: GRANT, grantedAt: "2026-10-16T00:00:01.000Z" },
+  ] });
+  const revoked = revokeProviderProfileMarkerGrant({ state: "present", marker: both }, { profileId: PROFILE, controlPlaneInstanceId: INSTANCE, grantId: GRANT });
+  assert.equal(revoked.changed, true);
+  assert.deepEqual(revoked.marker?.grants.map((grant) => grant.controlPlaneInstanceId), [OTHER_INSTANCE], "another control plane's grant survives");
+  assert.equal(revokeProviderProfileMarkerGrant({ state: "present", marker: both }, { profileId: PROFILE, controlPlaneInstanceId: INSTANCE, grantId: NEW_GRANT }).changed,
+    false, "a newer grant of the same instance is not revoked by an older id");
+  assert.deepEqual(revokeProviderProfileMarkerGrant({ state: "absent" }, { profileId: PROFILE, controlPlaneInstanceId: INSTANCE, grantId: GRANT }), { changed: false });
+  assert.throws(() => revokeProviderProfileMarkerGrant({ state: "present", marker: both }, { profileId: OTHER_PROFILE, controlPlaneInstanceId: INSTANCE, grantId: GRANT }),
+    changeRefusal("profile_changed"));
+  assert.throws(() => revokeProviderProfileMarkerGrant({ state: "unverifiable", cause: "marker" }, { profileId: PROFILE, controlPlaneInstanceId: INSTANCE, grantId: GRANT }),
+    changeRefusal("profile_unverifiable"));
 });

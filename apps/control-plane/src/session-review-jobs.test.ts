@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  PROTOCOL_VERSION, SESSION_REVIEW_ARTIFACT_LIMIT_BYTES, SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN,
+  PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, SESSION_REVIEW_ARTIFACT_LIMIT_BYTES, SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN,
   type RunnerMetadata, type SessionReviewCapability, type SessionReviewJobCommand, type SessionReviewJobRequest,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
@@ -98,11 +98,11 @@ test("malformed review requests are refused before anything is recorded or sent"
 });
 
 test("an unsupported runner, a missing installation or an unavailable reviewer is refused", () => {
-  const old = harness({ protocol: PROTOCOL_VERSION - 1 });
+  const old = harness({ protocol: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob - 1 });
   try {
     const refused = old.svc.requestSessionReviewJob("s1", request());
     assert.equal(refused.status, 409);
-    assert.equal(refused.capabilityRequirement?.requiredRunnerProtocolVersion, PROTOCOL_VERSION);
+    assert.equal(refused.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob);
     assert.equal(old.sent.length, 0);
   } finally { old.db.close(); }
   const missing = harness({ sessionReview: null });
@@ -258,7 +258,7 @@ test("a runner that lost support cannot report, so its unfinished jobs finish on
   const h = harness();
   try {
     const job = h.svc.requestSessionReviewJob("s1", request()).data!;
-    h.db.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "old", workspaces: [], agents: [] }, 1, PROTOCOL_VERSION - 1);
+    h.db.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "old", workspaces: [], agents: [] }, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob - 1);
     h.sent.length = 0;
     h.svc.recoverSessionReviewJobs("r");
     assert.equal(h.sent.length, 0);

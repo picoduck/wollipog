@@ -68,6 +68,7 @@ import {
   projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
   resolveRunnerLocalAgentEnvironment,
+  writeProviderAccountsConfig,
   type RunnerConfig,
 } from "./config.js";
 import { stageRunnerCredentialFile } from "./runner-credential-file.js";
@@ -153,6 +154,14 @@ import {
 } from "./worktree-setup-generator.js";
 import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { ProviderLoginSupervisor } from "./provider-login.js";
+import { ProviderProfileGrants } from "./provider-profile-grants.js";
+import {
+  adoptProviderProfileCommand,
+  removeProviderAccountWithProfile,
+  revokeProviderProfileGrantCommand,
+  revokeStaleProviderProfileGrants,
+  type ProviderProfileCommandDeps,
+} from "./provider-profile-commands.js";
 import {
   agentForProviderAccount,
   agentWithDefaultProviderAccount,
@@ -378,6 +387,11 @@ const runnerDataIdentity = {
   controlPlaneUrl: config.controlPlaneUrl,
   controlPlaneInstanceId: attestation.instanceId,
 };
+// Provider profiles (#3239): the connected control plane's grants, fed to every HOME acquisition.
+const providerProfileGrants = new ProviderProfileGrants({
+  controlPlaneInstanceId: attestation.instanceId,
+  accounts: () => config.providerAccounts,
+});
 const legacyEndpointMigrationCredentialHash = v1CredentialHash && (
   v1Credential === config.token || attestation.priorCredentialValid === true
 ) ? v1CredentialHash : undefined;
@@ -616,12 +630,21 @@ function agentsForControlPlane() {
 const providerAccountAuthStatus = new Map<string, ProviderAccountDefinition["authStatus"]>();
 
 function providerAccountsForControlPlane() {
-  return config.providerAccounts.map((account) => ({
+  // A v225 control plane sees each account's profile and its access; an older one never sees a
+  // profile-bearing account, which it could not use (#3239).
+  return providerProfileGrants.project(config.providerAccounts, (account) => ({
     ...providerAccountDefinition(account),
     ...(providerAccountAuthStatus.has(account.id)
       ? { authStatus: providerAccountAuthStatus.get(account.id)! }
       : {}),
   }));
+}
+
+/** Re-send the account inventory after a profile change; before discovery completes the next
+ * discovery result carries it, and an early agents_updated would read as "discovery done". */
+function publishProviderAccountInventory(): void {
+  if (!discoveryDone) return;
+  sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), providerAccounts: providerAccountsForControlPlane(), editors: metadata.editors });
 }
 
 /** Resolve exact configured/discovered agent env at the last responsible moment. */
@@ -658,7 +681,8 @@ const subscriptionUsage = new SubscriptionUsageManager({
   agents: () => metadata.agents,
   selectionReady: () => harnessInstallationChoices !== null,
   installationChoices: () => harnessInstallationChoices ?? [],
-  providerAccounts: providerAccountsForControlPlane,
+  // A profile this control plane is not granted cannot be probed; skip it rather than fail.
+  providerAccounts: () => providerAccountsForControlPlane().filter((account) => account.profile?.access !== "not_granted"),
   resolveProviderAccountAgent: (account, supportedDrivers, agents) => {
     const configured = config.providerAccounts.find((candidate) => candidate.id === account.id);
     return configured
@@ -1103,6 +1127,21 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   () => subscriptionUsage.inventory(),
   attestation.instanceId,
 );
+sessions.configureProviderProfiles({
+  access: () => providerProfileGrants.access(),
+  expectedProfileIdForHome: (home) => providerProfileGrants.expectedProfileIdForHome(home),
+});
+const providerProfileCommands: ProviderProfileCommandDeps = {
+  controlPlaneInstanceId: attestation.instanceId,
+  accounts: () => config.providerAccounts,
+  grants: providerProfileGrants,
+  adopt: (home, provider, grantId) => sessions.adoptProviderProfile(home, provider, grantId),
+  revoke: (home, provider, profileId, grantId) => sessions.revokeProviderProfileGrant(home, provider, profileId, grantId),
+  persistAccounts: (accounts) => writeProviderAccountsConfig(parsed.configPath, accounts),
+  removeAccount: (accountId, options) => providerLoginSupervisor.removeAccount(accountId, options),
+  publish: () => publishProviderAccountInventory(),
+  log,
+};
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
 const sessionStarts = new SessionStartFence();
@@ -1601,6 +1640,7 @@ function queueSkillsReconcile(requestId?: string): void {
         metadata.agents,
         config.providerAccounts,
         accountScopesEnabled,
+        (account) => providerProfileGrants.usable(account),
       );
       const baseAgents = reconciliationPlan.baseAgents;
       const baseHarnessScope = new Set(baseAgents.flatMap((agent) => {
@@ -1928,7 +1968,9 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     }
     await Promise.all(config.providerAccounts.map(async (account) => {
       const agent = agentForProviderAccount(metadata.agents, account);
-      if (!agent || agent.available !== true) {
+      // A profile this control plane is not granted is refused before acquisition; report it as
+      // unknown instead of letting the refusal fail the probe pass (#3239).
+      if (!agent || agent.available !== true || !providerProfileGrants.usable(account)) {
         providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
         return;
       }
@@ -2086,6 +2128,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
         ? msg.pendingSkillRequests : undefined);
       harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
+      {
+        // Before any flush or re-publication, so this control plane's grants decide what it sees.
+        const stale = providerProfileGrants.synchronize(controlPlaneProtocolVersion, msg.providerProfileGrants);
+        runCommandTask("provider_profile_grants", revokeStaleProviderProfileGrants(providerProfileCommands, stale));
+      }
       automaticAccountSwitchConfigurationSynchronized = false;
       harnessSelectionGeneration++;
       subscriptionUsage.selectionChanged();
@@ -2912,7 +2959,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         });
         break;
       }
-      runCommandTask("remove_provider_account", providerLoginSupervisor.removeAccount(msg.accountId)
+      runCommandTask("remove_provider_account", (runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")
+        ? removeProviderAccountWithProfile(providerProfileCommands, msg.accountId)
+        : providerLoginSupervisor.removeAccount(msg.accountId))
         .then(({ credentialsRetained }) => sendUp({
           type: "remove_provider_account_result",
           requestId: msg.requestId,
@@ -2925,6 +2974,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           ok: false,
           error: errText(error),
         })));
+      break;
+    case "adopt_provider_profile":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")) break;
+      runCommandTask("adopt_provider_profile", adoptProviderProfileCommand(providerProfileCommands, msg).then(sendUp));
+      break;
+    case "revoke_provider_profile_grant":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")) break;
+      runCommandTask("revoke_provider_profile_grant", revokeProviderProfileGrantCommand(providerProfileCommands, msg).then(sendUp));
       break;
     case "generate_session_title": {
       if (msg.mode === "custom_model_endpoint") {

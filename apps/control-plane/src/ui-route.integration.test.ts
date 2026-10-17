@@ -959,6 +959,34 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "the saved provider account default in the Machine view",
   );
   assert.equal(projectedDefaults?.length, 1);
+  // Provider profiles (#3239): registration carries the scope's complete grant list, and adoption
+  // runs behind the central auth gate and the mutation audit.
+  assert.deepEqual(registeredRunner.providerProfileGrants, [], "a v225 runner is told its scope holds no grants yet");
+  const adoptProfileUrl = `${httpBase}/api/runners/runner-ui-route/provider-accounts/work/adopt-profile`;
+  const adoptProfileInit = {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ acknowledgeProfileAdoption: true }),
+  };
+  const memberAdoption = await fetch(adoptProfileUrl, {
+    ...adoptProfileInit, headers: { ...adoptProfileInit.headers, authorization: `Bearer ${operatorToken}` },
+  });
+  assert.equal(memberAdoption.status, 403, "an ordinary member cannot grant a provider profile");
+  const adoptionResponse = fetchWithBearer(adoptProfileUrl, ownerToken, adoptProfileInit);
+  const adoption = await runnerInbox.take((message) => message.type === "adopt_provider_profile");
+  assert.equal(adoption.accountId, "work");
+  runner.send(JSON.stringify({
+    type: "adopt_provider_profile_result", requestId: adoption.requestId, ok: true, profileId: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455",
+  }));
+  const adoptionReply = await adoptionResponse;
+  assert.equal(adoptionReply.status, 200);
+  assert.deepEqual(await adoptionReply.json(), {
+    status: "active", profileId: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", grantId: adoption.grantId,
+  });
+  const profileAudit = (await (await fetchWithBearer(`${httpBase}/api/identity/mutation-audit?limit=100`, ownerToken)).json() as {
+    audit: Array<{ method: string; route: string; statusCode: number }>;
+  }).audit;
+  assert.equal(profileAudit.some((entry) => entry.method === "POST" &&
+    entry.route === "/api/runners/:id/provider-accounts/:accountId/adopt-profile" && entry.statusCode === 200), true,
+    "profile adoption is attributed in the mutation audit");
   const ordinaryAccountRemoval = await fetch(`${httpBase}/api/runners/runner-ui-route/provider-accounts/work`, {
     method: "DELETE",
     headers: { authorization: `Bearer ${operatorToken}` },

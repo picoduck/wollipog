@@ -193,7 +193,7 @@ import {
   usageWindowRejection,
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
-import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference } from "./provider-home-lease-async.js";
+import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type ProviderHomeReference, type ProviderProfileAccessSource } from "./provider-home-lease-async.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
 import type { ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
@@ -1568,6 +1568,10 @@ export class SessionManager {
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: AsyncProviderHomeLeaseRegistry;
+  /** Provider profiles (#3239): until the runner learns the control plane's grants, a HOME holding
+   * a profile marker is refused as needing a newer control plane; marker-less homes are unaffected. */
+  private providerProfileAccess: ProviderProfileAccessSource = () => ({ controlPlaneSupportsProfiles: false, activeProfileIds: [] });
+  private providerProfileExpectation: (home: string) => string | undefined = () => undefined;
   /** The provider-HOME reference each live driver instance took at launch (see
    * settleDriverProviderHome). An instance launched past the handle budget has no entry. */
   private readonly driverProviderHomes = new Map<Driver, ProviderHomeReference>();
@@ -1686,9 +1690,8 @@ export class SessionManager {
       onDiagnostic: (diagnostic) => this.log(JSON.stringify(diagnostic)),
       helperDataDir: dataDir ?? join(store.rootPath(), ".runner-data"),
       ...(controlPlaneInstanceId ? { controlPlaneInstanceId } : {}),
-      // Provider profiles (#3239) are not negotiated yet, so a HOME holding a profile marker is
-      // refused as needing a newer control plane; marker-less homes are unaffected.
-      profileAccess: () => ({ controlPlaneSupportsProfiles: false, activeProfileIds: [] }),
+      profileAccess: () => this.providerProfileAccess(),
+      expectedProfileIdForHome: (home) => this.providerProfileExpectation(home),
     }) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
@@ -4637,6 +4640,29 @@ export class SessionManager {
     return error instanceof Error && [LEASE_WORKER_ERRORS.cancelled,
       "provider-home acquisition was cancelled", "provider launch preparation was cancelled",
       "authentication preparation was cancelled"].includes(error.message);
+  }
+
+  /** Provider profiles (#3239): the control plane's negotiated capability and active grants, read
+   * at each acquisition's dispatch, and the profile id a configured account recorded per HOME. */
+  configureProviderProfiles(options: {
+    access: ProviderProfileAccessSource;
+    expectedProfileIdForHome: (home: string) => string | undefined;
+  }): void {
+    this.providerProfileAccess = options.access;
+    this.providerProfileExpectation = options.expectedProfileIdForHome;
+  }
+
+  /** Record this control plane's grant in one account HOME's profile marker under its lease. */
+  async adoptProviderProfile(home: string, provider: "claude" | "codex", grantId: string): Promise<{ profileId: string }> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    if (this.shuttingDown) throw new Error("provider profile adoption was cancelled by shutdown");
+    return this.providerHomeLeases.adoptProfile(home, provider, grantId);
+  }
+
+  /** Drop one exact grant of this control plane from a HOME's profile marker under its lease. */
+  async revokeProviderProfileGrant(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<boolean> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    return this.providerHomeLeases.revokeProfileGrant(home, provider, profileId, grantId);
   }
 
   /** Provider sign-in is a short-lived supervised mutation of one exact credential home. */

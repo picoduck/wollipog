@@ -564,8 +564,9 @@ export class ProviderLoginSupervisor {
 
   /** Forget one configured account. The runner-created credential home is deleted only when no
    * session or process on this Machine still depends on it; otherwise it is kept so those sessions
-   * continue to authenticate. Operator-configured homes are never deleted. */
-  async removeAccount(accountId: string): Promise<{ credentialsRetained: boolean }> {
+   * continue to authenticate. Operator-configured homes are never deleted, nor is a home whose
+   * provider profile other control planes are still granted (`retainCredentialHome`, #3239). */
+  async removeAccount(accountId: string, options: { retainCredentialHome?: boolean } = {}): Promise<{ credentialsRetained: boolean }> {
     const account = this.options.accounts.find((candidate) => candidate.id === accountId);
     if (!account) throw new Error("Provider account is not configured on this Machine.");
     if (this.pending.has(accountId) || [...this.active.values()].some((operation) => operation.resolved.accountId === accountId)) {
@@ -580,7 +581,8 @@ export class ProviderLoginSupervisor {
     }
     this.options.accounts.splice(this.options.accounts.indexOf(account), 1);
     const retire = () => this.deleteRemovedCredentialHome(account);
-    const credentialsRetained = !await (this.options.serializeHomeRetirement?.(retire) ?? retire());
+    const credentialsRetained = options.retainCredentialHome === true ||
+      !await (this.options.serializeHomeRetirement?.(retire) ?? retire());
     await this.options.onAccountRemoved?.(account);
     return { credentialsRetained };
   }

@@ -16,7 +16,8 @@ const INVENTORY_BYPASS_TYPES = new Set([
   "logout_agent_result", "switch_session_provider_account_result", "inspect_provider_authentication_result",
   "select_provider_authentication_account_result", "acp_registry_approval_result", "host_action_result",
   "interrupt_turn_result", "stop_background_job_result", "read_queued_prompt_result", "edit_queued_prompt_result",
-  "provider_login_result", "remove_provider_account_result", "session_worktree_progress",
+  "provider_login_result", "remove_provider_account_result", "adopt_provider_profile_result",
+  "revoke_provider_profile_grant_result", "session_worktree_progress",
   "campaign_forge_observe_result",
 ]);
 

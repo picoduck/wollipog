@@ -384,7 +384,9 @@ export type RunnerRequestResult =
   | GithubIssueClosureResultMessage
   | CampaignForgeObserveResultMessage
   | ProviderLoginResultMessage
-  | RemoveProviderAccountResultMessage;
+  | RemoveProviderAccountResultMessage
+  | import("@wollipog/protocol").AdoptProviderProfileResultMessage
+  | import("@wollipog/protocol").RevokeProviderProfileGrantResultMessage;
 
 interface PendingRequest {
   runnerId: string;
