@@ -1308,3 +1308,28 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
   criterion is NOT met in `provider` mode and the issue stays open for it.
 - Native hooks remain a cooperative same-user governance mechanism, not an OS isolation boundary,
   exactly as §2.3.1 already states.
+
+## Measurement Attempt (codex-cli 0.162.1, Provider Sandbox, 2026-10-16): Structured Orchestrator
+
+For #1486, an isolated real `codex --disable hooks app-server` was connected to the production
+driver's approval handlers and given the exact `buildCodexTurnParams` result for the Orchestrator
+preset. A throwaway repository and linked child worktree supplied the protection list; the
+command's cwd was a separate sibling directory, outside both. A throwaway `CODEX_HOME` selected a
+loopback scripted Responses endpoint, so the probe used no real model, account credentials, or
+hosting-stack files. The endpoint emitted `git -C <repo> status --porcelain` and, in a separate
+turn, `git -C <repo> worktree remove <child-worktree>`.
+
+The end-to-end veto measurement **could not be taken in this environment**. Both commands failed
+before shell execution with `bwrap: No permissions to create new namespace`, because this provider
+sandbox does not permit nested unprivileged namespaces. Neither produced an approval request. A
+separate explicit `require_escalated` attempt was rejected by Codex itself because the preset's
+granular policy has `sandbox_approval: false`; it also never reached the driver. The child worktree
+remained intact. All probe app-server process groups were killed and awaited, and the temporary
+fixture and local server were removed. Nothing in the Wollipog hosting stack was changed or
+restarted.
+
+This is an environment limitation, not evidence that the driver's veto fired or that it failed.
+The focused approval-handler test separately pins the Orchestrator's widened inventory, refusal of
+another session's worktree from an unrelated cwd before an approval card, and ordinary approval
+of a read-only command against the same repository. It does not establish that the installed
+CLI routes such a request to that handler under the preset.
