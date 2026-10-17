@@ -1,6 +1,12 @@
 import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
+  FULL_CONTROL_EVIDENCE_EXCEPTIONS,
+  FULL_CONTROL_HUMAN_REQUIRED_LABELS,
+  FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON,
   WORKFLOW_DECISION_CATEGORIES,
+  fullControlStandingHumanRequired,
+  type CampaignAuthorityOperation,
+  type CampaignControl,
   type DelegatableWorkflowDecisionCategory,
   type OrchestratorCampaignProjection,
   type OrchestratorDefaults,
@@ -62,12 +68,35 @@ export function workflowDecisionsSummary(decisions: ParentControlDecisionPolicy)
   return `${human} of ${total} decisions ${human === 1 ? "stays" : "stay"} with a person.`;
 }
 
+type ControlView = Pick<SessionView, "parentSessionId" | "orchestratorPolicy" | "orchestratorCampaign">;
+
+/** The root's control as this viewer may know it. The server projection is authoritative; a
+ * descendant's copied policy is not, so a descendant without a projection has none. */
+export function effectiveCampaignControl(session: ControlView): CampaignControl | undefined {
+  const projected = session.orchestratorCampaign?.control !== undefined && Number.isSafeInteger(session.orchestratorCampaign.policyRevision)
+    ? session.orchestratorCampaign.control : undefined;
+  return projected ?? (session.parentSessionId ? undefined : session.orchestratorPolicy?.control);
+}
+
+/** Under Full Control the saved Custom choices have no effect, so summaries describe the server's
+ * effective owners instead, or say only "Full Control" while those are not reported. */
+export function workflowDecisionsNote(session: ControlView & Pick<SessionView, "parentControlPolicy">): string | null {
+  if (effectiveCampaignControl(session)?.mode === "full_control") {
+    const owners = session.orchestratorCampaign?.decisionOwners;
+    return owners ? `Full Control: ${workflowDecisionsSummary(owners)}` : "Full Control.";
+  }
+  return session.parentControlPolicy ? workflowDecisionsSummary(session.parentControlPolicy.decisions) : null;
+}
+
+/** The Child Session Requests summary: "Full Control" while Full Control decides them. */
+export function childSessionRequestsNote(session: ControlView & Pick<SessionView, "parentControl">): string {
+  return effectiveCampaignControl(session)?.mode === "full_control" ? "Full Control" : childSessionRequestsLabel(session.parentControl);
+}
+
 /** The second line of the + menu's Orchestrator Controls… row. A control plane without typed
  * gates has only the Child Session Requests choice to summarize. */
-export function orchestratorControlsSummary(session: Pick<SessionView, "parentControl" | "parentControlPolicy">): string {
-  return session.parentControlPolicy
-    ? workflowDecisionsSummary(session.parentControlPolicy.decisions)
-    : `Child session requests: ${childSessionRequestsLabel(session.parentControl)}.`;
+export function orchestratorControlsSummary(session: ControlView & Pick<SessionView, "parentControl" | "parentControlPolicy">): string {
+  return workflowDecisionsNote(session) ?? `Child session requests: ${childSessionRequestsNote(session)}.`;
 }
 
 /** A campaign's lifecycle in the status vocabulary (§11.2). */
@@ -273,7 +302,8 @@ export function OrchestratorControlsDialog({
   const policy = session.parentControlPolicy;
   const projectedControl = session.orchestratorCampaign?.control !== undefined && Number.isSafeInteger(session.orchestratorCampaign.policyRevision)
     ? session.orchestratorCampaign.control : undefined;
-  const fullControl = (projectedControl ?? (session.parentSessionId ? undefined : session.orchestratorPolicy?.control))?.mode === "full_control";
+  const control = effectiveCampaignControl(session);
+  const fullControl = control?.mode === "full_control";
   const canRevoke = fullControl && !session.parentSessionId && policy !== undefined && refusal === null;
   // A descendant's copied policy is not authoritative; only the projected root state is.
   const effectiveMode = projectedControl ? projectedControl.mode
@@ -334,20 +364,26 @@ export function OrchestratorControlsDialog({
           <h3 className="section-title" id={`${ids}-requests`}>Child Session Requests</h3>
           {saved === "parentControl" && <SavedCheck />}
         </div>
-        <ChoiceRows<ParentControlMode>
-          label="Child Session Requests"
-          options={refusal === null
-            ? CHILD_SESSION_REQUEST_OPTIONS
-            : CHILD_SESSION_REQUEST_OPTIONS.map((option) => ({ ...option, disabled: true }))}
-          value={parentControl}
-          onChange={(mode) => {
-            if (mode === parentControl) return;
-            change("parentControl", mode, () => api.setParentControl(session.id, mode));
-          }}
-        />
+        {control?.mode === "full_control" ? <FullControlRequests control={control} customChoice={childSessionRequestsLabel(parentControl)} />
+          : <ChoiceRows<ParentControlMode>
+            label="Child Session Requests"
+            options={refusal === null
+              ? CHILD_SESSION_REQUEST_OPTIONS
+              : CHILD_SESSION_REQUEST_OPTIONS.map((option) => ({ ...option, disabled: true }))}
+            value={parentControl}
+            onChange={(mode) => {
+              if (mode === parentControl) return;
+              change("parentControl", mode, () => api.setParentControl(session.id, mode));
+            }}
+          />}
       </section>
 
-      {policy && (
+      {policy && control?.mode === "full_control" && (
+        <FullControlDecisions control={control} campaign={projectedControl ? session.orchestratorCampaign : undefined}
+          driver={session.parentSessionId ? null : session.driver} titleId={`${ids}-decisions`} />
+      )}
+
+      {policy && control?.mode !== "full_control" && (
         <section className="section" aria-labelledby={`${ids}-decisions`}>
           <div className="section-head">
             <h3 className="section-title" id={`${ids}-decisions`}>Workflow Decisions</h3>
@@ -404,6 +440,79 @@ export function OrchestratorControlsDialog({
       )}
     </Modal>
   );
+}
+
+const FULL_CONTROL_REQUEST_OPERATIONS: ReadonlyArray<{ operation: CampaignAuthorityOperation; label: string }> = [
+  { operation: "question", label: "Questions" },
+  { operation: "tool_approval", label: "One-Time Approvals" },
+  { operation: "policy_ask", label: "Governance Policy Asks" },
+];
+
+/** Full Control decides descendant requests from its boundary, so the Custom choice is shown as
+ * what returns after Revoke, never as a control that would have no effect now. */
+function FullControlRequests({ control, customChoice }: { control: Extract<CampaignControl, { mode: "full_control" }>; customChoice: string }) {
+  return <>
+    <p className="section-note">
+      Full Control decides these. Inside the authorized boundary the Orchestrator answers; protected requests, Human
+      Required exceptions and anything outside the boundary come to you. Your Custom choice, {customChoice}, applies
+      again only after you revoke Full Control.
+    </p>
+    <dl className="facts orchestrator-facts">
+      {FULL_CONTROL_REQUEST_OPERATIONS.map(({ operation, label }) => <div key={operation}>
+        <dt>{label}</dt>
+        <dd>{control.boundary.operations.includes(operation) ? "Orchestrator" : "Human"}</dd>
+      </div>)}
+    </dl>
+  </>;
+}
+
+/** Under Full Control each gate's owner is the server's effective owner for this campaign, read-only:
+ * the saved per-gate choices have no effect until Revoke. */
+function FullControlDecisions({ control, campaign, driver, titleId }: {
+  control: Extract<CampaignControl, { mode: "full_control" }>; campaign: OrchestratorCampaignProjection | undefined;
+  /** The root's driver; a descendant does not know it, so it sees every standing protection. */
+  driver: string | null; titleId: string;
+}) {
+  const standing = fullControlStandingHumanRequired(driver ?? "claude-code");
+  const reasonFor = (category: DelegatableWorkflowDecisionCategory) =>
+    category === "ui_evidence_approval" && campaign?.uiEvidenceReview.status === "unavailable"
+      ? campaign.uiEvidenceReview.reason ?? "This Orchestrator can't inspect the evidence images."
+      : !control.boundary.operations.includes(category) ? "Not part of this campaign's authorization."
+      : "This runner can't enforce Full Control for this gate.";
+  return <>
+    <section className="section" aria-labelledby={titleId}>
+      <div className="section-head">
+        <h3 className="section-title" id={titleId}>Workflow Decisions</h3>
+      </div>
+      <p className="section-note">
+        Full Control decides these for this campaign. Your per-gate choices apply again only after you revoke to Custom.
+      </p>
+      <dl className="facts orchestrator-facts">
+        {WORKFLOW_DECISION_CATEGORIES.map((category) => {
+          const owner = campaign?.decisionOwners[category];
+          return <div key={category}>
+            <dt>{WORKFLOW_DECISION_LABELS[category]}</dt>
+            <dd>
+              {owner === undefined ? "Not Reported" : owner === "orchestrator" ? "Orchestrator" : "Human"}
+              {owner === "human" && <small className="orchestrator-fact-source">{reasonFor(category)}</small>}
+            </dd>
+          </div>;
+        })}
+      </dl>
+      {campaign?.decisionOwners.ui_evidence_approval === "orchestrator" &&
+        <p className="orchestrator-gate-helper">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>}
+    </section>
+    <section className="section" aria-labelledby={`${titleId}-human-required`}>
+      <div className="section-head">
+        <h3 className="section-title" id={`${titleId}-human-required`}>Human Required</h3>
+      </div>
+      <p className="section-note">These always come to you under Full Control.</p>
+      <ul>
+        {FULL_CONTROL_EVIDENCE_EXCEPTIONS.map((item) => <li key={item.id}><strong>{item.exception}:</strong> {item.reason}</li>)}
+        {standing.map((id) => <li key={id}><strong>{FULL_CONTROL_HUMAN_REQUIRED_LABELS[id] ?? id}:</strong> {FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON}</li>)}
+      </ul>
+    </section>
+  </>;
 }
 
 /** The quiet "Saved" check (§8.6), announced by the dialog's polite region. */

@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, PromptImageInput, RunnerView, SessionConfig, SessionEvent, SessionView } from "@wollipog/protocol";
+import { campaignWorkflowOwner, WORKFLOW_DECISION_CATEGORIES, type CampaignControl, type ControlPlaneToUi, type PromptImageInput,
+  type RunnerView, type SessionConfig, type SessionEvent, type SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -365,10 +366,12 @@ if (composerFixture) {
         repository: issueScope.repository, objective: "Review the source fixture", authorizedByUserId: "fixture-human", authorizedAt: 2,
         operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [] } };
       session.orchestratorCampaign.control = session.orchestratorPolicy.control;
+      session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(session.orchestratorPolicy.control);
       if (fullFixture === "enable") {
         // A live Custom root with a Human-established scope, ready to enable through the server preflight.
         session.orchestratorPolicy.control = { mode: "custom" };
         session.orchestratorCampaign.control = { mode: "custom" };
+        session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(session.orchestratorCampaign.control);
         session.parentControlPolicy = { ...session.parentControlPolicy!, revision: 3 };
         session.orchestratorCampaign.policyRevision = 3;
       }
@@ -571,6 +574,16 @@ const navigation: ViewNavigation = {
 /** The default endpoints never answer, keeping recovery active for geometry tests. Pagination mode
  * resolves only the opening window; its next request stays pending so loading state is observable. */
 let tailRequestCount = 0;
+/** The projection's effective owners as the server derives them: under Full Control each gate follows
+ * the boundary, and UI Evidence Approval stays with a person while this Orchestrator can't inspect images. */
+function fixtureEffectiveOwners(control: CampaignControl) {
+  const saved = session.parentControlPolicy!.decisions;
+  const owners = { ...saved };
+  for (const category of WORKFLOW_DECISION_CATEGORIES) owners[category] = campaignWorkflowOwner(control, saved, category, true);
+  if (session.orchestratorCampaign?.uiEvidenceReview.effectiveOwner === "human") owners.ui_evidence_approval = "human";
+  return owners;
+}
+
 // Usage screenshots want the settled transcript on screen; the harness defaults to settled.
 const settledUsage = params.get("settled") !== "0";
 const client = {
@@ -585,7 +598,7 @@ const client = {
       operations: ["implementation_question", "pr_merge"] as Array<"implementation_question" | "pr_merge">, delegatablePolicyIds: [] } };
     session.orchestratorPolicy = { ...session.orchestratorPolicy!, control };
     session.parentControlPolicy = { ...session.parentControlPolicy!, revision };
-    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control, policyRevision: revision };
+    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control, policyRevision: revision, decisionOwners: fixtureEffectiveOwners(control) };
     return { ...session };
   },
   revokeCampaignControl: async (id: string, expectedRevision: number) => {
@@ -593,7 +606,8 @@ const client = {
     if (expectedRevision !== session.parentControlPolicy!.revision) throw new ApiError("Fixture revision changed", 409);
     session.orchestratorPolicy = { ...session.orchestratorPolicy!, control: { mode: "custom" } };
     session.parentControlPolicy = { ...session.parentControlPolicy!, revision: expectedRevision + 1 };
-    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control: { mode: "custom" }, policyRevision: expectedRevision + 1 };
+    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control: { mode: "custom" }, policyRevision: expectedRevision + 1,
+      decisionOwners: fixtureEffectiveOwners({ mode: "custom" }) };
     return { ...session };
   },
   // Orchestrator Controls (#2192): changes save at once against the policy revision. A conflict

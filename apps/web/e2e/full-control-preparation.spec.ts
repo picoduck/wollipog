@@ -71,6 +71,14 @@ async function expectUnreadableLimitsBlock(page: Page, action: Locator) {
   await expect(action).toBeEnabled();
 }
 
+/** Under Full Control the dialog shows the effective owners read-only: nothing editable that has no effect. */
+async function expectFullControlOwnersReadOnly(page: Page) {
+  await expect(page.getByRole("radiogroup", { name: "PR Merge Approval", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("radiogroup", { name: "Child Session Requests", exact: true })).toHaveCount(0);
+  await expect(page.getByText(/Your per-gate choices apply again only after you revoke to Custom\./)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Human Required", exact: true })).toBeVisible();
+}
+
 async function shoot(page: Page, anchor: Locator, path: string) {
   await anchor.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
   await settle(page);
@@ -210,6 +218,7 @@ for (const viewport of viewports) {
       await enable.click();
       await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
       await expect(page.getByRole("button", { name: "Revoke Full Control", exact: true })).toBeVisible();
+      await expectFullControlOwnersReadOnly(page);
       await shoot(page, heading, `${prefix}-enabled.png`);
     });
   }
@@ -224,9 +233,13 @@ for (const viewport of viewports) {
     await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
     const heading = page.getByRole("heading", { name: "Orchestrator Control", exact: true });
     await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
+    await expectFullControlOwnersReadOnly(page);
     await shoot(page, heading, `${captures}/revoke-${viewport.name}-${theme}-full.png`);
     await page.getByRole("button", { name: "Revoke Full Control", exact: true }).click();
     await expect(page.getByText(/Effective Mode: Custom/)).toBeVisible();
+    // Custom again: the per-gate and Child Session Requests choices are editable once more.
+    await expect(page.getByRole("radiogroup", { name: "PR Merge Approval", exact: true })).toBeVisible();
+    await expect(page.getByRole("radiogroup", { name: "Child Session Requests", exact: true })).toBeVisible();
     await shoot(page, heading, `${captures}/revoke-${viewport.name}-${theme}-custom.png`);
   });
   for (const theme of themes) test(`legacy descendant ${viewport.name} ${theme}: unknown root state cannot imply Full authority`, async ({ page }) => {

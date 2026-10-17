@@ -49,7 +49,7 @@ import { effortLabel, relativeTime, resolvedModelLabel, shortenPath } from "../f
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
-import { childSessionRequestsLabel, workflowDecisionsSummary } from "./OrchestratorControlsDialog.js";
+import { childSessionRequestsNote, workflowDecisionsNote } from "./OrchestratorControlsDialog.js";
 
 const BUSY = ["queued", "starting", "running", "input_required"];
 
@@ -213,7 +213,7 @@ export function PinnedSummary({
           <SummaryRow
             icon={<ChildSessionRequestsIcon className="ps-icon" size={14} aria-hidden="true" />}
             label="Child Session Requests"
-            note={childSessionRequestsLabel(session.parentControl)}
+            note={childSessionRequestsNote(session)}
             title="Open Orchestrator Controls"
             onClick={onOpenOrchestratorControls}
           />
@@ -222,7 +222,7 @@ export function PinnedSummary({
           <SummaryRow
             icon={<WorkflowDecisionsIcon className="ps-icon" size={14} aria-hidden="true" />}
             label="Workflow Decisions"
-            note={workflowDecisionsSummary(session.parentControlPolicy.decisions)}
+            note={workflowDecisionsNote(session) ?? undefined}
             title="Open Orchestrator Controls"
             onClick={onOpenOrchestratorControls}
           />

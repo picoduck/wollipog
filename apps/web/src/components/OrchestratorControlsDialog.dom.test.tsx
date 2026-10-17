@@ -24,6 +24,8 @@ import {
   ORCHESTRATOR_CONTROLS_CONFLICT,
   ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS,
   OrchestratorControlsDialog,
+  WORKFLOW_DECISION_LABELS,
+  childSessionRequestsNote,
   orchestratorControlsSummary,
   workflowDecisionsSummary,
 } from "./OrchestratorControlsDialog.js";
@@ -355,6 +357,45 @@ function sectionTitles(dialog: HTMLElement): string[] {
   return [...dialog.querySelectorAll(".section-title")].map((node) => node.textContent ?? "");
 }
 
+/** A Full Control root as the server projects it: only PR merge is inside the boundary, so the
+ * effective owners differ from the saved Custom choices (which delegate two other gates). */
+function fullControlProjection(): SessionView {
+  const base = fullCampaign();
+  return { ...base, parentControl: "questions_and_approvals",
+    orchestratorCampaign: { ...CAMPAIGN, control: base.orchestratorPolicy!.control, policyRevision: 3,
+      decisionOwners: { ...HUMAN_ONLY, pr_merge: "orchestrator" } } } as SessionView;
+}
+
+test("under Full Control the dialog shows the server's effective owners read-only, the Human Required exceptions, and what returns after Revoke", async () => {
+  const harness = await open(fullControlProjection(), {});
+  const dialog = harness.dialog();
+  const text = dialog.textContent ?? "";
+  // Nothing editable that has no effect while Full Control decides.
+  assertNoDomNode(dialog.querySelector('[role="radiogroup"][aria-label="Child Session Requests"]'));
+  for (const label of Object.values(WORKFLOW_DECISION_LABELS)) assertNoDomNode(dialog.querySelector(`[role="radiogroup"][aria-label="${label}"]`));
+  const fact = (term: string) => [...dialog.querySelectorAll("dt")].find((node) => node.textContent === term)?.nextElementSibling?.textContent;
+  assert.equal(fact("PR Merge Approval"), "Orchestrator");
+  assert.equal(fact("Implementation Questions"), "HumanNot part of this campaign's authorization.",
+    "a saved Custom delegation outside the boundary is shown as the Human's, with why");
+  assert.equal(fact("UI Evidence Approval"), "HumanNo image reader.", "the evidence fallback reason is the server's");
+  assert.equal(fact("Questions"), "Human");
+  assert.equal(fact("One-Time Approvals"), "Human");
+  assert.match(text, /Your Custom choice, Questions and Approvals, applies again only after you revoke Full Control\./);
+  assert.match(text, /Your per-gate choices apply again only after you revoke to Custom\./);
+  assert.match(text, /Video Evidence Review: Video evidence needs your review until production video review is available\./);
+  assert.match(text, /External Evidence Review: Evidence stored outside private Session artifacts \(links only\) needs your review\./);
+  assert.match(text, /Secrets and Sign-In: Always decided by the Human under Full Control\./);
+  assert.match(text, /Relative Shell Commands Without a Verified Directory/, "a Claude Code root keeps its driver's protection");
+  assert.ok([...dialog.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"));
+});
+
+test("under Full Control without a reported projection, owners are Not Reported rather than guessed", async () => {
+  const harness = await open(fullCampaign(), {});
+  const fact = (term: string) => [...harness.dialog().querySelectorAll("dt")].find((node) => node.textContent === term)?.nextElementSibling?.textContent;
+  assert.equal(fact("PR Merge Approval"), "Not Reported");
+  assertNoDomNode(harness.dialog().querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]'));
+});
+
 test("the summaries count the gates that stay with a person", () => {
   assert.equal(workflowDecisionsSummary(HUMAN_ONLY), "5 of 5 decisions stay with a person.");
   assert.equal(
@@ -370,6 +411,11 @@ test("the summaries count the gates that stay with a person", () => {
   );
   assert.equal(orchestratorControlsSummary({ parentControl: "questions", parentControlPolicy: undefined }),
     "Child session requests: Questions.", "a control plane without typed gates summarizes the one choice it has");
+  // Under Full Control the summaries describe the effective owners, never the inactive Custom choices.
+  const full = fullControlProjection();
+  assert.equal(orchestratorControlsSummary(full), "Full Control: 4 of 5 decisions stay with a person.");
+  assert.equal(childSessionRequestsNote(full), "Full Control");
+  assert.equal(orchestratorControlsSummary({ ...full, orchestratorCampaign: undefined }), "Full Control.");
 });
 
 test("the dialog has three titled sections, the campaign's facts and a close-only footer", async () => {
