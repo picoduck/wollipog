@@ -205,6 +205,32 @@ test("Install Manually opens with no spinner, then waits for the runner after th
   }
 });
 
+test("renaming the runner discards its credential, even when the name is changed back", async () => {
+  const view = await mount(<InstallManuallyDialog onClose={() => {}} />, {
+    getOnboarding: async () => info,
+    issueRunnerCredential: async (runnerId: string) => secretFor(runnerId),
+  });
+  const name = () => dialog().querySelector<HTMLInputElement>("input")!;
+  const rename = (value: string) => act(async () => {
+    name().focus();
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(name(), value);
+    name().dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+    name().dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true, key: "x" }) as unknown as Event);
+  });
+  try {
+    await rename("runner-a");
+    await act(async () => { buttonNamed("Generate Credential")!.click(); });
+    await act(settle);
+    assert.ok(dialog().querySelector(".code-well.one-line"), "the token is shown once it is issued");
+    await rename("runner-b");
+    await rename("runner-a");
+    assertNoDomNode(dialog().querySelector(".code-well.one-line"), "the token is not shown again");
+    assert.ok(buttonNamed("Generate Credential"), "a new credential has to be generated");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("Connects To reads in words, and a remote host adds one compact warning and the plaintext acknowledgement", async () => {
   const view = await mount(<InstallManuallyDialog onClose={() => {}} />, { getOnboarding: async () => info });
   try {

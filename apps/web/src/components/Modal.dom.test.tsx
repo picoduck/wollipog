@@ -281,6 +281,21 @@ test("the scrim of a phone sheet closes only the panel on top", async () => {
   matchingMedia = new Set();
 });
 
+test("a full-height sheet that turns into a fitted one shows its grabber at the top, before the panel", async () => {
+  // Install Manually opens full height and falls back to its fitted height when setup details fail
+  // to load (#2992). The grabber mounts then, after the panel already placed in the surface.
+  matchingMedia = new Set([PHONE]);
+  const sheet = (phoneSheet: "fit" | "full") => <Modal title="Install Manually" phoneSheet={phoneSheet} onClose={() => {}}>Body</Modal>;
+  const view = await mount(sheet("full"));
+  assertNoDomNode(document.querySelector(".sheet-grabber"));
+  await act(async () => { view.root.render(sheet("fit")); await tick(); });
+  const surface = document.querySelector(".modal")!;
+  assert.ok(surface.firstElementChild?.classList.contains("sheet-grabber"), "the grabber is the surface's first child");
+  assert.ok(surface.lastElementChild?.classList.contains("modal-panel-host"), "the panel follows it");
+  await view.unmount();
+  matchingMedia = new Set();
+});
+
 test("long forms open as a full-height phone sheet with a back arrow and no grabber", async () => {
   matchingMedia = new Set([PHONE]);
   let closed = false;
