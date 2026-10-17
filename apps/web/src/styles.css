@@ -12346,6 +12346,29 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .access-form-field > .pid-mask { min-height: 38px; display: flex; align-items: center; padding: 0 var(--space-3); }
 .access-member-picker > .pid-toggle { margin-inline-start: auto; }
 
+/* Connect via SSH (#2987). What This Needs is a closed disclosure of three requirements. Workspace
+   Folder takes the row beside the 96px Port (§8.3), and the row stacks under 480px as a `.field-row`
+   does (§8.1, #2538) while Port keeps its width: Workspace Folder's floor is what is left of 480px
+   beside Port, so Port wraps below it in any narrower row. */
+.connect-ssh-needs {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+.connect-ssh-location {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.connect-ssh-location > .field {
+  flex: 1 1 calc(480px - var(--space-3) - 96px);
+  min-width: 0;
+}
+.connect-ssh-location > .connect-ssh-port { flex: none; width: 96px; }
+
 /* ---- Onboarding dialog ---- */
 .onboard {
   display: flex;

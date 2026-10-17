@@ -349,9 +349,41 @@ export function sshErrorHint(error: string | null | undefined): string | null {
   const networkUnreachable = /\b(network is unreachable|no route to host)\b/.test(e);
   if (!connectBlocked && !networkUnreachable) return null;
   return (
-    "This looks like the connection was blocked before reaching the host — usually a VPN or firewall. " +
-    'If a VPN is active (e.g. NordVPN), add this app to its split-tunneling list set to bypass ' +
-    '("Don\'t use VPN for selected apps"), then restart the app — or pause the VPN. ' +
-    "Split-tunneling rules only take effect for apps started after the rule is added."
+    "The connection was blocked before it reached the host, usually by a VPN or firewall. " +
+    "Pause the VPN or add this app to its split-tunneling list, then restart the app and try again."
   );
+}
+
+/**
+ * One or two sentences for a failed SSH connection or a refused Connect via SSH request, in the
+ * person's words rather than ssh's. The caller keeps the raw text behind Show Details
+ * (docs/design-system.md §8.5, §13.2). `target` is the SSH target as entered: "user@host" or a
+ * `~/.ssh/config` alias.
+ *
+ * Connect via SSH (#2987) shows it above the dialog's footer; a machine's failure notice (#2988)
+ * reuses it for a reconnect that failed.
+ */
+export function describeSshFailure(error: string | null | undefined, target?: string): string {
+  const raw = (error ?? "").trim();
+  const e = raw.toLowerCase();
+  const host = target?.trim() || "the machine";
+  // The browser's words for a request that never reached Wollipog: nothing was tried over SSH.
+  if (/\b(failed to fetch|load failed|networkerror)\b/.test(e)) {
+    return "Wollipog couldn't be reached. Check the connection, then try again.";
+  }
+  // The control plane refused the target itself, before any SSH was attempted.
+  if (e.includes("invalid sshtarget")) return "Use an SSH target such as user@host, with no spaces or leading dash.";
+  // An authentication rejection ("Permission denied (publickey,password).") or too many keys offered.
+  // A connect-time EACCES reads "port 22: Permission denied" with no parenthesis, and is the hint's.
+  if (/permission denied \(/.test(e) || e.includes("too many authentication failures")) {
+    return "The host refused your SSH key. Load the key with ssh-add, then try again.";
+  }
+  const blocked = sshErrorHint(raw);
+  if (blocked) return blocked;
+  if (e.includes("host key verification failed") || e.includes("remote host identification has changed")) {
+    return `The host key for ${host} doesn't match the one this computer knows. Check the host, then update ~/.ssh/known_hosts.`;
+  }
+  if (e.includes("could not resolve hostname")) return `This computer couldn't find ${host}. Check the SSH target.`;
+  if (e.includes("connection refused")) return `${host} refused the connection. Check that SSH runs there and the port is right.`;
+  return `Wollipog couldn't reach ${host} over SSH.`;
 }

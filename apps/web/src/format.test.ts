@@ -10,6 +10,7 @@ import {
   permissionModeLabel,
   resolvedModelLabel,
   serviceTierLabel,
+  describeSshFailure,
   sshErrorHint,
   titleCaseLabel,
   relativeTime,
@@ -137,6 +138,34 @@ test("sshErrorHint: connection-blocked errors get the VPN/split-tunneling hint",
     const hint = sshErrorHint(msg);
     assert.ok(hint, `expected a hint for: ${msg}`);
     assert.match(hint!, /split-tunneling/);
+  }
+});
+
+test("describeSshFailure: one plain sentence per known failure, and the target in the fallback", () => {
+  assert.equal(describeSshFailure("ssh devbox: Permission denied (publickey,password).", "devbox"),
+    "The host refused your SSH key. Load the key with ssh-add, then try again.");
+  assert.equal(describeSshFailure("Received disconnect from 10.0.0.2: Too many authentication failures", "devbox"),
+    "The host refused your SSH key. Load the key with ssh-add, then try again.");
+  // A connect-time EACCES is a blocked connection, not a refused key.
+  const blocked = "ssh: connect to host devbox port 22: Permission denied";
+  assert.equal(describeSshFailure(blocked, "devbox"), sshErrorHint(blocked));
+  assert.equal(describeSshFailure("ssh: connect to host devbox port 22: Connection timed out", "devbox"),
+    sshErrorHint("ssh: connect to host devbox port 22: Connection timed out"));
+  assert.equal(describeSshFailure("Host key verification failed.", "me@devbox"),
+    "The host key for me@devbox doesn't match the one this computer knows. Check the host, then update ~/.ssh/known_hosts.");
+  assert.equal(describeSshFailure("ssh: Could not resolve hostname devbx: Name or service not known", "devbx"),
+    "This computer couldn't find devbx. Check the SSH target.");
+  assert.equal(describeSshFailure("ssh: connect to host devbox port 2222: Connection refused", "devbox"),
+    "devbox refused the connection. Check that SSH runs there and the port is right.");
+  assert.equal(describeSshFailure("invalid sshTarget (expected user@host, no leading '-' or whitespace)", "-oProxy"),
+    "Use an SSH target such as user@host, with no spaces or leading dash.");
+  for (const network of ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."]) {
+    assert.equal(describeSshFailure(network, "devbox"), "Wollipog couldn't be reached. Check the connection, then try again.");
+  }
+  assert.equal(describeSshFailure("unsupported remote platform: SunOS i86pc", " build-box "), "Wollipog couldn't reach build-box over SSH.");
+  assert.equal(describeSshFailure(null), "Wollipog couldn't reach the machine over SSH.");
+  for (const sentence of [describeSshFailure(blocked), describeSshFailure("x", "devbox")]) {
+    assert.doesNotMatch(sentence, /—|e\.g\.|dashboard/, "§17: no em-dash fragments, Latin abbreviations or 'dashboard'");
   }
 });
 
