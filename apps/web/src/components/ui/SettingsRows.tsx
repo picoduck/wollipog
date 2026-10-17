@@ -383,6 +383,7 @@ export function NumberRow({
   disabled,
   error,
   inputId,
+  onBadInput,
   busy,
   busyLabel,
   saved,
@@ -402,8 +403,21 @@ export function NumberRow({
   error?: string | null;
   /** The field's id, for a link or a label elsewhere that has to reach it. */
   inputId?: string;
+  /** Whether the field holds text the browser cannot read as a number (`validity.badInput`), such as
+   * `1e`. Such a field reports "" as its value, so a caller that reads "" as cleared needs this. */
+  onBadInput?: (bad: boolean) => void;
 }) {
   const id = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const reportedBad = useRef(false);
+  const reportBadInput = () => {
+    const bad = inputRef.current?.validity?.badInput ?? false;
+    if (!onBadInput || bad === reportedBad.current) return;
+    reportedBad.current = bad;
+    onBadInput(bad);
+  };
+  // Text set from outside (a save or Discard) can make the field readable again without an input event.
+  useLayoutEffect(reportBadInput);
   const titleId = `${id}-title`;
   const unitId = `${id}-unit`;
   const descriptionId = `${id}-desc`;
@@ -424,6 +438,7 @@ export function NumberRow({
         <span className="field">
           <span className="input-affix w-xs">
             <input
+              ref={inputRef}
               id={inputId ?? `${id}-input`}
               type="number"
               inputMode="numeric"
@@ -436,6 +451,8 @@ export function NumberRow({
               aria-describedby={describedBy}
               aria-invalid={error ? true : undefined}
               onChange={(event) => onChange(event.currentTarget.value)}
+              // React reports no change when unreadable text keeps the value "", so check every edit.
+              onInput={reportBadInput}
               onBlur={onBlur}
             />
             {unit && <span className="input-affix-text" id={unitId} ref={affixSuffixRef}>{unit}</span>}

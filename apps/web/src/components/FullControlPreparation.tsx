@@ -95,12 +95,14 @@ interface LimitDrafts { concurrency: string; followUps: string; maxIssues: strin
 type DraftField = "cost" | "tools" | "concurrency" | "followUps" | "maxIssues";
 type DraftErrors = Partial<Record<DraftField, string>>;
 const whole = (n: number, min: number, max: number) => Number.isSafeInteger(n) && n >= min && n <= max;
-const DRAFT_RULES: Record<DraftField, { valid: (n: number) => boolean; message: string }> = {
-  cost: { valid: (n) => Number.isFinite(n) && n > 0 && n <= 1_000_000, message: "Enter an amount above 0, up to 1,000,000." },
-  tools: { valid: (n) => whole(n, 1, 10_000_000), message: "Enter a whole number from 1 to 10,000,000." },
-  concurrency: { valid: (n) => whole(n, 1, 64), message: "Enter a whole number from 1 to 64." },
-  followUps: { valid: (n) => whole(n, 0, Number.MAX_SAFE_INTEGER), message: "Enter a whole number, 0 or more." },
-  maxIssues: { valid: (n) => whole(n, 1, 100), message: "Enter a whole number from 1 to 100." },
+// Plain digits only: `Number` alone would also accept forms such as `1e1` or `0x10`.
+const DECIMAL = /^(?:\d+(?:\.\d*)?|\.\d+)$/, WHOLE = /^\d+$/;
+const DRAFT_RULES: Record<DraftField, { pattern: RegExp; valid: (n: number) => boolean; message: string }> = {
+  cost: { pattern: DECIMAL, valid: (n) => n > 0 && n <= 1_000_000, message: "Enter an amount above 0, up to 1,000,000." },
+  tools: { pattern: WHOLE, valid: (n) => whole(n, 1, 10_000_000), message: "Enter a whole number from 1 to 10,000,000." },
+  concurrency: { pattern: WHOLE, valid: (n) => whole(n, 1, 64), message: "Enter a whole number from 1 to 64." },
+  followUps: { pattern: WHOLE, valid: (n) => whole(n, 0, Number.MAX_SAFE_INTEGER), message: "Enter a whole number, 0 or more." },
+  maxIssues: { pattern: WHOLE, valid: (n) => whole(n, 1, 100), message: "Enter a whole number from 1 to 100." },
 };
 const INVALID_DRAFTS = "Correct the highlighted limits to check readiness.";
 
@@ -109,8 +111,11 @@ const INVALID_DRAFTS = "Correct the highlighted limits to check readiness.";
 function draftErrors(budget: BudgetDraft, limits: LimitDrafts): DraftErrors {
   const values: Record<DraftField, string> = { cost: budget.cost, tools: budget.tools, concurrency: limits.concurrency,
     followUps: limits.followUps, maxIssues: limits.maxIssues };
-  return Object.fromEntries((Object.keys(values) as DraftField[])
-    .filter((field) => values[field].trim() && !DRAFT_RULES[field].valid(Number(values[field])))
+  const invalid = (field: DraftField) => {
+    const text = values[field].trim(), rule = DRAFT_RULES[field];
+    return text !== "" && !(rule.pattern.test(text) && rule.valid(Number(text)));
+  };
+  return Object.fromEntries((Object.keys(values) as DraftField[]).filter(invalid)
     .map((field) => [field, DRAFT_RULES[field].message]));
 }
 
@@ -190,12 +195,15 @@ function LimitInput({ label, value, onChange, mode, error, disabled, placeholder
   disabled: boolean; placeholder?: string;
 }) {
   const id = useId();
-  return <label className="field"><span>{label}</span>
-    <input type="number" inputMode={mode} min="0" step={mode === "decimal" ? "any" : "1"} value={value} disabled={disabled}
-      placeholder={placeholder} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined}
-      onChange={(event) => onChange(event.currentTarget.value)} />
+  // Text with a numeric keyboard, not type="number": a number input reports text it cannot read, such
+  // as `1e`, as "", which here would mean "use the derived value" while the entry is still shown.
+  return <>
+    <label className="field"><span>{label}</span>
+      <input type="text" inputMode={mode} autoComplete="off" value={value} disabled={disabled}
+        placeholder={placeholder} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined}
+        onChange={(event) => onChange(event.currentTarget.value)} /></label>
     {error && <span className="form-error" id={`${id}-error`}>{error}</span>}
-  </label>;
+  </>;
 }
 
 function BudgetEntry({ draft, onChange, errors, disabled }: {

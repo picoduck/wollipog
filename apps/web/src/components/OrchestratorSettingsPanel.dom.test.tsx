@@ -727,6 +727,36 @@ test("runner discovery keeps a typed campaign budget, complete or not, and saves
   }
 });
 
+test("a budget field holding text it cannot read is an error, never a cleared budget", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  initial.defaults = { ...initial.defaults, controlMode: "full_control" };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    for (const id of ["#orchestrator-campaign-cost", "#orchestrator-campaign-tools"]) {
+      const input = view.container.querySelector<HTMLInputElement>(id)!;
+      // A browser number input showing `1e` reports value "" with validity.badInput. The empty field's
+      // value does not change, so React reports no change and only the input event can tell.
+      let bad = true;
+      Object.defineProperty(input, "validity", { configurable: true, get: () => ({ badInput: bad }) });
+      await act(async () => { fireDomEvent.change(input, { target: { value: "" } }); });
+      assert.match(view.container.textContent ?? "", /Enter both a cost limit and a whole number of tool calls, or clear both\./);
+      assert.equal(button(view.container, "Save Defaults")!.getAttribute("aria-disabled"), "true", `${id} cannot save as a cleared budget`);
+      bad = false;
+      await act(async () => button(view.container, "Discard")!.click());
+      assertNoDomNode(view.container.querySelector(".save-bar"));
+      assert.doesNotMatch(view.container.textContent ?? "", /Enter both a cost limit/, "a field readable again after Discard clears the error");
+    }
+    // The saved Maximum Concurrent Children already treats "" as invalid, so `1e` there is an error too.
+    const children = view.container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;
+    await act(async () => { fireDomEvent.change(children, { target: { value: "" } }); });
+    assert.equal(button(view.container, "Save Defaults")!.getAttribute("aria-disabled"), "true");
+    assert.equal(writes.length, 0);
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("isolation is Off | On, and Strict Project Isolation On includes Integration Isolation", async () => {
   const { transport, writes } = server(settings());
   const view = await mount(panel(transport));

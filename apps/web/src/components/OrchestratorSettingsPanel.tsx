@@ -148,8 +148,11 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     cost: defaults?.campaignBudget ? String(defaults.campaignBudget.costUsd) : "",
     tools: defaults?.campaignBudget ? String(defaults.campaignBudget.toolCalls) : "",
   });
+  // Text a number field cannot read (`1e`) reports "", which must never read as a cleared budget.
+  const [budgetUnreadable, setBudgetUnreadable] = useState({ cost: false, tools: false });
+  const budgetBadInput = budgetUnreadable.cost || budgetUnreadable.tools;
   const savedBudgetText = budgetFromDefaults(view?.defaults);
-  const budgetTextDirty = budgetText.cost !== savedBudgetText.cost || budgetText.tools !== savedBudgetText.tools;
+  const budgetTextDirty = budgetBadInput || budgetText.cost !== savedBudgetText.cost || budgetText.tools !== savedBudgetText.tools;
   const dirty = !!draft && !!view && (canonical(draft) !== canonical(view.defaults) || budgetTextDirty);
   // Read by a refresh that lands later: discovery brings new capabilities, never a lost draft.
   const dirtyRef = useRef(dirty);
@@ -411,7 +414,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const budgetEmpty = !budgetText.cost.trim() && !budgetText.tools.trim();
   const budgetComplete = Number.isFinite(budgetCost) && budgetCost > 0 && budgetCost <= 1_000_000 &&
     Number.isSafeInteger(budgetTools) && budgetTools > 0 && budgetTools <= 10_000_000;
-  const budgetError = budgetEmpty || budgetComplete ? null : "Enter both a cost limit and a whole number of tool calls, or clear both.";
+  const budgetError = !budgetBadInput && (budgetEmpty || budgetComplete) ? null
+    : "Enter both a cost limit and a whole number of tool calls, or clear both.";
   const changeBudget = (next: { cost: string; tools: string }) => {
     setBudgetText(next);
     const cost = Number(next.cost), tools = Number(next.tools);
@@ -536,6 +540,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         value={budgetText.cost}
         error={budgetError}
         onChange={(cost) => changeBudget({ ...budgetText, cost })}
+        onBadInput={(cost) => setBudgetUnreadable((current) => ({ ...current, cost }))}
       />
       <NumberRow
         title="Campaign Tool Call Limit"
@@ -545,6 +550,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         step={1}
         value={budgetText.tools}
         onChange={(tools) => changeBudget({ ...budgetText, tools })}
+        onBadInput={(tools) => setBudgetUnreadable((current) => ({ ...current, tools }))}
       />
     </SettingsGroup>}
     <SettingsGroup

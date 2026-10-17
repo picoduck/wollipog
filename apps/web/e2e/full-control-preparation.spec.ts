@@ -54,6 +54,22 @@ const settle = (page: Page) => page.evaluate(() => Promise.all(document.getAnima
   .filter((animation) => !(animation.effect as KeyframeEffect | null)?.target?.closest("details:not([open])"))
   .map((animation) => animation.finished))
   .then(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))));
+/** Real typing of text a number field cannot read is an entry error on every limit, never a default. */
+async function expectUnreadableLimitsBlock(page: Page, action: Locator) {
+  for (const label of ["Cost Limit (USD)", "Tool Call Limit", "Concurrent Children", "Accepted Follow-Ups", "Maximum Issues"]) {
+    const field = page.getByLabel(label, { exact: true }).first();
+    const before = await field.inputValue();
+    await field.fill("");
+    await field.pressSequentially("1e");
+    await expect(field).toHaveValue("1e");
+    await expect(field).toHaveAttribute("aria-invalid", "true");
+    await expect(page.getByText("Correct the highlighted limits to check readiness.", { exact: true })).toBeVisible();
+    await expect(action).toBeDisabled();
+    await field.fill(before);
+  }
+  await expect(action).toBeEnabled();
+}
+
 async function shoot(page: Page, anchor: Locator, path: string) {
   await anchor.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
   await settle(page);
@@ -112,6 +128,7 @@ for (const viewport of viewports) {
       await expect(page.getByText("Campaign Limits", { exact: true })).toBeVisible();
       await expect(page.getByText(/Controlled Cross-Model Review \(Verified\)/)).toBeVisible();
       await shoot(page, advanced, `${prefix}-advanced.png`);
+      await expectUnreadableLimitsBlock(page, start);
       await advanced.click();
 
       await start.click();
@@ -136,6 +153,17 @@ for (const viewport of viewports) {
       const group = page.getByRole("heading", { name: "Full Control", exact: true });
       await expect(group).toBeVisible();
       await expect(page.getByText("Activation Unavailable", { exact: true })).toHaveCount(0);
+      const save = page.getByRole("button", { name: "Save Defaults", exact: true });
+      for (const id of ["#orchestrator-campaign-cost", "#orchestrator-campaign-tools", "#orchestrator-max-children"]) {
+        const field = page.locator(id);
+        const before = await field.inputValue();
+        await field.fill("");
+        // A lone `e` leaves the number field's value "", so React sees no change; only the input event can tell.
+        await field.pressSequentially("e");
+        await expect(save, `${id} holding e cannot save`).toHaveAttribute("aria-disabled", "true");
+        await field.fill(before);
+        await expect(save).not.toHaveAttribute("aria-disabled", "true");
+      }
       await page.locator("#orchestrator-campaign-cost").fill("40");
       await page.locator("#orchestrator-campaign-tools").fill("400");
       await shoot(page, group, `${captures}/defaults-${viewport.name}-${theme}-full-control.png`);
@@ -174,6 +202,10 @@ for (const viewport of viewports) {
       await expect(page.getByText("example/full-control-fixture · #12", { exact: true })).toBeVisible();
       await expect(enable).toBeEnabled();
       await shoot(page, ready, `${prefix}-enable-ready.png`);
+      const advanced = page.locator("summary").filter({ hasText: "Advanced" });
+      await advanced.click();
+      await expectUnreadableLimitsBlock(page, enable);
+      await advanced.click();
       await enable.click();
       await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
       await expect(page.getByRole("button", { name: "Revoke Full Control", exact: true })).toBeVisible();

@@ -1097,6 +1097,19 @@ test("Full Control authorizes exactly what is shown: issue-only work, the derive
     assert.equal(authorizeButton(fixture.container).disabled, true);
     assert.match(fixture.container.textContent ?? "", /Enter a whole number from 1 to 100\./);
     await act(async () => fireDomEvent.change(field("Maximum Issues", true), { target: { value: "" } }));
+    // Every limit is entered as text and read as plain digits: forms `Number` would accept, and text a
+    // number input would report as empty, are entry errors rather than "use the derived value".
+    for (const [label, text] of [["Cost Limit (USD)", "1e1"], ["Tool Call Limit", "2e2"], ["Concurrent Children", "1e1"],
+      ["Accepted Follow-Ups", "0b1"], ["Maximum Issues", "0x10"], ["Concurrent Children", "1e"]] as const) {
+      const input = field(label, true);
+      assert.equal(input.type, "text", `${label} keeps the raw entry`);
+      const before = input.value;
+      await act(async () => fireDomEvent.change(input, { target: { value: text } }));
+      await settlePreflight();
+      assert.equal(input.getAttribute("aria-invalid"), "true", `${label} rejects ${text}`);
+      assert.equal(authorizeButton(fixture.container).disabled, true, `${label}=${text} cannot be authorized`);
+      await act(async () => fireDomEvent.change(input, { target: { value: before } }));
+    }
     await act(async () => fireDomEvent.change(field("Tool Call Limit", true), { target: { value: "450" } }));
     await act(async () => related.click());
     await settlePreflight();
