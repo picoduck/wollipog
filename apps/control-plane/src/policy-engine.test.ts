@@ -307,6 +307,22 @@ test("network matching parses host/userinfo instead of matching opaque URL text"
   assert.equal(networkPatternMatches("https://api.example.com@evil.com/v1", "evil.com"), false);
 });
 
+for (const { name, value, pattern } of [
+  { name: "unparsable userinfo before an allowed host", value: "evil.com@api.example.com", pattern: "**.example.com" },
+  { name: "unparsable userinfo with a recursive wildcard", value: "api.example.com@evil.com", pattern: "**" },
+  { name: "whitespace in an unparsable host", value: "evil.com api.example.com", pattern: "**.example.com" },
+  { name: "a scheme pattern against a host-only value", value: "api.example.com", pattern: "https://api.example.com/*" },
+  // Traversal would normalize each forbidden segment away if the pattern guard were removed.
+  { name: "a query-bearing pattern", value: "https://api.example.com/v1", pattern: "https://api.example.com/ignored?x=1/../v1" },
+  { name: "a fragment-bearing pattern", value: "https://api.example.com/v1", pattern: "https://api.example.com/ignored#fragment/../v1" },
+  { name: "an at-sign-bearing pattern", value: "https://api.example.com/v1", pattern: "https://api.example.com/ignored@userinfo/../v1" },
+  { name: "a scheme separator without a scheme", value: "https://api.example.com/v1", pattern: "://api.example.com" },
+]) {
+  test(`network matching rejects ${name}`, () => {
+    assert.equal(networkPatternMatches(value, pattern), false);
+  });
+}
+
 test("policy validation rejects typo-broadened scopes, unknown conditions, and builtin ids", () => {
   const valid = storedPolicy();
   const input = { ...valid, createdAt: undefined, updatedAt: undefined } as unknown as Parameters<typeof validateGovernancePolicy>[0];
