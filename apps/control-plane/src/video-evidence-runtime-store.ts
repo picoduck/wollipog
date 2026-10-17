@@ -22,14 +22,34 @@ export class SqliteVideoReviewStore implements VideoReviewStore {
       "reviewer_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, status TEXT NOT NULL " +
       "CHECK(status IN ('pending','revoked','consumed')));" +
       "CREATE UNIQUE INDEX IF NOT EXISTS temporal_video_binding ON temporal_video_reviews(binding_sha256) WHERE status='pending';" +
+      // One receipt per (review, window, frame): the overlap frame is delivered, and receipted,
+      // once in each of the two fresh-context windows that share it (#1321).
       "CREATE TABLE IF NOT EXISTS temporal_video_receipts (" +
       "review_id TEXT NOT NULL REFERENCES temporal_video_reviews(review_id) ON DELETE CASCADE," +
-      "frame_index INTEGER NOT NULL, receipt_id TEXT NOT NULL UNIQUE," +
+      "window_index INTEGER NOT NULL, frame_index INTEGER NOT NULL, receipt_id TEXT NOT NULL UNIQUE," +
       "receipt TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0," +
-      "PRIMARY KEY(review_id, frame_index));" +
+      "PRIMARY KEY(review_id, window_index, frame_index));" +
       "CREATE TABLE IF NOT EXISTS temporal_video_verdicts (" +
       "review_id TEXT PRIMARY KEY REFERENCES temporal_video_reviews(review_id) ON DELETE CASCADE,verdict TEXT NOT NULL,sha256 TEXT NOT NULL);");
     this.migrateSessionReferences();
+    this.migrateReceiptWindows();
+  }
+  /** Per-frame receipts predate window binding. A pending review cannot prove which window saw
+   * each frame, so it is revoked; settled history is kept as window 0 and never re-verified. */
+  private migrateReceiptWindows(): void {
+    const columns = (this.db.prepare("PRAGMA table_info(temporal_video_receipts)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (columns.includes("window_index")) return;
+    if (JSON.stringify([...columns].sort()) !== JSON.stringify(["acknowledged", "frame_index", "receipt", "receipt_id", "review_id"]) ||
+      this.db.isTransaction) throw new Error("Temporal receipt window migration requires its exact prior schema and an owning transaction.");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec("UPDATE temporal_video_reviews SET status='revoked' WHERE status='pending';" +
+        "CREATE TABLE temporal_video_receipts_next (review_id TEXT NOT NULL REFERENCES temporal_video_reviews(review_id) ON DELETE CASCADE," +
+        "window_index INTEGER NOT NULL,frame_index INTEGER NOT NULL,receipt_id TEXT NOT NULL UNIQUE,receipt TEXT NOT NULL," +
+        "acknowledged INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(review_id,window_index,frame_index));" +
+        "INSERT INTO temporal_video_receipts_next SELECT review_id,0,frame_index,receipt_id,receipt,acknowledged FROM temporal_video_receipts;" +
+        "DROP TABLE temporal_video_receipts; ALTER TABLE temporal_video_receipts_next RENAME TO temporal_video_receipts;COMMIT");
+    } catch (error) { if (this.db.isTransaction) this.db.exec("ROLLBACK"); throw error; }
   }
   private migrateSessionReferences(): void {
     const references = this.db.prepare("PRAGMA foreign_key_list(temporal_video_reviews)").all();
@@ -115,7 +135,7 @@ export class SqliteVideoReviewStore implements VideoReviewStore {
     return review ? this.frames.readFrame(review, index) : null;
   }
   latestReceipts(reviewId: string): Array<{ receipt: TemporalVideoReceipt; acknowledged: boolean }> {
-    return (this.db.prepare("SELECT receipt,acknowledged FROM temporal_video_receipts WHERE review_id=? ORDER BY frame_index")
+    return (this.db.prepare("SELECT receipt,acknowledged FROM temporal_video_receipts WHERE review_id=? ORDER BY window_index,frame_index")
       .all(reviewId) as Array<{ receipt: string; acknowledged: number }>).map((row) => ({
         receipt: JSON.parse(row.receipt) as TemporalVideoReceipt, acknowledged: row.acknowledged === 1,
       }));
@@ -123,10 +143,13 @@ export class SqliteVideoReviewStore implements VideoReviewStore {
   recordDelivery(reviewId: string, receipt: TemporalVideoReceipt): void {
     const review = this.getReview(reviewId);
     if (!review || review.status !== "pending") throw new Error("Temporal review is no longer pending");
-    this.db.prepare("INSERT INTO temporal_video_receipts(review_id, frame_index, receipt_id, receipt) " +
-      "VALUES (?,?,?,?) ON CONFLICT(review_id,frame_index) DO UPDATE SET " +
-      "receipt_id=excluded.receipt_id,receipt=excluded.receipt,acknowledged=0")
-      .run(reviewId, receipt.videoFrame.index, receipt.receiptId, JSON.stringify(receipt));
+    if (!Number.isSafeInteger(receipt.windowIndex) || receipt.windowIndex < 0) throw new Error("A server-derived delivery window is required");
+    // Only an unacknowledged delivery in the same window may be replaced.
+    const replaced = this.db.prepare("INSERT INTO temporal_video_receipts(review_id, window_index, frame_index, receipt_id, receipt) " +
+      "VALUES (?,?,?,?,?) ON CONFLICT(review_id,window_index,frame_index) DO UPDATE SET " +
+      "receipt_id=excluded.receipt_id,receipt=excluded.receipt,acknowledged=0 WHERE acknowledged=0")
+      .run(reviewId, receipt.windowIndex, receipt.videoFrame.index, receipt.receiptId, JSON.stringify(receipt));
+    if (Number(replaced.changes) !== 1) throw new Error("An acknowledged window receipt cannot be replaced");
   }
   recordBatch(reviewId: string, receipts: readonly TemporalVideoReceipt[]): void {
     this.db.exec("SAVEPOINT temporal_delivery_batch");

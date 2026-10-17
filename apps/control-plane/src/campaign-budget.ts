@@ -271,6 +271,34 @@ export class CampaignBudgetLedger {
       "AND generation=? AND active=1 AND cost=0 AND tools=0").run(sessionId, expected.rootSessionId, expected.generation).changes) === 1;
   }
 
+  /** #1321 dedicated media reviewer final usage. The reviewer reports no checkpoint stream, only
+   * the owning runner's exact `media_review_finished`, so the caller must have authenticated that
+   * channel and matched its generation, command and dispatch. Priced usage settles once, never
+   * lowers recorded spend, and releases the unused reservation. Unpriced usage stops accounting
+   * and retains the reservation, so historical provenance stays withheld. */
+  settleMediaReview(sessionId: string, expected: { rootSessionId: string; generation: string },
+    usage: { priced: true; costUsd: number; toolCalls: number } | { priced: false; toolCalls: number }): boolean {
+    if (!Number.isSafeInteger(usage.toolCalls) || usage.toolCalls < 0 ||
+      usage.priced && (!Number.isFinite(usage.costUsd) || usage.costUsd < 0)) return false;
+    return this.atomic(() => {
+      const member = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as
+        (Member & { generation: string }) | undefined;
+      if (!member || member.root_id !== expected.rootSessionId || member.generation !== expected.generation) return false;
+      if (!member.active) return Boolean(this.completedAttestation(sessionId)); // Replay settles nothing new.
+      if (!usage.priced) {
+        this.stop(expected.rootSessionId, "accounting_unavailable", "Final media review usage is unpriced; reservation retained.");
+        return false;
+      }
+      const cost = Math.max(member.cost, usage.costUsd), tools = Math.max(member.tools, usage.toolCalls);
+      const checkpoint: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint = {
+        generation: expected.generation, historyEpoch: 0, throughSeq: 0, costUsd: usage.costUsd };
+      this.sql.prepare("INSERT OR IGNORE INTO campaign_budget_settlements VALUES (?,?,?,?)").run(sessionId, JSON.stringify(checkpoint), cost, tools);
+      this.sql.prepare("UPDATE campaign_budget_members SET cost=?,tools=?,active=0 WHERE session_id=?").run(cost, tools, sessionId);
+      this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
+      return true;
+    });
+  }
+
   /** Only for a child whose creation failed before its launch was sent (#3183): it never ran, so
    * its reservation is returned rather than retained like a deleted child's (#1496). */
   releaseUnlaunched(sessionId: string): void {

@@ -94,7 +94,7 @@ export class VideoLiveValidationRegistry {
     const maximum = runs.find((r) => r.kind === "maximum")!;
     const proof: VideoProfileLiveProof = {
       proofId: "video_live_proof_" + randomUUID().replaceAll("-", ""), driver: target.driver,
-      modelId: target.modelId, providerId: target.providerId, capabilitiesSha256: target.capabilitiesSha256,
+      modelId: target.modelId, effort: target.effort, providerId: target.providerId, capabilitiesSha256: target.capabilitiesSha256,
       reviewerNamespaceSha256: target.reviewerNamespaceSha256,
       oracleIsolationEvidenceSha256: maximum.oracleIsolationEvidenceSha256,
       profile: PACED_VIDEO_REVIEW_PROFILE, validatedAt: now, expiresAt: now + 30 * 24 * 60 * 60 * 1000,

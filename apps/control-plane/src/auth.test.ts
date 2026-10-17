@@ -171,6 +171,20 @@ test("general CLI/MCP access shares the closed manager route allowlist", () => {
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/new-future-surface"), false);
 });
 
+test("delegated video review owner routes admit Orchestrator credentials only", () => {
+  for (const route of ["/api/sessions/:id/video-evidence-review/prepare", "/api/sessions/:id/video-evidence-review/provenance"]) {
+    assert.equal(isAgentControlApiRouteAllowed("POST", route, "orchestrator"), true, route);
+    assert.equal(isAgentControlApiRouteAllowed("POST", route), false, "a child or implementation credential: " + route);
+    assert.equal(isAgentControlApiRouteAllowed("POST", route, "normal"), false, route);
+    assert.equal(isAgentControlApiRouteAllowed("POST", route, "orchestrator", true), false, "a media reviewer credential: " + route);
+  }
+  for (const media of ["frames", "acknowledge-frames", "verdict"]) {
+    const route = "/api/sessions/:id/video-evidence-review/" + media;
+    assert.equal(isAgentControlApiRouteAllowed("POST", route, null, true), true, route);
+    assert.equal(isAgentControlApiRouteAllowed("POST", route, "orchestrator"), false, "the owner never reads media: " + route);
+  }
+});
+
 test("requiresDeviceAuth: every client needs a token for /api/* and /ui only", () => {
   // Fed the CANONICAL matched-route path (req.routeOptions.url), so it is a clean pattern —
   // percent-encoded raw URLs are decoded by the router before this ever sees them.

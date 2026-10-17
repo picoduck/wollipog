@@ -50,7 +50,10 @@ export class MediaSessionPurposes {
         "JOIN sessions s ON s.id=m.session_id WHERE m.session_id=?").get(sessionId);
       if (!member || sha(r) !== row.payload_sha256 || r.state !== row.state || r.sessionId !== sessionId ||
         r.rootSessionId !== purpose.rootSessionId || r.childSessionId !== purpose.childSessionId || r.admissionId !== purpose.admissionId ||
-        member.root_id !== r.rootSessionId || member.parent_session_id !== r.rootSessionId || member.runner_id !== r.runnerId ||
+        // A null parent means only that the root was deleted (ON DELETE SET NULL); the orphaned
+        // reviewer keeps its exact identity so its dedicated Stop and settlement still reach it.
+        member.root_id !== r.rootSessionId || member.parent_session_id !== r.rootSessionId && member.parent_session_id !== null ||
+        member.runner_id !== r.runnerId ||
         member.generation !== purpose.generation || member.generation !== r.admission.dispatch.generation ||
         r.command.type !== "start_session" || r.command.spec.sessionId !== sessionId ||
         r.command.spec.campaignBudgetDispatch?.rootSessionId !== r.rootSessionId || r.command.spec.campaignBudgetDispatch.generation !== member.generation ||

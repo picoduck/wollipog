@@ -37,6 +37,10 @@ export interface PacedVideoReviewReceipt extends UiEvidenceReviewReceipt {
   operatorValidation?: OperatorVideoValidationPurpose;
   bindingSha256: string;
   criteriaSha256: string;
+  /** The review's fresh-context window plan; a verdict binds to exactly how frames were delivered. */
+  deliveryPlanSha256: string;
+  /** Server-derived planned window this delivery belongs to; never caller-selected. */
+  windowIndex: number;
   deliveryOrder: number;
   videoFrame: NonNullable<UiEvidenceReviewReceipt["videoFrame"]> & {
     profile: "paced-silent-complete-frames-v1";
@@ -65,6 +69,8 @@ export interface PacedVideoTransportGrant {
   manifestSha256: string;
   bindingSha256: string;
   criteriaSha256: string;
+  /** sha256 of `pacedVideoReviewWindowPlanBody(pacedVideoReviewWindowPlan(frames))`. */
+  deliveryPlanSha256: string;
   expiresAt: number;
   frames: Array<{ index: number; ptsUs: number; durationUs: number; sha256: string; sizeBytes: number }>;
 }

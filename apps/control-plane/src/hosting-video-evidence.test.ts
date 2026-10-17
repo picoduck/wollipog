@@ -7,26 +7,31 @@ import { Hub } from "./hub.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
 import { SessionsService } from "./sessions.js";
-import { syntheticInspectedVideoRuns, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
+import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
 
 const contract = { id: "wollipog-paced-video-review-v1", revision: 1 } as const;
 const REVIEW_ROUTES = ["prepare", "frame", "frames", "acknowledge-frames", "acknowledge", "verdict", "provenance"];
 
-function runner(pacedVideo: boolean): RunnerMetadata {
+const attestation = syntheticMediaReviewerAttestation("claude");
+function runner(pacedVideo: boolean, reviewer = attestation): RunnerMetadata {
   return { runnerId: "r", hostname: "fixture", os: "linux", version: "test", workspaces: [],
     agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" },
-      available: true, capabilities: { models: [{ id: "claude-opus-5-5", default: true }], effortLevels: [], slashCommands: [],
+      available: true, capabilities: { models: [{ id: "claude-opus-5-5", default: true }], effortLevels: ["high"], slashCommands: [],
         permissionModes: ["default"], supportsImages: true, supportsApprovals: true, imageToolResults: true,
-        ...(pacedVideo ? { pacedVideoReviewContract: contract } : {}) } }] };
+        ...(pacedVideo ? { pacedVideoReviewContract: contract, mediaReviewerAttestation: reviewer } : {}) } }] };
 }
+const code = (readiness: { available: boolean; code?: string }) => readiness.available ? "available" : readiness.code;
 
 async function harness(t: { after(fn: () => unknown): void }) {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runner(false), Date.now(), PROTOCOL_VERSION);
   const video = composeHostingVideoEvidence(db);
   // The same SessionsService wiring as hosting; constructing it must accept the composed pieces.
-  new SessionsService(db, new Hub(db), { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined, undefined,
-    undefined, false, undefined, undefined, video.workflowVideoApprovals, undefined, undefined, video.preparedMediaActiveStops);
+  // It is attached only where a test says so, so readiness otherwise stops at the adapters.
+  const hub = new Hub(db);
+  const sessions = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined, undefined,
+    undefined, false, undefined, video.preparedMediaRuntime, video.workflowVideoApprovals, undefined, video.operatorValidationPermits,
+    video.preparedMediaActiveStops);
   const identity = db.localIdentityContext();
   const human = (role: HumanPrincipal["role"]): HumanPrincipal => ({ ...identity, kind: "human", actorId: identity.userId, role });
   const agent = (orchestrator: boolean): AuthPrincipal => ({ kind: "agent", actorId: "agent", credentialSessionId: "media-session",
@@ -44,15 +49,16 @@ async function harness(t: { after(fn: () => unknown): void }) {
       ...(payload === undefined ? {} : { payload: payload as object }) });
     return { status: response.statusCode, body: response.json() as Record<string, unknown> };
   };
-  const register = (pacedVideo: boolean, protocol = PROTOCOL_VERSION) => db.registerRunner(runner(pacedVideo), Date.now(), protocol);
-  return { db, video, call, register, owner: principals.owner as HumanPrincipal };
+  const register = (pacedVideo: boolean, protocol = PROTOCOL_VERSION, reviewer = attestation) =>
+    db.registerRunner(runner(pacedVideo, reviewer), Date.now(), protocol);
+  return { db, video, call, register, owner: principals.owner as HumanPrincipal, attach: () => video.attach(sessions, hub) };
 }
 const review = (route: string) => `/api/sessions/media-session/video-evidence-review/${route}`;
 
 test("every video evidence route refuses in the current state with a specific reason", async (t) => {
   const h = await harness(t);
   assert.deepEqual(h.video.pacedPeers(), []);
-  assert.equal(h.video.readiness().code, "no_paced_video_peer");
+  assert.equal(code(h.video.readiness()), "no_paced_video_peer");
   for (const route of REVIEW_ROUTES) {
     for (const as of [null, "owner", "admin", "operator"]) {
       assert.equal((await h.call(as, "POST", review(route), {})).status, 403, `${route} as ${as}`);
@@ -76,7 +82,7 @@ test("every video evidence route refuses in the current state with a specific re
     assert.deepEqual(listed.body.proofs, []);
     assert.equal((listed.body.readiness as { code: string }).code, "no_paced_video_peer");
     const target = syntheticVideoReviewerTarget({ runnerId: "r", agentId: "claude", driver: "claude-code", modelId: "claude-opus-5-5",
-      protocolVersion: PROTOCOL_VERSION, contract });
+      protocolVersion: PROTOCOL_VERSION, contract, attestation });
     const recorded = await h.call(as, "POST", "/api/video-evidence/live-validations",
       { target, runs: syntheticInspectedVideoRuns(target, h.owner.userId) });
     assert.equal(recorded.status, 409);
@@ -91,15 +97,15 @@ test("every video evidence route refuses in the current state with a specific re
 test("readiness advances only through a paced peer and a Human proof, and still refuses without the media reviewer", async (t) => {
   const h = await harness(t);
   h.register(true, PACED_VIDEO_REVIEW_MIN_PROTOCOL - 1);
-  assert.equal(h.video.readiness().code, "no_paced_video_peer", "an older protocol cannot carry the contract");
+  assert.equal(code(h.video.readiness()), "no_paced_video_peer", "an older protocol cannot carry the contract");
   h.register(true);
-  assert.equal(h.video.readiness().code, "live_validation");
+  assert.equal(code(h.video.readiness()), "live_validation");
   const peer = h.video.pacedPeers()[0]!;
   assert.deepEqual(peer, { runnerId: "r", agentId: "claude", driver: "claude-code", models: ["claude-opus-5-5"],
     protocolVersion: PROTOCOL_VERSION, contract });
   for (const route of REVIEW_ROUTES) assert.equal((await h.call("reviewer", "POST", review(route), {})).body.code, "live_validation");
 
-  const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5" });
+  const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", attestation });
   const runs = syntheticInspectedVideoRuns(target, h.owner.userId);
   const record = (body: unknown) => h.call("owner", "POST", "/api/video-evidence/live-validations", body);
   for (const mismatch of [{ runnerId: "other" }, { agentId: "other" }, { modelId: "other-model" },
@@ -107,6 +113,11 @@ test("readiness advances only through a paced peer and a Human proof, and still 
     const changed = { ...target, ...mismatch };
     assert.equal((await record({ target: changed, runs: syntheticInspectedVideoRuns(changed, h.owner.userId) })).body.code,
       "no_paced_video_peer", JSON.stringify(mismatch));
+  }
+  for (const mismatch of [{ capabilitiesSha256: "0".repeat(64) }, { reviewerNamespaceSha256: "0".repeat(64) }, { effort: "low" }]) {
+    const changed = { ...target, ...mismatch };
+    assert.equal((await record({ target: changed, runs: syntheticInspectedVideoRuns(changed, h.owner.userId) })).body.code,
+      "attestation_mismatch", "a proof names the runner's current media-only attestation at the certified effort: " + JSON.stringify(mismatch));
   }
   assert.equal((await record({ target })).status, 400);
   assert.equal((await record({ target, runs, extra: true })).status, 400);
@@ -120,7 +131,7 @@ test("readiness advances only through a paced peer and a Human proof, and still 
   const proof = recorded.body.proof as { proofId: string; verifiedByUserId: string; revoked: boolean };
   assert.equal(proof.verifiedByUserId, h.owner.userId);
   assert.equal(proof.revoked, false);
-  assert.equal(h.video.readiness().code, "reviewer_unavailable");
+  assert.equal(code(h.video.readiness()), "reviewer_unavailable");
   for (const route of REVIEW_ROUTES) {
     const refused = await h.call("orchestrator", "POST", review(route), {});
     assert.equal(refused.status, 409);
@@ -130,14 +141,14 @@ test("readiness advances only through a paced peer and a Human proof, and still 
   assert.deepEqual((listed.body.proofs as Array<{ proofId: string }>).map((item) => item.proofId), [proof.proofId]);
   assert.equal((await h.call("foreignOwner", "GET", "/api/video-evidence/live-validations")).status, 403);
   assert.equal((await h.call("foreignOwner", "POST", `/api/video-evidence/live-validations/${proof.proofId}/revoke`)).status, 403);
-  assert.equal(h.video.readiness().code, "reviewer_unavailable", "a foreign organization cannot revoke the proof");
+  assert.equal(code(h.video.readiness()), "reviewer_unavailable", "a foreign organization cannot revoke the proof");
 
   const revoked = await h.call("admin", "POST", `/api/video-evidence/live-validations/${proof.proofId}/revoke`);
   assert.equal(revoked.status, 200);
   assert.equal((revoked.body.readiness as { code: string }).code, "live_validation");
   assert.equal((await h.call("admin", "POST", `/api/video-evidence/live-validations/${proof.proofId}/revoke`)).body.code, "no_current_proof");
   h.register(false);
-  assert.equal(h.video.readiness().code, "no_paced_video_peer", "removing the contract withdraws readiness at once");
+  assert.equal(code(h.video.readiness()), "no_paced_video_peer", "removing the contract withdraws readiness at once");
 });
 
 test("recording matches the advertised contract by field, whatever its key order", async (t) => {
@@ -146,11 +157,11 @@ test("recording matches the advertised contract by field, whatever its key order
   const peer = h.video.pacedPeers()[0]!;
   const reversed = { revision: contract.revision, id: contract.id };
   assert.notEqual(JSON.stringify(reversed), JSON.stringify(peer.contract));
-  const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", contract: reversed });
+  const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", contract: reversed, attestation });
   const recorded = await h.call("owner", "POST", "/api/video-evidence/live-validations",
     { target, runs: syntheticInspectedVideoRuns(target, h.owner.userId) });
   assert.equal(recorded.status, 201, JSON.stringify(recorded.body));
-  assert.equal(h.video.readiness().code, "reviewer_unavailable");
+  assert.equal(code(h.video.readiness()), "reviewer_unavailable");
   for (const invalid of [{ ...contract, extra: true }, { id: contract.id }, null]) {
     const changed = { ...target, pacedVideoReviewContract: invalid };
     const refused = await h.call("owner", "POST", "/api/video-evidence/live-validations",
@@ -159,7 +170,23 @@ test("recording matches the advertised contract by field, whatever its key order
   }
 });
 
-test("the composed pieces are inert: no gate, binding, source or owned Stop handle is available", async (t) => {
+test("readiness is available only once attached with a proof for the current attestation", async (t) => {
+  const h = await harness(t);
+  h.register(true);
+  const target = syntheticVideoReviewerTarget({ ...h.video.pacedPeers()[0]!, modelId: "claude-opus-5-5", attestation });
+  assert.ok(h.video.liveValidation.recordInspectedRuns(h.owner, target, syntheticInspectedVideoRuns(target, h.owner.userId)));
+  assert.equal(code(h.video.readiness()), "reviewer_unavailable", "unattached adapters admit nothing");
+  h.attach();
+  assert.equal(code(h.video.readiness()), "available");
+  for (const route of REVIEW_ROUTES) {
+    const reached = await h.call("orchestrator", "POST", review(route), {});
+    assert.equal(reached.status, 400, `${route} reaches body validation once available`);
+  }
+  h.register(true, PROTOCOL_VERSION, syntheticMediaReviewerAttestation("claude", "changed"));
+  assert.equal(code(h.video.readiness()), "live_validation", "a changed runner attestation needs a new Human proof");
+});
+
+test("the composed pieces admit nothing without a gate, binding, source or owned Stop handle", async (t) => {
   const h = await harness(t);
   h.register(true);
   assert.equal(h.video.preparedMediaActiveStops.request("any-session"), null);
@@ -175,5 +202,5 @@ test("the composed pieces are inert: no gate, binding, source or owned Stop hand
   }
   // Recomposing over the same database, as a restart does, keeps the schema and adds nothing.
   composeHostingVideoEvidence(h.db);
-  assert.equal(h.video.readiness().code, "live_validation");
+  assert.equal(code(h.video.readiness()), "live_validation");
 });

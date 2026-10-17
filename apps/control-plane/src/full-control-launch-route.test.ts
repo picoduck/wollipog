@@ -15,7 +15,7 @@ import { authorizeFullControl, evaluateCampaignAuthority } from "./campaign-auth
 import { closureEvidence, publicationEvidence } from "./campaign-issue-authority.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
-import { syntheticInspectedVideoRuns, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
+import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectCampaignWorkspace, registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
@@ -32,6 +32,7 @@ const review: ControlledReviewCapability = { profile: CONTROLLED_REVIEW_PROFILE,
 const runtime: RunnerRuntimeInfo = { dataDir: "/fixture/data", worktreeRoot: "/fixture/data/worktrees", maxConcurrentSessions: 4,
   campaignLaunchInspection: { version: 2 }, campaignReview: review, executionIsolation: { mode: "provider", network: "inherit" } };
 const pacedVideoContract = { id: "wollipog-paced-video-review-v1", revision: 1 } as const;
+const reviewerAttestation = syntheticMediaReviewerAttestation("claude");
 
 function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: number; priced?: boolean; images?: boolean; pacedVideo?: boolean;
   hostingVideo?: boolean } = {}) {
@@ -41,10 +42,10 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   const meta: RunnerMetadata = { runnerId: "r", hostname: "fixture", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Fixture Repo", path: "/fixture/repository" }],
     agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" }, available: true,
-      capabilities: { models: [{ id: "claude-opus-5-5", default: true }, { id: "claude-sonnet-5-5" }], effortLevels: [], slashCommands: [],
+      capabilities: { models: [{ id: "claude-opus-5-5", default: true }, { id: "claude-sonnet-5-5" }], effortLevels: ["high"], slashCommands: [],
         permissionModes: ["default", "orchestrator"], supportsImages: true, supportsApprovals: true,
         ...(options.images === false ? {} : { imageToolResults: true }),
-        ...(options.pacedVideo ? { pacedVideoReviewContract: pacedVideoContract } : {}) } }],
+        ...(options.pacedVideo ? { pacedVideoReviewContract: pacedVideoContract, mediaReviewerAttestation: reviewerAttestation } : {}) } }],
     runtime: "runtime" in options ? options.runtime : runtime };
   const reconnect = (at: number) => db.registerRunner(meta, at, options.protocolVersion ?? PROTOCOL_VERSION);
   reconnect(Date.now());
@@ -301,11 +302,14 @@ test("the hosting video composition flips no launch capability: video stays with
   const video = hosted.video!;
   const plainApp = await app(plain), hostedApp = await app(hosted);
   try {
-    assert.equal(video.readiness().code, "live_validation");
+    const before = video.readiness();
+    assert.equal(before.available ? "available" : before.code, "live_validation");
     const peer = video.pacedPeers()[0]!;
-    const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5" });
+    const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", attestation: reviewerAttestation });
     assert.ok(video.liveValidation.recordInspectedRuns(hosted.human, target, syntheticInspectedVideoRuns(target, hosted.human.userId)));
-    assert.equal(video.readiness().code, "reviewer_unavailable", "a recorded proof alone does not make video review available");
+    const readiness = video.readiness();
+    assert.equal(readiness.available ? "available" : readiness.code, "reviewer_unavailable",
+      "a recorded proof alone does not make video review available");
     const [expected, checked] = [(await preflight(plainApp.server, launch)).preflight!, (await preflight(hostedApp.server, launch)).preflight!];
     assert.deepEqual(checked.capabilities.map((item) => [item.id, item.state]), expected.capabilities.map((item) => [item.id, item.state]));
     const videoCapability = checked.capabilities.find((item) => item.id === "video_evidence")!;

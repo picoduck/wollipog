@@ -50,6 +50,9 @@ function localMediaRoutes(grant: PacedVideoTransportGrant, bytes: Buffer[], log:
     const reply = (status: number, value: unknown) => new Response(JSON.stringify(value), { status });
     if (action === "frames") {
       if (Array.from({ length: body.index }, (_, i) => i).some((i) => !acked.has(i))) return reply(409, { error: "order" });
+      const windowIndex = pacedVideoReviewWindowPlan(grant.frames).windows
+        .find((w) => w.endIndex === body.end && body.index >= w.firstIndex && body.index < w.endIndex)?.index;
+      if (windowIndex === undefined) return reply(409, { error: "window" });
       const deliveries = [];
       for (let index = body.index; index < Math.min(body.end ?? grant.frames.length, grant.frames.length) && deliveries.length < 20; index++) {
         const frame = grant.frames[index]!, receiptId = `probe_receipt_${++receipts}`;
@@ -59,7 +62,8 @@ function localMediaRoutes(grant: PacedVideoTransportGrant, bytes: Buffer[], log:
           artifactId: `${grant.reviewId}:frame:${index}`, sha256: frame.sha256, deliveredAt: Date.now(), deliveryOrder: ++order,
           videoFrame: { sourceArtifactId: grant.sourceArtifactId, sourceSha256: grant.sourceSha256, manifestSha256: grant.manifestSha256,
             profile: "paced-silent-complete-frames-v1", index, ptsMs: frame.ptsUs / 1000, ptsUs: frame.ptsUs, durationUs: frame.durationUs },
-          bindingSha256: grant.bindingSha256, criteriaSha256: grant.criteriaSha256 },
+          bindingSha256: grant.bindingSha256, criteriaSha256: grant.criteriaSha256,
+          deliveryPlanSha256: grant.deliveryPlanSha256, windowIndex },
         mimeType: "image/png", sizeBytes: frame.sizeBytes, data: bytes[index]!.toString("base64") });
       }
       log({ delivered: deliveries.map((d) => d.receipt.videoFrame.index) });
@@ -105,9 +109,10 @@ async function main(): Promise<void> {
   const grant: PacedVideoTransportGrant = { reviewId: "probe_review", reviewerSessionId: "probe_reviewer", childSessionId: "probe_child",
     occurrenceId: "probe_occurrence", policyRevision: 1, sourceEvidenceId: "probe_evidence", sourceArtifactId: "probe_capture",
     sourceSha256: sha(Buffer.concat(bytes)), manifestSha256: sha(names.join("\n")), bindingSha256: sha("probe binding"),
-    criteriaSha256: sha(criteria), expiresAt: Date.now() + 3_600_000,
+    criteriaSha256: sha(criteria), expiresAt: Date.now() + 3_600_000, deliveryPlanSha256: "",
     frames: bytes.map((b, index) => ({ index, ptsUs: index * durationUs, durationUs, sha256: sha(b), sizeBytes: b.length })) };
   const plan = pacedVideoReviewWindowPlan(grant.frames);
+  grant.deliveryPlanSha256 = sha(pacedVideoReviewWindowPlanBody(plan));
   const model = option("--model") ?? "claude-opus-5-5", effort = option("--effort") ?? "high";
   const budgetUsd = Number(option("--budget-usd") ?? "10");
   // Planning estimate only (1280x720 is 1196 image tokens; Opus 5.5 input list price $4/MTok); the

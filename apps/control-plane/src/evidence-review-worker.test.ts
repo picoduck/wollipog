@@ -9,7 +9,7 @@ import { PACED_VIDEO_REVIEW_PROFILE } from "./video-evidence-runtime.js";
 const hash = (v: string) => createHash("sha256").update(v).digest("hex");
 const sourceContract = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
 const target: EvidenceReviewerTarget = {
-  agentId: "synthetic-agent", driver: "codex-app-server", modelId: "synthetic-model", providerId: "synthetic-provider",
+  agentId: "synthetic-agent", driver: "codex-app-server", modelId: "synthetic-model", effort: "high", providerId: "synthetic-provider",
   runnerId: "isolated-runner", runnerProtocolVersion: PACED_VIDEO_REVIEW_MIN_PROTOCOL, capabilitiesSha256: hash("all-frame-attestation"),
   pacedVideoReviewContract: sourceContract,
   auditedAllFrameDelivery: true, reviewerNamespaceSha256: hash("narrowed namespace"), mediaOnlyNamespaceVerified: true,
@@ -37,7 +37,7 @@ const context: ReviewerAdmissionContext = {
 };
 /** Test-only fake proof exercises admission guards. It is never written as a live validation record. */
 const proof = (): VideoProfileLiveProof => ({
-  proofId: "synthetic-proof-not-live", driver: target.driver, modelId: target.modelId, providerId: target.providerId,
+  proofId: "synthetic-proof-not-live", driver: target.driver, modelId: target.modelId, effort: target.effort, providerId: target.providerId,
   reviewerNamespaceSha256: target.reviewerNamespaceSha256, oracleIsolationEvidenceSha256: hash("independent oracle denial probes"),
   capabilitiesSha256: target.capabilitiesSha256, profile: PACED_VIDEO_REVIEW_PROFILE, validatedAt: Date.now() - 1_000, expiresAt: Date.now() + 60_000,
   candidateValidationRunId: "synthetic-candidate", pacedValidationRunId: "synthetic-paced",

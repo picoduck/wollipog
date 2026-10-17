@@ -2776,6 +2776,40 @@ test("delegated media resolution preserves actual worker references and refuses 
   assert.equal(calls.length, count);
 });
 
+test("delegated video review tools are Orchestrator-only and send nothing without the exact private contract", async () => {
+  let declaration: unknown = { protocolVersion: 223 };
+  const { deps, calls } = makeDeps((call) => ({ status: 200,
+    body: call.url.endsWith("/api/compatibility") ? declaration : { ok: true, status: "pending", reason: "reviewing" } }));
+  const listed = async () => ((await dispatch({ jsonrpc: "2.0", id: 9, method: "tools/list" }, deps))!.result as { tools: { name: string }[] })
+    .tools.map((tool) => tool.name);
+  const prepare = { sessionId: "child", occurrenceId: "original-gate", evidenceId: "original-video" };
+  for (const name of ["prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance"]) {
+    assert.equal((await listed()).includes(name), false, "a child or implementation Session never sees " + name);
+    assert.equal((await callTool(deps, name, name.startsWith("prepare") ? prepare : { reviewId: "review-1" })).isError, true);
+  }
+  assert.equal(calls.length, 0);
+  deps.orchestrator = true;
+  for (const name of ["prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance"]) {
+    assert.ok((await listed()).includes(name), name);
+  }
+  assert.equal((await callTool(deps, "prepare_descendant_video_evidence_review", { ...prepare, reviewerModel: "other" })).isError, true,
+    "the Orchestrator cannot choose the reviewer, model or budget");
+  for (const contract of [undefined, { id: "wollipog-paced-video-review-v1", revision: 2 }]) {
+    declaration = { protocolVersion: 223, ...(contract ? { pacedVideoReviewContract: contract } : {}) };
+    assert.equal((await callTool(deps, "prepare_descendant_video_evidence_review", prepare)).isError, true);
+    assert.equal((await callTool(deps, "get_descendant_video_evidence_provenance", { reviewId: "review-1" })).isError, true);
+    assert.equal(calls.some((call) => call.method === "POST"), false, "no POST without the exact contract");
+  }
+  declaration = { protocolVersion: 223, pacedVideoReviewContract: { id: "wollipog-paced-video-review-v1", revision: 1 } };
+  assert.equal((await callTool(deps, "prepare_descendant_video_evidence_review", prepare)).isError, undefined);
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/video-evidence-review/prepare`);
+  assert.deepEqual(calls.at(-1)?.body, { childSessionId: "child", occurrenceId: "original-gate", evidenceId: "original-video" });
+  const provenance = await callTool(deps, "get_descendant_video_evidence_provenance", { reviewId: "review-1" });
+  assert.deepEqual(resultJson(provenance), { ok: true, status: "pending", reason: "reviewing" });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/video-evidence-review/provenance`);
+  assert.deepEqual(calls.at(-1)?.body, { reviewId: "review-1" });
+});
+
 /* docs/design-system.md §17.2 retires protocol numbers and "control plane" from sentences agents relay
  * to people. Each floor refuses with a sentence naming what to update, keeps its alternative, and
  * returns the versions beside it as fields (#3265). The conditions are the existing floors. */
