@@ -301,7 +301,7 @@ function Sample() {
             {/* `.card`, which is what Board actually renders — `.board-card` does not exist. */}
             <article className="card"><span className="card-title">A board card</span></article>
           </div>
-          {/* The five families round two found still bypassed. Rendered here so "application-wide"
+          {/* The families round two found still bypassed. Rendered here so "application-wide"
               is a measurement rather than a claim about which rules I remembered to edit. */}
           <div className="agent-list"><div className="agent-row"><span>An agent row</span></div></div>
           {/* Status chips whose fill comes from the base class and whose ink comes from a modifier
@@ -312,7 +312,6 @@ function Sample() {
             <span className="atag broken">Not Signed In</span>
           </div>
           <div className="review-findings-list"><div className="review-finding-row"><span /><span>A finding</span><span /></div></div>
-          <div className="ext-session-list"><div className="ext-session"><span>An external session</span></div></div>
           {/* Real production runner cards. Their headings caused #237, and copied markup would
               allow the fixture to stay green while the components regress again. */}
           <div className="runner-grid">

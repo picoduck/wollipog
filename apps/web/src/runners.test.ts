@@ -132,25 +132,24 @@ test("SSH lifecycle copy stays plain-language without promising unattended survi
   assert.doesNotMatch(sshRunnerLifecycleHint(), /supervised|tunnel|bootstrap/i);
 });
 
-test("adoptAction keeps 'Adopt & Continue' unless the runner said resumable === false", () => {
+test("adoptAction reads 'Continue Here' unless the runner said resumable === false", () => {
   assert.deepEqual(adoptAction({ driver: "codex", context: { kind: "native" }, resumable: true }), {
-    label: "Adopt & Continue",
+    label: "Continue Here",
   });
   // Absent flag = a pre-v15 runner that can't say — keep the optimistic default.
   assert.deepEqual(adoptAction({ driver: "codex", context: { kind: "native" } }), {
-    label: "Adopt & Continue",
+    label: "Continue Here",
   });
 });
 
-test("adoptAction relabels non-resumable descriptors and explains the driver+context gap", () => {
-  const native = adoptAction({ driver: "claude-code", context: { kind: "native" }, resumable: false });
-  assert.equal(native.label, "Adopt as Read-Only");
-  assert.match(native.title!, /No Claude Code Native agent/);
-  assert.match(native.title!, /\(native\)/);
-  assert.match(native.title!, /read-only history/);
-
+test("adoptAction imports a non-resumable session read-only and says why in plain words (#2994)", () => {
+  assert.deepEqual(adoptAction({ driver: "codex-app-server", context: { kind: "native" }, resumable: false }), {
+    label: "Import as Read-Only",
+    reason: "No Codex agent on this machine can continue it, so it opens as read-only history.",
+  });
   const wsl = adoptAction({ driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu" }, resumable: false });
-  assert.match(wsl.title!, /WSL: Ubuntu/);
+  assert.equal(wsl.reason, "No Claude Code agent in WSL (Ubuntu) on this machine can continue it, so it opens as read-only history.");
+  assert.doesNotMatch(wsl.reason!, /\bbox\b|adopt/i);
 });
 
 test("externalSessionKey scopes opaque ACP ids to their exact adapter", () => {
