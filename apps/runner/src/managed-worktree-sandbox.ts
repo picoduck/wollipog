@@ -139,3 +139,29 @@ export function managedWorktreeGitWritableRoots(
   }
   return [...roots];
 }
+
+/**
+ * Extra roots Codex's own workspace sandbox needs for the session's other managed worktrees
+ * (#3316): exactly the root and admin directory of each one the runner's bwrap boundary already
+ * binds writable, never a worktree it does not. The shared objects, refs, and logs come with the
+ * selected worktree's roots. Codex keeps each root's `.git` link read-only by itself; its link
+ * target is reopened only because the admin directory is named explicitly.
+ *
+ * A worktree retired since launch is skipped, so the policy never names a path that is gone.
+ */
+export function ownedWorktreeWritableRoots(
+  cwd: string,
+  ownedWorktrees: readonly { path: string; gitAdmin: string }[],
+): string[] {
+  const roots: string[] = [];
+  for (const { path, gitAdmin } of ownedWorktrees) {
+    if (!isAbsolute(path) || !isAbsolute(gitAdmin) || samePath(path, cwd) || roots.includes(path)) continue;
+    try {
+      if (!lstatSync(join(path, ".git")).isFile() || !lstatSync(gitAdmin).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    roots.push(path, gitAdmin);
+  }
+  return roots;
+}
