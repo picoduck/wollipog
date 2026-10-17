@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
@@ -3471,6 +3471,84 @@ test("buildCodexTurnParams: managed linked worktrees grant only shared Git metad
     ).sandboxPolicy,
     { type: "readOnly" },
   );
+});
+
+/** A second linked worktree of the fixture's repository with its own admin directory. */
+function linkedWorktree(repoPath: string, path: string) {
+  const gitAdmin = join(repoPath, ".git", "worktrees", basename(path));
+  mkdirSync(path, { recursive: true });
+  mkdirSync(gitAdmin, { recursive: true });
+  writeFileSync(join(path, ".git"), `gitdir: ${gitAdmin}\n`);
+  return { path, gitAdmin };
+}
+
+test("buildCodexTurnParams: the session's bound worktrees join a protected workspace and nothing else does (#3316)", (t) => {
+  const f = managedGitFixture(t);
+  const owned = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "owned"));
+  const other = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "other"));
+  // An Orchestrator's guard list names every session's worktrees; only the bound set is granted.
+  const protections = [f.worktreePath, owned.path, other.path].map((worktreePath) => ({ worktreePath, repoPath: f.repoPath }));
+  for (const mode of ["auto-review", "on-request", "workspace-write", "danger-full-access"]) {
+    const params = buildCodexTurnParams(cfg(mode), "t", f.worktreePath, [], undefined, protections, null, false, [owned]);
+    assert.deepEqual(params.sandboxPolicy, {
+      type: "workspaceWrite", writableRoots: [f.worktreePath, ...f.gitRoots, owned.path, owned.gitAdmin],
+    }, mode);
+  }
+  const orchestrator = buildCodexTurnParams(cfg("orchestrator"), "t", f.worktreePath, [], undefined, protections, null, false, [owned]);
+  assert.deepEqual(orchestrator.sandboxPolicy.writableRoots, [f.worktreePath, ...f.gitRoots, owned.path, owned.gitAdmin]);
+  assert.deepEqual(
+    buildCodexTurnParams(cfg("read-only"), "t", f.worktreePath, [], undefined, protections, null, false, [owned]).sandboxPolicy,
+    { type: "readOnly" },
+  );
+
+  // The selected worktree itself, a duplicate, and a worktree retired since launch add nothing.
+  const retired = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "retired"));
+  rmSync(retired.path, { recursive: true, force: true });
+  const filtered = buildCodexTurnParams(cfg("auto-review"), "t", f.worktreePath, [], undefined, protections, null, false,
+    [{ path: f.worktreePath, gitAdmin: f.gitRoots[0]! }, owned, owned, retired]);
+  assert.deepEqual(filtered.sandboxPolicy.writableRoots, [f.worktreePath, ...f.gitRoots, owned.path, owned.gitAdmin]);
+
+  // Without a protected selected worktree there is no Git grant to extend.
+  assert.deepEqual(
+    buildCodexTurnParams(cfg("auto-review"), "t", "/w", [], undefined, [], null, false, [owned]).sandboxPolicy,
+    { type: "workspaceWrite" },
+  );
+});
+
+test("prompt grants exactly the worktrees its launch boundary binds (#3316)", async (t) => {
+  const f = managedGitFixture(t);
+  const owned = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "owned"));
+  const other = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "other"));
+  let turnParams: any = null;
+  const h = makeHarness({
+    cwd: f.worktreePath,
+    config: cfg("workspace-write"),
+    managedWorktreeProtections: () => [f.worktreePath, owned.path, other.path]
+      .map((worktreePath) => ({ worktreePath, repoPath: f.repoPath })),
+    isolation: {
+      backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+      protectedWorktree: {
+        parent: dirname(f.worktreePath), path: f.worktreePath,
+        gitWritableRoots: [...f.gitRoots, owned.gitAdmin], ownedWorktrees: [owned],
+      },
+    },
+  });
+  (h.driver as any).threadId = "thread-owned";
+  (h.driver as any).peer = {
+    request: async (method: string, params: any) => {
+      if (method === "turn/start") turnParams = params;
+      return { turn: { id: "turn-owned" } };
+    },
+  };
+  const turn = h.driver.prompt("work");
+  await nextTask();
+  assert.deepEqual(turnParams.sandboxPolicy, {
+    type: "workspaceWrite",
+    writableRoots: [f.worktreePath, ...f.gitRoots, owned.path, owned.gitAdmin],
+  });
+  assert.equal(JSON.stringify(turnParams).includes(other.path), false, "another session's worktree is never granted");
+  (h.driver as any).settleTurn("end_turn");
+  assert.equal(await turn, "end_turn");
 });
 
 test("prompt keeps the managed Git grant with Integration Isolation enabled and disabled", async (t) => {

@@ -1553,6 +1553,7 @@ test("a managed launch binds only this session's other worktrees (#3316)", async
       worktrees: [{ id: "legacy", path: other, branch: "agent/s2", source: "legacy" }],
     });
     let observed: Parameters<typeof resolveExecutionIsolation>[3];
+    let resolved: Awaited<ReturnType<typeof resolveExecutionIsolation>>;
     const factory = () => ({
       pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
       prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
@@ -1563,10 +1564,11 @@ test("a managed launch binds only this session's other worktrees (#3316)", async
       undefined, undefined, { agentLimits: {}, agentWeights: {} },
       { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) => {
         observed = state;
-        return resolveExecutionIsolation(policy, context, {
+        resolved = await resolveExecutionIsolation(policy, context, {
           platform: "linux", uid: () => 1000, nativeEnvironment: () => ({ HOME: home }),
           resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
         }, state);
+        return resolved;
       },
       async () => {}, async () => {}, async () => {},
     );
@@ -1581,6 +1583,9 @@ test("a managed launch binds only this session's other worktrees (#3316)", async
       .trim().split("/").at(-1)!));
     assert.equal(observed?.protectedWorktree?.gitWritableRoots.length, 4);
     assert.deepEqual(observed?.protectedWorktree?.ownedWorktrees, [{ path: second, gitAdmin: adminOf(second) }]);
+    // The resolved boundary reports the same set, which is all a provider's inner sandbox may grant.
+    assert.deepEqual(resolved?.backend === "bwrap" ? resolved.protectedWorktree?.ownedWorktrees : undefined,
+      [{ path: second, gitAdmin: adminOf(second) }]);
     assert.ok(observed?.protectedWorktree?.requiredReadOnlyPaths.includes(join(adminOf(second), "config.worktree")));
     const mentioned = JSON.stringify(observed);
     assert.equal(mentioned.includes(other), false, "another session's worktree is never bound or named");

@@ -165,8 +165,15 @@ export interface BwrapSpawnIsolation {
   preservesProviderHome?: true;
   /** Narrow durable state exceptions; source lives under runner data, target is the CLI's home path. */
   writableBinds?: Array<{ source: string; target: string }>;
-  /** A managed worktree whose parent must remain read-only while the child stays writable. */
-  protectedWorktree?: { parent: string; path: string; gitWritableRoots: string[] };
+  /** A managed worktree whose parent must remain read-only while the child stays writable.
+   * `ownedWorktrees` are the session's other worktrees this boundary binds writable (#3316), each
+   * with its own admin directory, so a provider's inner sandbox can grant exactly the same set. */
+  protectedWorktree?: {
+    parent: string;
+    path: string;
+    gitWritableRoots: string[];
+    ownedWorktrees?: Array<{ path: string; gitAdmin: string }>;
+  };
   /** Runner-owned administrative entries bound read-only over themselves. Rendered after every
    * writable bind, including the cwd, so the narrower rule is the one that lands. */
   readOnlyBinds?: string[];

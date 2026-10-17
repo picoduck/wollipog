@@ -880,7 +880,8 @@ export async function resolveExecutionIsolation(
   if (runtime.uid() === 0) throw new Error("bubblewrap isolation refuses a root runner");
   const binary = await runtime.resolveNative("bwrap");
   if (!binary) throw new Error("bubblewrap is required by runner policy but bwrap was not found on PATH");
-  const protectedWorktree = state?.protectedWorktree ? await (async () => {
+  type ProtectedWorktree = NonNullable<Extract<SpawnIsolation, { backend: "bwrap" }>["protectedWorktree"]>;
+  const protectedWorktree = state?.protectedWorktree ? await (async (): Promise<ProtectedWorktree> => {
     const path = state.protectedWorktree!.path;
     const parent = dirname(path);
     if (state.cwd !== path || parent === path || parent === runtime.nativeTmp() ||
@@ -909,6 +910,7 @@ export async function resolveExecutionIsolation(
       ...protectedWorktree.gitWritableRoots,
       ...ownedWorktrees.map((owned) => owned.gitAdmin),
     ];
+    if (ownedWorktrees.length) protectedWorktree.ownedWorktrees = ownedWorktrees.map((owned) => ({ ...owned }));
   }
   const mapping = state && statePath(state.driver);
   let writableBinds: Array<{ source: string; target: string }> = [];
