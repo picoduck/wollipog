@@ -104,16 +104,29 @@ function validBinding(record: PreparedMediaRecord, binding: PreparedMediaBinding
     g.frames.at(-1)!.ptsUs + g.frames.at(-1)!.durationUs <= 30_000_000;
 }
 
+/** The one supported prepared-media schema initialization (#3366). Both the lifecycle ledger and
+ * its dedicated Stop coordinator call it, so neither depends on the other being constructed first.
+ * Each step is idempotent and additive: existing rows, Stop anchors and provenance are untouched. */
+export function initializePreparedMediaSchema(db: DatabaseSync): void {
+  db.exec("CREATE TABLE IF NOT EXISTS prepared_media_sessions (" +
+    "root_id TEXT NOT NULL, admission_id TEXT NOT NULL, request_sha256 TEXT NOT NULL," +
+    "state TEXT NOT NULL, payload TEXT NOT NULL, payload_sha256 TEXT NOT NULL," +
+    "PRIMARY KEY(root_id,admission_id));");
+  if (!(db.prepare("PRAGMA table_info(prepared_media_sessions)").all() as Array<{ name: string }>)
+    .some((column) => column.name === "stop_operation_id")) {
+    db.exec("ALTER TABLE prepared_media_sessions ADD COLUMN stop_operation_id TEXT");
+  }
+  db.exec("CREATE TABLE IF NOT EXISTS prepared_media_active_stops (session_id TEXT PRIMARY KEY," +
+    "record TEXT NOT NULL,sha256 TEXT NOT NULL);");
+}
+
 /** Owned lifecycle ledger. It is deliberately NOT wired to automation delivery or public
  * createSession APIs. Production wiring is held for actual prerequisite integration and proof. */
 export class PreparedMediaSessions {
   constructor(private readonly db: DatabaseSync, private readonly ports: PreparedMediaSessionPorts,
     private readonly now: () => number = Date.now) {
     if (ports.database !== db) throw new Error("Media Session admission must share its atomic database.");
-    db.exec("CREATE TABLE IF NOT EXISTS prepared_media_sessions (" +
-      "root_id TEXT NOT NULL, admission_id TEXT NOT NULL, request_sha256 TEXT NOT NULL," +
-      "state TEXT NOT NULL, payload TEXT NOT NULL, payload_sha256 TEXT NOT NULL," +
-      "PRIMARY KEY(root_id,admission_id));");
+    initializePreparedMediaSchema(db);
   }
   private transaction<T>(action: () => T): T {
     this.db.exec("SAVEPOINT media_session_admission");
