@@ -66,6 +66,16 @@ export function createManagedProviderProfileHome(root: string, profileId: string
 }
 
 /**
+ * The identity a managed profile HOME must hold: the account's recorded `profileId` when its
+ * directory is exactly `<root>/<profileId>`. Undefined for every other account HOME, including
+ * existing (legacy-path) HOMEs that adopted a profile, whose removal is unchanged.
+ */
+export function managedProviderProfileIdFor(root: string | undefined, account: { directory: string; profileId?: string | undefined }): string | undefined {
+  if (root === undefined || !account.profileId || !isProviderProfileId(account.profileId)) return undefined;
+  return resolve(account.directory) === join(resolve(root), account.profileId) ? account.profileId : undefined;
+}
+
+/**
  * Whether `directory` is exactly the managed profile HOME `<root>/<profileId>` of the account that
  * recorded `profileId`: the path names it, its ancestry is private and link-free, and it resolves
  * to itself. Only such a HOME may be deleted from this root; anything else, including an

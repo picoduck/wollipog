@@ -1210,3 +1210,73 @@ test("a managed profile that cannot be created starts no sign-in and leaves noth
   assert.equal(linked.fx.spawns.length, 0);
   assert.deepEqual(entries(elsewhere), []);
 });
+
+test("a managed Add Account refused before it takes its lease removes the HOME it created", posixOnly, async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const p = profileFixture(t, {
+    create: async (home, provider, profileId, grantId) => {
+      await gate;
+      await p.registry.createProfile(home, provider, profileId, grantId);
+      p.grants.recordCreated(profileId, grantId);
+    },
+  });
+  const starting = p.fx.supervisor.startAccount({ provider: "claude", label: "Work", profileGrantId: GRANT });
+  await eventually(() => entries(p.root).length === 1, "the managed HOME exists while its profile is created");
+  // The supervisor stops while the profile is being created: the start is refused before any lease.
+  p.fx.supervisor.shutdown();
+  release();
+  await assert.rejects(starting, /supervisor has stopped/u);
+  assert.equal(entries(p.root).length, 0, "the refused start leaves no managed HOME behind");
+  assert.equal(p.fx.spawns.length, 0, "and starts no process");
+  await eventually(() => p.settled.length === 1, "the created profile is settled as unrecorded");
+});
+
+test("an overlapping managed Add Account with the same label is refused before it creates a HOME or starts a sign-in", posixOnly, async (t) => {
+  // Each profile creation waits for the test: true creates the marker, false refuses it.
+  const gates: Array<(create: boolean) => void> = [];
+  const created: string[] = [];
+  const p = profileFixture(t, {
+    create: async (home, provider, profileId, grantId) => {
+      created.push(home);
+      if (!await new Promise<boolean>((resolve) => gates.push(resolve))) throw new Error("marker refused");
+      await p.registry.createProfile(home, provider, profileId, grantId);
+      p.grants.recordCreated(profileId, grantId);
+    },
+  });
+  const first = p.fx.supervisor.startAccount({ provider: "claude", label: "Work", profileGrantId: GRANT });
+  assert.equal(created.length, 1, "the first Add Account is creating its profile");
+  const overlapping = p.fx.supervisor.startAccount({ provider: "claude", label: "  WORK ", profileGrantId: GRANT });
+  // Checked before awaiting the refusal: an admitted request would wait on its own creation gate.
+  assert.equal(created.length, 1, "the overlapping request creates no profile");
+  await assert.rejects(overlapping, /A sign-in for an account with this label is already running\./u);
+  assert.equal(entries(p.root).length, 1, "and no second HOME");
+  assert.equal(p.fx.spawns.length, 0, "and starts no process");
+
+  gates.shift()!(true);
+  const view = await first;
+  assert.equal(p.fx.spawns.length, 1, "the first sign-in starts once its profile exists");
+  assert.equal(p.fx.spawns[0]!.cwd, join(p.root, entries(p.root)[0]!));
+  await assert.rejects(p.fx.supervisor.startAccount({ provider: "claude", label: "work", profileGrantId: GRANT }),
+    /already running/u, "the running sign-in keeps the label");
+  writeFileSync(join(p.fx.spawns[0]!.cwd as string, ".credentials.json"), "{}");
+  p.fx.children[0]!.close(0);
+  await eventually(() => p.settled.length === 1 && p.fx.supervisor.views()[0]?.status === "succeeded", "the first sign-in completes");
+  assert.deepEqual(p.fx.accounts.map((account) => [account.id, account.label]), [[view.accountId, "Work"]]);
+
+  // A creation that fails releases the reservation; the same label may be added again afterwards.
+  const failing = p.fx.supervisor.startAccount({ provider: "claude", label: "Retry", profileGrantId: GRANT });
+  const duplicate = p.fx.supervisor.startAccount({ provider: "claude", label: "retry", profileGrantId: GRANT });
+  assert.equal(created.length, 2, "only the first Retry creates a profile");
+  await assert.rejects(duplicate, /already running/u);
+  gates.shift()!(false);
+  await assert.rejects(failing, /provider profile could not be created: marker refused/u);
+  assert.equal(p.fx.spawns.length, 1);
+  const retry = p.fx.supervisor.startAccount({ provider: "claude", label: "retry", profileGrantId: GRANT });
+  assert.equal(created.length, 3, "the label is free again once the failed start released it");
+  gates.shift()!(true);
+  await retry;
+  assert.equal(p.fx.spawns.length, 2);
+  p.fx.supervisor.cancel(p.fx.supervisor.views().at(-1)!.operationId);
+  await eventually(() => p.settled.length === 3, "the retried sign-in settles");
+});

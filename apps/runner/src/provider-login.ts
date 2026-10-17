@@ -17,8 +17,8 @@ import {
 } from "./provider-accounts.js";
 import { killTreeAndWait, spawnAgent, trackPendingKill, type AgentProcess } from "./spawn.js";
 import type { LeaseCancellation } from "./provider-home-lease-async.js";
-import { isProviderProfileGrantId } from "./provider-profile.js";
-import { createManagedProviderProfileHome, isManagedProviderProfileHome } from "./provider-profile-home.js";
+import { isProviderProfileGrantId, readProviderProfileMarker } from "./provider-profile.js";
+import { createManagedProviderProfileHome, isManagedProviderProfileHome, managedProviderProfileIdFor } from "./provider-profile-home.js";
 
 const LOGIN_OUTPUT_LIMIT = 64 * 1024;
 const LOGIN_CODE_LIMIT = 4_096;
@@ -337,9 +337,16 @@ class ProviderLoginLeaseUnavailable extends Error {
   constructor() { super("The provider credential home is unavailable or already in use."); }
 }
 
+/** The sign-in was refused before it asked for its HOME's lease (a stopped supervisor or a duplicate). */
+class ProviderLoginNotStarted extends Error {}
+
 export class ProviderLoginSupervisor {
   private readonly active = new Map<string, ActiveLogin>();
   private readonly pending = new Map<string, { resolved: ResolvedProviderLogin; controller: AbortController }>();
+  /** #3239: a managed Add Account creates its HOME and first marker (awaited) before startResolved
+   * records its pending entry, so its label is reserved here, by account id, from the duplicate-label
+   * check until that entry replaces it or the start fails. */
+  private readonly reserved = new Map<string, ResolvedProviderLogin>();
   private stopped = false;
   private readonly recent = new Map<string, ProviderLoginView>();
   private readonly spawn: typeof spawnAgent;
@@ -386,8 +393,8 @@ export class ProviderLoginSupervisor {
           "Use Sign In on that account to refresh its login.");
       }
       // Settled operations stay active until the account is recorded, which includes the identity check.
-      if ([...this.active.values(), ...this.pending.values()].some((operation) => operation.resolved.persistAccount &&
-        operation.resolved.provider === input.provider && comparableLabel(operation.resolved.label) === comparable)) {
+      if ([...[...this.active.values(), ...this.pending.values()].map((operation) => operation.resolved), ...this.reserved.values()]
+        .some((running) => running.persistAccount && running.provider === input.provider && comparableLabel(running.label) === comparable)) {
         throw new Error("A sign-in for an account with this label is already running.");
       }
       if (input.profileGrantId !== undefined && !isProviderProfileGrantId(input.profileGrantId)) {
@@ -439,16 +446,27 @@ export class ProviderLoginSupervisor {
         supportsStructuredCodexDeviceLogin(agent.codexAppServer.installedVersion),
       ...(profile ? { profile } : {}),
     };
+    // Nothing above awaits, so the label check and pending entry of a legacy start are atomic.
     if (!resolved.profile) return (await this.startResolved(resolved)).view;
-    await this.createProfileHome(resolved, resolved.profile);
+    // A managed start awaits its HOME's creation first: reserve the label before that await, so an
+    // overlapping Add Account with the same provider and label is refused before it creates anything.
+    this.reserved.set(resolved.accountId, resolved);
     try {
-      return (await this.startResolved(resolved)).view;
-    } catch (error) {
-      // startResolved removed the unused HOME wherever its lease was released; a lease that was
-      // never taken leaves the fresh HOME this sign-in created and nobody else knows.
-      if (error instanceof ProviderLoginLeaseUnavailable) this.cleanupUnusedDirectory(resolved);
-      await this.settleProfile(resolved, false);
-      throw error;
+      await this.createProfileHome(resolved, resolved.profile);
+      try {
+        return (await this.startResolved(resolved)).view;
+      } catch (error) {
+        // startResolved removed the unused HOME wherever its lease was released; a lease that was
+        // never taken leaves the fresh HOME this sign-in created and nobody else knows.
+        if (error instanceof ProviderLoginLeaseUnavailable || error instanceof ProviderLoginNotStarted) {
+          this.cleanupUnusedDirectory(resolved);
+        }
+        await this.settleProfile(resolved, false);
+        throw error;
+      }
+    } finally {
+      // Already replaced by the pending entry when startResolved got that far.
+      if (this.reserved.get(resolved.accountId) === resolved) this.reserved.delete(resolved.accountId);
     }
   }
 
@@ -479,13 +497,15 @@ export class ProviderLoginSupervisor {
   }
 
   async startResolved(resolved: ResolvedProviderLogin): Promise<{ view: ProviderLoginView; completion: Promise<"completed" | "cancelled" | "failed"> }> {
-    if (this.stopped) throw new Error("The provider sign-in supervisor has stopped.");
+    if (this.stopped) throw new ProviderLoginNotStarted("The provider sign-in supervisor has stopped.");
     const duplicate = [...this.active.values()].find((operation) =>
       operation.resolved.accountId === resolved.accountId);
-    if (duplicate || this.pending.has(resolved.accountId)) throw new Error("A sign-in is already running for this account.");
+    if (duplicate || this.pending.has(resolved.accountId)) throw new ProviderLoginNotStarted("A sign-in is already running for this account.");
 
     const pending = { resolved, controller: new AbortController() };
     this.pending.set(resolved.accountId, pending);
+    // A managed start's label reservation becomes this pending entry, with no await in between.
+    if (this.reserved.get(resolved.accountId) === resolved) this.reserved.delete(resolved.accountId);
     try {
       await this.options.acquireLease(resolved.directory, resolved.provider, {
         signal: pending.controller.signal,
@@ -1069,11 +1089,20 @@ export class ProviderLoginSupervisor {
     const managedRoot = resolve(this.options.dataDir, "provider-accounts");
     // #3239: a managed profile HOME lives at the SSH-account-level root, outside this runner's
     // owner-namespaced data directory, so a replacement runner may retire it too. Only the exact
-    // `<root>/<profileId>` of an account recording that id qualifies, re-verified before deletion.
+    // `<root>/<profileId>` of an account recording that id qualifies, re-verified before deletion,
+    // and only while its marker still holds that identity: a directory substituted by another
+    // profile's HOME (or left without a readable marker) is never this account's to delete.
     const profileRoot = this.options.profiles?.root;
-    const profileHome = profileRoot !== undefined && account.profileId !== undefined &&
-      resolve(account.directory) === join(resolve(profileRoot), account.profileId);
-    const verifiedProfileHome = () => isManagedProviderProfileHome(profileRoot!, account.directory, account.profileId);
+    const profileHome = managedProviderProfileIdFor(profileRoot, account) !== undefined;
+    const verifiedProfileHome = () => {
+      if (!isManagedProviderProfileHome(profileRoot!, account.directory, account.profileId)) return false;
+      try {
+        const marker = readProviderProfileMarker(account.directory, { provider: account.provider });
+        return marker.state === "present" && marker.marker.profileId === account.profileId;
+      } catch {
+        return false;
+      }
+    };
     if (!profileHome && dirname(resolve(account.directory)) !== managedRoot) return false;
     if (!existsSync(account.directory)) return true;
     if (profileHome && !verifiedProfileHome()) return false;

@@ -134,6 +134,11 @@ A sign-in that does not record the account spends the grant on both sides:
 A lost start reply leaves the grant pending and unbound. The runner still uses it, and the account
 reports `pending` access; adopting the account replaces the grant in the marker.
 
+Labels are reserved the same way as before: a second Add Account with the same provider and an
+equal label (trimmed, case-insensitive) is refused while the first is running. A managed start
+reserves its label before it creates the HOME, so an overlapping request is refused without creating
+a HOME or starting a process; the reservation ends when the sign-in settles or its start fails.
+
 ## Replacement Runners
 
 A grant is bound to a profile, a control-plane instance and an organization/owner scope, never to a
@@ -291,6 +296,16 @@ A runner-created HOME is one of two shapes, and nothing else is ever deleted:
   deletion. An operator-configured account pointing into the root under another name, a linked
   HOME or a linked root is kept. Any runner of the SSH account may retire a managed HOME, so a
   replacement runner can remove an account its predecessor created.
+
+A managed profile HOME must also still hold the identity its account recorded. If
+`profiles/<profileId>` was replaced by another profile's HOME (or holds no readable marker), it is
+not this account's HOME: the removal reports `credentialsRetained`, keeps the directory and leaves
+its marker alone, so neither this control plane's grant in it nor any other control plane's is
+dropped. The identity is checked three times: when the removal handler reads the marker (only a
+marker holding the recorded id loses this control plane's grant), under the HOME's lease during
+retirement (`profile_retire` is sent the recorded id and keeps any other identity unchanged), and
+when the marker is read again immediately before deletion. The account itself is still forgotten.
+Accounts at other paths, including existing HOMEs that adopted a profile, are removed as before.
 
 Deletion still follows the lease release, as it did before profiles: #3157 tracks serializing
 managed-directory removal with a competing acquisition, and this part does not change that window.

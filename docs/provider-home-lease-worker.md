@@ -119,11 +119,13 @@ for the grant model:
 - `profile_revoke { home, provider, profileId, grantId }` removes exactly that grant of this
   instance. The reply's `value` is true when the marker changed; a HOME without a marker has nothing
   to revoke, and a marker holding another profile is refused as `profile_changed`.
-- `profile_retire { home, provider }` is the retain-or-delete decision for a removed account's
-  HOME. It removes every grant of this instance and replies `value: true` only when dropping its
-  reference released the lease (nothing else on this runner held the HOME) and the marker grants no
-  other instance. A marker-less HOME is not shared; an unreadable marker is kept (`value: false`),
-  never replaced. The caller deletes the HOME only on `true`, after a last marker read.
+- `profile_retire { home, provider, profileId? }` is the retain-or-delete decision for a removed
+  account's HOME. It removes every grant of this instance and replies `value: true` only when
+  dropping its reference released the lease (nothing else on this runner held the HOME) and the
+  marker grants no other instance. A marker-less HOME is not shared; an unreadable marker is kept
+  (`value: false`), never replaced. For a managed profile HOME the caller sends the account's
+  recorded `profileId`: a marker holding another identity, or none, is kept unchanged
+  (`value: false`). The caller deletes the HOME only on `true`, after a last marker read.
 
 All four take the HOME's lease the same way an acquisition does, but skip the grant check, since
 they are how grants change. A HOME another live owner holds is refused with the acquisition's code

@@ -68,7 +68,7 @@ export function runProviderHomeLeaseWorker(): void {
               read => createProviderProfileMarker(read, { provider: op.provider, profileId: op.profileId, grant }));
             reply.value = true;
           } else if (op.method === "profile_retire") {
-            reply.value = registry.retireProfileHomeWhileHeld(op.home, op.provider, controlPlaneInstanceId);
+            reply.value = registry.retireProfileHomeWhileHeld(op.home, op.provider, controlPlaneInstanceId, op.profileId);
           } else {
             reply.value = registry.changeProfileMarkerWhileHeld(op.home, op.provider, read =>
               revokeProviderProfileMarkerGrant(read, { profileId: op.profileId, controlPlaneInstanceId, grantId: op.grantId })).changed;

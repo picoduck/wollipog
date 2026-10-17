@@ -155,10 +155,13 @@ export class AsyncProviderHomeLeaseRegistry {
 
   /** #3239: the retain-or-delete decision for a removed account's HOME, taken while the worker
    * holds its lease: drops every grant of this control plane from the marker, then releases.
-   * Resolves true only when the lease was released and no other control plane is granted. */
-  retireProfileHome(home: string, provider: "claude" | "codex"): Promise<boolean> {
+   * Resolves true only when the lease was released and no other control plane is granted. With
+   * `expectedProfileId` (a managed profile HOME) a marker holding another identity, or none, is kept
+   * unchanged and resolves false. */
+  retireProfileHome(home: string, provider: "claude" | "codex", expectedProfileId?: string): Promise<boolean> {
     if (this.closing) return Promise.reject(unavailable("shutdown admission closed"));
-    return this.enqueue({ method: "profile_retire", home, provider }).then(({ value }) => value);
+    return this.enqueue({ method: "profile_retire", home, provider, ...(expectedProfileId !== undefined ? { profileId: expectedProfileId } : {}) })
+      .then(({ value }) => value);
   }
 
   releaseHome(home: string): Promise<boolean> {

@@ -325,11 +325,17 @@ export function revokeProviderProfileMarkerGrant(
  * The retain-or-delete decision for a removed account's HOME (#3239), taken while its lease is held:
  * every grant of this instance is dropped, and the HOME is `shared` (kept) when the marker still
  * grants another control plane or cannot be verified. A marker-less HOME is not shared.
+ *
+ * With `expectedProfileId` (a managed profile HOME, whose account recorded that identity) the HOME
+ * must still hold exactly that identity: a missing, unverifiable or different marker means the
+ * directory is no longer the account's HOME, so it is kept and its marker is left untouched.
  */
 export function retireProviderProfileMarker(
   read: ProviderProfileRead,
-  input: { controlPlaneInstanceId: string },
+  input: { controlPlaneInstanceId: string; expectedProfileId?: string },
 ): { marker?: ProviderProfileMarker; changed: boolean; shared: boolean } {
+  if (input.expectedProfileId !== undefined &&
+    (read.state !== "present" || read.marker.profileId !== input.expectedProfileId)) return { changed: false, shared: true };
   if (read.state === "absent") return { changed: false, shared: false };
   if (read.state === "unverifiable") return { changed: false, shared: true };
   const { marker } = read;

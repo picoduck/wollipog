@@ -4893,9 +4893,9 @@ export class SessionManager {
   }
 
   /** The retain-or-delete decision for a removed account's HOME under its lease (#3239). */
-  async retireProviderAccountHome(home: string, provider: "claude" | "codex"): Promise<boolean> {
+  async retireProviderAccountHome(home: string, provider: "claude" | "codex", expectedProfileId?: string): Promise<boolean> {
     if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
-    return this.providerHomeLeases.retireProfileHome(home, provider);
+    return this.providerHomeLeases.retireProfileHome(home, provider, expectedProfileId);
   }
 
   /** Provider sign-in is a short-lived supervised mutation of one exact credential home. */
