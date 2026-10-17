@@ -2111,13 +2111,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
+        ? msg.pendingSkillRequests : undefined);
+      harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
+      // Every recorded review outcome goes up again; the control plane keeps the first (#3368).
       if (runnerSupportsProtocol(controlPlaneProtocolVersion, "reviewSession")) {
         for (const update of sessions.reviewSessionUpdates()) sendUp(update);
         reviewSessionLauncher.outcomesSent();
       }
-      skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
-        ? msg.pendingSkillRequests : undefined);
-      harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
       automaticAccountSwitchConfigurationSynchronized = false;
       harnessSelectionGeneration++;
       subscriptionUsage.selectionChanged();
