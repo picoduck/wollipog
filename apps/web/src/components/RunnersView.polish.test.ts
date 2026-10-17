@@ -7,6 +7,8 @@ const discovery = readFileSync(new URL("./AgentSessionDiscoveryDialog.tsx", impo
 const access = readFileSync(new URL("./PeopleDevicesPanel.tsx", import.meta.url), "utf8");
 const icons = readFileSync(new URL("./Icons.tsx", import.meta.url), "utf8");
 const onboarding = readFileSync(new URL("./OnboardRunnerDialog.tsx", import.meta.url), "utf8");
+const install = readFileSync(new URL("./InstallManuallyDialog.tsx", import.meta.url), "utf8");
+const repair = readFileSync(new URL("./RepairConnectionDialog.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
 test("Connections separates machines from people and exposes durable machine recovery", () => {
@@ -20,11 +22,11 @@ test("Connections separates machines from people and exposes durable machine rec
   assert.match(view, /id: "people", label: <>People and Devices/);
   assert.match(view, /const instancesTab = instances\.desktopMultiInstance && !isMobile/);
   assert.match(view, /<PeopleDevicesPanel identity=\{identity\}/);
-  assert.match(view, /Repair Credentials/);
+  assert.match(view, />Repair Connection…<\/button>/);
   assert.match(view, /canRepair=\{canManage\}/);
   assert.match(view, /<NativeRunnerCard[\s\S]*canManage=\{canManageMachines\}/);
   assert.match(view, /Ask an organization owner or admin to repair this connection/);
-  assert.match(view, /initialRunnerId=\{repairRunnerId\}/);
+  assert.match(view, /runnerId=\{repairRunnerId\}/);
   assert.match(view, /isManagedLocalRunnerRepair\(runnerId, localRunnerStatus, bundledLocalRunner, localInstanceActive\)/);
   assert.match(view, /isManagedLocalRunnerRepair[\s\S]*setOnboarding\("local"\)[\s\S]*setRepairRunnerId\(runnerId\)/);
   assert.match(view, /onRepair=\{repairRunner\}/);
@@ -116,15 +118,16 @@ test("machine cards use consistent action rows and progressively disclose deploy
   assert.match(view, /api\.adoptLegacyBoxData\(box\.boxId, true\)/);
 });
 
-test("runner repair preserves identity, rotates when needed, and exposes selection semantics", () => {
-  assert.match(onboarding, /initialRunnerId\?: string/);
-  assert.match(onboarding, /api\.rotateRunnerCredential\(id, "Connection repair"\)/);
-  assert.match(onboarding, /readOnly=\{repairingExisting\}/);
-  assert.match(onboarding, /showLocalSetup && mode !== "local" && \(\s*<button/);
-  assert.match(onboarding, /mode !== "local" && \(!showLocalSetup \|\| advancedOpen\)/);
+test("runner repair preserves identity and rotates when needed; adding and repairing are separate dialogs (#2992)", () => {
+  assert.match(repair, /api\.rotateRunnerCredential\(runnerId, "Connection repair"\)/);
+  assert.match(view, /<RepairConnectionDialog runnerId=\{repairRunnerId\}/);
+  assert.match(view, /onboarding === "manual" && <InstallManuallyDialog/);
+  assert.match(view, /onboarding === "local" && \(\s*<OnboardRunnerDialog/);
   assert.match(onboarding, /Wollipog could not access its managed local runner\. Close this dialog and try again\./);
-  // The host choice is the shared segmented control (§10.2), which renders the radio group.
-  assert.match(onboarding, /<SegmentedControl\s+className="runner-hosts"\s+label="Runner Connection Host"\s+value=\{host\}/);
+  // The host choice is a Select whose options read in words (§8.4), not a segmented control.
+  assert.match(install, /<Select label="Connects To" value=\{host\} options=\{hostOptions\}/);
+  assert.doesNotMatch(install + repair + onboarding, /SegmentedControl|runner-hosts|step-head/);
+  assert.doesNotMatch(css, /\.onboard-health|\.onboard-advanced-toggle|\.step-head|\.runner-hosts/);
 });
 
 test("agent session discovery is a progressive modal instead of an inline runner-card list", () => {
