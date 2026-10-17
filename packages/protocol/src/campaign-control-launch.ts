@@ -119,7 +119,7 @@ export interface CampaignLaunchSummary {
     isolation: { mode: string; network: string } | null; strictProjectIsolation: boolean; integrationIsolation: boolean;
     completion: OrchestratorCampaignPolicy["behavior"]["completion"] };
   budget: { costUsd: number | null; toolCalls: number | null; concurrency: number; acceptedFollowUps: number;
-    source: "override" | "project_defaults" | "unset"; reviewIncluded: boolean };
+    source: "override" | "unset"; reviewIncluded: boolean };
   followUps: { policy: OrchestratorCampaignPolicy["behavior"]["followUps"]; relatedFollowUps: boolean;
     maxIssues: number; closureReasons: Array<"completed" | "not_planned"> };
   evidence: {

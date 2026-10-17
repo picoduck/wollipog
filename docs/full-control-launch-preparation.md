@@ -47,8 +47,10 @@ numbers, and optional overrides (`FullControlLaunchRequest` in
   Code installation, else the first available native Claude Code or Codex App Server one, and
   the root joins the workspace's Project.
 - Concurrency from `behavior.maximumConcurrentChildren`; accepted follow-ups from the saved
-  follow-up policy (none for Recommend Only); cost and tool limits from the Project's child-session
-  defaults times the planned sessions, unless overridden; closure reasons default to completed.
+  follow-up policy (none for Recommend Only); closure reasons default to completed. The cost and
+  tool-call envelope is always entered by the Human: saved per-session limits (root ceilings,
+  Project child-session defaults) are tighter ceilings, and controlled review refuses to run under
+  them, so they block readiness instead of becoming the envelope.
 - `controlledReview` from the runner's discovered `campaignReview` profile.
 
 The preflight returns `ready`, a digest, a concise `summary` (scope, budget, follow-up policy,
@@ -60,7 +62,10 @@ scope, the authority contract, accounting/budget, controlled review and the runn
 execution isolation are mandatory. Screenshot review is delegated when the Orchestrator can review
 images; video and external evidence are Human Required until #1321.
 
-Admission requires request identity and the exact reviewed digest. It then mints the issue scope
+Admission requires request identity and the exact reviewed digest. The preflight is computed
+from facts re-read after the runner inspection, and admission creates the root synchronously from
+those same facts, so saved defaults changed during the inspection invalidate the digest. A request
+identity that already committed returns its retained root before readiness is re-evaluated. It then mints the issue scope
 from the inspection and the Full Control boundary, and creates the Orchestrator root in one
 transaction: scope, matching control and policy revision, original Session ceilings, allowance,
 root reservation and request identity. The root is user-owned, so campaign spend and controlled

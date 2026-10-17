@@ -15,6 +15,7 @@ import { authorizeFullControl } from "./campaign-authority.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectCampaignWorkspace, registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 
 const proposal: CampaignLaunchProposal = { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
   operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [],
@@ -36,7 +37,7 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   const meta: RunnerMetadata = { runnerId: "r", hostname: "fixture", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Fixture Repo", path: "/fixture/repository" }],
     agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" }, available: true,
-      capabilities: { models: [{ id: "claude-opus-5-5", default: true }], effortLevels: [], slashCommands: [],
+      capabilities: { models: [{ id: "claude-opus-5-5", default: true }, { id: "claude-sonnet-5-5" }], effortLevels: [], slashCommands: [],
         permissionModes: ["default", "orchestrator"], supportsImages: true, supportsApprovals: true,
         ...(options.images === false ? {} : { imageToolResults: true }),
         ...(options.pacedVideo ? { pacedVideoReviewContract: pacedVideoContract } : {}) } }],
@@ -44,8 +45,8 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   const reconnect = (at: number) => db.registerRunner(meta, at, options.protocolVersion ?? PROTOCOL_VERSION);
   reconnect(Date.now());
   if (options.priced !== false) {
-    db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
-      cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]])); // Fixture pricing only.
+    const rate = { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 };
+    db.setUsageRateTable(new Map([["claude-opus-5-5", rate], ["claude-sonnet-5-5", rate]])); // Fixture pricing only.
   }
   const hub = new Hub(db);
   hub.isRunnerOnline = () => true;
@@ -151,6 +152,7 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     for (const category of WORKFLOW_DECISION_CATEGORIES) assert.equal(projection.decisionOwners[category], "orchestrator", category);
     assert.equal(f.db.campaignBudgets.view(root.id)!.state, "active");
     assert.deepEqual(f.db.campaignBudgets.view(root.id)!.authority.controlledReview, review);
+    assert.equal(projection.budget!.requiredNativeReview!.supported, true, "the launched campaign can actually admit controlled review");
     assert.equal(f.starts.length, 1);
     const start = f.starts[0]! as Extract<ControlPlaneToRunner, { type: "start_session" }>;
     assert.deepEqual(start.spec.orchestrator!.control, control);
@@ -181,6 +183,9 @@ test("each missing mandatory capability blocks launch with a specific reason and
     { name: "no isolation report", options: { runtime: { ...runtime, executionIsolation: undefined } }, id: "execution_isolation", reason: /does not report the execution isolation/ },
     { name: "unpriced model", options: { priced: false }, id: "accounting_budget", reason: /unpriced/ },
     { name: "no budget", body: { ...launch, overrides: { ...launch.overrides, budget: undefined } }, id: "accounting_budget", reason: /No campaign cost and tool-call budget/ },
+    { name: "root session ceiling", body: { ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session,
+      config: { model: "claude-opus-5-5", permissionMode: "orchestrator", costBudgetUsd: 50, maxToolCalls: 500 } } } },
+      id: "native_review", reason: /root session's own cost or tool-call limit/ },
     { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract", reason: /protocol-v218/ },
     { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the workspace/ },
     { name: "unknown policy ask", body: { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } }, id: "authority_contract", reason: /missing/ },
@@ -284,27 +289,94 @@ test("a peer declaring the private media contract gets the evidence envelope fro
   } finally { await server.close(); f.db.close(); }
 });
 
-test("saved Project child defaults derive the budget, and a task alone launches with an empty issue scope", async () => {
+test("Project child-session ceilings block controlled review, and a task alone launches with an empty issue scope", async () => {
   const f = fixture();
-  const project = f.db.createProject({ name: "Fixture", scope: f.scope });
-  f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w" });
+  const organizationScope = { organizationId: f.human.organizationId, owner: { kind: "organization" as const, organizationId: f.human.organizationId } };
+  const project = f.db.createProject({ name: "Fixture", scope: organizationScope });
+  const location = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w" });
   f.db.updateProject(project.id, { childSessionDefaults: { costBudgetUsd: 5, maxToolCalls: 50 } });
   const { server } = await app(f);
   try {
     const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", projectId: project.id, task: "Investigate flaky tests",
-      overrides: { session: { config: { model: "claude-opus-5-5", permissionMode: "orchestrator" } } } };
+      overrides: { session: { config: { model: "claude-opus-5-5", permissionMode: "orchestrator" } }, budget: { costUsd: 10, toolCalls: 100 } } };
+    const blocked = await preflight(server, body);
+    assert.equal(blocked.response.statusCode, 200, blocked.response.body);
+    assert.equal(blocked.preflight!.ready, false);
+    assert.match(blocked.preflight!.capabilities.find((item) => item.id === "native_review")!.reason, /child-session defaults/);
+    assert.equal(blocked.preflight!.summary.budget.source, "override", "saved per-session limits never become the campaign envelope");
+
+    f.db.updateProject(project.id, { childSessionDefaults: null });
     const { response, preflight: checked } = await preflight(server, body);
     assert.equal(response.statusCode, 200, response.body);
     assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
     assert.equal(checked!.summary.root.agentId, "claude", "the default root is the reviewer's own Claude Code installation");
     assert.deepEqual(checked!.summary.issueNumbers, []);
     assert.deepEqual(f.sent.filter((message) => message.type === "campaign_launch_inspect").map((message) =>
-      (message as { issueNumbers: number[] }).issueNumbers), [[]]);
-    assert.deepEqual(checked!.summary.budget, { costUsd: 10, toolCalls: 100, concurrency: 4, acceptedFollowUps: 0, source: "project_defaults", reviewIncluded: true });
+      (message as { issueNumbers: number[] }).issueNumbers), [[], []]);
+    assert.deepEqual(checked!.summary.budget, { costUsd: 10, toolCalls: 100, concurrency: 4, acceptedFollowUps: 0, source: "override", reviewIncluded: true });
     const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
       payload: { ...body, requestId: "task-only", preflightDigest: checked!.digest } });
     assert.equal(admitted.statusCode, 201, admitted.body);
-    assert.deepEqual(f.db.getSession(admitted.json().id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    const root = f.db.getSession(admitted.json().id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    // The organization Project contains a user-owned root; ordinary creation there is unchanged.
+    assert.equal(root.projectId, project.id);
+    assert.deepEqual(f.db.sessionScope(root.id), f.scope);
+    const ordinary = resolveSessionCreationOwnership(f.db, f.human, { runnerId: "r", workspaceId: "w", projectId: project.id,
+      projectLocationId: location.id, agentId: "claude" });
+    assert.ok(ordinary.ok);
+    assert.deepEqual(ordinary.scope, organizationScope);
+    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, true);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("saved defaults changed while the admission inspection is pending invalidate the reviewed digest", async () => {
+  const f = fixture();
+  const identity = { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } };
+  f.db.setAgentHarnessDefault(f.human.userId, identity, { model: "claude-opus-5-5" });
+  const { server } = await app(f);
+  try {
+    const body: FullControlLaunchRequest = { ...launch, overrides: { ...launch.overrides, session: { agentId: "claude", config: { permissionMode: "orchestrator" } } } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    assert.equal(checked!.summary.root.model, "claude-opus-5-5");
+    const answer = f.state.inspect;
+    f.state.inspect = (message) => {
+      f.db.setAgentHarnessDefault(f.human.userId, identity, { model: "claude-sonnet-5-5" });
+      return answer(message);
+    };
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "drift", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 409, admitted.body);
+    assert.match(admitted.json().error, /preflight changed/);
+    assert.equal(admitted.json().preflight.summary.root.model, "claude-sonnet-5-5");
+    assert.equal(sessionCount(f), 0);
+    assert.deepEqual(f.starts, []);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a lost admission response recovers the committed root even after HEAD or runner generation change", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, launch);
+    const payload = { ...launch, requestId: "lost-response", preflightDigest: checked!.digest };
+    const first = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" }, payload });
+    assert.equal(first.statusCode, 201, first.body);
+    const answer = f.state.inspect;
+    f.state.inspect = (message) => ({ ...answer(message)!, digest: "e".repeat(64) });
+    f.reconnect(Date.now() + 1000);
+    const inspections = f.sent.filter((message) => message.type === "campaign_launch_inspect").length;
+    const retry = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" }, payload });
+    assert.equal(retry.statusCode, 200, retry.body);
+    assert.equal(retry.json().id, first.json().id);
+    assert.equal(f.sent.filter((message) => message.type === "campaign_launch_inspect").length, inspections, "no new inspection");
+    assert.equal(f.starts.length, 1, "no provider start is replayed");
+    const reused = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...payload, preflightDigest: "f".repeat(64) } });
+    assert.equal(reused.statusCode, 409);
+    assert.match(reused.json().error, /already admitted a different reviewed launch/);
+    assert.equal(sessionCount(f), 1);
   } finally { await server.close(); f.db.close(); }
 });
 

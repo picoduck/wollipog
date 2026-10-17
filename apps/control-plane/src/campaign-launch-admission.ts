@@ -167,13 +167,12 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const acceptedFollowUps = overrides.budget?.acceptedFollowUps ??
     (behavior.followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0);
   const concurrency = overrides.budget?.concurrency ?? behavior.maximumConcurrentChildren;
-  const workers = 1 + Math.max(1, issueNumbers.length + acceptedFollowUps);
-  const derivedCost = facts.projectDefaults ? Math.round(facts.projectDefaults.costBudgetUsd * workers * 100) / 100 : undefined;
-  const derivedTools = facts.projectDefaults ? facts.projectDefaults.maxToolCalls * workers : undefined;
-  const costUsd = overrides.budget?.costUsd ?? derivedCost;
-  const toolCalls = overrides.budget?.toolCalls ?? derivedTools;
-  const budgetSource = overrides.budget?.costUsd !== undefined && overrides.budget?.toolCalls !== undefined ? "override" as const
-    : costUsd !== undefined && toolCalls !== undefined ? "project_defaults" as const : "unset" as const;
+  // The campaign envelope is always an explicit Human amount. Saved per-session limits (root
+  // ceilings, Project child-session defaults) are tighter ceilings, not a campaign envelope, and
+  // controlled review refuses to run under them.
+  const costUsd = overrides.budget?.costUsd;
+  const toolCalls = overrides.budget?.toolCalls;
+  const budgetSource = costUsd !== undefined && toolCalls !== undefined ? "override" as const : "unset" as const;
   const relatedFollowUps = overrides.issues?.relatedFollowUps ?? behavior.followUps === "execute_approved";
   const maxIssues = overrides.issues?.maxIssues ?? Math.min(100, Math.max(1, issueNumbers.length + acceptedFollowUps));
   const closureReasons = overrides.issues?.closureReasons ?? ["completed" as const];
@@ -216,17 +215,24 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const budgetValid = budgetSource !== "unset" && Boolean(proposal || !repository);
   add("accounting_budget", "Campaign Accounting and Budget", !facts.accountingError && budgetValid ? "verified" : "unsupported",
     facts.accountingError ? facts.accountingError
-      : budgetSource === "unset" ? "No campaign cost and tool-call budget: set Project child-session defaults or enter a campaign budget."
+      : budgetSource === "unset" ? "No campaign cost and tool-call budget: enter both limits for this campaign."
       : !budgetValid ? "The derived campaign limits are invalid; adjust the budget, concurrency or issue limits."
-      : `Managed workers are metered and priced; the campaign is limited to $${costUsd} and ${toolCalls} tool calls${budgetSource === "project_defaults" ? ` (Project child-session defaults × ${workers} sessions)` : ""}.`);
+      : `Managed workers are metered and priced; the campaign is limited to $${costUsd} and ${toolCalls} tool calls.`);
 
   const reviewOwnerScope = plan.scope.owner.kind === "user";
+  // Review admission refuses any root or worker holding an original per-session ceiling; workers
+  // inherit the Project's child-session defaults as such ceilings.
+  const rootCeiling = (plan.config.costBudgetUsd ?? 0) > 0 || (plan.config.maxToolCalls ?? 0) > 0;
+  const workerCeiling = facts.projectDefaults !== null;
   add("native_review", "Controlled Cross-Model Review",
-    controlledReview && runnerSupportsProtocol(runner.protocolVersion, "campaignBudgetAdmission") && reviewOwnerScope && !facts.dailyLimit ? "verified" : "unsupported",
+    controlledReview && runnerSupportsProtocol(runner.protocolVersion, "campaignBudgetAdmission") && reviewOwnerScope && !facts.dailyLimit &&
+      !rootCeiling && !workerCeiling ? "verified" : "unsupported",
     !controlledReview ? `This runner does not advertise the controlled native reviewer. It needs executionIsolation.mode "provider" (current: ${runner.runtime?.executionIsolation?.mode ?? "unreported"}), a native claude-code agent whose command is "claude", Claude Code CLI 2.1.296 and python3 on a Linux host; restart the runner after configuring it.`
       : !runnerSupportsProtocol(runner.protocolVersion, "campaignBudgetAdmission") ? "Controlled review admission needs a protocol-v218 runner; update the runner."
       : !reviewOwnerScope ? "Controlled review accounting needs a user-owned campaign."
       : facts.dailyLimit ? "Controlled review cannot honor this organization's per-user daily limit; remove the limit or launch in Custom."
+      : rootCeiling ? "Controlled review cannot run under the root session's own cost or tool-call limit; clear the root limits and rely on the campaign budget."
+      : workerCeiling ? "Controlled review cannot run under the Project's child-session defaults, which every worker inherits as a tighter limit; clear them for this Project and rely on the campaign budget."
       : `Reviews run as ${controlledReview.profile} through agent ${controlledReview.agentId}, charged to this campaign's budget.`);
 
   const isolation = runner.runtime?.executionIsolation;

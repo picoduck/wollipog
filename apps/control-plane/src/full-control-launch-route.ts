@@ -67,10 +67,23 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
         ? "a workspace, a task or issue numbers, a request identity and the exact preflight digest are required"
         : "a workspace and a task or issue numbers are required" });
     }
-    const runner = db.listRunnersForPrincipal(principal).find((candidate) => candidate.runnerId === body.runnerId);
-    if (!runner || !runner.workspaces.some((workspace) => workspace.id === body.workspaceId)) {
-      return reply.code(404).send({ error: "runner workspace not found" });
+    reply.header("cache-control", "private, no-store");
+    if (admit) {
+      // A committed identity answers before readiness is re-evaluated: HEAD, runner generation or
+      // inspection availability may legitimately change after commit, and a lost response must
+      // still recover the retained root without another inspection or provider start.
+      const committed = db.humanCampaignLaunchIdentity(principal.userId, body.requestId!);
+      if (committed) {
+        const retained = committed.digest === body.preflightDigest && db.canAccessSession(principal, committed.sessionId)
+          ? db.getSession(committed.sessionId) : null;
+        return retained ? reply.code(200).send(retained)
+          : reply.code(409).send({ error: "this request identity already admitted a different reviewed launch; use a new request identity" });
+      }
     }
+    const currentRunner = () => db.listRunnersForPrincipal(principal).find((candidate) =>
+      candidate.runnerId === body.runnerId && candidate.workspaces.some((workspace) => workspace.id === body.workspaceId));
+    const runner = currentRunner();
+    if (!runner) return reply.code(404).send({ error: "runner workspace not found" });
     // The simple request names a workspace; resolve its exact Project Location so saved Project
     // defaults apply. Without one accessible Location the root is an explicit no-Project session.
     if (body.projectLocationId === undefined && body.projectId !== null) {
@@ -93,11 +106,15 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
       orchestratorDefaults: settings.view(principal),
       validateOrchestratorDefaults: (defaults: Parameters<OrchestratorSettings["compatibilityError"]>[1]) => settings.compatibilityError(principal, defaults),
     };
-    let plan: PreparedCampaignLaunch | undefined;
-    const prepared = sessions.createSession(ownership.body, undefined, scope, false, false, false, {
-      ...creationContext, inspectLaunchPlan: (value) => { plan = value; },
-    });
-    if (!plan) return reply.code(prepared.status).send({ error: prepared.error ?? "launch preparation failed" });
+    const prepare = (): { plan?: PreparedCampaignLaunch; status: number; error?: string } => {
+      let plan: PreparedCampaignLaunch | undefined;
+      const prepared = sessions.createSession(ownership.body, undefined, scope, false, false, false, {
+        ...creationContext, inspectLaunchPlan: (value) => { plan = value; },
+      });
+      return { plan, status: prepared.status, error: prepared.error };
+    };
+    const initial = prepare();
+    if (!initial.plan) return reply.code(initial.status).send({ error: initial.error ?? "launch preparation failed" });
 
     // The inspection lives only as long as this request: a closed connection cancels it.
     const lifetime = new AbortController();
@@ -105,7 +122,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     reply.raw.once("close", onClose);
     let inspection: CampaignLaunchInspectionResult | undefined;
     try {
-      inspection = await inspectCampaignWorkspace(hub, runner, plan.workspaceId, [...(body.issueNumbers ?? [])].sort((a, b) => a - b),
+      inspection = await inspectCampaignWorkspace(hub, runner, initial.plan.workspaceId, [...(body.issueNumbers ?? [])].sort((a, b) => a - b),
         lifetime.signal, dependencies.inspectionTimeoutMs);
     } finally { reply.raw.off("close", onClose); }
     if (lifetime.signal.aborted) {
@@ -114,10 +131,18 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
       return reply;
     }
 
-    const agent = runner.agents.find((candidate) => candidate.id === plan!.agentId);
+    // Saved defaults, runner discovery and policy may change while the inspection is pending. The
+    // preflight (and so the digest the Human reviewed) is computed from facts re-read after it,
+    // and admission below creates the root synchronously from these same facts.
+    const runnerNow = currentRunner();
+    if (!runnerNow) return reply.code(404).send({ error: "runner workspace not found" });
+    const current = prepare();
+    if (!current.plan) return reply.code(current.status).send({ error: current.error ?? "launch preparation failed" });
+    const plan = current.plan;
+    const agent = runnerNow.agents.find((candidate) => candidate.id === plan.agentId);
     const policyIds = body.overrides?.delegatablePolicyIds ?? [];
     const { preflight, proposal } = campaignLaunchPreflight({
-      request: body, plan, runner, inspection, organizationId: principal.organizationId,
+      request: body, plan, runner: runnerNow, inspection, organizationId: principal.organizationId,
       projectDefaults: plan.projectId ? db.projectChildSessionDefaults(plan.projectId) : null,
       accountingError: db.campaignBudgetAccountingError(plan.driver, plan.config.model, true),
       dailyLimit: db.getUsageDailyBudget(plan.scope.organizationId).perUserUsd !== null,
@@ -125,7 +150,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
         rule.policyId === id && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),
       imageReview: evaluateUiEvidenceReviewClient(db.uiEvidenceReviewClient({ runnerId: plan.runnerId, agentId: plan.agentId,
         driver: plan.driver, model: plan.config.model ?? null }, "orchestrator")),
-      pacedVideoPeer: supportsPacedVideoReviewPeer(runner.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
+      pacedVideoPeer: supportsPacedVideoReviewPeer(runnerNow.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
       disclosuresAvailable: dependencies.evidenceDisclosures !== undefined,
     });
     request.log.info({ event: "full_control_launch_preflight", requestId: request.id,
@@ -134,7 +159,6 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
       humanRequired: preflight.capabilities.filter((item) => item.state === "human_required").map((item) => item.id),
       inspectionCancellation: preflight.inspectionCancellation,
       preflightDigest: preflight.digest, durationMs: Math.round(performance.now() - startedAt) }, "Full Control launch preflight evaluated");
-    reply.header("cache-control", "private, no-store");
     if (!admit) return { preflight };
     if (body.preflightDigest !== preflight.digest) return reply.code(409).send({ error: "launch preflight changed; refresh and review the exact proposal again", preflight });
     if (!preflight.ready || !proposal) {
