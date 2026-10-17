@@ -137,6 +137,9 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     // and admission below creates the root synchronously from these same facts.
     const runnerNow = currentRunner();
     if (!runnerNow) return reply.code(404).send({ error: "runner workspace not found" });
+    // Re-read the Human's defaults too: the saved campaign budget never enters campaign policy,
+    // so a change to it is visible to the digest only through this fresh snapshot.
+    creationContext.orchestratorDefaults = settings.view(principal);
     const current = prepare();
     if (!current.plan) return reply.code(current.status).send({ error: current.error ?? "launch preparation failed" });
     const plan = current.plan;

@@ -620,6 +620,19 @@ test("the saved Full Control budget becomes the launch envelope, an override rep
     const control = f.db.getSession(admitted.json().id)!.orchestratorPolicy!.control!;
     if (control.mode !== "full_control") throw new Error("Full Control expected");
     assert.deepEqual([control.boundary.budgetAuthority!.costUsd, control.boundary.budgetAuthority!.toolCalls], [30, 300]);
+
+    // A saved budget changed while the admission inspection is pending invalidates the reviewed digest.
+    const { preflight: reviewed } = await preflight(server, plain);
+    assert.equal(reviewed!.summary.budget.source, "saved_defaults");
+    const answer = f.state.inspect;
+    f.state.inspect = (message) => { saveBudget(f, null); return answer(message); };
+    const sessions = sessionCount(f);
+    const refused = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...plain, requestId: "budget-changed", preflightDigest: reviewed!.digest } });
+    assert.equal(refused.statusCode, 409, refused.body);
+    assert.match(refused.json().error, /preflight changed/);
+    assert.equal(refused.json().preflight.summary.budget.source, "unset");
+    assert.equal(sessionCount(f), sessions, "no campaign starts on the budget the Human no longer has saved");
   } finally { await server.close(); f.db.close(); }
 });
 
