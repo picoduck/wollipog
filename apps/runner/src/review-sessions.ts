@@ -20,7 +20,7 @@
  * the bridge's reviewers, and it must be the first match on PATH, because that is what spawn runs.
  */
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -42,6 +42,8 @@ const execFileAsync = promisify(execFile);
 /** The pinned patch is inlined up to this size; a larger change is reviewed from the checkout. */
 export const REVIEW_PATCH_LIMIT_BYTES = 400 * 1024;
 const REVIEW_DIFF_TIMEOUT_MS = 120_000;
+/** How long a lost review's intent is reported after a restart before it is pruned. */
+const INTENT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 /** The driver a reviewer harness launches through. */
 const REVIEWER_DRIVERS: Record<SessionReviewHarness, AgentDefinition["driver"]> = {
@@ -128,7 +130,9 @@ export function verifySpawnedCommand(command: string, pathEnv: string | undefine
     candidate = command;
   } else if (/^[A-Za-z0-9_+-][A-Za-z0-9._+-]{0,63}$/u.test(command)) {
     for (const dir of (pathEnv ?? "").split(":")) {
-      if (!dir || !isAbsolute(dir)) continue;
+      // Spawn resolves an empty or relative entry against its working directory, the reviewed
+      // checkout, so any such entry could run a program the pull request planted.
+      if (!dir || !isAbsolute(dir)) throw new Error(`${command} is looked up on a PATH with a relative entry`);
       const path = join(dir, command);
       try {
         const info = statSync(path);
@@ -257,6 +261,10 @@ function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionRevie
 
 /** What the session manager needs to launch and retire a review session. */
 export interface ReviewSessionHooks {
+  /** Durable intent, recorded before any slow preparation, cleared by `release`. */
+  markPreparing(sessionId: string): void;
+  /** Reviews an earlier runner process accepted but lost before persisting their session. */
+  lostPreparations(): string[];
   prepare(sessionId: string, policy: ReviewLaunchPolicy, launch: ReviewLaunch, brief: string): Promise<PreparedReview>;
   launchArgs(driver: AgentDefinition["driver"], checkout: string): string[];
   release(sessionId: string): void;
@@ -361,16 +369,42 @@ export class ReviewSessionLauncher {
     }
   }
 
-  /** Remove every checkout. Only at startup, when no review session's provider can be running. */
-  releaseAll(): void {
+  /** Remove every checkout, and intents older than a week. Only at startup, when no review
+   * session's provider can be running; younger intents are still reported as lost reviews. */
+  releaseAll(now = Date.now()): void {
     try { rmSync(join(this.root, "checkouts"), { recursive: true, force: true }); } catch (error) {
       this.deps.log(`review session checkouts could not be removed: ${(error as Error).message}`);
     }
+    for (const sessionId of this.intents()) {
+      const path = join(this.root, "intents", sessionId);
+      try {
+        if (now - statSync(path).mtimeMs > INTENT_RETENTION_MS) rmSync(path, { force: true });
+      } catch { /* already gone */ }
+    }
   }
 
-  /** Remove the review session's checkout; safe to repeat. */
+  private intents(): string[] {
+    try { return readdirSync(join(this.root, "intents")).filter((name) => SESSION_IDENTITY.test(name)); }
+    catch { return []; }
+  }
+
+  /** Durable before the snapshot is prepared, which can take minutes: a runner that dies meanwhile
+   * still knows, at its next start, that this review was accepted and never ran. */
+  markPreparing(sessionId: string): void {
+    if (!SESSION_IDENTITY.test(sessionId)) throw new Error("invalid review session identity");
+    mkdirSync(join(this.root, "intents"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(this.root, "intents", sessionId), "", { mode: 0o600 });
+  }
+
+  /** Accepted reviews whose session was never persisted: an earlier process lost them. */
+  lostPreparations(): string[] {
+    return this.intents().filter((sessionId) => !this.store.readMeta(sessionId));
+  }
+
+  /** Remove the review session's checkout and intent; safe to repeat. */
   release(sessionId: string): void {
     if (!SESSION_IDENTITY.test(sessionId)) return;
+    rmSync(join(this.root, "intents", sessionId), { force: true });
     const checkout = join(this.root, "checkouts", sessionId);
     if (!existsSync(checkout)) return;
     try { rmSync(checkout, { recursive: true, force: true }); } catch (error) {

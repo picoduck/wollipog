@@ -79,6 +79,11 @@ export class ReviewSessions {
     return row.spent;
   }
 
+  /** Drop the row of a review session whose launch was never delivered and whose session is gone. */
+  forget(reviewSessionId: string): void {
+    this.sql.prepare("DELETE FROM review_sessions WHERE review_session_id=?").run(reviewSessionId);
+  }
+
   isReviewSession(sessionId: string): boolean {
     return !!this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(sessionId);
   }

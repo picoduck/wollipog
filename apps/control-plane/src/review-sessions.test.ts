@@ -48,10 +48,12 @@ function harness(options: {
   hub.isRunnerOnline = () => online;
   hub.sessionChangedById = () => {};
   const sent: Array<{ type: string } & Record<string, unknown>> = [];
-  hub.sendToRunner = (_, message) => { sent.push(message as { type: string }); return true; };
+  let deliver = true;
+  hub.sendToRunner = (_, message) => { if (deliver) sent.push(message as { type: string }); return deliver; };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   const starts = () => sent.filter((message): message is StartSessionMessage & Record<string, unknown> => message.type === "start_session");
-  return { db, svc, sent, starts, metadata, setOnline: (value: boolean) => { online = value; } };
+  return { db, svc, sent, starts, metadata, setOnline: (value: boolean) => { online = value; },
+    setDeliver: (value: boolean) => { deliver = value; } };
 }
 
 function requested(h: ReturnType<typeof harness>, sessionId = "s1") {
@@ -194,6 +196,29 @@ test("only the owning runner reports a review, a terminal state is final, and ou
     const empty = h.db.reviewSessions.view(second.reviewSessionId)!;
     assert.deepEqual({ state: empty.state, reason: empty.reason, output: empty.output },
       { state: "failed", reason: "the review ended without a result", output: null }, "a completion needs its output");
+  } finally { h.db.close(); }
+});
+
+test("an undelivered review launch leaves no active review behind", () => {
+  const h = harness();
+  try {
+    h.setDeliver(false);
+    const refused = h.svc.requestReviewSession("s1", request());
+    assert.equal(refused.status, 409);
+    assert.equal(h.db.reviewSessions.activeFor("s1"), null);
+    h.setDeliver(true);
+    assert.ok(h.svc.requestReviewSession("s1", request()).ok, "the requester can retry at once");
+  } finally { h.db.close(); }
+});
+
+test("a refusal reported before the terminal status keeps its specific reason", () => {
+  const h = harness();
+  try {
+    const view = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "failed",
+      reason: "the requested head is not the pull request's pushed head" });
+    h.svc.onSessionStatus(view.reviewSessionId, "failed", "the requested head is not the pull request's pushed head", undefined, "r");
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)?.reason, "the requested head is not the pull request's pushed head");
   } finally { h.db.close(); }
 });
 

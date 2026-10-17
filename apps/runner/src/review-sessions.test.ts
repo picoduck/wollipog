@@ -192,6 +192,10 @@ test("a spawned reviewer command must be trusted as the first PATH match, with i
   writeFileSync(join(writable, "node"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   assert.throws(() => verifySpawnedCommand("codex", `${writable}:${trusted}`, [writable], uid, rootUid), /a session can write|node/u);
   assert.throws(() => verifySpawnedCommand("missing-cli", trusted, [], uid, rootUid), /is not installed/u);
+  // Spawn resolves an empty or relative entry against the reviewed checkout: refused outright.
+  for (const path of [`:${trusted}`, `.:${trusted}`, `bin:${trusted}`]) {
+    assert.throws(() => verifySpawnedCommand("claude", path, [writable], uid, rootUid), /relative entry/u, path);
+  }
   assert.throws(() => verifySpawnedCommand("../claude", trusted, [], uid, rootUid), /is not installed/u);
 });
 
@@ -270,6 +274,22 @@ test("a snapshot that cannot be prepared is refused with a fixed reason and leav
     "the review snapshot could not be prepared");
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
   assert.ok(f.logs.some((line) => line.includes("snapshot failed")));
+});
+
+test("a review accepted but lost before its session was persisted is reported once found, until pruned", (t) => {
+  const f = fixture(t);
+  f.launcher.markPreparing("s_lost");
+  f.launcher.markPreparing("s_review");
+  f.metas.set("s_review", { sessionId: "s_review" } as SessionMeta);
+  assert.deepEqual(f.launcher.lostPreparations(), ["s_lost"], "a persisted session is settled by its own metadata");
+  f.launcher.releaseAll();
+  assert.deepEqual(f.launcher.lostPreparations(), ["s_lost"], "a recent intent survives startup");
+  f.launcher.releaseAll(Date.now() + 8 * 24 * 60 * 60_000);
+  assert.deepEqual(f.launcher.lostPreparations(), [], "a week-old intent is pruned");
+  f.launcher.markPreparing("s_lost");
+  f.launcher.release("s_lost");
+  assert.deepEqual(f.launcher.lostPreparations(), [], "a settled review clears its intent");
+  assert.throws(() => f.launcher.markPreparing("../escape"), /invalid review session identity/u);
 });
 
 test("releaseAll removes every checkout left by an earlier runner process", async (t) => {

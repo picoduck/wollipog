@@ -1927,10 +1927,12 @@ export class SessionManager {
     authorizationError: string | undefined,
   ): Promise<{ spec: SessionLaunchSpec; prompt: string } | { error: string }> {
     // Nothing is persisted for a refused review session: its status and outcome go up directly.
+    // The outcome goes up before the terminal status, which would otherwise settle it generically.
     const refuse = (reason: string) => {
       const sanitized = sanitizedReviewSessionReason(reason);
-      this.send({ type: "session_status", sessionId: spec.sessionId, status: "failed", detail: sanitized });
+      this.reviewSessions?.release(spec.sessionId);
       this.send({ type: "review_session_update", sessionId: spec.sessionId, state: "failed", reason: sanitized });
+      this.send({ type: "session_status", sessionId: spec.sessionId, status: "failed", detail: sanitized });
       return { error: sanitized };
     };
     // A review session launches once; a relaunch leaves its recorded status and outcome alone.
@@ -1944,6 +1946,7 @@ export class SessionManager {
     let prepared: Awaited<ReturnType<ReviewSessionHooks["prepare"]>>;
     this.reviewsPreparing.add(spec.sessionId);
     try {
+      this.reviewSessions.markPreparing(spec.sessionId);
       prepared = await this.reviewSessions.prepare(spec.sessionId, spec.review!, { driver, agentId: spec.agentId, command: spec.command }, brief);
     } catch (error) {
       this.reviewsStoppedBeforeLaunch.delete(spec.sessionId);
@@ -1956,8 +1959,8 @@ export class SessionManager {
     if (this.reviewsStoppedBeforeLaunch.delete(spec.sessionId)) {
       this.reviewSessions.release(spec.sessionId);
       const reason = sanitizedReviewSessionReason("the review was cancelled");
-      this.send({ type: "session_status", sessionId: spec.sessionId, status: "stopped", detail: reason });
       this.send({ type: "review_session_update", sessionId: spec.sessionId, state: "cancelled", reason });
+      this.send({ type: "session_status", sessionId: spec.sessionId, status: "stopped", detail: reason });
       return { error: reason };
     }
     return {
@@ -1999,9 +2002,15 @@ export class SessionManager {
     this.send(update);
   }
 
-  /** Every recorded review outcome, re-sent at registration; the control plane keeps the first. */
+  /** Every recorded review outcome, re-sent at registration; the control plane keeps the first.
+   * A review an earlier process accepted but lost before persisting its session has failed. */
   reviewSessionUpdates(): ReviewSessionUpdate[] {
-    return this.store.listSessions().flatMap((meta) => meta.review?.update ? [meta.review.update] : []);
+    return [
+      ...this.store.listSessions().flatMap((meta) => meta.review?.update ? [meta.review.update] : []),
+      ...(this.reviewSessions?.lostPreparations() ?? []).map((sessionId): ReviewSessionUpdate => ({
+        type: "review_session_update", sessionId, state: "failed", reason: "the review session ended when its runner restarted",
+      })),
+    ];
   }
 
   /** The reviewer's one turn has settled: record its outcome and stop the provider. */
@@ -5941,6 +5950,11 @@ export class SessionManager {
     const authorization = this.authorizeHostLaunch(spec);
     spec = authorization.spec;
     const reviewLaunch = !!spec.review;
+    if (!spec.review && this.store.readMeta(spec.sessionId)?.review) {
+      durable?.failed("a review session runs once and cannot be relaunched", "INVALID_COMMAND");
+      reportMaterialized(false);
+      return false;
+    }
     if (spec.review) {
       const review = await this.prepareReviewLaunch(spec, initialPrompt ?? "", authorization.error);
       if ("error" in review) {
@@ -7305,7 +7319,9 @@ export class SessionManager {
 
   sessionCanOpen(sessionId: string): boolean {
     return !this.deleted.has(sessionId) && !this.deleting.has(sessionId) &&
-      !this.store.isDeleted(sessionId) && this.store.has(sessionId) && !this.roleConversionPending(sessionId);
+      !this.store.isDeleted(sessionId) && this.store.has(sessionId) && !this.roleConversionPending(sessionId) &&
+      // A review session's one provider runs its review; nothing else opens on it (#3368).
+      !this.isReviewSession(sessionId);
   }
 
   /** A completed replacement must still invalidate asynchronous TUI launch preparation. */

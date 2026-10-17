@@ -3272,6 +3272,38 @@ test("buildCodexTurnParams: orchestrator uses constrained Guardian review withou
   });
 });
 
+test("a review session's Codex launch disables every configured MCP server, with no exemption (#3368)", async () => {
+  // An empty `mcp_servers` table does not remove servers from the user's or the checkout's
+  // configuration: the launch must disable each one the effective inventory lists.
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-review-mcp-"));
+  try {
+    const stub = join(dir, "codex");
+    writeFileSync(stub, `#!/bin/sh\nprintf '%s' '[{"name":"railway","enabled":true},{"name":"declared","enabled":true},{"name":"wollipog","enabled":true}]'\n`, { mode: 0o755 });
+    const launched: string[][] = [];
+    const h = makeHarness({
+      command: stub, cwd: dir, review: true, config: cfg("read-only"),
+      args: ["-c", 'mcp_servers.declared={ "command" = "/x" }'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.driver as any).spawn = (options: { args: string[] }) => {
+      launched.push(options.args);
+      throw new Error("spawn-reached");
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await assert.rejects(() => (h.driver as any).startAppServer(false), /spawn-reached/u);
+    assert.ok(launched[0]!.includes("mcp_servers.railway.enabled=false"), "a user-configured server is disabled");
+    assert.ok(launched[0]!.includes("mcp_servers.declared.enabled=false"), "a server the launch arguments declare is not exempt");
+    assert.ok(launched[0]!.includes("mcp_servers.wollipog.enabled=false"), "not even a Wollipog server is kept");
+    // With nothing configured at all, the launch still proceeds rather than demanding a Wollipog server.
+    writeFileSync(stub, "#!/bin/sh\nprintf '%s' '[]'\n", { mode: 0o755 });
+    const empty = makeHarness({ command: stub, cwd: dir, review: true, config: cfg("read-only") });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (empty.driver as any).spawn = () => { throw new Error("spawn-reached"); };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await assert.rejects(() => (empty.driver as any).startAppServer(false), /spawn-reached/u);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("an additive Codex Orchestrator turn follows the selected mode and skips the isolation probe", async () => {
   // The additive shape is an ordinary permission mode plus runner-injected launch arguments. The
   // driver has no other signal, so both the turn parameters and the app-server launch must be

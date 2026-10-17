@@ -4864,6 +4864,8 @@ export class SessionsService {
         // terminal instead of reporting that a launch was accepted when no runner owns it.
         if (cleanupUndelivered) {
           this.db.deleteSession(id);
+          // An undelivered review never ran: it must not hold its requester's one active review.
+          if (creationContext?.review) this.db.reviewSessions.forget(id);
           this.hub.sessionRemoved(id);
           if (session.parentSessionId) this.hub.sessionChangedById(session.parentSessionId);
           return fail("runner disconnected while launching the session", 409);

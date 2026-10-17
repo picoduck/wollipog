@@ -1472,6 +1472,8 @@ const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, 
 // Startup reconciliation has already settled every review session: no checkout is in use.
 reviewSessionLauncher.releaseAll();
 sessions.setReviewSessions({
+  markPreparing: (sessionId) => reviewSessionLauncher.markPreparing(sessionId),
+  lostPreparations: () => reviewSessionLauncher.lostPreparations(),
   prepare: (sessionId, policy, launch, brief) => reviewSessionLauncher.prepare(sessionId, policy, launch, brief),
   launchArgs: reviewLaunchArgs,
   release: (sessionId) => reviewSessionLauncher.release(sessionId),

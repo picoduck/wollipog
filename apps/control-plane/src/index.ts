@@ -3593,6 +3593,8 @@ async function openSessionShell(
 ): Promise<OpenSessionShellResult> {
   const session = db.getSession(sessionId);
   if (!session) return { ok: false, status: 404, error: "session not found" };
+  const reviewRefusal = svc.reviewSessionRefusal(sessionId, "opens no terminal or Native TUI");
+  if (reviewRefusal) return { ok: false, status: 409, error: reviewRefusal };
   if (!hub.isRunnerOnline(session.runnerId)) return { ok: false, status: 409, error: "runner is offline" };
   const unsupported = runnerCapabilityError(session.runnerId, "sessionShells", "session terminal access");
   if (unsupported) return { ok: false, status: 409, ...unsupported };
