@@ -179,6 +179,32 @@ test("stopping a running review cancels it once, and a later outcome changes not
   assert.equal(h.updates().length, 1);
 });
 
+test("a stop that arrives while the snapshot is prepared cancels the review before it launches", async (t) => {
+  let release!: () => void;
+  const h = harness(t, {
+    prepare: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { checkout: "/never", prompt: "P", baseSha: "b".repeat(40) };
+    },
+  });
+  const pending = h.manager.start(reviewSpec(), "brief");
+  await until(() => release !== undefined, "the preparation");
+  h.manager.stop("s_review");
+  // An unrelated stop of an unknown session leaves nothing behind.
+  h.manager.stop("s_unrelated");
+  release();
+  assert.equal(await pending, false);
+  assert.equal(h.drivers.length, 0, "nothing launched");
+  assert.deepEqual(h.released, ["s_review"]);
+  assert.deepEqual(h.updates(), [{
+    type: "review_session_update", sessionId: "s_review", state: "cancelled", reason: "the review was cancelled",
+  }]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const internals = h.manager as any;
+  assert.equal(internals.reviewsStoppedBeforeLaunch.size, 0);
+  assert.equal(internals.reviewsPreparing.size, 0);
+});
+
 test("a review launch the runner cannot honor is refused and reported before anything runs", async (t) => {
   for (const [overrides, reason] of [
     [{ useWorktree: true }, "the runner cannot launch this reviewer"],

@@ -1903,6 +1903,9 @@ export class SessionManager {
 
   /** Review sessions (#3368): preparation, launch preset and checkout release. */
   private reviewSessions: ReviewSessionHooks | null = null;
+  /** Review sessions whose snapshot is being prepared, and those stopped meanwhile. */
+  private readonly reviewsPreparing = new Set<string>();
+  private readonly reviewsStoppedBeforeLaunch = new Set<string>();
 
   setReviewSessions(hooks: ReviewSessionHooks): void {
     this.reviewSessions = hooks;
@@ -1939,11 +1942,23 @@ export class SessionManager {
       return refuse("the runner cannot launch this reviewer");
     }
     let prepared: Awaited<ReturnType<ReviewSessionHooks["prepare"]>>;
+    this.reviewsPreparing.add(spec.sessionId);
     try {
       prepared = await this.reviewSessions.prepare(spec.sessionId, spec.review!, { driver, agentId: spec.agentId, command: spec.command }, brief);
     } catch (error) {
+      this.reviewsStoppedBeforeLaunch.delete(spec.sessionId);
       if (!(error instanceof ReviewScopeRefusal)) this.log(`review session ${spec.sessionId} preparation failed: ${errText(error)}`);
       return refuse(error instanceof ReviewScopeRefusal ? error.message : "the review snapshot could not be prepared");
+    } finally {
+      this.reviewsPreparing.delete(spec.sessionId);
+    }
+    // Preparation can take minutes; a stop that arrived meanwhile wins over the launch.
+    if (this.reviewsStoppedBeforeLaunch.delete(spec.sessionId)) {
+      this.reviewSessions.release(spec.sessionId);
+      const reason = sanitizedReviewSessionReason("the review was cancelled");
+      this.send({ type: "session_status", sessionId: spec.sessionId, status: "stopped", detail: reason });
+      this.send({ type: "review_session_update", sessionId: spec.sessionId, state: "cancelled", reason });
+      return { error: reason };
     }
     return {
       spec: {
@@ -8350,7 +8365,8 @@ export class SessionManager {
           managedWorktreeProtections: () => this.managedWorktreeGuardProtections(
             this.store.readMeta(sessionId) ?? meta,
           ),
-          hookStateDir: this.guardStateSandbox?.hookStateDir,
+          // A review session's preset is exact: no permission profile is layered onto it.
+          hookStateDir: meta.review ? undefined : this.guardStateSandbox?.hookStateDir,
           ...(launchPreparation?.codexPrompts ? { codexPrompts: launchPreparation.codexPrompts } : {}),
         },
         this.coalesceTextDeltas(sessionId, {
@@ -15179,6 +15195,8 @@ export class SessionManager {
   stop(sessionId: string): void {
     this.flushTextDeltas(sessionId);
     this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
+    // A review session still preparing its snapshot has nothing persisted yet; its launch checks this.
+    if (this.reviewsPreparing.has(sessionId)) this.reviewsStoppedBeforeLaunch.add(sessionId);
     // Stop is a terminal lifecycle boundary even while launch is suspended in an asynchronous
     // provider-authentication probe. Fence that generation before the probe can persist a new
     // recovery block or publish a non-terminal status for the stopped session.
