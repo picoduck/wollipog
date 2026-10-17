@@ -252,7 +252,9 @@ masks the interop endpoints, and removes `WSL_INTEROP` for the provider and its 
 `/proc` only hides the binfmt control file; it does not disable the registered kernel handler (#1503).
 Provider-side VM sockets, io_uring, and non-native syscall ABIs are unavailable; ordinary Unix and
 TCP sockets retain the existing network policy. The hardened binary uses its own installation
-generation so an older runner cannot replace it while the preparation ABI remains compatible. Credential
+generation so an older runner cannot replace it while the preparation ABI remains compatible.
+Direct WSL requires working unprivileged user namespaces: `no_new_privs` prevents privileged
+setuid or file-capability fallback when bwrap starts. Credential
 acknowledgement precedes launch, restart rotates the token, and terminal lifecycle removes it.
 Direct WSL provider mode, conversation fork/state adoption, Native TUI, and generic ACP remain unavailable. Container and cloud targets deliberately
 advertise `secrets: none` and mount only
