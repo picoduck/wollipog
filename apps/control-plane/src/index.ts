@@ -6097,6 +6097,24 @@ app.post("/api/sessions/:id/retry-stop", async (req, reply) => {
   return respond(reply, svc.retryStop(id));
 });
 
+app.post("/api/sessions/:id/background-deliveries/acknowledge-blocked-results", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const body = req.body as { targets?: unknown } | null;
+  if (!body || !Array.isArray(body.targets) || body.targets.length < 1 || body.targets.length > 32 ||
+      !body.targets.every((target: unknown) => {
+        if (typeof target !== "object" || target === null) return false;
+        const value = target as Record<string, unknown>;
+        return typeof value.parentTurnId === "string" && value.parentTurnId.length > 0 && value.parentTurnId.length <= 512 &&
+          typeof value.revision === "string" && value.revision.length > 0 && value.revision.length <= 262_144;
+      })) return reply.code(400).send({ error: "invalid blocked-result acknowledgement targets" });
+  if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+  const changed = db.acknowledgeBackgroundBlockedResults(id, body.targets, Date.now());
+  if (changed) hub.sessionChangedById(id);
+  req.log.info({ event: "background_blocked_results_acknowledged", sessionId: id, changed,
+    requested: body.targets.length, entryPoint: "dashboard" }, "Blocked-result acknowledgement completed");
+  return db.getSession(id);
+});
+
 app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result", async (req, reply) => {
   const { id, continuationId } = req.params as { id: string; continuationId: string };
   const changed = db.acknowledgeBackgroundMissingResult(id, continuationId, Date.now());

@@ -12,7 +12,7 @@ export function historicalBackgroundResultRecovery(
 ): boolean {
   return session.driver === "claude-code" && session.status === "idle" && !session.backgroundWorkState &&
     (session.backgroundDeliveries ?? []).some((delivery) => delivery.watchdogState === "continuation_blocked" ||
-      delivery.watchdogState === "terminal_without_continuation");
+      delivery.watchdogState === "terminal_without_continuation" || delivery.blockedResultAcknowledgedAt != null);
 }
 
 export interface BackgroundDeliveryStatusCopy {
@@ -96,6 +96,16 @@ export function shownWatchdogDelivery<T extends Pick<BackgroundDeliveryView, "wa
     watchdogState: BackgroundDeliveryWatchdogState;
   } => delivery.watchdogState != null);
   return watched.find((delivery) => backgroundDeliveryNeedsYou(delivery.watchdogState)) ?? watched[0];
+}
+
+export const ACKNOWLEDGE_BLOCKED_RESULT_EFFECT = "Clears this alert from session status. Background jobs and held results are kept.";
+
+/** Capture only the currently reported incidents, never a session-wide future mute. */
+export function blockedResultAcknowledgementTargets(session: Pick<SessionView, "backgroundDeliveries">) {
+  return (session.backgroundDeliveries ?? []).flatMap((delivery) =>
+    delivery.watchdogState === "continuation_blocked" && delivery.blockedResultRevision &&
+      delivery.blockedResultAcknowledgedAt == null
+      ? [{ parentTurnId: delivery.parentTurnId, revision: delivery.blockedResultRevision }] : []);
 }
 
 /** What a recovery notice names (#2859): the one job it is about, or how many when it is several or

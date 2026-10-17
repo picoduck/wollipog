@@ -4589,6 +4589,89 @@ for (const parentTurnId of ["unknown", "known-parent"]) test(`historical ${paren
   } finally { db.close(); }
 });
 
+test("acknowledging blocked results persists and never acknowledges a new result or changes jobs (#3408)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "blocked-ack-"));
+  const path = join(dir, "control-plane.sqlite");
+  let db = ControlPlaneDb.open(path);
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    const finished = { id: "finished", parentTurnId: "turn-1", runnerId: "runner-1", workspaceId: null,
+      launchType: "agent" as const, registeredAt: 1_000, terminalStatus: "completed" as const,
+      terminalObservedAt: 1_100, continuationRequired: true };
+    const monitor = { id: "monitor", parentTurnId: "turn-1", runnerId: "runner-1", workspaceId: null,
+      launchType: "monitor" as const, registeredAt: 1_000 };
+    const report = (jobs = [finished, monitor]) => snapshot({ id: "ack-blocked", driver: "claude_code",
+      backgroundWorkState: "running", backgroundJobs: jobs });
+    db.createSessionFromSnapshot(report(), "runner-1", 2_000);
+    const blocked = db.getSession("ack-blocked")!.backgroundDeliveries![0]!;
+    assert.equal(blocked.watchdogState, "continuation_blocked");
+    assert.ok(blocked.blockedResultRevision);
+    const targets = [{ parentTurnId: blocked.parentTurnId, revision: blocked.blockedResultRevision }];
+    const jobsBefore = db.listManagedBackgroundJobs("ack-blocked");
+    assert.equal(db.acknowledgeBackgroundBlockedResults("ack-blocked", targets, Date.now()), 1);
+    assert.equal(db.acknowledgeBackgroundBlockedResults("ack-blocked", targets, Date.now()), 0);
+    assert.deepEqual(db.listManagedBackgroundJobs("ack-blocked"), jobsBefore);
+    assert.equal(db.getSession("ack-blocked")!.backgroundDeliveries![0]!.watchdogState, undefined);
+    assert.ok(db.getSession("ack-blocked")!.backgroundDeliveries![0]!.blockedResultAcknowledgedAt);
+    assert.deepEqual(db.listSessionSummaries().find((s) => s.id === "ack-blocked")!.backgroundDeliveries,
+      db.getSession("ack-blocked")!.backgroundDeliveries);
+    assert.ok(!db.getSession("ack-blocked")!.attention!.humanActions.some((a) => a.requestId.includes("background")));
+    db.close();
+    db = ControlPlaneDb.open(path);
+    db.updateSessionFromSnapshot("ack-blocked", report(), Date.now());
+    assert.ok(db.getSession("ack-blocked")!.backgroundDeliveries![0]!.blockedResultAcknowledgedAt);
+    // A different result, even in the same launching turn, must raise fresh attention. A stale
+    // click from another device must never acknowledge it.
+    db.updateSessionFromSnapshot("ack-blocked", report([finished, monitor, { ...finished, id: "new-result" }]), Date.now());
+    assert.equal(db.acknowledgeBackgroundBlockedResults("ack-blocked", targets, Date.now()), 0);
+    const fresh = db.getSession("ack-blocked")!.backgroundDeliveries![0]!;
+    assert.equal(fresh.watchdogState, "continuation_blocked");
+    assert.notEqual(fresh.blockedResultRevision, blocked.blockedResultRevision);
+    assert.equal(fresh.blockedResultAcknowledgedAt, undefined);
+    assert.deepEqual(db.listSessionSummaries().find((s) => s.id === "ack-blocked")!.backgroundDeliveries,
+      db.getSession("ack-blocked")!.backgroundDeliveries);
+    assert.equal(db.acknowledgeBackgroundBlockedResults("ack-blocked", [{ parentTurnId: fresh.parentTurnId,
+      revision: fresh.blockedResultRevision! }], Date.now()), 1);
+    // A runner drops an old finished result from its inventory. The remaining acknowledged result
+    // stays quiet; changing the aggregate set must not resurrect its alert.
+    db.updateSessionFromSnapshot("ack-blocked", report([monitor, { ...finished, id: "new-result" }]), Date.now());
+    assert.equal(db.getSession("ack-blocked")!.backgroundDeliveries![0]!.watchdogState, undefined);
+    assert.ok(db.getSession("ack-blocked")!.backgroundDeliveries![0]!.blockedResultAcknowledgedAt);
+    // Real terminal evidence releases the barrier normally; acknowledgement grants no retry.
+    db.updateSessionFromSnapshot("ack-blocked", report([finished, { ...monitor, ...finished, id: "monitor" },
+      { ...finished, id: "new-result" }]), Date.now());
+    assert.equal(db.getSession("ack-blocked")!.backgroundDeliveries![0]!.watchdogState, "terminal_without_continuation");
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("blocked acknowledgement leaves concurrent results and other alerts visible beyond the projection bound (#3408)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    const jobs = Array.from({ length: 34 }, (_, index) => {
+      const parentTurnId = `turn-${String(index).padStart(2, "0")}`;
+      const base = { parentTurnId, runnerId: "runner-1", workspaceId: null, launchType: "agent" as const, registeredAt: 1_000 };
+      return [{ ...base, id: `finished-${index}`, terminalStatus: "completed" as const,
+        terminalObservedAt: 1_100, continuationRequired: true }, { ...base, id: `monitor-${index}` }];
+    }).flat();
+    const state = () => snapshot({ id: "many-blocked", driver: "claude_code", backgroundWorkState: "running", backgroundJobs: jobs });
+    db.createSessionFromSnapshot(state(), "runner-1", 2_000);
+    const targets = db.getSession("many-blocked")!.backgroundDeliveries!.map((delivery) => ({
+      parentTurnId: delivery.parentTurnId, revision: delivery.blockedResultRevision!,
+    }));
+    assert.equal(targets.length, 32);
+    // A new result appears after this dashboard rendered, before its acknowledgement reaches us.
+    jobs.push({ ...jobs[0]!, id: "concurrent-result" });
+    db.updateSessionFromSnapshot("many-blocked", state(), Date.now());
+    assert.equal(db.acknowledgeBackgroundBlockedResults("many-blocked", targets, Date.now()), 32);
+    const view = db.getSession("many-blocked")!;
+    const blocked = view.backgroundDeliveries!.filter((delivery) => delivery.watchdogState === "continuation_blocked");
+    assert.deepEqual(blocked.map((delivery) => delivery.parentTurnId), ["turn-00", "turn-32", "turn-33"]);
+    assert.deepEqual(db.listSessionSummaries().find((s) => s.id === view.id)!.backgroundDeliveries, view.backgroundDeliveries);
+    assert.equal(db.listManagedBackgroundJobs(view.id).filter((job) => !job.terminalStatus).length, 34);
+  } finally { db.close(); }
+});
+
 test("a finished job whose sibling never finishes is a blocked delivery, and a listed job past the bound is reported as stalled (#1651)", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {
@@ -4610,6 +4693,7 @@ test("a finished job whose sibling never finishes is a blocked delivery, and a l
     assert.deepEqual(db.getSession("blocked")?.backgroundDeliveries, [{
       parentTurnId: "turn-1", jobCount: 1, terminalCount: 1,
       watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
+      blockedResultRevision: '[["shell-1",1000]]',
     }]);
     const before = db.listManagedBackgroundJobs("blocked", 900 + BACKGROUND_JOB_STALL_MS - 1);
     assert.equal(before.find((job) => job.id === "monitor-1")?.stalledSince, undefined);
@@ -4688,7 +4772,7 @@ test("a held-back result is not blocked while its parent turn runs, and is Resul
     // Past the bound it is Result Blocked, everywhere, and the sweep names the session when it crosses.
     db.raw().prepare("UPDATE managed_background_jobs SET terminal_observed_at=? WHERE session_id='held' AND job_id='shell-turn-1'")
       .run(long);
-    const blocked = [{ ...waiting[0], watchdogState: "continuation_blocked" }];
+    const blocked = [{ ...waiting[0], watchdogState: "continuation_blocked", blockedResultRevision: '[["shell-turn-1",1000]]' }];
     assert.deepEqual(delivery(), blocked);
     assert.deepEqual(summary()?.backgroundDeliveries, blocked);
     assert.deepEqual(recovery(), ["background-recovery:turn-1"]);

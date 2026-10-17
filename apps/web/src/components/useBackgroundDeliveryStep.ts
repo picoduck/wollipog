@@ -13,6 +13,7 @@ import { useInstanceScope } from "../instance-scope.js";
 import type { SessionCondition } from "../status-meta.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import type { SessionStatusStep } from "./SessionStatusButton.js";
+import { useBlockedResultAcknowledgement } from "./useBlockedResultAcknowledgement.js";
 
 /** `confirming`: Stop Job's confirmation is open. `pending`: the request is in flight. `done`: it
  * succeeded and the session update that clears the row is on its way. */
@@ -130,6 +131,7 @@ export function useBackgroundDeliveryStep({
   const api = useApi();
   const instanceScope = useInstanceScope();
   const { confirm, showToast } = useFeedback();
+  const blocked = useBlockedResultAcknowledgement(session);
   useSyncExternalStore(subscribe, () => version);
   const sessionKey = JSON.stringify([instanceScope, session.id]);
   const inputs: StepInputs = { session, condition, runnerOnline, runnerProtocolVersion };
@@ -154,6 +156,12 @@ export function useBackgroundDeliveryStep({
     pruneDone(sessionKey, offer?.key ?? null);
   });
 
+  if (condition?.delivery?.watchdogState === "continuation_blocked" && condition.delivery.blockedResultRevision) {
+    // A completed acknowledgement waits for its session update. Never substitute a destructive
+    // action into that same row while it is settling; recovery remains in Background Work.
+    return blocked.available ? { label: "Acknowledge", progress: "Acknowledging blocked results…", busy: blocked.busy,
+      run: blocked.acknowledge } : undefined;
+  }
   if (!offer) return undefined;
   const sessionId = session.id;
   const { key } = offer;
