@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import fc from "fast-check";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS, LEASE_WORKER_REFERENCE_LIMIT, ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
+import { writeProviderProfileMarker } from "./provider-profile.js";
 
 function worker(data: Record<string, unknown>): Worker {
   return new Worker(`require(${JSON.stringify(createRequire(import.meta.url).resolve("tsx/cjs"))});require(${JSON.stringify(fileURLToPath(new URL("./provider-home-lease-worker.ts", import.meta.url)))});`,
@@ -189,4 +190,38 @@ test("foreign-owner and foreign-host refusals keep their typed code across the w
       return true;
     });
   }
+});
+
+test("profile refusals cross the real worker boundary as fixed codes before any lease journal I/O", { skip: process.platform === "win32" }, async t => {
+  const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", instance = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
+  const root = mkdtempSync(join(tmpdir(), "wollipog-async-profile-")), home = join(root, "home");
+  mkdirSync(home);
+  writeProviderProfileMarker(home, { version: 1, kind: "wollipog-provider-profile", profileId, provider: "claude", createdAt: "2026-10-16T00:00:00.000Z",
+    grants: [{ controlPlaneInstanceId: instance, grantId: "2a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", grantedAt: "2026-10-16T00:00:01.000Z" }] });
+  let access = { controlPlaneSupportsProfiles: false, activeProfileIds: [] as string[] };
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), { controlPlaneInstanceId: instance, profileAccess: () => access });
+  const unrelated = new AsyncProviderHomeLeaseRegistry("a".repeat(64), { controlPlaneInstanceId: "1a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3",
+    profileAccess: () => ({ controlPlaneSupportsProfiles: true, activeProfileIds: [profileId] }) });
+  t.after(async () => { await registry.close(); await unrelated.close(); rmSync(root, { recursive: true, force: true }); });
+  const refused = (code: string) => (error: unknown) => {
+    assert.ok(error instanceof ProviderHomeLeaseError);
+    assert.equal(error.code, code);
+    assert.equal(error.message, LEASE_WORKER_ERRORS[error.code]);
+    assert.ok(!error.message.includes(root), "no HOME path crosses the boundary");
+    return true;
+  };
+  await assert.rejects(registry.acquireHome(home, "claude"), refused("profile_unsupported_control_plane"));
+  await assert.rejects(unrelated.acquireHome(home, "claude"), refused("profile_not_granted"));
+  await assert.rejects(registry.acquireHomeReference(home, "claude", {}, { expectedProfileId: "7f1c2d3e-4a5b-4c6d-8e7f-001122334455" }), refused("profile_changed"));
+  assert.equal(existsSync(join(home, ".agent-manager", "provider-home-leases-v1")), false);
+  access = { controlPlaneSupportsProfiles: true, activeProfileIds: [profileId] };
+  const reference = await registry.acquireHomeReference(home, "claude", {}, { expectedProfileId: profileId });
+  assert.equal(reference.first, true);
+  assert.equal(await reference.release(), true);
+});
+
+test("an invalid control-plane instance id fails worker startup closed", async () => {
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), { controlPlaneInstanceId: "not-an-instance" });
+  await assert.rejects(registry.acquireHome(join(tmpdir(), "wollipog-never-created")), /worker unavailable/);
+  assert.equal(await registry.close(), false);
 });

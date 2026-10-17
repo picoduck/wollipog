@@ -14,6 +14,8 @@ export interface BoundProviderAccount {
   label: string;
   provider: "claude" | "codex";
   credentialHome: string;
+  /** The configured account's provider profile identity (#3239), when it has been adopted. */
+  profileId?: string;
 }
 
 export function bindSessionProviderAccount(
@@ -164,6 +166,7 @@ export function selectProviderAccount(
     label: selected.label,
     provider: selected.provider,
     credentialHome: selected.directory,
+    ...(selected.profileId !== undefined ? { profileId: selected.profileId } : {}),
   };
 }
 

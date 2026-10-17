@@ -5,8 +5,11 @@ import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys
 /** Only the fixed source/SEA entry starts this worker; there is no public RPC/CLI entry. */
 export function runProviderHomeLeaseWorker(): void {
   if (!parentPort || typeof workerData?.epoch !== "string" || !/^[a-f0-9-]{36}$/u.test(workerData.epoch)) throw new Error("invalid lease worker startup");
+  const instance: unknown = workerData.controlPlaneInstanceId;
+  if (instance !== undefined && (typeof instance !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(instance))) throw new Error("invalid lease worker startup");
   const port = parentPort, epoch: string = workerData.epoch;
   const options: ProviderHomeLeaseOptions = { helperDataDir: workerData.helperDataDir,
+    ...(instance === undefined ? {} : { controlPlaneInstanceId: instance.toLowerCase() }),
     ...workerData.tests,
     onDiagnostic: d => send({ kind: "diagnostic", epoch, ...d }),
   };
@@ -22,7 +25,8 @@ export function runProviderHomeLeaseWorker(): void {
   }
   const fail = (error: unknown): LeaseWorkerError => {
     const kind = providerHomeLeaseRefusalKind(error);
-    if (kind === "busy" || kind === "foreign_owner" || kind === "foreign_host") return kind;
+    if (kind === "busy" || kind === "foreign_owner" || kind === "foreign_host" || kind === "profile_unsupported_control_plane" ||
+        kind === "profile_unverifiable" || kind === "profile_not_granted" || kind === "profile_changed") return kind;
     const message = error instanceof Error ? error.message : "";
     return message.includes("helper unavailable") ? "unavailable" : /already in use|publication is in progress/u.test(message) ? "busy" : "refusal";
   };
@@ -45,7 +49,7 @@ export function runProviderHomeLeaseWorker(): void {
         } else if (op.method === "acquire" || op.method === "acquire_reference") {
           if (op.method === "acquire_reference" && references.size >= LEASE_WORKER_REFERENCE_LIMIT) reply.error = "busy";
           else {
-            const acquisition = registry.acquireHomeWithReceipt(op.home, op.provider);
+            const acquisition = registry.acquireHomeWithReceipt(op.home, op.provider, op.profile);
             reply.value = acquisition.first; prepared.cancel = acquisition.cancel;
           }
         } else if (op.method === "release_reference" || op.method === "retain_reference") {
