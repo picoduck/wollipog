@@ -580,12 +580,12 @@ builds to write inside the worktree or another authorized scratch path.
 
 An ACP provider in a selected managed Linux worktree cannot launch under `provider` mode because
 the runner does not know which provider state root to preserve. Git commands that write shared
-administration outside `objects`, `refs`, and `logs` can also fail inside this boundary. These
-include repository config changes, setting an upstream with `git push -u`, and creating a worktree
-directly with Git; use the runner's managed worktree operation for the latter. Git layouts that
-cannot supply canonical linked-worktree administration and all four narrow writable Git roots fail
-before provider launch, including a linked-worktree Project Location, missing Git logs, and
-symlinked Git object storage.
+administration outside `objects`, `refs`, `logs`, and the relocated packed-refs directory (see
+"Shared Git Metadata") can also fail inside this boundary. These include repository config
+changes, setting an upstream with `git push -u`, and creating a worktree directly with Git; use the
+runner's managed worktree operation for the latter. Git layouts that cannot supply canonical
+linked-worktree administration and all four narrow writable Git roots fail before provider launch,
+including a linked-worktree Project Location, missing Git logs, and symlinked Git object storage.
 
 **The rule is bound at launch, like every other filesystem boundary here.** A `bwrap` or Seatbelt
 sandbox is constructed when the provider starts, so the read-only entries are the ones that exist
@@ -600,6 +600,44 @@ For a native Linux provider already launched in a *selected requested worktree*,
 worktree boundary is the read-only parent of that selected child. A newly requested sibling is
 therefore not writable during the current turn. Select it and relaunch before editing it. This
 keeps the selected root and Git registration intact; it does not preserve writable file contents.
+
+### Shared Git Metadata
+
+A protected launch also binds every other runner-created worktree the session owns in the same
+repository (#3316), as it existed at launch: its root and its own admin directory are writable, so
+the session can commit in it and fast-forward it, and its `.git` link and `gitdir`, `commondir`, and
+`config.worktree` registration files stay read-only like the selected worktree's. Each root is a
+mount point, so it cannot be renamed or removed from inside. Attached worktrees and every other
+session's worktrees are never bound. Codex's own workspace sandbox still grants only the selected
+worktree.
+
+Git deletes any ref, including the `CHERRY_PICK_HEAD` and `AUTO_MERGE` pseudo-refs a rebase or
+cherry-pick removes when it finishes, by first creating `packed-refs.lock` beside `packed-refs`. The
+common Git directory's root must stay read-only: a new entry there, such as a `commondir` file,
+would redirect the operator's own Git. Before the first protected launch in a repository, the runner
+therefore moves `packed-refs` to `wollipog-refs/packed-refs` inside the common Git directory and
+leaves a relative symlink in its place. Git's lockfile code resolves that link before it appends
+`.lock`, so only the `wollipog-refs` directory is added to the writable Git roots. The move takes
+Git's own `packed-refs.lock` and the relocated directory's lock; while either is held, the launch
+proceeds without the directory and ref deletion stays unavailable until the next launch. Git, and
+any client that follows symlinks, works with the layout unchanged.
+
+A sandbox can write `wollipog-refs`, so it could replace the relocated file with a symlink that host
+Git would follow on its next packed-refs rewrite. Before every protected launch, when any provider
+exits, at runner start, and before each runner Git command, the runner checks that the file is a
+plain, singly linked file owned by the runner's user, or absent. Anything else is moved to
+`wollipog-refs-quarantine/` in the read-only common root and the launch is refused; the packed refs
+it replaced are lost, as they would be if the sandbox had emptied the file. Git run by the operator
+outside the runner is not intercepted.
+
+To restore a plain `packed-refs` file, stop every protected session in the repository, then run
+these commands in its common Git directory (`git rev-parse --git-common-dir`). The next protected
+launch relocates it again.
+
+```sh
+if [ -f wollipog-refs/packed-refs ]; then mv -f wollipog-refs/packed-refs packed-refs; else rm -f packed-refs; fi
+rm -rf wollipog-refs wollipog-refs-quarantine
+```
 
 ## Runner Hook State at the Sandbox Boundary
 
@@ -895,8 +933,9 @@ a policy is also present.
   which sandbox the launch resolves (an ephemeral thread, no turn, nothing reaches a model). It
   migrates only when that is exactly the plain built-in; otherwise it keeps its legacy policy.
 - **Managed linked worktrees keep an explicit policy.** An App Server turn whose cwd is the
-  session's runner-created linked worktree adds only the canonical linked-worktree admin directory
-  and the common `objects`, `refs`, and `logs` descendants as writable roots. Codex automatically
+  session's runner-created linked worktree adds only the canonical linked-worktree admin directory,
+  the common `objects`, `refs`, and `logs` descendants, and the relocated `wollipog-refs` directory
+  when present (see "Shared Git Metadata") as writable roots. Codex automatically
   makes the `.git` pointer and its resolved target read-only; the exact admin-directory root
   reopens ordinary staging, commits, status, and branch operations beneath that carveout while the
   pointer stays protected. The common `.git` root, the primary checkout, and unrelated host paths

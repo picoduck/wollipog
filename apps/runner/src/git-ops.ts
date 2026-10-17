@@ -42,6 +42,7 @@ import type {
   AgentContext,
 } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
+import { guardRelocatedPackedRefs } from "./packed-refs-relocation.js";
 
 /** A git-action failure the UI reacts to by code (stale diff / index conflict → refetch). */
 export class GitOpError extends Error {
@@ -143,6 +144,12 @@ const realGitRunner: GitRunner = (cwd, args, opts) => {
     }).then((result) => result.stdout);
   }
   return new Promise((resolve, reject) => {
+    try {
+      guardRelocatedPackedRefs();
+    } catch (error) {
+      reject(error);
+      return;
+    }
     const child = execFile(
       "git",
       args,

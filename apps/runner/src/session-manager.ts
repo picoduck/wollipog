@@ -117,12 +117,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
 import { managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
+import {
+  guardRelocatedPackedRefs, PackedRefsViolationError, registerRepositoryPackedRefs, relocatePackedRefs, type PackedRefsRelocation,
+} from "./packed-refs-relocation.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundJobStopResult,
@@ -1710,6 +1713,20 @@ export class SessionManager {
       WORKTREE_PR_RECONCILIATION_MS,
     );
     this.worktreePullRequestReconcileTimer.unref?.();
+    // A runner that stopped while a sandbox could write a relocated packed-refs directory must
+    // verify it before its own Git calls, not only at the next launch (#3316).
+    for (const meta of this.store.listSessions()) {
+      if (meta.context.kind === "native") registerRepositoryPackedRefs(meta.repoPath);
+    }
+    this.verifyRelocatedPackedRefs("runner start");
+  }
+
+  private verifyRelocatedPackedRefs(boundary: string): void {
+    try {
+      guardRelocatedPackedRefs();
+    } catch (error) {
+      console.error(`[wollipog] relocated Git packed-refs could not be verified at ${boundary}: ${errText(error)}`);
+    }
   }
 
   private capacityRevision = 0;
@@ -3213,6 +3230,8 @@ export class SessionManager {
       this.cancelActiveTurnWait(sessionId);
       this.releaseActiveTurn(sessionId);
       if (refreshCapacityInventory) this.refreshCapacityInventorySession(sessionId);
+      // The exited sandbox could write the relocated packed-refs directory (#3316).
+      this.verifyRelocatedPackedRefs("provider exit");
       this.scheduleDeferredSafeWorktreeReaps(sessionId, "provider exit");
     }
     return deleted;
@@ -8659,16 +8678,51 @@ export class SessionManager {
       : [];
     let gitWritableRoots: string[] = [];
     let requiredReadOnlyPaths: string[] = [];
+    const ownedWorktrees: Array<{ path: string; gitAdmin: string }> = [];
     if (protectedWorktree) {
-      requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath: protectedWorktree, repoPath: meta.repoPath }], true);
+      const selected = { worktreePath: protectedWorktree, repoPath: meta.repoPath };
+      const gitLink = join(protectedWorktree, ".git");
+      const baseRoots = managedWorktreeGitWritableRoots(protectedWorktree, [selected]);
+      if (baseRoots.length >= 4) {
+        // Moves packed-refs behind the runner's link before the roots are read, so ref deletion
+        // can take Git's lock without the common root (#3316). A substituted relocated entry is
+        // quarantined and refuses this launch; a held lock just leaves deletion unavailable.
+        let relocation: PackedRefsRelocation;
+        try {
+          relocation = relocatePackedRefs(dirname(baseRoots[1]!));
+        } catch (error) {
+          if (error instanceof PackedRefsViolationError) throw error;
+          relocation = { status: "unavailable", reason: errText(error) };
+        }
+        if (relocation.status === "unavailable") {
+          console.warn(`[session ${meta.sessionId}] Git ref deletion stays unavailable in the sandbox: ${relocation.reason}`);
+        }
+      }
+      gitWritableRoots = managedWorktreeGitWritableRoots(protectedWorktree, [selected]);
+      // The session's other runner-created worktrees of this repository stay usable (#3316): each
+      // root and its own admin directory are writable, with registration files read-only. Another
+      // session's worktree is never in this list, and a missing or foreign one is skipped.
+      for (const protection of this.managedWorktreeProtections(meta)) {
+        if (protection.worktreePath === protectedWorktree || protection.worktreePath === meta.repoPath) continue;
+        const roots = managedWorktreeGitWritableRoots(protection.worktreePath, [protection]);
+        if (roots.length !== gitWritableRoots.length ||
+            roots.slice(1).some((root, index) => root !== gitWritableRoots[index + 1])) continue;
+        try {
+          if (realpathSync.native(protection.worktreePath) !== protection.worktreePath ||
+              !lstatSync(protection.worktreePath).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        ownedWorktrees.push({ path: protection.worktreePath, gitAdmin: roots[0]! });
+      }
+      requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([
+        selected,
+        ...ownedWorktrees.map((owned) => ({ worktreePath: owned.path, repoPath: meta.repoPath })),
+      ], true);
       for (const path of requiredReadOnlyPaths) {
         if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
       }
-      const gitLink = join(protectedWorktree, ".git");
-      gitWritableRoots = managedWorktreeGitWritableRoots(protectedWorktree, [{
-        worktreePath: protectedWorktree, repoPath: meta.repoPath,
-      }]);
-      if (requiredReadOnlyPaths.length < 4 || gitWritableRoots.length !== 4 ||
+      if (requiredReadOnlyPaths.length < 4 || (gitWritableRoots.length !== 4 && gitWritableRoots.length !== 5) ||
           !lstatSync(gitLink).isFile() || realpathSync.native(gitLink) !== gitLink ||
           !requiredReadOnlyPaths.every((path) => readOnlyPaths.includes(path))) {
         throw new Error("managed worktree Git registration could not be protected before provider launch");
@@ -8689,7 +8743,10 @@ export class SessionManager {
       sessionId: meta.sessionId,
       cwd,
       ...(projectMemoryDirectory ? { projectMemoryDirectory } : {}),
-      ...(protectedWorktree ? { protectedWorktree: { path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths } } : {}),
+      ...(protectedWorktree ? { protectedWorktree: {
+        path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
+        ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
+      } } : {}),
       ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),

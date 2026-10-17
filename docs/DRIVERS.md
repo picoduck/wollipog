@@ -1079,7 +1079,8 @@ all existing app-server capabilities. Other startup failures are not retried or 
    failures are ignored.
    For a runner-managed linked-worktree cwd, every workspace-write mode also sends explicit
    `writableRoots` for the exact linked-worktree admin directory and the common Git `objects`,
-   `refs`, and `logs` descendants. This is deliberately narrower than the primary repository or
+   `refs`, and `logs` descendants, plus the relocated `wollipog-refs` packed-refs directory when the
+   runner has relocated it (docs/agent-control.md, "Shared Git Metadata"). This is deliberately narrower than the primary repository or
    its whole `.git` directory. It overrides Codex's automatic read-only carveout for the resolved
    admin directory, so staging, commits, status, and branch operations work while the worktree's
    `.git` pointer remains read-only; primary-checkout files and unrelated host paths remain outside

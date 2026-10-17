@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import type { AgentContext } from "@wollipog/protocol";
 import { windowsCommandSpec } from "./windows-cmd.js";
+import { guardRelocatedPackedRefs } from "./packed-refs-relocation.js";
 
 export interface ContextCommandOptions {
   cwd: string;
@@ -62,6 +63,8 @@ export function runContextCommand(
   return new Promise((resolve, reject) => {
     let spec;
     try {
+      // Host Git follows a relocated packed-refs link; verify what a sandbox could write (#3316).
+      if (context.kind === "native" && command === "git") guardRelocatedPackedRefs();
       spec = contextCommandSpec(context, command, args, options);
     } catch (error) {
       reject(error);

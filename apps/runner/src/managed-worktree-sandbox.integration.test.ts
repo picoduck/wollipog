@@ -7,6 +7,7 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
 import { buildBwrapArgs } from "./spawn.js";
+import { PackedRefsViolationError, RELOCATED_PACKED_REFS_DIRECTORY, relocatePackedRefs } from "./packed-refs-relocation.js";
 
 /** Never inherit this process's stdin: a sandboxed child that reads it blocks the whole suite
  * instead of failing, and the timeout below only helps once the child is actually running. */
@@ -548,4 +549,239 @@ test("a cache symlink to a separate disk remains writable without widening Git a
     bind.source === externalCache && bind.target === externalCache));
   assert.equal(isolation?.backend === "bwrap" && isolation.writableBinds?.some((bind) =>
     bind.target === realpathSync(join(repoPath, ".git"))), false);
+});
+
+function gitAdminDirectory(worktreePath: string): string {
+  const link = readFileSync(join(worktreePath, ".git"), "utf8");
+  return realpathSync(resolve(worktreePath, link.trim().replace(/^gitdir: /u, "")));
+}
+
+const COMMITTER = "git -c user.email=runner@example.invalid -c user.name=Runner";
+
+test("an isolated session deletes its own refs and finishes a rebase and cherry-pick (#3316)", {
+  skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
+}, async () => {
+  const { root, repoPath, worktreePath, home } = managedWorktreeFixture();
+  const common = realpathSync(join(repoPath, ".git"));
+  const host = (args: string[], cwd = repoPath) => {
+    const result = run("git", args, cwd);
+    assert.equal(result.status, 0, `git ${args.join(" ")} failed: ${result.output}`);
+    return result.output.trim();
+  };
+  // The session's branch has a commit to replay; main moved on; a side branch has one to pick.
+  writeFileSync(join(worktreePath, "work.txt"), "work\n");
+  host(["add", "work.txt"], worktreePath);
+  host(["commit", "--quiet", "-m", "work"], worktreePath);
+  host(["checkout", "--quiet", "-b", "side"]);
+  writeFileSync(join(repoPath, "side.txt"), "side\n");
+  host(["add", "side.txt"]);
+  host(["commit", "--quiet", "-m", "side"]);
+  host(["checkout", "--quiet", "main"]);
+  writeFileSync(join(repoPath, "main.txt"), "main\n");
+  host(["add", "main.txt"]);
+  host(["commit", "--quiet", "-m", "main"]);
+  host(["pack-refs", "--all"]);
+  assert.equal(relocatePackedRefs(common).status, "relocated");
+  const relocated = join(common, RELOCATED_PACKED_REFS_DIRECTORY);
+  const config = readFileSync(join(common, "config"), "utf8");
+  const admin = gitAdminDirectory(worktreePath);
+  const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
+  const gitWritableRoots = managedWorktreeGitWritableRoots(worktreePath, [{ worktreePath, repoPath }]);
+  assert.deepEqual(gitWritableRoots, [admin, join(common, "objects"), join(common, "refs"), join(common, "logs"), relocated]);
+  const isolation = await resolveExecutionIsolation(
+    { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      sessionId: "s_managed", cwd: worktreePath, readOnlyPaths: requiredReadOnlyPaths,
+      protectedWorktree: { path: worktreePath, gitWritableRoots, requiredReadOnlyPaths },
+      preserveProviderHome: true,
+    },
+  );
+  assert.equal(isolation?.backend, "bwrap");
+  const sandboxed = (script: string) => run(isolation!.command, buildBwrapArgs(
+    { command: "/bin/sh", args: ["-c", script], cwd: worktreePath },
+    isolation as Extract<typeof isolation, { backend: "bwrap" }>,
+  ), worktreePath);
+
+  const work = sandboxed([
+    "set -e",
+    `${COMMITTER} rebase --quiet main`,
+    `${COMMITTER} cherry-pick side`,
+    `test ! -e ${JSON.stringify(join(admin, "CHERRY_PICK_HEAD"))}`,
+    "git cherry-pick --quit",
+    // Stock Git may keep AUTO_MERGE after a clean pick; the session can now remove it itself.
+    "if git rev-parse -q --verify AUTO_MERGE >/dev/null; then git update-ref -d AUTO_MERGE; fi",
+    `test ! -e ${JSON.stringify(join(admin, "AUTO_MERGE"))}`,
+    "git update-ref refs/heads/scratch HEAD",
+    "git update-ref -d refs/heads/scratch",
+    "git update-ref -d refs/heads/side",
+    "git status --short --branch",
+  ].join("\n"));
+  assert.equal(work.status, 0, work.output);
+  assert.doesNotMatch(work.output, /packed-refs\.lock|error|fatal|cherry-picking/i);
+  assert.equal(host(["log", "--format=%s", "-3"], worktreePath), "side\nwork\nmain");
+  assert.equal(run("git", ["rev-parse", "--verify", "-q", "refs/heads/side"], repoPath).status, 1);
+
+  // config, hooks and the common root stay read-only; only the relocated directory is new.
+  for (const script of [
+    `printf '[core]\\n\\thooksPath = /tmp\\n' >> ${JSON.stringify(join(common, "config"))}`,
+    `printf '#!/bin/sh\\n' > ${JSON.stringify(join(common, "hooks", "pre-commit"))}`,
+    `printf . > ${JSON.stringify(join(common, "commondir"))}`,
+    `mkdir ${JSON.stringify(join(common, "modules"))}`,
+    `rm -f ${JSON.stringify(join(common, "packed-refs"))}`,
+    `mv ${JSON.stringify(relocated)} ${JSON.stringify(`${relocated}.moved`)}`,
+  ]) {
+    const attempted = sandboxed(script);
+    assert.notEqual(attempted.status, 0, `${script}: ${attempted.output}`);
+  }
+  assert.equal(readFileSync(join(common, "config"), "utf8"), config);
+  assert.equal(existsSync(join(common, "hooks", "pre-commit")), false);
+  assert.equal(existsSync(join(common, "commondir")), false);
+  assert.equal(existsSync(join(common, "modules")), false);
+  assert.ok(lstatSync(join(common, "packed-refs")).isSymbolicLink());
+
+  // A link planted in the writable directory is quarantined before host Git can follow it.
+  const victim = join(root, "victim");
+  writeFileSync(victim, "keep\n");
+  const target = JSON.stringify(join(relocated, "packed-refs"));
+  const planted = sandboxed(`rm -f ${target} && ln -s ${JSON.stringify(victim)} ${target}`);
+  assert.equal(planted.status, 0, planted.output);
+  assert.throws(() => relocatePackedRefs(common), PackedRefsViolationError);
+  host(["branch", "after-quarantine", "HEAD"], worktreePath);
+  host(["pack-refs", "--all"]);
+  assert.equal(readFileSync(victim, "utf8"), "keep\n");
+  assert.ok(lstatSync(join(relocated, "packed-refs")).isFile());
+});
+
+test("every managed worktree the session owns stays usable while another session's stays read-only (#3316)", {
+  skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
+}, async () => {
+  const { root, repoPath, worktreePath, home } = managedWorktreeFixture();
+  const boundary = join(root, "worktrees", "s_managed.requested");
+  const slot = join(boundary, "slot");
+  const other = join(root, "worktrees", "s_other");
+  mkdirSync(boundary);
+  for (const [branch, path] of [["agent/requested", slot], ["agent/s_other", other]] as const) {
+    const added = run("git", ["worktree", "add", "--quiet", "-b", branch, path, "main"], repoPath);
+    assert.equal(added.status, 0, added.output);
+  }
+  writeFileSync(join(repoPath, "upstream.txt"), "upstream\n");
+  assert.equal(run("git", ["add", "upstream.txt"], repoPath).status, 0);
+  assert.equal(run("git", ["commit", "--quiet", "-m", "upstream"], repoPath).status, 0);
+  const ownedAdmin = gitAdminDirectory(worktreePath);
+  const otherAdmin = gitAdminDirectory(other);
+  const otherHead = readFileSync(join(otherAdmin, "HEAD"), "utf8");
+  const ownedLink = readFileSync(join(worktreePath, ".git"), "utf8");
+  const ownedGitdir = readFileSync(join(ownedAdmin, "gitdir"), "utf8");
+  const protections = [{ worktreePath: slot, repoPath }, { worktreePath, repoPath }];
+  const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths(protections, true);
+  const isolation = await resolveExecutionIsolation(
+    { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      sessionId: "s_managed", cwd: slot, additionalWritableRoots: [boundary],
+      readOnlyPaths: requiredReadOnlyPaths,
+      protectedWorktree: {
+        path: slot,
+        gitWritableRoots: managedWorktreeGitWritableRoots(slot, [{ worktreePath: slot, repoPath }]),
+        requiredReadOnlyPaths,
+        ownedWorktrees: [{ path: worktreePath, gitAdmin: ownedAdmin }],
+      },
+      preserveProviderHome: true,
+    },
+  );
+  assert.equal(isolation?.backend, "bwrap");
+  assert.ok(isolation?.backend === "bwrap" && isolation.protectedWorktree?.gitWritableRoots.includes(ownedAdmin));
+  assert.ok(isolation?.backend === "bwrap" && isolation.readOnlyBinds?.includes(join(ownedAdmin, "config.worktree")));
+  const sandboxed = (script: string) => run(isolation!.command, buildBwrapArgs(
+    { command: "/bin/sh", args: ["-c", script], cwd: slot },
+    isolation as Extract<typeof isolation, { backend: "bwrap" }>,
+  ), slot);
+
+  const work = sandboxed([
+    "set -e",
+    `cd ${JSON.stringify(worktreePath)}`,
+    "git merge --ff-only --quiet main",
+    "printf owned > owned.txt",
+    "git add owned.txt",
+    `${COMMITTER} commit --quiet -m owned`,
+    `cd ${JSON.stringify(slot)}`,
+    "printf selected > selected.txt",
+    "git add selected.txt",
+    `${COMMITTER} commit --quiet -m selected`,
+  ].join("\n"));
+  assert.equal(work.status, 0, work.output);
+  assert.equal(run("git", ["log", "--format=%s", "-3"], worktreePath).output.trim(), "owned\nupstream\nbase");
+  assert.equal(run("git", ["log", "--format=%s", "-1"], slot).output.trim(), "selected");
+
+  for (const script of [
+    `printf x > ${JSON.stringify(join(other, "new.txt"))}`,
+    `printf x >> ${JSON.stringify(join(otherAdmin, "HEAD"))}`,
+    `cd ${JSON.stringify(other)} && ${COMMITTER} commit --allow-empty -qm escape`,
+    `printf x > ${JSON.stringify(join(worktreePath, ".git"))}`,
+    `printf x > ${JSON.stringify(join(ownedAdmin, "gitdir"))}`,
+    `printf '[core]\\n\\thooksPath = /tmp\\n' > ${JSON.stringify(join(ownedAdmin, "config.worktree"))}`,
+    `mv ${JSON.stringify(worktreePath)} ${JSON.stringify(`${worktreePath}.moved`)}`,
+  ]) {
+    const attempted = sandboxed(script);
+    assert.notEqual(attempted.status, 0, `${script}: ${attempted.output}`);
+  }
+  assert.equal(existsSync(join(other, "new.txt")), false);
+  assert.equal(readFileSync(join(otherAdmin, "HEAD"), "utf8"), otherHead);
+  assert.equal(readFileSync(join(worktreePath, ".git"), "utf8"), ownedLink);
+  assert.equal(readFileSync(join(ownedAdmin, "gitdir"), "utf8"), ownedGitdir);
+  assert.equal(readFileSync(join(ownedAdmin, "config.worktree"), "utf8"), "");
+  assert.ok(lstatSync(worktreePath).isDirectory());
+});
+
+test("another owned worktree cannot widen the selected worktree's boundary", async () => {
+  const { root, repoPath, worktreePath, home } = managedWorktreeFixture();
+  const second = join(root, "worktrees", "s_managed.requested", "slot");
+  mkdirSync(dirname(second));
+  assert.equal(run("git", ["worktree", "add", "--quiet", "-b", "agent/slot", second, "main"], repoPath).status, 0);
+  const common = realpathSync(join(repoPath, ".git"));
+  const selectedAdmin = gitAdminDirectory(worktreePath);
+  const secondAdmin = gitAdminDirectory(second);
+  const nested = join(worktreePath, "nested");
+  mkdirSync(nested);
+  const launch = (ownedWorktrees: Array<{ path: string; gitAdmin: string }>) => {
+    const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([
+      { worktreePath, repoPath }, { worktreePath: second, repoPath },
+    ], true);
+    return resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, {
+      platform: "linux", uid: () => 1000,
+      resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+    }, {
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      sessionId: "s_managed", cwd: worktreePath, readOnlyPaths: requiredReadOnlyPaths,
+      protectedWorktree: {
+        path: worktreePath,
+        gitWritableRoots: managedWorktreeGitWritableRoots(worktreePath, [{ worktreePath, repoPath }]),
+        requiredReadOnlyPaths,
+        ownedWorktrees,
+      },
+    });
+  };
+  const rejected: Array<[string, { path: string; gitAdmin: string }]> = [
+    ["inside the selected worktree", { path: nested, gitAdmin: secondAdmin }],
+    ["the selected admin directory", { path: second, gitAdmin: selectedAdmin }],
+    ["an admin directory outside worktrees", { path: second, gitAdmin: join(common, "refs") }],
+    ["the common Git directory", { path: common, gitAdmin: secondAdmin }],
+    ["the worktree parent", { path: dirname(worktreePath), gitAdmin: secondAdmin }],
+    ["a missing worktree", { path: join(root, "worktrees", "missing"), gitAdmin: secondAdmin }],
+  ];
+  for (const [label, owned] of rejected) {
+    await assert.rejects(launch([owned]), /cannot be bound without widening its boundary/, label);
+  }
+  await assert.rejects(launch([{ path: second, gitAdmin: secondAdmin }, { path: second, gitAdmin: secondAdmin }]),
+    /cannot be bound without widening its boundary/, "a duplicate");
+  assert.equal(existsSync(join(root, "worktrees", "missing")), false);
+
+  const isolation = await launch([{ path: second, gitAdmin: secondAdmin }]);
+  assert.equal(isolation?.backend, "bwrap");
+  if (isolation?.backend !== "bwrap") return;
+  assert.ok(isolation.writableBinds?.some((bind) => bind.source === second && bind.target === second));
+  assert.equal(isolation.protectedWorktree?.gitWritableRoots.at(-1), secondAdmin);
+  for (const path of [join(second, ".git"), join(secondAdmin, "gitdir"), join(secondAdmin, "config.worktree")]) {
+    assert.ok(isolation.readOnlyBinds?.includes(path), path);
+  }
+  assert.equal(readFileSync(join(secondAdmin, "config.worktree"), "utf8"), "");
 });
