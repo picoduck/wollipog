@@ -70,15 +70,17 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
           await expect(page.getByRole("alert").filter({ hasText: "Full Control activation is unavailable" })).toBeVisible();
           expect(await page.evaluate(() => document.documentElement.dataset.createSessionCount)).toBeUndefined();
           await page.route("**/api/full-control-campaigns/preflight", async (route) => {
-            const { session, proposal } = route.request().postDataJSON();
-            await route.fulfill({ json: { preflight: { supported: false, digest: "a".repeat(64), proposal,
-              plan: { ...session, config: { model: "source-fixture-model", effort: "high", permissionMode: "orchestrator" } },
-              capabilities: [{ capability: "Complete Execution Enforcement", state: "unsupported", reason: "Complete current enforcement is not proven." },
-                { capability: "Native Review and Usage", state: "unsupported", reason: "Native delivery and complete managed usage are not proven." },
-                { capability: "Evidence Delivery and Quality", state: "unsupported", reason: "Actual media delivery and quality are not proven." }], humanRequired: [],
+            const launch = route.request().postDataJSON();
+            expect(launch.repository).toBeUndefined();
+            await route.fulfill({ json: { preflight: { ready: false, digest: "a".repeat(64), inspectionCancellation: "supported",
+              summary: { repository: "example/full-control-fixture", evidence: { statement: "Screenshots are reviewed by the Orchestrator; video and external evidence need a Human (Human Required) until production video review (#1321) lands.", provider: null } },
+              advanced: { proposal: null, plan: { ...launch.overrides.session, config: { model: "source-fixture-model", effort: "high", permissionMode: "orchestrator" } } },
+              capabilities: [{ id: "execution_isolation", capability: "Execution Isolation", state: "unsupported", mandatory: true, reason: "Complete current enforcement is not proven." },
+                { id: "native_review", capability: "Controlled Cross-Model Review", state: "unsupported", mandatory: true, reason: "Native delivery and complete managed usage are not proven." },
+                { id: "video_evidence", capability: "Video Evidence Review", state: "human_required", mandatory: false, reason: "Actual media delivery and quality are not proven." }],
             } } });
           });
-          const fields: Record<string, string> = { Repository: "example/full-control-fixture", "Issue Numbers": "12", Objective: "Review the source fixture",
+          const fields: Record<string, string> = { "Issue Numbers": "12", Objective: "Review the source fixture",
             "Campaign Cost Limit (USD)": "20", "Campaign Tool Call Limit": "200", "Campaign Concurrency Limit": "2", "Maximum Authorized Issues": "10" };
           for (const [name, value] of Object.entries(fields)) await page.getByLabel(name, { exact: true }).fill(value);
           await page.getByRole("button", { name: "Check Full Control Preflight", exact: true }).click();

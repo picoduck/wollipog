@@ -28,57 +28,60 @@ not constitute actual media-quality or native admission proof.
 Unestablished facts are explicit. Codex permission-profile approvals disclose the session lifetime
 and remain human-owned; command/file one-time approvals keep their existing semantics.
 
-Final integration remains required work under #2940:
-
-- Compose issueAuthority, budgetAuthority, and evidenceAuthority from the reviewed prerequisite
-  contracts behind one authenticated-human selection. Never accept human identity or authorization
-  metadata from agent JSON, a role selection, a preset, or defaults.
-- Bind the exact repository/objective/issue boundary and permitted related follow-ups and effects.
-  Missing issue expansion or closure support must retain its Human Required gate.
-- Project budget.authority, original budget.sessionLimits, generated budget.rootAllocation,
-  spending and reservations, and budget.requiredNativeReview separately. Preserve the immutable
-  aggregate envelope and tighter per-Session ceilings. Exact native admission binds controller/CLI
-  hashes, version, read-only profile, account, and agent identity; a capability declaration or
-  fixture receipt cannot replace approved admission and actual live proof.
-- Disclose the actual artifact destination, retention, reviewer provider/model, media delivery and
-  quality. Keep the sole UI Evidence Approval gate. No extra evidence opt-in or fabricated media
-  readiness. Unsupported/external evidence continues to require a human.
-- Add the atomic authenticated Human launch/enable composition only after all prerequisites are
-  integrated. A preferred mode is not admission. Active revocation already uses the current
-  revision and revokes incompatible unused grants. Preserve harness, model, effort, isolation,
-  and completion choices.
-- Verify the complete live flow on final main, including informational completion, through #2939.
+The server half of the launch is integrated (see Atomic Launch below). Remaining work under
+#2940 is the simple web launch experience on that protocol and verification of the complete live
+flow on final main through #2939. Production video review remains #1321.
 
 The deterministic browser fixtures test the real components and the unsupported state. Their
 captures prove layout and launch fencing, not unattended readiness or live provider media support.
 
-## Atomic Launch Source Contract
+## Atomic Launch
 
-The Human-only `/api/full-control-campaigns/preflight` route shares the normal session validator
-through an internal inspection seam which returns before any stage, insert or provider call.
-It binds the resolved model, effort, provider permissions, selected workspace/target, isolation,
-child behavior, completion and exact finite proposal into a digest. A distinct admission endpoint
-requires request identity and that exact digest. Neither endpoint permits agent authorization
-metadata or falls back to ordinary session creation.
+`POST /api/full-control-campaigns/preflight` and `POST /api/full-control-campaigns` are
+Human-only. The request names a workspace (and optionally its Project), a task and/or issue
+numbers, and optional overrides (`FullControlLaunchRequest` in
+`packages/protocol/src/campaign-control-launch.ts`). The server derives everything else:
 
-The optional negotiated `campaignLaunchInspection` descriptor means only that this runner can
-inspect its registered workspace's sanitized GitHub origin and bounded exact issues. Numeric
-protocol 220, a preset, image support or a native-review descriptor cannot prove Full readiness.
-The inspection returns no origin credentials, local path, issue body or provider environment.
+- Repository from the runner's inspection of the registered workspace origin; objective from the
+  task (or the issue list); the root installation defaults to the controlled reviewer's Claude
+  Code installation, else the first available native Claude Code or Codex App Server one, and
+  the root joins the workspace's Project.
+- Concurrency from `behavior.maximumConcurrentChildren`; accepted follow-ups from the saved
+  follow-up policy (none for Recommend Only); cost and tool limits from the Project's child-session
+  defaults times the planned sessions, unless overridden; closure reasons default to completed.
+- `controlledReview` from the runner's discovered `campaignReview` profile.
 
-Production admission currently returns a blocked preflight: complete execution, native review,
-media, evidence and managed usage proof remain absent. This contract cannot enable Full Control
-from partial authority support or caller booleans. The source form has an exact proposal and an
-explicit authorization action, fenced by that complete preflight.
+The preflight returns `ready`, a digest, a concise `summary` (scope, budget, follow-up policy,
+evidence destination/provider with the verbatim retention disclosure, Human Required exceptions,
+blockers), per-capability readiness and an `advanced` block with the derived proposal and plan.
+Each capability is `verified`, `unsupported` (blocks launch, with an actionable reason) or
+`human_required` (a disclosed exception routing that decision class to the Human). Repository
+scope, the authority contract, accounting/budget, controlled review and the runner's enforced
+execution isolation are mandatory. Screenshot review is delegated when the Orchestrator can review
+images; video and external evidence are Human Required until #1321.
 
-Fixture Human admission exercises the internal transaction: root, Human issue-scope provenance,
-matching control/policy revision, original session ceilings, allowance, root reservation and request
-identity commit together. A provider command is sent only after commit. Duplicate identity reads
-the retained root without another send; changed identity or a late SQL failure cannot leave partial
-authority. A Hub send failure cannot prove zero escaped bytes, so the root and reservation remain
-retained with uncertain dispatch state and cannot replay automatically. These are temporary source
-fixture checks, never live authorization, native admission or media-readiness receipts.
+Admission requires request identity and the exact reviewed digest. It then mints the issue scope
+from the inspection and the Full Control boundary, and creates the Orchestrator root in one
+transaction: scope, matching control and policy revision, original Session ceilings, allowance,
+root reservation and request identity. The root is user-owned, so campaign spend and controlled
+review are charged to the authorizing Human. A provider command is sent only after commit.
+Duplicate identity returns the retained root without another send; a changed identity or a late
+SQL failure leaves no partial authority. A Hub send failure cannot prove that zero bytes escaped,
+so the root and reservation are retained with uncertain dispatch state and are never replayed
+automatically.
 
-The `full_control_launch_preflight` structured event answers which entry point was used, whether
-preflight was blocked and which capability categories were missing. Its request ID, digest and
-duration support correlation; it excludes proposal text, scope contents, origin URLs and credentials.
+The paced-media evidence envelope (`evidenceAuthority`) is minted by the same launch only when
+every peer declares the private media contract. The hosting control plane supplies its disclosures:
+private Session artifacts of the Human's organization, and the audited native providers with their
+advertised models. Disclosure revisions are part of the digest.
+
+The runner inspection lives only as long as its request. Request expiry or a closed connection
+drops the pending request, so a late result is discarded and never admits a launch. Version-2
+runners receive `campaign_launch_inspect_cancel` for that one request id; they stop scheduling
+issue reads and terminate only that inspection's commands, and a runner-side lifetime bounds a
+lost cancel. Version-1 runners report `inspectionCancellation: "unsupported"` and remain bounded
+by per-command timeouts.
+
+The `full_control_launch_preflight` and `full_control_launch_admission` structured events record
+the entry point, readiness, missing and Human Required capability ids, digest and duration. They
+exclude task text, scope contents, origin URLs and credentials.

@@ -71,17 +71,30 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     if (!runner || !runner.workspaces.some((workspace) => workspace.id === body.workspaceId)) {
       return reply.code(404).send({ error: "runner workspace not found" });
     }
+    // The simple request names a workspace; resolve its exact Project Location so saved Project
+    // defaults apply. Without one accessible Location the root is an explicit no-Project session.
+    if (body.projectLocationId === undefined && body.projectId !== null) {
+      const location = body.projectId === undefined ? db.findProjectLocation(body.runnerId, body.workspaceId)
+        : db.findProjectLocationForProject(body.projectId, body.runnerId, body.workspaceId);
+      const visible = location && db.canAccessProject(principal, location.projectId) ? location : null;
+      if (body.projectId !== undefined && !visible) return reply.code(404).send({ error: "project location not found" });
+      body.projectId = visible?.projectId ?? null;
+      body.projectLocationId = visible?.id ?? null;
+    }
     const sessionRequest = launchSessionRequest(body, runner);
     if (!sessionRequest) return reply.code(409).send({ error: "this runner has no available native Claude Code or Codex App Server installation for an Orchestrator" });
     const ownership = resolveSessionCreationOwnership(db, principal, sessionRequest);
     if (!ownership.ok) return reply.code(ownership.status).send({ error: ownership.error });
+    // Campaign allowance and controlled review are charged to the authorizing Human, so the root is
+    // user-owned even inside an organization Project; creation verifies the Project contains it.
+    const scope = { organizationId: principal.organizationId, owner: { kind: "user" as const, userId: principal.userId } };
     const creationContext = {
       defaultOwnerUserId: principal.userId,
       orchestratorDefaults: settings.view(principal),
       validateOrchestratorDefaults: (defaults: Parameters<OrchestratorSettings["compatibilityError"]>[1]) => settings.compatibilityError(principal, defaults),
     };
     let plan: PreparedCampaignLaunch | undefined;
-    const prepared = sessions.createSession(ownership.body, undefined, ownership.scope, false, false, false, {
+    const prepared = sessions.createSession(ownership.body, undefined, scope, false, false, false, {
       ...creationContext, inspectLaunchPlan: (value) => { plan = value; },
     });
     if (!plan) return reply.code(prepared.status).send({ error: prepared.error ?? "launch preparation failed" });
@@ -134,7 +147,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const control = authorizeFullControl(principal, issueScope, proposal, 1, now);
     if (control?.mode !== "full_control") return reply.code(409).send({ error: "the reviewed proposal is outside the Full Control schema", preflight });
     const evidence = preflight.summary.evidence;
-    const created = sessions.createSession(ownership.body, undefined, ownership.scope, false, false, false, {
+    const created = sessions.createSession(ownership.body, undefined, scope, false, false, false, {
       ...creationContext,
       humanCampaignLaunch: { principal, requestId: body.requestId!, digest: preflight.digest, control, issueScope,
         ...(evidence.envelope && evidence.provider?.reviewer.model ? { evidenceAuthority: {

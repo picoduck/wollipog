@@ -14993,7 +14993,7 @@ export class ControlPlaneDb {
         scope.authorizedByUserId !== principal.userId || scope.repository !== boundary.repository ||
         scope.revision !== 1 || boundary.issueScopeRevision !== 1 || boundary.revision !== 1 ||
         scope.authorizedAt !== boundary.authorizedAt || !boundary.budgetAuthority ||
-        !boundary.issueAuthority || scope.issueNumbers.length < 1 || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
+        !boundary.issueAuthority || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
         scope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(scope.issueNumbers).size !== scope.issueNumbers.length ||
         JSON.stringify(policy?.issueNumbers) !== JSON.stringify(scope.issueNumbers) ||
         boundary.budgetAuthority.costUsd === undefined || boundary.budgetAuthority.toolCalls === undefined ||

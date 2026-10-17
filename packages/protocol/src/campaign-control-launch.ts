@@ -29,7 +29,7 @@ export interface CampaignLaunchProposal {
  * authority field, provenance, readiness claim or evidence envelope. */
 export interface FullControlLaunchOverrides {
   /** Root Orchestrator selection. Omitted fields use the account's saved defaults. */
-  session?: Pick<CreateSessionRequest, "agentId" | "providerAccountId" | "title" | "useWorktree" | "config" | "orchestrator">;
+  session?: Partial<Pick<CreateSessionRequest, "agentId" | "providerAccountId" | "title" | "useWorktree" | "config" | "orchestrator">>;
   objective?: string;
   /** May only narrow the default operation set. */
   operations?: CampaignAuthorityOperation[];
