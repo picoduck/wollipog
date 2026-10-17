@@ -66,6 +66,10 @@ export function FullControlPreparation({ mode, onChange, disabled = false, prefe
   </section>;
 }
 
+const CAPABILITY_STATE_LABELS: Record<CampaignLaunchPreflight["capabilities"][number]["state"], string> = {
+  verified: "Verified", unsupported: "Blocks Launch", human_required: "Human Required",
+};
+
 function CampaignLaunchForm({ request, selectionValid, disabled, onCreated }: {
   request: CreateSessionRequest; selectionValid: boolean; disabled: boolean; onCreated: (id: string) => void;
 }) {
@@ -161,7 +165,7 @@ function CampaignLaunchForm({ request, selectionValid, disabled, onCreated }: {
         <div><dt>Resolved Root Effort</dt><dd>{fresh.advanced.plan.config.effort ? titleCaseLabel(fresh.advanced.plan.config.effort) : "Provider Default"}</dd></div>
         <div><dt>Resolved Provider Permissions</dt><dd>{fresh.advanced.plan.config.permissionMode ? titleCaseLabel(fresh.advanced.plan.config.permissionMode) : "Provider Default"}</dd></div>
       </dl>
-      <ul>{fresh.capabilities.map((capability) => <li key={capability.id}>{capability.capability}: {capability.reason}</li>)}</ul>
+      <ul>{fresh.capabilities.map((capability) => <li key={capability.id}>{capability.capability} ({CAPABILITY_STATE_LABELS[capability.state]}): {capability.reason}</li>)}</ul>
       <p className="section-note">{fresh.summary.evidence.statement} {fresh.summary.evidence.provider?.retentionDisclosure}</p>
     </>}
     {error && <Notice tone="danger" role="alert">{error}</Notice>}
