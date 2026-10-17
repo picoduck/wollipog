@@ -54,6 +54,14 @@ export interface FullControlLaunchRequest {
   preflightDigest?: string;
 }
 
+/** Enable Full Control on an existing root campaign (#2940). The preflight answers
+ * `{ preflight, expectedRevision }`; enabling echoes both after one explicit Human authorization. */
+export interface FullControlEnableRequest {
+  overrides?: Pick<FullControlLaunchOverrides, "objective" | "operations" | "delegatablePolicyIds" | "budget" | "issues">;
+  expectedRevision?: number;
+  preflightDigest?: string;
+}
+
 /** Internal server plan, produced by the ordinary creation validator before its first write. */
 export interface PreparedCampaignLaunch {
   runnerId: string;
@@ -119,7 +127,7 @@ export interface CampaignLaunchSummary {
     isolation: { mode: string; network: string } | null; strictProjectIsolation: boolean; integrationIsolation: boolean;
     completion: OrchestratorCampaignPolicy["behavior"]["completion"] };
   budget: { costUsd: number | null; toolCalls: number | null; concurrency: number; acceptedFollowUps: number;
-    source: "override" | "unset"; reviewIncluded: boolean };
+    source: "override" | "saved_defaults" | "unset"; reviewIncluded: boolean };
   followUps: { policy: OrchestratorCampaignPolicy["behavior"]["followUps"]; relatedFollowUps: boolean;
     maxIssues: number; closureReasons: Array<"completed" | "not_planned"> };
   evidence: {

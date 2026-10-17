@@ -21,6 +21,7 @@ import {
   type OrchestratorHarnessCapability,
   type OrchestratorSettingsView,
   type RunnerView,
+  validOrchestratorCampaignBudgetDefault,
 } from "@wollipog/protocol";
 import {
   agentHarnessIdentityFor,
@@ -42,8 +43,9 @@ const EXECUTION_KEYS = ["strictProjectIsolation", "integrationIsolation"] as con
 export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const input = value as Partial<OrchestratorDefaults>;
-  if (Object.keys(input).some((key) => !["behavior", "delegation", "execution", "controlMode"].includes(key))) return null;
+  if (Object.keys(input).some((key) => !["behavior", "delegation", "execution", "controlMode", "campaignBudget"].includes(key))) return null;
   if (input.controlMode !== undefined && input.controlMode !== "custom" && input.controlMode !== "full_control") return null;
+  if (input.campaignBudget !== undefined && input.campaignBudget !== null && !validOrchestratorCampaignBudgetDefault(input.campaignBudget)) return null;
   const behavior = input.behavior;
   const delegation = input.delegation;
   const execution = input.execution;
@@ -77,6 +79,8 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
         decisions[category] === "human" || decisions[category] === "orchestrator")) return null;
   return {
     ...(input.controlMode === undefined ? {} : { controlMode: input.controlMode }),
+    ...(input.campaignBudget === undefined ? {} : { campaignBudget: input.campaignBudget === null ? null
+      : { costUsd: input.campaignBudget.costUsd, toolCalls: input.campaignBudget.toolCalls } }),
     behavior: {
       childHarness,
       childModel: behavior.childModel,

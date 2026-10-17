@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
 import {
-  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
+  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
   campaignWorkflowOwner,
   type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
@@ -10,7 +10,7 @@ import {
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
-import { OrchestratorSettings } from "./orchestrator-settings.js";
+import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { authorizeFullControl, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { closureEvidence, publicationEvidence } from "./campaign-issue-authority.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
@@ -183,7 +183,7 @@ test("each missing mandatory capability blocks launch with a specific reason and
     { name: "no controlled reviewer", options: { runtime: { ...runtime, campaignReview: undefined } }, id: "native_review", reason: /executionIsolation\.mode "provider".*2\.1\.296/ },
     { name: "no isolation report", options: { runtime: { ...runtime, executionIsolation: undefined } }, id: "execution_isolation", reason: /does not report the execution isolation/ },
     { name: "unpriced model", options: { priced: false }, id: "accounting_budget", reason: /unpriced/ },
-    { name: "no budget", body: { ...launch, overrides: { ...launch.overrides, budget: undefined } }, id: "accounting_budget", reason: /No campaign cost and tool-call budget/ },
+    { name: "no budget", body: { ...launch, overrides: { ...launch.overrides, budget: undefined } }, id: "accounting_budget", reason: /No campaign budget yet/ },
     { name: "root session ceiling", body: { ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session,
       config: { model: "claude-opus-5-5", permissionMode: "orchestrator", costBudgetUsd: 50, maxToolCalls: 500 } } } },
       id: "native_review", reason: /root session's own cost or tool-call limit/ },
@@ -590,4 +590,123 @@ test("uncertain dispatch retains the root reservation and identity without retry
     assert.equal(sends, 1);
     assert.equal(f.db.claimHumanCampaignDispatch(id), false);
   } finally { f.db.close(); }
+});
+
+const savedBudget = { costUsd: 30, toolCalls: 300 };
+const saveBudget = (f: ReturnType<typeof fixture>, campaignBudget: { costUsd: number; toolCalls: number } | null) =>
+  f.settings.update(f.human, { defaults: { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), campaignBudget } });
+
+test("the saved Full Control budget becomes the launch envelope, an override replaces it, and none asks for one inline", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const plain: FullControlLaunchRequest = { ...launch, overrides: { session: launch.overrides!.session } };
+    const unset = await preflight(server, plain);
+    assert.equal(unset.preflight!.summary.budget.source, "unset");
+    assert.equal(unset.preflight!.capabilities.find((item) => item.id === "accounting_budget")!.reason,
+      "No campaign budget yet: enter a cost limit and a tool-call limit.");
+    saveBudget(f, savedBudget);
+    const saved = await preflight(server, plain);
+    assert.equal(saved.preflight!.ready, true, JSON.stringify(saved.preflight!.summary.blockers));
+    assert.deepEqual([saved.preflight!.summary.budget.costUsd, saved.preflight!.summary.budget.toolCalls, saved.preflight!.summary.budget.source],
+      [30, 300, "saved_defaults"]);
+    assert.notEqual(saved.preflight!.digest, unset.preflight!.digest);
+    const overridden = await preflight(server, { ...plain, overrides: { ...plain.overrides, budget: { costUsd: 12 } } });
+    assert.deepEqual([overridden.preflight!.summary.budget.costUsd, overridden.preflight!.summary.budget.toolCalls, overridden.preflight!.summary.budget.source],
+      [12, 300, "override"]);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...plain, requestId: "saved-budget", preflightDigest: saved.preflight!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const control = f.db.getSession(admitted.json().id)!.orchestratorPolicy!.control!;
+    if (control.mode !== "full_control") throw new Error("Full Control expected");
+    assert.deepEqual([control.boundary.budgetAuthority!.costUsd, control.boundary.budgetAuthority!.toolCalls], [30, 300]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+
+/** A live Custom campaign whose issue scope this Human established, never Full Control before. */
+function customCampaign(f: ReturnType<typeof fixture>, id = "custom-root", authorizedByUserId = f.human.userId) {
+  const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+  policy.issueScope = { repository: "owner/repo", issueNumbers: [12], revision: 1, authorizedByUserId, authorizedAt: 1 };
+  policy.issueNumbers = [12];
+  f.db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "claude", title: "Deliver #12", useWorktree: false,
+    driver: "claude-code", creationActor: "human", scope: f.scope, config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, now: 2,
+    role: "orchestrator", orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } });
+  f.db.updateSessionStatus(id, "running", 3);
+  return id;
+}
+
+test("an existing campaign enables Full Control through one exact reviewed authorization and keeps Revoke", async () => {
+  const f = fixture();
+  saveBudget(f, savedBudget);
+  const { server } = await app(f);
+  try {
+    const rootId = customCampaign(f);
+    const url = `/api/sessions/${rootId}/orchestrator-campaign/full-control`;
+    for (const auth of ["", "Bearer agent"]) {
+      assert.equal((await server.inject({ method: "POST", url: `${url}/preflight`, headers: auth ? { authorization: auth } : {}, payload: {} })).statusCode, 403);
+    }
+    const checked = await server.inject({ method: "POST", url: `${url}/preflight`, headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: enablePreflight, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(enablePreflight.ready, true, JSON.stringify(enablePreflight.summary.blockers));
+    assert.equal(enablePreflight.capabilities.find((item) => item.id === "repository_scope")!.reason,
+      "This campaign's Human-established scope is owner/repo with issues #12.");
+    assert.equal(enablePreflight.summary.budget.source, "saved_defaults");
+    assert.equal(f.sent.filter((message) => message.type === "campaign_launch_inspect").length, 0, "enabling needs no workspace inspection");
+    for (const stale of [{ expectedRevision: expectedRevision + 1, preflightDigest: enablePreflight.digest },
+      { expectedRevision, preflightDigest: "f".repeat(64) }]) {
+      const refused = await server.inject({ method: "POST", url, headers: { authorization: "Bearer human" }, payload: stale });
+      assert.equal(refused.statusCode, 409, JSON.stringify(stale));
+      assert.match(refused.json().error, /changed; refresh/);
+    }
+    assert.equal(f.db.getSession(rootId)!.orchestratorPolicy!.control, undefined, "a refused enable changes nothing");
+    const enabled = await server.inject({ method: "POST", url, headers: { authorization: "Bearer human" },
+      payload: { expectedRevision, preflightDigest: enablePreflight.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const root = f.db.getSession(rootId)!;
+    const control = root.orchestratorPolicy!.control!;
+    if (control.mode !== "full_control") throw new Error("Full Control expected");
+    assert.equal(root.parentControlPolicy!.revision, expectedRevision + 1);
+    assert.equal(control.boundary.authorizedByUserId, f.human.userId);
+    assert.deepEqual([control.boundary.budgetAuthority!.costUsd, control.boundary.budgetAuthority!.toolCalls], [30, 300]);
+    assert.deepEqual(control.boundary.budgetAuthority!.controlledReview, review);
+    for (const category of WORKFLOW_DECISION_CATEGORIES) {
+      assert.equal(f.db.campaignProjection(rootId)!.decisionOwners[category], "orchestrator", category);
+    }
+    const replay = await server.inject({ method: "POST", url, headers: { authorization: "Bearer human" },
+      payload: { expectedRevision, preflightDigest: enablePreflight.digest } });
+    assert.equal(replay.statusCode, 409, "an enabled revision cannot be replayed");
+    const revoked = f.sessions.setCampaignControl(rootId, { mode: "custom" }, root.parentControlPolicy!.revision, f.human);
+    assert.ok(revoked.ok, revoked.error ?? "Revoke stays the ordinary operation");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("enabling an existing campaign is blocked by another person's scope, participant ceilings and a missing budget", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  const check = async (id: string, payload: object = {}) => (await server.inject({ method: "POST",
+    url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload })).json().preflight as CampaignLaunchPreflight;
+  try {
+    const foreign = customCampaign(f, "foreign-root", "someone-else");
+    assert.equal((await check(foreign, { overrides: { budget: savedBudget } })).capabilities.find((item) => item.id === "repository_scope")!.reason,
+      "Only the person who established this campaign's issue scope can enable Full Control for it.");
+    const rootId = customCampaign(f);
+    const unbudgeted = await check(rootId);
+    assert.equal(unbudgeted.ready, false);
+    assert.equal(unbudgeted.summary.budget.source, "unset");
+    assert.equal(unbudgeted.capabilities.find((item) => item.id === "native_review")!.state, "verified");
+    f.db.createSession({ id: "limited-child", parentSessionId: rootId, runnerId: "r", workspaceId: "w", agentId: "claude", title: "child",
+      useWorktree: false, creationActor: "agent", driver: "claude-code", config: { model: "claude-opus-5-5" }, now: 3 });
+    f.db.updateSessionStatus("limited-child", "running", 4);
+    f.db.updateSessionCostBudget("limited-child", 5, 4);
+    const limited = await check(rootId, { overrides: { budget: savedBudget } });
+    assert.equal(limited.ready, false);
+    assert.match(limited.capabilities.find((item) => item.id === "native_review")!.reason, /limits some of this campaign's sessions already hold/);
+    f.db.updateSessionStatus("limited-child", "completed", 5);
+    assert.equal((await check(rootId, { overrides: { budget: savedBudget } })).ready, true, "a finished participant no longer blocks");
+    assert.equal((await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: { overrides: { session: { agentId: "claude" } } } })).statusCode, 400,
+      "an existing root's harness cannot be overridden");
+  } finally { await server.close(); f.db.close(); }
 });

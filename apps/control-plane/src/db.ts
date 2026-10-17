@@ -13,7 +13,7 @@ import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePri
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
-import { validCampaignControl, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
+import { validCampaignControl, validOrchestratorCampaignBudgetDefault, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
@@ -2625,6 +2625,7 @@ CREATE TABLE IF NOT EXISTS agent_harness_defaults (
 CREATE TABLE IF NOT EXISTS orchestrator_settings (
   user_id                     TEXT PRIMARY KEY,
   control_mode                TEXT CHECK (control_mode IN ('custom','full_control')),
+  campaign_budget             TEXT,
   child_harness               TEXT,
   child_model                 TEXT,
   child_effort                TEXT,
@@ -6914,6 +6915,9 @@ export class ControlPlaneDb {
     if (!(db.prepare("PRAGMA table_info(orchestrator_settings)").all() as Array<{ name: string }>).some((column) => column.name === "control_mode")) {
       db.exec("ALTER TABLE orchestrator_settings ADD COLUMN control_mode TEXT CHECK (control_mode IN ('custom','full_control'))");
     }
+    if (!(db.prepare("PRAGMA table_info(orchestrator_settings)").all() as Array<{ name: string }>).some((column) => column.name === "campaign_budget")) {
+      db.exec("ALTER TABLE orchestrator_settings ADD COLUMN campaign_budget TEXT");
+    }
     if (needsCreationActorBackfill) {
       // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
       // Orchestrators qualify only when their already-persisted campaign snapshot establishes a
@@ -10831,11 +10835,12 @@ export class ControlPlaneDb {
 
   getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
     const row = this.stmt(
-      `SELECT control_mode, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+      `SELECT control_mode, campaign_budget, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
               strict_project_isolation, integration_isolation, parent_control, decision_policy, updated_at
        FROM orchestrator_settings WHERE user_id=?`,
     ).get(userId) as {
       control_mode: OrchestratorDefaults["controlMode"] | null;
+      campaign_budget: string | null;
       child_harness: string | null;
       child_model: string | null;
       child_effort: string | null;
@@ -10851,9 +10856,11 @@ export class ControlPlaneDb {
     if (!row) return null;
     const decisions = parentControlDecisionPolicyFromJson(row.decision_policy);
     if (!decisions) return null;
+    const campaignBudget = parseJson<unknown>(row.campaign_budget);
     return {
       defaults: {
         ...(row.control_mode == null ? {} : { controlMode: row.control_mode }),
+        ...(validOrchestratorCampaignBudgetDefault(campaignBudget) ? { campaignBudget } : {}),
         behavior: {
           // Saved before #3247 under a Machine-local agent id; read as the harness it names.
           childHarness: canonicalChildHarness(parseJson<unknown>(row.child_harness)),
@@ -10903,6 +10910,11 @@ export class ControlPlaneDb {
       JSON.stringify(defaults.delegation.decisions),
       now,
     );
+    // Omission keeps the saved envelope for clients that predate it; null explicitly clears it.
+    if (defaults.campaignBudget !== undefined) {
+      this.stmt("UPDATE orchestrator_settings SET campaign_budget=? WHERE user_id=?")
+        .run(defaults.campaignBudget === null ? null : JSON.stringify(defaults.campaignBudget), userId);
+    }
   }
 
   setAgentHarnessDefault(
