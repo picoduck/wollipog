@@ -86,6 +86,15 @@ if (process.platform === "linux") {
   console.log("compiled Claude provider pipe helper ->", claudePipeHelper);
 }
 
+// Protected sessions that may delete refs run under a fixed Landlock helper that keeps special
+// files out of the relocated packed-refs directory (#3316).
+const landlockHelper = join(buildDir, "landlock-special-files");
+if (process.platform === "linux") {
+  execFileSync("/usr/bin/cc", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", "-static",
+    join(runner, "native", "landlock-special-files.c"), "-o", landlockHelper], { stdio: "inherit" });
+  console.log("compiled Landlock special-file helper ->", landlockHelper);
+}
+
 // Stop here when only validating the bundle (CI / quick check).
 if (process.argv.includes("--bundle-only")) {
   console.log("bundle-only: skipping SEA packaging");
@@ -98,6 +107,7 @@ const blob = join(buildDir, "runner.blob");
 const assets = { "wollipog/provider-home-lease-worker": leaseWorker };
 if (process.platform === "linux" || process.platform === "darwin") assets["wollipog/provider-home-lease-io"] = leaseIoHelper;
 if (process.platform === "linux") assets["wollipog/claude-provider-pipe"] = claudePipeHelper;
+if (process.platform === "linux") assets["wollipog/landlock-special-files"] = landlockHelper;
 if (process.platform === "darwin") {
   const helper = join(buildDir, "macos-skill-snapshots");
   execFileSync("/usr/bin/clang", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror",

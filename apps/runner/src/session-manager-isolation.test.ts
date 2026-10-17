@@ -13,6 +13,8 @@ import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js"
 import { providerStateKey } from "./execution-isolation.js";
 import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
 import { requestedWorktreeBoundary, setStatfsForTests } from "./worktree.js";
+import { setLandlockSpecialFilesHelperForTests } from "./landlock-special-files.js";
+import { resetPackedRefsRelocationsForTests } from "./packed-refs-relocation.js";
 
 /** Cloud placements snapshot the session's real host worktree and launch re-proves that exact
  * coordinate before any adapter runs, so these fixtures materialize one instead of naming a path
@@ -1595,6 +1597,68 @@ test("a managed launch binds only this session's other worktrees (#3316)", async
     assert.equal(observed?.protectedWorktree?.gitWritableRoots.includes(foreignAdmin), false);
     assert.equal(JSON.stringify(observed?.additionalWritableRoots ?? []).includes(foreignAdmin), false);
   } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a managed launch relocates packed refs only when the Landlock helper proved enforcement (#3316)", async () => {
+  if (process.platform !== "linux") return;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-packed-refs-")));
+  const home = mkdtempSync(join(tmpdir(), "wollipog-managed-packed-refs-home-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repoPath, worktreePath } = hostWorktree(root, "s1");
+    execFileSync("git", ["-C", repoPath, "pack-refs", "--all"]);
+    const common = realpathSync(join(repoPath, ".git"));
+    const helperPath = join(root, "landlock-helper");
+    writeFileSync(helperPath, "");
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta(), repoPath, worktreePath, worktreeBranch: "agent/s1", env: { HOME: home },
+      worktrees: [{ id: "legacy", path: worktreePath, branch: "agent/s1", source: "legacy" }],
+    });
+    let observed: Parameters<typeof resolveExecutionIsolation>[3];
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+      prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+    });
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) => {
+        observed = state;
+        return resolveExecutionIsolation(policy, context, {
+          platform: "linux", uid: () => 1000, nativeEnvironment: () => ({ HOME: home }),
+          resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+        }, state);
+      },
+      async () => {}, async () => {}, async () => {},
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.verifySelectedWorktreeBeforeLaunch = async () => true;
+
+    // No proven helper: the repository keeps its stock layout and nothing new is bound.
+    setLandlockSpecialFilesHelperForTests(() => null);
+    const unavailable = await internals.resolveLaunchIsolation(store.readMeta("s1"), worktreePath);
+    assert.equal(observed?.packedRefs, undefined);
+    assert.equal(unavailable?.backend === "bwrap" ? unavailable.packedRefs : undefined, undefined);
+    assert.ok(lstatSync(join(common, "packed-refs")).isFile());
+
+    setLandlockSpecialFilesHelperForTests(() => ({ path: helperPath, verify: () => {} }));
+    const isolation = await internals.resolveLaunchIsolation(store.readMeta("s1"), worktreePath);
+    const directory = join(common, "wollipog-refs");
+    assert.deepEqual(observed?.packedRefs, { directory, helperPath });
+    assert.deepEqual(isolation?.backend === "bwrap" ? isolation.packedRefs : undefined, { directory, helperPath });
+    assert.ok(lstatSync(join(common, "packed-refs")).isSymbolicLink());
+    assert.equal(observed?.protectedWorktree?.gitWritableRoots.includes(directory), false,
+      "the directory is never an ordinary Git root; only the helper-wrapped bind carries it");
+  } finally {
+    setLandlockSpecialFilesHelperForTests();
+    resetPackedRefsRelocationsForTests();
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

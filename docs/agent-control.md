@@ -581,8 +581,8 @@ builds to write inside the worktree or another authorized scratch path.
 An ACP provider in a selected managed Linux worktree cannot launch under `provider` mode because
 the runner does not know which provider state root to preserve. Git commands that write shared
 administration outside `objects`, `refs`, and `logs` can also fail inside this boundary. These
-include deleting a ref (so a rebase or cherry-pick leaves `CHERRY_PICK_HEAD` behind; #3316),
-repository config changes, setting an upstream with `git push -u`, and creating a worktree
+include deleting a ref when the host cannot enforce the Landlock helper described in "Shared Git
+Metadata" (a rebase or cherry-pick then leaves `CHERRY_PICK_HEAD` behind), repository config changes, setting an upstream with `git push -u`, and creating a worktree
 directly with Git; use the runner's managed worktree operation for the latter. Git layouts that
 cannot supply canonical linked-worktree administration and all four narrow writable Git roots fail
 before provider launch, including a linked-worktree Project Location, missing Git logs, and
@@ -612,6 +612,49 @@ mount point, so it cannot be renamed or removed from inside. A worktree is bound
 directory's `gitdir` back-pointer names it, so a rewritten `.git` link cannot claim another
 session's admin directory. Attached worktrees and every other session's worktrees are never bound.
 Codex's own workspace sandbox still grants only the selected worktree.
+
+### Shared Git Metadata
+
+Git deletes any ref, including the `CHERRY_PICK_HEAD` and `AUTO_MERGE` pseudo-refs a rebase or
+cherry-pick removes when it finishes, by first creating `packed-refs.lock` beside `packed-refs`
+(#3316). The common Git directory's root stays read-only, because a new entry there, such as a
+`commondir` file, would redirect the operator's own Git. Git's lockfile code resolves a symlinked
+`packed-refs` before it appends `.lock`, so a protected launch can move the file to
+`wollipog-refs/packed-refs` inside the common Git directory, leave a relative symlink in its place,
+and bind only `wollipog-refs` writable.
+
+Host Git, run by the runner or by the operator, follows that file by name. A sandbox that could
+replace it with a symlink would steer Git's next packed-refs rewrite, which `git gc --auto` also
+performs, to any path the runner's user can write. The directory is therefore bound only together
+with a fixed Landlock helper (`apps/runner/native/landlock-special-files.c`) that runs the provider
+and everything it starts. Beneath every other writable root the helper grants creating symlinks,
+FIFOs, sockets and device nodes, and moving or hard-linking files between directories; it grants
+none of these in `wollipog-refs`. Renames and hard links into it from another mount already fail,
+so `packed-refs` there is always a regular file or absent. Git's own lock-and-rename stays within
+the directory and works unchanged.
+
+The runner stages the helper once and proves enforcement on the host before the first relocation:
+a restricted child must be able to create a symlink and rename across directories beneath an allowed
+directory, and must be refused a symlink elsewhere. Landlock ABI 2 (Linux 5.19) is required, because
+ABI 1 refuses every cross-directory rename. When the proof fails, the launch proceeds exactly as
+before, the repository keeps its stock layout, and ref deletion stays unavailable. The runner logs
+the reason once. The move takes Git's own `packed-refs.lock` and the relocated directory's lock; if
+either is held, that launch proceeds without the directory.
+
+The runner checks the relocated file before every launch that binds it and again whenever a
+provider exits. It must be a plain, singly linked file owned by the runner's user, or absent, and
+modes the sandbox changed are restored. Anything else is moved to `wollipog-refs-quarantine/` in the
+read-only root and the launch is refused. Codex's own workspace sandbox does not grant
+`wollipog-refs`, so ref deletion stays unavailable inside a Codex turn.
+
+To restore a plain `packed-refs`, stop every protected session in the repository, then run these
+commands in its common Git directory (`git rev-parse --git-common-dir`). The next protected launch
+on a host that can enforce the helper relocates it again.
+
+```sh
+if [ -f wollipog-refs/packed-refs ]; then mv -f wollipog-refs/packed-refs packed-refs; else rm -f packed-refs; fi
+rm -rf wollipog-refs wollipog-refs-quarantine
+```
 
 ## Runner Hook State at the Sandbox Boundary
 

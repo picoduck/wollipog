@@ -117,7 +117,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
@@ -125,6 +125,10 @@ import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } 
 import {
   managedWorktreeAdminMatches, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths,
 } from "./managed-worktree-sandbox.js";
+import { landlockSpecialFilesHelper, landlockSpecialFilesUnavailableReason } from "./landlock-special-files.js";
+import {
+  PackedRefsViolationError, recordBoundPackedRefs, relocatePackedRefs, verifyBoundPackedRefs, type PackedRefsRelocation,
+} from "./packed-refs-relocation.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundJobStopResult,
@@ -3221,6 +3225,8 @@ export class SessionManager {
       this.cancelActiveTurnWait(sessionId);
       this.releaseActiveTurn(sessionId);
       if (refreshCapacityInventory) this.refreshCapacityInventorySession(sessionId);
+      // The exited sandbox could chmod the relocated packed-refs directory (#3316).
+      for (const report of verifyBoundPackedRefs()) console.error(`[runner] ${report}`);
       this.scheduleDeferredSafeWorktreeReaps(sessionId, "provider exit");
     }
     return deleted;
@@ -8668,6 +8674,7 @@ export class SessionManager {
     let gitWritableRoots: string[] = [];
     let requiredReadOnlyPaths: string[] = [];
     const ownedWorktrees: Array<{ path: string; gitAdmin: string }> = [];
+    let packedRefs: { directory: string; helperPath: string } | undefined;
     if (protectedWorktree) {
       const selected = { worktreePath: protectedWorktree, repoPath: meta.repoPath };
       const gitLink = join(protectedWorktree, ".git");
@@ -8701,6 +8708,7 @@ export class SessionManager {
           !requiredReadOnlyPaths.every((path) => readOnlyPaths.includes(path))) {
         throw new Error("managed worktree Git registration could not be protected before provider launch");
       }
+      packedRefs = this.prepareRelocatedPackedRefs(meta, dirname(gitWritableRoots[1]!));
     }
     // The runner's hook state directory is hidden from every native sandboxed launch (#1336),
     // whatever the driver: nothing a provider runs has a use for it, and only the guard's own
@@ -8721,6 +8729,7 @@ export class SessionManager {
         path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
         ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
       } } : {}),
+      ...(packedRefs ? { packedRefs } : {}),
       ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
@@ -8735,6 +8744,42 @@ export class SessionManager {
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
   }
+
+  /**
+   * Let a protected launch delete refs (#3316): relocate the repository's packed-refs behind the
+   * runner's link and bind its directory, but only when the Landlock helper has proven on this host
+   * that it keeps special files out of it. Without the helper the launch proceeds exactly as before
+   * and ref deletion stays unavailable. A substituted relocated entry is quarantined and refuses
+   * the launch; a held Git lock leaves deletion unavailable until the next launch.
+   */
+  private prepareRelocatedPackedRefs(
+    meta: SessionMeta,
+    commonGitDir: string,
+  ): { directory: string; helperPath: string } | undefined {
+    const helper = landlockSpecialFilesHelper(this.stateDir);
+    if (!helper) {
+      if (!this.landlockUnavailableReported) {
+        this.landlockUnavailableReported = true;
+        console.warn(`[runner] Git ref deletion stays unavailable in protected sandboxes: ${landlockSpecialFilesUnavailableReason()}`);
+      }
+      return undefined;
+    }
+    let relocation: PackedRefsRelocation;
+    try {
+      relocation = relocatePackedRefs(commonGitDir);
+    } catch (error) {
+      if (error instanceof PackedRefsViolationError) throw error;
+      relocation = { status: "unavailable", reason: errText(error) };
+    }
+    if (relocation.status === "unavailable") {
+      console.warn(`[session ${meta.sessionId}] Git ref deletion stays unavailable in the sandbox: ${relocation.reason}`);
+      return undefined;
+    }
+    recordBoundPackedRefs(commonGitDir);
+    return { directory: relocation.directory, helperPath: helper.path };
+  }
+
+  private landlockUnavailableReported = false;
 
   private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
     if (process.platform !== "linux" || meta.context.kind !== "native" || !meta.worktreePath ||

@@ -9,6 +9,7 @@ import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
+import { LANDLOCK_SPECIAL_FILES_TARGET } from "./landlock-special-files.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
@@ -1256,4 +1257,60 @@ test("Direct WSL provider invocations use collision-free bounded pidfiles", () =
   for (const value of [first, second]) {
     assert.match(value, /^\/var\/lib\/wollipog-wsl-launcher\/session\/relay\/provider-[a-f0-9]{32}\.pgid$/u);
   }
+});
+
+test("buildBwrapArgs binds the relocated packed-refs directory only under the Landlock helper (#3316)", () => {
+  const isolation = {
+    backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "inherit" as const,
+    writableBinds: [
+      { source: "/data/provider", target: "/home/me/.claude" },
+      { source: "/work/trees/s1.requested", target: "/work/trees/s1.requested" },
+    ],
+    protectedWorktree: {
+      parent: "/work/trees", path: "/work/trees/s1",
+      gitWritableRoots: ["/repo/.git/worktrees/s1", "/repo/.git/objects", "/repo/.git/refs", "/repo/.git/logs"],
+    },
+    readOnlyBinds: ["/work/trees/s1/.git"],
+  };
+  const plain = buildBwrapArgs({ command: "/usr/bin/agent", args: ["--flag"], cwd: "/work/trees/s1" }, isolation);
+  assert.equal(plain.includes(LANDLOCK_SPECIAL_FILES_TARGET), false);
+  assert.equal(plain.includes("/repo/.git/wollipog-refs"), false);
+
+  const args = buildBwrapArgs({ command: "/usr/bin/agent", args: ["--flag"], cwd: "/work/trees/s1" }, {
+    ...isolation, packedRefs: { directory: "/repo/.git/wollipog-refs", helperPath: "/data/landlock/helper" },
+  });
+  const bind = args.findIndex((value, index) => value === "--bind" && args[index + 1] === "/repo/.git/wollipog-refs");
+  const logs = args.findIndex((value, index) => value === "--bind" && args[index + 1] === "/repo/.git/logs");
+  const readOnly = args.findIndex((value, index) => value === "--ro-bind" && args[index + 1] === "/work/trees/s1/.git");
+  assert.ok(bind > logs && readOnly > bind, args.join(" "));
+  const helper = args.findIndex((value, index) => value === "--ro-bind" && args[index + 1] === "/data/landlock/helper");
+  assert.ok(helper > args.indexOf("--tmpfs"));
+  assert.equal(args[helper + 2], LANDLOCK_SPECIAL_FILES_TARGET);
+  const command = args.slice(args.indexOf("--") + 1);
+  assert.equal(command[0], LANDLOCK_SPECIAL_FILES_TARGET);
+  const separator = command.indexOf("--");
+  assert.deepEqual(command.slice(separator + 1), ["/usr/bin/agent", "--flag"]);
+  const allowed = command.slice(1, separator).filter((_, index) => index % 2 === 1);
+  assert.deepEqual(command.slice(1, separator).filter((_, index) => index % 2 === 0), allowed.map(() => "--allow"));
+  assert.deepEqual(allowed.sort(), [
+    "/dev", "/home/me/.claude", "/repo/.git/logs", "/repo/.git/objects", "/repo/.git/refs",
+    "/repo/.git/worktrees/s1", "/tmp", "/work/trees/s1", "/work/trees/s1.requested",
+  ]);
+});
+
+test("buildBwrapArgs refuses a relocated packed-refs directory any writable root would cover", () => {
+  const base = {
+    backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "inherit" as const,
+    protectedWorktree: { parent: "/work/trees", path: "/work/trees/s1", gitWritableRoots: ["/repo/.git/objects"] },
+    packedRefs: { directory: "/repo/.git/wollipog-refs", helperPath: "/data/landlock/helper" },
+  };
+  for (const target of ["/repo/.git", "/repo/.git/wollipog-refs", "/repo/.git/wollipog-refs/inner", "/"]) {
+    assert.throws(() => buildBwrapArgs({ command: "/bin/sh", args: [], cwd: "/work/trees/s1" }, {
+      ...base, writableBinds: [{ source: target, target }],
+    }), /overlaps the relocated packed-refs directory/, target);
+  }
+  assert.throws(() => buildBwrapArgs({ command: "/bin/sh", args: [], cwd: "/work/tree" }, {
+    backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+    packedRefs: { directory: "/repo/.git/wollipog-refs", helperPath: "/data/landlock/helper" },
+  }), /only for a protected worktree/);
 });

@@ -20,6 +20,7 @@ import {
   type WslBwrapPrepareRequest,
 } from "./wsl-bwrap-launcher.js";
 import { WSL_AGENT_CONTROL_PRIVATE_DIR } from "./wsl-agent-control.js";
+import { RELOCATED_PACKED_REFS_DIRECTORY } from "./packed-refs-relocation.js";
 
 interface IsolationDeps {
   platform: NodeJS.Platform;
@@ -150,6 +151,9 @@ export interface IsolationStateOptions {
     requiredReadOnlyPaths: string[];
     ownedWorktrees?: Array<{ path: string; gitAdmin: string }>;
   };
+  /** The protected worktree repository's relocated packed-refs directory and the staged Landlock
+   * helper that must run the provider whenever it is bound writable (#3316). */
+  packedRefs?: { directory: string; helperPath: string };
   /** Preserve the installed provider's real transcript and credential directory when a managed
    * Linux worktree forces bwrap over a runner configured for provider isolation. */
   preserveProviderHome?: boolean;
@@ -893,6 +897,17 @@ export async function resolveExecutionIsolation(
   const commonGitDir = protectedWorktree
     ? await managedGitBoundary(protectedWorktree.gitWritableRoots, protectedWorktree.path, runtime)
     : undefined;
+  let packedRefs: { directory: string; helperPath: string } | undefined;
+  if (state?.packedRefs) {
+    const { directory, helperPath } = state.packedRefs;
+    if (!protectedWorktree || !commonGitDir ||
+        directory !== posix.join(commonGitDir, RELOCATED_PACKED_REFS_DIRECTORY) ||
+        await runtime.realpathNative(directory) !== directory || !(await lstat(directory)).isDirectory() ||
+        !posix.isAbsolute(helperPath) || await runtime.realpathNative(helperPath) !== helperPath) {
+      throw new Error("the relocated packed-refs directory does not belong to the protected worktree's repository");
+    }
+    packedRefs = { directory, helperPath };
+  }
   const ownedWorktrees = state?.protectedWorktree?.ownedWorktrees ?? [];
   if (protectedWorktree && commonGitDir) {
     for (const owned of ownedWorktrees) {
@@ -985,6 +1000,7 @@ export async function resolveExecutionIsolation(
     ...(state?.preserveProviderHome ? { preservesProviderHome: true } : {}),
     ...(writableBinds.length ? { writableBinds } : {}),
     ...(protectedWorktree ? { protectedWorktree } : {}),
+    ...(packedRefs ? { packedRefs } : {}),
     ...(readOnlyBinds.length ? { readOnlyBinds } : {}),
     ...(guardStateMask ? { guardStateMask } : {}),
   };

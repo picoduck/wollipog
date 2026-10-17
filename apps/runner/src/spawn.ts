@@ -35,6 +35,7 @@ import {
   type WslAgentControlLaunch,
 } from "./wsl-agent-control.js";
 import { buildWslBwrapRelayArgs } from "./wsl-bwrap-launcher.js";
+import { LANDLOCK_SPECIAL_FILES_TARGET } from "./landlock-special-files.js";
 import {
   cancelClaudeNamespaceProvider,
   claudeNamespaceFor,
@@ -181,6 +182,10 @@ export interface BwrapSpawnIsolation {
   claudePipeHelperDataDir?: string;
   /** Internal, attested bind points for a session-owned Claude namespace. */
   claudeNamespace?: { helperPath: string; taskDirectory: string };
+  /** The relocated packed-refs directory of a protected worktree's repository (#3316). It is bound
+   * writable only together with the Landlock helper, which runs the command and leaves the sandbox
+   * able to create nothing but regular files and directories in it. */
+  packedRefs?: { directory: string; helperPath: string };
 }
 
 /** Exact target-local launcher authorization. This is deliberately not `bwrap`: generic WSL
@@ -360,6 +365,26 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
   const childBinds = protectedChild
     ? (isolation.writableBinds ?? []).filter((bind) => within(protectedChild, bind.target))
     : [];
+  const packedRefs = isolation.packedRefs;
+  // Landlock rules grant beneath a hierarchy, so the helper gets every other writable root and
+  // never the relocated directory or anything containing it; read-only mounts need no rule.
+  let landlockRoots: string[] = [];
+  if (packedRefs) {
+    if (!isolation.protectedWorktree || !posix.isAbsolute(packedRefs.directory) || !posix.isAbsolute(packedRefs.helperPath)) {
+      throw new Error("the relocated packed-refs directory is bound only for a protected worktree");
+    }
+    landlockRoots = [...new Set([
+      "/tmp", "/dev",
+      ...(isolation.writableBinds ?? []).map((bind) => bind.target),
+      ...(!protectedChild ? [opts.cwd] : []),
+      isolation.protectedWorktree.path,
+      ...isolation.protectedWorktree.gitWritableRoots,
+    ])];
+    if (landlockRoots.some((root) => root === packedRefs.directory || within(root, packedRefs.directory) ||
+        within(packedRefs.directory, root))) {
+      throw new Error("a writable root overlaps the relocated packed-refs directory");
+    }
+  }
   return [
     ...isolation.args,
     "--die-with-parent",
@@ -386,6 +411,7 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
         "--bind", isolation.protectedWorktree.path, isolation.protectedWorktree.path,
         ...childBinds.flatMap((bind) => ["--bind", bind.source, bind.target]),
         ...isolation.protectedWorktree.gitWritableRoots.flatMap((path) => ["--bind", path, path]),
+        ...(packedRefs ? ["--bind", packedRefs.directory, packedRefs.directory] : []),
       ]
       : []),
     ...(isolation.readOnlyBinds ?? []).flatMap((path) => ["--ro-bind", path, path]),
@@ -394,6 +420,7 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
       "--bind", isolation.claudeNamespace.taskDirectory, "/tmp/claude",
       "--ro-bind", isolation.claudeNamespace.helperPath, "/tmp/wollipog-claude-provider-pipe",
     ] : []),
+    ...(packedRefs ? ["--ro-bind", packedRefs.helperPath, LANDLOCK_SPECIAL_FILES_TARGET] : []),
     ...(isolation.guardStateMask
       ? [
         "--tmpfs", isolation.guardStateMask.directory,
@@ -405,6 +432,9 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
       : []),
     "--chdir", opts.cwd,
     "--",
+    ...(packedRefs
+      ? [LANDLOCK_SPECIAL_FILES_TARGET, ...landlockRoots.flatMap((root) => ["--allow", root]), "--"]
+      : []),
     opts.command,
     ...opts.args,
   ];
