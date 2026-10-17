@@ -5,7 +5,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, afterEach, test } from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { after, afterEach, mock, test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { runContextCommand } from "./context-command.js";
 import { managedWorktreeGitWritableRoots } from "./managed-worktree-sandbox.js";
@@ -179,4 +181,51 @@ test("host Git commands verify every registered relocation before they run", asy
   git(repoPath, ["branch", "host-branch"]);
   git(repoPath, ["pack-refs", "--all"]);
   assert.equal(existsSync(victim), false, "host Git never followed the substituted link");
+});
+
+test("relocation removes only its own lock, never one a later Git writer holds", () => {
+  const { repoPath, common } = repository();
+  git(repoPath, ["pack-refs", "--all"]);
+  const directory = join(common, RELOCATED_PACKED_REFS_DIRECTORY);
+  const lock = join(directory, "packed-refs.lock");
+  // The relocated lock is held through publication, so a writer resolving the new link waits for
+  // it instead of taking a lock the migration would later remove.
+  const heldAtPublication: boolean[] = [];
+  const rename = fs.renameSync;
+  const spy = mock.method(fs, "renameSync", (from: string, to: string) => {
+    rename(from, to);
+    if (to === join(common, "packed-refs")) heldAtPublication.push(existsSync(lock));
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(relocatePackedRefs(common).status, "relocated");
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(heldAtPublication, [true]);
+  assert.equal(existsSync(lock), false);
+  assert.equal(readdirSync(directory).filter((name) => name !== "packed-refs").length, 0, "no staged copy is left");
+  // A writer that took the lock after publication keeps it through a verifying relaunch.
+  writeFileSync(lock, "");
+  assert.equal(relocatePackedRefs(common).status, "relocated");
+  assert.ok(existsSync(lock));
+});
+
+test("a chmodded relocated directory is repaired and never blocks Git for another repository", async () => {
+  const { repoPath, common } = repository();
+  const unrelated = repository();
+  assert.equal(relocatePackedRefs(common).status, "relocated");
+  const directory = join(common, RELOCATED_PACKED_REFS_DIRECTORY);
+  git(repoPath, ["pack-refs", "--all"]);
+  chmodSync(join(directory, "packed-refs"), 0o000);
+  chmodSync(directory, 0o000);
+  try {
+    await runContextCommand({ kind: "native" }, "git", ["status", "--short"], { cwd: unrelated.repoPath });
+    assert.equal(lstatSync(directory).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(directory, "packed-refs")).mode & 0o777, 0o644);
+    assert.match(git(repoPath, ["for-each-ref", "refs/heads/main"]), /refs\/heads\/main/);
+  } finally {
+    chmodSync(directory, 0o755);
+  }
 });

@@ -64,7 +64,7 @@ export function runContextCommand(
     let spec;
     try {
       // Host Git follows a relocated packed-refs link; verify what a sandbox could write (#3316).
-      if (context.kind === "native" && command === "git") guardRelocatedPackedRefs();
+      if (context.kind === "native" && command === "git") guardRelocatedPackedRefs(options.cwd);
       spec = contextCommandSpec(context, command, args, options);
     } catch (error) {
       reject(error);

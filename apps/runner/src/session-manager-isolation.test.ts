@@ -1587,6 +1587,15 @@ test("a managed launch relocates packed refs and binds only this session's other
     const mentioned = JSON.stringify(observed);
     assert.equal(mentioned.includes(other), false, "another session's worktree is never bound or named");
     assert.equal(mentioned.includes(adminOf(other)), false);
+
+    // A rewritten link cannot claim another session's admin directory: its back-pointer disagrees.
+    const foreignAdmin = adminOf(other);
+    writeFileSync(join(second, ".git"), `gitdir: ${foreignAdmin}\n`);
+    await internals.resolveLaunchIsolation(store.readMeta("s1"), worktreePath);
+    assert.equal(observed?.protectedWorktree?.ownedWorktrees, undefined);
+    // The foreign registration files may only gain read-only rules; nothing of it becomes writable.
+    assert.equal(observed?.protectedWorktree?.gitWritableRoots.includes(foreignAdmin), false);
+    assert.equal(JSON.stringify(observed?.additionalWritableRoots ?? []).includes(foreignAdmin), false);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

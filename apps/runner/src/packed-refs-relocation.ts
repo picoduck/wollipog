@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
-  closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync,
-  symlinkSync, unlinkSync, writeSync, type Stats,
+  chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync,
+  realpathSync, renameSync, symlinkSync, unlinkSync, writeSync, type Stats,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /**
  * Git deletes any ref — a branch, `refs/worktree/*`, or a sequencer pseudo-ref such as
@@ -99,12 +99,31 @@ export function verifyRelocatedPackedRefs(commonGitDir: string): string | null {
     return null;
   }
   registered.add(commonGitDir);
+  // The sandbox owns nothing here but shares the runner's user, so it can chmod the directory or
+  // file; restore the modes Git needs instead of failing every later command.
+  if ((lstatSync(directory).mode & 0o777) !== 0o755) chmodSync(directory, 0o755);
   const file = join(directory, "packed-refs");
   const entry = lstatOrNull(file);
   if (entry && !(entry.isFile() && entry.nlink === 1 && ownedByRunner(entry))) {
     quarantine(commonGitDir, file, `relocated Git packed-refs at ${file} is not a plain runner-owned file`);
   }
+  if (entry && (entry.mode & 0o777) !== 0o644) chmodSync(file, 0o644);
   return directory;
+}
+
+/** Whether `cwd` is in this repository's primary checkout or one of its registered worktrees. */
+function commandUsesRepository(commonGitDir: string, cwd: string): boolean {
+  const within = (root: string) => cwd === root || cwd.startsWith(`${root}/`);
+  if (within(commonGitDir) || within(dirname(commonGitDir))) return true;
+  try {
+    for (const name of readdirSync(join(commonGitDir, "worktrees"))) {
+      const link = readFileSync(join(commonGitDir, "worktrees", name, "gitdir"), "utf8").trim();
+      if (within(dirname(link))) return true;
+    }
+  } catch {
+    return true;
+  }
+  return false;
 }
 
 function openExclusive(path: string): number | null {
@@ -148,21 +167,26 @@ export function relocatePackedRefs(commonGitDir: string): PackedRefsRelocation {
     else if (!directoryEntry.isDirectory() || !ownedByRunner(directoryEntry)) {
       return { status: "unavailable", reason: `${RELOCATED_PACKED_REFS_DIRECTORY} is not a runner-owned directory` };
     }
+    // Held until the link is published, so a client resolving the new link waits for the copy.
+    // Only this lock, never one a later Git writer takes, is removed below.
     const innerLock = join(directory, "packed-refs.lock");
-    const fd = openExclusive(innerLock);
-    if (fd === null) return { status: "unavailable", reason: `Git holds ${LINK_TARGET}.lock` };
+    const lockFd = openExclusive(innerLock);
+    if (lockFd === null) return { status: "unavailable", reason: `Git holds ${LINK_TARGET}.lock` };
+    closeSync(lockFd);
+    const staged = join(directory, `packed-refs.wollipog-${randomUUID()}`);
     try {
-      try {
-        if (current) {
+      if (current) {
+        const fd = openSync(staged, "wx", 0o644);
+        try {
           writeSync(fd, readFileSync(top));
           fsyncSync(fd);
+        } finally {
+          closeSync(fd);
         }
-      } finally {
-        closeSync(fd);
       }
       // rename(2) and unlink(2) act on the entry itself, so a link left in the directory by an
       // earlier relocation is replaced or removed rather than followed.
-      if (current) renameSync(innerLock, join(directory, "packed-refs"));
+      if (current) renameSync(staged, join(directory, "packed-refs"));
       else if (lstatOrNull(join(directory, "packed-refs"))) unlinkSync(join(directory, "packed-refs"));
       const temporaryLink = join(commonGitDir, `packed-refs.wollipog-${randomUUID()}`);
       symlinkSync(LINK_TARGET, temporaryLink);
@@ -173,7 +197,8 @@ export function relocatePackedRefs(commonGitDir: string): PackedRefsRelocation {
         throw error;
       }
     } finally {
-      if (lstatOrNull(innerLock)) unlinkSync(innerLock);
+      if (lstatOrNull(staged)) unlinkSync(staged);
+      unlinkSync(innerLock);
     }
   } finally {
     unlinkSync(`${top}.lock`);
@@ -187,15 +212,20 @@ export function relocatePackedRefs(commonGitDir: string): PackedRefsRelocation {
 /**
  * Re-verify every relocation this runner knows before host Git acts on it, and when a protected
  * provider exits. A substituted entry is quarantined first, so the command that follows sees a
- * safe layout; a quarantine that cannot complete throws and the command does not run.
+ * safe layout. A failure that cannot be repaired refuses only a command whose `cwd` uses that
+ * repository; without a `cwd` (provider exit, runner start) it is logged.
  */
-export function guardRelocatedPackedRefs(): void {
+export function guardRelocatedPackedRefs(cwd?: string): void {
   for (const commonGitDir of [...registered]) {
     try {
       verifyRelocatedPackedRefs(commonGitDir);
     } catch (error) {
-      if (!(error instanceof PackedRefsViolationError) || !error.quarantinedAt) throw error;
-      console.error(`[wollipog] ${error.message}`);
+      if (error instanceof PackedRefsViolationError && error.quarantinedAt) {
+        console.error(`[wollipog] ${error.message}`);
+        continue;
+      }
+      if (cwd !== undefined && commandUsesRepository(commonGitDir, cwd)) throw error;
+      console.error(`[wollipog] relocated Git packed-refs in ${commonGitDir} could not be verified: ${(error as Error).message}`);
     }
   }
 }

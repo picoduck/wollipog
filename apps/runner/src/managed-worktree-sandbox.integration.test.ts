@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
@@ -32,8 +32,12 @@ function bubblewrapUsable(): boolean {
 const roots: string[] = [];
 after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5 }); });
 
-function managedWorktreeFixture(): { root: string; repoPath: string; worktreePath: string; home: string } {
-  const root = mkdtempSync(join(tmpdir(), "wollipog-managed-worktree-sandbox-"));
+/** `base` defaults to the host temp directory. A launch replaces /tmp with an empty tmpfs, so a
+ * fixture whose sandboxed Git needs the common directory's root (packed-refs, config) must live
+ * elsewhere, as every real repository does. */
+function managedWorktreeFixture(base = tmpdir()): { root: string; repoPath: string; worktreePath: string; home: string } {
+  mkdirSync(base, { recursive: true });
+  const root = realpathSync(mkdtempSync(join(base, "wollipog-managed-worktree-sandbox-")));
   roots.push(root);
   const repoPath = join(root, "repo");
   const worktreePath = join(root, "worktrees", "s_managed");
@@ -558,10 +562,13 @@ function gitAdminDirectory(worktreePath: string): string {
 
 const COMMITTER = "git -c user.email=runner@example.invalid -c user.name=Runner";
 
+/** Outside the masked /tmp; see managedWorktreeFixture. */
+const UNMASKED_FIXTURE_BASE = join(homedir(), ".cache", "wollipog-bwrap-fixtures");
+
 test("an isolated session deletes its own refs and finishes a rebase and cherry-pick (#3316)", {
   skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
 }, async () => {
-  const { root, repoPath, worktreePath, home } = managedWorktreeFixture();
+  const { root, repoPath, worktreePath, home } = managedWorktreeFixture(UNMASKED_FIXTURE_BASE);
   const common = realpathSync(join(repoPath, ".git"));
   const host = (args: string[], cwd = repoPath) => {
     const result = run("git", args, cwd);
@@ -602,6 +609,9 @@ test("an isolated session deletes its own refs and finishes a rebase and cherry-
     isolation as Extract<typeof isolation, { backend: "bwrap" }>,
   ), worktreePath);
 
+  const view = sandboxed(`readlink ${JSON.stringify(join(common, "packed-refs"))} && cat ${JSON.stringify(join(common, "config"))}`);
+  assert.equal(view.status, 0, view.output);
+  assert.equal(view.output, `${RELOCATED_PACKED_REFS_DIRECTORY}/packed-refs\n${config}`);
   const work = sandboxed([
     "set -e",
     `${COMMITTER} rebase --quiet main`,
@@ -655,7 +665,7 @@ test("an isolated session deletes its own refs and finishes a rebase and cherry-
 test("every managed worktree the session owns stays usable while another session's stays read-only (#3316)", {
   skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
 }, async () => {
-  const { root, repoPath, worktreePath, home } = managedWorktreeFixture();
+  const { root, repoPath, worktreePath, home } = managedWorktreeFixture(UNMASKED_FIXTURE_BASE);
   const boundary = join(root, "worktrees", "s_managed.requested");
   const slot = join(boundary, "slot");
   const other = join(root, "worktrees", "s_other");
@@ -740,6 +750,9 @@ test("another owned worktree cannot widen the selected worktree's boundary", asy
   const common = realpathSync(join(repoPath, ".git"));
   const selectedAdmin = gitAdminDirectory(worktreePath);
   const secondAdmin = gitAdminDirectory(second);
+  const other = join(root, "worktrees", "s_other");
+  assert.equal(run("git", ["worktree", "add", "--quiet", "-b", "agent/s_other", other, "main"], repoPath).status, 0);
+  const otherAdmin = gitAdminDirectory(other);
   const nested = join(worktreePath, "nested");
   mkdirSync(nested);
   const launch = (ownedWorktrees: Array<{ path: string; gitAdmin: string }>) => {
@@ -767,6 +780,7 @@ test("another owned worktree cannot widen the selected worktree's boundary", asy
     ["the common Git directory", { path: common, gitAdmin: secondAdmin }],
     ["the worktree parent", { path: dirname(worktreePath), gitAdmin: secondAdmin }],
     ["a missing worktree", { path: join(root, "worktrees", "missing"), gitAdmin: secondAdmin }],
+    ["another worktree's admin directory", { path: second, gitAdmin: otherAdmin }],
   ];
   for (const [label, owned] of rejected) {
     await assert.rejects(launch([owned]), /cannot be bound without widening its boundary/, label);

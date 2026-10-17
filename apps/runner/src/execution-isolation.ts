@@ -1,7 +1,7 @@
 import type { AgentContext } from "@wollipog/protocol";
 import type { AgentDriverKind } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, open, opendir, realpath, rm, stat } from "node:fs/promises";
+import { cp, lstat, mkdir, open, opendir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import type { RunnerExecutionIsolation } from "./config.js";
@@ -335,6 +335,18 @@ async function managedOwnedWorktree(
       pathsOverlap(owned.path, protectedWorktree.path) || pathsOverlap(owned.path, commonGitDir) ||
       pathWithinOrEqual(owned.path, protectedWorktree.parent) ||
       !await canonical(owned.path) || !await canonical(owned.gitAdmin)) {
+    throw new Error("another managed worktree of this session cannot be bound without widening its boundary");
+  }
+  // The pair comes from the worktree's `.git` link. Git writes the admin directory's `gitdir`
+  // back-pointer itself and the sandbox keeps it read-only, so a link retargeted at another
+  // session's admin directory fails here instead of binding that directory.
+  let backPointer: string;
+  try {
+    backPointer = (await readFile(posix.join(owned.gitAdmin, "gitdir"), "utf8")).replace(/\r?\n$/u, "");
+  } catch {
+    backPointer = "";
+  }
+  if (posix.resolve(owned.gitAdmin, backPointer) !== posix.join(owned.path, ".git")) {
     throw new Error("another managed worktree of this session cannot be bound without widening its boundary");
   }
 }

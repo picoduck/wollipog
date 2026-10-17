@@ -145,7 +145,7 @@ const realGitRunner: GitRunner = (cwd, args, opts) => {
   }
   return new Promise((resolve, reject) => {
     try {
-      guardRelocatedPackedRefs();
+      guardRelocatedPackedRefs(cwd);
     } catch (error) {
       reject(error);
       return;

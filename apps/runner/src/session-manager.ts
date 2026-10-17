@@ -122,7 +122,9 @@ import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
-import { managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
+import {
+  managedWorktreeAdminMatches, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths,
+} from "./managed-worktree-sandbox.js";
 import {
   guardRelocatedPackedRefs, PackedRefsViolationError, registerRepositoryPackedRefs, relocatePackedRefs, type PackedRefsRelocation,
 } from "./packed-refs-relocation.js";
@@ -8706,7 +8708,8 @@ export class SessionManager {
         if (protection.worktreePath === protectedWorktree || protection.worktreePath === meta.repoPath) continue;
         const roots = managedWorktreeGitWritableRoots(protection.worktreePath, [protection]);
         if (roots.length !== gitWritableRoots.length ||
-            roots.slice(1).some((root, index) => root !== gitWritableRoots[index + 1])) continue;
+            roots.slice(1).some((root, index) => root !== gitWritableRoots[index + 1]) ||
+            !managedWorktreeAdminMatches(protection.worktreePath, roots[0]!)) continue;
         try {
           if (realpathSync.native(protection.worktreePath) !== protection.worktreePath ||
               !lstatSync(protection.worktreePath).isDirectory()) continue;
