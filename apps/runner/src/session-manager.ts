@@ -1661,6 +1661,8 @@ export class SessionManager {
     private readonly resolveProviderCredentialHome?: (meta: SessionMeta) => string | undefined,
     private readonly providerAccounts: () => ProviderAccountDefinition[] = () => [],
     private readonly subscriptionUsageInventory: () => SubscriptionUsageSnapshot[] = () => [],
+    /** The attested control-plane instance; the provider-HOME lease worker checks profile grants against it. */
+    controlPlaneInstanceId?: string,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     // Every worktree creation, activation, attach, and discard lands as a `worktrees` patch. The
@@ -1683,6 +1685,10 @@ export class SessionManager {
     this.providerHomeLeases = runnerOwnerHash ? new AsyncProviderHomeLeaseRegistry(runnerOwnerHash, {
       onDiagnostic: (diagnostic) => this.log(JSON.stringify(diagnostic)),
       helperDataDir: dataDir ?? join(store.rootPath(), ".runner-data"),
+      ...(controlPlaneInstanceId ? { controlPlaneInstanceId } : {}),
+      // Provider profiles (#3239) are not negotiated yet, so a HOME holding a profile marker is
+      // refused as needing a newer control plane; marker-less homes are unaffected.
+      profileAccess: () => ({ controlPlaneSupportsProfiles: false, activeProfileIds: [] }),
     }) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);

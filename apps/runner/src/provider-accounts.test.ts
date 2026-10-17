@@ -45,6 +45,19 @@ test("selectProviderAccount honors an explicit account and maps only the provide
   assert.deepEqual(providerAccountEnvironment(selected!), { CODEX_HOME: "/credentials/personal" });
 });
 
+test("selectProviderAccount carries a configured profile id without changing the environment", () => {
+  const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  const accounts = [
+    { id: "work", label: "Work", provider: "codex" as const, directory: "/credentials/work", profileId },
+    { id: "personal", label: "Personal", provider: "codex" as const, directory: "/credentials/personal" },
+  ];
+  const work = selectProviderAccount(accounts, codexAgent, "codex-app-server", "work");
+  assert.deepEqual(work, { id: "work", label: "Work", provider: "codex", credentialHome: "/credentials/work", profileId });
+  assert.deepEqual(providerAccountEnvironment(work!), { CODEX_HOME: "/credentials/work" });
+  const personal = selectProviderAccount(accounts, codexAgent, "codex-app-server", "personal");
+  assert.equal(Object.hasOwn(personal!, "profileId"), false);
+});
+
 test("selectProviderAccount preserves legacy default-home behavior when no accounts are configured", () => {
   assert.equal(selectProviderAccount([], { id: "claude", driver: "claude-code" }, "claude-code"), undefined);
 });

@@ -55,9 +55,49 @@ the code:
 - `foreign_host`: a lease recorded on another host.
 - `unavailable`: the helper is unavailable.
 - `refusal`: everything else the registry cannot prove.
+- `profile_unsupported_control_plane`, `profile_unverifiable`, `profile_not_granted` and
+  `profile_changed`: a provider-profile refusal before acquisition (see below).
 
 A foreign-owner lease is still never taken over automatically. Its text names that cause and the
 safe options, instead of the generic "could not be proved" refusal.
+
+### Provider Profile Identity
+
+A provider HOME can carry a stable host-local profile identity (#3239) in
+`<home>/.agent-manager/profile-v1.json`, a sibling of `provider-home-leases-v1/`. The lease journal
+and its root are unchanged. The marker is strict JSON, at most 4 KiB, with exactly these keys:
+`version: 1`, `kind: "wollipog-provider-profile"`, a lowercase UUID v4 `profileId`, `provider`
+(`claude` or `codex`), an ISO `createdAt`, and at most 16 `grants` of
+`{ controlPlaneInstanceId, grantId, grantedAt }`, one per control-plane instance. An unknown
+version, kind or key makes the marker unverifiable.
+
+The worker reads the marker without following links. `.agent-manager` must be a real directory.
+The file must be a regular file owned by the runner's user, with one link, not group- or
+world-writable, and unchanged across the read. Windows has no `O_NOFOLLOW` or POSIX owner check, so
+a marker present there is always unverifiable; marker-less Windows homes are unaffected. Markers are
+replaced only through an exclusive 0600 temporary file, fsync, rename and directory fsync, and only
+by the worker while it holds that HOME's lease.
+
+Each acquisition carries an optional `profile` context: the profile id the account or session
+recorded, whether the control plane negotiates profiles, and the profile ids it holds active grants
+for. The parent reads the capability when it dispatches the request, not when it queues it. The
+worker knows its attested control-plane instance. Against the canonical HOME, before any lease
+journal I/O and again on every re-entrant reference, it decides:
+
+1. No marker and no recorded id: acquire as before.
+2. No marker but a recorded id: `profile_changed`.
+3. An unreadable, unsafe or newer-format marker: `profile_unverifiable`.
+4. A marker whose id differs from the recorded one: `profile_changed`.
+5. A marker the control plane does not negotiate (including callers that send no context):
+   `profile_unsupported_control_plane`.
+6. No grant for this instance in the marker, or no active grant on the control plane:
+   `profile_not_granted`.
+
+A refused acquisition creates no lease directory, and a refused re-entrant reference adds no
+reference. An unsafe `.agent-manager` keeps its existing `refusal`. The four codes cross the boundary
+with fixed, path-free texts. Nothing creates markers yet and the control plane does not negotiate
+profiles, so only the first case is reachable today. A follow-up adds grants, adoption and the
+operations that write markers.
 
 Callers that release before shutdown (skill transactions, launch preparation, and a launch or skill
 acquisition that became stale after its grant) use `acquire_reference`. The worker keeps the receipt's exact-entry

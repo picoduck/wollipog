@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { isAbsolute } from "node:path";
 import { join } from "node:path";
@@ -18,6 +19,8 @@ import {
   resolveRunnerLocalAgentEnvironment,
   resolveConfig,
   resolveWorkspacePath,
+  validateProviderAccounts,
+  writeProviderAccountsConfig,
 } from "./config.js";
 
 test("parseArgs defaults to runner.config.json (absolute)", () => {
@@ -130,6 +133,34 @@ test("resolveConfig validates provider accounts and agent defaults", () => {
     controlPlaneUrl: "ws://localhost",
     providerAccounts: [{ id: 123 as never, label: "Work", provider: "codex", directory: "/credentials/work" }],
   }), /provider account id/);
+});
+
+test("a provider account's optional profile id is validated and preserved through a config rewrite", (t) => {
+  const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  const accounts = validateProviderAccounts([
+    { id: "work", label: "Work", provider: "codex", directory: "/credentials/work", profileId },
+    { id: "personal", label: "Personal", provider: "claude", directory: "/credentials/personal" },
+  ]);
+  assert.deepEqual(accounts, [
+    { id: "work", label: "Work", provider: "codex", directory: "/credentials/work", profileId },
+    { id: "personal", label: "Personal", provider: "claude", directory: "/credentials/personal" },
+  ]);
+  assert.equal(Object.hasOwn(accounts[1]!, "profileId"), false, "legacy accounts gain no profile field");
+  for (const invalid of ["", "not-a-uuid", profileId.toUpperCase(), "6f1c2d3e-4a5b-1c6d-8e7f-001122334455", 7, null]) {
+    assert.throws(() => validateProviderAccounts([
+      { id: "work", label: "Work", provider: "codex", directory: "/credentials/work", profileId: invalid },
+    ]), /profileId must be a lowercase UUID v4/u, String(invalid));
+  }
+  const directory = mkdtempSync(join(tmpdir(), "wollipog-config-profile-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const configPath = join(directory, "runner.json");
+  writeFileSync(configPath, `${JSON.stringify({ runnerId: "r", controlPlaneUrl: "ws://localhost", providerAccounts: [] })}\n`);
+  writeProviderAccountsConfig(configPath, accounts);
+  const written = JSON.parse(readFileSync(configPath, "utf8")) as { providerAccounts: unknown[] };
+  assert.deepEqual(written.providerAccounts, accounts);
+  assert.deepEqual(loadConfig(configPath).providerAccounts, accounts);
+  assert.throws(() => writeProviderAccountsConfig(configPath, [{ ...accounts[0]!, profileId: "../profile" }]), /profileId/u);
+  assert.deepEqual(loadConfig(configPath).providerAccounts, accounts, "a refused update leaves the committed config intact");
 });
 
 /* ---- config-less startup: flags / env / merge ---- */

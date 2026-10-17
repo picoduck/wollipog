@@ -1101,6 +1101,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   },
   providerAccountsForControlPlane,
   () => subscriptionUsage.inventory(),
+  attestation.instanceId,
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);

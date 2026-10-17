@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
-import type { LeaseWorkerExecute, LeaseWorkerAccept } from "./provider-home-lease-worker-protocol.js";
+import { LEASE_WORKER_ERRORS, LEASE_WORKER_PROFILE_LIMIT, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept } from "./provider-home-lease-worker-protocol.js";
 
 class Port extends EventEmitter {
   readonly sent: Array<LeaseWorkerExecute | LeaseWorkerAccept> = [];
@@ -113,4 +113,91 @@ test("shutdown closes admission, drains cancellation, and refuses a late release
   const shutdown = f.port.execute(1); assert.equal(shutdown.operation.method, "close");
   f.port.reply("receipt", shutdown); f.port.reply("done", shutdown);
   assert.equal(await close, true);
+});
+
+const PROFILE = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+const OTHER_PROFILE = "7f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+
+test("acquire frames accept exactly one bounded optional profile context", () => {
+  const base = { method: "acquire", home: "/private/home", provider: "claude" };
+  const profile = { controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] };
+  assert.equal(validLeaseWorkerOperation(base), true);
+  assert.equal(validLeaseWorkerOperation({ ...base, profile }), true);
+  assert.equal(validLeaseWorkerOperation({ ...base, method: "acquire_reference", profile: { ...profile, expectedId: PROFILE } }), true);
+  const invalid: Array<[string, unknown]> = [
+    ["extra operation key", { ...base, profile, extra: true }],
+    ["extra key without profile", { ...base, extra: true }],
+    ["profile on release", { method: "release", home: "/private/home", profile }],
+    ["null profile", { ...base, profile: null }],
+    ["array profile", { ...base, profile: [] }],
+    ["extra profile key", { ...base, profile: { ...profile, grants: [] } }],
+    ["missing capability", { ...base, profile: { activeProfileIds: [] } }],
+    ["non-boolean capability", { ...base, profile: { ...profile, controlPlaneSupportsProfiles: "yes" } }],
+    ["undefined expected id", { ...base, profile: { ...profile, expectedId: undefined } }],
+    ["malformed expected id", { ...base, profile: { ...profile, expectedId: "../profile" } }],
+    ["malformed active id", { ...base, profile: { ...profile, activeProfileIds: [PROFILE.toUpperCase()] } }],
+    ["duplicate active ids", { ...base, profile: { ...profile, activeProfileIds: [PROFILE, PROFILE] } }],
+    ["too many active ids", { ...base, profile: { ...profile, activeProfileIds: Array.from({ length: LEASE_WORKER_PROFILE_LIMIT + 1 }, (_, i) =>
+      `${i.toString(16).padStart(8, "0")}-4a5b-4c6d-8e7f-001122334455`) } }],
+  ];
+  for (const [name, value] of invalid) assert.equal(validLeaseWorkerOperation(value), false, name);
+});
+
+test("profile context is read at dispatch and refusal codes reach the caller unchanged", async () => {
+  let access = { controlPlaneSupportsProfiles: false, activeProfileIds: [] as string[] };
+  let port!: Port, data: Record<string, unknown> | undefined;
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), {
+    controlPlaneInstanceId: "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3",
+    profileAccess: () => { if (!access) throw new Error("capability source failed"); return access; },
+    workerFactoryForTest: value => { data = value; return port = new Port(value.epoch as string); },
+  });
+  const first = registry.acquireHome("/private/home", "claude", {}, { expectedProfileId: PROFILE });
+  assert.equal(data?.controlPlaneInstanceId, "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3");
+  // Granted after enqueue but before dispatch: the worker sees the grants current at dispatch.
+  access = { controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] };
+  port.ready();
+  const op = port.execute();
+  assert.deepEqual(op.operation, { method: "acquire", home: "/private/home", provider: "claude",
+    profile: { expectedId: PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] } });
+  for (const kind of ["receipt", "done"] as const) port.reply(kind, op, { ok: false, value: false, error: "profile_not_granted" });
+  await assert.rejects(first, (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === "profile_not_granted" &&
+    error.message === LEASE_WORKER_ERRORS.profile_not_granted);
+
+  // Revoked while queued behind another operation: the queued acquisition carries the revocation.
+  const busy = registry.acquireHome("/private/busy", "claude");
+  const queued = registry.acquireHomeReference("/private/second", "claude");
+  access = { controlPlaneSupportsProfiles: true, activeProfileIds: [OTHER_PROFILE] };
+  const op2 = port.execute(1);
+  assert.deepEqual((op2.operation as { profile?: unknown }).profile, { controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] });
+  port.reply("receipt", op2); port.reply("done", op2); assert.equal(await busy, true);
+  const op3 = port.execute(2);
+  assert.deepEqual(op3.operation, { method: "acquire_reference", home: "/private/second", provider: "claude",
+    profile: { controlPlaneSupportsProfiles: true, activeProfileIds: [OTHER_PROFILE] } });
+  for (const kind of ["receipt", "done"] as const) port.reply(kind, op3, { ok: false, value: false, error: "profile_changed" });
+  await assert.rejects(queued, (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === "profile_changed");
+
+  // A failing capability source refuses only that acquisition; non-acquisitions never carry a profile.
+  access = undefined as never;
+  await assert.rejects(registry.acquireHome("/private/fourth", "claude"), /profile context is unavailable/);
+  const release = registry.releaseHome("/private/busy");
+  const op4 = port.execute(3);
+  assert.deepEqual(op4.operation, { method: "release", home: "/private/busy" });
+  port.reply("receipt", op4); port.reply("done", op4); assert.equal(await release, true);
+  await assert.rejects(registry.acquireHome("/private/home", "claude", {}, { expectedProfileId: "not-a-profile" }), /invalid or oversized/);
+  const close = registry.close(); const shutdown = port.execute(4);
+  port.reply("receipt", shutdown); port.reply("done", shutdown); assert.equal(await close, true);
+});
+
+test("without a capability source an acquisition carries a profile only when it names one", async () => {
+  const f = fixture();
+  const plain = f.registry.acquireHome("/private/home");
+  f.port.ready(); const op = f.port.execute();
+  assert.deepEqual(op.operation, { method: "acquire", home: "/private/home", provider: "skills" });
+  f.port.reply("receipt", op); f.port.reply("done", op); assert.equal(await plain, true);
+  const named = f.registry.acquireHome("/private/home", "claude", {}, { expectedProfileId: PROFILE });
+  const op2 = f.port.execute(1);
+  assert.deepEqual((op2.operation as { profile?: unknown }).profile, { expectedId: PROFILE, controlPlaneSupportsProfiles: false, activeProfileIds: [] });
+  f.port.reply("receipt", op2); f.port.reply("done", op2); assert.equal(await named, true);
+  const close = f.registry.close(); const shutdown = f.port.execute(2);
+  f.port.reply("receipt", shutdown); f.port.reply("done", shutdown); assert.equal(await close, true);
 });
