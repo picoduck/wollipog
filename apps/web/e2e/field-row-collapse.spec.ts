@@ -4,19 +4,11 @@ import { choosePageAction } from "./page-actions";
 /**
  * #2538: a `.field-row` keeps two equal columns on desktop and is one column under 480px
  * (docs/design-system.md §8.1), so on a phone sheet every row's fields are full width and stacked.
- * These three dialogs use the bare row; Hand Off and Import from Git are measured in their own specs.
+ * These dialogs use the bare row; Hand Off and Import from Git are measured in their own specs, and
+ * Connect via SSH's Workspace Folder and 96px Port row in connect-via-ssh.spec.ts (#2987).
  */
 
 const dialogs: Array<{ name: string; open: (page: Page) => Promise<Locator> }> = [
-  {
-    name: "Connect via SSH",
-    open: async (page) => {
-      await page.goto("/machine-management-e2e.html");
-      await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
-      await choosePageAction(page, "Connect via SSH");
-      return page.getByRole("dialog", { name: "Connect via SSH" });
-    },
-  },
   {
     name: "New Run",
     open: async (page) => {

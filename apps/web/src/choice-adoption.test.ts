@@ -89,7 +89,6 @@ type Pattern = keyof typeof PATTERNS;
  * one in `SessionPanelToggles.tsx` fails here instead of hiding behind a whole-file exemption.
  */
 const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
-  ["components/AddBoxDialog.tsx", "native-select", 1],
   ["components/AgentSessionDiscoveryDialog.tsx", "agent-pick", 1],
   ["components/AutomationsView.tsx", "native-select", 12],
   ["components/NewRunDialog.tsx", "native-select", 6],

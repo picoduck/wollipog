@@ -639,19 +639,24 @@ test("Machine settings expose deletion with an explicit history warning", async 
 test("SSH config import keeps the selected Host and auto-populates an editable Machine Name", async ({ page }) => {
   await page.getByRole("button", { name: "Connect via SSH" }).click();
   const dialog = page.getByRole("dialog", { name: "Connect via SSH" });
-  const hosts = dialog.getByLabel("Import From ~/.ssh/config");
+  const hosts = dialog.getByRole("button", { name: /^Choose from SSH Config:/ });
+  const choose = async (host: string) => {
+    await hosts.click();
+    await page.getByRole("option", { name: new RegExp(`^${host}`) }).click();
+  };
 
-  await hosts.selectOption("golf-sim");
-  await expect(hosts).toHaveValue("golf-sim");
-  await expect(dialog.getByLabel("Machine Name")).toHaveValue("golf-sim");
+  await choose("golf-sim");
+  await expect(hosts).toHaveAccessibleName("Choose from SSH Config: golf-sim");
+  await expect(dialog.getByLabel("Machine Name (Optional)")).toHaveValue("golf-sim");
   await expect(dialog.getByLabel("SSH Target")).toHaveValue("golf-sim");
-  await expect(dialog.getByLabel("SSH Port")).toHaveValue("2222");
+  await expect(dialog.getByLabel("Port", { exact: true })).toHaveValue("2222");
 
-  await dialog.getByLabel("Machine Name").fill("Golf Simulator");
-  await hosts.selectOption("build-box");
-  await expect(hosts).toHaveValue("build-box");
-  await expect(dialog.getByLabel("Machine Name")).toHaveValue("Golf Simulator");
+  await dialog.getByLabel("Machine Name (Optional)").fill("Golf Simulator");
+  await choose("build-box");
+  await expect(hosts).toHaveAccessibleName("Choose from SSH Config: build-box");
+  await expect(dialog.getByLabel("Machine Name (Optional)")).toHaveValue("Golf Simulator");
   await expect(dialog.getByLabel("SSH Target")).toHaveValue("build-box");
+  await expect(dialog.getByLabel("Port", { exact: true })).toHaveValue("22");
 
   await dialog.getByRole("button", { name: "Connect Machine" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.lastAddBoxRequest()))

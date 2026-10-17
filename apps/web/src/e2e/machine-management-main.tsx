@@ -136,6 +136,8 @@ let socket: FixtureSocket | null = null;
 let box: BoxView | null = null;
 let lastRegisteredWorkspace: { name: string; path: string } | null = null;
 let lastAddBoxRequest: AddBoxRequest | null = null;
+/** How Connect via SSH's request answers (#2987): accepted, refused with this message, or held open. */
+let addBoxOutcome: { kind: "accept" } | { kind: "refuse"; message: string; status: number } | { kind: "hold" } = { kind: "accept" };
 
 function snapshot(): UiSnapshotMessage {
   return {
@@ -215,6 +217,11 @@ const client = {
   }),
   addBox: async (body: AddBoxRequest) => {
     lastAddBoxRequest = structuredClone(body);
+    if (addBoxOutcome.kind === "hold") return new Promise<never>(() => undefined);
+    if (addBoxOutcome.kind === "refuse") {
+      if (addBoxOutcome.status === 0) throw new TypeError(addBoxOutcome.message);
+      throw new ApiError(addBoxOutcome.message, addBoxOutcome.status);
+    }
     return {
       box: {
         boxId: "box-created",
@@ -447,6 +454,8 @@ declare global {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
+      /** status 0 is a request that never reached the server (the browser's TypeError). */
+      setAddBoxOutcome(outcome: { kind: "accept" } | { kind: "refuse"; message: string; status: number } | { kind: "hold" }): void;
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
         "multiple-installations" | "harness-states" | "harness-states-ssh" |
         "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper" |
@@ -459,6 +468,7 @@ declare global {
 window.__WOLLIPOG_MACHINE_E2E__ = {
   lastRegisteredWorkspace: () => structuredClone(lastRegisteredWorkspace),
   lastAddBoxRequest: () => structuredClone(lastAddBoxRequest),
+  setAddBoxOutcome: (outcome) => { addBoxOutcome = outcome; },
   setAgentAvailabilityScenario: (scenario) => {
     if (!runner) return;
     if (scenario === "legacy-unverified") {
