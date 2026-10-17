@@ -32,7 +32,7 @@ async function openWithKey(page: Page, url: string): Promise<Locator> {
 
 const headings = (reference: Locator) => reference.locator(".shortcut-group h3");
 
-test.describe("at 1440Ãƒâ€”900", () => {
+test.describe("at 1440×900", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
   test("the reference is 800px wide, two columns, and under two screens tall", async ({ page }) => {
@@ -107,8 +107,8 @@ test.describe("at 1440Ãƒâ€”900", () => {
     await page.keyboard.press("Alt+ArrowUp");
     await expect(title).toHaveText("Alpha Session");
 
-    // The composer hops too. From an empty composer at the first session, Alt+Ã¢â€ â€˜ has nowhere to go
-    // and recalls nothing; only a plain Ã¢â€ â€˜ recalls the last prompt.
+    // The composer hops too. From an empty composer at the first session, Alt+↑ has nowhere to go
+    // and recalls nothing; only a plain ↑ recalls the last prompt.
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage("session-alpha", "earlier prompt", "turn-earlier"));
     const composer = page.locator(".composer-input");
     await composer.focus();
@@ -154,9 +154,7 @@ test.describe("at 1440Ãƒâ€”900", () => {
     await expect(headings(reference)).toHaveText(["Session"]);
     await expect(reference.locator(".shortcut-row dt")).toHaveText(["Toggle Terminal", "Exit Terminal Focus"]);
     await filter.fill("xyzzy");
-        await expect(reference.getByRole("status")).toContainText(
-          "No shortcuts match",
-        );
+    await expect(reference.getByRole("status")).toContainText("No shortcuts match “xyzzy”.");
   });
 
   test("Done closes the reference and returns focus to its opener", async ({ page }) => {

@@ -90,8 +90,8 @@ export function ShortcutReference({
   const filterRef = useRef<HTMLInputElement>(null);
   const phone = useIsMobile();
   const oneColumn = useIsTabletOrSmaller();
-  // A switched-off experiment's bindings are dead â€” their handlers live inside the hidden
-  // surfaces â€” so the reference must say so rather than advertise a working key.
+  // A switched-off experiment's bindings are dead — their handlers live inside the hidden
+  // surfaces — so the reference must say so rather than advertise a working key.
   const { flags: experimentFlags } = useExperiments();
   // Navigation digits derive from the visible rail order (#385); the reference reads the same
   // derived mapping as the rail keycaps and the key handler, so the three cannot disagree.
@@ -99,7 +99,7 @@ export function ShortcutReference({
   const derivedDigits = railDigits(visibleRailViews(railPreferences, experimentFlags));
   const keys = (definition: ShortcutDefinition) => {
     const railView = railViewForShortcut(definition.id);
-    return railView === null ? shortcutDisplay(definition.id) : derivedDigits.get(railView) ?? "â€”";
+    return railView === null ? shortcutDisplay(definition.id) : derivedDigits.get(railView) ?? "—";
   };
   const groups = shortcutReferenceGroups({
     scope,
@@ -168,7 +168,7 @@ export function ShortcutReference({
             </button>
           }
         >
-          No shortcuts match â€œ{query.trim()}â€.
+          No shortcuts match “{query.trim()}”.
         </State>
       ) : (
         <div className="shortcut-columns">
