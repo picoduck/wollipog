@@ -82,7 +82,7 @@ test("no user-facing string calls a Machine a box", () => {
  */
 const EXPECTED_PLACEHOLDERS: ReadonlyArray<[string, string]> = [
   ["./components/SessionsSearch.tsx", "Search sessions"],
-  ["./components/ProjectsView.tsx", "Search projects"],
+  ["./components/ProjectList.tsx", "Search projects"],
   ["./components/CommitBar.tsx", "Describe the change"],
 ];
 

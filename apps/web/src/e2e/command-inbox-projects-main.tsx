@@ -18,6 +18,7 @@ import {
   type InvokeSessionCommandRequest,
   type PodView,
   type PromptImageInput,
+  type ProjectLocationView,
   type ProjectView,
   type ProviderAccountDefinition,
   type ProviderLoginView,
@@ -184,7 +185,14 @@ const UNARCHIVE_RESTART = FIXTURE_QUERY.get("unarchiveRestart") === "1";
 const ARCHIVE_STOP_STATUS = FIXTURE_QUERY.get("archiveStop") === "failed" ? "stop_failed" as const
   : FIXTURE_QUERY.get("archiveStop") === "pending" ? "stop_pending" as const
     : undefined;
-const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
+/**
+ * The Projects page's frame (#2957). `?projects=nine` is nine projects, one hidden; `many` is forty,
+ * whose Alpha has enough locations that its detail is taller than any viewport; `empty` has none;
+ * `unsupported` is a control plane without projects; `loading` never delivers the snapshot. The
+ * nine and the forty spread their locations over an online and an offline machine.
+ */
+const SHELL_PROJECTS_MODE = FIXTURE_QUERY.get("projects");
+const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}${SHELL_PROJECTS_MODE ? `.projects-${SHELL_PROJECTS_MODE}` : ""}`;
 /** The `switch-account` scenario's machine (#2149): `default`, `removed` (the session's account was
  * removed from the machine), `none` (no other account), `auth` (blocked on authentication) or
  * `reasons` (the endpoint lists an exhausted and an unknown-usage account with its reasons, #2276). */
@@ -776,7 +784,40 @@ function initialModel(): FixtureModel {
       workspaceName: null,
     });
   }
+  if (SHELL_PROJECTS_MODE === "empty") {
+    initial.projects = [];
+    for (const value of initial.sessions) Object.assign(value, { projectId: null, projectLocationId: null });
+  }
+  if (SHELL_PROJECTS_MODE === "nine" || SHELL_PROJECTS_MODE === "many") initial.projects = shellProjects(SHELL_PROJECTS_MODE === "nine" ? 9 : 40);
   return initial;
+}
+
+const SHELL_PROJECT_NAMES = ["Alpha", "Billing Service", "Checkout Web", "Docs Site", "Edge Proxy", "Field App", "Growth Experiments", "Secret", "Infra"];
+
+/** `?projects=nine|many`: Alpha first, with many locations; Secret hidden; every fourth on the offline machine only. */
+function shellProjects(count: number): ProjectView[] {
+  const at = (projectId: string, index: number, offline: boolean): ProjectLocationView => ({
+    id: index === 0 ? `location-${projectId}` : `location-${projectId}-${index}`,
+    projectId,
+    runnerId: offline ? "runner-2" : "runner-1",
+    workspaceId: index === 0 ? `${projectId}-workspace` : `${projectId}-workspace-${index}`,
+    name: index === 0 ? projectId : `${projectId}-${index}`,
+    path: index === 0 ? `/repos/${projectId}` : `/repos/${projectId}-${index}`,
+    source: "managed",
+    availability: offline ? "runner_offline" : "available",
+    isDefault: index === 0,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  return Array.from({ length: count }, (_, index) => {
+    const name = SHELL_PROJECT_NAMES[index] ?? `Team Project ${String(index + 1).padStart(2, "0")}`;
+    const id = index === 0 ? "alpha" : name === "Secret" ? "secret" : name.toLowerCase().replace(/\s+/g, "-");
+    const offline = index % 4 === 3;
+    const locations = index === 0 ? Array.from({ length: 8 }, (_, location) => at(id, location, location % 3 === 2))
+      : index % 5 === 4 ? [] : [at(id, 0, offline)];
+    const sessions = index === 0 ? 1 : (index * 7) % 12;
+    return project(id, name, { hidden: name === "Secret", locations, unarchivedSessionCount: sessions, totalSessionCount: sessions });
+  });
 }
 
 function loadModel(): FixtureModel {
@@ -1338,7 +1379,7 @@ function snapshot(): UiSnapshotMessage {
       sessionSubscriptions: TARGETED_READER_STREAMS,
       boundedDelivery: TARGETED_READER_STREAMS,
       paginatedSessionHistory: TARGETED_READER_STREAMS,
-      projects: !LEGACY_WORKSPACES,
+      projects: !LEGACY_WORKSPACES && SHELL_PROJECTS_MODE !== "unsupported",
       createProjectLocations: !LEGACY_WORKSPACES,
       nativeTuiLaunch: true,
       stopBeforeArchive: true,
@@ -1354,7 +1395,7 @@ function snapshot(): UiSnapshotMessage {
       boxId: "box-fixture", sshTarget: "pat@build.example.com", runnerId: runner.runnerId, status: "online",
       lastError: null, createdAt: 1,
     }] : [],
-    ...(LEGACY_WORKSPACES ? {} : { projects: structuredClone(model.projects) }),
+    ...(LEGACY_WORKSPACES || SHELL_PROJECTS_MODE === "unsupported" ? {} : { projects: structuredClone(model.projects) }),
     sessions: structuredClone(model.sessions.filter((candidate) => !candidate.archived)),
     ...(ROW_COLUMNS ? { reminders: [rowColumnsReminder()] } : {}),
     runs: [structuredClone(activeRun)],
@@ -1387,7 +1428,7 @@ class FixtureSocket implements UiSocket {
         }));
         this.push({ type: "session_snapshot_page", sessions: sessions.slice(0, 1), complete: false });
         this.push({ type: "session_snapshot_page", sessions: sessions.slice(1), complete: true });
-      } else this.push(initial);
+      } else if (SHELL_PROJECTS_MODE !== "loading") this.push(initial);
     }, 0);
   }
   send(data: string): void {
@@ -1736,11 +1777,12 @@ const shellOverviewMachine = () => {
   };
 };
 /** The overview's offline second machine. */
-const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW || SCENARIO === "preview-bar"
+const SHELL_PROJECTS_MACHINES = SHELL_PROJECTS_MODE === "nine" || SHELL_PROJECTS_MODE === "many";
+const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW || SCENARIO === "preview-bar" || SHELL_PROJECTS_MACHINES
   ? { ...structuredClone(runner), runnerId: "runner-2", hostname: "studio-workstation", displayName: "Studio Workstation", status: "offline",
     providerLogins: undefined }
   : null;
-if (SHELL_OVERVIEW) runner.displayName = "Build Machine";
+if (SHELL_OVERVIEW || SHELL_PROJECTS_MACHINES) runner.displayName = "Build Machine";
 const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : SHELL_SKILLS_MODE === "list" ? SHELL_LIST_SKILLS : SHELL_OVERVIEW ? SHELL_OVERVIEW_SKILLS : Array.from(
   { length: SHELL_SKILLS_MODE === "many" ? 40 : SHELL_SKILL_NAMES.length },
   (_, index) => ({

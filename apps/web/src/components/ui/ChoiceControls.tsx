@@ -306,6 +306,8 @@ export interface SegmentedOption<T extends string> {
   disabled?: boolean;
   /** Why it is disabled. Rendered, never hidden — §11.3: never hide a setting that could exist. */
   disabledReason?: string;
+  /** A plain count after the label (§10.2, §11.4): faint and tabular, part of the option's name. */
+  count?: number;
 }
 
 /**
@@ -392,6 +394,8 @@ export function SegmentedControl<T extends string>({
               onClick={() => { if (!option.disabled) onChange(option.value); }}
             >
               {option.label}
+              {/* The space keeps the name "Hidden 1"; a flex row drops it from the layout. */}
+              {option.count !== undefined && <>{" "}<span className="seg-count">{option.count}</span></>}
               {perOptionReasons && option.disabledReason && (
                 <small className="seg-option-reason">{option.disabledReason}</small>
               )}

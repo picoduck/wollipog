@@ -187,7 +187,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
  */
 const FULLY_MIGRATED = [
   "components/UsageView.tsx",
-  "components/ProjectsView.tsx",
+  "components/ProjectList.tsx",
   "components/NewSessionDialog.tsx",
 ];
 

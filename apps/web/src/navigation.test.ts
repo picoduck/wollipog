@@ -321,7 +321,7 @@ test("empty states that name a destination read its name", () => {
     ["./sessions-states.ts", /return `No \$\{destination\("inbox"\)\.name\} Yet`;/],
     ["./components/Board.tsx", /title=\{`No \$\{destination\("inbox"\)\.name\} Yet`\}/],
     ["./components/ArchivedSessionsView.tsx", /`No \$\{destination\("archived"\)\.name\}`/],
-    ["./components/ProjectsView.tsx", /`No \$\{PROJECTS\.name\} Found`/],
+    ["./components/ProjectsView.tsx", /title=\{`No \$\{PROJECTS\.name\} Yet`\}/],
     ["./components/RunsView.tsx", /title=\{`No \$\{runsDestination\.name\} Yet`\}/],
     ["./components/PodsView.tsx", /title=\{`No \$\{podsDestination\.name\} Yet`\}/],
     ["./detail-placeholder.ts", /const resource = destination\(list\)\.name;/],

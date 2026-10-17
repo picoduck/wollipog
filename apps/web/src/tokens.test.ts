@@ -171,16 +171,17 @@ test("every compact-tier query ends where useIsCompact() does", () => {
   const compact = [...mediaBlocks(css).map((block) => ({ ...block, kind: "@media" })),
     ...containerBlocks(css).map((block) => ({ ...block, kind: "@container" }))].filter((block) =>
     block.containsSelector('.page-more[data-overflow="2"]') && block.kind === "@media" ||
-    block.declarationsForSelector(".project-manager-grid").get("grid-template-columns")?.includes("280px minmax(0, 1fr)"));
-  assert.equal(compact.length, 2, "the page header's priority+ tier and the Projects list pane");
+    block.declarationsForSelector(".master-detail").get("--list-pane-w")?.includes("280px"));
+  assert.equal(compact.length, 2, "the page header's priority+ tier and the master-detail list pane");
   for (const block of compact) {
     assert.deepEqual(block.maxWidths, [COMPACT_BREAKPOINT_PX - 1],
       `${block.kind} ${block.params} must end at the shared compact breakpoint, or CSS and useIsCompact() disagree`);
   }
-  // The Projects list pane answers to the width the main column has (§2.10, #2105).
-  const listPane = compact.find((block) => block.containsSelector(".project-manager-grid"));
+  // The list pane Agent Skills and Projects share answers to the width the main column has (§2.10,
+  // #2105, #2957).
+  const listPane = compact.find((block) => block.containsSelector(".master-detail"));
   assert.equal(listPane?.kind, "@container");
-  assert.match(listPane!.params, /^app\s*\(/, "the Projects list pane queries the main column's `app` container");
+  assert.match(listPane!.params, /^app\s*\(/, "the list pane queries the main column's `app` container");
 });
 
 test("the Archived Sessions table folds until its full layout leaves the Session column 200px (§14)", () => {
