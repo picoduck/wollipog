@@ -112,7 +112,8 @@ test.describe("desktop", () => {
     await openProjectMenu(page);
     await page.getByRole("menuitem", { name: /Manage Project/ }).click();
     await page.getByRole("button", { name: /Alpha/ }).first().click();
-    await page.getByRole("button", { name: "Delete Project" }).click();
+    await page.locator(".project-detail-title-row").getByRole("button", { name: "Project Actions" }).click();
+    await page.getByRole("menuitem", { name: "Delete Project…" }).click();
     const dialog = page.getByRole("dialog", { name: "Delete Project" });
     await dialogMotionSettled(page);
     expect((await anatomy(dialog)).width).toBe(400);

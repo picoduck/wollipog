@@ -246,6 +246,7 @@ export function DetailBar({
   primary,
   secondary,
   menu = [],
+  menuLabel,
 }: {
   title: string;
   /** "Back to <Destination>" — the button's accessible name and tooltip. */
@@ -257,6 +258,8 @@ export function DetailBar({
   secondary?: DetailBarAction;
   /** ⋯ contents. Destructive actions belong only here (§3.3). */
   menu?: PageMenuAction[];
+  /** ⋯'s name when it says more than "More Actions" (`ActionsMenu`'s `label`). */
+  menuLabel?: string;
 }) {
   const compact = useIsCompact();
   const onSearch = useContext(AppBarSearchContext);
@@ -329,7 +332,7 @@ export function DetailBar({
         <div className="detail-bar-actions">
           {onSearch && <AppBarSearch onSearch={onSearch} />}
           {secondary && action(secondary, "btn")}
-          {menu.length > 0 && <ActionsMenu overflow="always" items={menu} />}
+          {menu.length > 0 && <ActionsMenu overflow="always" label={menuLabel} items={menu} />}
           {primary && action(primary, "btn primary")}
         </div>
       )}
@@ -434,7 +437,13 @@ function slotButtonShown(trigger: HTMLElement | null, slot: number): boolean {
  * and engines at the build floor that give `container-type` layout containment would make it the
  * containing block of a fixed-position menu and its backdrop.
  */
-export function ActionsMenu({ className, overflow = "always", items }: { className?: string; overflow?: string; items: ActionsMenuItem[] }) {
+export function ActionsMenu({ className, overflow = "always", label = "More Actions", items }: {
+  className?: string;
+  overflow?: string;
+  /** The ⋯ button's name and tooltip, and the menu's name: what the actions act on ("Project Actions"). */
+  label?: string;
+  items: ActionsMenuItem[];
+}) {
   const [open, setOpen] = useState(false);
   const [, remeasure] = useState(0);
   const menu = useAccessibleMenu(open, setOpen, "page-actions-menu");
@@ -529,8 +538,8 @@ export function ActionsMenu({ className, overflow = "always", items }: { classNa
         className="icon-btn"
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
-        title="More Actions"
-        aria-label="More Actions"
+        title={label}
+        aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menu.menuId}
@@ -542,7 +551,7 @@ export function ActionsMenu({ className, overflow = "always", items }: { classNa
           surfaceRef={menu.menuRef}
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
-          label="More Actions"
+          label={label}
           align="end"
           onDismiss={() => menu.close(true)}
           onFocus={(event) => {

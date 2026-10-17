@@ -4,13 +4,15 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { PROTOCOL_VERSION, type ProjectView, type RunnerView, type UiSnapshotMessage } from "@wollipog/protocol";
-import { api } from "../api.js";
+import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { ProjectsView } from "./ProjectsView.js";
+import type { NewSessionPreset } from "./NewSessionDialog.js";
+import { projectDetailMenu } from "./ProjectDetailHeader.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -43,7 +45,9 @@ const runner: RunnerView = {
   status: "online",
   displayName: "Build Machine",
   agents: [],
-  workspaces: [],
+  workspaces: Array.from({ length: 9 }, (_, index) => ({
+    id: `workspace-${index + 1}`, name: `Location ${index + 1}`, path: `/repos/project-${index + 1}`,
+  })),
   connectedAt: 1,
   lastSeen: 1,
   protocolVersion: PROTOCOL_VERSION,
@@ -89,13 +93,17 @@ function project(index: number, options: Partial<ProjectView> = {}): ProjectView
   };
 }
 
+/** Every preset New Session was opened with, newest last. */
+const newSessionPresets: (NewSessionPreset | undefined)[] = [];
+
 /** The route is the view's only selection, so the harness renders the store's current route. */
 function ProjectsRoute() {
   const view = useStoreSelector((state) => state.view);
-  return <ProjectsView selectedProjectId={view.name === "projects" ? view.id : undefined} onNewSession={() => {}} />;
+  return <ProjectsView selectedProjectId={view.name === "projects" ? view.id : undefined}
+    onNewSession={(preset) => { newSessionPresets.push(preset); }} />;
 }
 
-async function render(snapshot: Partial<UiSnapshotMessage> | null) {
+async function render(snapshot: Partial<UiSnapshotMessage> | null, client: ApiClient = api) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   const root = createRoot(mountPoint);
@@ -105,7 +113,7 @@ async function render(snapshot: Partial<UiSnapshotMessage> | null) {
   };
   await act(async () => {
     root.render(
-      <ApiProvider client={api}>
+      <ApiProvider client={client}>
         <FeedbackContext.Provider value={feedback as never}>
           <StoreProvider connection={connection} navigation={navigation}>
             <ProjectsRoute />
@@ -197,4 +205,226 @@ test("before the snapshot, the list shows skeleton rows and the detail its skele
   assert.ok(body.querySelector(".master-detail-detail .detail-skeleton"));
   const primary = [...body.querySelectorAll<HTMLButtonElement>(".page-header button")].find((button) => text(button) === "New Project");
   assert.equal(primary?.disabled, true);
+});
+
+/** A phone viewport for useIsMobile (≤ 760px); every other width query stays false. */
+function stubPhone(): () => void {
+  const prior = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  return () => { domWindow.matchMedia = prior; };
+}
+
+/** Renders the projects and opens the one named. */
+async function renderSelected(projects: ProjectView[], name: string, snapshot: Partial<UiSnapshotMessage> = {}, client?: ApiClient) {
+  const body = await render({ projects, ...snapshot }, client);
+  const row = rows(body).find((candidate) => text(candidate.querySelector(".row-title")) === name);
+  assert.ok(row, name);
+  await act(async () => { row!.click(); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  return body;
+}
+
+async function openProjectActions(scope: Element) {
+  const more = scope.querySelector<HTMLButtonElement>('button[aria-label="Project Actions"]');
+  assert.ok(more, "⋯ is named for what it acts on");
+  assert.equal(more!.title, "Project Actions");
+  await act(async () => more!.click());
+  const menu = domWindow.document.querySelector('[role="menu"][aria-label="Project Actions"]') as unknown as HTMLElement;
+  assert.ok(menu, "Project Actions menu");
+  return menu;
+}
+
+const menuItems = (menu: Element) => [...menu.querySelectorAll<HTMLButtonElement>(".menu-item")].map((item) => ({
+  label: text(item.querySelector(".menu-text")),
+  reason: item.querySelector(".menu-desc") ? text(item.querySelector(".menu-desc")) : null,
+  disabled: item.disabled || item.getAttribute("aria-disabled") === "true",
+  danger: item.classList.contains("danger"),
+}));
+
+/** A project with two locations on the build machine, the second one its default. */
+function busyProject(): ProjectView {
+  const base = project(1);
+  return {
+    ...base,
+    activeSessionCount: 1,
+    unarchivedSessionCount: 11,
+    totalSessionCount: 14,
+    locations: [
+      { ...base.locations[0]!, isDefault: false },
+      { ...base.locations[0]!, id: "location-1b", workspaceId: "workspace-2", name: "Second", path: "/repos/project-2", isDefault: true },
+    ],
+  };
+}
+
+test("the detail's first row is the name, New Session and ⋯; New Session opens with the project and its default location", async () => {
+  newSessionPresets.length = 0;
+  const body = await renderSelected([busyProject(), project(3)], "Project 1");
+  const row = body.querySelector(".master-detail-detail .project-detail-title-row");
+  assert.ok(row, "one title row");
+  const title = row!.querySelector("h2");
+  assert.equal(text(title), "Project 1");
+  assert.equal(title!.getAttribute("title"), "Project 1", "a truncated name keeps its tooltip");
+  const buttons = [...row!.querySelectorAll<HTMLButtonElement>("button")];
+  assert.deepEqual(buttons.map((button) => button.getAttribute("aria-label") ?? text(button)), ["New Session", "Project Actions"]);
+  assert.ok(buttons[0]!.classList.contains("primary"));
+  assert.equal(buttons[0]!.disabled, false);
+  assertNoDomNode(body.querySelector(".project-detail-blocker"), "a project that can start sessions gives no reason");
+  await act(async () => { buttons[0]!.click(); });
+  assert.deepEqual(newSessionPresets.at(-1), {
+    runnerId: "runner-1", workspaceId: "workspace-2", projectId: "project-1", projectLocationId: "location-1b",
+  });
+});
+
+test("the meta line shows locations and sessions with the running count, and no id, tiles, Session Actions or Danger Zone", async () => {
+  const body = await renderSelected([busyProject()], "Project 1");
+  const detail = body.querySelector(".master-detail-detail")!;
+  const meta = detail.querySelector('.project-detail-meta[aria-label="Project Details"]');
+  assert.deepEqual([...meta!.querySelectorAll("li")].map(text), ["2 Locations", "11 Sessions, 1 Running"]);
+  assert.ok([...meta!.querySelectorAll("li")].every((fact) => fact.querySelector("svg")), "each fact has its icon");
+  assert.doesNotMatch(text(detail), /Project ID/);
+  assert.doesNotMatch(text(detail), /Shown in Sessions|Hidden from Sessions/);
+  assertNoDomNode(detail.querySelector(".project-counts"), "no stat tiles");
+  const headings = [...detail.querySelectorAll("h2, h3, h4")].map(text);
+  assert.equal(headings.includes("Session Actions"), false);
+  assert.equal(headings.includes("Danger Zone"), false);
+});
+
+test("every section is the one recipe, in order, and no bare heading renders", async () => {
+  const body = await renderSelected([{ ...busyProject(), childSessionDefaults: null, memorySharing: "separate" }], "Project 1");
+  const detail = body.querySelector(".master-detail-detail")!;
+  const sections = [...detail.querySelectorAll(":scope .project-detail > section")];
+  assert.deepEqual(sections.map((section) => text(section.querySelector(":scope > .section-head > .section-title"))),
+    ["Locations", "Settings", "Memory Sharing", "Child Session Defaults"]);
+  for (const section of sections) {
+    assert.ok(section.classList.contains("section"), text(section.querySelector("h3")));
+    assert.equal(section.getAttribute("aria-labelledby"), section.querySelector(".section-title")!.id);
+    assert.ok(section.querySelectorAll(":scope > .section-note").length <= 1, "at most one sentence under the title");
+  }
+  const headings = [...detail.querySelectorAll("h3")];
+  assert.equal(headings.length, 4);
+  assert.ok(headings.every((heading) => heading.classList.contains("section-title")), "every h3 is a section title");
+  assert.deepEqual([...detail.querySelectorAll("h2")].map((heading) => heading.className), ["project-detail-title"]);
+  // Settings holds the rename form, Hide Project and access unchanged until #2962.
+  const settings = sections[1]!;
+  assert.ok(settings.querySelector("input[maxlength='120']"));
+  assert.ok([...settings.querySelectorAll("button")].some((button) => text(button) === "Hide Project"));
+});
+
+test("⋯ lists Copy Project ID, the archive item, a separator and Delete Project… last in danger text", async () => {
+  const body = await renderSelected([busyProject()], "Project 1");
+  const menu = await openProjectActions(body.querySelector(".project-detail-title-row")!);
+  assert.deepEqual(menuItems(menu), [
+    { label: "Copy Project ID", reason: null, disabled: false, danger: false },
+    { label: "Archive Sessions…", reason: null, disabled: false, danger: false },
+    { label: "Delete Project…", reason: null, disabled: false, danger: true },
+  ]);
+  const children = [...menu.querySelectorAll(".menu-item, .menu-sep")].map((node) => node.classList.contains("menu-sep") ? "separator" : text(node.querySelector(".menu-text")));
+  assert.deepEqual(children, ["Copy Project ID", "Archive Sessions…", "separator", "Delete Project…"]);
+});
+
+test("with no sessions, the archive item is disabled and says why", async () => {
+  const body = await renderSelected([project(0, { name: "Quiet" })], "Quiet");
+  const menu = await openProjectActions(body.querySelector(".project-detail-title-row")!);
+  assert.deepEqual(menuItems(menu)[1], { label: "Archive Sessions…", reason: "No sessions to archive.", disabled: true, danger: false });
+});
+
+test("the archive item says it stops sessions when archiving would stop one", () => {
+  const actions = { onCopyId() {}, onArchive() {}, onDelete() {} };
+  assert.equal(projectDetailMenu(project(2), { stopsRuntime: true, busy: false }, actions)[1]!.label, "Archive and Stop Sessions…");
+  assert.equal(projectDetailMenu(project(2), { stopsRuntime: false, busy: false }, actions)[1]!.label, "Archive Sessions…");
+});
+
+test("Copy Project ID copies the id and confirms it", async () => {
+  const toasts: { message: string; detail?: string }[] = [];
+  const prior = feedback.showToast;
+  feedback.showToast = ((message: string, options?: { detail?: string }) => { toasts.push({ message, detail: options?.detail }); return 1; }) as never;
+  const written: string[] = [];
+  Object.defineProperty(domWindow.navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => { written.push(value); } } });
+  try {
+    const body = await renderSelected([busyProject()], "Project 1");
+    const menu = await openProjectActions(body.querySelector(".project-detail-title-row")!);
+    const copy = [...menu.querySelectorAll<HTMLButtonElement>(".menu-item")].find((item) => text(item) === "Copy Project ID")!;
+    await act(async () => { copy.click(); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.deepEqual(written, ["project-1"]);
+    assert.deepEqual(toasts.at(-1), { message: "Project ID copied.", detail: "project-1" });
+  } finally {
+    feedback.showToast = prior;
+  }
+});
+
+test("with no locations New Session is disabled and the reason shows under the title", async () => {
+  const body = await renderSelected([project(4, { name: "Empty", locations: [] })], "Empty");
+  const button = [...body.querySelectorAll<HTMLButtonElement>(".project-detail-title-row button")].find((candidate) => text(candidate) === "New Session")!;
+  assert.equal(button.disabled, true);
+  assert.equal(text(body.querySelector(".project-detail-head .project-detail-blocker")), "Add a location to start sessions.");
+});
+
+test("when its only location is offline the reason names the machine", async () => {
+  const offline = project(5, {
+    name: "Remote",
+    locations: [{ ...project(5).locations[0]!, availability: "runner_offline" }],
+  });
+  const body = await renderSelected([offline], "Remote", { runners: [{ ...runner, status: "offline" }] });
+  const button = [...body.querySelectorAll<HTMLButtonElement>(".project-detail-title-row button")].find((candidate) => text(candidate) === "New Session")!;
+  assert.equal(button.disabled, true);
+  assert.equal(text(body.querySelector(".project-detail-blocker")), "Build Machine is offline, so new sessions can't start.");
+});
+
+test("a viewer sees the neutral notice, New Session and only Copy Project ID", async () => {
+  const body = await renderSelected([project(6, { name: "Shared", canManage: false })], "Shared");
+  const notice = body.querySelector(".master-detail-detail .notice.t-neutral");
+  assert.ok(notice?.classList.contains("compact"), "a compact notice");
+  assert.equal(text(notice), "You can view this project, but you can't change it.");
+  const button = [...body.querySelectorAll<HTMLButtonElement>(".project-detail-title-row button")].find((candidate) => text(candidate) === "New Session")!;
+  assert.equal(button.disabled, false);
+  const menu = await openProjectActions(body.querySelector(".project-detail-title-row")!);
+  assert.deepEqual(menuItems(menu).map((item) => item.label), ["Copy Project ID"]);
+});
+
+test("a failed project action is a danger notice: the sentence first, the raw message behind Show Details", async () => {
+  const client = { ...api, updateProject: async () => { throw new Error("HTTP 500: database is locked"); } } as ApiClient;
+  const body = await renderSelected([busyProject()], "Project 1", {}, client);
+  const settings = [...body.querySelectorAll(".project-detail > section")][1]!;
+  const hide = [...settings.querySelectorAll<HTMLButtonElement>("button")].find((button) => text(button) === "Hide Project")!;
+  await act(async () => { hide.click(); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  assertNoDomNode(body.querySelector(".project-manager-error"), "no bare form error");
+  const notice = body.querySelector(".master-detail-detail .notice.t-danger");
+  assert.ok(notice, "a danger notice");
+  assert.equal(notice!.getAttribute("role"), "alert");
+  assert.match(text(notice), /^Couldn't hide the project from Sessions\./);
+  assert.doesNotMatch(text(notice), /database is locked/, "the raw message waits behind Show Details");
+  const toggle = [...notice!.querySelectorAll<HTMLButtonElement>("button")].find((button) => text(button) === "Show Details")!;
+  await act(async () => { toggle.click(); });
+  assert.match(text(notice), /HTTP 500: database is locked/);
+});
+
+test("on a phone the detail bar carries New Session and the same ⋯ items, and the title row is not repeated", async () => {
+  const restore = stubPhone();
+  try {
+    newSessionPresets.length = 0;
+    const body = await renderSelected([busyProject()], "Project 1");
+    const bar = body.querySelector(".detail-bar")!;
+    assert.equal(text(bar.querySelector("h1")), "Project 1");
+    assertNoDomNode(body.querySelector(".project-detail-title-row"), "the body has no second title row");
+    assert.ok(body.querySelector(".project-detail-meta"), "the meta line stays");
+    const primary = bar.querySelector<HTMLButtonElement>(".detail-bar-action.primary")!;
+    assert.equal(text(primary.querySelector(".detail-bar-action-label")), "New Session");
+    await act(async () => { primary.click(); });
+    assert.equal(newSessionPresets.at(-1)?.projectLocationId, "location-1b");
+    const menu = await openProjectActions(bar);
+    assert.deepEqual(menuItems(menu).map((item) => item.label), ["Copy Project ID", "Archive Sessions…", "Delete Project…"]);
+  } finally {
+    restore();
+  }
 });
