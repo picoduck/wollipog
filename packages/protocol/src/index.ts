@@ -695,8 +695,13 @@ export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export type {
-  CampaignLaunchProposal, FullControlLaunchRequest, PreparedCampaignLaunch,
-  CampaignLaunchInspectionMessage, CampaignLaunchInspectionResult, CampaignLaunchPreflight,
+  CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, PreparedCampaignLaunch,
+  CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
+  CampaignLaunchPreflight, CampaignLaunchCapability, CampaignLaunchCapabilityId, CampaignLaunchSummary,
+} from "./campaign-control-launch.js";
+export {
+  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION,
+  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -3323,8 +3328,9 @@ export interface RunnerMetadata {
 export interface RunnerRuntimeInfo {
   /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
-  /** Exact read-only workspace inspection path only; never Full Control readiness. */
-  campaignLaunchInspection?: { version: 1 };
+  /** Exact read-only workspace inspection path only; never Full Control readiness. Version 2
+   * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection. */
+  campaignLaunchInspection?: { version: 1 | 2 };
   /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Native-host runner data root. WSL contexts use the same `.agent-manager` layout in-distro. */
@@ -10825,6 +10831,7 @@ export interface GitActionResultMessage {
 export type ControlPlaneToRunner =
   | { type: "media_review_stop"; request: import("./media-active-stop.js").MediaActiveStopRequest }
   | import("./campaign-control-launch.js").CampaignLaunchInspectionMessage
+  | import("./campaign-control-launch.js").CampaignLaunchInspectionCancelMessage
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
   | import("./session-review-job.js").SessionReviewJobCommand

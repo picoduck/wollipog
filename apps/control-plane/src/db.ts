@@ -14980,6 +14980,14 @@ export class ControlPlaneDb {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  /** The committed launch for one Human request identity, so a lost response can be recovered
+   * without re-evaluating readiness against facts that legitimately changed after commit. */
+  humanCampaignLaunchIdentity(userId: string, requestId: string): { digest: string; sessionId: string } | null {
+    const row = this.stmt("SELECT digest,session_id FROM human_campaign_launches WHERE user_id=? AND request_id=?")
+      .get(userId, requestId) as { digest: string; session_id: string } | undefined;
+    return row ? { digest: row.digest, sessionId: row.session_id } : null;
+  }
+
   /** Internal Human admission, never an HTTP/agent-provided grant. All resources and initial
    * reservation commit together; callers may send a provider command only after this returns. */
   createHumanCampaignLaunch(input: NewSessionInput, principal: HumanPrincipal, requestId: string, digest: string): { session: SessionView; created: boolean } {
@@ -14993,7 +15001,7 @@ export class ControlPlaneDb {
         scope.authorizedByUserId !== principal.userId || scope.repository !== boundary.repository ||
         scope.revision !== 1 || boundary.issueScopeRevision !== 1 || boundary.revision !== 1 ||
         scope.authorizedAt !== boundary.authorizedAt || !boundary.budgetAuthority ||
-        !boundary.issueAuthority || scope.issueNumbers.length < 1 || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
+        !boundary.issueAuthority || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
         scope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(scope.issueNumbers).size !== scope.issueNumbers.length ||
         JSON.stringify(policy?.issueNumbers) !== JSON.stringify(scope.issueNumbers) ||
         boundary.budgetAuthority.costUsd === undefined || boundary.budgetAuthority.toolCalls === undefined ||

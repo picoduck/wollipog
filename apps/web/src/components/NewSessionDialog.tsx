@@ -1151,7 +1151,7 @@ export function NewSessionDialog({
     setRequestError(null);
     if (!valid) {
       if (orchestrator && controlPreview === "full_control") {
-        setValidationError("Full Control activation is unavailable. Review the preflight or choose Custom.");
+        setValidationError("Check the Full Control preflight, then use Authorize and Create Session, or choose Custom.");
         focusValidationProblem('[data-control-mode="full_control"]');
       } else if (retainedSessionId) {
         setValidationError("Open the retained session before creating another one.");
@@ -1708,6 +1708,7 @@ export function NewSessionDialog({
                 onChange={setControlPreview} disabled={busy}
                 launchRequest={buildSessionRequest} launchSelectionValid={launchSelectionValid}
                 onCampaignCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
+                onLaunchActivity={() => setValidationError(null)}
                 root={{ driver: agent?.driver, permissionMode: roleOverride === "orchestrator" &&
                   (providerPermissionsPreset || !orchestratorRoleSupported) ? "orchestrator" : savedPermissionMode }}
                 workspace={workspaceId || browsedPath} />

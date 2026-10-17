@@ -212,6 +212,7 @@ import { OrchestratorSettings, childHarnessAgents, childModelMachines } from "./
 import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
   canAssignSessionProject,
@@ -955,6 +956,10 @@ const sessionNamingSettings = new SessionNamingSettings(db, process.env, hub);
 const agentHarnessDefaultsSettings = new AgentHarnessDefaultsSettings(db);
 const orchestratorSettings = new OrchestratorSettings(db);
 
+const evidenceAuthorityDisclosures = hostingEvidenceAuthorityDisclosures({
+  organizationExists: (organizationId) => db.listOrganizationIds().includes(organizationId),
+  listRunners: () => db.listRunners(),
+});
 const svc = new SessionsService(
   db,
   hub,
@@ -976,6 +981,9 @@ const svc = new SessionsService(
   sessionNamingSettings.revisionForSession,
   VIDEO_FRAME_VALIDATION_SESSION_ID !== undefined,
   VIDEO_FRAME_VALIDATION_SESSION_ID,
+  undefined,
+  undefined,
+  evidenceAuthorityDisclosures,
 );
 const roleConversions = new SessionRoleConversions(db, hub, (event, fields) =>
   app.log.info({ event, ...fields }, "session role conversion"));
@@ -989,7 +997,7 @@ const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
-registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal });
+registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures });
 registerArtifactUploadSettingsRoutes(app, db, hub, requestPrincipal);
 
 // An attempt session's observed status moves its work item without a ledger write; give such
