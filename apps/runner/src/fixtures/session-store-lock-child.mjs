@@ -88,5 +88,9 @@ if (config.resultFault === "exit") {
 }
 fs.writeFileSync(pendingPath, payload);
 fs.renameSync(pendingPath, resultPath);
+if (config.exitPause) {
+  fs.writeFileSync(signal(config.exitPause, "checked"), "");
+  while (!realExists(signal(config.exitPause, "go"))) Atomics.wait(cell, 0, 0, 5);
+}
 // Optionally stay alive afterwards, so this process's files name a live pid.
 while (config.stayAlive && !realExists(signal(config.name, "exit"))) Atomics.wait(cell, 0, 0, 5);

@@ -20,7 +20,7 @@ test("lock-race cleanup preserves source-mapped lcov reporting", () => {
   try {
     const child = spawnSync(process.execPath, [
       "--import", "tsx", "--test", "--experimental-test-coverage",
-      "--test-name-pattern=^of two processes taking a free lock, exactly one wins$",
+      "--test-name-pattern=^(of two processes taking a free lock, exactly one wins|cleanup lets a published child finish before removing its files)$",
       "--test-reporter=tap", `--test-reporter-destination=${tapPath}`,
       "--test-reporter=lcov", `--test-reporter-destination=${lcovPath}`,
       "apps/runner/src/session-store-lock.test.ts",
@@ -28,7 +28,7 @@ test("lock-race cleanup preserves source-mapped lcov reporting", () => {
     assert.ifError(child.error);
     const tap = readFileSync(tapPath, "utf8");
     assert.equal(child.status, 0, `${child.stderr}\n${tap}`);
-    assert.match(tap, /^# pass 1$/m, "the selected two-process race must run");
+    assert.match(tap, /^# pass 2$/m, "the two-process race and post-publication cleanup must run");
     assert.match(tap, /^# fail 0$/m);
     assert.doesNotMatch(tap, /Could not report code coverage|ERR_SOURCE_MAP_MISSING_SOURCE/);
     const lcov = readFileSync(lcovPath, "utf8");
