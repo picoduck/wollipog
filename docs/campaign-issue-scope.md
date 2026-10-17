@@ -29,6 +29,11 @@ failure is recoverable by reconnecting/updating the runner; closure remains refu
 GitHub credentials, governance, and the independent exact issue-closure decision remain authoritative;
 Custom closure approval is human-owned.
 
+Campaign GitHub operations support validated local and SSH host targets belonging to the runner.
+Container and cloud placements are unsupported. A target refusal is reported separately from origin
+or GitHub authentication failures; `campaign_issue_scope_refused` logs its operation, request and
+session identifiers with the fixed `unsupported_execution_target` reason, without command output.
+
 Operational questions: which human approved the change, which revision is authoritative, and did every
 active participant synchronize? Workflow audit plus `campaign_issue_scope_approved`,
 `campaign_issue_scope_synchronized`, and `campaign_issue_scope_sync_pending` answer these with session,

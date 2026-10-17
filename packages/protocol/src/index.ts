@@ -4529,6 +4529,8 @@ export interface CampaignIssueScopeResultMessage {
   requestId: string;
   sessionId: string;
   ok: boolean;
+  /** Fixed refusal classification; older runners omit it. Never surface raw runner error text. */
+  failure?: "unsupported_execution_target";
   repository?: string;
   revision?: number;
   candidates?: CampaignIssueScopeView["candidates"];

@@ -311,7 +311,8 @@ const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
 
 const client = {
   ...api,
-  campaignIssueScope: async (id: string) => ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
+  campaignIssueScope: async (id: string) => params.get("scope") === "unsupported-target" ? api.campaignIssueScope(id)
+    : ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
     ...scopeCompatibility, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
       { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }],
