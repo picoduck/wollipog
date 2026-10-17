@@ -5,7 +5,7 @@ import {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
   campaignWorkflowOwner,
   type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
-  type ControlPlaneToRunner, type CreateSessionRequest, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
+  type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -347,7 +347,8 @@ test("an empty launch scope delegates no issue writes: additions are refused and
   };
   try {
     const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", task: "Investigate flaky tests",
-      overrides: { session: { config: { model: "claude-opus-5-5", permissionMode: "orchestrator" } }, budget: { costUsd: 10, toolCalls: 100 } } };
+      overrides: { session: { config: { model: "claude-opus-5-5", permissionMode: "orchestrator" } }, budget: { costUsd: 10, toolCalls: 100 },
+        issues: { relatedFollowUps: true, maxIssues: 3 } } };
     const { preflight: checked } = await preflight(server, body);
     assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
     const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
@@ -372,12 +373,28 @@ test("an empty launch scope delegates no issue writes: additions are refused and
     assert.equal(f.db.getSession(root.id)!.orchestratorPolicy!.issueScope!.revision, 1);
 
     // Closure and publication have no bounded admission, so the typed gate stays with the Human.
+    // Ledger reads are stubbed with otherwise eligible delivered work and an accepted related
+    // recommendation, so only scope membership separates the positive control from the refusal.
+    const delivered = { id: "wi-5", issue: { repository: "owner/repo", number: 5 }, primaryState: "delivered", currentAttempt: null,
+      verifications: [{ outcome: "delivered", report: { digest: "d".repeat(64) } }],
+      observed: { pullRequests: [{ ref: { repository: "owner/repo", number: 10 },
+        fact: { availability: "fresh", value: { state: "merged", headSha: "b".repeat(40), mergeCommitSha: "c".repeat(40) } } }] } } as unknown as CampaignWorkItemDetail;
+    const ledger = f.db.campaignWorkLedger;
+    ledger.page = (() => ({ ok: true, data: { items: [delivered] } })) as unknown as typeof ledger.page;
+    ledger.detail = (() => delivered) as unknown as typeof ledger.detail;
+    ledger.recommendation = (() => ({ id: "rec-1", disposition: "accepted", duplicateOfId: null, publication: "awaiting_publication",
+      dispositionReason: "Observed related work", repository: "owner/repo", title: "Fixture Follow-Up", originWorkItemIds: ["wi-5"] })) as unknown as typeof ledger.recommendation;
+    const inScope = structuredClone(root);
+    inScope.orchestratorPolicy!.issueNumbers = [5];
     const closure = { category: "issue_closure", repository: "owner/repo", issue: 5, title: "Issue 5", forgeDigest: "f".repeat(64),
-      reason: "completed", explanation: "Fixture closure", evidence: [], activeChildren: [], openPullRequests: [] } as unknown as GithubIssueClosureSnapshot;
+      reason: "completed", explanation: "Fixture closure", evidence: [], activeChildren: [], openPullRequests: [],
+      delivery: [{ number: 10, headSha: "b".repeat(40), mergeCommitSha: "c".repeat(40) }] } as unknown as GithubIssueClosureSnapshot;
+    assert.ok(closureEvidence(f.db, inScope, closure), "positive control: the same delivered issue in scope is admissible");
     assert.equal(closureEvidence(f.db, root, closure), null);
     const publication = { category: "follow_up_issue_publication" as const, repository: "owner/repo", sanitizedTitle: "Fixture Follow-Up",
-      sanitizedBody: "## Problem\nFixture\n## Proposed Behavior\nFixture\n## Acceptance Criteria\n- Fixture\n## Security and Compatibility\nNone",
+      sanitizedBody: "## Problem\nRelated failure\n## Proposed Behavior\nRepair it\n## Acceptance Criteria\n- Verified repair\n## Security and Compatibility\nNone",
       labels: [], recommendationId: "rec-1" };
+    assert.ok(publicationEvidence(f.db, inScope, publication), "positive control: an in-scope origin is admissible");
     assert.equal(publicationEvidence(f.db, root, publication), null);
     for (const snapshot of [closure, publication]) {
       const evaluation = evaluateCampaignAuthority(root, root, PROTOCOL_VERSION, snapshot);
