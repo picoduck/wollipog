@@ -94,8 +94,12 @@ test("the schema refuses scopes, roles, and states outside the grant model", () 
   const { db } = open();
   try {
     assert.throws(() => db.authorizeProviderProfileGrant({ grantId: "11111111-1111-4111-8111-111111111111", runnerId: "runner-a",
-      providerAccountId: "work", provider: "claude", origin: "adopted", grantedBy: "user-1", grantedRole: "operator" as never, now: 1 }),
-      /CHECK constraint failed/u);
+      providerAccountId: "work", provider: "claude", origin: "adopted", grantedBy: "user-1", grantedRole: "member" as never, now: 1 }),
+      /CHECK constraint failed/u, "only organization roles are recorded");
+    // A grant created by Add Account records whoever could manage the Machine, not only an Owner/Admin.
+    const created = db.authorizeProviderProfileGrant({ grantId: "33333333-3333-4333-8333-333333333333", runnerId: "runner-a",
+      providerAccountId: "created-by-operator", provider: "claude", origin: "created", grantedBy: "user-2", grantedRole: "operator", now: 1 });
+    assert.equal(created?.grant.grantedRole, "operator");
     const grant = authorize(db, "22222222-2222-4222-8222-222222222222")!.grant.grantId;
     const raw = (db as unknown as { db: { prepare(sql: string): { run(...values: unknown[]): unknown } } }).db;
     assert.throws(() => raw.prepare("UPDATE provider_profile_grants SET scope='runner' WHERE grant_id=?").run(grant), /CHECK constraint failed/u);

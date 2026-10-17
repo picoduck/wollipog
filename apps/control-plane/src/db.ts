@@ -2295,7 +2295,9 @@ CREATE TABLE IF NOT EXISTS provider_profile_grants (
   origin                    TEXT NOT NULL CHECK (origin IN ('adopted','created')),
   status                    TEXT NOT NULL CHECK (status IN ('pending','active','revoked')),
   granted_by                TEXT NOT NULL,
-  granted_role              TEXT NOT NULL CHECK (granted_role IN ('owner','admin')),
+  -- Adoption and revocation are Owner/Admin only; a grant created by Add Account (#3239) records
+  -- the creating person's role, which may be any role that can manage the Machine.
+  granted_role              TEXT NOT NULL CHECK (granted_role IN ('owner','admin','operator','viewer')),
   created_at                INTEGER NOT NULL,
   activated_at              INTEGER,
   revoked_at                INTEGER,
@@ -3248,7 +3250,7 @@ export interface ProviderProfileGrantRecord {
   origin: "adopted" | "created";
   status: "pending" | "active" | "revoked";
   grantedBy: string;
-  grantedRole: "owner" | "admin";
+  grantedRole: OrganizationRole;
   createdAt: number;
   activatedAt: number | null;
   revokedAt: number | null;
@@ -3265,7 +3267,7 @@ interface ProviderProfileGrantRow {
   grant_id: string; profile_id: string | null; control_plane_instance_id: string;
   organization_id: string; owner_kind: "organization" | "user" | "team"; owner_id: string; scope: "provider_home";
   runner_id: string; provider_account_id: string; provider: "claude" | "codex"; origin: "adopted" | "created";
-  status: "pending" | "active" | "revoked"; granted_by: string; granted_role: "owner" | "admin";
+  status: "pending" | "active" | "revoked"; granted_by: string; granted_role: OrganizationRole;
   created_at: number; activated_at: number | null; revoked_at: number | null; revoked_by: string | null; revoked_role: string | null;
 }
 
@@ -12771,7 +12773,7 @@ export class ControlPlaneDb {
     provider: "claude" | "codex";
     origin: "adopted" | "created";
     grantedBy: string;
-    grantedRole: "owner" | "admin";
+    grantedRole: OrganizationRole;
     now: number;
   }): { grant: ProviderProfileGrantRecord; created: boolean } | null {
     return this.atomic(() => {
