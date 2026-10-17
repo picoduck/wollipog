@@ -256,7 +256,7 @@ test("on a control plane without projects the workspace menu files the session, 
   await expect(dialog).toBeVisible();
   await expect(chooser.locator(".modal-foot").getByRole("button")).toHaveText(["Cancel", "Use This Folder"]);
   await chooser.getByRole("button", { name: "billing-service" }).click();
-  await expect(chooser.locator(".dir-path-input")).toHaveValue("/repos/billing-service");
+  await expect(chooser.locator(".crumbs .crumb.is-current")).toHaveText("billing-service");
   await chooser.getByRole("button", { name: "Use This Folder" }).click();
   await expect(chooser).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Browse…" })).toBeFocused();

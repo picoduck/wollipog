@@ -63,7 +63,7 @@ test("a declared transition still runs, for 1ms, and fires transitionend", async
       : []);
   });
   expect(running).toEqual([{ property: "background-color", duration: 1 }]);
-  await expect.poll(() => endEvents(page)).toContain("transitionend:background-color@dir-entry");
+  await expect.poll(() => endEvents(page)).toContain("transitionend:background-color@row");
   await expect(declared).toHaveCSS("background-color", "rgb(1, 2, 3)");
 });
 

@@ -1164,6 +1164,7 @@ function MachineSettingsDialog({
           <div className="machine-workspace-create">
             <DirectoryPicker
               runnerId={runner.runnerId}
+              machineName={display.name}
               protocolVersion={runner.protocolVersion}
               onPick={pickWorkspace}
               onCancel={() => setBrowsing(false)}

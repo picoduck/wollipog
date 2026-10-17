@@ -271,7 +271,6 @@ test("nothing fades a subtree with opacity except an inactive control", () => {
   const ALLOWED = new Map<string, string>([
     ["0%, 80%, 100%", "a keyframe step: the animation's REST state is what has to be readable"],
     ["50%", "a keyframe step"],
-    [".dir-icon", "a decorative glyph beside a label that is not itself dimmed"],
     [".working-dots span", "three animated dots, purely decorative"],
     [".ui-switch-control.is-busy > .ui-switch",
       "the switch track and knob, non-text; #214 measured 0.85 to hold the track's 3:1 border"],

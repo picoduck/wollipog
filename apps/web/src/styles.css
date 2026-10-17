@@ -7643,8 +7643,7 @@ body.shell-dock-dragging * {
 button,
 select,
 input,
-textarea,
-.dir-entry {
+textarea {
   transition:background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
 /* Slim, theme-matched scrollbars (Chromium) instead of the chunky OS default */
@@ -12052,81 +12051,65 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .static-pick .online-dot {
   background: var(--green);
 }
-/* Remote directory browser */
-.dir-picker {
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-  overflow: hidden;
-}
-.dir-path-row {
-  display: flex;
-  gap: 6px;
-  padding: 8px;
-  border-bottom: 1px solid var(--border);
-}
-.dir-path-input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
-  font-size: 12px;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-}
-.dir-error {
-  margin: 0;
-  padding: 8px 12px;
-}
-.dir-list {
-  max-height: 220px;
-  overflow-y: auto;
+/* Choose Folder's folder browser (DirectoryPicker.tsx, #2956, §4.8, §5.2, §12.3): a breadcrumb
+   with Edit Path, then one --row-h row per folder. The list has no height of its own, so the dialog
+   body is the only scroller. */
+.folder-picker {
   display: flex;
   flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
 }
-.dir-entry {
+/* The trail and the path field swap in one bar, which keeps the field's height either way. */
+.folder-picker-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: none;
-  color: var(--text);
-  font-size: 13px;
-  padding: 7px 12px;
-  cursor: pointer;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--control-h);
 }
-.dir-icon {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  opacity: 0.85;
-}
-.dir-name {
+.folder-picker-path { font-family: var(--font-mono); }
+.folder-picker-bar > .folder-picker-path {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.dir-entry:hover {
-  background: var(--bg-elev-2);
+/* A crumb and the chevron before it wrap together, and a long folder name breaks rather than
+   pushing the current folder out of view. */
+.folder-picker-crumb {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
 }
-.dir-entry.up {
+.folder-picker-crumb > .crumb {
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.folder-picker-crumb > .crumb-sep { display: inline-flex; }
+.folder-picker-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.folder-picker-list .row-title { font: var(--type-body); }
+.folder-picker-empty {
+  display: flex;
+  align-items: center;
+  min-height: var(--row-h);
+  margin: 0;
+  padding: 0 var(--space-3);
   color: var(--text-dim);
+  font: var(--type-body);
 }
-.dir-empty {
-  padding: 10px 12px;
+.skeleton.folder-picker-skeleton {
+  gap: 0;
+  min-height: 0;
+  padding: 0;
 }
-.dir-actions {
+/* Cancel and Use This Folder where the picker sits inline in a form (Manage Machine, Add Location). */
+.folder-picker-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 8px 12px;
-  border-top: 1px solid var(--border);
+  gap: var(--space-2);
 }
 /* A Checkbox row (§8.4): the 16px box, its label 8px to the right, and the whole row as the
    target. At least 32px tall, 44px on a coarse pointer, through the dense row token. Items sit at
