@@ -384,7 +384,7 @@ export function ProjectsView({
     if (!selected) return;
     try {
       applyProject((await api.project(selected.id)).project);
-      showToast("Access scope updated.");
+      showToast("Access changed.");
     } catch (cause) {
       fail("Access changed, but the project couldn't be reloaded.", cause);
     }
@@ -671,7 +671,7 @@ export function ProjectsView({
                 </button>
                 {accessScopeManagementSupported && selected.scope && (
                   <AccessScopeSettings
-                    resource={{ kind: "project", projectId: selected.id, name: selected.name }}
+                    resource={{ kind: "project", projectId: selected.id, name: selected.name, locations: selected.locations }}
                     scope={selected.scope}
                     identity={accessIdentity}
                     disabled={selected.canManage === false || busy !== null}

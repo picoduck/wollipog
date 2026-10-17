@@ -85,7 +85,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `SettingsIcon` | Lucide | `Settings` | Generic settings navigation. |
 | `UserPlusIcon` | Lucide | `UserPlus` | Add a collaborator. |
 | `DeviceIcon` | Lucide | `Smartphone` | Paired device. |
-| `TeamIcon` | Lucide | `Users` | Team or access group. |
+| `TeamIcon` | Lucide | `Users` | Team or access group; access shared with a team. |
 | `EditIcon` | Lucide | `Pencil` | Generic edit action. |
 | `CopyIcon` | Lucide | `Copy` | Generic copy action. |
 | `InsertIntoDraftIcon` | Lucide | `TextCursorInput` | Insert into Draft on a Side Chat reply, which puts its text into the session's draft (#2862). |
@@ -104,7 +104,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts: the palette action and Settings › Behavior's Show Shortcuts. |
 | `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
 | `SignInIcon` | Lucide | `KeyRound` | The Request Card's Sign-In kind: a sign-in the session waits for (#2198). |
-| `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |
+| `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email; Private to Me access. |
+| `BuildingIcon` | Lucide | `Building` | Organization-Wide access (#2960). |
 | `SecureContextRequiredIcon` | Lucide | `LockKeyhole` | A page that must be HTTPS or localhost to check evidence: the HTTPS or Localhost Required notice and a UI evidence tile that is Not Shown. |
 | `PlayIcon` | Lucide | `Play` | A recording: the mark over a UI evidence tile's first frame. |
 | `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
