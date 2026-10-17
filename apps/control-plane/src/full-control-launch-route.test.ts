@@ -120,11 +120,11 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     assert.deepEqual(summary.followUps, { policy: "execute_approved", relatedFollowUps: true, maxIssues: 4, closureReasons: ["completed"] });
     assert.equal(summary.root.completion, "stop_and_archive");
     assert.deepEqual(summary.root.isolation, { mode: "provider", network: "inherit" });
-    assert.match(summary.evidence.statement, /Screenshots are reviewed by the Orchestrator; video and external evidence need a Human/);
+    assert.equal(summary.evidence.statement, "The Orchestrator reviews screenshots. Video and external evidence need your review.");
     assert.equal(summary.evidence.provider!.retentionDisclosure, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE);
     assert.equal(summary.evidence.destination.configurationId, `session_artifacts:${f.human.organizationId}`);
     assert.equal(summary.evidence.envelope, false, "no peer declares the private media contract");
-    assert.ok(summary.humanRequired.some((item) => item.exception === "Secrets and sign-in"));
+    assert.ok(summary.humanRequired.some((item) => item.exception === "Secrets and Sign-In"));
     assert.deepEqual(summary.blockers, []);
     assert.deepEqual(checked!.advanced.controlledReview, review);
     assert.deepEqual(f.starts, []);
@@ -263,7 +263,7 @@ test("screenshots route to the Human when the Orchestrator model cannot review i
     assert.equal(image.state, "human_required");
     assert.equal(image.mandatory, false);
     assert.equal(checked!.summary.evidence.provider, null);
-    assert.match(checked!.summary.evidence.statement, /Screenshots, video and external evidence need a Human/);
+    assert.equal(checked!.summary.evidence.statement, "Screenshots, video and external evidence need your review.");
     assert.ok(checked!.summary.humanRequired.some((item) => item.exception === "Screenshot Evidence Review"));
   } finally { await server.close(); f.db.close(); }
 });

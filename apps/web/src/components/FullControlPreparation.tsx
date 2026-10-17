@@ -25,14 +25,18 @@ export function FullControlModeChoice({ mode, onChange, disabled = false, prefer
 /** Shared preference/preflight display. Launch uses only the exact Human endpoint, which admits
  * only when the server verifies every mandatory capability; ordinary creation stays fenced. */
 export function FullControlPreparation({ mode, onChange, disabled = false, preferenceSupported = false,
-  launchRequest, launchSelectionValid = false, onCampaignCreated, ...input }: PreparationInput & {
+  launchRequest, launchSelectionValid = false, onCampaignCreated, onLaunchActivity, ...input }: PreparationInput & {
   mode: CampaignControlMode; onChange: (mode: CampaignControlMode) => void; disabled?: boolean; preferenceSupported?: boolean;
   launchRequest?: () => CreateSessionRequest; launchSelectionValid?: boolean; onCampaignCreated?: (id: string) => void;
+  /** The Human acted on the launch preflight, so a stale ordinary-submit hint no longer applies. */
+  onLaunchActivity?: () => void;
 }) {
   const id = useId();
   const preflight = fullControlPreflight(input);
   const current = preflight.effectiveMode;
   const defaults = input.surface === "defaults";
+  // New Session's launch preflight comes from the server; the local preview below cannot judge it.
+  const serverLaunch = input.surface === "launch" && launchRequest !== undefined && onCampaignCreated !== undefined;
   if (defaults && mode === "custom") return null;
   return <section className="section" aria-labelledby={defaults ? undefined : `${id}-title`}
     aria-label={defaults ? "Orchestrator Control" : undefined}>
@@ -41,7 +45,9 @@ export function FullControlPreparation({ mode, onChange, disabled = false, prefe
       <ChoiceRows<CampaignControlMode> label="Orchestrator Control" value={mode} onChange={onChange}
         options={[
           { value: "custom", title: "Custom", description: "Choose individual request and workflow decision owners.", disabled, inputData: { "data-control-mode": "custom" } },
-          { value: "full_control", title: "Full Control", description: "Review autonomous control within one human-established campaign boundary. Activation is unavailable here.", disabled, inputData: { "data-control-mode": "full_control" } },
+          { value: "full_control", title: "Full Control", description: serverLaunch
+            ? "Authorize one bounded campaign once the server verifies it is ready."
+            : "Review autonomous control within one human-established campaign boundary. Activation is unavailable here.", disabled, inputData: { "data-control-mode": "full_control" } },
         ]} />
       <p className="section-note">Selecting the Orchestrator role or assigning all five owners does not authorize Full Control.</p>
     </>}
@@ -51,16 +57,18 @@ export function FullControlPreparation({ mode, onChange, disabled = false, prefe
         <p className="section-note">Selecting the Orchestrator role or assigning all five owners does not authorize Full Control.</p>
         <p className="section-note">Defaults apply only to new campaigns. {preferenceSupported ? "Save Defaults records a preferred mode; it grants no campaign authority. " : "This version cannot save a control preference. "}Each new campaign still needs its own exact scope and authenticated human authorization.</p>
       </>}
-      <h4 className="section-title">Full Control Preflight</h4>
-      <Notice tone="neutral" role="status">Activation Unavailable</Notice>
-      <dl className="facts orchestrator-facts">
-        {preflight.facts.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
-      </dl>
-      <h4 className="section-title">Human Required and Unsupported Capabilities</h4>
-      <ul>{preflight.blockers.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+      {!serverLaunch && <>
+        <h4 className="section-title">Full Control Preflight</h4>
+        <Notice tone="neutral" role="status">Activation Unavailable</Notice>
+        <dl className="facts orchestrator-facts">
+          {preflight.facts.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+        </dl>
+        <h4 className="section-title">Human Required and Unsupported Capabilities</h4>
+        <ul>{preflight.blockers.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+      </>}
       <p className="section-note">One authenticated human confirmation must bind the complete issue, budget, and evidence authorities together. Agent JSON, saved defaults, and this preview cannot grant authorization.</p>
-      {input.surface === "launch" && launchRequest && onCampaignCreated
-        ? <CampaignLaunchForm request={launchRequest()} selectionValid={launchSelectionValid} disabled={disabled} onCreated={onCampaignCreated} />
+      {serverLaunch
+        ? <CampaignLaunchForm request={launchRequest!()} selectionValid={launchSelectionValid} disabled={disabled} onCreated={onCampaignCreated!} onActivity={onLaunchActivity} />
         : <button type="button" className="btn primary" disabled>Authorize Full Control</button>}
     </>}
   </section>;
@@ -70,8 +78,8 @@ const CAPABILITY_STATE_LABELS: Record<CampaignLaunchPreflight["capabilities"][nu
   verified: "Verified", unsupported: "Blocks Launch", human_required: "Human Required",
 };
 
-function CampaignLaunchForm({ request, selectionValid, disabled, onCreated }: {
-  request: CreateSessionRequest; selectionValid: boolean; disabled: boolean; onCreated: (id: string) => void;
+function CampaignLaunchForm({ request, selectionValid, disabled, onCreated, onActivity }: {
+  request: CreateSessionRequest; selectionValid: boolean; disabled: boolean; onCreated: (id: string) => void; onActivity?: () => void;
 }) {
   const api = useApi();
   const id = useId();
@@ -120,6 +128,7 @@ function CampaignLaunchForm({ request, selectionValid, disabled, onCreated }: {
   const check = async () => {
     if (!valid || disabled || busy) return;
     const attempt = ++generation.current;
+    onActivity?.();
     setBusy(true); setError(null);
     try {
       const { preflight } = await api.fullControlLaunchPreflight(JSON.parse(input));
@@ -161,12 +170,21 @@ function CampaignLaunchForm({ request, selectionValid, disabled, onCreated }: {
       <Notice tone="neutral" role="status">{ready ? "Ready for Exact Human Authorization" : "Full Control Launch Blocked"}</Notice>
       <dl className="facts orchestrator-facts">
         <div><dt>Resolved Repository</dt><dd>{fresh.summary.repository ?? "Unverified"}</dd></div>
+        <div><dt>Issue Scope</dt><dd>{fresh.summary.issueNumbers?.length ? fresh.summary.issueNumbers.map((n) => "#" + n).join(", ") : "No Issues"}</dd></div>
+        {fresh.summary.budget && <div><dt>Campaign Budget</dt><dd>{fresh.summary.budget.costUsd === null || fresh.summary.budget.toolCalls === null
+          ? "Not Set" : "$" + fresh.summary.budget.costUsd + " · " + fresh.summary.budget.toolCalls + " tool calls · " + fresh.summary.budget.concurrency + " concurrent"}</dd></div>}
+        {fresh.summary.followUps && <div><dt>Follow-Ups</dt><dd>{titleCaseLabel(fresh.summary.followUps.policy.replaceAll("_", " ")) + " · up to " + fresh.summary.followUps.maxIssues + " issues"}</dd></div>}
         <div><dt>Resolved Root Model</dt><dd>{fresh.advanced.plan.config.model ?? "Unverified"}</dd></div>
         <div><dt>Resolved Root Effort</dt><dd>{fresh.advanced.plan.config.effort ? titleCaseLabel(fresh.advanced.plan.config.effort) : "Provider Default"}</dd></div>
         <div><dt>Resolved Provider Permissions</dt><dd>{fresh.advanced.plan.config.permissionMode ? titleCaseLabel(fresh.advanced.plan.config.permissionMode) : "Provider Default"}</dd></div>
       </dl>
       <ul>{fresh.capabilities.map((capability) => <li key={capability.id}>{capability.capability} ({CAPABILITY_STATE_LABELS[capability.state]}): {capability.reason}</li>)}</ul>
-      <p className="section-note">{fresh.summary.evidence.statement} {fresh.summary.evidence.provider?.retentionDisclosure}</p>
+      <p className="section-note">{fresh.summary.evidence.statement}</p>
+      {fresh.summary.evidence.provider && <p className="section-note">{fresh.summary.evidence.provider.retentionDisclosure}</p>}
+      {fresh.summary.humanRequired?.length ? <>
+        <h5 className="section-title">Always Needs Your Decision</h5>
+        <ul>{fresh.summary.humanRequired.map((item) => <li key={item.exception}>{item.exception}</li>)}</ul>
+      </> : null}
     </>}
     {error && <Notice tone="danger" role="alert">{error}</Notice>}
     <button type="button" className="btn primary" disabled={!ready || !valid || disabled || busy} onClick={() => void authorize()}>Authorize and Create Session</button>

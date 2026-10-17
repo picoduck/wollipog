@@ -138,16 +138,16 @@ export function campaignLaunchDigest(value: unknown): string {
 }
 
 const HUMAN_REQUIRED_LABELS: Record<string, string> = {
-  secrets_and_sign_in: "Secrets and sign-in",
-  persistent_permissions: "Persistent permission grants",
-  provider_access_expansion: "Provider access expansion",
-  external_elicitation: "External provider forms",
-  root_forms_without_suggested_answers: "Root questions without a suggested answer",
-  unverified_tool_effects: "Tool effects that cannot be verified",
-  git_execution_without_bounded_effect_proof: "Git commands without bounded effect proof",
-  script_execution_without_bounded_effect_proof: "Scripts without bounded effect proof",
-  human_required_rules: "Human Required governance rules",
-  relative_shell_commands_without_verified_cwd: "Relative shell commands without a verified directory",
+  secrets_and_sign_in: "Secrets and Sign-In",
+  persistent_permissions: "Persistent Permission Grants",
+  provider_access_expansion: "Provider Access Expansion",
+  external_elicitation: "External Provider Forms",
+  root_forms_without_suggested_answers: "Root Questions Without a Suggested Answer",
+  unverified_tool_effects: "Tool Effects That Cannot Be Verified",
+  git_execution_without_bounded_effect_proof: "Git Commands Without Bounded Effect Proof",
+  script_execution_without_bounded_effect_proof: "Scripts Without Bounded Effect Proof",
+  human_required_rules: "Human Required Governance Rules",
+  relative_shell_commands_without_verified_cwd: "Relative Shell Commands Without a Verified Directory",
 };
 
 /** Readiness comes from current server and runner facts. `unsupported` blocks the launch with an
@@ -244,12 +244,12 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const imageDelegated = operations.includes("ui_evidence_approval") && facts.imageReview.effectiveOwner === "orchestrator";
   add("image_evidence", "Screenshot Evidence Review", imageDelegated ? "verified" : "human_required", imageDelegated
     ? "Screenshots attached as private Session artifacts are reviewed by the Orchestrator."
-    : facts.imageReview.effectiveOwner === "human" && facts.imageReview.fallback ? `Screenshots go to the Human: ${facts.imageReview.fallback.reason}`
-    : "Screenshots go to the Human because UI evidence approval is not delegated.", false);
+    : facts.imageReview.effectiveOwner === "human" && facts.imageReview.fallback ? `Screenshots need your review: ${facts.imageReview.fallback.reason}`
+    : "Screenshots need your review because UI evidence approval is not delegated.", false);
   add("video_evidence", "Video Evidence Review", "human_required",
-    "Video evidence goes to the Human until production video review (#1321) lands.", false);
+    "Video evidence needs your review until production video review is available.", false);
   add("external_evidence", "External Evidence Review", "human_required",
-    "Evidence stored outside private Session artifacts (links only) goes to the Human.", false);
+    "Evidence stored outside private Session artifacts (links only) needs your review.", false);
 
   const blockers = capabilities.filter((item) => item.mandatory && item.state !== "verified");
   const ready = blockers.length === 0 && proposal !== null;
@@ -266,8 +266,8 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     followUps: { policy: behavior.followUps, relatedFollowUps, maxIssues, closureReasons },
     evidence: {
       statement: imageDelegated
-        ? "Screenshots are reviewed by the Orchestrator; video and external evidence need a Human (Human Required) until production video review (#1321) lands."
-        : "Screenshots, video and external evidence need a Human (Human Required) for this campaign.",
+        ? "The Orchestrator reviews screenshots. Video and external evidence need your review."
+        : "Screenshots, video and external evidence need your review.",
       destination: { kind: "private_session_artifacts", configurationId: campaignSessionArtifactDestinationId(facts.organizationId),
         disclosureRevision: CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION },
       provider: imageDelegated ? { providerId: plan.driver, disclosureRevision: CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION,

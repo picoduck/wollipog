@@ -283,9 +283,13 @@ const connection: UiConnectionRuntime = {
   close() {},
 };
 
+// `openedView=1` lets a spec observe where a successful creation navigated.
+const openedSessionListeners = new Set<(id: string) => void>();
 const navigation: ViewNavigation = {
   current: () => ({ name: "inbox" }),
-  push() {},
+  push(view) {
+    if (fixtureParams.get("openedView") === "1" && view.name === "session") openedSessionListeners.forEach((listener) => listener(view.id));
+  },
   listen: () => () => {},
 };
 
@@ -360,7 +364,13 @@ function Harness() {
   const ready = useStoreSelector((state) => state.snapshotLoaded);
   const keyboardFixture = fixtureParams.get("keyboard") === "1";
   const [dialogOpen, setDialogOpen] = React.useState(!keyboardFixture);
+  const [openedSession, setOpenedSession] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    openedSessionListeners.add(setOpenedSession);
+    return () => { openedSessionListeners.delete(setOpenedSession); };
+  }, []);
   if (!ready) return null;
+  if (openedSession) return <main className="section"><h1 className="section-title">Session Opened</h1><p role="status">{openedSession}</p></main>;
   if (fixtureParams.get("probe") === "select") return <SelectProbe />;
   if (runDialog) return <NewRunDialog onClose={() => undefined} />;
   if (keyboardFixture) return (

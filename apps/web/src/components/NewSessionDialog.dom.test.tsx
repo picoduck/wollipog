@@ -926,13 +926,14 @@ test("unsupported Full Control preview prevents button and Enter launch; Custom 
     assert.equal(createButton(fixture.container).disabled, true);
     await act(async () => submitWithEnter(fixture.container));
     assert.equal(fixture.requests.length, 0);
-    assert.match(fixture.container.textContent ?? "", /Full Control activation is unavailable/);
-    const permissionTerm = [...fixture.container.querySelectorAll("dt")].find((node) => node.textContent === "Provider Permissions")!;
-    assert.equal(permissionTerm.nextElementSibling?.textContent, "Orchestrator", "effective coupled preset replaces the saved provider default");
+    assert.match(fixture.container.textContent ?? "", /Check the Full Control preflight, then use Authorize and Create Session/);
+    const providerPermissions = fixture.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    assert.match(providerPermissions.textContent!, /Orchestrator/, "effective coupled preset replaces the saved provider default");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Activation Unavailable/, "the launch surface defers readiness to the server preflight");
     await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
     assert.equal(createButton(fixture.container).disabled, false);
     assert.equal([...fixture.container.querySelectorAll('[role="alert"]')]
-      .find((node) => node.textContent?.includes("Full Control activation is unavailable")), undefined, "returning to Custom clears stale unsupported validation");
+      .find((node) => node.textContent?.includes("Check the Full Control preflight")), undefined, "returning to Custom clears stale unsupported validation");
     await act(async () => createButton(fixture.container).click());
     assert.equal(fixture.requests.length, 1);
     assert.equal((fixture.requests[0]?.orchestrator as unknown as Record<string, unknown>).control, undefined);
