@@ -68,40 +68,37 @@ export class BoxAdmission {
     return this.limit;
   }
 
-  acquire(request: AdmissionRequest | string): boolean {
-    const normalized: AdmissionRequest = typeof request === "string"
-      ? { sessionId: request, agentId: "default", weight: 1 }
-      : request;
-    if (this.held.has(normalized.sessionId)) return true;
-    this.capacityLockWaiters.delete(normalized.sessionId);
-    if (!Number.isInteger(normalized.weight) || normalized.weight < 1 || normalized.weight > this.limit) return false;
+  acquire(request: AdmissionRequest): boolean {
+    if (this.held.has(request.sessionId)) return true;
+    this.capacityLockWaiters.delete(request.sessionId);
+    if (!Number.isInteger(request.weight) || request.weight < 1 || request.weight > this.limit) return false;
 
     const claimed: string[] = [];
-    if (normalized.exclusiveGroup) {
-      const exclusiveRoot = join(this.root, "exclusive", createHash("sha256").update(normalized.exclusiveGroup).digest("hex"));
+    if (request.exclusiveGroup) {
+      const exclusiveRoot = join(this.root, "exclusive", createHash("sha256").update(request.exclusiveGroup).digest("hex"));
       mkdirSync(exclusiveRoot, { recursive: true });
-      const exclusive = this.claimSlots(exclusiveRoot, 1, 1, normalized);
+      const exclusive = this.claimSlots(exclusiveRoot, 1, 1, request);
       if (!exclusive) return false;
       claimed.push(...exclusive);
     }
-    if (normalized.targetId && normalized.targetLimit) {
-      const targetRoot = join(this.root, "targets", createHash("sha256").update(normalized.targetId).digest("hex"));
+    if (request.targetId && request.targetLimit) {
+      const targetRoot = join(this.root, "targets", createHash("sha256").update(request.targetId).digest("hex"));
       mkdirSync(targetRoot, { recursive: true });
-      const target = this.claimSlots(targetRoot, normalized.targetLimit, 1, normalized);
+      const target = this.claimSlots(targetRoot, request.targetLimit, 1, request);
       if (!target) {
         this.releaseSlots(claimed);
         return false;
       }
       claimed.push(...target);
     }
-    const providerRoot = join(this.root, "providers", createHash("sha256").update(normalized.agentId).digest("hex"));
+    const providerRoot = join(this.root, "providers", createHash("sha256").update(request.agentId).digest("hex"));
     // Keep empty hashed provider roots. Removing them races a sibling between its parent mkdir and
     // atomic slot mkdir; the number is bounded by validated configured/discovered agent ids.
     mkdirSync(providerRoot, { recursive: true });
     // Every v42 process claims a provider slot, even without an explicit quota. That makes a later
     // policy tightening visible across sibling runner processes instead of counting only sessions
     // launched by the process that happened to carry the limit.
-    const provider = this.claimSlots(providerRoot, normalized.agentLimit ?? 256, 1, normalized);
+    const provider = this.claimSlots(providerRoot, request.agentLimit ?? 256, 1, request);
     if (!provider) {
       this.releaseSlots(claimed);
       return false;
@@ -112,16 +109,16 @@ export class BoxAdmission {
     // cannot all race through the same observed remainder.
     const mutationRoot = join(this.root, "capacity-mutation");
     mkdirSync(mutationRoot, { recursive: true });
-    const mutation = this.claimSlots(mutationRoot, 1, 1, normalized);
+    const mutation = this.claimSlots(mutationRoot, 1, 1, request);
     if (!mutation) {
       this.releaseSlots(claimed);
-      this.capacityLockWaiters.add(normalized.sessionId);
+      this.capacityLockWaiters.add(request.sessionId);
       return false;
     }
     let global: string[] | null = null;
     try {
-      if (this.usedCapacity() + normalized.weight <= this.limit) {
-        global = this.claimSlots(this.root, this.limit, normalized.weight, normalized);
+      if (this.usedCapacity() + request.weight <= this.limit) {
+        global = this.claimSlots(this.root, this.limit, request.weight, request);
       }
     } finally {
       this.releaseSlots(mutation);
@@ -131,7 +128,7 @@ export class BoxAdmission {
       return false;
     }
     claimed.push(...global);
-    this.held.set(normalized.sessionId, claimed);
+    this.held.set(request.sessionId, claimed);
     return true;
   }
 
