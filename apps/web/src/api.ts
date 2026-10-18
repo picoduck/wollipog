@@ -1196,6 +1196,11 @@ export function createApiClient(transport: ApiTransport) {
       { method: "POST" },
     ),
 
+  acknowledgeBackgroundBlockedResults: (id: string, targets: readonly import("@wollipog/protocol").BlockedResultAcknowledgementTarget[]) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/background-deliveries/acknowledge-blocked-results`, {
+      method: "POST", body: JSON.stringify({ targets }),
+    }),
+
   acknowledgeBackgroundRetryExhaustion: (id: string, continuationId: string) =>
     req<SessionView>(
       `/api/sessions/${encodeURIComponent(id)}/background-deliveries/${encodeURIComponent(continuationId)}/acknowledge-retry-exhaustion`,

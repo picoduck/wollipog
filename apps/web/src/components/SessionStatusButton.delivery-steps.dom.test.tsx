@@ -59,6 +59,8 @@ const finishedAgent = job("agent", {
 });
 const runningMonitor = job("monitor");
 
+/** Legacy control-plane projection, without acknowledgement support. Modern projections add a
+ * blockedResultRevision, exercised by the #3408 tests below. */
 function blocked(overrides: Partial<SessionView> = {}): Partial<SessionView> {
   return {
     driver: "claude-code",
@@ -105,6 +107,7 @@ interface Harness {
   root: Root;
   stops: Array<{ sessionId: string; jobId: string; reply: Deferred<BackgroundJobStopResponse> }>;
   acknowledgements: Array<{ sessionId: string; continuationId: string; reply: Deferred<SessionView> }>;
+  blockedAcknowledgements: Array<{ sessionId: string; targets: Array<{ parentTurnId: string; revision: string }>; reply: Deferred<SessionView> }>;
   confirmations: ConfirmationOptions[];
   toasts: Array<{ message: string; tone?: ToastOptions["tone"] }>;
   opened: { background: number };
@@ -128,6 +131,7 @@ async function renderHeader(
     root: undefined as unknown as Root,
     stops: [],
     acknowledgements: [],
+    blockedAcknowledgements: [],
     confirmations: [],
     toasts: [],
     opened: { background: 0 },
@@ -137,6 +141,11 @@ async function renderHeader(
   };
   const client: ApiClient = {
     ...api,
+    acknowledgeBackgroundBlockedResults: (sessionId, targets) => {
+      const reply = deferred<SessionView>();
+      harness.blockedAcknowledgements.push({ sessionId, targets: [...targets], reply });
+      return reply.promise;
+    },
     stopBackgroundJob: (sessionId: string, jobId: string) => {
       const reply = deferred<BackgroundJobStopResponse>();
       harness.stops.push({ sessionId, jobId, reply });
@@ -233,7 +242,58 @@ function rowAction(badge: string): { name: string; button: HTMLButtonElement } {
   return { name: button.getAttribute("aria-label") ?? button.textContent ?? "", button };
 }
 
-test("Result Blocked is the bar's status and its row offers Stop Job… for the one job still running", async () => {
+test("Result Blocked acknowledges all displayed snapshots without stopping jobs or asking for confirmation (#3408)", async () => {
+  const deliveries = ["turn-1", "unknown"].map((parentTurnId) => ({
+    parentTurnId, jobCount: 1, terminalCount: 1, watchdogState: "continuation_blocked" as const,
+    blockedResultRevision: `revision-${parentTurnId}`,
+  }));
+  const harness = await renderHeader(blocked({ backgroundDeliveries: deliveries }), { runnerOnline: false });
+  try {
+    await openPopover();
+    assert.equal(rowAction("Result Blocked").name, "Acknowledge");
+    await act(async () => { rowAction("Result Blocked").button.click(); });
+    assert.equal(harness.blockedAcknowledgements.length, 1);
+    assert.deepEqual(harness.blockedAcknowledgements[0]!.targets,
+      deliveries.map((delivery) => ({ parentTurnId: delivery.parentTurnId, revision: delivery.blockedResultRevision })));
+    assert.equal(harness.confirmations.length, 0);
+    assert.equal(harness.stops.length, 0);
+    await openPopover();
+    assert.equal(rowAction("Result Blocked").button.getAttribute("aria-disabled"), "true");
+    const acknowledged = blocked({ backgroundDeliveries: deliveries.map((delivery) => ({
+      ...delivery, watchdogState: undefined, blockedResultAcknowledgedAt: NOW,
+    })) });
+    await act(async () => { harness.blockedAcknowledgements[0]!.reply.resolve(acknowledged as SessionView); });
+    await settle();
+    await openPopover();
+    assert.equal(rowAction("Result Blocked").name, "Open Background Work",
+      "acknowledgement settling must not substitute Stop Job into the same row");
+    await harness.rerender(acknowledged);
+    assert.doesNotMatch(trigger().getAttribute("aria-label")!, /Result Blocked/);
+    await harness.rerender(blocked({ backgroundDeliveries: [{ ...deliveries[0]!, blockedResultRevision: "new-result" }] }));
+    assert.match(trigger().getAttribute("aria-label")!, /Result Blocked/);
+    await openPopover();
+    assert.equal(rowAction("Result Blocked").name, "Acknowledge");
+  } finally { await cleanUp(harness.root); }
+});
+
+test("a changed blocked result cannot claim acknowledgement success from an older acknowledged group (#3408)", async () => {
+  const original = { parentTurnId: "turn-1", jobCount: 1, terminalCount: 1,
+    watchdogState: "continuation_blocked" as const, blockedResultRevision: "current" };
+  const old = { parentTurnId: "old", jobCount: 1, terminalCount: 1,
+    blockedResultRevision: "old", blockedResultAcknowledgedAt: NOW };
+  const harness = await renderHeader(blocked({ backgroundDeliveries: [original, old] }));
+  try {
+    await openPopover();
+    await act(async () => { rowAction("Result Blocked").button.click(); });
+    await act(async () => { harness.blockedAcknowledgements[0]!.reply.resolve({
+      backgroundDeliveries: [{ ...original, blockedResultRevision: "new" }, old],
+    } as SessionView); });
+    await settle();
+    assert.deepEqual(harness.toasts.at(-1), { message: "Background results changed. Review the current alerts.", tone: "info" });
+  } finally { await cleanUp(harness.root); }
+});
+
+test("a legacy Result Blocked row offers Stop Job… for the one job still running", async () => {
   const harness = await renderHeader(blocked());
   try {
     assert.equal(trigger().getAttribute("aria-label"), "Session Status: Result Blocked");

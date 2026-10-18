@@ -1344,7 +1344,12 @@ queued behind a turn that had never started.
   sibling from the same turn is unfinished waits passively (the session reads **Waiting on External
   Job**) while its parent turn runs and until an hour has passed since it finished
   (`BACKGROUND_HANDOFF_WAIT_MAX_MS`, the runner's default handoff bound; #3073). After both, it is a
-  `continuation_blocked` delivery, shown as **Result Blocked** with the step that clears it (ask the
+  `continuation_blocked` delivery, shown as **Result Blocked**. A dashboard's **Acknowledge** clears
+  attention for the exact currently reported result snapshots without ending jobs, discarding
+  results, granting retry authority or releasing execution barriers (#3408). The acknowledgement
+  persists in the control plane and is independent of runner snapshots; a new held result gets a
+  different snapshot identity and raises fresh attention. Background Work keeps acknowledged
+  entries inspectable. Recovery remains separate (ask the
   session to stop the unfinished job; a stop or a restart ends every job, a stop discards the result,
   and a v191 restart reports it to the new conversation), rather than **Result Pending** with "No
   action is needed".

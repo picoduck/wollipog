@@ -56,6 +56,7 @@ import { PanelHeaderActions } from "./RightPanel.js";
 import { PANEL_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { useBlockedResultAcknowledgement } from "./useBlockedResultAcknowledgement.js";
 
 export { backgroundJobCurrentState, type BackgroundJobCurrentState } from "../background-job-stop.js";
 
@@ -185,6 +186,7 @@ export function BackgroundWorkPanel({
   onOpenJobHandled,
 }: BackgroundWorkPanelProps) {
   const api = useApi();
+  const blockedAcknowledgement = useBlockedResultAcknowledgement(session);
   const pages = usePanelPages();
   // Arriving from Agents with a job lands on its page, and Back goes to this list (#2860).
   useEffect(() => {
@@ -202,7 +204,11 @@ export function BackgroundWorkPanel({
   const jobStop = backgroundJobStopAvailability(session, runnerProtocolVersion, runnerOnline);
   const restartReportsResult = runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork");
   const jobs = useMemo(() => session.backgroundJobs ?? [], [session.backgroundJobs]);
-  const deliveries = useMemo(() => session.backgroundDeliveries ?? [], [session.backgroundDeliveries]);
+  const deliveries = useMemo(() => (session.backgroundDeliveries ?? []).map((delivery) =>
+    delivery.watchdogState === "continuation_blocked" && delivery.blockedResultRevision &&
+      blockedAcknowledgement.isAcknowledged(delivery.parentTurnId, delivery.blockedResultRevision)
+      ? { ...delivery, watchdogState: undefined, blockedResultAcknowledgedAt: Date.now() } : delivery),
+  [session.backgroundDeliveries, blockedAcknowledgement.isAcknowledged]);
   const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
   const highlightedWatchdogDelivery = shownWatchdogDelivery(deliveries);
   // Every visible relative timestamp ages, including settled history left open for inspection.
@@ -235,7 +241,7 @@ export function BackgroundWorkPanel({
     }
     // Once per acknowledgement, reading the groups of the render that shows it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locallyAcknowledged]);
+  }, [locallyAcknowledged, blockedAcknowledgement.acknowledged]);
   const acknowledge = (acknowledgement: BackgroundDeliveryAcknowledgement, groupKey: string) => {
     const { continuationId } = acknowledgement;
     const key = acknowledgementKey(session.id, continuationId, acknowledgement.kind);
@@ -384,6 +390,11 @@ export function BackgroundWorkPanel({
                       error: feedback?.state === "error" ? feedback.message : null,
                       onAcknowledge: () => acknowledge(acknowledgement, group.key),
                     } : null}
+                    blockedAcknowledgement={state === "continuation_blocked" && blockedAcknowledgement.available
+                      ? { busy: blockedAcknowledgement.busy, onAcknowledge: () => {
+                        acknowledgedFocus.current = { sessionId: session.id, groupKey: group.key };
+                        blockedAcknowledgement.acknowledge();
+                      } } : null}
                     jobStop={jobStop}
                     stopTarget={target && {
                       job: target,
@@ -397,6 +408,12 @@ export function BackgroundWorkPanel({
                     restartReportsResult={restartReportsResult} />
                 );
               })}
+              {group.deliveries.filter((delivery) => delivery.blockedResultAcknowledgedAt != null).map((delivery) => (
+                <Notice key={`acknowledged:${delivery.blockedResultRevision}`} tone="info" title="Acknowledged">
+                  <p>The blocked-result alert was acknowledged. Background jobs and held results are kept.</p>
+                  <RecordedTime at={delivery.blockedResultAcknowledgedAt} now={now} />
+                </Notice>
+              ))}
               <ul className="background-work-rows" aria-labelledby={headingId}>
                 {/* A receipt with a recovery notice is that notice; the rest list as rows. */}
                 {group.jobs.length === 0 ? group.deliveries.filter((delivery) =>

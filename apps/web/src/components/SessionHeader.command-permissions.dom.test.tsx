@@ -369,7 +369,11 @@ test("historical idle-result recovery offers a confirmed restart and preserves c
   const session = { id: "historical", runnerId: "runner-1", title: "Historical", status: "idle",
     driver: "claude-code", backgroundDeliveries: [{ parentTurnId: "unknown", jobCount: 2,
       terminalCount: 1, watchdogState: "continuation_blocked" }] } as SessionView;
-  const cases = [session, ...["unknown", "known-parent"].map((parentTurnId) => ({
+  const acknowledged = ["unknown", "known-parent"].map((parentTurnId) => ({
+    ...session, backgroundDeliveries: [{ parentTurnId, jobCount: 2, terminalCount: 1,
+      blockedResultAcknowledgedAt: Date.now(), blockedResultRevision: "acknowledged", unfinishedSiblingJobs: 1 }],
+  }));
+  const cases = [session, ...acknowledged, ...["unknown", "known-parent"].map((parentTurnId) => ({
     ...session, backgroundDeliveries: [{ parentTurnId, jobCount: 2, terminalCount: 2,
       watchdogState: "terminal_without_continuation" as const }],
   }))];

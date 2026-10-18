@@ -6645,6 +6645,10 @@ export interface BackgroundNotificationReceiptView {
 /** Control-plane-owned durable projection of one parent continuation. `dashboardObservedAt`
  * acknowledges receipt by an authenticated dashboard, not OS notification display or user click. */
 export interface BackgroundDeliveryView {
+  /** Control-plane snapshot identity for acknowledging a held result without changing its jobs. */
+  blockedResultRevision?: string;
+  /** Clears this snapshot's attention only; later held results have a different revision. */
+  blockedResultAcknowledgedAt?: number;
   /** Absent while terminal required work has not acquired a continuation identity. */
   continuationId?: string;
   parentTurnId: string;
@@ -6673,6 +6677,11 @@ export interface BackgroundDeliveryView {
   /** Jobs from the same turn that still have no terminal status, while they hold back a finished
    * result: with `continuation_blocked`, or with no watchdog state before that (#3073). */
   unfinishedSiblingJobs?: number;
+}
+
+export interface BlockedResultAcknowledgementTarget {
+  parentTurnId: string;
+  revision: string;
 }
 
 /** The union's single source, exported so a consumer can enumerate the states rather than restate

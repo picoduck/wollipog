@@ -1,6 +1,7 @@
 import { useId, type ReactNode } from "react";
 import type { BackgroundDeliveryWatchdogState, ManagedBackgroundJobView } from "@wollipog/protocol";
 import {
+  ACKNOWLEDGE_BLOCKED_RESULT_EFFECT,
   ACKNOWLEDGE_MISSING_RESULT_EFFECT,
   BACKGROUND_DELIVERY_STATUS,
   backgroundRecoverySentence,
@@ -52,6 +53,8 @@ export interface BackgroundRecoveryNoticeProps {
   /** Result Missing: when the result was found missing, and Acknowledge where it applies. */
   missingSince?: number;
   acknowledgement?: MissingResultAcknowledgement | null;
+  /** Acknowledges the currently reported blocked snapshots without stopping their jobs. */
+  blockedAcknowledgement?: { busy: boolean; onAcknowledge: () => void } | null;
   /** Result Blocked: whether Stop Job applies here (`null`: it does not, so nothing is offered). */
   jobStop?: BackgroundJobStopAvailability | null;
   stopTarget?: BlockedResultStopTarget | null;
@@ -131,6 +134,7 @@ function ResultBlockedNotice({
   unknownParentTurn = false,
   unverifiedUnfinished = false,
   historicalRecovery = false,
+  blockedAcknowledgement,
 }: BackgroundRecoveryNoticeProps) {
   const reasonId = useId();
   // Called with no target too, so the hooks run in the same order whatever the notice offers.
@@ -178,7 +182,11 @@ function ResultBlockedNotice({
       title={BACKGROUND_DELIVERY_STATUS[state].label}
       className="background-recovery-notice"
       dataState={state}
-      actions={(button || outcome) && <>{button}{outcome}</>}
+      actions={(blockedAcknowledgement || button || outcome) && <>
+        {blockedAcknowledgement && <BusyButton className="btn sm" busy={blockedAcknowledgement.busy}
+          progress="Acknowledging blocked results…" onClick={blockedAcknowledgement.onAcknowledge}>Acknowledge</BusyButton>}
+        {button}{outcome}
+      </>}
       details={(
         <dl className="facts">
           <div><dt>Finished</dt><dd><RecordedTime at={finishedAt} now={now} /></dd></div>
@@ -194,6 +202,7 @@ function ResultBlockedNotice({
         : unverifiedUnfinished
           ? "Finished background results are held because another job has no confirmed end."
           : backgroundRecoverySentence(state, subject)}</p>
+      {blockedAcknowledgement && <p>{ACKNOWLEDGE_BLOCKED_RESULT_EFFECT}</p>}
       {reason && <p id={reasonId}>{reason}</p>}
     </Notice>
   );
