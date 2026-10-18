@@ -1896,7 +1896,10 @@ export function Select<T extends string>({
    * still open to explain why the app changed colour. Derived, there is one rule — the list is
    * either browsing an option or it is not — and every dismissal satisfies it by closing.
    */
-  const previewValue = open ? visible[activeIndex]?.value ?? null : null;
+  // An unavailable option can be highlighted so its reason is heard, but it can't be chosen, so it
+  // never previews either (#2953).
+  const previewOption = open ? visible[activeIndex] : undefined;
+  const previewValue = previewOption && !previewOption.disabled ? previewOption.value : null;
   const previewRef = useRef(onPreview);
   previewRef.current = onPreview;
   /*

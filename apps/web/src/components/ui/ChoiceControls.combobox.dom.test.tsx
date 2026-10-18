@@ -359,6 +359,7 @@ function mountSelect(extra: {
   createOption?: PickerCreateOption;
   leadingIcon?: React.ReactNode;
   onChange?: (value: string) => void;
+  onPreview?: (value: string | null) => void;
 } = {}) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -371,6 +372,7 @@ function mountSelect(extra: {
         options={PROJECTS}
         value="alpha"
         onChange={extra.onChange ?? (() => undefined)}
+        onPreview={extra.onPreview}
         searchable
         noun="projects"
         createOption={extra.createOption}
@@ -437,13 +439,19 @@ test("typing in a searchable Select's filter narrows the options and Enter commi
 // still land on the first and last options that can be chosen, and Enter refuses an unavailable one.
 test("a searchable Select's arrows reach unavailable options, while Home/End skip them and Enter refuses them", () => {
   const chosen: string[] = [];
-  const { open, options, unmount } = mountSelect({ onChange: (value) => chosen.push(value) });
+  const previews: Array<string | null> = [];
+  const { open, options, unmount } = mountSelect({
+    onChange: (value) => chosen.push(value),
+    onPreview: (value) => previews.push(value),
+  });
   try {
     const filter = open();
     assert.equal(filter.getAttribute("aria-activedescendant"), options()[0]!.id);
+    assert.equal(previews.at(-1), "alpha");
     press(filter, "ArrowDown");
     assert.equal(filter.getAttribute("aria-activedescendant"), options()[1]!.id);
     assert.equal(options()[1]!.getAttribute("aria-disabled"), "true");
+    assert.equal(previews.at(-1), null, "an unavailable option is never previewed");
     press(filter, "Enter");
     assert.deepEqual(chosen, [], "Enter does not choose an unavailable option");
     assert.equal(filter.getAttribute("aria-activedescendant"), options()[1]!.id, "and the list stays open on it");
