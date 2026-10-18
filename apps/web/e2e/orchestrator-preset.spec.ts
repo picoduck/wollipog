@@ -99,7 +99,10 @@ for (const theme of ["light", "dark"] as const) {
       await expect(permissionsRow(dialog)).toContainText("Saved Default — Orchestrator");
       await dialog.getByRole("radio", { name: /^Native TUI/ }).click();
       // One sentence (#2954): the five-sentence accounting paragraph is gone.
-      await expect(dialog.getByText("Native TUI opens the provider's own terminal UI. It doesn't track usage or show approval cards, so sessions with budgets must use Direct.")).toBeVisible();
+      // The row's visible description; the option also carries it as its accessible description.
+      const harnessRow = dialog.locator(".setting-row").filter({ has: page.getByRole("radiogroup", { name: "Harness" }) });
+      await expect(harnessRow.locator(".setting-row-desc")).toHaveText("Native TUI opens the provider's own terminal UI. It doesn't track usage or show approval cards, so sessions with budgets must use Direct.");
+      await expect(dialog.getByRole("radio", { name: /^Native TUI/ })).toHaveAccessibleDescription("Native TUI opens the provider's own terminal UI. It doesn't track usage or show approval cards, so sessions with budgets must use Direct.");
       await expect(dialog.getByText(/Usage Accounting: Unavailable|spending and tool calls are not included/)).toHaveCount(0);
       await dialog.getByRole("spinbutton", { name: "Maximum Concurrent Children" }).fill("8");
       await page.screenshot({ path: testInfo.outputPath("native-tui-unmetered.png") });
