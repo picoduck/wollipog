@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -73,7 +73,8 @@ test("the runner deletes only the calling session's refs and audits every call (
     ? [{ sessionId: message.sessionId, payload: message.payload }] : []);
 
   const cleared = await manager.deleteWorktreeRefs("s_owner", second.worktree.path, [{ ref: "CHERRY_PICK_HEAD", oldOid: head }]);
-  assert.deepEqual(cleared.refDeletion, { worktreePath: second.worktree.path, deleted: ["CHERRY_PICK_HEAD"], absent: [] });
+  assert.deepEqual(cleared.refDeletion, { worktreePath: second.worktree.path, deleted: ["CHERRY_PICK_HEAD"],
+    deletedRefs: [{ ref: "CHERRY_PICK_HEAD", oldOid: head }], absent: [] });
   assert.equal(existsSync(join(secondAdmin, "CHERRY_PICK_HEAD")), false);
   const branch = await manager.deleteWorktreeRefs("s_owner", undefined, [{ ref: "refs/heads/fix/owner-first", oldOid: head }]);
   assert.deepEqual(branch.refDeletion.deleted, ["refs/heads/fix/owner-first"]);
@@ -106,10 +107,60 @@ test("the runner deletes only the calling session's refs and audits every call (
   assert.equal(recorded.length, 2 + refusals.length + 1 + 2, "every call leaves one audit event");
   assert.ok(recorded.every((entry) => entry.sessionId === "s_owner"));
   assert.deepEqual(recorded.slice(0, 2).map((entry) => entry.payload.outcome), ["deleted", "deleted"]);
+  assert.deepEqual(recorded[1]!.payload.deletedRefs, [{ ref: "refs/heads/fix/owner-first", oldOid: head }],
+    "the audit names each deleted ref with the value it held");
   for (const entry of recorded.slice(2)) {
     assert.equal(entry.payload.outcome, "refused");
     assert.deepEqual(entry.payload.deleted, []);
     assert.ok(entry.payload.reason, "a refusal names its fixed reason");
     assert.ok(!entry.payload.reason!.includes("elsewhere"), "a caller-supplied path is never echoed");
   }
+});
+
+test("runner shutdown during a paused deletion leaves no HEAD or index lock behind (CR-2.2)", async (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-session-ref-deletion-shutdown-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  git(["init", "-q", "--initial-branch=main", "."], repo);
+  isolateFromAmbientIgnores(repo);
+  writeFileSync(join(repo, "tracked.txt"), "base\n");
+  git(["add", "tracked.txt"], repo);
+  git(["commit", "-qm", "base"], repo);
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  meta(store, "s_owner", repo);
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined as never, dataDir);
+  const first = await manager.requestWorktree("s_owner", { baseRef: "HEAD", branch: "fix/owner-first" });
+  await manager.requestWorktree("s_owner", { baseRef: "HEAD", branch: "fix/owner-second" });
+  git(["switch", "-q", "-c", "fix/owner-first-renamed"], first.worktree.path);
+  const head = git(["rev-parse", "HEAD"], repo);
+  let resume!: () => void;
+  const paused = new Promise<void>((resolve) => { resume = resolve; });
+  let reached = false;
+  const seam = manager as unknown as { worktreeRefDeletionGit: (scope: WorktreeRefDeletionScope) => Promise<GitRunner> };
+  seam.worktreeRefDeletionGit = async () => async (args, options) => {
+    if (args.includes("for-each-ref") && !reached) {
+      reached = true;
+      await paused;
+    }
+    return unconfinedGitRunnerForTests(args, options);
+  };
+  const running = manager.deleteWorktreeRefs("s_owner", undefined, [{ ref: "refs/heads/fix/owner-first", oldOid: head }])
+    .then(() => "done", () => "refused");
+  for (let attempt = 0; !reached && attempt < 400; attempt++) await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.ok(reached, "the deletion paused with its locks held");
+  const common = realpathSync(join(repo, ".git"));
+  const admins = [common, ...readdirSync(join(common, "worktrees")).map((name) => join(common, "worktrees", name))];
+  const locks = () => admins.flatMap((admin) => ["HEAD.lock", "index.lock"].map((name) => join(admin, name)).filter(existsSync));
+  assert.equal(locks().length, admins.length * 2);
+
+  manager.shutdownAll();
+  await manager.drainWorktreeRefDeletions(50);
+  assert.deepEqual(locks(), [], "no lock outlives the drain");
+  await assert.rejects(manager.deleteWorktreeRefs("s_owner", undefined, [{ ref: "refs/heads/fix/owner-first", oldOid: head }]),
+    /shutting down/u, "a deletion after shutdown begins is refused");
+  resume();
+  await running;
+  assert.deepEqual(locks(), []);
 });

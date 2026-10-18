@@ -725,12 +725,32 @@ could still swap a directory after that check, the runner runs this Git only in 
 mount view: only the shared Git directory's `refs`, `logs`, `packed-refs` and lock files and the
 worktree's own admin directory are writable, so a redirected path reaches nothing the session could
 not already write. A runner that cannot build that view refuses the operation: every non-Linux
-runner, including macOS, and a Linux runner without `bwrap`. While it deletes a branch, the runner
-holds every worktree's `HEAD.lock`, so a checkout of that branch in another worktree fails until it
-finishes; if a HEAD is pointed at the branch anyway, every ref the call deleted is restored and the
-call is refused. Each call, refused
-or not, records a `worktree_refs_deleted` session event; its refusal reasons are fixed runner
-strings that never echo repository content.
+runner, including macOS, and a Linux runner without `bwrap`.
+
+While it deletes a branch, the runner holds every worktree's `HEAD.lock` and `index.lock`, the main
+worktree's included. Git moves a HEAD only through `HEAD.lock`, and a checkout holds `index.lock`
+while it rewrites the working tree, so a checkout of that branch in another worktree fails until the
+deletion finishes, and a lock that already exists refuses the deletion. If a HEAD is pointed at the
+branch anyway, by a writer that ignores Git's locks, every ref the call deleted is restored and the
+call is refused. Each lock file the runner creates holds a marker naming the runner and the
+operation, and is listed in a journal under the runner's data directory before it is created:
+
+- runner shutdown stops admitting deletions, waits up to five seconds for running ones and then
+  removes their remaining locks itself before it exits;
+- at startup the runner removes only the marked locks that a journaled, no-longer-running operation
+  of its own left behind. A lock Git created, or one marked for another runner or operation, is never
+  touched.
+
+One window remains: a checkout that has written its index but not yet taken `HEAD.lock` when the
+runner locks. That checkout's HEAD update then fails on `HEAD.lock`, leaving its worktree with the
+branch's files while HEAD still names the previous branch, and the branch is deleted. The operation
+returns, and its audit event records, every deleted ref with the object id it held, so the branch
+can be recreated with `git branch <branch> <object-id>`.
+
+Each call, refused
+or not, records a `worktree_refs_deleted` session event with every deleted ref and the object id it
+held (`deletedRefs`), including any a refusal could not restore; its refusal reasons are fixed
+runner strings that never echo repository content.
 
 ## Runner Hook State at the Sandbox Boundary
 

@@ -128,6 +128,7 @@ import {
 } from "./managed-worktree-sandbox.js";
 import {
   deleteOwnedWorktreeRefs,
+  RefDeletionLockJournal,
   refDeletionGitRunner,
   validateWorktreeRefDeletionRequests,
   WorktreeRefDeletionRefusal,
@@ -1599,6 +1600,8 @@ export class SessionManager {
    * session can race the runner's path checks; a runner that cannot confine it refuses. */
   private worktreeRefDeletionGit: (scope: WorktreeRefDeletionScope) => Promise<GitRunner> =
     (scope) => refDeletionGitRunner(scope);
+  /** The HEAD and index locks ref deletions hold, journaled so none outlives the runner (#3316). */
+  private readonly refDeletionLocks: RefDeletionLockJournal;
   /** Test seam keeps provider-home discovery deterministic without writing into a real Claude home. */
   private discoverClaudeTasks: typeof discoverIncompleteClaudeTasks = discoverIncompleteClaudeTasks;
   /** Disk scan for a Claude Code init list's new plugin roots (#1224); a test seam. */
@@ -1740,6 +1743,9 @@ export class SessionManager {
       expectedProfileIdForHome: (home) => this.providerProfileExpectation(home),
     }) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
+    this.refDeletionLocks = new RefDeletionLockJournal(join(this.stateDir, "ref-deletion-locks"), runnerId);
+    // Locks a previous runner process left are removed before this one deletes anything.
+    void this.refDeletionLocks.recover();
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
     this.worktreeSetupTrust = new WorktreeSetupTrustStore(this.stateDir);
     this.worktreePortAllocator = new WorktreePortAllocator(this.stateDir, this.worktreePorts);
@@ -4469,6 +4475,12 @@ export class SessionManager {
     path: string | undefined,
     refs: unknown,
   ): Promise<{ snapshot: SessionSnapshot; refDeletion: SessionWorktreeRefDeletionResult }> {
+    // Refused before the worktree lane, which a deletion being drained may still hold.
+    if (this.shuttingDown) {
+      const reason = "the runner is shutting down; try again once it is back";
+      this.emitEvent(sessionId, { kind: "worktree_refs_deleted", outcome: "refused", deleted: [], absent: [], reason });
+      throw new Error(reason);
+    }
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -4495,18 +4507,21 @@ export class SessionManager {
           commonGitDir: layout.commonGitDir,
           ownedBranches,
         };
-        const result = await deleteOwnedWorktreeRefs(scope, requests, await this.worktreeRefDeletionGit(scope));
+        const git = await this.worktreeRefDeletionGit(scope);
+        const result = await this.refDeletionLocks.run((locks) => deleteOwnedWorktreeRefs(scope, requests, git, locks));
         this.emitEvent(sessionId, { kind: "worktree_refs_deleted", worktreePath, outcome: "deleted", ...result });
         return { snapshot: this.snapshot(this.store.readMeta(sessionId) ?? meta), refDeletion: { worktreePath, ...result } };
       } catch (error) {
         const reason = error instanceof WorktreeRefDeletionRefusal ? error.message : "the refs could not be deleted";
+        const stillDeleted = error instanceof WorktreeRefDeletionRefusal ? error.deletedRefs : [];
         this.emitEvent(sessionId, {
           kind: "worktree_refs_deleted",
           ...(worktreePath ? { worktreePath } : {}),
           outcome: "refused",
-          deleted: [],
+          deleted: stillDeleted.map((entry) => entry.ref),
           absent: [],
           reason,
+          ...(stillDeleted.length ? { deletedRefs: stillDeleted } : {}),
         });
         throw new Error(reason);
       }
@@ -17184,6 +17199,8 @@ export class SessionManager {
    * lease (fail closed) — releasing it could let a replacement runner share the same HOME. */
   shutdownAll(): boolean {
     this.shuttingDown = true;
+    // No new ref deletion starts; drainWorktreeRefDeletions releases the running ones' locks.
+    this.refDeletionLocks.close();
     this.providerHomeLeases?.stopAcquisitions();
     for (const sessionId of this.worktreeSetupRuns.keys()) void this.abortWorktreeSetup(sessionId);
     for (const [key, resolveApproval] of this.worktreeSetupApprovals) {
@@ -17310,6 +17327,12 @@ export class SessionManager {
       this.log(`shutdown flushAll failed: ${errText(error)}`);
     }
     return clean;
+  }
+
+  /** Wait, bounded, for running ref deletions, then remove any lock they still hold (#3316), so the
+   * runner never exits holding a worktree's HEAD.lock or index.lock. */
+  async drainWorktreeRefDeletions(timeoutMs: number): Promise<void> {
+    await this.refDeletionLocks.drain(timeoutMs);
   }
 
   /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree

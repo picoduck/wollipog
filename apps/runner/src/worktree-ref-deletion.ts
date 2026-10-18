@@ -28,13 +28,16 @@
  */
 
 import { execFile } from "node:child_process";
-import { lstat, open, readFile, readdir, rm, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { link, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { MAX_SESSION_WORKTREE_REF_DELETIONS } from "@wollipog/protocol";
 
 /** Per-worktree refs a stopped cherry-pick, revert or rebase leaves behind. */
 export const SEQUENCER_LEFTOVER_REFS = ["CHERRY_PICK_HEAD", "REVERT_HEAD", "AUTO_MERGE"] as const;
 export const MAX_WORKTREE_REF_DELETIONS = MAX_SESSION_WORKTREE_REF_DELETIONS;
+/** How long runner shutdown waits for running deletions before it removes their locks itself. */
+export const REF_DELETION_DRAIN_MS = 5_000;
 
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const GIT_TIMEOUT_MS = 30_000;
@@ -46,9 +49,13 @@ const SAFE_CONFIG = [
 ] as const;
 
 export class WorktreeRefDeletionRefusal extends Error {
-  constructor(message: string) {
+  /** Refs this call deleted and could not put back, each with the value it held, so a HEAD left
+   * on one of them can be restored by hand. Empty for every refusal that changed nothing. */
+  readonly deletedRefs: WorktreeRefDeletionRequest[];
+  constructor(message: string, deletedRefs: WorktreeRefDeletionRequest[] = []) {
     super(message);
     this.name = "WorktreeRefDeletionRefusal";
+    this.deletedRefs = deletedRefs;
   }
 }
 
@@ -70,6 +77,8 @@ export interface WorktreeRefDeletionScope {
 
 export interface WorktreeRefDeletionResult {
   deleted: string[];
+  /** The same refs with the value each held, for the audit record. */
+  deletedRefs: WorktreeRefDeletionRequest[];
   /** Requested refs that no longer exist. A repeated call reports them here instead of failing. */
   absent: string[];
 }
@@ -244,9 +253,56 @@ async function branchInUse(commonGitDir: string, branch: string): Promise<boolea
   return false;
 }
 
-/** Every worktree's HEAD.lock, the main worktree's included, or a refusal holding none. Each lock
- * is created exclusively, so an existing lock or anything planted in its place refuses the call. */
-async function lockWorktreeHeads(commonGitDir: string): Promise<string[]> {
+/**
+ * The locks one deletion holds. `marker` is the exact content of every lock file it creates, naming
+ * the runner and the operation, so only those files are ever removed: never a lock Git created.
+ * `record` durably lists the paths before any is created, and `release` removes the marked ones.
+ */
+export interface WorktreeLockKeeper {
+  readonly marker: string;
+  record(paths: readonly string[]): Promise<void>;
+  release(): Promise<void>;
+}
+
+/** The temporary file a lock is linked from, so the lock appears with its marker already inside. */
+function lockSource(lock: string, marker: string): string {
+  return `${lock}.${createHash("sha256").update(marker).digest("hex").slice(0, 16)}.wollipog`;
+}
+
+/** Removes each path that is a regular file holding exactly `marker`, and nothing else. */
+async function removeMarkedLocks(paths: readonly string[], marker: string): Promise<void> {
+  for (const path of paths) {
+    for (const candidate of [path, lockSource(path, marker)]) {
+      try {
+        const entry = await lstat(candidate);
+        if (!entry.isFile() || await readFile(candidate, "utf8") !== marker) continue;
+        await rm(candidate, { force: true });
+      } catch {
+        // Already gone, or not ours.
+      }
+    }
+  }
+}
+
+/** A keeper with no journal, for callers that own the whole process lifetime (tests). */
+export function ephemeralLockKeeper(label = "ephemeral"): WorktreeLockKeeper {
+  const marker = `wollipog-ref-deletion runner=${label} operation=${randomUUID()}\n`;
+  let paths: readonly string[] = [];
+  return {
+    marker,
+    record: async (recorded) => { paths = [...recorded]; },
+    release: async () => { await removeMarkedLocks(paths, marker); paths = []; },
+  };
+}
+
+/**
+ * Every worktree's HEAD.lock and index.lock, the main worktree's included, or a refusal holding
+ * none. Git updates HEAD only through HEAD.lock, and a checkout holds index.lock while it rewrites
+ * the working tree, so neither can move a worktree onto the branch while these are held. Each lock
+ * is linked into place with its marker already written: it exists complete or not at all, and an
+ * existing lock, Git's or anything planted in its place, refuses the call.
+ */
+async function lockWorktrees(commonGitDir: string, keeper: WorktreeLockKeeper): Promise<void> {
   const adminDirs = [commonGitDir];
   try {
     for (const entry of await readdir(join(commonGitDir, "worktrees"), { withFileTypes: true })) {
@@ -255,23 +311,131 @@ async function lockWorktreeHeads(commonGitDir: string): Promise<string[]> {
   } catch {
     // No linked worktrees.
   }
-  const held: string[] = [];
+  const locks = adminDirs.flatMap((admin) => [join(admin, "HEAD.lock"), join(admin, "index.lock")]);
+  await keeper.record(locks);
   try {
-    for (const admin of adminDirs) {
-      const lock = join(admin, "HEAD.lock");
-      const handle = await open(lock, "wx", 0o644);
-      held.push(lock);
-      await handle.close();
+    for (const lock of locks) {
+      const source = lockSource(lock, keeper.marker);
+      await writeFile(source, keeper.marker, { flag: "wx", mode: 0o644 });
+      try {
+        await link(source, lock);
+      } finally {
+        await rm(source, { force: true });
+      }
     }
   } catch {
-    await releaseLocks(held);
-    throw new WorktreeRefDeletionRefusal("a worktree's HEAD is locked by another Git operation; try again");
+    await keeper.release();
+    throw new WorktreeRefDeletionRefusal(
+      "a worktree's HEAD or index is locked, so a checkout or another Git operation is in progress; try again",
+    );
   }
-  return held;
 }
 
-async function releaseLocks(locks: readonly string[]): Promise<void> {
-  for (const lock of locks) await rm(lock, { force: true }).catch(() => undefined);
+/**
+ * The runner's journal of the locks its deletions hold (#3316). A lock left behind would stop every
+ * checkout and commit in that worktree, so:
+ *
+ * - each operation's lock paths are written here before any lock is created and removed after;
+ * - `recover` (run before the first deletion of a runner process) removes the marked locks of
+ *   journaled operations that no longer exist, which is every one a previous process left;
+ * - `drain` stops new deletions at shutdown, waits a bounded time for running ones, then removes
+ *   whatever marked locks remain, so the runner never exits holding one.
+ */
+export class RefDeletionLockJournal {
+  private closed = false;
+  private recovery: Promise<void> | undefined;
+  private readonly active = new Map<string, { paths: readonly string[]; done: Promise<void> }>();
+
+  constructor(private readonly directory: string, private readonly runnerId: string) {}
+
+  private marker(operationId: string): string {
+    return `wollipog-ref-deletion runner=${encodeURIComponent(this.runnerId)} operation=${operationId}\n`;
+  }
+
+  private journalPath(operationId: string): string {
+    return join(this.directory, `${operationId}.json`);
+  }
+
+  recover(): Promise<void> {
+    this.recovery ??= (async () => {
+      let names: string[];
+      try {
+        names = await readdir(this.directory);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        const match = /^([0-9a-f-]{36})\.json$/u.exec(name);
+        if (!match || this.active.has(match[1]!)) continue;
+        try {
+          const record = JSON.parse(await readFile(join(this.directory, name), "utf8")) as { paths?: unknown };
+          const paths = Array.isArray(record.paths) ? record.paths.filter((path): path is string => typeof path === "string") : [];
+          await removeMarkedLocks(paths, this.marker(match[1]!));
+        } catch {
+          // An unreadable record lists nothing this runner can prove is its own.
+        }
+        await rm(join(this.directory, name), { force: true });
+      }
+    })();
+    return this.recovery;
+  }
+
+  /** Runs one deletion with a journaled keeper, or refuses once shutdown has begun. */
+  async run<T>(operation: (keeper: WorktreeLockKeeper) => Promise<T>): Promise<T> {
+    if (this.closed) throw new WorktreeRefDeletionRefusal("the runner is shutting down; try again once it is back");
+    await this.recover();
+    if (this.closed) throw new WorktreeRefDeletionRefusal("the runner is shutting down; try again once it is back");
+    const operationId = randomUUID();
+    const marker = this.marker(operationId);
+    let finish!: () => void;
+    const entry = { paths: [] as readonly string[], done: new Promise<void>((resolve) => { finish = resolve; }) };
+    this.active.set(operationId, entry);
+    const keeper: WorktreeLockKeeper = {
+      marker,
+      record: async (paths) => {
+        entry.paths = [...paths];
+        await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        const journal = this.journalPath(operationId);
+        await writeFile(`${journal}.tmp`, JSON.stringify({ runnerId: this.runnerId, paths: entry.paths }), { mode: 0o600 });
+        await rename(`${journal}.tmp`, journal);
+      },
+      release: async () => {
+        await removeMarkedLocks(entry.paths, marker);
+        entry.paths = [];
+        await rm(this.journalPath(operationId), { force: true });
+      },
+    };
+    try {
+      return await operation(keeper);
+    } finally {
+      await keeper.release().catch(() => undefined);
+      this.active.delete(operationId);
+      finish();
+    }
+  }
+
+  /** Stop admitting deletions; nothing is held after this resolves, within `timeoutMs` plus cleanup. */
+  async drain(timeoutMs: number): Promise<void> {
+    this.closed = true;
+    const running = [...this.active.values()].map((entry) => entry.done);
+    if (running.length) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        Promise.all(running),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+      ]);
+      clearTimeout(timer);
+    }
+    // Whatever is still running loses its locks now; its confined Git dies with the runner.
+    for (const [operationId, entry] of this.active) {
+      await removeMarkedLocks(entry.paths, this.marker(operationId));
+      await rm(this.journalPath(operationId), { force: true });
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+  }
 }
 
 /** Host Git follows a directory symlink inside the session-writable `refs` and `logs` trees, so a
@@ -347,6 +511,7 @@ export async function deleteOwnedWorktreeRefs(
   scope: WorktreeRefDeletionScope,
   requests: readonly WorktreeRefDeletionRequest[],
   git: GitRunner,
+  locks: WorktreeLockKeeper = ephemeralLockKeeper(),
 ): Promise<WorktreeRefDeletionResult> {
   if (!posix.isAbsolute(scope.worktreeGitDir) || !posix.isAbsolute(scope.commonGitDir) ||
       posix.dirname(scope.worktreeGitDir) !== posix.join(scope.commonGitDir, "worktrees")) {
@@ -385,9 +550,9 @@ export async function deleteOwnedWorktreeRefs(
 
   const branches = classified.filter((entry): entry is Extract<Classified, { kind: "branch" }> => entry.kind === "branch");
   // A worktree that checks a branch out between the scan and the deletion would be left on a branch
-  // that no longer exists. Git updates HEAD only through HEAD.lock, so holding every worktree's lock
-  // across the scan and the transaction makes such a checkout fail instead.
-  const locks = branches.length ? await lockWorktreeHeads(scope.commonGitDir) : [];
+  // that no longer exists. Holding every worktree's HEAD.lock and index.lock across the scan and the
+  // transaction makes such a checkout fail instead (see lockWorktrees for the remaining window).
+  if (branches.length) await lockWorktrees(scope.commonGitDir, locks);
   try {
     for (const entry of branches) {
       if (await branchInUse(scope.commonGitDir, entry.branch)) {
@@ -421,13 +586,22 @@ export async function deleteOwnedWorktreeRefs(
         const restored = await git([...SAFE_CONFIG, "update-ref", "--no-deref", "--stdin"], {
           env, input: deleted.map((item) => `create ${item.ref} ${item.oldOid}\n`).join(""),
         });
-        throw new WorktreeRefDeletionRefusal(restored.code === 0
-          ? `${entry.ref} was checked out while it was being deleted; every ref was restored`
-          : `${entry.ref} was checked out while it was being deleted, and the deleted refs could not be restored`);
+        if (restored.code === 0) {
+          throw new WorktreeRefDeletionRefusal(`${entry.ref} was checked out while it was being deleted; every ref was restored`);
+        }
+        throw new WorktreeRefDeletionRefusal(
+          `${entry.ref} was checked out while it was being deleted, and the deleted refs could not be restored: ` +
+            deleted.map((item) => `${item.ref} was ${item.oldOid}`).join(", "),
+          deleted.map((item) => ({ ref: item.ref, oldOid: item.oldOid })),
+        );
       }
     }
-    return { deleted: deleted.map((entry) => entry.ref), absent };
+    return {
+      deleted: deleted.map((entry) => entry.ref),
+      deletedRefs: deleted.map((entry) => ({ ref: entry.ref, oldOid: entry.oldOid })),
+      absent,
+    };
   } finally {
-    await releaseLocks(locks);
+    if (branches.length) await locks.release();
   }
 }

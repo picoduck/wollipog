@@ -154,6 +154,7 @@ import {
 } from "./git-ops.js";
 import { flushProjectedOutbox, Outbox } from "./outbox.js";
 import { SessionManager } from "./session-manager.js";
+import { REF_DELETION_DRAIN_MS } from "./worktree-ref-deletion.js";
 import {
   inspectCheckoutWorktreeSetupConfig,
   resolveWorktreeSetupRepositoryRoot,
@@ -4241,7 +4242,15 @@ function shutdown(exitCode = 0): void {
       }
     })
     .catch((error) => log(`pending-kill drain failed: ${errText(error)}`))
-    .finally(() => process.exit(exitCode));
+    .finally(async () => {
+      // A ref deletion holds worktrees' HEAD and index locks; none may outlive the runner (#3316).
+      try {
+        await sessions.drainWorktreeRefDeletions(REF_DELETION_DRAIN_MS);
+      } catch (error) {
+        log(`ref deletion drain failed: ${errText(error)}`);
+      }
+      process.exit(exitCode);
+    });
 }
 
 // Wrapped so the signal name Node passes as the listener's first argument is never mistaken for

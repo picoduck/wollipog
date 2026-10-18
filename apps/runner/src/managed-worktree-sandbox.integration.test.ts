@@ -796,7 +796,11 @@ test("refs an isolated session cannot delete itself are deleted by the runner, a
     { ref: "refs/heads/agent/s_managed-old", oldOid: base },
     { ref: "refs/remotes/origin/agent/s_managed", oldOid: base },
   ]);
-  assert.deepEqual(deleted, { deleted: ["refs/heads/agent/s_managed-old", "refs/remotes/origin/agent/s_managed"], absent: [] });
+  assert.deepEqual(deleted, {
+    deleted: ["refs/heads/agent/s_managed-old", "refs/remotes/origin/agent/s_managed"],
+    deletedRefs: [{ ref: "refs/heads/agent/s_managed-old", oldOid: base }, { ref: "refs/remotes/origin/agent/s_managed", oldOid: base }],
+    absent: [],
+  });
   assert.equal(host(["for-each-ref", "--format=%(refname)", "refs/heads/agent/s_managed-old", "refs/remotes/origin/agent/s_managed"]), "");
 
   // A conflicted cherry-pick, quit inside the sandbox, leaves CHERRY_PICK_HEAD for the runner.

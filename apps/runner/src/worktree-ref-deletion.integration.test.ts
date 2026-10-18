@@ -1,26 +1,31 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import {
   deleteOwnedWorktreeRefs,
   findBubblewrap,
   MAX_WORKTREE_REF_DELETIONS,
+  RefDeletionLockJournal,
   refDeletionGitRunner,
   unconfinedGitRunnerForTests,
   type GitRunner,
   validateWorktreeRefDeletionRequests,
   WorktreeRefDeletionRefusal,
+  type WorktreeLockKeeper,
   type WorktreeRefDeletionRequest,
   type WorktreeRefDeletionScope,
 } from "./worktree-ref-deletion.js";
 
 /** These fixtures are changed by nobody but the test, so the unconfined host Git is safe here. */
 function deleteRefs(scope: WorktreeRefDeletionScope, requests: WorktreeRefDeletionRequest[],
-  git: GitRunner = unconfinedGitRunnerForTests) {
-  return deleteOwnedWorktreeRefs(scope, requests, git);
+  git: GitRunner = unconfinedGitRunnerForTests, locks?: WorktreeLockKeeper) {
+  return deleteOwnedWorktreeRefs(scope, requests, git, locks);
 }
 
 const roots: string[] = [];
@@ -108,7 +113,7 @@ test("the runner clears a worktree's sequencer leftovers and the session's own l
     { ref: "CHERRY_PICK_HEAD", oldOid: pick },
     { ref: "refs/remotes/origin/agent/s_owner", oldOid: head },
   ]);
-  assert.deepEqual(repeated, { deleted: [], absent: ["CHERRY_PICK_HEAD", "refs/remotes/origin/agent/s_owner"] });
+  assert.deepEqual(repeated, { deleted: [], deletedRefs: [], absent: ["CHERRY_PICK_HEAD", "refs/remotes/origin/agent/s_owner"] });
 });
 
 test("another session's refs and unrecorded branches are refused", async () => {
@@ -146,7 +151,7 @@ test("a branch checked out or being rebased in any worktree is refused", async (
   await refused(deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }]), /checked out or being rebased/u);
   rmSync(join(otherAdmin, "rebase-merge"), { recursive: true });
   assert.deepEqual(await deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }]),
-    { deleted: ["refs/heads/agent/s_owner-old"], absent: [] });
+    { deleted: ["refs/heads/agent/s_owner-old"], deletedRefs: [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }], absent: [] });
 });
 
 test("sequencer leftovers stay while a rebase, merge or cherry-pick sequence is in progress", async () => {
@@ -197,7 +202,7 @@ test("a ref is read by its exact name, never resolved like a revision", async ()
   assert.deepEqual(await deleteRefs(scope, [
     { ref: "AUTO_MERGE", oldOid: head },
     { ref: "refs/heads/agent/s_owner-old", oldOid: head },
-  ]), { deleted: [], absent: ["AUTO_MERGE", "refs/heads/agent/s_owner-old"] });
+  ]), { deleted: [], deletedRefs: [], absent: ["AUTO_MERGE", "refs/heads/agent/s_owner-old"] });
   assert.equal(git(["rev-parse", "refs/heads/AUTO_MERGE"], repoPath), head);
   writeFileSync(join(scope.worktreeGitDir, "AUTO_MERGE"), "ref: refs/heads/main\n");
   await refused(deleteRefs(scope, [{ ref: "AUTO_MERGE", oldOid: head }]), /does not hold an object id/u);
@@ -252,7 +257,7 @@ function interleaved(between: () => void): GitRunner {
   };
 }
 
-test("a checkout racing the deletion is refused by Git while the runner holds every HEAD.lock", async () => {
+test("a checkout racing the deletion is refused by Git while the runner holds every HEAD and index lock", async () => {
   const { repoPath, otherPath, otherAdmin, scope } = fixture();
   const head = git(["rev-parse", "main"], repoPath);
   git(["branch", "agent/s_owner-old", "main"], repoPath);
@@ -260,13 +265,14 @@ test("a checkout racing the deletion is refused by Git while the runner holds ev
   const result = await deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }], interleaved(() => {
     raced = spawnSync("git", ["switch", "-q", "agent/s_owner-old"], { cwd: otherPath, encoding: "utf8", timeout: 60_000 });
   }));
-  assert.notEqual(raced?.status, 0, "the racing checkout fails on HEAD.lock");
-  assert.match(String(raced?.stderr), /HEAD\.lock/u);
-  assert.deepEqual(result, { deleted: ["refs/heads/agent/s_owner-old"], absent: [] });
+  assert.notEqual(raced?.status, 0, "the racing checkout fails on a held lock");
+  assert.match(String(raced?.stderr), /(?:HEAD|index)\.lock/u);
+  assert.deepEqual(result, { deleted: ["refs/heads/agent/s_owner-old"],
+    deletedRefs: [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }], absent: [] });
   assert.equal(readFileSync(join(otherAdmin, "HEAD"), "utf8"), "ref: refs/heads/agent/s_other\n");
   assert.equal(git(["rev-parse", "HEAD"], otherPath), head, "the other checkout stays valid");
   for (const admin of [scope.commonGitDir, scope.worktreeGitDir, otherAdmin]) {
-    assert.equal(existsSync(join(admin, "HEAD.lock")), false, "every lock is released");
+    for (const lock of ["HEAD.lock", "index.lock"]) assert.equal(existsSync(join(admin, lock)), false, "every lock is released");
   }
 });
 
@@ -292,8 +298,111 @@ test("a worktree whose HEAD is already locked refuses the branch deletion and le
   const head = git(["rev-parse", "main"], repoPath);
   git(["branch", "agent/s_owner-old", "main"], repoPath);
   writeFileSync(join(otherAdmin, "HEAD.lock"), "busy\n");
-  await refused(deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }]), /HEAD is locked/u);
+  await refused(deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }]), /HEAD or index is locked/u);
   assert.equal(readFileSync(join(otherAdmin, "HEAD.lock"), "utf8"), "busy\n");
-  for (const admin of [scope.commonGitDir, scope.worktreeGitDir]) assert.equal(existsSync(join(admin, "HEAD.lock")), false);
+  for (const admin of [scope.commonGitDir, scope.worktreeGitDir]) {
+    for (const lock of ["HEAD.lock", "index.lock"]) assert.equal(existsSync(join(admin, lock)), false, lock);
+  }
+  assert.equal(existsSync(join(otherAdmin, "index.lock")), false);
   assert.equal(git(["rev-parse", "agent/s_owner-old"], repoPath), head);
+});
+
+async function until(condition: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    if (condition()) return;
+    await delay(25);
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+const LOCK_NAMES = ["HEAD.lock", "index.lock"] as const;
+function heldLocks(...admins: string[]): string[] {
+  return admins.flatMap((admin) => LOCK_NAMES.filter((name) => existsSync(join(admin, name))).map((name) => join(admin, name)));
+}
+
+test("a checkout paused in a smudge filter holds index.lock, so the deletion is refused (CR-2.1)", async () => {
+  const { root, repoPath, otherPath, otherAdmin, scope } = fixture();
+  const started = join(root, "smudge-started");
+  const go = join(root, "smudge-go");
+  // The branch to delete carries a file whose checkout runs a smudge filter that waits.
+  git(["switch", "-q", "-c", "agent/s_owner-old"], repoPath);
+  writeFileSync(join(repoPath, ".gitattributes"), "*.slow filter=slow\n");
+  writeFileSync(join(repoPath, "payload.slow"), "payload\n");
+  git(["add", ".gitattributes", "payload.slow"], repoPath);
+  git(["commit", "-qm", "slow"], repoPath);
+  git(["switch", "-q", "main"], repoPath);
+  const branchOid = git(["rev-parse", "agent/s_owner-old"], repoPath);
+  git(["config", "filter.slow.smudge",
+    `sh -c 'touch ${started}; while [ ! -e ${go} ]; do sleep 0.05; done; cat'`], repoPath);
+  // The other worktree resolves the branch and stops while rewriting its working tree.
+  const checkout = spawn("git", ["switch", "-q", "agent/s_owner-old"], { cwd: otherPath, stdio: "ignore" });
+  const exited = new Promise<number | null>((resolve) => checkout.once("exit", resolve));
+  try {
+    await until(() => existsSync(started), "the smudge filter to start");
+    assert.ok(existsSync(join(otherAdmin, "index.lock")), "Git holds the paused worktree's index.lock");
+    assert.equal(existsSync(join(otherAdmin, "HEAD.lock")), false, "but not its HEAD.lock yet");
+    await refused(deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: branchOid }]), /HEAD or index is locked/u);
+  } finally {
+    writeFileSync(go, "");
+  }
+  assert.equal(await exited, 0, "the checkout finishes");
+  assert.equal(readFileSync(join(otherAdmin, "HEAD"), "utf8"), "ref: refs/heads/agent/s_owner-old\n");
+  assert.equal(git(["rev-parse", "refs/heads/agent/s_owner-old"], repoPath), branchOid, "the branch survives");
+  assert.equal(git(["rev-parse", "HEAD"], otherPath), branchOid, "and the checkout on it is valid");
+  assert.deepEqual(heldLocks(scope.commonGitDir, scope.worktreeGitDir, otherAdmin), []);
+});
+
+test("startup recovery removes this runner's marked stale locks and never an unmarked one (CR-2.2)", async () => {
+  const { root, otherAdmin, scope } = fixture();
+  const journalDir = join(root, "journal");
+  mkdirSync(journalDir);
+  const operation = randomUUID();
+  const marker = `wollipog-ref-deletion runner=runner-a operation=${operation}\n`;
+  const ours = join(otherAdmin, "HEAD.lock");
+  const gits = join(scope.worktreeGitDir, "index.lock");
+  const anotherOperation = join(otherAdmin, "index.lock");
+  writeFileSync(ours, marker);
+  writeFileSync(gits, "DIRC index Git is writing\n");
+  writeFileSync(anotherOperation, `wollipog-ref-deletion runner=runner-a operation=${randomUUID()}\n`);
+  writeFileSync(join(journalDir, `${operation}.json`), JSON.stringify({ runnerId: "runner-a", paths: [ours, gits, anotherOperation] }));
+  // Another runner's journal is not this runner's to act on, and its marker would not match.
+  const foreign = randomUUID();
+  const foreignLock = join(scope.commonGitDir, "HEAD.lock");
+  writeFileSync(foreignLock, `wollipog-ref-deletion runner=runner-b operation=${foreign}\n`);
+  writeFileSync(join(journalDir, `${foreign}.json`), JSON.stringify({ runnerId: "runner-b", paths: [foreignLock] }));
+
+  await new RefDeletionLockJournal(journalDir, "runner-a").recover();
+  assert.equal(existsSync(ours), false, "the marked stale lock is removed");
+  assert.equal(readFileSync(gits, "utf8"), "DIRC index Git is writing\n", "Git's own lock stays");
+  assert.ok(existsSync(anotherOperation), "a lock marked for another operation stays");
+  assert.ok(existsSync(foreignLock), "another runner's lock stays");
+  assert.equal(existsSync(join(journalDir, `${operation}.json`)), false);
+});
+
+test("shutdown drains a paused deletion without leaving a lock, and admits no new one (CR-2.2)", async () => {
+  const { root, repoPath, otherAdmin, scope } = fixture();
+  const head = git(["rev-parse", "main"], repoPath);
+  git(["branch", "agent/s_owner-old", "main"], repoPath);
+  const journal = new RefDeletionLockJournal(join(root, "journal"), "runner-a");
+  let resume!: () => void;
+  const paused = new Promise<void>((resolve) => { resume = resolve; });
+  let reached = false;
+  const pausing: GitRunner = async (args, options) => {
+    if (args.includes("for-each-ref") && !reached) {
+      reached = true;
+      await paused;
+    }
+    return unconfinedGitRunnerForTests(args, options);
+  };
+  const running = journal.run((locks) => deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }], pausing, locks));
+  const settled = running.then(() => "done", () => "refused");
+  await until(() => reached, "the deletion to pause with its locks held");
+  assert.equal(heldLocks(scope.commonGitDir, scope.worktreeGitDir, otherAdmin).length, 6);
+  await journal.drain(50);
+  assert.deepEqual(heldLocks(scope.commonGitDir, scope.worktreeGitDir, otherAdmin), [], "no lock outlives the drain");
+  assert.deepEqual(readdirSync(join(root, "journal")), [], "and nothing is left to recover");
+  await assert.rejects(journal.run(async () => "never"), /shutting down/u);
+  resume();
+  await settled;
+  assert.deepEqual(heldLocks(scope.commonGitDir, scope.worktreeGitDir, otherAdmin), []);
 });

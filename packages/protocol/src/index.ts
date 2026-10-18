@@ -5727,7 +5727,10 @@ export type SessionEventPayload =
    * Ref names appear only once validated as this session's own; `reason` is a fixed runner string.
    * A client that predates the kind skips it. */
   | { kind: "worktree_refs_deleted"; worktreePath?: string; outcome: "deleted" | "refused";
-      deleted: string[]; absent: string[]; reason?: string }
+      deleted: string[]; absent: string[]; reason?: string;
+      /** Every ref this call left deleted, with the value it held; a refusal lists any it could not
+       * put back. Names appear only once validated as the session's own. */
+      deletedRefs?: SessionWorktreeRefDeletion[] }
   | { kind: "conversation_checkpoint"; turn: number }
   | { kind: "conversation_forked"; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
   | { kind: "provider_account_switched"; providerAccountId: string; providerAccountLabel: string; automatic?: boolean }
@@ -9798,6 +9801,8 @@ export const MAX_SESSION_WORKTREE_REF_DELETIONS = 16;
 export interface SessionWorktreeRefDeletionResult {
   worktreePath: string;
   deleted: string[];
+  /** The deleted refs with the value each held, so a HEAD left on one can be restored. */
+  deletedRefs: SessionWorktreeRefDeletion[];
   /** Requested refs that were already gone, so a repeated call succeeds. */
   absent: string[];
 }
