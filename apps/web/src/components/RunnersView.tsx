@@ -1708,6 +1708,10 @@ export function RunnersView() {
     : requestedSection;
   // The route is the only source of selection (§6): `/connections/machines/~<runnerId>` a machine.
   const machineId = section === "machines" && view.name === "runners" ? view.machineId ?? null : null;
+  const machineIdRef = useRef(machineId);
+  useLayoutEffect(() => {
+    machineIdRef.current = machineId;
+  }, [machineId]);
   /** An SSH machine just connected and selected, whose box has not streamed in yet. */
   const [arrivingMachineId, setArrivingMachineId] = useState<string | null>(null);
   const identityRole = identity?.context.role ?? null;
@@ -1739,7 +1743,26 @@ export function RunnersView() {
   }, [bundledLocalRunner]);
 
   // A box's runner is that machine's, not a machine of its own; sorted by what needs the person.
-  const machines = useMemo(() => machineListEntries(runners, boxes.values()), [runners, boxes]);
+  const storedMachines = useMemo(() => machineListEntries(runners, boxes.values()), [runners, boxes]);
+  /**
+   * Machines deleted here whose removal the live stream has not delivered yet. The delete request and
+   * the stream's removal arrive in either order, so until the second one lands the machine leaves the
+   * list, the count and the default selection at once: the tab can never reselect it (§6.1).
+   */
+  const [deletedMachineIds, setDeletedMachineIds] = useState<ReadonlySet<string>>(() => new Set());
+  const machines = useMemo(
+    () => deletedMachineIds.size === 0
+      ? storedMachines
+      : storedMachines.filter((machine) => !deletedMachineIds.has(machine.runnerId)),
+    [deletedMachineIds, storedMachines],
+  );
+  // Once the stream has removed it too, it is forgotten, so a machine that registers again later shows.
+  useEffect(() => {
+    if (deletedMachineIds.size === 0) return;
+    const stored = new Set(storedMachines.map((machine) => machine.runnerId));
+    const pending = [...deletedMachineIds].filter((runnerId) => stored.has(runnerId));
+    if (pending.length < deletedMachineIds.size) setDeletedMachineIds(new Set(pending));
+  }, [deletedMachineIds, storedMachines]);
   const selectedMachine = machineId ? machines.find((machine) => machine.runnerId === machineId) ?? null : null;
   const selectMachine = (runnerId: string | null) => navigate(runnerId
     ? { name: "runners", section: "machines", machineId: runnerId }
@@ -1794,11 +1817,14 @@ export function RunnersView() {
   // A deleted machine's route is gone too: the tab returns to the list in its place, so Back never
   // lands on it, and the first row or the empty state follows (§6.1).
   const leaveDeletedMachine = (runnerId: string) => {
-    if (machineId === runnerId) navigate({ name: "runners", section: "machines" }, { replace: true });
+    setDeletedMachineIds((current) => new Set(current).add(runnerId));
+    // The selection as of now: the person may have moved on while the request was in flight.
+    if (machineIdRef.current === runnerId) navigate({ name: "runners", section: "machines" }, { replace: true });
   };
   const removeBox = async (boxId: string) => {
-    await api.removeBox(boxId);
+    // Read before the request: the stream may remove the box while it is in flight.
     const runnerId = [...boxes.values()].find((box) => box.boxId === boxId)?.runnerId;
+    await api.removeBox(boxId);
     if (runnerId) leaveDeletedMachine(runnerId);
   };
   const dialogs = (

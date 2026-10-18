@@ -116,6 +116,11 @@ class MemoryHistory implements ViewNavigation {
     await act(async () => this.listener?.(this.entries[this.index]!));
     await settle();
   }
+  async forward() {
+    this.index += 1;
+    await act(async () => this.listener?.(this.entries[this.index]!));
+    await settle();
+  }
 }
 
 let sequence = 0;
@@ -506,6 +511,209 @@ test("connecting a machine over SSH selects it, and its detail waits for it rath
     assert.ok(row(view.body, "Golf Sim").classList.contains("is-selected"));
     assert.equal(detailName(view.body), "Golf Sim");
     assert.match(detail(view.body).querySelector(".box-card .status")?.textContent ?? "", /Bootstrapping/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+/*
+ * The selection's state machine (#2985). The route is the only selection. It changes by:
+ *   a deep link or reload            → that machine, or Machine Not Found, never replaced;
+ *   no selection, wider than a phone → the first row shown, in place (`replace`);
+ *   a row or Show All Machines       → pushed, so Back and Forward retrace it;
+ *   Connect via SSH                  → the new machine, pushed, waiting until its box arrives;
+ *   deleting the selected machine    → the list, in place, never reselecting the deleted one;
+ *   a phone                          → never selects by itself; Back leaves the detail route.
+ * The delete request and the stream's removal arrive in either order; both orders end the same.
+ */
+
+async function deleteSelectedMachine(view: Awaited<ReturnType<typeof mount>>, name: string) {
+  const card = detail(view.body).querySelector(".runner-card")!;
+  await act(async () => [...card.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.trim() === "Manage")!.click());
+  const dialog = [...view.body.querySelectorAll<HTMLElement>('[role="dialog"]')]
+    .find((candidate) => candidate.textContent?.includes(`Manage ${name}`))!;
+  assert.ok(dialog, `Manage ${name} opens`);
+  await act(async () => [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.trim() === "Delete Machine")!.click());
+  await settle();
+  const confirmation = [...view.body.querySelectorAll<HTMLElement>('[role="alertdialog"], [role="dialog"]')]
+    .find((candidate) => candidate !== dialog && candidate.textContent?.includes("permanently deleted"))!;
+  assert.ok(confirmation, "the deletion asks first");
+  await act(async () => [...confirmation.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.trim() === "Delete Machine")!.click());
+  await settle();
+}
+
+const offlineOnly = runner("solo", { displayName: "Solo", status: "offline" });
+
+test("deleting the only machine before its removal streams in shows No Machines Yet, and the removal changes nothing", async () => {
+  const removed: string[] = [];
+  const view = await mount({ runners: [offlineOnly], client: { removeRunner: async (id: string) => { removed.push(id); } } as Partial<ApiClient> });
+  try {
+    assert.equal(detailName(view.body), "Solo");
+    await deleteSelectedMachine(view, "Solo");
+    assert.deepEqual(removed, ["solo"]);
+    // The stream has not removed it yet.
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" }, "the route is the list, in place");
+    assert.equal(view.history.entries.length, 1, "Back cannot return to the deleted machine");
+    assert.ok(view.body.querySelector(".connections-empty"), "No Machines Yet");
+    assertNoDomNode(view.body.querySelector(".master-detail-detail"));
+    assert.equal(view.body.querySelector("#connections-machines-tab")?.textContent, "Machines 0");
+
+    await view.push({ type: "runner_removed", runnerId: "solo" } as never);
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
+    assert.ok(view.body.querySelector(".connections-empty"));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("deleting the only machine after its removal streams in ends the same way", async () => {
+  // The stream's removal lands while the request is in flight; the click's act() already wraps it.
+  let socket: FakeSocket | null = null;
+  const view = await mount({
+    runners: [offlineOnly],
+    client: { removeRunner: async () => { socket!.push({ type: "runner_removed", runnerId: "solo" } as never); } } as Partial<ApiClient>,
+  });
+  socket = view.socket;
+  try {
+    await deleteSelectedMachine(view, "Solo");
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
+    assert.ok(view.body.querySelector(".connections-empty"));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("deleting the selected one of two selects the other in place, never the deleted one, before and after its removal", async () => {
+  const other = runner("other", { displayName: "Other" });
+  const view = await mount({ runners: [offlineOnly, other], client: { removeRunner: async () => {} } as Partial<ApiClient> });
+  try {
+    assert.equal(detailName(view.body), "Solo", "the offline machine sorts first and is the default selection");
+    await deleteSelectedMachine(view, "Solo");
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "other" });
+    assert.equal(view.history.entries.length, 1);
+    assert.deepEqual(rowNames(view.body), ["Other"], "the deleted machine leaves the list at once");
+    assert.equal(detailName(view.body), "Other");
+    await view.push({ type: "runner_removed", runnerId: "solo" } as never);
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "other" });
+    assert.deepEqual(rowNames(view.body), ["Other"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("deleting the only SSH machine leaves for the list whichever arrives first, the response or box_removed", async () => {
+  const box: BoxView = { boxId: "box-solo", runnerId: "box-solo-runner", displayName: "Solo Box", sshTarget: "me@solo", status: "offline", lastError: null, createdAt: 1 };
+  for (const order of ["response first", "removal first"] as const) {
+    let socket: FakeSocket | null = null;
+    const view = await mount({
+      runners: [],
+      boxes: [box],
+      client: {
+        removeBox: async () => {
+          if (order === "removal first") socket!.push({ type: "box_removed", boxId: "box-solo" } as never);
+        },
+      } as Partial<ApiClient>,
+    });
+    socket = view.socket;
+    try {
+      assert.ok(detail(view.body).querySelector(".box-card"));
+      await deleteSelectedMachine(view, "Solo Box");
+      assert.deepEqual(view.history.current(), { name: "runners", section: "machines" }, order);
+      assert.ok(view.body.querySelector(".connections-empty"), `${order}: No Machines Yet`);
+      if (order === "response first") {
+        await view.push({ type: "box_removed", boxId: "box-solo" } as never);
+        assert.ok(view.body.querySelector(".connections-empty"));
+        assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
+      }
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("a failed deletion keeps the machine selected and listed", async () => {
+  const view = await mount({ runners: [offlineOnly], client: { removeRunner: async () => { throw new Error("runner is busy"); } } as Partial<ApiClient> });
+  try {
+    await deleteSelectedMachine(view, "Solo");
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "solo" });
+    assert.deepEqual(rowNames(view.body), ["Solo"]);
+    assert.match(view.body.textContent ?? "", /runner is busy/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a machine deleted and then registered again shows once its removal has streamed in", async () => {
+  const view = await mount({ runners: [offlineOnly], client: { removeRunner: async () => {} } as Partial<ApiClient> });
+  try {
+    await deleteSelectedMachine(view, "Solo");
+    await view.push({ type: "runner_removed", runnerId: "solo" } as never);
+    await view.push({ type: "runner_upsert", runner: { ...offlineOnly, status: "online" } } as never);
+    assert.deepEqual(rowNames(view.body), ["Solo"]);
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "solo" }, "the default selection again");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Back and Forward retrace pushed selections, and the default selection adds no entry", async () => {
+  const view = await mount();
+  try {
+    assert.equal(view.history.entries.length, 1);
+    await act(async () => row(view.body, "Alpha").click());
+    await settle();
+    await act(async () => row(view.body, "Beta").click());
+    await settle();
+    assert.equal(view.history.entries.length, 3);
+    await view.history.back();
+    assert.equal(detailName(view.body), "Alpha");
+    await view.history.back();
+    assert.equal(detailName(view.body), "Zeta", "the first entry is the replaced default selection");
+    await view.history.forward();
+    assert.equal(detailName(view.body), "Alpha");
+    assert.equal(view.history.entries.length, 3, "retracing adds nothing");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a phone never selects by itself; widening the window selects the first row in place", async () => {
+  await setWidth(390);
+  const view = await mount();
+  try {
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
+    assertNoDomNode(view.body.querySelector(".master-detail[data-detail-open]"));
+    await setWidth(1440);
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "zeta" });
+    assert.equal(view.history.entries.length, 1);
+    assert.equal(detailName(view.body), "Zeta");
+    // Narrowed again with a machine open, the phone shows it as the detail route.
+    await setWidth(390);
+    assert.ok(view.body.querySelector(".detail-bar"));
+    assert.ok(view.body.querySelector(".master-detail[data-detail-open]"));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("on a phone, deleting the open machine returns to the list route without it", async () => {
+  await setWidth(390);
+  const other = runner("other", { displayName: "Other" });
+  const view = await mount({
+    view: { name: "runners", section: "machines", machineId: "solo" },
+    runners: [offlineOnly, other],
+    client: { removeRunner: async () => {} } as Partial<ApiClient>,
+  });
+  try {
+    assert.ok(view.body.querySelector(".detail-bar"));
+    await deleteSelectedMachine(view, "Solo");
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
+    assertNoDomNode(view.body.querySelector(".detail-bar"));
+    assert.deepEqual(rowNames(view.body), ["Other"]);
+    assert.equal(view.body.querySelectorAll(".row.is-selected").length, 0);
   } finally {
     await view.unmount();
   }
