@@ -269,13 +269,9 @@ const AA_NON_TEXT = 3;
  * wrong about the standard, and a wrong threshold gets relaxed rather than fixed the first time it
  * blocks something.
  */
-const ICON_ONLY = new Set([
-  // The local runner's status mark: one aria-hidden glyph (✓ or !) beside a heading that states the
-  // status in text, which OnboardRunnerDialog.test.tsx pins. It is measured over its own
-  // `--bg-elev-3` disc as a colour-only rule on a base fill.
-  ".onboard-local-ready .onboard-local-icon",
-  ".onboard-local-needs-attention .onboard-local-icon",
-]);
+// None today: the last one, the local runner's ✓ and ! status mark, became a check icon and a Notice in
+// Set Up This Machine (#2993).
+const ICON_ONLY: ReadonlySet<string> = new Set();
 
 /**
  * Transparent rules that provably sit on ONE surface, each with the rule that paints it.
@@ -322,7 +318,7 @@ const TOKEN_BLOCK_SELECTORS = new Set([DARK_SELECTOR, LIGHT_SELECTOR].map((s) =>
  * and patching it against that claim is what the last two rounds were. Closing it means measuring
  * rendered pixels on whole screens, which is §25 and §26's machinery and its own piece of work.
  */
-function measure(rules: readonly TintedRule[]): { checked: number; unresolved: string[]; failures: string[] } {
+function measure(rules: readonly TintedRule[], iconOnly: ReadonlySet<string> = ICON_ONLY): { checked: number; unresolved: string[]; failures: string[] } {
   const unresolved: string[] = [];
   const failures: string[] = [];
   let checked = 0;
@@ -380,7 +376,7 @@ function measure(rules: readonly TintedRule[]): { checked: number; unresolved: s
         fills = [fill];
       }
 
-      const floor = ICON_ONLY.has(selector) ? AA_NON_TEXT : AA_NORMAL;
+      const floor = iconOnly.has(selector) ? AA_NON_TEXT : AA_NORMAL;
       for (const fill of fills) {
         // An opaque fill is its own backdrop; a translucent one takes the surface behind it.
         const backdrops = fill.a >= 1
@@ -450,13 +446,13 @@ test("a faded glyph on a transparent fill fails in every palette, even at the gl
   // #1880's first pass, verbatim: an unavailable message action faded to 45% of --text-faint.
   // It rendered at 1.9–2.7:1, so it fails even the 3:1 bar an icon-only selector is held to.
   const faded = "color-mix(in srgb, var(--text-faint) 45%, transparent)";
-  const unavailable = [...ICON_ONLY].find((selector) => selector.startsWith(".onboard-local-ready"))!;
+  const unavailable = ".unavailable-glyph";
   for (const fill of ["transparent", "none"]) {
     for (const rule of [
       { selector: unavailable, declarations: { color: faded, background: fill } },
       { selector: ".faded-label", declarations: { color: faded, "background-color": fill } },
     ]) {
-      const { unresolved, failures } = measure([rule]);
+      const { unresolved, failures } = measure([rule], new Set([unavailable]));
       assert.deepEqual(unresolved, []);
       const failing = new Set(failures.map((failure) => failure.slice(rule.selector.length).match(/\((\S+)\)/)![1]));
       assert.deepEqual([...failing].sort(), [...PALETTES].sort(),
@@ -588,8 +584,9 @@ function impliedFillPairs(source: string): TintedRule[] {
 test("a colour-only rule clears AA on the fill its own element's base rule paints", () => {
   const pairs = impliedFillPairs(css);
   // Thirty-odd since #1802 folded the per-surface badge tone classes (`.st-running` and the rest)
-  // into the status recipe, whose tones the paired check above measures one by one.
-  assert.ok(pairs.length >= 25, `expected many colour-only rules over a base fill, found ${pairs.length}`);
+  // into the status recipe, whose tones the paired check above measures one by one, and two fewer
+  // since Set Up This Machine (#2993) dropped the local runner's ✓ and ! marks.
+  assert.ok(pairs.length >= 20,`expected many colour-only rules over a base fill, found ${pairs.length}`);
   for (const chip of [".atag.broken", ".atag.discovered"]) {
     assert.ok(pairs.some(({ selector }) => selector === chip), `${chip} must be measured over .atag's fill`);
   }

@@ -6,7 +6,7 @@ const view = readFileSync(new URL("./RunnersView.tsx", import.meta.url), "utf8")
 const discovery = readFileSync(new URL("./AgentSessionDiscoveryDialog.tsx", import.meta.url), "utf8");
 const access = readFileSync(new URL("./PeopleDevicesPanel.tsx", import.meta.url), "utf8");
 const icons = readFileSync(new URL("./Icons.tsx", import.meta.url), "utf8");
-const onboarding = readFileSync(new URL("./OnboardRunnerDialog.tsx", import.meta.url), "utf8");
+const onboarding = readFileSync(new URL("./SetUpThisMachineDialog.tsx", import.meta.url), "utf8");
 const install = readFileSync(new URL("./InstallManuallyDialog.tsx", import.meta.url), "utf8");
 const repair = readFileSync(new URL("./RepairConnectionDialog.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
@@ -122,12 +122,14 @@ test("runner repair preserves identity and rotates when needed; adding and repai
   assert.match(repair, /api\.rotateRunnerCredential\(runnerId, "Connection repair"\)/);
   assert.match(view, /<RepairConnectionDialog runnerId=\{repairRunnerId\}/);
   assert.match(view, /onboarding === "manual" && <InstallManuallyDialog/);
-  assert.match(view, /onboarding === "local" && \(\s*<OnboardRunnerDialog/);
-  assert.match(onboarding, /Wollipog could not access its managed local runner\. Close this dialog and try again\./);
+  assert.match(view, /onboarding === "local" && \(\s*<SetUpThisMachineDialog/);
+  assert.match(onboarding, /Wollipog couldn't reach its bundled runner\. Close this dialog and try again\./);
   // The host choice is a Select whose options read in words (§8.4), not a segmented control.
   assert.match(install, /<Select label="Connects To" value=\{host\} options=\{hostOptions\}/);
   assert.doesNotMatch(install + repair + onboarding, /SegmentedControl|runner-hosts|step-head/);
   assert.doesNotMatch(css, /\.onboard-health|\.onboard-advanced-toggle|\.step-head|\.runner-hosts/);
+  // Set Up This Machine (#2993) replaced the local mode's bordered card and its agent chips.
+  assert.doesNotMatch(css, /\.onboard \{|\.onboard-local/);
 });
 
 test("agent session discovery is a progressive modal instead of an inline runner-card list", () => {

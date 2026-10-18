@@ -41,8 +41,8 @@ import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { InstallManuallyDialog } from "./InstallManuallyDialog.js";
-import { OnboardRunnerDialog } from "./OnboardRunnerDialog.js";
 import { RepairConnectionDialog } from "./RepairConnectionDialog.js";
+import { SetUpThisMachineDialog } from "./SetUpThisMachineDialog.js";
 import { AddBoxDialog } from "./AddBoxDialog.js";
 import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
 import { agentDisplayName, agentDriverDescription, agentDriverLabel } from "../agent-presentation.js";
@@ -1769,7 +1769,7 @@ export function RunnersView() {
   const dialogs = (
     <>
       {onboarding === "local" && (
-        <OnboardRunnerDialog onClose={() => setOnboarding(null)} onLocalRunnerChanged={setLocalRunnerStatus} />
+        <SetUpThisMachineDialog onClose={() => setOnboarding(null)} onLocalRunnerChanged={setLocalRunnerStatus} />
       )}
       {onboarding === "manual" && <InstallManuallyDialog onClose={() => setOnboarding(null)} />}
       {repairRunnerId && (

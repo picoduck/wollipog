@@ -2242,6 +2242,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out, Status Unknown: neutral |
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
+| Agent on a machine (`agent`: Set Up This Machine's agent rows, #2993) | Ready: success · Needs Attention: warning |
 | Terminal tab (`shell`, #2864) | Exited: neutral · Reconnecting: info. Rendered as the inline badge after the tab's label; a running shell has none. |
 | Transcript share link | Active: success · Expired, Revoked: neutral. Rendered as the inline badge on Share Transcript's link rows. |
 | Pull request | Open, Draft, Merged and Closed are **facts**: row meta with the Git icon, not status badges. |

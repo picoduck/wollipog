@@ -332,6 +332,11 @@ const VOCABULARY = {
     sign_in_required: warning("Sign-In Required"),
     not_applicable: neutral("Not Applicable"),
   },
+  /** One coding agent a machine found, as Set Up This Machine lists it (#2993). */
+  agent: {
+    ready: success("Ready"),
+    needs_attention: warning("Needs Attention"),
+  },
 } as const satisfies Record<string, Record<string, Entry>>;
 
 export type StatusDomain = keyof typeof VOCABULARY;
