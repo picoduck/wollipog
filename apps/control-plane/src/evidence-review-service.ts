@@ -6,6 +6,7 @@ import { VideoEvidenceRuntime, VideoReviewRefused, type VideoReviewBinding,
   type VideoReviewCriterion, type VideoReviewRecord, type VideoReviewStore, type VideoReviewVerdict } from "./video-evidence-runtime.js";
 import { planEvidenceRecovery, type EvidenceRecoveryPlan } from "./evidence-review-recovery.js";
 import type { EvidenceRecoveryExecutor, RecoveryExecutionResult } from "./evidence-review-recovery-executor.js";
+import type { VideoPreparationFailureCode } from "./video-evidence-preparation.js";
 
 export interface PendingVideoReviewRequest {
   childSessionId: string;
@@ -60,7 +61,8 @@ export interface EvidenceReviewServiceAdapter {
 export type PrepareEvidenceReviewResult =
   | { ok: true; review: VideoReviewRecord }
   | { ok: false; code: "not_authorized" | "custom_fallback" | "live_validation" | "mixed_peer" |
-      "preparation"; recovery?: EvidenceRecoveryPlan; execution?: RecoveryExecutionResult };
+      "preparation"; recovery?: EvidenceRecoveryPlan; preparationCode?: VideoPreparationFailureCode;
+      execution?: RecoveryExecutionResult };
 const agentSession = (principal: AuthPrincipal) => principal.kind === "agent" ? principal.credentialSessionId : null;
 
 /** Authenticated service boundary for the independent runtime. Agent routes/MCP exposure and
@@ -135,7 +137,7 @@ export class EvidenceReviewService {
             criteriaSha256: b.criteriaSha256, workerAdmissionSha256: b.workerAdmissionSha256 }, recovery) : undefined;
         // Replacement subjects start new exact occurrences; this original snapshot cannot be
         // rewritten or approved with substituted media. Unknown operations reconcile only.
-        return { ok: false, code: "preparation", recovery, ...(execution ? { execution } : {}) };
+        return { ok: false, code: "preparation", recovery, preparationCode: result.code, ...(execution ? { execution } : {}) };
       }
       await this.delay(recovery.delayMs);
     }

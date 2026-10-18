@@ -41,7 +41,7 @@ const syntheticDecoder: VideoReviewDecoder = {
   candidate: async () => ({ ok: false, code: "decoder_unavailable", reason: "No candidate profile in this test.", retryable: false }),
 };
 
-async function harness(t: { after(fn: () => void): void }, options: { proof?: boolean; childContract?: boolean } = {}) {
+async function harness(t: { after(fn: () => void): void }, options: { proof?: boolean; childContract?: boolean; decoder?: VideoReviewDecoder } = {}) {
   const native = await videoPreparationDecoderAvailable();
   const db = ControlPlaneDb.open(":memory:");
   const human: HumanPrincipal = { ...db.localIdentityContext(), kind: "human", actorId: "synthetic-human" };
@@ -102,7 +102,7 @@ async function harness(t: { after(fn: () => void): void }, options: { proof?: bo
 
   let now = Date.now();
   const timers: Array<{ run: () => void; at: number }> = [];
-  const video = composeHostingVideoEvidence(db, { decoder: native ? undefined : syntheticDecoder, clock: () => now,
+  const video = composeHostingVideoEvidence(db, { decoder: options.decoder ?? (native ? undefined : syntheticDecoder), clock: () => now,
     schedule: (run, ms) => { timers.push({ run, at: now + ms }); return setTimeout(() => {}, 0); } });
   const sessions = new SessionsService(db, hub, log, undefined, undefined, undefined, undefined, undefined, undefined, false, undefined,
     video.preparedMediaRuntime, video.workflowVideoApprovals, disclosures, video.operatorValidationPermits, video.preparedMediaActiveStops);
@@ -428,6 +428,126 @@ test("a busy retry that runs past the deadline refuses without reserving or disp
     reason: "The reviewer host stayed busy through every bounded retry; video evidence stays with the Human." });
 });
 
+// ---- Inadequate evidence repair through the typed gate (#2938). ----
+
+/** Refuses the listed sources as the isolated decoder refuses a capture that needs splitting, and
+ * derives every other source synthetically. Disclosed synthetic control flow, not decoding proof. */
+const inadequateDecoder = (inadequate: Set<string>): VideoReviewDecoder => ({
+  ...syntheticDecoder,
+  paced: async (bytes, mediaType) => inadequate.has(sha(bytes))
+    ? { ok: false, code: "split_capture", reason: "Synthetic source exceeds the conversion envelope.", retryable: false }
+    : syntheticDecoder.paced(bytes, mediaType),
+});
+type RepairRefusal = { ok: false; code: string; reason: string; recovery: Record<string, unknown> & { action: string;
+  repairAttempt: number; reprepare: boolean; summary: string; reason: string; requiredInput: string } };
+const members = (h: Awaited<ReturnType<typeof harness>>) =>
+  h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_members").get()!.n as number;
+/** The child attaches a new capture and requests a fresh occurrence under the same resource key. */
+function recapture(h: Awaited<ReturnType<typeof harness>>, n: number, bytes = Buffer.concat([source, Buffer.from(`repair ${n}`)])) {
+  const artifactId = `repair-source-${n}`;
+  h.db.createWorkflowArtifactBytes({ artifactId, sessionId: "child", kind: "video", name: `Repair ${n}.webm`, mimeType: "video/webm",
+    encoding: "base64", sha256: sha(bytes), sizeBytes: bytes.length, createdBy: { kind: "agent", id: "child" },
+    metadata: { purpose: "session_attachment" }, createdAt: 10 + n }, bytes);
+  const created = h.sessions.createWorkflowDecision("child", { requestId: `repair-${n}`, resourceKey: "synthetic",
+    resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: `repair-video-${n}`, artifactId, sha256: sha(bytes),
+      mediaType: "video/webm" }] } });
+  assert.ok(created.ok && created.data, JSON.stringify(created));
+  assert.equal(created.data.authority, "orchestrator", "a repaired capture stays with the Orchestrator, never the Human");
+  return { bytes, request: { childSessionId: "child", occurrenceId: created.data.occurrenceId, evidenceId: `repair-video-${n}` } };
+}
+const decline = (h: Awaited<ReturnType<typeof harness>>, occurrenceId: string, childMessage: string) =>
+  h.sessions.resolveWorkflowDecision("root", "child", occurrenceId, { outcome: "deny", childMessage }, "orchestrator",
+    { kind: "agent", id: "root" }, () => true);
+
+test("inadequate evidence routes to repair: structured plan, idempotent refusal, typed decline, fresh occurrence, review", async (t) => {
+  const inadequate = new Set([sha(source)]);
+  const h = await harness(t, { decoder: inadequateDecoder(inadequate) });
+  const refused = await h.video.delegated.prepare(h.owner, h.request) as RepairRefusal;
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, "preparation");
+  assert.deepEqual([refused.recovery.action, refused.recovery.owner, refused.recovery.repairAttempt, refused.recovery.reprepare,
+    refused.recovery.preparationCode, refused.recovery.occurrenceId], ["split", "orchestrator", 1, false, "split_capture", "original-gate"]);
+  assert.equal(refused.reason, refused.recovery.summary, "the refusal's reason is the exception's own summary");
+  assert.match(refused.recovery.requiredInput, /Decline occurrence original-gate .* childMessage/u);
+  assert.doesNotMatch(JSON.stringify(refused), /\/synthetic-repo|base64|Synthetic source exceeds/u,
+    "only fixed planner text and identifiers, never decoder detail, paths or bytes");
+  assert.equal(h.dispatches().length, 0);
+
+  // Preparing the same occurrence again cannot change its immutable source: same answer, no reservation.
+  const before = members(h);
+  assert.deepEqual(await h.video.delegated.prepare(h.owner, h.request), refused);
+  assert.equal(members(h), before, "no reviewer is reserved for an unchanged inadequate source");
+
+  // The Orchestrator owns the gate, so the decline is automatic and nothing reaches the Human.
+  const declined = decline(h, "original-gate", refused.recovery.reason);
+  assert.ok(declined.ok, JSON.stringify(declined));
+  const fresh = recapture(h, 1);
+  const projection = h.sessions.campaignProjection("root");
+  assert.ok(projection.ok && projection.data);
+  assert.deepEqual([projection.data.pendingDecisions.human, projection.data.children.waitingHuman], [0, 0]);
+  assert.equal(projection.data.pendingDecisions.orchestrator, 1, "only the fresh occurrence awaits the Orchestrator");
+
+  const prepared = await h.video.delegated.prepare(h.owner, fresh.request) as { ok: boolean; status?: string };
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const [dispatch] = h.dispatches();
+  assert.ok(dispatch);
+  assert.equal(dispatch.grant.occurrenceId, fresh.request.occurrenceId);
+  assert.equal(await h.video.delegated.onDispatchReceipt("r", h.runner.accepted(dispatch)), true);
+  const verdict = h.review(dispatch);
+  assert.equal(await h.video.delegated.onFinished("r", h.runner.finished(dispatch, { priced: true, costUsd: 0.5 })), true);
+  const observed = h.video.delegated.provenance(h.owner, dispatch.grant.reviewId) as { status: string; resolveWith?: unknown };
+  assert.equal(observed.status, "complete");
+  const approved = h.sessions.resolveWorkflowDecision("root", "child", fresh.request.occurrenceId, { outcome: "approve", evidenceReviewed: [],
+    delegatedVideoEvidence: [{ evidenceId: fresh.request.evidenceId, reviewId: dispatch.grant.reviewId, verdictId: verdict.verdictId,
+      reviewerSessionId: dispatch.grant.reviewerSessionId }] }, "orchestrator", { kind: "agent", id: "root" }, () => true);
+  assert.ok(approved.ok, JSON.stringify(approved));
+  assert.equal(h.db.workflowDecisionByOccurrence("original-gate")?.status, "denied", "the inadequate original is never approved");
+});
+
+test("an evidence lineage gets two replacement captures; then it is exhausted and blocked without reserving a reviewer", async (t) => {
+  const inadequate = new Set([sha(source)]);
+  const h = await harness(t, { decoder: inadequateDecoder(inadequate) });
+  const first = await h.video.delegated.prepare(h.owner, h.request) as RepairRefusal;
+  assert.ok(decline(h, "original-gate", first.recovery.reason).ok);
+  const attempts: RepairRefusal[] = [];
+  let occurrence = "original-gate";
+  for (const n of [1, 2]) {
+    const next = recapture(h, n);
+    inadequate.add(sha(next.bytes));
+    const refused = await h.video.delegated.prepare(h.owner, next.request) as RepairRefusal;
+    attempts.push(refused);
+    occurrence = next.request.occurrenceId;
+    assert.ok(decline(h, occurrence, refused.recovery.reason).ok);
+  }
+  assert.deepEqual(attempts.map((a) => [a.recovery.action, a.recovery.repairAttempt]), [["split", 2], ["reject", 2]],
+    "the second replacement is the last; its failure is exhausted rather than another repair");
+  assert.match(attempts[1]!.recovery.requiredInput, /exhausted exception/u);
+
+  // A fourth capture, even an adequate one, is refused before any reviewer is reserved.
+  const before = members(h);
+  const blocked = recapture(h, 3);
+  const refused = await h.video.delegated.prepare(h.owner, blocked.request) as RepairRefusal;
+  assert.deepEqual([refused.ok, refused.recovery.action, refused.recovery.reprepare], [false, "reject", false]);
+  assert.equal(members(h), before, "an exhausted ceiling reserves nothing");
+  assert.deepEqual(await h.video.delegated.prepare(h.owner, blocked.request), refused, "repeated observation changes nothing");
+  assert.equal(h.dispatches().length, 0);
+  const projection = h.sessions.campaignProjection("root");
+  assert.ok(projection.ok && projection.data);
+  assert.equal(projection.data.pendingDecisions.human, 0, "an exhausted repair is not escalated to the Human");
+});
+
+test("a busy decoder keeps its occurrence preparable and does not count toward the repair limit", async (t) => {
+  let busy = true;
+  const h = await harness(t, { decoder: { ...syntheticDecoder, paced: async (bytes, mediaType) => busy
+    ? { ok: false, code: "decoder_busy", reason: "Synthetic busy decoder.", retryable: true } : syntheticDecoder.paced(bytes, mediaType) } });
+  const waiting = await h.video.delegated.prepare(h.owner, h.request) as RepairRefusal;
+  assert.deepEqual([waiting.recovery.action, waiting.recovery.reprepare, waiting.recovery.owner], ["wait", true, "orchestrator"]);
+  busy = false;
+  const prepared = await h.video.delegated.prepare(h.owner, h.request) as { ok: boolean };
+  assert.equal(prepared.ok, true, "capacity returned, so the same occurrence is prepared");
+  assert.equal(h.dispatches().length, 1);
+});
+
 // ---- Lifecycle audit matrix (#1321 PR C round 3). Each test names its cell: state x event. ----
 
 /** The runner's ordinary inventory for the controller and child; it never lists a media reviewer. */
@@ -487,6 +607,41 @@ test("dispatched x startup, archive and readback: provisional stays open, archiv
   assert.equal(h.db.getSession(h.reviewerId)?.archived, false);
   assert.equal(await h.video.delegated.onDispatchReceipt("r", h.runner.accepted(h.dispatch)), true);
   assert.equal(h.db.getSession(h.reviewerId)?.status, "running");
+});
+
+test("running x legacy provisional stop x early media call: media waits without revoking, and readback resumes the review", async (t) => {
+  const h = await dispatched(t);
+  provisional(h, h.reviewerId); // As an older control plane's startup wrote it.
+  const before = h.readbacks().length;
+  const reviewer = h.principal(h.reviewerId, false);
+  const window = pacedVideoReviewWindowPlan(h.dispatch.grant.frames).windows[0]!;
+  assert.throws(() => h.video.reviewService.deliverBatch(reviewer, h.dispatch.grant.reviewId, 0, window.endIndex),
+    "no frame reaches a reviewer its runner has not confirmed");
+  assert.equal(h.video.reviewStore.getReview(h.dispatch.grant.reviewId)?.status, "pending", "the early call does not revoke the review");
+  assert.equal(h.readbacks().length, before + 1, "it asks the owning runner for the exact outcome instead");
+  assert.equal(h.db.getSession(h.reviewerId)?.status, "stopped", "a media call never restores the Session itself");
+  assert.equal(await h.video.delegated.onDispatchReceipt("r", h.runner.accepted(h.dispatch)), true);
+  assert.equal(h.db.getSession(h.reviewerId)?.status, "running", "the runner's authenticated readback restores it");
+  h.review(h.dispatch);
+  assert.equal(await h.video.delegated.onFinished("r", h.runner.finished(h.dispatch, { priced: true, costUsd: 0.5 })), true);
+  assert.equal((h.video.delegated.provenance(h.owner, h.dispatch.grant.reviewId) as { status: string }).status, "complete");
+});
+
+test("running x legacy provisional stop x revocation: a changed binding still revokes, and a confirmed stop never resumes", async (t) => {
+  const revoked = await dispatched(t);
+  provisional(revoked, revoked.reviewerId);
+  revoked.db.raw().prepare("UPDATE workflow_decisions SET status='revoked' WHERE occurrence_id='original-gate'").run();
+  const window = (h: typeof revoked) => pacedVideoReviewWindowPlan(h.dispatch.grant.frames).windows[0]!.endIndex;
+  assert.throws(() => revoked.video.reviewService.deliverBatch(revoked.principal(revoked.reviewerId, false),
+    revoked.dispatch.grant.reviewId, 0, window(revoked)));
+  assert.equal(revoked.video.reviewStore.getReview(revoked.dispatch.grant.reviewId)?.status, "revoked");
+
+  const confirmed = await dispatched(t);
+  confirmed.db.updateSessionStatus(confirmed.reviewerId, "stopped", Date.now(), { cause: "startup_settlement", confirmation: "runner_absent" });
+  assert.throws(() => confirmed.video.reviewService.deliverBatch(confirmed.principal(confirmed.reviewerId, false),
+    confirmed.dispatch.grant.reviewId, 0, window(confirmed)));
+  assert.equal(confirmed.video.reviewStore.getReview(confirmed.dispatch.grant.reviewId)?.status, "revoked",
+    "a confirmed stop is not open, so it fails closed as before");
 });
 
 for (const sweep of ["reconcile", "hydrate"] as const) {

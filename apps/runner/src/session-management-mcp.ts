@@ -1804,7 +1804,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "prepare_descendant_video_evidence_review",
-    description: "Start the managed media-only review of one video evidence item of an exact pending descendant ui_evidence_approval decision that this Orchestrator owns. The control plane derives every frame, admits a separate Claude Code reviewer and dispatches it; you never see or choose the frames, reviewer, model or budget. Returns the review id, frame and window counts, or a specific reason video stays with the Human. Then poll get_descendant_video_evidence_provenance.",
+    description: "Start the managed media-only review of one video evidence item of an exact pending descendant ui_evidence_approval decision that this Orchestrator owns. The control plane derives every frame, admits a separate Claude Code reviewer and dispatches it; you never see or choose the frames, reviewer, model or budget. Returns the review id, frame and window counts, or a specific reason video stays with the Human. When the capture itself is inadequate, the refusal names the repair: deny that occurrence with its reason as childMessage so the child splits or recaptures and requests a fresh occurrence; preparing the same occurrence again returns the same refusal. Then poll get_descendant_video_evidence_provenance.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" }, occurrenceId: { type: "string" }, evidenceId: { type: "string" } },

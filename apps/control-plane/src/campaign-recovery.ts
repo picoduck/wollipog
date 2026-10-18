@@ -10,7 +10,8 @@ import type { CampaignRecoveryObservation } from "./campaign-recovery-store.js";
 export function recoveryCoordinate(value: string): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
-function requestReason(evaluation: CampaignAuthorityEvaluation): CampaignRecoveryReason {
+/** Why a pending request needs its owner: the four irrecoverable classes of #2938 stay distinct. */
+export function requestReason(evaluation: CampaignAuthorityEvaluation): CampaignRecoveryReason {
   if (evaluation.owner === "orchestrator") return "authorized_action";
   switch (evaluation.reason) {
     case "outside_boundary": return "boundary_enlargement";
