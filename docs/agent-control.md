@@ -673,7 +673,10 @@ the session can commit in it and fast-forward it, and its `.git` link and `gitdi
 mount point, so it cannot be renamed or removed from inside. A worktree is bound only when its admin
 directory's `gitdir` back-pointer names it, so a rewritten `.git` link cannot claim another
 session's admin directory. Attached worktrees and every other session's worktrees are never bound.
-Codex's own workspace sandbox still grants only the selected worktree.
+Codex App Server's own workspace sandbox grants the same set: each turn's `writableRoots` add the
+root and admin directory of every worktree this launch's boundary binds, and only those, so a Codex
+turn can commit there too. Codex keeps each root's `.git` link read-only. A worktree retired since
+launch is left out of the turn's roots.
 
 ## Runner Hook State at the Sandbox Boundary
 

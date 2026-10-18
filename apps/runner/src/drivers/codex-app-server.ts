@@ -76,7 +76,7 @@ import {
   type ManagedWorktreeProtection,
 } from "../managed-worktree-protection.js";
 import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
-import { managedWorktreeGitWritableRoots } from "../managed-worktree-sandbox.js";
+import { managedWorktreeGitWritableRoots, ownedWorktreeWritableRoots } from "../managed-worktree-sandbox.js";
 import { CODEX_REVIEW_THREAD_PARAMS, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -277,9 +277,18 @@ export function buildCodexTurnParams(
    * Codex session has, and it is reachable only while the request comes to this client.
    */
   managedWorktreeGuardActive = false,
+  /**
+   * The session's other managed worktrees the runner's bwrap boundary binds writable for this
+   * process (#3316). They join the workspace only beside a protected selected worktree, and never
+   * from `managedWorktreeProtections`, which for an Orchestrator names every session's worktrees.
+   */
+  ownedWorktrees: readonly { path: string; gitAdmin: string }[] = [],
 ): Json {
   const protectManagedWorktrees = managedWorktreeProtections.length > 0;
-  const gitWritableRoots = managedWorktreeGitWritableRoots(cwd, managedWorktreeProtections);
+  const selectedGitRoots = managedWorktreeGitWritableRoots(cwd, managedWorktreeProtections);
+  const gitWritableRoots = selectedGitRoots.length
+    ? [...selectedGitRoots, ...ownedWorktreeWritableRoots(cwd, ownedWorktrees)]
+    : selectedGitRoots;
   const configuredMode = cfg.permissionMode || AUTO_REVIEW_MODE;
   // Full access would let the provider unlink the worktree root or its shared Git registration
   // without crossing an approval boundary. Preserve every restricted mode, but narrow this one
@@ -1396,6 +1405,7 @@ export class CodexAppServerDriver implements Driver {
         protections,
         this.threadCarriesLegacySandboxPolicy ? null : this.permissionProfileBase,
         this.managedWorktreeGuardActive,
+        this.opts.isolation?.backend === "bwrap" ? this.opts.isolation.protectedWorktree?.ownedWorktrees : undefined,
       );
       if (this.opts.review) {
         // A review turn is read-only with network access off, never asks, and must return the
