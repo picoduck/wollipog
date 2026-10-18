@@ -402,8 +402,8 @@ export function ProjectLocationDialog({
               candidate.canManage !== false && canChangeAccessScope(identity, candidate.scope, project.scope.owner));
             return (
               <article className="project-location-candidate" role="listitem" key={candidate.key}>
-                <div className="project-location-main">
-                  <div className="project-location-heading">
+                <div className="project-location-candidate-main">
+                  <div className="project-location-candidate-heading">
                     <strong>{candidate.name}</strong>
                     <StatusBadge meta={projectAvailabilityMeta(candidate.availability)} />
                   </div>

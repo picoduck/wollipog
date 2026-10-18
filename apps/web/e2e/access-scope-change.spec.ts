@@ -17,8 +17,8 @@ async function open(page: Page, id: string, extra = "") {
   await expect(projectReadout(page)).toBeVisible();
 }
 
-// The project's own readout; each location row has one too.
-const projectReadout = (page: Page) => page.locator(".access-scope-readout:not(.project-location-row .access-scope-readout)");
+// The project's readout; a location's access is changed from its row's ⋯ (#2961).
+const projectReadout = (page: Page) => page.locator(".access-scope-readout");
 const dialogNamed = (page: Page, name: string) => page.getByRole("dialog", { name });
 
 test.describe("at desktop widths", () => {
@@ -73,7 +73,20 @@ test.describe("at desktop widths", () => {
     await expect(dialog.locator(".access-change-sentence")).toHaveText("Everyone in your organization will see this project, and its 3 sessions keep their current access.");
     await dialog.getByRole("button", { name: "Change Access" }).click();
     await expect(dialog).toHaveCount(0);
-    await expect(page.locator(".access-scope-readout .setting-row-title")).toHaveText(["Organization-Wide", "Organization-Wide"]);
+    await expect(projectReadout(page).locator(".setting-row-title")).toHaveText("Organization-Wide");
+  });
+
+  test("a location's access is changed from its row's ⋯, never a field in the row", async ({ page }) => {
+    await open(page, "beta");
+    const row = page.locator(".project-location").filter({ hasText: "Laptop Checkout" });
+    await expect(row.locator(".access-scope-readout")).toHaveCount(0);
+    await row.getByRole("button", { name: "Laptop Checkout Actions" }).click();
+    await page.getByRole("menuitem", { name: "Change Location Access…" }).click();
+    const location = dialogNamed(page, "Change Location Access");
+    await expect(location.locator(".modal-desc")).toHaveText("Laptop Checkout");
+    await location.getByRole("radio", { name: /Organization-Wide/ }).check();
+    await location.getByRole("button", { name: "Change Access" }).click();
+    await expect(location).toHaveCount(0);
   });
 
   test("narrowing an organization-wide project to a team names the team and how many keep access", async ({ page }) => {

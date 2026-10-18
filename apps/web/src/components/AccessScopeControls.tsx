@@ -116,6 +116,11 @@ function changeableChoices(identity: IdentityAdministrationView, scope: Resource
     choice.key === currentKey || canChangeAccessScope(identity, scope, choice.owner));
 }
 
+/** Whether Change Access would offer anything besides the saved access. */
+export function hasOtherAccessChoice(identity: IdentityAdministrationView, scope: ResourceScope): boolean {
+  return changeableChoices(identity, scope).length > 1;
+}
+
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
@@ -337,7 +342,7 @@ export function AccessScopeSettings({
   const titleId = `${ids}-title`;
   const descriptionId = `${ids}-desc`;
   const buttonId = `${ids}-change`;
-  const canChange = useMemo(() => identity ? changeableChoices(identity, scope).length > 1 : false, [identity, scope]);
+  const canChange = useMemo(() => identity ? hasOtherAccessChoice(identity, scope) : false, [identity, scope]);
   if (!identity) return <span className="muted">Loading access…</span>;
   const readOnly = identity.context.role === "viewer";
   return (

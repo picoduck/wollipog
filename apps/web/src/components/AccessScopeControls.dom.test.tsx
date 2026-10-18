@@ -400,22 +400,36 @@ async function renderProjectsPage(who: IdentityAdministrationView) {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 }
 
-test("on the Projects page the project and its location show their saved access as readouts, never a Select", async () => {
+/** Opens the location's ⋯ and returns its items' names. */
+async function locationMenuItems(): Promise<string[]> {
+  const trigger = body().querySelector<HTMLButtonElement>('button[aria-label="Checkout Actions"]');
+  assert.ok(trigger, "the location row has its ⋯");
+  await act(async () => { trigger.click(); });
+  return [...body().querySelectorAll("[role=menuitem] .menu-text")].map((item) => text(item));
+}
+
+test("on the Projects page the project shows its saved access as a readout, and its location's is changed from ⋯", async () => {
   await renderProjectsPage(identity());
   const readouts = [...body().querySelectorAll(".access-scope-readout")];
-  assert.equal(readouts.length, 2, "one readout for the project and one for its location");
-  for (const readout of readouts) {
-    assert.deepEqual(readoutParts(readout), ["Organization-Wide", "Everyone in your organization can see and use it.", "Change…"]);
-  }
+  assert.equal(readouts.length, 1, "the project's readout; the location row carries no access field (#2961)");
+  assert.deepEqual(readoutParts(readouts[0]!), ["Organization-Wide", "Everyone in your organization can see and use it.", "Change…"]);
   const options = [...body().querySelectorAll("[aria-haspopup=listbox]")].map((trigger) => text(trigger));
   assert.ok(!options.some((label) => /Organization-Wide|Private to Me|Team:/u.test(label)),
     "no Select on the page holds an access level");
   assert.equal(buttonNamed("Review Access Change"), undefined);
   assert.doesNotMatch(text(body()), /resource/iu);
+  assert.ok((await locationMenuItems()).includes("Change Location Access…"));
+  const change = buttonNamed("Change Location Access…");
+  assert.equal(change?.disabled, false);
+  await act(async () => { change!.click(); });
+  await settle();
+  assert.equal(text(dialog()?.querySelector(".modal-title")), "Change Location Access");
+  assert.equal(text(dialog()?.querySelector(".modal-desc")), "Checkout");
 });
 
-test("a Viewer on the Projects page sees each access readout without Change…", async () => {
+test("a Viewer on the Projects page sees the access readout without Change…, and no Change Location Access…", async () => {
   await renderProjectsPage(identity("viewer"));
-  assert.equal(body().querySelectorAll(".access-scope-readout").length, 2);
+  assert.equal(body().querySelectorAll(".access-scope-readout").length, 1);
   assert.equal(buttonNamed("Change…"), undefined);
+  assert.ok(!(await locationMenuItems()).includes("Change Location Access…"));
 });
