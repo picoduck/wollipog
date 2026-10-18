@@ -256,7 +256,7 @@ test("Add Machine is one menu of two-line methods; each opens its dialog, and Es
   try {
     const menu = await openAddMachine(manual.body);
     await act(async () => menuItems(menu)[1]!.click());
-    assert.match(manual.body.querySelector('[role="dialog"]')?.textContent ?? "", /Add a Runner/);
+    assert.equal(dialogTitle(manual.body), "Install Manually");
   } finally {
     await manual.unmount();
   }
@@ -311,7 +311,7 @@ test("the empty Machines tab owns the create actions: three method rows for an o
     ]);
     assert.ok(rows.every((row) => row.querySelector(".row-icon svg")), "each method has its icon");
     await act(async () => rows[1]!.querySelector("button")!.click());
-    assert.match(body.querySelector('[role="dialog"]')?.textContent ?? "", /Add a Runner/, "each row opens its dialog");
+    assert.equal(dialogTitle(body), "Install Manually", "each row opens its dialog");
   } finally {
     await web.unmount();
   }
