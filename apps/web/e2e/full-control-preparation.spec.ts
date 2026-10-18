@@ -13,7 +13,7 @@ const themes = ["dark", "light"];
  * disclosure are the exact server-derived text. The runner fixtures differ only in what the runner
  * reports: bwrap isolation without the controlled reviewer, or provider isolation with the audited
  * reviewer profile. Enabling an existing campaign uses its own Human-established scope. */
-function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean, existingCampaign = false) {
+function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean, existingCampaign = false, storedChildren = 3) {
   const runner = { runnerId: "runner-1", connectedAt: 1, protocolVersion: PROTOCOL_VERSION, agents: [], workspaces: [],
     runtime: { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 2 },
       executionIsolation: runnerReady ? { mode: "provider", network: "inherit" } : { mode: "bwrap", network: "deny" },
@@ -24,6 +24,8 @@ function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean,
   // The server resolves the session's behavior overrides into the plan it evaluates.
   const children = launch.overrides?.session?.orchestrator?.behavior?.maximumConcurrentChildren;
   if (children !== undefined) policy.behavior.maximumConcurrentChildren = children;
+  // Enabling evaluates the campaign's stored policy: the session fixture stores 3 unless told otherwise.
+  if (existingCampaign) policy.behavior.maximumConcurrentChildren = storedChildren;
   const plan = { runnerId: "runner-1", workspaceId: launch.workspaceId, agentId: "claude", driver: "claude-code" as const,
     config: { model: "source-fixture-model", effort: "high", permissionMode: "orchestrator" }, useWorktree: true,
     executionTarget: { adapter: "host" as const }, policy, scope: { organizationId: "org", owner: { kind: "user" as const, userId: "user" } } };
@@ -59,8 +61,8 @@ const settle = (page: Page) => page.evaluate(() => Promise.all(document.getAnima
   .map((animation) => animation.finished))
   .then(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))));
 /** Real typing of text a number field cannot read is an entry error on every limit, never a default. */
-const LAUNCH_LIMITS = ["Cost Limit (USD)", "Tool Call Limit", "Accepted Follow-Ups", "Maximum Issues"];
-const ENABLE_LIMITS = ["Cost Limit (USD)", "Tool Call Limit", "Concurrent Children", "Accepted Follow-Ups", "Maximum Issues"];
+// Neither surface has a concurrency entry: the campaign's concurrency is its Maximum Concurrent Children.
+const LIMITS = ["Cost Limit (USD)", "Tool Call Limit", "Accepted Follow-Ups", "Maximum Issues"];
 async function expectUnreadableLimitsBlock(page: Page, action: Locator, labels: readonly string[]) {
   for (const label of labels) {
     const field = page.getByLabel(label, { exact: true }).first();
@@ -142,7 +144,7 @@ for (const viewport of viewports) {
       await expect(page.getByText("Campaign Limits", { exact: true })).toBeVisible();
       await expect(page.getByText(/Controlled Cross-Model Review \(Verified\)/)).toBeVisible();
       await shoot(page, advanced, `${prefix}-advanced.png`);
-      await expectUnreadableLimitsBlock(page, start, LAUNCH_LIMITS);
+      await expectUnreadableLimitsBlock(page, start, LIMITS);
       // One concurrency control: Behavior's Maximum Concurrent Children is the campaign's concurrency.
       await expect(page.getByLabel("Concurrent Children", { exact: true })).toHaveCount(0);
       const children = page.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
@@ -210,8 +212,10 @@ for (const viewport of viewports) {
       await page.setViewportSize(viewport);
       const prefix = `${captures}/campaign-${viewport.name}-${theme}`;
       await routeSettings(page, []);
+      const bodies: Array<{ overrides?: FullControlLaunchRequest["overrides"] }> = [];
       await page.route("**/orchestrator-campaign/full-control/preflight", async (route) => {
         const body = route.request().postDataJSON() as { overrides?: FullControlLaunchRequest["overrides"] };
+        bodies.push(body);
         await route.fulfill({ json: { preflight: serverPreflight({ runnerId: "runner-1", workspaceId: "w", task: "Review the source fixture",
           overrides: body.overrides }, true, true), expectedRevision: 3 } });
       });
@@ -240,9 +244,15 @@ for (const viewport of viewports) {
       await shoot(page, ready, `${prefix}-enable-ready.png`);
       const advanced = page.locator("summary").filter({ hasText: "Advanced" });
       await advanced.click();
-      await expectUnreadableLimitsBlock(page, enable, ENABLE_LIMITS);
+      await expectUnreadableLimitsBlock(page, enable, LIMITS);
       await expect(enable).toBeInViewport();
+      // One concurrency: the campaign's Maximum Concurrent Children, stated read-only, never a second entry.
+      await expect(page.getByLabel("Concurrent Children", { exact: true })).toHaveCount(0);
+      const concurrency = page.locator("details dt", { hasText: /^Concurrent Children$/ }).locator("xpath=following-sibling::dd[1]");
+      await expect(concurrency).toHaveText("3This campaign's Maximum Concurrent Children. Change it with Live Child Limit in Guardrails.");
+      await expect(page.getByText(/· 3 at a time/)).toBeVisible();
       await shoot(page, advanced, `${prefix}-enable-advanced.png`);
+      await shoot(page, concurrency.locator("xpath=ancestor::dl[1]"), `${prefix}-enable-concurrency.png`);
       await advanced.click();
       await enable.click();
       await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
@@ -250,6 +260,33 @@ for (const viewport of viewports) {
       await expectFullControlOwnersReadOnly(page);
       await expect(footer.getByRole("button")).toHaveText(["Done"]);
       await shoot(page, heading, `${prefix}-enabled.png`);
+      expect(bodies.length).toBeGreaterThan(0);
+      expect(bodies.filter((body) => body.overrides?.budget?.concurrency !== undefined)).toEqual([]);
+    });
+
+    test(`paused campaign ${viewport.name} ${theme}: a campaign that admits no children says why it can't enable`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await routeSettings(page, []);
+      await page.route("**/orchestrator-campaign/full-control/preflight", async (route) => {
+        const body = route.request().postDataJSON() as { overrides?: FullControlLaunchRequest["overrides"] };
+        await route.fulfill({ json: { preflight: serverPreflight({ runnerId: "runner-1", workspaceId: "w", task: "Review the source fixture",
+          overrides: body.overrides }, true, true, 0), expectedRevision: 3 } });
+      });
+      await page.goto(`/session-usage-e2e.html?width=${viewport.width}&height=${viewport.height}&composer=orchestrator&fullControlFixture=enable&maxChildren=0`);
+      await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+      await page.getByRole("button", { name: "Attach and Settings" }).click();
+      await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
+      await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+      await page.getByLabel("Cost Limit (USD)", { exact: true }).first().fill("30");
+      await page.getByLabel("Tool Call Limit", { exact: true }).first().fill("300");
+      await expect(page.getByText("Can't Enable Yet", { exact: true })).toBeVisible();
+      const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
+      await expect(enable).toBeDisabled();
+      await page.locator("summary").filter({ hasText: "Advanced" }).click();
+      const concurrency = page.locator("details dt", { hasText: /^Concurrent Children$/ }).locator("xpath=following-sibling::dd[1]");
+      await expect(concurrency).toHaveText("0This campaign pauses new children. Raise Live Child Limit in Guardrails to enable Full Control.");
+      await expect(enable).toBeInViewport();
+      await shoot(page, concurrency.locator("xpath=ancestor::dl[1]"), `${captures}/paused-${viewport.name}-${theme}-concurrency.png`);
     });
   }
 }
@@ -412,7 +449,7 @@ test.describe("limit entry lifecycle", () => {
     await expect(page.getByText(/\$30 · 300 tool calls/)).toBeVisible();
     await expect(page.getByText(/Saved Default/)).toHaveCount(0);
     // L4, L6 and L2: invalid, blur, collapse, expand.
-    const children = page.getByLabel("Concurrent Children", { exact: true });
+    const children = page.getByLabel("Accepted Follow-Ups", { exact: true });
     await children.pressSequentially("1e");
     await expect(enable).toBeDisabled();
     await children.press("Tab");
@@ -429,7 +466,7 @@ test.describe("limit entry lifecycle", () => {
     await page.keyboard.press("Escape");
     await expect(enable).toHaveCount(0);
     await open();
-    await expect(page.getByLabel("Concurrent Children", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("Accepted Follow-Ups", { exact: true })).toHaveValue("");
     await expect(invalidNotice(page)).toHaveCount(0);
   });
 
