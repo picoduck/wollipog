@@ -17,10 +17,12 @@ export const FIRED_REMINDER_RESULT_REVISION = "reminder";
  * its ordinary follow-up. */
 export function completedFullControlCampaign(session: CampaignFacts): boolean {
   if (session.parentSessionId) return false;
-  if (session.fullControlCampaignStatus !== undefined) return session.fullControlCampaignStatus === "verified_complete";
-  const campaign = session.orchestratorCampaign;
-  if (campaign?.status !== "verified_complete") return false;
-  return (campaign.control ?? session.orchestratorPolicy?.control)?.mode === "full_control";
+  // The row's own stored policy is authoritative for its control mode. A projection the store kept
+  // from an earlier detail read may predate a revoke, so its control counts only on a row without one.
+  const policy = session.orchestratorPolicy;
+  const fullControl = policy ? policy.control?.mode === "full_control"
+    : session.fullControlCampaignStatus !== undefined || session.orchestratorCampaign?.control?.mode === "full_control";
+  return fullControl && (session.fullControlCampaignStatus ?? session.orchestratorCampaign?.status) === "verified_complete";
 }
 
 export function outstandingSessionResult(session: Pick<SessionView, "attention"> & CampaignFacts) {
