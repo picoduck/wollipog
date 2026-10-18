@@ -34,7 +34,6 @@ import type {
   CreateWorkspaceReferenceRequest,
   AddProjectLocationRequest,
   CreateProjectLocationRequest,
-  MoveProjectLocationRequest,
   CreateTranscriptShareRequest,
   CreateTranscriptShareResult,
   CreateWorkflowDefinitionRequest,
@@ -490,12 +489,6 @@ export function createApiClient(transport: ApiTransport) {
     `/api/runners/${encodeURIComponent(runnerId)}/workspaces/${encodeURIComponent(workspaceId)}/access-scope`,
     { method: "PUT", body: JSON.stringify({ owner, confirmationToken }) },
   ),
-
-  moveProjectLocation: (projectId: string, body: MoveProjectLocationRequest) =>
-    req<ProjectResponse>(`/api/projects/${encodeURIComponent(projectId)}/locations/move`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
 
   removeProjectLocation: (projectId: string, locationId: string) =>
     req<ProjectResponse>(
