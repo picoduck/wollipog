@@ -1431,8 +1431,8 @@ test("New Session creates a durable Project and links its first Location inline"
   await noLocations.getByRole("button", { name: "Add Location…" }).click();
 
   const addLocation = page.getByRole("dialog", { name: "Add Location to Inline Project" });
-  const loose = addLocation.getByRole("listitem").filter({ hasText: "/repos/loose" });
-  await loose.getByRole("button", { name: "Add to Project" }).click();
+  await addLocation.locator(".add-location-list > .choice-row").filter({ hasText: "/repos/loose" }).getByRole("radio").check();
+  await addLocation.getByRole("button", { name: "Add Location", exact: true }).click();
   await expect(newSession).toBeVisible();
   const location = newSession.getByRole("button", { name: /^Location:/ });
   await expect(location).toHaveAccessibleName("Location: runner-1");
@@ -2077,21 +2077,22 @@ test("one exact Location can be launched from two Projects and unlinked independ
   await page.getByRole("button", { name: "Add Location" }).first().click();
   const picker = page.getByRole("dialog", { name: "Add Location to Gamma" });
   await picker.getByLabel("Search Locations").fill("definitely-not-a-location");
-  await expect(picker.getByText("No Matching Locations", { exact: true })).toBeVisible();
-  await expect(picker.getByRole("button", { name: "Manage Connections" })).toHaveCount(0);
+  await expect(picker.getByText("No locations match. Try a machine name, a folder or a path, or add a new folder.", { exact: true })).toBeVisible();
+  await expect(picker.getByRole("button", { name: "Open Connections" })).toHaveCount(0);
   await picker.getByLabel("Search Locations").fill("");
-  const loose = picker.getByRole("listitem").filter({ hasText: "/repos/loose" });
-  await loose.getByRole("button", { name: "Add to Project" }).click();
+  await picker.locator(".add-location-list > .choice-row").filter({ hasText: "/repos/loose" }).getByRole("radio").check();
+  await picker.getByRole("button", { name: "Add Location", exact: true }).click();
   await expect(page.getByText("/repos/loose", { exact: true })).toBeVisible();
   await expect(page.getByText("Default", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Add Location" }).first().click();
   const sharedPicker = page.getByRole("dialog", { name: "Add Location to Gamma" });
-  const alphaChoice = sharedPicker.getByRole("listitem").filter({
-    has: page.locator('code[title="/repos/alpha"]'),
+  const alphaChoice = sharedPicker.locator(".add-location-list > .choice-row").filter({
+    has: page.locator('.add-location-path[title="/repos/alpha"]'),
   });
-  await expect(alphaChoice).toContainText("Also Used by: Alpha");
-  await alphaChoice.getByRole("button", { name: "Add to Project" }).click();
+  await expect(alphaChoice.locator(".choice-row-meta")).toHaveText("Used by Alpha");
+  await alphaChoice.getByRole("radio").check();
+  await sharedPicker.getByRole("button", { name: "Add Location", exact: true }).click();
   await expect(page.getByText("/repos/alpha", { exact: true })).toBeVisible();
   await expect.poll(async () => page.evaluate(() => {
     const projects = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().projects;

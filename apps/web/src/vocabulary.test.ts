@@ -176,9 +176,10 @@ const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
   ["./session-preset-defaults.ts", "Update Wollipog to configure Integration Isolation."],
   ["./components/ProjectLocationDialog.tsx",
     "This version of Wollipog does not support creating a Location from a new folder. Update or restart Wollipog so it matches this dashboard, then try again."],
-  ["./components/ProjectLocationDialog.tsx", "<strong>Wollipog Update Required</strong>"],
+  // Add Location's New Folder notice (#2966).
+  ["./components/ProjectLocationDialog.tsx", "title=\"Adding New Folders Needs an Update\""],
   ["./components/ProjectLocationDialog.tsx",
-    "This version of Wollipog cannot register a new folder as a Location. Update or restart Wollipog so it matches this dashboard. Existing Locations can still be added below."],
+    "This version of Wollipog can't register a new folder as a location. Update or restart Wollipog so it matches this dashboard. You can still add an existing location."],
   ["./components/ProjectMemorySharing.tsx", "Memory policy is unavailable. Update Wollipog to configure it."],
   // Settings › Behavior › Agent Defaults (#3024).
   ["./components/AgentDefaultsPanel.tsx",

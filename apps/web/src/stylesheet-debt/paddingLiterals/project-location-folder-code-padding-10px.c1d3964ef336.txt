@@ -1,1 +1,0 @@
-|.project-location-folder code|padding|10px

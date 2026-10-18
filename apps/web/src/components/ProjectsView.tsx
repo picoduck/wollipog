@@ -620,7 +620,8 @@ export function ProjectsView({
           boxes={boxes}
           canCreateLocation={projectLocationCreationSupported}
           accessScopeManagementSupported={accessScopeManagementSupported}
-          onboarding={dialog.onboarding && worktreeSetupConfigSupported}
+          onboarding={dialog.onboarding}
+          setupFileSupported={worktreeSetupConfigSupported}
           onClose={() => setDialog(null)}
           onManageConnections={manageConnections}
           onAdd={async (candidate: ProjectLocationCandidate, generateSetup) => {

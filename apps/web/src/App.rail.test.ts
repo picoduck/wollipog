@@ -383,33 +383,34 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "the empty state waits for the skeleton");
   assert.match(createProjectDialog, /const close = \(\) => \{\s*if \(!busy\) onClose\(\);/,
     "create cannot be dismissed while its mutation is in flight");
-  assert.match(projectLocationDialog, /const close = \(\) => \{\s*if \(!busyKey\) onClose\(\);/,
+  assert.match(projectLocationDialog, /const close = \(\) => \{\s*if \(!busy\) onClose\(\);/,
     "location changes cannot be dismissed while their mutation is in flight");
   assert.equal(projectsView.match(/const close = \(\) => \{\s*if \(!busy\) onClose\(\);/g)?.length, 1,
     "delete confirmation cannot be dismissed while its mutation is in flight");
-  assert.match(projectLocationDialog, /candidates\.length === 0 \? "No Locations Found" : "No Matching Locations"/,
+  assert.match(projectLocationDialog, /candidates\.length === 0\s*\? "There are no locations to add yet\. Add a new folder instead\."\s*: "No locations match\./,
     "an empty search result stays distinct from having no Locations to manage");
-  assert.match(projectLocationDialog, /targetLink\?\.availability === "runner_removed"[\s\S]*"Relink Location"/,
+  assert.match(projectLocationDialog, /alreadyAdded \? "Already Added"\s*: relinkRequired \? "Relink"/,
     "a returned exact workspace offers stable-identity relinking instead of duplicating its tombstone");
   for (const contract of [
-    /await onCreate\(\{[\s\S]*runnerId: selectedRunnerId,[\s\S]*path: selectedFolder,[\s\S]*owner: selectedScope\.owner/,
-    /Create New Location[\s\S]*<span>Machine<\/span>/,
-    /Browse for a Folder…/,
-    /<DirectoryPicker/,
+    /await onCreate\(\{[\s\S]*runnerId: selectedRunnerId,[\s\S]*path: selectedFolder,[\s\S]*owner: creationScope\.owner/,
+    /<span>Machine<\/span>\s*<Select[\s\S]*<span>Folder<\/span>\s*<DirectoryPicker[\s\S]*hideActions/,
   ]) assert.match(projectLocationDialog, contract,
-    "Add Location can register a browsed folder on a selected online machine");
+    "Add Location can register a browsed folder on a selected online machine, browsed under the Machine field");
+  // #2966: one switch between the two paths, Existing Location first while one can be added.
   assert.match(projectLocationDialog,
-    /const \[createExpanded, setCreateExpanded\] = useState\(false\)[\s\S]*aria-expanded=\{createExpanded\}[\s\S]*createExpanded &&/,
-    "new Location creation stays behind an explicit progressive disclosure");
-  assert.match(projectLocationDialog, /<strong>Existing Locations<\/strong>[\s\S]*<input\s+autoFocus/,
+    /useState<AddLocationMode>\(\(\) => addable \? "existing" : "new"\)[\s\S]*\{ value: "existing", label: "Existing Location"[^}]*\},\s*\{ value: "new", label: "New Folder"[^}]*\}/,
+    "Existing Location and New Folder are one segmented switch");
+  assert.doesNotMatch(projectLocationDialog, /Create New Location|aria-expanded/,
+    "the creation disclosure is gone");
+  assert.match(projectLocationDialog, /<input\s+type="search"\s+autoFocus/,
     "the common existing-Location path owns initial focus");
-  assert.match(projectLocationDialog, /"Add to Project"/);
+  assert.doesNotMatch(projectLocationDialog, /"Add to Project"|<select\b/);
   assert.doesNotMatch(projectLocationDialog, /Move (?:Here|to|Location)/,
     "adding a shared Location does not imply moving it from another Project");
   assert.match(projectsView, /onCreate=\{async \(location, generateSetup\)[\s\S]*api\.createProjectLocation/,
     "Project management uses the atomic Project-scoped Location creation API");
-  assert.match(css, /\.project-location-create-section > \.disclosure-trigger\s*\{[^}]*width:\s*100%;/,
-    "the collapsed creation disclosure remains a full-width readable target");
+  assert.doesNotMatch(css, /\.add-location-list[^{]*\{[^}]*(?:overflow|max-height)/,
+    "the candidate list has no scroller of its own: the dialog body scrolls");
   // The phone Projects back control is the detail bar's (#1801): an `.icon-btn` named "Back to
   // Projects", one control height, which a touch screen makes 44px.
   assert.match(projectsView, /const phoneDetail = isMobile && detailOpen && !spanningEmpty;[\s\S]*?\{phoneDetail && \(\s*<DetailBar[\s\S]*?backLabel=\{backLabel\("projects"\)\}/,

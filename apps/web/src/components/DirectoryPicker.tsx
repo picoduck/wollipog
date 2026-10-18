@@ -41,6 +41,10 @@ interface DirectoryPickerProps {
    * or null while there is none. For a dialog or form that owns the actions (`hideActions`). */
   onLocationChange?: (path: string | null) => void;
   hideActions?: boolean;
+  /** Freezes the picker while its host commits the folder it shows (Add Location, #2966): every
+   * control is disabled and nothing navigates, so the folder and its derived name stay the ones
+   * being submitted. */
+  disabled?: boolean;
 }
 
 /**
@@ -63,6 +67,7 @@ function FolderBrowser({
   onCancel,
   onLocationChange,
   hideActions = false,
+  disabled = false,
 }: DirectoryPickerProps) {
   const api = useApi();
   const supported = runnerSupportsProtocol(protocolVersion, "directoryListing");
@@ -145,6 +150,7 @@ function FolderBrowser({
   });
 
   const open = (path: string, fromField = false) => {
+    if (disabled) return;
     if (!fromField) setEditing(false);
     // A typed path's field hands focus back to Edit Path itself (above).
     keepFocus.current = !fromField && pickerRef.current?.contains(document.activeElement) ? { holder: null } : null;
@@ -157,10 +163,10 @@ function FolderBrowser({
 
   const actions = !hideActions && (
     <div className="folder-picker-actions">
-      <button type="button" className="btn sm" onClick={onCancel}>
+      <button type="button" className="btn sm" disabled={disabled} onClick={onCancel}>
         Cancel
       </button>
-      <button type="button" className="btn primary sm" disabled={selection === null}
+      <button type="button" className="btn primary sm" disabled={disabled || selection === null}
         onClick={() => { if (selection !== null) onPick(selection); }}>
         {supported ? "Use This Folder" : "Use Path"}
       </button>
@@ -183,9 +189,10 @@ function FolderBrowser({
             autoCapitalize="off"
             autoCorrect="off"
             placeholder="Type or paste a folder path"
+            disabled={disabled}
             onChange={(event) => setPathInput(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && selection !== null) {
+              if (event.key === "Enter" && selection !== null && !disabled) {
                 event.preventDefault();
                 onPick(selection);
               }
@@ -212,6 +219,7 @@ function FolderBrowser({
               autoCapitalize="off"
               autoCorrect="off"
               placeholder="Type or paste a folder path"
+              disabled={disabled}
               onChange={(event) => setPathInput(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -225,7 +233,7 @@ function FolderBrowser({
                 }
               }}
             />
-            <button type="button" className="btn" disabled={!pathInput.trim()} onClick={go}>
+            <button type="button" className="btn" disabled={disabled || !pathInput.trim()} onClick={go}>
               Go
             </button>
           </>
@@ -240,7 +248,7 @@ function FolderBrowser({
                   {index === crumbs.length - 1 ? (
                     <span className="crumb is-current" aria-current="location" title={crumb.path}>{crumb.name}</span>
                   ) : (
-                    <button type="button" className="crumb" title={crumb.path} onClick={() => open(crumb.path)}>
+                    <button type="button" className="crumb" title={crumb.path} disabled={disabled} onClick={() => open(crumb.path)}>
                       {crumb.name}
                     </button>
                   )}
@@ -253,6 +261,7 @@ function FolderBrowser({
               className="icon-btn sm"
               aria-label="Edit Path"
               title="Edit Path"
+              disabled={disabled}
               onClick={() => {
                 setPathInput(listing?.path ?? "");
                 setEditing(true);
@@ -281,7 +290,7 @@ function FolderBrowser({
       ) : listing && (
         <div className="folder-picker-list">
           {listing.parent != null && (
-            <button type="button" className="row" title={listing.parent} onClick={() => open(listing.parent!)}>
+            <button type="button" className="row" title={listing.parent} disabled={disabled} onClick={() => open(listing.parent!)}>
               <span className="row-icon"><FolderUpIcon size={16} /></span>
               <span className="row-title">Up One Level</span>
             </button>
@@ -289,7 +298,7 @@ function FolderBrowser({
           {listing.entries.length === 0 ? (
             <p className="folder-picker-empty">No subfolders here. You can still use this folder.</p>
           ) : listing.entries.map((entry) => (
-            <button type="button" className="row" key={entry.path} title={entry.path} onClick={() => open(entry.path)}>
+            <button type="button" className="row" key={entry.path} title={entry.path} disabled={disabled} onClick={() => open(entry.path)}>
               <span className="row-icon"><FolderIcon size={16} /></span>
               <span className="row-title">{entry.name}</span>
             </button>
