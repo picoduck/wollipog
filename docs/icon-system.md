@@ -156,6 +156,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |
 | `NotesIcon` | Lucide | `NotebookText` | Notes summary. |
 | `ComputerIcon` | Lucide | `Monitor` | Local computer. |
+| `ServerIcon` | Lucide | `Server` | A machine reached over SSH: a project location row's leading icon (#2961). |
 | `BranchIcon` | Lucide | `GitBranch` | Git branch. |
 | `ThreadForkIcon` | Lucide | `GitFork` | Conversation fork. |
 | `CompactedIcon` | Lucide | `FoldVertical` | The provider compacted the conversation into a summary. |

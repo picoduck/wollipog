@@ -43,6 +43,7 @@ import {
   type SteerResultReason,
   type SteeringAttemptView,
   type UiSnapshotMessage,
+  type WorktreeSetupConfigStatus,
   type UiToControlPlane,
   type WorkspaceReference,
 } from "@wollipog/protocol";
@@ -836,8 +837,48 @@ function initialModel(): FixtureModel {
     initial.projects = SHELL_PROJECTS_MODE === "two" ? healthy.slice(0, 2) : healthy;
   }
   if (SHELL_PROJECTS_MODE === "access") initial.projects = accessProjects();
+  if (SHELL_PROJECTS_MODE === "locations") initial.projects = locationProjects();
   return initial;
 }
+
+/**
+ * `?projects=locations` (#2961): Alpha's location rows in each state. Its default has a long name
+ * and is on the offline machine; the build machine's folders have a setup file that is ready,
+ * missing, invalid or still being checked; Legacy is on a machine too old to say. Edge Proxy has no
+ * locations.
+ */
+function locationProjects(): ProjectView[] {
+  const at = (id: string, name: string, path: string, options: Partial<ProjectLocationView> = {}): ProjectLocationView => ({
+    id: `location-${id}`, projectId: "alpha", runnerId: "runner-1", workspaceId: `${id}-workspace`, name, path,
+    source: "managed", availability: "available", isDefault: false, createdAt: 1, updatedAt: 1, totalSessionCount: 0, ...options,
+  });
+  return [
+    project("alpha", "Alpha", {
+      locations: [
+        at("billing", "Customer Billing Reconciliation Workspace", "/srv/checkouts/customer-billing-reconciliation", {
+          runnerId: "runner-2", availability: "runner_offline", isDefault: true, totalSessionCount: 12,
+        }),
+        at("alpha", "alpha", "/repos/alpha", { totalSessionCount: 3 }),
+        at("alpha-docs", "alpha-docs", "/home/builder/src/github.com/picoduck/alpha/docs-site", { totalSessionCount: 1 }),
+        at("alpha-api", "alpha-api", "/repos/alpha-api"),
+        at("alpha-tools", "alpha-tools", "/repos/alpha-tools"),
+        at("legacy", "legacy", "/repos/legacy", { runnerId: "runner-3" }),
+      ],
+      unarchivedSessionCount: 16, totalSessionCount: 16,
+    }),
+    project("edge-proxy", "Edge Proxy"),
+  ];
+}
+
+/** The `locations` fixture's setup files by location; a missing one is still being checked. */
+const LOCATION_SETUP: Record<string, WorktreeSetupConfigStatus> = {
+  "location-alpha": { status: "valid", hash: "a".repeat(64) },
+  "location-alpha-docs": { status: "absent" },
+  "location-alpha-api": {
+    status: "invalid",
+    error: "setup.commands[0] must be a string\n  at .wollipog.json:4:7\n  > 4 |     \"commands\": [{ \"run\": \"pnpm install\" }]",
+  },
+};
 
 /** The `attention` fixture's second Docs Site's folder, on the online machine. */
 const SHELL_SECOND_DOCS_WORKSPACE = { id: "docs-site-2-workspace", name: "docs-site-2", path: "/repos/docs-site-2" };
@@ -1522,12 +1563,12 @@ function snapshot(): UiSnapshotMessage {
       ...(UNARCHIVE_RESTART ? { unarchiveAndRestart: true } : {}),
       ...(SESSION_REMINDERS ? { sessionReminders: true } : {}),
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
-      ...(LIST_NOTICES.has("setup") ? { worktreeSetupConfig: true } : {}),
+      ...(LIST_NOTICES.has("setup") || SHELL_PROJECTS_MODE === "locations" ? { worktreeSetupConfig: true } : {}),
       ...(SHELL_PROJECTS_MODE === "access" ? { accessScopeManagement: true } : {}),
     },
     runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner]
       : SHELL_SKILLS_MODE === "notices" ? [noticeStudio, noticeLaptop]
-      : shellOfflineRunner ? [runner, shellOfflineRunner]
+      : shellOfflineRunner ? [runner, shellOfflineRunner, ...(shellOldRunner ? [shellOldRunner] : [])]
         : OFFLINE_MACHINE ? [runner, { ...structuredClone(runner), runnerId: "runner-3", hostname: "build-02",
           displayName: "Build Server 02", status: "offline" as const, providerLogins: undefined }]
           : [runner],
@@ -1917,7 +1958,12 @@ const shellOverviewMachine = () => {
   };
 };
 /** The overview's offline second machine. */
-const SHELL_PROJECTS_MACHINES = ["nine", "many", "attention", "healthy", "two"].includes(SHELL_PROJECTS_MODE ?? "");
+const SHELL_PROJECTS_MACHINES = ["nine", "many", "attention", "healthy", "two", "locations"].includes(SHELL_PROJECTS_MODE ?? "");
+/** The `locations` fixture's machine whose runner predates setup-file checks. */
+const shellOldRunner: RunnerView | null = SHELL_PROJECTS_MODE === "locations"
+  ? { ...structuredClone(runner), runnerId: "runner-3", hostname: "old-laptop", displayName: "Old Laptop", protocolVersion: 140,
+    providerLogins: undefined, workspaces: [{ id: "legacy-workspace", name: "legacy", path: "/repos/legacy" }] }
+  : null;
 const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW || SCENARIO === "preview-bar" || SHELL_PROJECTS_MACHINES
   ? { ...structuredClone(runner), runnerId: "runner-2", hostname: "studio-workstation", displayName: "Studio Workstation", status: "offline",
     providerLogins: undefined }
@@ -1930,6 +1976,11 @@ if (SHELL_PROJECTS_MACHINES) {
     runner.workspaces.push({ id: location.workspaceId, name: location.name, path: location.path });
   }
   runner.workspaces.push(SHELL_SECOND_DOCS_WORKSPACE);
+  if (SHELL_PROJECTS_MODE === "locations") {
+    for (const location of locationProjects()[0]!.locations.filter((value) => value.runnerId === runner.runnerId)) {
+      runner.workspaces.push({ id: location.workspaceId, name: location.name, path: location.path });
+    }
+  }
 }
 const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : SHELL_SKILLS_MODE === "list" ? SHELL_LIST_SKILLS : SHELL_OVERVIEW ? SHELL_OVERVIEW_SKILLS : Array.from(
   { length: SHELL_SKILLS_MODE === "many" ? 40 : SHELL_SKILL_NAMES.length },
@@ -3294,6 +3345,17 @@ const client = {
       : [];
     return { path: at, parent, entries };
   },
+  ...(SHELL_PROJECTS_MODE === "locations" ? {
+    projectLocationWorktreeSetup: (_projectId: string, locationId: string) => {
+      const status = LOCATION_SETUP[locationId];
+      return status ? Promise.resolve({ locationId, status: structuredClone(status) }) : new Promise<never>(() => {});
+    },
+    generateProjectLocationWorktreeSetup: async (_projectId: string, locationId: string) => {
+      LOCATION_SETUP[locationId] = { status: "valid", hash: "b".repeat(64) };
+      return { locationId, status: structuredClone(LOCATION_SETUP[locationId]!), path: ".wollipog.json" as const, detected: ["pnpm"] };
+    },
+    dismissWorktreeSetupNotice: async () => undefined,
+  } : {}),
 } as ApiClient;
 
 if (SCENARIO === "inbox-triage") {

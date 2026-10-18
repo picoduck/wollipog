@@ -475,11 +475,13 @@ function slotButtonShown(trigger: HTMLElement | null, slot: number): boolean {
  * and engines at the build floor that give `container-type` layout containment would make it the
  * containing block of a fixed-position menu and its backdrop.
  */
-export function ActionsMenu({ className, overflow = "always", label = "More Actions", items }: {
+export function ActionsMenu({ className, overflow = "always", label = "More Actions", size, items }: {
   className?: string;
   overflow?: string;
   /** The ⋯ button's name and tooltip, and the menu's name: what the actions act on ("Project Actions"). */
   label?: string;
+  /** `sm`: a row's ⋯ (§5.2), beside the row's `.btn.sm`. */
+  size?: "sm";
   items: ActionsMenuItem[];
 }) {
   const [open, setOpen] = useState(false);
@@ -573,7 +575,7 @@ export function ActionsMenu({ className, overflow = "always", label = "More Acti
       <button
         ref={menu.triggerRef}
         type="button"
-        className="icon-btn"
+        className={size ? `icon-btn ${size}` : "icon-btn"}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
         title={label}

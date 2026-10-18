@@ -2011,7 +2011,8 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await openProjectManager(page, "Durable Empty");
   await expect(page.getByText("Group related sessions and choose the folders where they run.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Durable Empty" })).toBeVisible();
-  await expect(page.getByText("No Project Locations", { exact: true })).toBeVisible();
+  // No Locations is one inline row (#2961).
+  await expect(page.getByText("Add the folder on one of your machines where this project's sessions run.", { exact: true })).toBeVisible();
   // The Settings section's button says the state; the retired pill no longer repeats it (#2959).
   await page.getByRole("button", { name: "Hide Project" }).click();
   await expect(page.getByRole("button", { name: "Show Project" })).toBeVisible();
@@ -2102,8 +2103,8 @@ test("one exact Location can be launched from two Projects and unlinked independ
     ];
   })).toEqual(["location-alpha", "location-gamma-alpha-workspace"]);
 
-  const gammaLocation = page.locator(".project-location-row").filter({
-    has: page.locator('code[title="/repos/alpha"]'),
+  const gammaLocation = page.locator(".project-location").filter({
+    has: page.locator('.project-location-path[title="/repos/alpha"]'),
   });
   await gammaLocation.getByRole("button", { name: "New Session Here" }).click();
   let sessionDialog = page.getByRole("dialog", { name: "New Session" });
@@ -2117,8 +2118,8 @@ test("one exact Location can be launched from two Projects and unlinked independ
 
   await page.goto("/command-inbox-projects-e2e.html");
   await openProjectManager(page, "Alpha");
-  const alphaLocation = page.locator(".project-location-row").filter({
-    has: page.locator('code[title="/repos/alpha"]'),
+  const alphaLocation = page.locator(".project-location").filter({
+    has: page.locator('.project-location-path[title="/repos/alpha"]'),
   });
   await alphaLocation.getByRole("button", { name: "New Session Here" }).click();
   sessionDialog = page.getByRole("dialog", { name: "New Session" });
@@ -2132,10 +2133,12 @@ test("one exact Location can be launched from two Projects and unlinked independ
 
   await page.goto("/command-inbox-projects-e2e.html");
   await openProjectManager(page, "Gamma");
-  const gammaSharedLocation = page.locator(".project-location-row").filter({
-    has: page.locator('code[title="/repos/alpha"]'),
+  const gammaSharedLocation = page.locator(".project-location").filter({
+    has: page.locator('.project-location-path[title="/repos/alpha"]'),
   });
-  await gammaSharedLocation.getByRole("button", { name: "Remove Location" }).click();
+  // Remove Location… is the last item of the row's ⋯ (#2961).
+  await gammaSharedLocation.getByRole("button", { name: / Actions$/ }).click();
+  await page.getByRole("menuitem", { name: "Remove Location…" }).click();
   const confirmation = page.getByRole("dialog", { name: "Remove Location" });
   await expect(confirmation).toContainText("The folder is not deleted");
   await expect(confirmation).toContainText("other Projects are unaffected");
@@ -2160,7 +2163,8 @@ test("one exact Location can be launched from two Projects and unlinked independ
 
 test("deleting a Project explicitly retains sessions and moves them to No Project", async ({ page }) => {
   await openProjectManager(page);
-  await page.getByRole("button", { name: /Alpha/ }).click();
+  // The list's row: its Alpha location's ⋯ is "Alpha Actions" too (#2961).
+  await page.locator(".master-detail-list-body").getByRole("button", { name: /^Alpha\b/ }).click();
   // Delete Project… is destructive, so it lives last in the detail's ⋯ (§3.3, #2959).
   await page.locator(".project-detail-title-row").getByRole("button", { name: "Project Actions" }).click();
   await page.getByRole("menuitem", { name: "Delete Project…" }).click();

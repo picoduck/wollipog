@@ -19,6 +19,7 @@ const projectSplitMenu = readFileSync(new URL("./components/ProjectSplitMenu.tsx
 const menuSurface = readFileSync(new URL("./components/Menu.tsx", import.meta.url), "utf8");
 const projectsView = readFileSync(new URL("./components/ProjectsView.tsx", import.meta.url), "utf8");
 const projectList = readFileSync(new URL("./components/ProjectList.tsx", import.meta.url), "utf8");
+const projectLocationRow = readFileSync(new URL("./components/ProjectLocationRow.tsx", import.meta.url), "utf8");
 const pageHeader = readFileSync(new URL("./components/PageHeader.tsx", import.meta.url), "utf8");
 const runsView = readFileSync(new URL("./components/RunsView.tsx", import.meta.url), "utf8");
 const podsView = readFileSync(new URL("./components/PodsView.tsx", import.meta.url), "utf8");
@@ -362,9 +363,11 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   // The list's filter says whether a project has a Sessions tab (#2957), not who can see it.
   assert.match(projectList, /label="Sessions Tabs"/,
     "the Sessions show-or-hide filter does not reuse the Project audience label");
-  for (const label of ["New Project", "Add Location", "Make Default", "Archive Sessions", "Delete Project"]) {
+  for (const label of ["New Project", "Add Location", "Archive Sessions", "Delete Project"]) {
     assert.equal(projectsView.includes(label), true, label);
   }
+  // A location's own actions live in its row's ⋯ (#2961).
+  assert.match(projectLocationRow, /"Make Default"/);
   // #2957 retired the Projects list's compact empty state, and #2952 New Session's: a project with
   // no locations is a compact Notice in the Location field's place, with Add Location….
   assert.doesNotMatch(newSessionDialog, /project-manager-empty/);

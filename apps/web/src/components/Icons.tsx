@@ -123,6 +123,7 @@ import {
   ScrollText as LucideScrollText,
   Search as LucideSearch,
   SearchX as LucideSearchX,
+  Server as LucideServer,
   Settings as LucideSettings,
   Share as LucideShare,
   Shield as LucideShield,
@@ -876,6 +877,11 @@ export function NotesIcon(props: IconProps) {
 
 export function ComputerIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideMonitor} {...props} />;
+}
+
+/** A machine reached over SSH, beside `ComputerIcon` for one that runs Wollipog's runner itself. */
+export function ServerIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideServer} {...props} />;
 }
 
 export function BranchIcon(props: IconProps) {

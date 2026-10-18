@@ -10847,19 +10847,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .held-children .facts > div + div > dt { margin-top: var(--space-2); }
 }
 
-.project-location-setup-status {
-  display: grid;
-  justify-items: start;
-  gap: 6px;
-  margin-top: 6px;
-}
-
-.project-location-setup-status code {
-  color: var(--red);
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
 .project-location-generate-option {
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
@@ -12553,18 +12540,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: grid;
   gap: var(--space-2);
 }
-.project-default-badge {
-  display: inline-flex;
-  width: max-content;
-  flex: none;
-  align-items: center;
-  padding: 2px 6px;
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
-  border-radius: var(--radius-pill);
-  color: var(--accent);
-  font-size: var(--text-xs);
-  font-weight: 650;
-}
 /* ProjectDetailHeader.tsx (#2959): the detail's title row, the reason New Session can't start and
    one meta line, then the notices and the sections, 32px apart like every detail (§5.1). */
 .project-detail {
@@ -12647,24 +12622,102 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .access-change-sentence { margin: 0; color: var(--text-dim); font: var(--type-body); }
 .project-location-corrections { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.project-location-list { display: flex; flex-direction: column; gap: 9px; }
-.project-location-row,
+/* ProjectLocationRow.tsx (#2961): each location a §5.2 two-line row in one surface. Line 1 is the
+   name, which badges never squeeze under seven characters, quiet "Default" text and the availability;
+   line 2 the machine, the path in 12px mono losing its start first (§11.3), and the setup status. */
+.project-locations {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.project-location + .project-location { box-shadow: inset 0 1px 0 var(--border); }
+.project-location > .row { border-radius: unset; }
+.project-location-name { flex: 0 1 auto; min-width: 7ch; }
+.project-location-default {
+  flex: none;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.project-location .row-line > .status { flex: none; }
+.project-location-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.project-location-machine {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The box runs right to left so the folder the path ends in stays; `<bdi>` keeps the path itself
+   left to right. */
+.project-location-path {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  direction: rtl;
+  font-family: var(--font-mono);
+  text-align: left;
+  text-overflow: ellipsis;
+}
+.project-location-setup {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+.project-location-setup > :is(svg, .spinner) { flex: none; }
+.project-location-setup > .spinner { width: 12px; height: 12px; }
+.project-location-setup-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.project-location-setup-ready { color: var(--green); }
+@media (forced-colors: active) {
+  .project-location-setup-ready { color: inherit; }
+}
+.project-location-count { flex: none; }
+.project-location-notice { margin: 0 var(--space-3) var(--space-3); }
+/* Under 1100px the path takes a line of its own, so the row grows past its two-line height. */
+@media (max-width: 1099px) {
+  .project-location > .row.row-2 {
+    height: auto;
+    min-height: var(--row-h-2);
+    padding-block: var(--space-2);
+  }
+  .project-location-meta { flex-wrap: wrap; row-gap: 0; }
+  .project-location-path { flex-basis: 100%; }
+  /* A long setup sentence that wraps to a line of its own truncates there rather than clipping. */
+  .project-location-setup { flex-shrink: 1; min-width: 0; }
+}
+/* No Locations (§12.1): one inline row, its sentence wrapping rather than squeezing its action. */
+.project-locations-empty {
+  height: auto;
+  min-height: var(--row-h);
+  flex-wrap: wrap;
+  padding-block: var(--space-2);
+}
+.project-locations-empty-text {
+  flex: 1 1 24ch;
+  color: var(--text-dim);
+}
 .project-location-candidate {
   display: flex;
   min-width: 0;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  padding: 12px;
+  gap: var(--space-3);
+  padding: var(--space-3);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   background: var(--bg);
 }
-.project-location-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
-.project-location-main code { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
-.project-location-heading { display: flex; min-width: 0; align-items: center; gap: 7px; }
-.project-location-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-location-actions { display: flex; max-width: 430px; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.project-location-candidate-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: var(--space-1); }
+.project-location-candidate-main code { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.project-location-candidate-heading { display: flex; min-width: 0; align-items: center; gap: var(--space-2); }
+.project-location-candidate-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-manager-empty {
   display: flex;
   min-height: 260px;
@@ -12675,7 +12728,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   color: var(--text-dim);
   text-align: center;
 }
-.project-manager-empty.location-empty { min-height: 180px; border: 1px dashed var(--border); border-radius: 9px; }
 .project-manager-empty > div { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .project-location-picker { display: grid; gap: 14px; }
 .project-location-picker > .muted { margin: 0; }
@@ -12754,10 +12806,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .project-location-candidates { display: flex; max-height: min(360px, 38vh); flex-direction: column; gap: 8px; overflow-y: auto; }
 .project-location-candidate .btn { flex: none; }
 .danger-note { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger-text) 45%, var(--border)); border-radius: 8px; color: var(--danger-text); background: color-mix(in srgb, var(--danger-text) 7%, transparent); }
-@media (max-width: 900px) {
-  .project-location-row { align-items: stretch; flex-direction: column; }
-  .project-location-actions { max-width: none; justify-content: flex-start; }
-}
 @media (max-width: 760px) {
   .project-name-form { align-items: stretch; flex-direction: column; }
   .project-name-form .btn { justify-content: center; }
