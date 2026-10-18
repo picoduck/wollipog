@@ -745,3 +745,40 @@ test("on a phone, deleting the open machine returns to the list route without it
     await view.unmount();
   }
 });
+
+test("on a phone, a machine removed after leaving its detail is Machine Not Found when Back returns to it", async () => {
+  await setWidth(390);
+  const view = await mount();
+  try {
+    await act(async () => row(view.body, "Alpha").click());
+    await settle();
+    assert.equal(detailName(view.body), "Alpha");
+    await act(async () => view.body.querySelector<HTMLButtonElement>('.detail-bar button[aria-label="Back to Connections"]')!.click());
+    await settle();
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
+    await view.push(removed("alpha"));
+    await view.history.back();
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "alpha" },
+      "the entry is kept, not replaced by the list");
+    assert.match(detail(view.body).textContent ?? "", /Machine Not Found/);
+    assert.ok(view.body.querySelector(".detail-bar"), "the detail route, under Back");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("on a desktop, a machine removed while another tab is open is Machine Not Found when Back returns to it", async () => {
+  const view = await mount({ view: { name: "runners", section: "machines", machineId: "alpha" } });
+  try {
+    assert.equal(detailName(view.body), "Alpha");
+    await act(async () => view.body.querySelector<HTMLButtonElement>("#connections-people-tab")!.click());
+    await settle();
+    assert.deepEqual(view.history.current(), { name: "runners", section: "people" });
+    await view.push(removed("alpha"));
+    await view.history.back();
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "alpha" });
+    assert.match(detail(view.body).textContent ?? "", /Machine Not Found/);
+  } finally {
+    await view.unmount();
+  }
+});

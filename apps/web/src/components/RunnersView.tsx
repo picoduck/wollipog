@@ -1742,17 +1742,15 @@ export function RunnersView() {
   const machines = useMemo(() => machineListEntries(runners, boxes.values()), [runners, boxes]);
   const selectedMachine = machineId ? machines.find((machine) => machine.runnerId === machineId) ?? null : null;
   // Everything follows the live machines and the route; nothing tracks a deletion in flight. When the
-  // machine this page was showing leaves them while still selected (deleted here or anywhere), its
-  // route is replaced by the list, and the first row or the empty state follows (§6.1). A route to a
-  // machine this page never showed, a link or a reload, is Machine Not Found instead.
+  // machine on screen leaves them while it stays selected (deleted here or anywhere), its route is
+  // replaced by the list, and the first row or the empty state follows (§6.1). Any other route to a
+  // machine that is not there, a link, a reload or Back to an old entry, is Machine Not Found.
+  /** The machine the detail showed as of the last commit, and only while it showed one. */
   const shownMachineId = useRef<string | null>(null);
   useEffect(() => {
-    if (selectedMachine) {
-      shownMachineId.current = selectedMachine.runnerId;
-      return;
-    }
-    if (machineId !== null && machineId === shownMachineId.current) {
-      shownMachineId.current = null;
+    const wasShown = shownMachineId.current;
+    shownMachineId.current = selectedMachine?.runnerId ?? null;
+    if (!selectedMachine && machineId !== null && machineId === wasShown) {
       navigate({ name: "runners", section: "machines" }, { replace: true });
     }
   }, [machineId, navigate, selectedMachine]);
