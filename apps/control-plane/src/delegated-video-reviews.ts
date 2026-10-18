@@ -291,7 +291,19 @@ export class DelegatedVideoReviews {
     this.attached = { sessions, hub };
     this.service = service;
     for (const row of this.ledger.queued()) this.scheduleRetry(row);
+    this.recoverInterruptedValidations();
     this.readback();
+  }
+
+  /** A validation interrupted between its reviewer's commit and dispatch (a restart, for example)
+   * has no attempt running here. Its permit may since have expired or been revoked, so recovery
+   * never needs a current permit: an unsent reservation is released, a possibly dispatched one is
+   * kept for its runner. Runs at startup and whenever the Human inspects a run. */
+  private recoverInterruptedValidations(): void {
+    const rows = (this.db.raw().prepare("SELECT record FROM delegated_video_reviews WHERE json_extract(record,'$.state')='preparing' " +
+      "AND json_extract(record,'$.validation.permitId') IS NOT NULL").all() as Array<{ record: string }>)
+      .map((row) => JSON.parse(row.record) as ReviewRow);
+    for (const row of rows) this.recoverStale(row);
   }
 
   /** An unsent reviewer whose subject was deleted (the original decision cascades away) has no
@@ -749,8 +761,18 @@ export class DelegatedVideoReviews {
    * unsent reservation is released; a possibly dispatched one is kept and awaits its runner. */
   private recoverStale(row: ReviewRow | null): ReviewRow | null {
     if (!row || row.state !== "preparing" || this.inFlight.has(`${row.occurrenceId}\0${row.evidenceId}`)) return row;
-    const decision = this.db.workflowDecisionByOccurrence(row.occurrenceId);
-    const identity = decision ? identityFor(row, decision.resourceDigest) : null;
+    let identity: PreparedMediaIdentity | null;
+    if (row.validation) {
+      // The reviewer's own committed record, else the identity its permit pinned: neither needs the
+      // permit to be current, nor the original decision to still exist.
+      let stored: PreparedMediaIdentity | null = null;
+      try { stored = this.validation?.permits.get(row.validation.permitId)?.scope.identity ?? null; } catch { stored = null; }
+      const record = row.reviewerSessionId ? this.recordForSession(row.reviewerSessionId) : null;
+      identity = record ? identityOf(record) : stored;
+    } else {
+      const decision = this.db.workflowDecisionByOccurrence(row.occurrenceId);
+      identity = decision ? identityFor(row, decision.resourceDigest) : null;
+    }
     let state: PreparedMediaRecord["state"] | undefined;
     try { state = identity ? this.prepared.get(identity)?.state : undefined; } catch { state = "uncertain"; }
     if (state === "dispatching" || state === "uncertain" || state === "active") {
@@ -1011,11 +1033,18 @@ export class DelegatedVideoReviews {
   /** Step two, after the Human minted the permit: materialize, derive, bind and dispatch its one
    * reviewer. Only the Human who minted it can start it, once, while it is current. */
   async startValidation(principal: HumanPrincipal, permitId: string) {
-    const permit = this.validation?.permits.current(permitId) ?? null;
-    if (!this.attached || !this.service || !permit || permit.mintedByUserId !== principal.userId ||
-      permit.scope.organizationId !== principal.organizationId) {
-      return this.refuse("not_authorized", "No current validation permit minted by you has this identifier.");
+    let stored;
+    try { stored = this.validation?.permits.get(permitId) ?? null; } catch { stored = null; }
+    if (!this.attached || !this.service || !stored || stored.mintedByUserId !== principal.userId ||
+      stored.scope.organizationId !== principal.organizationId) {
+      return this.refuse("not_authorized", "No validation permit minted by you has this identifier.");
     }
+    // A run already started under this permit is reported (and recovered if it was interrupted),
+    // whatever the permit's state now. Only a new admission needs a current permit.
+    const started = this.validationRow(permitId);
+    if (started) return this.status(this.recoverStale(started)!);
+    const permit = this.validation!.permits.current(permitId);
+    if (!permit) return this.refuse("not_authorized", "No current validation permit minted by you has this identifier.");
     const { subject, identity } = permit.scope;
     const existing = this.recoverStale(this.ledger.get(subject.occurrenceId, subject.evidenceId));
     if (existing) return existing.validation?.permitId === permitId ? this.status(existing)
@@ -1044,6 +1073,7 @@ export class DelegatedVideoReviews {
       return this.refuse("not_authorized", "No validation permit minted by you has this identifier.");
     }
     this.reconcileSubjects();
+    this.recoverInterruptedValidations();
     const summary = { permitId, profile: permit.scope.subject.profile, state: permit.state, expiresAt: permit.expiresAt,
       occurrenceId: permit.scope.subject.occurrenceId, evidenceId: permit.scope.subject.evidenceId };
     const row = this.validationRow(permitId);

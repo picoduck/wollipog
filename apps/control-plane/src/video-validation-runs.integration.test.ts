@@ -105,21 +105,43 @@ async function harness(t: { after(fn: () => unknown): void }) {
     resourceDigest: sha(json(normalized.data)), policyRevision: boundary.revision, authority: "human", createdAt: 7 }));
 
   let now = Date.now();
-  const video = composeHostingVideoEvidence(db, { decoder: syntheticDecoder, clock: () => now,
-    schedule: (run, ms) => setTimeout(run, ms + 3_600_000) });
-  const sessions = new SessionsService(db, hub, log, undefined, undefined, undefined, undefined, undefined, undefined, false, undefined,
-    video.preparedMediaRuntime, video.workflowVideoApprovals, disclosures, video.operatorValidationPermits, video.preparedMediaActiveStops);
+  // `hold` parks every derivation forever, standing in for a process stopped between the reviewer's
+  // commit and its dispatch. Nothing resolves it; a restart composes a fresh coordinator instead.
+  const control = { hold: false };
+  const decoder: VideoReviewDecoder = { candidate: syntheticDecoder.candidate,
+    paced: (bytes, mediaType) => control.hold ? new Promise<VideoPreparationResult>(() => {}) : syntheticDecoder.paced(bytes, mediaType) };
+  const compose = () => {
+    const composed = composeHostingVideoEvidence(db, { decoder, clock: () => now, schedule: (run, ms) => setTimeout(run, ms + 3_600_000) });
+    return { composed, sessions: new SessionsService(db, hub, log, undefined, undefined, undefined, undefined, undefined, undefined, false,
+      undefined, composed.preparedMediaRuntime, composed.workflowVideoApprovals, disclosures, composed.operatorValidationPermits,
+      composed.preparedMediaActiveStops) };
+  };
+  let { composed: video, sessions } = compose();
   video.attach(sessions, hub);
   const agentPrincipal = (id: string, orchestrator: boolean): AgentPrincipal => ({ kind: "agent", actorId: id, credentialSessionId: id,
     orchestrator, organizationId: owner.organizationId, delegatedScope: audience });
   const principals: Record<string, AuthPrincipal> = { owner, admin: { ...owner, role: "admin" as const, userId: "other-admin", actorId: "other-admin" },
     member: { ...owner, role: "operator" as const }, orchestrator: agentPrincipal("root", true), child: agentPrincipal("child", false) };
-  const server = Fastify();
-  registerHostingVideoEvidenceRoutes(server, { video, requestPrincipal: (req) => {
-    const as = String(req.headers["x-fixture-principal"]);
-    return principals[as] ?? (as.startsWith("reviewer:") ? agentPrincipal(as.slice("reviewer:".length), false) : null);
-  } });
-  t.after(async () => { await server.close(); video.delegated.close(); db.close(); });
+  const routes = () => {
+    const app = Fastify();
+    registerHostingVideoEvidenceRoutes(app, { video, requestPrincipal: (req) => {
+      const as = String(req.headers["x-fixture-principal"]);
+      return principals[as] ?? (as.startsWith("reviewer:") ? agentPrincipal(as.slice("reviewer:".length), false) : null);
+    } });
+    return app;
+  };
+  let server = routes();
+  const retired: Array<{ close(): void }> = [];
+  t.after(async () => { await server.close(); video.delegated.close(); for (const old of retired) old.close(); db.close(); });
+  /** A control-plane restart over the same database: a fresh composition and routes, attached to
+   * Sessions and the hub unless `attach` is false (to exercise recovery on inspection alone). */
+  const restart = async (attach = true) => {
+    await server.close();
+    retired.push(video.delegated);
+    ({ composed: video, sessions } = compose());
+    if (attach) video.attach(sessions, hub);
+    server = routes();
+  };
   const call = async (as: string | null, method: "GET" | "POST", url: string, payload?: unknown) => {
     const response = await server.inject({ method, url, headers: as ? { "x-fixture-principal": as } : {},
       ...(payload === undefined ? {} : { payload: payload as object }) });
@@ -164,7 +186,8 @@ async function harness(t: { after(fn: () => unknown): void }) {
       criteria: [{ criterionId: "every_frame_in_order", outcome: "pass", observedFrameIndices: [0, 359], observation: "Synthetic." },
         { criterionId: "transient_overlays", outcome: "pass", observedFrameIndices: [42], observation: "Synthetic: a red rectangle at frame 42." }] } });
   };
-  return { db, video, sessions, sent, call, preview, mint, dispatches, runner, review, owner,
+  return { db, get video() { return video; }, get sessions() { return sessions; }, sent, call, preview, mint, dispatches, runner, review,
+    owner, control, restart,
     advance: (ms: number) => { now += ms; }, now: () => now };
 }
 
@@ -320,4 +343,70 @@ test("a changed policy revision invalidates a minted permit before it starts", a
   const started = await h.call("owner", "POST", `/api/video-evidence/validation-permits/${minted.body.permit.permitId}/run`);
   assert.equal(started.status, 403, json(started.body));
   assert.equal(h.dispatches().length, 0);
+});
+
+/** The reviewer committed by an interrupted start: its prepared record, Session and reservation. */
+function interrupted(h: Awaited<ReturnType<typeof harness>>) {
+  const row = h.db.raw().prepare("SELECT record FROM delegated_video_reviews").get() as { record: string } | undefined;
+  const sessionId = row ? (JSON.parse(row.record) as { reviewerSessionId: string | null }).reviewerSessionId : null;
+  assert.ok(sessionId, "the interrupted start committed its reviewer");
+  const state = () => (h.db.raw().prepare("SELECT state FROM prepared_media_sessions WHERE json_extract(payload,'$.sessionId')=?")
+    .get(sessionId) as { state: string }).state;
+  const ledger = () => JSON.parse((h.db.raw().prepare("SELECT record FROM delegated_video_reviews").get() as { record: string }).record) as
+    { state: string; reason: string | null };
+  return { sessionId, state, ledger, status: () => h.db.getSession(sessionId)!.status,
+    reserved: () => h.db.campaignBudgets.active(sessionId) };
+}
+
+for (const [ending, end, attach] of [
+  ["expired", "expire", true], ["revoked", "revoke", false],
+] as const) {
+  test(`an interrupted run whose permit was ${ending} releases its unsent reviewer on ${attach ? "restart" : "inspection"}`, async (t) => {
+    const h = await harness(t);
+    const previewed = await h.preview();
+    const minted = await h.mint("owner", previewed.body, h.now() + 60_000);
+    const permitId = minted.body.permit.permitId as string;
+    h.control.hold = true;
+    void h.video.delegated.startValidation(h.owner, permitId);
+    await new Promise((done) => setImmediate(done));
+    const reviewer = interrupted(h);
+    assert.deepEqual([reviewer.state(), reviewer.status(), reviewer.reserved(), reviewer.ledger().state],
+      ["prepared", "queued", true, "preparing"]);
+    if (end === "expire") h.advance(61_000);
+    else assert.equal((await h.call("owner", "POST", `/api/video-evidence/validation-permits/${permitId}/revoke`)).status, 200);
+    // The stopped process's attempt never finishes; a restarted control plane recovers it.
+    await h.restart(attach);
+    if (!attach) {
+      assert.equal(reviewer.state(), "prepared", "nothing recovers before the Human inspects");
+      const inspected = await h.call("owner", "GET", `/api/video-evidence/validation-permits/${permitId}`);
+      assert.equal(inspected.body.code, "preparation", JSON.stringify(inspected.body));
+    }
+    assert.deepEqual([reviewer.state(), reviewer.status(), reviewer.reserved(), reviewer.ledger().state],
+      ["cancelled", "stopped", false, "refused"], "the unsent reservation and its slot are released");
+    assert.equal(h.dispatches().length, 0);
+    // Attached, the run reports its release; either way it never starts again.
+    const started = await h.call("owner", "POST", `/api/video-evidence/validation-permits/${permitId}/run`);
+    assert.equal(started.body.code, attach ? "preparation" : "not_authorized");
+    assert.equal((await h.call("owner", "GET", `/api/video-evidence/validation-permits/${permitId}`)).body.code, "preparation");
+    assert.equal(h.dispatches().length, 0);
+  });
+}
+
+test("an interrupted run that was possibly dispatched keeps its reservation after its permit expires", async (t) => {
+  const h = await harness(t);
+  const previewed = await h.preview();
+  const minted = await h.mint("owner", previewed.body, h.now() + 60_000);
+  const permitId = minted.body.permit.permitId as string;
+  assert.equal((await h.call("owner", "POST", `/api/video-evidence/validation-permits/${permitId}/run`)).body.status, "dispatched");
+  const reviewer = interrupted(h);
+  const sent = reviewer.state();
+  assert.ok(["dispatching", "uncertain"].includes(sent), sent);
+  // Fixture-only: the process stopped after the dispatch committed but before the ledger recorded it.
+  h.db.raw().prepare("UPDATE delegated_video_reviews SET record=json_set(record,'$.state','preparing')").run();
+  h.advance(61_000);
+  await h.restart();
+  assert.deepEqual([reviewer.state(), reviewer.reserved(), reviewer.ledger().state], [sent, true, "dispatched"],
+    "a possibly dispatched reviewer is never released; it waits for its runner's readback");
+  assert.equal(h.dispatches().length, 1, "and is never dispatched again");
+  assert.ok(h.sent.some((m) => m.type === "media_review_readback"), "the restart asks the owning runner for its outcome");
 });
