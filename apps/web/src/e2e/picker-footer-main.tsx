@@ -13,6 +13,8 @@ import "../styles.css";
  * touch device gets, with a create row and a footer action; Location is a plain Select with one.
  * Each field reports how often its footer action ran in `data-footer-runs`, and its value in
  * `data-value`. `?theme=light` switches theme; `?openOnFocus=0` makes Agent focus without opening.
+ * `?narrow=1` adds Reviewer first: the same combobox in a 200px field, whose open list still takes
+ * the 280px floor Select's does (§8.3).
  */
 
 const AGENTS: SearchableComboboxOption<string>[] = [
@@ -46,6 +48,20 @@ function Harness() {
     // every box read during the first frames a frame of that motion rather than the layout.
     <div style={{ margin: "24px auto", maxWidth: 560, background: "var(--bg-elev)", borderRadius: "var(--radius-md)" }}>
       <div className="modal-body form">
+        {params.get("narrow") === "1" && (
+          <div className="field" data-field="reviewer" style={{ width: 200 }}>
+            <span>Reviewer</span>
+            <SearchableCombobox<string>
+              label="Reviewer"
+              options={AGENTS}
+              value={agent}
+              onChange={setAgent}
+              placeholder="Choose an Agent…"
+              noun="agents"
+              footerAction={{ label: "Set Up Agents in Connections", icon: <SettingsIcon />, onSelect: ran("reviewer") }}
+            />
+          </div>
+        )}
         <div className="field" data-field="agent" data-value={agent ?? ""} data-footer-runs={runs.agent ?? 0}>
           <span>Agent</span>
           <SearchableCombobox<string>

@@ -1197,7 +1197,11 @@ export function SearchableCombobox<T extends string>({
   });
   const listStyle = useAnchoredMenuStyle(open, inputRef, {
     desiredHeight,
-    matchTriggerWidth: true,
+    // Select's width rule (§8.3): at least as wide as the field and at least
+    // SELECT_LIST_MIN_WIDTH_PX, clamped to the viewport. Matching the field alone let a combobox in
+    // a narrow field (a two-column row, a compact panel) wrap its descriptions and group labels.
+    desiredWidth: SELECT_LIST_MIN_WIDTH_PX,
+    minTriggerWidth: true,
     measure: () => document.getElementById(listboxId),
     maxHeight: SELECT_MENU_MAX_HEIGHT_PX,
   });
