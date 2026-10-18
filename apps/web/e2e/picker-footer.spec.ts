@@ -200,3 +200,42 @@ for (const theme of THEMES) {
     });
   });
 }
+
+/**
+ * A combobox in a narrow field opens a list at least SELECT_LIST_MIN_WIDTH_PX wide (§8.3), as a
+ * Select's does, starting at the field's left edge and kept inside the viewport.
+ */
+async function narrowFieldList(page: Page) {
+  const reviewer = page.getByRole("combobox", { name: "Reviewer" });
+  const fieldBox = (await reviewer.boundingBox())!;
+  expect(fieldBox.width, "the field itself is narrower than the floor").toBeLessThan(SELECT_LIST_MIN_WIDTH_PX);
+  return { reviewer, fieldBox, list: page.getByRole("listbox", { name: "Reviewer Options" }) };
+}
+
+for (const theme of THEMES) {
+  for (const viewport of [
+    { name: "1440", use: { viewport: { width: 1440, height: 1000 } } },
+    { name: "390", use: { viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true } },
+  ]) {
+    test.describe(`a combobox in a 200px field at ${viewport.name}px (${theme})`, () => {
+      test.use(viewport.use);
+
+      test("opens a list at least 280px wide, from the field's left edge, inside the viewport", async ({ page }) => {
+        await page.goto(`/picker-footer-e2e.html?theme=${theme}&narrow=1`);
+        const { reviewer, fieldBox, list } = await narrowFieldList(page);
+        if (viewport.name === "390") await reviewer.tap();
+        else await reviewer.click();
+        await expect(list).toBeVisible();
+        const box = (await list.boundingBox())!;
+        expect(box.width).toBeGreaterThanOrEqual(SELECT_LIST_MIN_WIDTH_PX);
+        expect(box.width).toBeGreaterThanOrEqual(fieldBox.width);
+        expect(Math.abs(box.x - fieldBox.x), "the list starts where its field does").toBeLessThanOrEqual(1);
+        expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+        const layout = await listLayout(list);
+        expect(layout.height).toBeLessThanOrEqual(SELECT_MENU_MAX_HEIGHT_PX);
+        expect(layout.rows.at(-1)!.text).toBe("Set Up Agents in Connections");
+        await capture(page, `combobox-narrow-${viewport.name}-${theme}`);
+      });
+    });
+  }
+}
