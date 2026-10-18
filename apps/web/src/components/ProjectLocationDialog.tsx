@@ -263,6 +263,8 @@ export function ProjectLocationDialog({
 
   // The browser's current folder is the selection; the name follows it until the person edits it.
   const folderChanged = (path: string | null) => {
+    // The picker is frozen while a commit is pending; this keeps the submitted folder regardless.
+    if (busy) return;
     setFolderSelection(path === null ? null : { runnerId: selectedRunnerId, path });
     if (!nameEdited) setLocationName(path === null ? "" : locationNameFromFolder(path));
   };
@@ -352,6 +354,7 @@ export function ProjectLocationDialog({
           type="search"
           autoFocus
           aria-label="Search Locations"
+          disabled={busy}
           placeholder="Search locations"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
@@ -385,7 +388,8 @@ export function ProjectLocationDialog({
                   : usedBy.length > 0
                     ? <span title={`Used by ${usedBy.join(", ")}`}>Used by {usedBy[0]}{usedBy.length > 1 ? ` +${usedBy.length - 1}` : ""}</span>
                     : undefined,
-              disabled: unavailable,
+              // Every row holds still while a commit is pending; only an unavailable one says why.
+              disabled: unavailable || busy,
               disabledReason: alreadyAdded ? `It's already one of ${project.name}'s locations.`
                 : unavailable ? "Its access can't be checked, so it can't be added." : undefined,
             };
@@ -491,6 +495,7 @@ export function ProjectLocationDialog({
             machineName={selectedMachine.display.name}
             protocolVersion={selectedMachine.runner.protocolVersion}
             hideActions
+            disabled={busy}
             onLocationChange={folderChanged}
             onPick={folderChanged}
             onCancel={close}
@@ -569,8 +574,8 @@ export function ProjectLocationDialog({
         value={mode}
         onChange={switchMode}
         options={[
-          { value: "existing", label: "Existing Location" },
-          { value: "new", label: "New Folder" },
+          { value: "existing", label: "Existing Location", disabled: busy },
+          { value: "new", label: "New Folder", disabled: busy },
         ]}
       />
       {mode === "existing" ? existing : newFolder}

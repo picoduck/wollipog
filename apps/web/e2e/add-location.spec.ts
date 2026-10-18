@@ -44,6 +44,8 @@ for (const { name, viewport, coarse, rowHeight } of VIEWPORTS) {
       expect((await scrollers(page)).every((className) => className === "modal-body"),
         "only the dialog body may scroll").toBe(true);
       await expect(dialog.locator(".add-location-list button")).toHaveCount(0);
+      // The rows meet at their hairlines: the shared `.choice-rows` gap must not reach this list.
+      expect(await dialog.locator(".add-location-list").evaluate((element) => getComputedStyle(element).rowGap)).toBe("0px");
 
       if (coarse) {
         // Six rows show under the sheet's header, and the header is still there.

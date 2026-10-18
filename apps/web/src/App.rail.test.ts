@@ -398,7 +398,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "Add Location can register a browsed folder on a selected online machine, browsed under the Machine field");
   // #2966: one switch between the two paths, Existing Location first while one can be added.
   assert.match(projectLocationDialog,
-    /useState<AddLocationMode>\(\(\) => addable \? "existing" : "new"\)[\s\S]*\{ value: "existing", label: "Existing Location" \},\s*\{ value: "new", label: "New Folder" \}/,
+    /useState<AddLocationMode>\(\(\) => addable \? "existing" : "new"\)[\s\S]*\{ value: "existing", label: "Existing Location"[^}]*\},\s*\{ value: "new", label: "New Folder"[^}]*\}/,
     "Existing Location and New Folder are one segmented switch");
   assert.doesNotMatch(projectLocationDialog, /Create New Location|aria-expanded/,
     "the creation disclosure is gone");

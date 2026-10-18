@@ -496,6 +496,72 @@ test("a failed add is a danger notice above the footer with the raw text behind 
   }
 });
 
+test("while a new folder is being added, the browser and the form hold still on the folder being submitted", async () => {
+  let settleCreate: () => void = () => {};
+  const listed: string[] = [];
+  const view = await render({
+    client: {
+      listDirectory: async (_runnerId: string, path: string) => {
+        listed.push(path);
+        const at = path || "/repos/acme-storefront";
+        return { path: at, parent: "/repos", entries: at === "/repos/acme-storefront" ? [{ name: "billing", path: "/repos/acme-storefront/billing", isDir: true }] : [] };
+      },
+    },
+    onCreate: () => new Promise<void>((resolve) => { settleCreate = resolve; }),
+  });
+  try {
+    const radios = () => [...dialog()!.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Add From"] [role="radio"]')];
+    await act(async () => { radios().find((radio) => text(radio) === "New Folder")!.click(); });
+    await settle();
+    await settle();
+    const name = () => [...dialog()!.querySelectorAll<HTMLElement>(".modal-body .field")]
+      .find((field) => text(field.querySelector(":scope > span")) === "Location Name")!.querySelector<HTMLInputElement>("input")!;
+    assert.equal(name().value, "Acme Storefront");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.created.length, 1, "the request is in flight");
+
+    const picker = dialog()!.querySelector(".folder-picker")!;
+    const controls = [...picker.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input")];
+    assert.ok(controls.length >= 3, "the crumbs, Edit Path, Up One Level and folder rows render");
+    assert.deepEqual(controls.filter((control) => !control.disabled).map((control) => text(control) || control.getAttribute("aria-label")), [],
+      "every browser control is disabled while the folder is submitted");
+    const billing = [...picker.querySelectorAll<HTMLButtonElement>(".folder-picker-list > .row")].find((row) => text(row) === "billing")!;
+    await act(async () => { billing.click(); });
+    await settle();
+    assert.deepEqual(listed, [""], "nothing navigated");
+    assert.equal(name().value, "Acme Storefront", "the name stays the submitted folder's");
+    assert.equal(name().disabled, true);
+    assert.ok(radios().every((radio) => radio.getAttribute("aria-disabled") === "true" || radio.disabled), "the mode switch holds still");
+
+    await act(async () => { settleCreate(); });
+    await settle();
+    assert.equal(view.closed(), 1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("while an existing location is being added, the search and the rows hold still", async () => {
+  let settleAdd: () => void = () => {};
+  const view = await render({ onAdd: () => new Promise<void>((resolve) => { settleAdd = resolve; }) });
+  try {
+    await choose("Loose Checkout");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(dialog()!.querySelector<HTMLInputElement>('input[aria-label="Search Locations"]')!.disabled, true);
+    const inputs = [...dialog()!.querySelectorAll<HTMLInputElement>('.add-location-list input[type="radio"]')];
+    assert.ok(inputs.every((input) => input.getAttribute("aria-disabled") === "true"), "every row is refused while pending");
+    await choose("Shared Checkout");
+    assert.equal(rowNamed("Loose Checkout")!.querySelector<HTMLInputElement>("input")!.checked, true, "the submitted row stays chosen");
+    await act(async () => { settleAdd(); });
+    await settle();
+    assert.deepEqual(view.added.map((candidate) => candidate.workspaceId), ["loose"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a server too old to register folders says so in the failed-add notice, with nothing behind Show Details", async () => {
   const view = await render({
     client: {
