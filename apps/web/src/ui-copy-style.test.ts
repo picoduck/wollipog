@@ -1313,6 +1313,16 @@ test("New Session's agent and account strings name the choice, never the mechani
     failure("contract_mismatch"),
     failure("probe_timeout"),
     { ...base, unavailableReason: "Install it, then rediscover." },
+    { ...base, unavailableReason: "The discovered harness executable changed. Rediscover this Machine." },
+    { ...base, unavailableReason: "This WSL launch target is incompatible with a non-Windows runner." },
+    { ...failure("version_unverified"), codexAppServer: { ...failure("version_unverified").codexAppServer!, installedVersion: "0.1.0" } },
+    failure("version_unverified"),
+    { ...base, driver: "claude-code", claudeCode: {
+      status: "unsupported", effortLevels: [], permissionModes: [], streamJsonInput: false, streamJsonImages: false,
+      controlProtocol: false, forkSession: false, replayUserMessages: false,
+      auth: { status: "authenticated", billingSource: "unknown" },
+      failure: { code: "unsupported_mode", message: "Native Claude Code requires Git for Windows Bash." },
+    } },
     ...(["approval-required", "manual-only", "unsupported-platform"] as const).map((installStatus) => ({
       ...base,
       registry: { installStatus } as NonNullable<AgentDefinition["registry"]>,
@@ -1324,11 +1334,12 @@ test("New Session's agent and account strings name the choice, never the mechani
     kinds.add(agentSetupProblem(agent, true));
     reasons.push(agentSetupReason(agent, "Studio Mac", true));
   }
-  assert.equal(kinds.size, 9, `every setup problem is covered: ${[...kinds].join(", ")}`);
+  assert.equal(kinds.size, 14, `every setup problem is covered: ${[...kinds].join(", ")}`);
   for (const reason of reasons) {
     assert.doesNotMatch(reason, NEW_SESSION_MECHANISM_WORDS, reason);
     // Proper names (the machine, Wollipog, Codex, the places to go) are checked as one placeholder word.
-    const sentences = reason.replace(/Studio Mac|Wollipog|Machine Settings|Connections|Codex/gu, "X").split(/(?<=[.!?])\s+/u);
+    const sentences = reason.replace(/Studio Mac|Wollipog|Machine Settings|Connections|Codex|Git for Windows|Windows/gu, "X")
+      .split(/(?<=[.!?])\s+/u);
     assert.ok(reason.endsWith(".") && sentences.every(isSentenceCase), reason);
   }
   const limits = agentSessionLimits({ ...base, capabilities: {
