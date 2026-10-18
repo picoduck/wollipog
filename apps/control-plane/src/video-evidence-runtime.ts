@@ -155,6 +155,10 @@ export interface VideoReviewDecoder {
   candidate(bytes: Buffer, mediaType: "video/webm" | "video/mp4"): Promise<VideoPreparationResult>;
 }
 const NATIVE_DECODER: VideoReviewDecoder = { paced: prepareVideoEvidence, candidate: prepareCandidateVideoEvidence };
+/** The manifest a review pins: the decoder's, relabelled as a trusted temporal derivation. */
+const temporalManifest = (prepared: VideoPreparationManifest, validationProfile?: "candidate" | "paced" | "maximum" | null): TemporalVideoManifest => ({
+  ...prepared, ...(validationProfile === "candidate" ? { captureProfile: "candidate" as const } : {}),
+  purpose: "trusted_temporal_derivation", profile: PACED_VIDEO_REVIEW_PROFILE });
 
 export class VideoEvidenceRuntime {
   private readonly inFlight = new Map<string, Promise<{ ok: true; review: VideoReviewRecord } | Extract<VideoPreparationResult, { ok: false }>>>();
@@ -203,9 +207,7 @@ export class VideoEvidenceRuntime {
     const retained = this.access.readSource(pinned.sourceArtifactId);
     if (!retained || hash(retained) !== pinned.sourceSha256) throw new VideoReviewRefused("source_mismatch");
     if (pinned.operatorValidation && this.access.validationProfile?.(pinned) !== validationProfile) throw new VideoReviewRefused("stale");
-    const manifest: TemporalVideoManifest = { ...result.manifest,
-      ...(validationProfile === "candidate" ? { captureProfile: "candidate" as const } : {}),
-      purpose: "trusted_temporal_derivation", profile: PACED_VIDEO_REVIEW_PROFILE };
+    const manifest = temporalManifest(result.manifest, validationProfile);
     let plan: PacedVideoReviewWindowPlan;
     try { plan = pacedVideoReviewWindowPlan(manifest.frames); } catch {
       // Too many large frames for the reviewed window profile: a shorter capture fits.
@@ -221,6 +223,16 @@ export class VideoEvidenceRuntime {
     };
     this.store.saveDerived(review, result.images);
     return { ok: true, review };
+  }
+
+  /** The exact manifest `derive` would pin for these bytes under a validation profile, so a Human
+   * permit scope can name it before any reviewer exists. Stores nothing and grants nothing. */
+  async validationManifest(bytes: Buffer, mediaType: "video/webm" | "video/mp4", profile: "candidate" | "paced" | "maximum")
+    : Promise<{ ok: true; manifest: TemporalVideoManifest; manifestSha256: string } | Extract<VideoPreparationResult, { ok: false }>> {
+    const result = await (profile === "candidate" ? this.decoder.candidate(bytes, mediaType) : this.decoder.paced(bytes, mediaType));
+    if (!result.ok) return result;
+    const manifest = temporalManifest(result.manifest, profile);
+    return { ok: true, manifest, manifestSha256: hash(JSON.stringify(manifest)) };
   }
 
   private current(reviewId: string, authenticatedReviewerSessionId: string,

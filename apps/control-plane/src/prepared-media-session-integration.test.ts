@@ -133,7 +133,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
   const subject = { occurrenceId: "original-gate", evidenceId: "original-video" };
   // Disclosed synthetic permit scope only: no real Human mint, provider profile or live proof.
   let validationScope: OperatorVideoValidationScope | null = validation ? {
-    identity, subject: { ...subject, profile: "paced" }, authorizedByUserId: human.userId, organizationId: human.organizationId,
+    identity, subject: { ...subject, profile: "paced", privateOracleCommitmentSha256: sha("disclosed synthetic test commitment, never a blind oracle") }, authorizedByUserId: human.userId, organizationId: human.organizationId,
     gate: { authority: "human", status: "pending", resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision },
     source: { artifactId: "source", sha256: sha(source), sizeBytes: source.length, manifestSha256: sha("synthetic native manifest"),
       orderedFramesSha256: sha(JSON.stringify(syntheticValidationFrames())), criteriaSha256: sha("synthetic criteria"),
@@ -143,7 +143,8 @@ function harness(sourceBytes?: Buffer, validation = false) {
     nativeToolProfileSha256: sha("synthetic installed media tools"), namespaceLaunchSha256: sha("synthetic launch"), authoritySha256: sha("synthetic current authority"),
   } : null;
   const permits = validation ? new OperatorVideoValidationPermits(db.raw(), { current: () => validationScope }) : undefined;
-  const validationProposal = { identity, subject: { ...subject, profile: "paced" as const },
+  const validationProposal = { identity, subject: { ...subject, profile: "paced" as const,
+    privateOracleCommitmentSha256: sha("disclosed synthetic test commitment, never a blind oracle") },
     expectedScopeSha256: sha(JSON.stringify(validationScope)), expiresAt: Date.now() + 30_000 };
   const permit = permits?.mint(human, validationProposal);
   if (validation) { assert.ok(permit); validationPermitId = permit.permitId; }

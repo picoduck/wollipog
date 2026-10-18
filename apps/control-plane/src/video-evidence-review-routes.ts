@@ -23,11 +23,12 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   service: EvidenceReviewService;
   owner?: VideoEvidenceReviewOwner;
   requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
-  unavailable?(): { code: string; reason: string } | null;
+  /** `route` is "owner" for prepare and provenance, "reviewer" for the media and verdict methods. */
+  unavailable?(sessionId: string, route: "owner" | "reviewer"): { code: string; reason: string } | null;
 }): void {
   const prefix = "/api/sessions/:id/video-evidence-review";
-  const refused = (reply: FastifyReply) => {
-    const refusal = deps.unavailable?.();
+  const refused = (reply: FastifyReply, principal: AuthPrincipal, route: "owner" | "reviewer" = "reviewer") => {
+    const refusal = deps.unavailable?.(principal.kind === "agent" ? principal.credentialSessionId ?? "" : "", route);
     return refusal ? reply.code(409).send({ error: refusal.reason, code: refusal.code }) : null;
   };
   const principalFor = (req: FastifyRequest) => {
@@ -38,7 +39,7 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/prepare", async (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching Session credential is required." });
-    const refusal = refused(reply);
+    const refusal = refused(reply, principal, "owner");
     if (refusal) return refusal;
     if (!body(req.body, ["childSessionId", "occurrenceId", "evidenceId"]) ||
       !text(req.body.childSessionId) || !text(req.body.occurrenceId) || !text(req.body.evidenceId)) {
@@ -58,7 +59,7 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/frame", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
-    const refusal = refused(reply);
+    const refusal = refused(reply, principal);
     if (refusal) return refusal;
     if (!body(req.body, ["reviewId", "index"]) || !text(req.body.reviewId) ||
       !Number.isSafeInteger(req.body.index) || Number(req.body.index) < 0 || Number(req.body.index) >= 900) {
@@ -77,7 +78,7 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/frames", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
-    const refusal = refused(reply);
+    const refusal = refused(reply, principal);
     if (refusal) return refusal;
     // `end` (exclusive) keeps a batch inside the reviewer's current fresh-context delivery window.
     if (!(body(req.body, ["reviewId", "index"]) || body(req.body, ["reviewId", "index", "end"])) || !text(req.body.reviewId) ||
@@ -99,7 +100,7 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/acknowledge-frames", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
-    const refusal = refused(reply);
+    const refusal = refused(reply, principal);
     if (refusal) return refusal;
     if (!body(req.body, ["reviewId", "receipts"]) || !text(req.body.reviewId) ||
       !Array.isArray(req.body.receipts) || !req.body.receipts.length || req.body.receipts.length > VIDEO_REVIEW_BATCH.frames ||
@@ -116,7 +117,7 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/acknowledge", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
-    const refusal = refused(reply);
+    const refusal = refused(reply, principal);
     if (refusal) return refusal;
     if (!body(req.body, ["reviewId", "receiptId", "sha256"]) || !text(req.body.reviewId) || !text(req.body.receiptId) ||
       typeof req.body.sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(req.body.sha256)) {
@@ -131,7 +132,7 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/verdict", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching reviewer Session credential is required." });
-    const refusal = refused(reply);
+    const refusal = refused(reply, principal);
     if (refusal) return refusal;
     if (!body(req.body, ["reviewId", "report"]) || !text(req.body.reviewId) ||
       !body(req.body.report, ["outcome", "criteria", "rationale"]) ||
@@ -149,7 +150,7 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   app.post(prefix + "/provenance", (req, reply) => {
     const principal = principalFor(req);
     if (!principal) return reply.code(403).send({ error: "A matching decision-owner Session credential is required." });
-    const refusal = refused(reply);
+    const refusal = refused(reply, principal, "owner");
     if (refusal) return refusal;
     if (!body(req.body, ["reviewId"]) || !text(req.body.reviewId)) {
       return reply.code(400).send({ error: "An exact review identifier is required." });
