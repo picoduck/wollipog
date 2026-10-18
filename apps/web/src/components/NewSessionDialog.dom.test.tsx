@@ -4154,3 +4154,63 @@ test("a saved Orchestrator default this runner can't honor opens Options and nam
     await assertCreateRefused(fixture);
   } finally { await unmountFixture(fixture); }
 });
+
+test("a Full Control launch that fails with Options closed opens Options and shows why; one not ready names itself in the head (#2954)", async () => {
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => ({
+      preflight: launchPreflight(Boolean(input.overrides?.budget?.costUsd && input.overrides.budget.toolCalls && input.task !== "Full Control readiness check"), input),
+    }),
+    createFullControlCampaign: async () => { throw new ApiError("The campaign budget is above your remaining allowance.", 409); },
+  });
+  const head = () => optionsHead(fixture.container);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await settlePreflight();
+    assert.equal(authorizeButton(fixture.container).disabled, true);
+    // Closed while it can't start, the head says so: the disabled footer action has no reason of its own.
+    await act(async () => { head().click(); });
+    assert.equal(head().getAttribute("aria-expanded"), "false");
+    assert.match(head().textContent ?? "", /Full Control Not Ready/);
+    await act(async () => { head().click(); });
+    const field = (label: string) => [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
+      .find((node) => node.querySelector("span")?.textContent === label && !node.closest("details"))!.querySelector("input, textarea") as HTMLInputElement;
+    await act(async () => fireDomEvent.change(field("Task"), { target: { value: "Deliver #12" } }));
+    await act(async () => fireDomEvent.change(field("Issue Numbers"), { target: { value: "#12" } }));
+    await act(async () => fireDomEvent.change(field("Cost Limit (USD)"), { target: { value: "20" } }));
+    await act(async () => fireDomEvent.change(field("Tool Call Limit"), { target: { value: "200" } }));
+    await settlePreflight();
+    assert.equal(authorizeButton(fixture.container).disabled, false);
+    await act(async () => { head().click(); });
+    assert.equal(head().getAttribute("aria-expanded"), "false", "a ready launch needs no attention");
+    assertNoDomNode(head().querySelector(".status.t-warning"));
+
+    await act(async () => authorizeButton(fixture.container).click());
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(head().getAttribute("aria-expanded"), "true", "the failure is never left inside closed Options");
+    const alert = [...fixture.container.querySelectorAll<HTMLElement>('.session-options-body [role="alert"]')]
+      .find((node) => node.textContent?.includes("The campaign budget is above your remaining allowance."));
+    assert.ok(alert, "the panel's failure is shown and announced");
+    assertNoDomNode(alert.closest<HTMLElement>("[hidden]"), "and not inside a hidden region");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an out-of-range Cloud Budget left behind closed Options is named in the head (#2954)", async () => {
+  const boundaries = { filesystem: "snapshot", network: "policy", secrets: "references", billing: "target_metered" } as const;
+  const fixture = await mountFixture({ runners: [{ ...runner, executionTargets: [...hostTargets(), {
+    id: "cloud", runnerId: runner.runnerId, name: "Cloud Sandbox", kind: "cloud", workspaceStrategy: "snapshot", adapter: "cloud",
+    boundaries, available: true,
+    policy: { cost: { currency: "USD", estimatedHourlyRateUsd: 2, minimumBudgetUsd: 1, maximumBudgetUsd: 20 }, admission: { maxConcurrentSessions: 2, queue: "fifo" } },
+  }] }] }, undefined, undefined, undefined, undefined, undefined, { runnerSkills: async () => ({ desired: [], reported: null }) as never });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await act(async () => { optionsHead(fixture.container).click(); });
+    await chooseSelectOption(fixture.container, "Run On", "Cloud Sandbox");
+    const budget = fixture.container.querySelector<HTMLInputElement>('input[step="0.01"]')!;
+    await act(async () => { fireDomEvent.change(budget, { target: { value: "0" } }); });
+    await act(async () => { optionsHead(fixture.container).click(); });
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false");
+    assert.equal(optionsHead(fixture.container).querySelector(".status.t-warning")?.textContent, "Budget Out of Range");
+  } finally { await unmountFixture(fixture); }
+});

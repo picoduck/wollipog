@@ -224,7 +224,8 @@ const runner: RunnerView = {
   // A current runner, so `sessionOrchestration` is advertised and the Orchestrator preset is a real
   // choice rather than a disabled card. The disabled path is covered by `?orchestrator=0`.
   protocolVersion: PROTOCOL_VERSION,
-  ...(containerTargets || cloudTargets ? {
+  // An ACP agent's Extra Folders are offered on a host target, so its fixture advertises the two.
+  ...(containerTargets || cloudTargets || acpAgent ? {
     executionTargets: [
       {
         id: "host-in-place", runnerId: "runner-1", name: "Runner Host · in place",
@@ -238,12 +239,12 @@ const runner: RunnerView = {
         boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" },
         available: true,
       },
-      {
+      ...(containerTargets || cloudTargets ? [{
         id: "container", runnerId: "runner-1", name: "Offline Container",
-        kind: "container", workspaceStrategy: "worktree", adapter: "container",
-        boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+        kind: "container" as const, workspaceStrategy: "worktree" as const, adapter: "container" as const,
+        boundaries: { filesystem: "container" as const, network: "deny" as const, secrets: "none" as const, billing: "none" as const },
         available: true,
-      },
+      }] : []),
       ...(cloudTargets ? [{
         id: "cloud", runnerId: "runner-1", name: "Cloud Sandbox",
         kind: "cloud" as const, workspaceStrategy: "snapshot" as const, adapter: "cloud" as const,

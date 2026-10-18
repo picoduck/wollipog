@@ -173,6 +173,21 @@ const settingRow = (control: Locator) =>
  * it is a comparison of an element with itself, so it carries no assumption about font size,
  * zoom or platform.
  */
+/**
+ * How far an element's own text reaches past its box. A segmented option's coarse-pointer hit area
+ * (#1799) deliberately extends past the option, so its scroll size is not a clipping signal; its
+ * label's extent is.
+ */
+async function textOverflow(locator: Locator): Promise<number> {
+  return locator.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const text = range.getBoundingClientRect();
+    return Math.max(0, box.top - text.top, text.bottom - box.bottom, box.left - text.left, text.right - box.right);
+  });
+}
+
 async function overflow(locator: Locator): Promise<{ vertical: number; horizontal: number }> {
   return locator.evaluate((element) => ({
     vertical: element.scrollHeight - element.clientHeight,
@@ -211,11 +226,8 @@ for (const viewport of VIEWPORTS) {
         expect(box.height).toBeGreaterThan(0);
         expect(box.y).toBeGreaterThanOrEqual(groupBox!.y - 1);
         expect(box.y + box.height).toBeLessThanOrEqual(groupBox!.y + groupBox!.height + 1);
-        const inner = await overflow(option);
-        expect(inner.vertical).toBeLessThanOrEqual(1);
-        expect(inner.horizontal).toBeLessThanOrEqual(1);
+        expect(await textOverflow(option), "the option's label is not clipped").toBeLessThanOrEqual(1);
       }
-      expect((await overflow(group)).vertical).toBeLessThanOrEqual(1);
 
       // Horizontal reflow, asserted from the SAME page load rather than a second one (#842).
       const form = page.locator(".form");
@@ -709,7 +721,7 @@ test.describe("increased text size", () => {
     await expect(group.getByRole("radio")).toHaveCount(2);
     for (const option of await group.getByRole("radio").all()) {
       await expect(option).toBeVisible();
-      expect((await overflow(option)).vertical).toBeLessThanOrEqual(1);
+      expect(await textOverflow(option), "the option's label is not clipped").toBeLessThanOrEqual(1);
     }
     for (const row of await page.locator(".session-options-body .setting-row").all()) {
       expect((await overflow(row)).vertical).toBeLessThanOrEqual(1);
@@ -786,6 +798,22 @@ test.describe("Options at 1440px (#2954)", () => {
     await page.getByRole("button", { name: "Create Session" }).click();
     await expect(budget).toBeFocused();
     expect(await page.locator("html").getAttribute("data-create-session-count")).toBeNull();
+  });
+});
+
+test.describe("Options on a phone (#2954)", () => {
+  test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
+
+  test("the cloud budget stays a compact field under its sentence, at §8.3's 16px-text width", async ({ page }) => {
+    await openDialog(page, "?cloudTargets=1");
+    await openOptions(page);
+    await page.getByRole("button", { name: /^Run On:/ }).click();
+    await page.getByRole("option", { name: /Cloud Sandbox/ }).click();
+    const budget = page.getByRole("spinbutton", { name: "Cloud Budget USD" });
+    const field = (await budget.locator("xpath=..").boundingBox())!;
+    const row = (await settingRow(budget).boundingBox())!;
+    expect(field.width).toBe(120);
+    expect(field.x - row.x, "at the row's start, under its text").toBeLessThan(24);
   });
 });
 

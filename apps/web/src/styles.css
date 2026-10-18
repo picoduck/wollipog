@@ -17355,6 +17355,18 @@ button.setting-row { cursor: pointer; }
   min-width: 0;
 }
 .session-options-folder > .checkbox-label { font-family: var(--font-mono); font-size: var(--text-sm); }
+/* Cloud Budget stays a §8.3 number field with USD inside it, 96px (120px where field text is 16px),
+   although this 560px dialog stacks every row: under its sentence, at the row's start, rather than
+   stretched across it as a stacked number row otherwise is. */
+@container (max-width: 559px) {
+  .session-options-body .setting-row-number .input-affix { align-self: flex-start; }
+  .session-options-body .setting-row-number .w-xs { width: 96px; }
+}
+@media (max-width: 760px), (pointer: coarse) {
+  @container (max-width: 559px) {
+    .session-options-body .setting-row-number .w-xs:has(> .input-affix-text:last-child) { width: 120px; }
+  }
+}
 .orchestrator-policy-area {
   display: grid;
   gap: var(--space-3);

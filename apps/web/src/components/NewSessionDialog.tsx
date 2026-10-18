@@ -1428,6 +1428,8 @@ export function NewSessionDialog({
         report("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.", "full-control");
         return;
       }
+      // The panel inside Options says why a launch did not start, so it must be on screen first.
+      if (!optionsOpen) flushSync(() => setOptionsOpen(true));
       busyRef.current = true;
       setBusy(true);
       try { await fullControlAuthorization.authorize(); } catch { /* The panel shows why it did not start. */ }
@@ -2035,8 +2037,12 @@ export function NewSessionDialog({
     ...(orchestrator && !orchestratorSettingsReady && orchestratorSettings?.error
       ? [{ key: "policy-error", label: "Policy Not Loaded" }] : []),
     ...(orchestrator && orchestratorSettingsReady &&
-      !(orchestratorCapabilitiesValid && orchestratorDelegationValid && orchestratorExecutionValid)
+      !(orchestratorCapabilitiesValid && orchestratorDelegationValid && orchestratorExecutionValid && liveChildLimitValid)
       ? [{ key: "policy-invalid", label: "Policy Needs a Change" }] : []),
+    // Full Control's footer action is disabled until its preparation inside Options is ready, and
+    // only that preparation says what is missing.
+    ...(fullControlLaunch && !fullControlAuthorization?.ready ? [{ key: "full-control", label: "Full Control Not Ready" }] : []),
+    ...(!cloudBudgetValid ? [{ key: "cloud-budget", label: "Budget Out of Range" }] : []),
   ];
 
   return (
