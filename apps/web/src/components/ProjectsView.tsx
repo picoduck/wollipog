@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import type { BoxView, ProjectLocationView, ProjectView } from "@wollipog/protocol";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { BoxView, ProjectLocationView, ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { archiveProjectWithFeedback, projectArchiveMessage } from "../project-actions.js";
 import { ProjectMemorySharingSettings } from "./ProjectMemorySharing.js";
-import { ProjectChildDefaults } from "./ProjectChildDefaults.js";
+import { ProjectSettings } from "./ProjectSettings.js";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
   filterManagedProjects,
@@ -123,7 +123,6 @@ export function ProjectsView({
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<ProjectActionError | null>(null);
-  const [renameDraft, setRenameDraft] = useState("");
   const { identity: accessIdentity, error: accessIdentityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const createButtonRef = useRef<HTMLButtonElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
@@ -186,9 +185,8 @@ export function ProjectsView({
     if (!detailOpen && listBodyRef.current) listBodyRef.current.scrollTop = listScrollTop.current;
   }, [detailOpen]);
   useEffect(() => {
-    setRenameDraft(selected?.name ?? "");
     setError(null);
-  }, [selected?.id, selected?.name]);
+  }, [selected?.id]);
   useEffect(() => {
     if (overrides.size === 0) return;
     setOverrides((current) => {
@@ -230,22 +228,11 @@ export function ProjectsView({
     }
   };
 
-  const rename = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!selected || !renameDraft.trim() || renameDraft.trim() === selected.name) return;
-    try {
-      await runProjectMutation("rename", async () => (await api.updateProject(selected.id, { name: renameDraft.trim() })).project,
-        "Couldn't rename the project.");
-      showToast("Project renamed.");
-    } catch { /* inline error */ }
-  };
-  const toggleHidden = async () => {
+  /** A change from the settings editor, which shows its own failure: the save bar's, or the row's. */
+  const updateSettings = async (key: string, changes: UpdateProjectRequest) => {
     if (!selected) return;
-    try {
-      await runProjectMutation("visibility", async () => (await api.updateProject(selected.id, { hidden: !selected.hidden })).project,
-        selected.hidden ? "Couldn't show the project in Sessions." : "Couldn't hide the project from Sessions.");
-      showToast(selected.hidden ? "Project shown in Sessions." : "Project hidden from Sessions.");
-    } catch { /* inline error */ }
+    const project = await runProjectMutation(key, async () => (await api.updateProject(selected.id, changes)).project, null);
+    if (!project) throw new Error("Another change to this project is still saving.");
   };
   const archiveSessions = async () => {
     if (!selected || selected.unarchivedSessionCount === 0) return;
@@ -311,7 +298,9 @@ export function ProjectsView({
       const next = projectAfterRemoval(allProjects, selected.id);
       setDeletedIds((current) => new Set(current).add(selected.id));
       setDialog(null);
-      navigate(next ? { name: "projects", id: next.id } : { name: "projects" });
+      // A replace: the deleted project's route cannot be shown, so its unsaved settings are not
+      // asked about.
+      navigate(next ? { name: "projects", id: next.id } : { name: "projects" }, { replace: true });
       showToast("Project deleted. Sessions moved to No Project.");
     } catch (cause) {
       fail("Couldn't delete the project.", cause);
@@ -480,8 +469,9 @@ export function ProjectsView({
             />
           ) : (
             // The header, then the notices, then one section recipe in a fixed order (#2959). Each
-            // location is a ProjectLocationRow (#2961); the other sections are reworked by #2962
-            // (Settings, Child Session Defaults) and #2963 (Memory Sharing).
+            // location is a ProjectLocationRow (#2961); Settings and Child Session Defaults are setting
+            // rows saved by one save bar at the end (ProjectSettings, #2962), which Memory Sharing
+            // joins in #2963.
             <div className="project-detail">
               <ProjectDetailHeader
                 project={selected}
@@ -554,48 +544,34 @@ export function ProjectsView({
                   </ul>
                 )}
               </DetailSection>
-              <DetailSection title="Settings" note="Renaming a project doesn't rename its folders or locations.">
-                <form className="project-name-form" onSubmit={(event) => void rename(event)}>
-                  <label className="field">
-                    <span>Project Name</span>
-                    <input ref={nameInputRef} value={renameDraft} disabled={selected.canManage === false || busy !== null} maxLength={120} onChange={(event) => setRenameDraft(event.target.value)} />
-                  </label>
-                  <button type="submit" className="btn" disabled={selected.canManage === false || busy !== null || !renameDraft.trim() || renameDraft.trim() === selected.name}>
-                    <span>{busy === "rename" ? "Saving…" : "Save Changes"}</span>
-                  </button>
-                </form>
-                <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => void toggleHidden()}>
-                  {busy === "visibility" ? "Saving…" : selected.hidden ? "Show Project" : "Hide Project"}
-                </button>
-                {accessScopeManagementSupported && selected.scope && (
+              <ProjectSettings
+                key={selected.id}
+                project={selected}
+                busy={busy}
+                nameInputRef={nameInputRef}
+                access={accessScopeManagementSupported && selected.scope && (
                   <AccessScopeSettings
                     resource={{ kind: "project", projectId: selected.id, name: selected.name, locations: selected.locations }}
                     scope={selected.scope}
                     identity={accessIdentity}
-                    disabled={selected.canManage === false || busy !== null}
+                    readOnly={selected.canManage === false}
+                    disabled={busy !== null}
                     onUpdated={() => void refreshSelectedProject()}
                   />
                 )}
-              </DetailSection>
-              <ProjectMemorySharingSettings key={`memory:${selected.id}`} project={selected} runners={runners}
-                disabled={selected.canManage === false || busy !== null}
-                onSave={async (memorySharing) => {
-                  const result = await runProjectMutation("memory-sharing",
-                    // This form owns its error alert; do not announce the rejection twice.
-                    async () => (await api.updateProject(selected.id, { memorySharing })).project, null);
-                  if (!result) throw new Error("Could not save the memory policy.");
-                }} />
-              {selected.childSessionDefaults !== undefined && <ProjectChildDefaults
-                key={selected.id}
-                project={selected}
-                disabled={selected.canManage === false || busy !== null}
-                onSave={async (childSessionDefaults) => {
-                  const result = await runProjectMutation("child-defaults",
-                    // This form owns its error alert; do not announce the rejection twice.
-                    async () => (await api.updateProject(selected.id, { childSessionDefaults })).project, null);
-                  if (!result) throw new Error("Could not save child session defaults.");
-                }}
-              />}
+                memorySharing={(
+                  <ProjectMemorySharingSettings key={`memory:${selected.id}`} project={selected} runners={runners}
+                    disabled={selected.canManage === false || busy !== null}
+                    onSave={async (memorySharing) => {
+                      const result = await runProjectMutation("memory-sharing",
+                        // This form owns its error alert; do not announce the rejection twice.
+                        async () => (await api.updateProject(selected.id, { memorySharing })).project, null);
+                      if (!result) throw new Error("Could not save the memory policy.");
+                    }} />
+                )}
+                onSave={(changes) => updateSettings("settings", changes)}
+                onSetSessionsTab={(shown) => updateSettings("visibility", { hidden: !shown })}
+              />
             </div>
           )}
         </div>

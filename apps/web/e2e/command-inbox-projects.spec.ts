@@ -2015,9 +2015,14 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await expect(page.getByRole("heading", { name: "Durable Empty" })).toBeVisible();
   // No Locations is one inline row (#2961).
   await expect(page.getByText("Add the folder on one of your machines where this project's sessions run.", { exact: true })).toBeVisible();
-  // The Settings section's button says the state; the retired pill no longer repeats it (#2959).
-  await page.getByRole("button", { name: "Hide Project" }).click();
-  await expect(page.getByRole("button", { name: "Show Project" })).toBeVisible();
+  // Show as a Sessions Tab says the state and applies at once; the retired pill no longer repeats it
+  // (#2959), and no Hide Project button renders (#2962).
+  const sessionsTab = page.getByRole("switch", { name: "Show as a Sessions Tab" });
+  await expect(sessionsTab).toHaveAttribute("aria-checked", "true");
+  await sessionsTab.click();
+  await expect(sessionsTab).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByText("Sessions tab hidden.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^(Hide|Show) Project$/ })).toHaveCount(0);
   await expect(page.getByText("Hidden from Sessions", { exact: true })).toHaveCount(0);
 
   await page.reload();
@@ -2028,8 +2033,10 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await page.getByRole("radio", { name: /^Hidden \d+$/ }).click();
   await expect(page.getByRole("button", { name: /Durable Empty/ })).toBeVisible();
   await page.getByRole("button", { name: /Durable Empty/ }).click();
-  await page.getByRole("button", { name: "Show Project" }).click();
-  await expect(page.getByRole("button", { name: "Hide Project" })).toBeVisible();
+  await expect(sessionsTab).toHaveAttribute("aria-checked", "false");
+  await sessionsTab.click();
+  await expect(sessionsTab).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByText("Sessions tab shown.", { exact: true })).toBeVisible();
 });
 
 test.describe("with a touch pointer", () => {

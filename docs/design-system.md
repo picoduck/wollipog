@@ -1842,10 +1842,10 @@ Only a disabled row dims, and only its title (`--text-faint`, never opacity, §3
 
 | Component | Control | Notes |
 | --- | --- | --- |
-| `SwitchRow` | The whole row is the `Switch` (`.setting-row-switch`); the track at the column's right edge. | `saved` and `failure` (in place, with Try Again) as before; `busy` keeps the confirmed value. |
+| `SwitchRow` | The whole row is the `Switch` (`.setting-row-switch`); the track at the column's right edge. | `saved` and `failure` (in place, with Try Again) as before; `busy` keeps the confirmed value. A disabled row's `disabledReason` is a `.setting-row-reason` line under the description, which the switch is also described by ("You can't change this project."). |
 | `SegmentedRow` | `.seg` filling the column. | For two or three options whose labels fit the column (labels never wrap); a `Select` otherwise. `disabledReason` under the pills. |
 | `SelectRow` | `Select` filling the column. | Its `.menu.listbox` is at least as wide as the trigger and 280px, and 360px when options carry descriptions, by default. `disabledReason` is visible under the trigger and part of its description. |
-| `NumberRow` | A `.w-xs` (96px) field with its unit inside (§8.3). | Named by the title and unit; a long unit goes in the title or description. An invalid value is `aria-invalid` with a `FieldError` under the field (§8.5). |
+| `NumberRow` | A `.w-xs` (96px) field with its unit inside (§8.3). | Named by the title and unit; a long unit goes in the title or description. An invalid value is `aria-invalid` with a `FieldError` under the field (§8.5), or, with `errorPlacement="description"`, in the description's place where the description is the field's helper ("A whole number."), so the two never show at once. `placeholder` says what an empty field means ("No limit"); `readOnly` takes the §8.1 read-only treatment. |
 | `ValueRow` | A read-only value, right-aligned. | `mono` for addresses, versions and ids; `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>", or `copyLabel` where the title does not name the value ("Copy Address" beside Connected To). It confirms with its icon. A value is one line, cut to an ellipsis with its full text in the tooltip; `wrap` is for a value that is only useful whole, an address (Connected To): it wraps on lines of even length, breaking only after `.`, `/` and `:`, never at a hyphen. |
 | `LinkRow` | Trailing `ChevronRight`, after an optional trailing word. | Navigation only; the whole row is the button. |
 | `ActionRow` | One `.btn` (`--control-h`), such as Edit…, with an optional 14px icon before its label. | Named by its label and the row's title ("Edit… Claude Code"). |
@@ -1860,7 +1860,10 @@ check: before the track on a switch row, at the end of the text cell otherwise, 
 polite region beside the control. A failed instant save that is
 not a switch is the group's failure notice (below). A `SettingRow` with no value to show until a read
 succeeds (Settings › Network's Tailnet Access before its status is known) takes `failure` too, in
-place of its description with Try Again, so an unknown value is never drawn as a control.
+place of its description with Try Again, so an unknown value is never drawn as a control. A
+`SettingRow` holding a field in an editor (a project's Name, #2962) takes `error` and `errorId`: the
+`FieldError` in the description's place, which the caller's field marks `aria-invalid` and points
+at.
 
 **Narrow.** Under a 560px **container** the control drops below the text at full width; switch, link
 and action rows (`.setting-row-trailing`) keep their control trailing. The container is the group's
@@ -2009,6 +2012,14 @@ settings panel's own children so the bar is too, a field error at a setting (`Nu
 page with a dirty draft asks **Keep Editing** or **Discard Changes** first (`useLeaveGuard`). Browser
 Back and Forward ask too (#3218): the editor's entry is put back while it asks, so Keep Editing loses
 no forward entry, and Discard Changes completes the move.
+
+A project's detail is the second (#2962): Name and the two child-session limits are one draft,
+saved by one bar sticky 16px above the bottom of the detail pane in one update request carrying only
+the changed fields, while Show as a Sessions Tab beside them applies at once. Each field validates on
+leaving it after an edit and on Save, which moves focus to the first invalid field; a shown error
+blocks Save with "Fix N fields to save". A failed save keeps the draft and reads "Couldn't save the
+changes. Nothing was changed." with Try Again. Leaving the project with a dirty draft asks first, as
+Settings › Orchestrator does.
 
 An editor names its actions and states with four props, and changes nothing in `SaveBar` itself:
 

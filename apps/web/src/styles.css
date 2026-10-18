@@ -3050,14 +3050,15 @@ button.status { cursor: pointer; }
 @media (forced-colors: active) {
   .save-bar-icon { color: inherit; }
 }
-/* In Settings the bar floats 16px above the panel's bottom edge. */
-.settings-panel > .save-bar { bottom: var(--space-4); }
+/* In Settings, and in a project's detail pane (#2962), the bar floats 16px above the scrolling
+   pane's bottom edge. */
+:is(.settings-panel, .project-detail) > .save-bar { bottom: var(--space-4); }
 /* On a phone its two actions share the full width under the message (and a failure's icon, which
    the message leaves room for), as a phone sheet's footer does (§7.5). */
 @media (max-width: 760px) {
-  .settings-panel > .save-bar { flex-wrap: wrap; }
-  .settings-panel > .save-bar > .save-bar-message { flex: 1 1 calc(100% - var(--space-6)); }
-  .settings-panel > .save-bar > .btn { flex: 1; max-width: none; }
+  :is(.settings-panel, .project-detail) > .save-bar { flex-wrap: wrap; }
+  :is(.settings-panel, .project-detail) > .save-bar > .save-bar-message { flex: 1 1 calc(100% - var(--space-6)); }
+  :is(.settings-panel, .project-detail) > .save-bar > .btn { flex: 1; max-width: none; }
 }
 
 /* ---------------------------------- Steps ----------------------------------
@@ -12596,8 +12597,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   gap: var(--space-1);
   min-width: 0;
 }
-.project-name-form { display: flex; max-width: 660px; align-items: flex-end; gap: 10px; }
-.project-name-form .field { min-width: 0; flex: 1; }
 .project-location-reason {
   display: block;
   padding: 8px 10px;
@@ -12607,9 +12606,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: color-mix(in srgb, var(--yellow) 7%, transparent);
   font-size: 11px;
 }
-/* The saved access (#2960): a §8.2 row outside a settings surface, so it takes its container's
-   inline edges and keeps Change… beside the text at any width. */
-.setting-row.access-scope-readout { grid-template-columns: minmax(0, 1fr) auto; padding-inline: 0; }
 /* Change Access: the preview's checking line, and a broadening's one dim sentence. */
 .access-change-checking {
   display: flex;
@@ -12743,10 +12739,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .row.add-location-empty > svg { flex: none; }
 .danger-note { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger-text) 45%, var(--border)); border-radius: 8px; color: var(--danger-text); background: color-mix(in srgb, var(--danger-text) 7%, transparent); }
-@media (max-width: 760px) {
-  .project-name-form { align-items: stretch; flex-direction: column; }
-  .project-name-form .btn { justify-content: center; }
-}
 
 /* Command Inbox --------------------------------------------------------- */
 .main-body.inbox-main-body {

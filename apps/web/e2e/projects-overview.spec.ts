@@ -59,7 +59,7 @@ for (const width of [1440, 834]) {
 
       await section(page, "Needs Attention").getByRole("button", { name: "Rename Docs Site" }).click();
       expect(await routePath(page)).toBe(projectPath("docs-site"));
-      const name = page.getByRole("textbox", { name: "Project Name" });
+      const name = page.getByRole("textbox", { name: "Name", exact: true });
       await expect(name).toBeFocused();
       await expect(name).toHaveValue("Docs Site");
     });
