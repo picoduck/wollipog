@@ -1008,6 +1008,7 @@ export function Shell() {
           {view.name === "projects" && (
             <ProjectsView
               selectedProjectId={view.id}
+              pane={view.pane}
               onNewSession={(preset) => setDialog({ kind: "session", preset })}
             />
           )}

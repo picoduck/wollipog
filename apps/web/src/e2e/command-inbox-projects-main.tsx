@@ -189,7 +189,9 @@ const ARCHIVE_STOP_STATUS = FIXTURE_QUERY.get("archiveStop") === "failed" ? "sto
  * The Projects page's frame (#2957). `?projects=nine` is nine projects, one hidden; `many` is forty,
  * whose Alpha has enough locations that its detail is taller than any viewport; `empty` has none;
  * `unsupported` is a control plane without projects; `loading` never delivers the snapshot. The
- * nine and the forty spread their locations over an online and an offline machine.
+ * nine and the forty spread their locations over an online and an offline machine. For the Projects
+ * Overview (#2958), `attention` is the nine with a second Docs Site, `healthy` only the six that can
+ * start sessions, and `two` the first two of those.
  */
 const SHELL_PROJECTS_MODE = FIXTURE_QUERY.get("projects");
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}${SHELL_PROJECTS_MODE ? `.projects-${SHELL_PROJECTS_MODE}` : ""}`;
@@ -789,8 +791,25 @@ function initialModel(): FixtureModel {
     for (const value of initial.sessions) Object.assign(value, { projectId: null, projectLocationId: null });
   }
   if (SHELL_PROJECTS_MODE === "nine" || SHELL_PROJECTS_MODE === "many") initial.projects = shellProjects(SHELL_PROJECTS_MODE === "nine" ? 9 : 40);
+  if (SHELL_PROJECTS_MODE === "attention") {
+    const docs = shellProjects(9).find((candidate) => candidate.id === "docs-site")!;
+    initial.projects = [...shellProjects(9), project("docs-site-2", "Docs Site", {
+      locations: [{
+        ...shellProjects(9)[1]!.locations[0]!, id: "location-docs-site-2", projectId: "docs-site-2",
+        workspaceId: SHELL_SECOND_DOCS_WORKSPACE.id, name: SHELL_SECOND_DOCS_WORKSPACE.name, path: SHELL_SECOND_DOCS_WORKSPACE.path,
+      }],
+      unarchivedSessionCount: 2, totalSessionCount: 2, createdAt: docs.createdAt + 1,
+    })];
+  }
+  if (SHELL_PROJECTS_MODE === "healthy" || SHELL_PROJECTS_MODE === "two") {
+    const healthy = shellProjects(9).filter((candidate) => candidate.locations.some((value) => value.availability === "available"));
+    initial.projects = SHELL_PROJECTS_MODE === "two" ? healthy.slice(0, 2) : healthy;
+  }
   return initial;
 }
+
+/** The `attention` fixture's second Docs Site's folder, on the online machine. */
+const SHELL_SECOND_DOCS_WORKSPACE = { id: "docs-site-2-workspace", name: "docs-site-2", path: "/repos/docs-site-2" };
 
 const SHELL_PROJECT_NAMES = ["Alpha", "Billing Service", "Checkout Web", "Docs Site", "Edge Proxy", "Field App", "Growth Experiments", "Secret", "Infra"];
 
@@ -816,7 +835,11 @@ function shellProjects(count: number): ProjectView[] {
     const locations = index === 0 ? Array.from({ length: 8 }, (_, location) => at(id, location, location % 3 === 2))
       : index % 5 === 4 ? [] : [at(id, 0, offline)];
     const sessions = index === 0 ? 1 : (index * 7) % 12;
-    return project(id, name, { hidden: name === "Secret", locations, unarchivedSessionCount: sessions, totalSessionCount: sessions });
+    // A few are running, so the Projects Overview's counts have something to say (#2958).
+    const running = index === 1 ? 2 : index === 2 ? 1 : 0;
+    return project(id, name, {
+      hidden: name === "Secret", locations, unarchivedSessionCount: sessions, totalSessionCount: sessions, activeSessionCount: running,
+    });
   });
 }
 
@@ -1777,12 +1800,20 @@ const shellOverviewMachine = () => {
   };
 };
 /** The overview's offline second machine. */
-const SHELL_PROJECTS_MACHINES = SHELL_PROJECTS_MODE === "nine" || SHELL_PROJECTS_MODE === "many";
+const SHELL_PROJECTS_MACHINES = ["nine", "many", "attention", "healthy", "two"].includes(SHELL_PROJECTS_MODE ?? "");
 const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW || SCENARIO === "preview-bar" || SHELL_PROJECTS_MACHINES
   ? { ...structuredClone(runner), runnerId: "runner-2", hostname: "studio-workstation", displayName: "Studio Workstation", status: "offline",
     providerLogins: undefined }
   : null;
 if (SHELL_OVERVIEW || SHELL_PROJECTS_MACHINES) runner.displayName = "Build Machine";
+// The Projects fixtures' folders are on their machines, so a project there can start sessions.
+if (SHELL_PROJECTS_MACHINES) {
+  for (const location of shellProjects(40).flatMap((candidate) => candidate.locations)) {
+    if (location.runnerId !== runner.runnerId || runner.workspaces.some((workspace) => workspace.id === location.workspaceId)) continue;
+    runner.workspaces.push({ id: location.workspaceId, name: location.name, path: location.path });
+  }
+  runner.workspaces.push(SHELL_SECOND_DOCS_WORKSPACE);
+}
 const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : SHELL_SKILLS_MODE === "list" ? SHELL_LIST_SKILLS : SHELL_OVERVIEW ? SHELL_OVERVIEW_SKILLS : Array.from(
   { length: SHELL_SKILLS_MODE === "many" ? 40 : SHELL_SKILL_NAMES.length },
   (_, index) => ({
@@ -3768,7 +3799,7 @@ function FixtureSurface() {
   if (view.name === "projects") {
     return (
       <>
-        <ProjectsView selectedProjectId={view.id} onNewSession={openNewSession} />
+        <ProjectsView selectedProjectId={view.id} pane={view.pane} onNewSession={openNewSession} />
         {newSession && (
           <NewSessionDialog
             preset={newSession.preset}

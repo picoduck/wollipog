@@ -1,4 +1,4 @@
-import { useMemo, type Ref, type UIEventHandler } from "react";
+import { useId, useMemo, type Ref, type UIEventHandler } from "react";
 import type { ProjectView } from "@wollipog/protocol";
 import {
   projectAvailabilityMeta,
@@ -8,6 +8,7 @@ import {
   type LocationMachineName,
   type ProjectVisibilityFilter,
 } from "../project-management.js";
+import { CountBadge } from "./CountBadge.js";
 import { SearchIcon } from "./Icons.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
@@ -31,6 +32,8 @@ export interface ProjectListProps {
   machineName: LocationMachineName;
   selectedId: string | null;
   onSelect: (projectId: string) => void;
+  /** The phone's first row, which opens the Projects Overview route with its Needs Attention count. */
+  overview?: { count: number; onOpen: () => void };
   /** The list's one scroll container, which the page restores on a phone's Back. */
   bodyRef?: Ref<HTMLDivElement>;
   onBodyScroll?: UIEventHandler<HTMLDivElement>;
@@ -43,8 +46,9 @@ export interface ProjectListProps {
  */
 export function ProjectList({
   projects, shown, query, onQueryChange: setQuery, visibility, onVisibilityChange: setVisibility,
-  machineName, selectedId, onSelect, bodyRef, onBodyScroll,
+  machineName, selectedId, onSelect, overview, bodyRef, onBodyScroll,
 }: ProjectListProps) {
+  const overviewDescriptionId = `project-overview-${useId().replace(/:/g, "")}`;
   const counts = useMemo(() => projects ? projectVisibilityCounts(projects, query, machineName) : null,
     [machineName, projects, query]);
   const trimmedQuery = query.trim();
@@ -76,6 +80,24 @@ export function ProjectList({
         />
       </div>
       <div ref={bodyRef} className="master-detail-list-body clip-focus" onScroll={onBodyScroll}>
+        {projects !== null && overview && (
+          <>
+            <button
+              type="button"
+              className="row project-list-overview"
+              aria-describedby={overview.count > 0 ? overviewDescriptionId : undefined}
+              onClick={overview.onOpen}
+            >
+              <span className="row-title">Projects Overview</span>
+              <CountBadge count={overview.count} />
+            </button>
+            {overview.count > 0 && (
+              <span id={overviewDescriptionId} className="sr-only">
+                {overview.count} {overview.count === 1 ? "item needs" : "items need"} attention
+              </span>
+            )}
+          </>
+        )}
         {projects === null ? (
           <div className="skeleton" role="status" aria-live="polite">
             <span className="sr-only">Loading projects</span>

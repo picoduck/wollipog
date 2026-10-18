@@ -19,7 +19,7 @@ export type View =
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage" }
   | { name: "archived" }
-  | { name: "projects"; id?: string }
+  | { name: "projects"; id?: string; pane?: ProjectsPane }
   | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
   | { name: "run"; id: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
@@ -139,6 +139,13 @@ export type ConnectionSection = "instances" | "machines" | "people";
  * which is what a phone opens from the list (§6.2).
  */
 export type SkillsPane = "orphans" | "overview";
+
+/**
+ * The Projects pane that is not a project (#2958): the Projects Overview. `/projects` shows the list
+ * with the overview beside it; `/projects/overview` is the same content as its own route, which is
+ * what a phone opens from the list (§6.2). A project id wins over the pane.
+ */
+export type ProjectsPane = "overview";
 
 export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
@@ -393,7 +400,7 @@ export function viewPath(view: View): string {
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return "/usage";
     case "archived": return "/archived";
-    case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : "/projects";
+    case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : view.pane ? `/projects/${view.pane}` : "/projects";
     case "session": return view.location
       ? `/sessions/~${encodeResourceId(view.id)}/files/~${encodeOpaque(view.location.path)}${sourceLocationSearch(view.location)}`
       : view.attention
@@ -476,6 +483,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return policyId === null ? null : approvalsPolicyView(policyId);
   }
   if (path === "/projects") return { name: "projects" };
+  if (path === "/projects/overview") return { name: "projects", pane: "overview" };
   const projectMatch = /^\/projects\/~([^/]+)$/.exec(path);
   if (projectMatch) {
     const id = decodeResourceId(projectMatch[1]!);

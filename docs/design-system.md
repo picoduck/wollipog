@@ -1467,6 +1467,14 @@ Never a centered sentence. Pick the first rule that applies:
 If the **collection is empty**, the list pane and detail pane are replaced by one empty state spanning
 the content area (§12.1), not an empty list beside a void.
 
+**Projects Overview (#2958).** Projects follows rule 1. Needs Attention lists each project that can't
+start sessions (every location out of reach, or none yet) and each name more than one project shares,
+ignoring case, each row with one action: Open, Add Location… or Rename… (which opens the project with
+its Name field focused); a project the person can't change offers Open. Most Active takes Recently
+Changed's place: up to five projects by unarchived sessions. A search changes only the list. On a
+phone the list leads with a Projects Overview row carrying the Needs Attention count (§11.4), which
+opens `/projects/overview`.
+
 ### 6.2 Phone
 
 List and detail are two routes. Tapping a row pushes the detail route; the app bar shows ‹ Back and the
