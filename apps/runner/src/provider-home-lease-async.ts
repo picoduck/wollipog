@@ -3,8 +3,9 @@ import { createRequire } from "node:module";
 import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { leaseWorkerDeadline, leaseWorkerDelay, leaseWorkerNow } from "./provider-home-lease-clock.js";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerOperation, validLeaseWorkerProfileAccess, validLeaseWorkerReplyProfileId, type LeaseWorkerOperation, type LeaseWorkerProfileAccess, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
+import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_CLOCK, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerOperation, validLeaseWorkerProfileAccess, validLeaseWorkerReplyProfileId, type LeaseWorkerOperation, type LeaseWorkerProfileAccess, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** One acquired provider-HOME reference. Settle it exactly once: `release` drops exactly this
  * reference; `retain` keeps the reference until shutdown and frees only the worker-side handle.
@@ -54,7 +55,7 @@ interface Pending {
   id: string;
   operation: LeaseWorkerOperation;
   expectedProfileId?: string;
-  deadline: number;
+  deadline: bigint;
   enqueuedAt: number;
   startedAt?: number;
   timer: ReturnType<typeof setTimeout>;
@@ -209,14 +210,11 @@ export class AsyncProviderHomeLeaseRegistry {
     if (this.queue.length + (this.active ? 1 : 0) >= this.pendingLimit) return Promise.reject(new Error("Provider-HOME lease queue is full; retry later."));
     return new Promise((resolve, reject) => {
       const pending: Pending = { id: randomUUID(), operation, ...(expectedProfileId === undefined ? {} : { expectedProfileId }),
-        deadline: Date.now() + this.deadlineMs, timer: undefined!, signal, isCurrent,
+        deadline: leaseWorkerDeadline(this.deadlineMs), timer: undefined!, signal, isCurrent,
         enqueuedAt: performance.now(),
         cancelled: false, acceptedCancel: false, compensation: false, phase: "queued",
         resolve: (value, profileId) => resolve({ value, id: pending.id, ...(profileId === undefined ? {} : { profileId }) }), reject };
-      pending.timer = setTimeout(() => {
-        if (pending === this.active) this.poison("active deadline or ambiguous completion");
-        else { this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); }
-      }, this.deadlineMs);
+      this.watchDeadline(pending);
       pending.abort = () => this.cancel(pending);
       signal?.addEventListener("abort", pending.abort, { once: true });
       this.queue.push(pending);
@@ -226,7 +224,7 @@ export class AsyncProviderHomeLeaseRegistry {
 
   private startWorker(): void {
     if (this.worker) return;
-    const data = { epoch: this.epoch, ownerHash: this.ownerHash, helperDataDir: this.options.helperDataDir, tests: this.options.engineOptionsForTest,
+    const data = { epoch: this.epoch, ownerHash: this.ownerHash, clock: LEASE_WORKER_CLOCK, helperDataDir: this.options.helperDataDir, tests: this.options.engineOptionsForTest,
       ...(this.options.controlPlaneInstanceId === undefined ? {} : { controlPlaneInstanceId: this.options.controlPlaneInstanceId }) };
     if (this.options.workerFactoryForTest) this.worker = this.options.workerFactoryForTest(data);
     else {
@@ -253,16 +251,20 @@ export class AsyncProviderHomeLeaseRegistry {
     const pending = this.queue.shift();
     if (!pending) { this.worker?.unref(); return; }
     if (!this.current(pending)) { this.cancel(pending); this.pump(); return; }
-    if (pending.deadline <= Date.now()) {
+    if (pending.deadline <= leaseWorkerNow()) {
       this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); this.pump(); return;
     }
     let operation: LeaseWorkerOperation;
     try { operation = this.dispatched(pending); } catch {
       this.remove(pending); pending.reject(new Error("Provider-HOME lease profile context is unavailable; retry later.")); this.pump(); return;
     }
+    // Dispatch-time context callbacks may consume the remaining enqueue budget.
+    if (pending.deadline <= leaseWorkerNow()) {
+      this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); this.pump(); return;
+    }
     this.active = pending; pending.phase = "executing";
     pending.startedAt = performance.now();
-    this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline, operation });
+    this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline.toString(), operation });
   }
 
   /** Attach the profile context at dispatch, not enqueue, so a grant revoked while this request
@@ -289,12 +291,12 @@ export class AsyncProviderHomeLeaseRegistry {
     if (this.poisonReason) return;
     if (!value || typeof value !== "object" || !boundedLeaseWorkerFrame(value, LEASE_WORKER_LIMITS.responseBytes)) return this.poison("invalid response");
     const reply = value as LeaseWorkerReply;
-    const keys = reply.kind === "ready" ? ["kind", "epoch", "pid"] : reply.kind === "diagnostic"
+    const keys = reply.kind === "ready" ? ["kind", "epoch", "pid", "clock"] : reply.kind === "diagnostic"
       ? ["kind", "epoch", "event", "leaseId", "message"] : ["kind", "epoch", "id", "ok", "value", "error", "profileId"];
     if (!leaseWorkerFrameKeys(reply, keys)) return this.poison("unexpected response fields");
     if (reply.epoch !== this.epoch) return this.poison("wrong worker epoch");
     if (reply.kind === "ready") {
-      if (this.ready || reply.pid !== process.pid) return this.poison("unproved worker parent identity");
+      if (this.ready || reply.pid !== process.pid || reply.clock !== LEASE_WORKER_CLOCK) return this.poison("unproved worker parent identity or clock");
       this.ready = true; this.pump(); return;
     }
     if (reply.kind === "diagnostic") {
@@ -308,9 +310,10 @@ export class AsyncProviderHomeLeaseRegistry {
     // Only a successful adoption names a profile, and it must name exactly one valid id.
     if (Object.hasOwn(reply, "profileId") !== (reply.ok && pending.operation.method === "profile_adopt") ||
         (Object.hasOwn(reply, "profileId") && !validLeaseWorkerReplyProfileId(reply.profileId))) return this.poison("unexpected profile id");
-    if (pending.deadline <= Date.now()) return this.poison("late completion receipt");
+    if (pending.deadline <= leaseWorkerNow()) return this.poison("late completion receipt");
     if (reply.kind === "receipt" && pending.phase === "executing") {
       if (!this.current(pending)) pending.cancelled = true;
+      if (pending.deadline <= leaseWorkerNow()) return this.poison("late completion receipt");
       pending.receipt = reply; pending.phase = "accepting";
       pending.acceptedCancel = pending.cancelled && isLeaseWorkerAcquisition(pending.operation.method);
       this.post({ kind: "accept", epoch: this.epoch, id: pending.id, cancel: pending.acceptedCancel }); return;
@@ -322,12 +325,13 @@ export class AsyncProviderHomeLeaseRegistry {
     } else if (reply.ok !== receipt.ok || reply.value !== receipt.value || reply.error !== receipt.error || reply.profileId !== receipt.profileId) return this.poison("changed completion receipt");
     if (reply.error === "cancel_release_failed") return this.poison("unproved cancelled reference release");
     if (!this.current(pending)) pending.cancelled = true;
+    if (pending.deadline <= leaseWorkerNow()) return this.poison("late completion receipt");
     // An abort can arrive after accept was sent. Compensate before dispatching any other work.
     if (pending.cancelled && !pending.acceptedCancel && reply.ok &&
         (pending.operation.method === "acquire" || pending.operation.method === "acquire_reference")) {
       pending.operation = { method: "cancel", home: pending.operation.home, completedId: pending.id };
       pending.id = randomUUID(); pending.compensation = true; pending.phase = "executing"; pending.receipt = undefined;
-      this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline, operation: pending.operation }); return;
+      this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline.toString(), operation: pending.operation }); return;
     }
     if (pending.compensation && (!reply.ok || !reply.value)) return this.poison("unproved late cancellation release");
     if (pending.operation.method === "close" && reply.ok && reply.value) this.closed = true;
@@ -345,6 +349,15 @@ export class AsyncProviderHomeLeaseRegistry {
 
   private current(pending: Pending): boolean {
     try { return !pending.cancelled && (pending.isCurrent?.() ?? true); } catch { return false; }
+  }
+
+  private watchDeadline(pending: Pending): void {
+    pending.timer = setTimeout(() => {
+      if (pending !== this.active && !this.queue.includes(pending)) return;
+      if (leaseWorkerDelay(pending.deadline) > 0) { this.watchDeadline(pending); return; }
+      if (pending === this.active) this.poison("active deadline or ambiguous completion");
+      else { this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); }
+    }, Math.max(1, leaseWorkerDelay(pending.deadline)));
   }
 
   private cancel(pending: Pending): void {

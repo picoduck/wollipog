@@ -29,6 +29,7 @@ const instanceId = randomUUID(), runnerId = "isolated-lease-worker", interval = 
 // Daemons only: Windows requires a native numeric exit receipt from each. Holders are plain Node
 // children whose forced exit reports a signal instead, so they are tracked and reaped separately.
 const children = [], holders = [], peers = [], states = new Map();
+const deadlineReport = join(root, "embedded-worker-deadlines.json");
 let output = "", lastHeartbeat = 0, delays = [], measuring = false;
 const wss = new WebSocketServer({ noServer: true });
 const server = createServer((request, response) => {
@@ -103,11 +104,26 @@ async function start(dataDir) {
   const inherited = process.platform === "win32"
     ? Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key.toUpperCase(), value])) : process.env;
   const systemPath = process.platform === "win32" ? `${inherited.SYSTEMROOT}\\System32;${inherited.SYSTEMROOT}\\System32\\WindowsPowerShell\\v1.0` : "/usr/bin:/bin";
+  // This verifier-only preload reads the actual SEA asset and executes its unchanged bytes in
+  // the deterministic fixture. It adds no production clock override or alternate worker entry.
+  // The ordinary daemon below still launches its fixed embedded worker and real native helper.
+  const verifyEmbedded = !source && children.length === 0;
+  const preload = join(root, "verify-embedded-deadlines.cjs");
+  if (verifyEmbedded) writeFileSync(preload, [
+    `const assert = require("node:assert/strict");`,
+    `const {getAsset,isSea} = require("node:sea"); assert.equal(isSea(),true);`,
+    `assert.throws(()=>getAsset("wollipog/provider-home-lease-worker","utf8"));`,
+    `const code = getAsset("wollipog/provider-home-lease-worker-hrtime-ns-v1","utf8");`,
+    `const {verifyWorkerDeadlines} = require(${JSON.stringify(join(repo, "apps/runner/scripts/provider-home-worker-deadline-fixture.cjs"))});`,
+    `const report = verifyWorkerDeadlines(code,__filename);`,
+    `require("node:fs").writeFileSync(${JSON.stringify(deadlineReport)},JSON.stringify(report));`,
+  ].join("\n"));
   const child = launchDaemon(binary, [...(source ? ["--import", loader, join(repo, "apps/runner/src/cli.ts")] : []), "--config", config], {
     cwd: dataDir, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
     env: { ...inherited, HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, "local"), APPDATA: join(home, "roaming"),
       TMPDIR: temp, TMP: temp, TEMP: temp, PATH: source ? systemPath : process.platform === "win32" ? systemPath : emptyBin,
       RUNNER_ID: runnerId, RUNNER_DATA_DIR: dataDir, RUNNER_TOKEN: "isolated-smoke-token",
+      ...(verifyEmbedded ? { NODE_OPTIONS: `${inherited.NODE_OPTIONS ?? ""} --require ${JSON.stringify(preload)}` } : {}),
       CONTROL_PLANE_URL: `ws://127.0.0.1:${server.address().port}/runner` },
   });
   children.push(child); child.stdout.on("data", b => { output = (output + b).slice(-65536); });
@@ -193,6 +209,14 @@ async function stop(child, signal) {
 try {
   await new Promise(resolveListen => server.listen(0, "127.0.0.1", resolveListen));
   const first = await start(join(root, "runner-a"));
+  let embeddedDeadlines;
+  if (!source) {
+    embeddedDeadlines = JSON.parse(readFileSync(deadlineReport, "utf8"));
+    assert.ok(embeddedDeadlines.cases >= 25, "actual embedded worker ran all deadline cases");
+    const builtWorker = readFileSync(join(repo, "apps/runner/.bin-build/provider-home-lease-worker.cjs"));
+    assert.equal(embeddedDeadlines.exactWorkerSha256, createHash("sha256").update(builtWorker).digest("hex"),
+      "the tested SEA worker is byte-identical to this build's fixed worker asset");
+  }
   const ownerHash = JSON.parse(readFileSync(join(first.dataDir, ".wollipog-runner-owner-v2.json"), "utf8")).ownerHash;
   if (maximal) seed(ownerHash);
   lastHeartbeat = performance.now(); measuring = true;
@@ -226,6 +250,7 @@ try {
   const stopped = await stop(second.child, "SIGTERM"); assert.equal(stopped.code, 0, output);
   assert.ok(evidence().some(item => item.record.state === "released" && item.record.pid === second.child.pid), "graceful shutdown awaited exact release");
   console.log(JSON.stringify({ mode: source ? "source-daemon" : "SEA-daemon", platform: process.platform, maximal,
+    ...(embeddedDeadlines ? { embeddedDeadlines } : {}),
     operationDurationMs, heartbeatIntervalMs: interval, heartbeatDispatches: delays.length, maxHeartbeatDelayMs: Math.max(...delays),
     liveOwnerRefused: true, killedRunnerRecovered: true, gracefulReleaseProved: true }));
 } finally {

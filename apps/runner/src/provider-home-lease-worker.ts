@@ -1,11 +1,12 @@
 import { parentPort, workerData } from "node:worker_threads";
+import { leaseWorkerDelay, leaseWorkerNow, parseLeaseWorkerDeadline } from "./provider-home-lease-clock.js";
 import { ProviderHomeLeaseRegistry, providerHomeLeaseRefusalKind, type ProviderHomeLeaseOptions } from "./provider-home-lease.js";
 import { adoptProviderProfileMarker, createProviderProfileMarker, revokeProviderProfileMarkerGrant } from "./provider-profile.js";
-import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_LIMITS, LEASE_WORKER_REFERENCE_LIMIT, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept, type LeaseWorkerError, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
+import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_CLOCK, LEASE_WORKER_LIMITS, LEASE_WORKER_REFERENCE_LIMIT, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept, type LeaseWorkerError, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** Only the fixed source/SEA entry starts this worker; there is no public RPC/CLI entry. */
 export function runProviderHomeLeaseWorker(): void {
-  if (!parentPort || typeof workerData?.epoch !== "string" || !/^[a-f0-9-]{36}$/u.test(workerData.epoch)) throw new Error("invalid lease worker startup");
+  if (!parentPort || workerData?.clock !== LEASE_WORKER_CLOCK || typeof workerData.epoch !== "string" || !/^[a-f0-9-]{36}$/u.test(workerData.epoch)) throw new Error("invalid lease worker startup");
   const instance: unknown = workerData.controlPlaneInstanceId;
   if (instance !== undefined && (typeof instance !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(instance))) throw new Error("invalid lease worker startup");
   const port = parentPort, epoch: string = workerData.epoch;
@@ -15,9 +16,20 @@ export function runProviderHomeLeaseWorker(): void {
     onDiagnostic: d => send({ kind: "diagnostic", epoch, ...d }),
   };
   const registry = new ProviderHomeLeaseRegistry(workerData.ownerHash, options);
-  let prepared: { request: LeaseWorkerExecute; reply: Extract<LeaseWorkerReply, { kind: "receipt" | "done" }>; cancel?: () => boolean } | undefined;
+  let prepared: { request: LeaseWorkerExecute; deadline: bigint; reply: Extract<LeaseWorkerReply, { kind: "receipt" | "done" }>; cancel?: () => boolean } | undefined;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  function timely(deadline: bigint): void {
+    if (leaseWorkerNow() >= deadline) throw new Error("lease worker deadline exceeded; preserve all evidence");
+  }
+  function watchDeadline(deadline: bigint): void {
+    watchdog = setTimeout(() => {
+      if (leaseWorkerDelay(deadline) > 0) { watchDeadline(deadline); return; }
+      // Failure exits this worker. Termination proves neither release nor rollback.
+      timely(deadline);
+    }, Math.max(1, leaseWorkerDelay(deadline)));
+  }
   let lastId: string | undefined;
-  let completedAcquisition: { id: string; home: string; cancel: () => boolean } | undefined;
+  let completedAcquisition: { id: string; home: string; deadline: bigint; cancel: () => boolean } | undefined;
   // Exact-entry release handles for completed acquire_reference operations, keyed by their id.
   const references = new Map<string, { home: string; release: () => boolean }>();
   function send(reply: LeaseWorkerReply): void {
@@ -35,15 +47,16 @@ export function runProviderHomeLeaseWorker(): void {
     if (!boundedLeaseWorkerFrame(message, LEASE_WORKER_LIMITS.requestBytes) || message?.epoch !== epoch ||
         typeof message.id !== "string" || !/^[a-f0-9-]{36}$/u.test(message.id)) throw new Error("invalid lease worker control frame");
     if (message.kind === "execute") {
-      if (!leaseWorkerFrameKeys(message, ["kind", "epoch", "id", "deadline", "operation"]) || prepared || message.id === lastId || !validLeaseWorkerOperation(message.operation) || !Number.isSafeInteger(message.deadline) ||
-          message.deadline > Date.now() + LEASE_WORKER_LIMITS.deadlineMs) throw new Error("invalid lease worker execution receipt");
+      const deadline = parseLeaseWorkerDeadline(message.deadline), now = leaseWorkerNow();
+      if (!leaseWorkerFrameKeys(message, ["kind", "epoch", "id", "deadline", "operation"]) || prepared || message.id === lastId || !validLeaseWorkerOperation(message.operation) || deadline === undefined ||
+          deadline > now + BigInt(LEASE_WORKER_LIMITS.deadlineMs) * 1_000_000n) throw new Error("invalid lease worker execution receipt");
       const reply: Extract<LeaseWorkerReply, { kind: "receipt" | "done" }> = { kind: "receipt", epoch, id: message.id, ok: false, value: false };
-      prepared = { request: message, reply };
-      if (message.deadline <= Date.now()) reply.error = "expired";
+      prepared = { request: message, deadline, reply };
+      if (deadline <= now) reply.error = "expired";
       else try {
         const op = message.operation;
         if (op.method === "cancel") {
-          if (completedAcquisition?.id !== op.completedId || completedAcquisition.home !== op.home) throw new Error("unproved cancellation receipt");
+          if (completedAcquisition?.id !== op.completedId || completedAcquisition.home !== op.home || completedAcquisition.deadline !== deadline) throw new Error("unproved cancellation receipt");
           references.delete(op.completedId);
           reply.value = completedAcquisition.cancel();
           if (!reply.value) reply.error = "cancel_release_failed";
@@ -83,30 +96,36 @@ export function runProviderHomeLeaseWorker(): void {
           reply.value = registry.releaseAll();
           if (reply.value) references.clear();
         }
-        if (reply.error) { send(reply); return; }
-        reply.ok = true;
+        if (!reply.error) reply.ok = true;
       } catch (error) { reply.error = fail(error); }
+      // Sync execution cannot be interrupted by a timer. Refuse late completion after any
+      // possible publication, preserving canonical proof instead of inferring rollback.
+      if (deadline > now) timely(deadline);
       send(reply);
+      watchDeadline(deadline);
     } else if (message.kind === "accept") {
       if (!leaseWorkerFrameKeys(message, ["kind", "epoch", "id", "cancel"]) || !prepared || prepared.request.id !== message.id || typeof message.cancel !== "boolean") throw new Error("unproved lease worker acceptance");
-      const { request, reply, cancel } = prepared;
+      const { request, deadline, reply, cancel } = prepared;
+      timely(deadline);
       // No second operation can interleave between completion and this exact reference unwind.
       if (message.cancel && reply.ok && isLeaseWorkerAcquisition(request.operation.method)) {
         const released = cancel?.() === true;
         reply.ok = false; reply.value = false; reply.error = released ? "cancelled" : "cancel_release_failed";
       }
+      timely(deadline);
       send({ ...reply, kind: "done" });
+      clearTimeout(watchdog); watchdog = undefined;
       const op = request.operation;
       completedAcquisition = undefined;
       if (reply.ok && (op.method === "acquire" || op.method === "acquire_reference")) {
-        completedAcquisition = { id: request.id, home: op.home, cancel: cancel! };
+        completedAcquisition = { id: request.id, home: op.home, deadline, cancel: cancel! };
         if (op.method === "acquire_reference") references.set(request.id, { home: op.home, release: cancel! });
       }
       prepared = undefined; lastId = request.id;
       if (request.operation.method === "close" && reply.ok && reply.value) port.close();
     } else throw new Error("unknown lease worker control frame");
   });
-  send({ kind: "ready", epoch, pid: process.pid });
+  send({ kind: "ready", epoch, pid: process.pid, clock: LEASE_WORKER_CLOCK });
 }
 
 runProviderHomeLeaseWorker();

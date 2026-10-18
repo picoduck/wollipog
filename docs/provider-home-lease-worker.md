@@ -27,6 +27,47 @@ The existing record, byte, native IPC, migration and retirement budgets remain u
 The heartbeat interval, initial-pong grace and missed-pong termination thresholds remain unchanged.
 The dispatch bound does not promise hard real-time behavior when the OS deschedules the runner.
 
+## Monotonic Deadline
+
+The enqueue-to-terminal budget remains exactly 300,000 milliseconds. The runner records
+`process.hrtime.bigint() + 300000000000n` once at enqueue. Startup, queueing, execution, receipt
+delivery, acknowledgement, cancellation unwind and any compensating request retain that original
+deadline. Expiry means `now >= deadline`, including at the exact boundary. Wall-clock timestamps
+in canonical records and profile grants keep their existing meaning; they are not deadline inputs.
+
+Both threads read the raw host coordinate. [Node's implementation](https://github.com/nodejs/node/blob/v24.18.0/src/node_process_methods.cc)
+copies `uv_hrtime()` without subtracting a process or worker startup origin. [libuv documents](https://docs.libuv.org/en/v1.x/misc.html#c.uv_hrtime)
+nanosecond units unrelated to time of day; units do not guarantee nanosecond resolution. This
+coordinate is comparable between this runner and its worker, and between processes using the same
+host clock. It is not a portable timestamp and is never persisted or compared across hosts or boots.
+
+Suspend semantics follow the runtime's native clock, rather than a wall-clock approximation:
+
+- Linux uses [`CLOCK_MONOTONIC`](https://github.com/nodejs/node/blob/v24.18.0/deps/uv/src/unix/linux.c),
+  which [excludes suspend and can frequency-slew](https://man7.org/linux/man-pages/man2/clock_gettime.2.html).
+- macOS libuv in [Node 22.13](https://github.com/nodejs/node/blob/v22.13.0/deps/uv/src/unix/darwin.c)
+  and [Node 24.18](https://github.com/nodejs/node/blob/v24.18.0/deps/uv/src/unix/darwin.c) uses
+  `mach_continuous_time()`. [Apple's implementation](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/clock.c)
+  includes sleep time. Do not infer the older `mach_absolute_time()` behavior.
+- Windows libuv uses [`QueryPerformanceCounter`](https://github.com/nodejs/node/blob/v24.18.0/deps/uv/src/win/util.c).
+  [Microsoft documents](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps)
+  a shared system counter including sleep, with an ordering uncertainty of one tick between threads.
+
+Thus 300 seconds means elapsed time on that platform's monotonic clock, with no universal promise
+that suspended time counts identically. Timers are wakeups: an early callback recomputes the bounded,
+rounded-up remaining delay, and a delayed callback cannot authorize late receipt acceptance. The
+worker checks before and after synchronous execution and cancellation unwind, and watches an
+unacknowledged receipt with the same deadline. Synchronous native work or OS descheduling may delay
+refusal; termination does not prove rollback or release, and canonical evidence is preserved.
+Boundary tests exercise logical nanosecond comparisons, not physical nanosecond scheduling accuracy.
+
+The wire carries a canonical unsigned 64-bit decimal string (at most 20 digits), because JSON frame
+sizing cannot serialize BigInt. Legacy numbers, signs, whitespace, leading zeros, overflow and
+deadlines farther than the unchanged budget are refused. Startup and ready frames require the
+`hrtime-ns-v1` clock marker; SEA uses the versioned fixed asset
+`wollipog/provider-home-lease-worker-hrtime-ns-v1`. A legacy worker cannot silently interpret the
+new coordinate. Message, queue, helper, heartbeat, profile and reference bounds are unchanged.
+
 Each operation has a fresh UUID in a single worker epoch. Execution produces a receipt; the parent
 checks its identity, deadline and lifecycle before acknowledging it; only the matching terminal
 reply resolves the caller. The worker cannot process another operation while that receipt is
@@ -270,6 +311,16 @@ alias retargeting, worker loss, live-parent refusal and generated reference-coun
 loss, deadlines and queue saturation. `provider-home-lease-heartbeat.test.ts` covers maximal migration,
 cold/failure paths, actual fence contention and killed-runner recovery. Existing native, portable,
 checkpoint and I/O suites retain the ownership, durability and private-token proofs.
+`provider-home-lease-clock.test.ts` covers unsigned wire round-trips, bounded timer rounding and
+actual cross-thread/process coordinate bracketing. `provider-home-lease-deadline.test.ts` controls
+monotonic time, wall time, timers and message delivery independently, including both wall-jump
+directions, startup, queue expiry, receipt/done boundaries, early callbacks and original-deadline
+cancellation compensation. `provider-home-lease-worker-deadline.test.ts` executes the complete
+source worker with the same deterministic fixture, including real canonical I/O and fixed helpers.
+The packaged verifier reads the exact embedded SEA asset through a verifier-only preload and runs
+those unchanged bytes through that fixture, then checks the asset digest against the release build.
+Its ordinary daemon lifecycle checks still launch the actual fixed worker. There is no production
+clock override, alternate selectable worker or native diagnostic shortcut.
 `session-manager-lease-preparation.test.ts` executes the production plugin ownership phase with
 isolated controllers, including stale card/account/epoch checks, recovery cancellation, the
 automatic timeout and unrelated-error preservation. It also runs the production Codex guard phase,
