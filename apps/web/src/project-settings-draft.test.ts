@@ -7,6 +7,7 @@ import {
   projectSettingsDirty,
   projectSettingsErrors,
   projectSettingsValues,
+  revealedAfterSave,
 } from "./project-settings-draft.js";
 
 function project(options: Partial<ProjectView> = {}): ProjectView {
@@ -72,4 +73,12 @@ test("after a save, a field still showing what was sent leaves the draft, and on
   const sent = { name: "Beta", cost: "2", tools: "30" };
   assert.deepEqual(draftAfterSave({ name: "Beta", cost: "2", tools: "30" }, sent), {});
   assert.deepEqual(draftAfterSave({ name: "Betamax", cost: "2" }, sent), { name: "Betamax" });
+});
+
+test("after a save, only fields still in the draft keep their errors shown", () => {
+  const revealed = new Set(["name", "cost", "tools"] as const);
+  assert.deepEqual([...revealedAfterSave(revealed, { cost: "-2" })], ["cost"]);
+  assert.deepEqual([...revealedAfterSave(revealed, {})], []);
+  assert.deepEqual([...revealedAfterSave(new Set(["name"] as const), { cost: "-2" })], [],
+    "a field typed into but never left keeps waiting for its leave");
 });

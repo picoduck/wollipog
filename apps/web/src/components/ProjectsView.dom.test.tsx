@@ -609,6 +609,107 @@ test("leaving a project with unsaved settings asks first, and Keep Editing stays
   assert.equal(fieldOf(body, "Name").value, "Project 2", "another project starts with no draft");
 });
 
+/** A client whose project updates wait until the test settles each one, in order. */
+function heldClient(base: ProjectView) {
+  const updates: unknown[] = [];
+  const held: (() => void)[] = [];
+  let current = base;
+  const client = {
+    ...api,
+    updateProject: (_id: string, body: Record<string, unknown>) => {
+      updates.push(body);
+      return new Promise((resolve) => {
+        held.push(() => {
+          current = { ...current, ...body, updatedAt: current.updatedAt + 1 } as ProjectView;
+          resolve({ project: current });
+        });
+      });
+    },
+  } as unknown as ApiClient;
+  const settleNext = async () => {
+    await act(async () => { held.shift()!(); });
+    await settle();
+  };
+  return { client, updates, settleNext };
+}
+const projectRow = (body: HTMLElement, name: string) => rows(body).find((row) => text(row.querySelector(".row-title")) === name)!;
+
+test("a save in flight keeps leaving guarded: a name typed back to the saved one is asked about once the save settles", async () => {
+  confirmations.length = 0;
+  const { client, updates, settleNext } = heldClient(project(1, { name: "Alpha" }));
+  const body = await renderSelected([project(1, { name: "Alpha" }), project(2)], "Alpha", {}, client);
+  await type(fieldOf(body, "Name"), "Beta");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  // Typed back to the saved name while the rename is on its way: the draft reads clean.
+  await type(fieldOf(body, "Name"), "Alpha");
+  assert.ok(saveBar(body), "the bar stays up while the save runs");
+  await act(async () => { projectRow(body, "Project 2").click(); });
+  await settle();
+  assert.deepEqual(currentView, { name: "projects", id: "project-1" }, "leaving waits for the save");
+  assert.deepEqual(confirmations, [], "nothing to ask about until the save settles");
+  confirmAnswer = false;
+  try {
+    await settleNext();
+  } finally {
+    confirmAnswer = true;
+  }
+  assert.deepEqual(confirmations, ["Discard Changes"], "Alpha now differs from the saved Beta");
+  assert.deepEqual(currentView, { name: "projects", id: "project-1" }, "Keep Editing stays");
+  assert.equal(fieldOf(body, "Name").value, "Alpha");
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Unsaved changes");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settleNext();
+  assert.deepEqual(updates, [{ name: "Beta" }, { name: "Alpha" }], "the typed-back name is still savable");
+  assertNoDomNode(saveBar(body));
+});
+
+test("leaving during a save that leaves nothing behind goes ahead once it settles, without asking", async () => {
+  confirmations.length = 0;
+  const { client, settleNext } = heldClient(project(1, { name: "Alpha" }));
+  const body = await renderSelected([project(1, { name: "Alpha" }), project(2)], "Alpha", {}, client);
+  await type(fieldOf(body, "Name"), "Beta");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await act(async () => { projectRow(body, "Project 2").click(); });
+  await settle();
+  assert.deepEqual(currentView, { name: "projects", id: "project-1" });
+  await settleNext();
+  assert.deepEqual(confirmations, []);
+  assert.deepEqual(currentView, { name: "projects", id: "project-2" });
+});
+
+test("a field left invalid while a save ran keeps its error, aria-invalid and the blocked Save after it settles", async () => {
+  const alpha = { ...project(1, { name: "Alpha" }), childSessionDefaults: null };
+  const { client, updates, settleNext } = heldClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", {}, client);
+  await type(fieldOf(body, "Name"), "Beta");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await type(fieldOf(body, "Cost Limit per Child"), "-2");
+  await leave(fieldOf(body, "Cost Limit per Child"));
+  await settleNext();
+  assert.deepEqual(updates, [{ name: "Beta" }]);
+  const cost = fieldOf(body, "Cost Limit per Child");
+  assert.equal(cost.value, "-2", "the edit made during the save stays");
+  assert.equal(text(settingRow(body, "Cost Limit per Child").querySelector(".field-error")), "Enter an amount above 0.");
+  assert.equal(cost.getAttribute("aria-invalid"), "true");
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Fix 1 field to save",
+    "the empty tool-call limit was never edited, so it waits for its own leave or the next Save");
+  assert.equal(saveBarButton(body, "Save")!.getAttribute("aria-disabled"), "true");
+  assertNoDomNode(settingRow(body, "Name").querySelector(".field-error"), "the saved name has nothing left to say");
+});
+
+test("Save pressed while a Sessions tab change runs saves once that change settles", async () => {
+  const { client, updates, settleNext } = heldClient(project(1, { name: "Alpha" }));
+  const body = await renderSelected([project(1, { name: "Alpha" })], "Alpha", {}, client);
+  await act(async () => { settingRow(body, "Show as a Sessions Tab").querySelector<HTMLButtonElement>('[role="switch"]')!.click(); });
+  await type(fieldOf(body, "Name"), "Beta");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  assert.deepEqual(updates, [{ hidden: true }], "one request at a time");
+  await settleNext();
+  assert.deepEqual(updates, [{ hidden: true }, { name: "Beta" }], "the press was kept, not dropped");
+  await settleNext();
+  assertNoDomNode(saveBar(body));
+});
+
 test("a viewer sees the rows read-only: no Clear Limits, and the switch disabled with its reason", async () => {
   const shared = { ...project(6, { name: "Shared", canManage: false }), childSessionDefaults: { costBudgetUsd: 5, maxToolCalls: 100 } };
   const body = await renderSelected([shared], "Shared");

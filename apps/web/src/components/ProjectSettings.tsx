@@ -8,6 +8,7 @@ import {
   projectSettingsDirty,
   projectSettingsErrors,
   projectSettingsValues,
+  revealedAfterSave,
   type ProjectSettingsDraft,
   type ProjectSettingsField,
 } from "../project-settings-draft.js";
@@ -61,6 +62,20 @@ export function ProjectSettings({
   const edited = useRef(new Set<ProjectSettingsField>());
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /*
+   * A save in flight is part of the editor's state, not only the draft beside it. Until it settles
+   * the editor stays guarded and its bar stays up even when the draft reads clean (a name typed back
+   * to the saved one while the rename is still on its way), and what it settles into is reconciled
+   * against what was SENT, never against the project the save produced. The latest draft and
+   * revealed set are read through refs so that reconciliation sees edits made while it ran.
+   */
+  const savingRef = useRef(false);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  /** A navigation asked for while a save ran: it goes ahead, or asks, once the save settles. */
+  const leaveAfterSave = useRef<(() => void) | null>(null);
+  /** Save pressed while another request for this project ran: it runs once that one settles. */
+  const saveWhenFree = useRef(false);
 
   const values = projectSettingsValues(project, draft);
   const dirty = projectSettingsDirty(project, draft);
@@ -82,12 +97,18 @@ export function ProjectSettings({
     setRevealed(new Set());
     edited.current.clear();
     setSaveError(null);
+    saveWhenFree.current = false;
   };
 
   const save = async () => {
-    if (saving || readOnly) return;
-    // Another request for this project is still running; Save is pressed again once it settles.
-    if (busy !== null) return;
+    if (savingRef.current || readOnly) return;
+    // Another request for this project is still running (a Sessions tab change); the press is kept
+    // and Save runs once that request settles, on the draft as it is then.
+    if (busy !== null) {
+      saveWhenFree.current = true;
+      return;
+    }
+    saveWhenFree.current = false;
     setRevealed(new Set(PROJECT_SETTINGS_FIELDS));
     edited.current.clear();
     // Focus moves to the first invalid field, which announces its error (§8.5).
@@ -102,21 +123,30 @@ export function ProjectSettings({
       return;
     }
     const sent = values;
+    savingRef.current = true;
     setSaving(true);
     setSaveError(null);
     try {
       await onSave(changes);
-      // A field typed into while the request ran keeps what was typed.
-      setDraft((current) => draftAfterSave(current, sent));
-      setRevealed(new Set());
+      // Reconciled against what was sent: a field still showing it leaves the draft, and one typed
+      // into while the request ran keeps its text and, if it was left invalid, its error.
+      const next = draftAfterSave(draftRef.current, sent);
+      setDraft(next);
+      setRevealed((current) => revealedAfterSave(current, next));
     } catch {
       // The draft stays as typed, and the bar offers Try Again (§8.6). The request is one atomic
       // update, so a failure changed nothing.
       setSaveError("Couldn't save the changes. Nothing was changed.");
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
+  useEffect(() => {
+    if (busy === null && saveWhenFree.current) void save();
+  // `save` reads this render's draft, which is the point: it saves what is on screen now.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy]);
   const submit = (event: FormEvent) => {
     // React bubbles a submit through portals, so a dialog opened from a row (Change Access) that
     // holds a form of its own would otherwise save this draft too.
@@ -125,7 +155,7 @@ export function ProjectSettings({
     void save();
   };
 
-  useLeaveGuard(dirty, (leave) => {
+  const askToLeave = (leave: () => void) => {
     void confirm({
       title: "Discard Changes",
       message: `“${project.name}” has changes that aren't saved. Discarding them keeps the saved settings.`,
@@ -134,7 +164,23 @@ export function ProjectSettings({
       // Danger opens with focus on Keep Editing, the choice that loses nothing (§7.4).
       tone: "danger",
     }).then((discard) => { if (discard) leave(); });
+  };
+  // A save in flight cannot be discarded (Discard is disabled while busy, §8.6), so leaving waits for
+  // it, as Settings › Orchestrator does: a save that leaves nothing behind then leaves without
+  // asking, and one that failed or was typed past asks as any dirty draft does.
+  useLeaveGuard(dirty || saving, (leave) => {
+    if (savingRef.current) leaveAfterSave.current = leave;
+    else askToLeave(leave);
   });
+  // Runs once the settled save has rendered, so `dirty` is the reconciled draft's.
+  useEffect(() => {
+    const leave = leaveAfterSave.current;
+    if (!leave || saving) return;
+    leaveAfterSave.current = null;
+    if (dirty) askToLeave(leave);
+    else leave();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saving, dirty]);
 
   // Show as a Sessions Tab applies at once, with the row's Saved check and a toast (§8.6, §13.1).
   const [tabSavedAt, setTabSavedAt] = useState<number | null>(null);
@@ -260,7 +306,8 @@ export function ProjectSettings({
         </DetailSection>
       )}
       <SaveBar
-        dirty={dirty}
+        // Up while a save runs, even with a draft that reads clean until it settles.
+        dirty={dirty || saving}
         busy={saving}
         error={saveError}
         blockedReason={invalidCount > 0 ? `Fix ${invalidCount} field${invalidCount === 1 ? "" : "s"} to save` : null}

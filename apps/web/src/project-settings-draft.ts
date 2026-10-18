@@ -108,3 +108,15 @@ export function draftAfterSave(draft: ProjectSettingsDraft, sent: ProjectSetting
   }
   return next;
 }
+
+/**
+ * The fields whose errors still show after a save settled into `draftAfter`: only those still in the
+ * draft, typed into while the request ran. A field the save took out of the draft shows the saved
+ * value again, and has nothing left to say.
+ */
+export function revealedAfterSave(
+  revealed: ReadonlySet<ProjectSettingsField>,
+  draftAfter: ProjectSettingsDraft,
+): ReadonlySet<ProjectSettingsField> {
+  return new Set([...revealed].filter((field) => draftAfter[field] !== undefined));
+}
