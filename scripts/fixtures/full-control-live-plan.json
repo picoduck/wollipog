@@ -24,7 +24,8 @@
     "unknownUsage": "retain_reservation"
   },
   "provider": {
-    "root": { "driver": "codex-app-server", "model": "gpt-6.1-sol", "effort": "high", "accountProfile": "existing runner-default OpenAI account; operator must verify" },
+    "root": { "driver": "claude-code", "context": "native", "model": "claude-opus-5-5", "effort": "high", "accountProfile": "existing runner-default Claude account; operator must verify" },
+    "children": { "driver": "claude-code", "context": "native", "accountProfile": "existing runner-default Claude account; operator must verify" },
     "media": {
       "driver": "claude-code", "model": "claude-opus-5-5", "provider": "Anthropic", "accountProfile": "dedicated runner-local media reviewer API key; operator must verify",
       "capabilitiesSha256": null,

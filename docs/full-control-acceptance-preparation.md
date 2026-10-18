@@ -54,7 +54,19 @@ test setup; it is never a live issuer, and a synthetic runner launch is not a na
 
 ## Native Feasibility Before Live Authorization
 
-The fixed release target remains Codex App Server, `gpt-6.1-sol`, high effort. Offline inspection
+The Human fixed this release run's root as native Claude Code, `claude-opus-5-5`, high effort,
+and its implementation children as native Claude Code too. Delegated video review needs paced
+peers: admission refuses `mixed_peer` unless the controller, the child and the reviewer each declare
+the paced video review contract (`reviewerAdmissionPrerequisites` in
+`apps/control-plane/src/evidence-review-worker.ts`). Only a native Claude Code agent with a re-proven
+media-only reviewer attestation advertises that contract (`withMediaReviewerCapabilities` in
+`apps/runner/src/index.ts`). With a Codex App Server root, no #2939 video could ever be delegated.
+Codex remains a supported implementation harness elsewhere; this release run does not exercise a
+Codex root. The plan's `fixed_root_profile` check requires exactly that root, and
+`paced_video_peers` requires the declared children to be native Claude Code (undeclared children
+fail closed).
+
+Codex was inspected as a media reviewer and refused. Offline inspection
 of installed Codex `0.162.1` found executable SHA256
 `628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1` and freshly generated
 experimental `ThreadStartParams` schema SHA256
@@ -161,8 +173,10 @@ without repeated overrides; unknown usage keeps reservations. If normal/maximum 
 report that concrete refusal rather than silently increasing limits, sampling frames or using an
 external unaccounted reviewer. All positive and fault attempts share the original ledger/allowance.
 
-Root/implementation path: fixed Codex App Server / `gpt-6.1-sol` / high, existing runner-default
-OpenAI account. Media path: the separately admitted Claude Code media-only reviewer
+Root/implementation path: fixed native Claude Code / `claude-opus-5-5` / high root and native
+Claude Code implementation children, all on the existing runner-default Claude account (the
+operator must verify it). Each must run on an agent whose media-only reviewer attestation the runner
+re-proves, or that peer cannot declare the paced contract and its video stays with the Human. Media path: the separately admitted Claude Code media-only reviewer
 (`claude-opus-5-5`, high, dedicated runner-local API key) only if its runner attestation and actual
 namespace probes pass and a current Human-recorded live proof certifies that exact attestation. Native code review remains
 Claude Opus 5.5 / high / Read-only using the exact #2936 admitted controller, executable hash, CLI
