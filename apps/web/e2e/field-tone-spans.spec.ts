@@ -93,28 +93,21 @@ async function sweep(page: Page) {
 
 for (const theme of ["dark", "light"] as const) {
   test.describe(`${theme} theme`, () => {
-    test("New Session: a field error is red and its notes keep their own look, under a --type-label label", async ({ page }) => {
+    test("New Session: a field's notes keep their own look, under a --type-label label", async ({ page }) => {
+      // Role, Harness and Working Copy are setting rows inside Options since #2954, so their notes
+      // are row descriptions (below); the fields left are Project, Location, Agent and Account.
       await open(page, `theme=${theme}&defaults=error`, "New Session");
       const [red, faint, text, dim] = await Promise.all(
         ["--red", "--text-faint", "--text", "--text-dim"].map((name) => token(page, name)),
       );
       expect(new Set([red, faint, text, dim]).size, "the four tones are distinct").toBe(4);
 
-      const role = field(page, "Session Role");
-      const error = role.locator(":scope > span.form-error");
-      await expect(error).toHaveText(/Could not load saved permission defaults/);
-      expect(await look(error), "Session Role's field error").toEqual({ color: red, size: "12.5px", weight: "400" });
-
-      // The Agent field has no meta line (#2953); the Mode note keeps the dialog's own size.
+      // The Agent field has no meta line (#2953).
       await expect(field(page, "Agent").locator(":scope > span.muted")).toHaveCount(0);
-      const modeNote = field(page, "Mode").locator(":scope > span.muted").first();
-      await expect(modeNote).toHaveText(/Runs (directly in the workspace directory|in an isolated git worktree)/);
-      expect((await look(modeNote)).color, "Mode note").toBe(faint);
-      expect((await look(modeNote)).weight, "Mode note").toBe("400");
 
       // The labels keep §8.1's --type-label (12/16, 500) in --text: a bare first span and a
       // `.new-session-field-label`.
-      for (const label of [role.locator(":scope > span:first-child"), page.locator(".new-session-field-label", { hasText: /^Agent$/ })]) {
+      for (const label of [field(page, "Location").locator(":scope > span:first-child"), page.locator(".new-session-field-label", { hasText: /^Agent$/ })]) {
         const style = await label.evaluate((element) => {
           const computed = getComputedStyle(element);
           return { color: computed.color, size: computed.fontSize, lineHeight: computed.lineHeight, weight: computed.fontWeight };
@@ -123,24 +116,26 @@ for (const theme of ["dark", "light"] as const) {
       }
 
       const result = await sweep(page);
-      expect(result.fields, "New Session renders fields to sweep").toBeGreaterThan(4);
+      expect(result.fields, "New Session renders fields to sweep").toBeGreaterThanOrEqual(4);
       expect(result.mismatches, "a classed later span looks the same inside and outside a field").toEqual([]);
       expect(result.reference["form-error"]?.color).toBe(red);
       expect(result.reference.muted?.color).toBe(faint);
       for (const bare of result.bare) expect(bare, "a bare later span keeps the dim rule").toEqual({ color: dim, size: "12px", weight: "500" });
     });
 
-    test("New Session: Session Role's muted notes are --text-faint", async ({ page }) => {
-      for (const [defaults, copy] of [
-        ["pending", /Loading saved permission defaults/],
-        ["orchestrator", /Orchestrator is your saved Agent Harness default/],
+    test("New Session: Options' notes are their rows' --text-dim descriptions (#2954)", async ({ page }) => {
+      for (const [defaults, title, copy] of [
+        ["pending", "Permissions", /Change them in the composer after the session opens\./],
+        ["orchestrator", "Role", /Orchestrator is your saved default\. Choose Normal to ignore it for this session/],
       ] as const) {
         await open(page, `theme=${theme}&defaults=${defaults}`, "New Session");
-        const note = field(page, "Session Role").locator(":scope > span.muted");
+        await page.getByRole("button", { name: "Options", exact: true }).click();
+        const row = page.locator(".setting-row").filter({ has: page.locator(".setting-row-title", { hasText: new RegExp(`^${title}$`) }) });
+        const note = row.locator(".setting-row-desc").first();
         await expect(note).toHaveText(copy);
         const style = await look(note);
-        expect(style.color, `${defaults}: muted note`).toBe(await token(page, "--text-faint"));
-        expect(style.weight, `${defaults}: muted note`).toBe("400");
+        expect(style.color, `${defaults}: row description`).toBe(await token(page, "--text-dim"));
+        expect(style.size, `${defaults}: row description`).toBe("12px");
       }
     });
 

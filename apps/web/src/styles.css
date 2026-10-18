@@ -17315,9 +17315,46 @@ button.setting-row { cursor: pointer; }
   font: inherit;
 }
 
-.new-session-orchestrator-policy { display: grid; gap: var(--space-3); margin-top: var(--space-2); }
-.new-session-provider-permissions { display: grid; gap: var(--space-1); margin-top: var(--space-2); }
-.new-session-provider-permissions-value { font-weight: 600; }
+.new-session-orchestrator-policy { display: grid; gap: var(--space-3); }
+
+/* New Session's Options (#2954, SessionOptions.tsx): one disclosure (§5.5) whose closed head lists
+   the current values as §11.3 meta, 14px icons 12px apart, wrapping rather than clipping. The rows
+   inside are the shared setting rows on a settings group's surface; nothing here restyles them. */
+.session-options-head {
+  flex-wrap: wrap;
+  width: 100%;
+  min-height: var(--control-h);
+  padding-block: var(--space-1);
+}
+.session-options-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+  margin-inline-start: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.session-options-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.session-options-meta-icon { display: inline-flex; flex: none; }
+.session-options-body[hidden] { display: none; }
+/* What sits between two rows of the surface, at the rows' inset: the Orchestrator policy under
+   Role, the skills notice under Run On. */
+.session-options-inset { padding: var(--space-3) var(--space-4); }
+.session-options-folders {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.session-options-folder > .checkbox-label { font-family: var(--font-mono); font-size: var(--text-sm); }
 .orchestrator-policy-area {
   display: grid;
   gap: var(--space-3);
@@ -17757,12 +17794,6 @@ a.tab { text-decoration: none; }
 .seg.block {
   display: grid;
   width: 100%;
-}
-/* New Session's two short Mode choices keep an intentional content width. `.field` stretches its
-   children by default, which otherwise leaves a large empty bordered track after the buttons. */
-.seg.new-session-mode {
-  align-self: flex-start;
-  max-width: 100%;
 }
 @media (max-width: 760px) {
   .seg.usage-range {

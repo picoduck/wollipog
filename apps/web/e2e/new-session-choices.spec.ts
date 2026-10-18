@@ -148,11 +148,23 @@ async function selectCommonProjectWithoutPointer(page: Page, touch = false) {
   return project;
 }
 
-const permissionPresets = (page: Page) =>
-  page.getByRole("radiogroup", { name: "Session Role" });
+/**
+ * Options (#2954): every choice below Agent is one row, whose setting rows render only once it is
+ * open. Opens it, if it is not already.
+ */
+async function openOptions(page: Page): Promise<Locator> {
+  const head = page.getByRole("button", { name: "Options", exact: true });
+  if ((await head.getAttribute("aria-expanded")) !== "true") await head.click();
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  return head;
+}
 
-/** The ChoiceRow a native radio sits in: the `<label>` that is the row's whole target. */
-const choiceRow = (radio: Locator) => radio.locator("xpath=ancestor::label[1]");
+const permissionPresets = (page: Page) =>
+  page.getByRole("radiogroup", { name: "Role" });
+
+/** The setting row a control sits in: its title, and the sentence that says what it does or why it can't. */
+const settingRow = (control: Locator) =>
+  control.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' setting-row ')][1]");
 
 /**
  * Whether an element's own content overflows the box it is drawn in.
@@ -180,46 +192,35 @@ for (const viewport of VIEWPORTS) {
       isMobile: viewport.touch,
     });
 
-    test("both presets are fully visible and nothing overflows the form", async ({ page }) => {
+    test("Options' segmented rows span their rows, nothing is clipped, and nothing overflows the form", async ({ page }) => {
       await openDialog(page);
+      await openOptions(page);
       const group = permissionPresets(page);
-      const options = group.locator(".choice-row");
+      const options = group.getByRole("radio");
       await expect(options).toHaveCount(2);
 
-      // The structural half: the inline Permission Preset group has no trigger or popup. The
-      // initial-focus Project combobox may legitimately have its own autocomplete open.
+      // The structural half: Role is pills in its row, with no trigger or popup. The initial-focus
+      // Project combobox may legitimately have its own autocomplete open.
       await expect(group.locator(".ui-select-trigger, .menu.listbox")).toHaveCount(0);
 
       const groupBox = await group.boundingBox();
       expect(groupBox).not.toBeNull();
       for (const option of await options.all()) {
         await expect(option).toBeVisible();
-        const box = await option.boundingBox();
-        expect(box).not.toBeNull();
-        // Inside its own group, with its full height — the assertion that fails when a container
-        // caps a list below what its rows render.
-        expect(box!.height).toBeGreaterThan(0);
-        expect(box!.y).toBeGreaterThanOrEqual(groupBox!.y - 1);
-        expect(box!.y + box!.height).toBeLessThanOrEqual(groupBox!.y + groupBox!.height + 1);
-        // And no clipped label, description or reason inside the row itself.
+        const box = (await option.boundingBox())!;
+        expect(box.height).toBeGreaterThan(0);
+        expect(box.y).toBeGreaterThanOrEqual(groupBox!.y - 1);
+        expect(box.y + box.height).toBeLessThanOrEqual(groupBox!.y + groupBox!.height + 1);
         const inner = await overflow(option);
         expect(inner.vertical).toBeLessThanOrEqual(1);
         expect(inner.horizontal).toBeLessThanOrEqual(1);
       }
+      expect((await overflow(group)).vertical).toBeLessThanOrEqual(1);
 
-      // The group itself does not scroll. A scrollbar on a two-option control is the user-visible
-      // symptom the issue reported.
-      const groupOverflow = await overflow(group);
-      expect(groupOverflow.vertical).toBeLessThanOrEqual(1);
-
-      // Horizontal reflow, asserted from the SAME page load rather than a second one. Both checks
-      // want this dialog at this viewport, so opening it twice bought nothing but wall clock — and
-      // the browser job has roughly 18 seconds of headroom against its 30-minute cap (#842).
+      // Horizontal reflow, asserted from the SAME page load rather than a second one (#842).
       const form = page.locator(".form");
       const formBox = (await form.boundingBox())!;
-      // `.loc-pick` and the native Project/Agent selects are gone. Include both responsive owners
-      // so the two controls #218 migrated cannot overflow unnoticed.
-      for (const selector of [".choice-row", ".seg", ".ui-select-trigger", ".ui-searchable-combobox-input"]) {
+      for (const selector of [".seg", ".ui-select-trigger", ".ui-searchable-combobox-input", ".setting-row"]) {
         for (const control of await page.locator(selector).all()) {
           if (!(await control.isVisible())) continue;
           const box = (await control.boundingBox())!;
@@ -236,35 +237,48 @@ for (const viewport of VIEWPORTS) {
         await expect(page.getByRole("combobox", { name: "Agent" })).toBeVisible();
       }
 
-      // A short segmented choice should wrap its options, not inherit `.field`'s stretch and draw
-      // an empty bordered track across the dialog. Compare the rendered group with its own options
-      // so the assertion remains stable across font rendering, zoom and viewport size.
-      const mode = page.getByRole("radiogroup", { name: "Session Mode" });
-      const modeBox = (await mode.boundingBox())!;
-      const modeOptions = await mode.getByRole("radio").all();
-      await expect(modeOptions).toHaveLength(2);
-      const modeOptionBoxes = await Promise.all(modeOptions.map((option) => option.boundingBox()));
-      const renderedOptionWidth = modeOptionBoxes.reduce((width, box) => width + box!.width, 0);
-      expect(modeBox.width - renderedOptionWidth).toBeLessThanOrEqual(modeBox.width * 0.1);
-      expect(modeBox.width).toBeLessThan(formBox.width * 0.75);
-      for (const [index, option] of modeOptions.entries()) {
-        await expect(option).toBeVisible();
-        const box = modeOptionBoxes[index]!;
-        expect(box.x).toBeGreaterThanOrEqual(modeBox.x - 1);
-        expect(box.x + box.width).toBeLessThanOrEqual(modeBox.x + modeBox.width + 1);
-        if (viewport.floor) {
-          // The track is the 44px control; each option is 38px inside its 2px inset and 1px edge,
-          // and the coarse-pointer block extends the option's hit area over both (#1799).
-          expect(modeBox.height).toBeGreaterThanOrEqual(43);
-          const hitsEdges = await option.evaluate((element) => {
-            element.scrollIntoView({ block: "center" });
-            const rect = element.getBoundingClientRect();
-            const x = rect.left + rect.width / 2;
-            return [rect.top - 2.5, rect.bottom + 2.5].every((y) => element.contains(document.elementFromPoint(x, y)));
-          });
-          expect(hitsEdges, "the option's hit area reaches the track's edge").toBe(true);
+      // Every segmented control is full width (`.seg.block`): it spans its row's control, which in
+      // this dialog's surface is the whole row under its text (§8.2's 560px rule), at 44px on touch
+      // with #1799's hit areas.
+      for (const name of ["Role", "Harness", "Working Copy"]) {
+        const seg = page.getByRole("radiogroup", { name });
+        await expect(seg).toHaveClass(/\bblock\b/);
+        const segBox = (await seg.boundingBox())!;
+        const rowBox = (await settingRow(seg).boundingBox())!;
+        const column = (await seg.locator("xpath=..").boundingBox())!;
+        expect(Math.abs(segBox.width - column.width), `${name} spans its control column`).toBeLessThanOrEqual(1);
+        expect(segBox.width, `${name} spans most of its row`).toBeGreaterThan(rowBox.width * 0.85);
+        for (const option of await seg.getByRole("radio").all()) {
+          const box = (await option.boundingBox())!;
+          expect(box.x).toBeGreaterThanOrEqual(segBox.x - 1);
+          expect(box.x + box.width).toBeLessThanOrEqual(segBox.x + segBox.width + 1);
+          if (viewport.floor) {
+            // The track is the 44px control; each option is 38px inside its 2px inset and 1px edge,
+            // and the coarse-pointer block extends the option's hit area over both (#1799).
+            expect(segBox.height).toBeGreaterThanOrEqual(43);
+            const hitsEdges = await option.evaluate((element) => {
+              element.scrollIntoView({ block: "center" });
+              const rect = element.getBoundingClientRect();
+              const x = rect.left + rect.width / 2;
+              return [rect.top - 2.5, rect.bottom + 2.5].every((y) => element.contains(document.elementFromPoint(x, y)));
+            });
+            expect(hitsEdges, `${name}: the option's hit area reaches the track's edge`).toBe(true);
+          }
         }
       }
+
+      // The Options body is part of the sheet's one scroller: nothing between it and the dialog
+      // body, and nothing inside it, scrolls on its own.
+      const scrollers = await page.locator(".session-options-body").evaluate((body) => {
+        const scrolls = (element: Element) => /(auto|scroll)/.test(getComputedStyle(element).overflowY);
+        const found: string[] = [];
+        for (let node: Element | null = body; node && !node.classList.contains("modal-body"); node = node.parentElement) {
+          if (scrolls(node)) found.push(node.className);
+        }
+        for (const element of body.querySelectorAll("*")) if (scrolls(element)) found.push(element.className);
+        return found;
+      });
+      expect(scrollers, "no nested scroller").toEqual([]);
     });
 
     test("a two-option Select opens a list its own options fit inside", async ({ page }) => {
@@ -658,41 +672,54 @@ test.describe("New Session dialog keyboard contract", () => {
 });
 
 test.describe("unavailable preset", () => {
-  // One run, at the BINDING width rather than a comfortable one. Review caught that calling this
-  // "viewport-independent" was wrong: it asserts geometry, and a disabled card carries the longest
-  // content in the group — title, description AND reason — so 320px is where its extra wrapped
-  // lines would be clipped first. Running it at 390px would have passed while 320px broke.
+  // One run, at the BINDING width rather than a comfortable one: a disabled option's reason is the
+  // longest sentence its row carries, so 320px is where it would be clipped first.
   test.use({ viewport: { width: REFLOW_WIDTH, height: 640 } });
 
-  test("an unavailable preset is readable rather than hidden", async ({ page }) => {
+  test("an unavailable Orchestrator keeps its place and its row says why (#2954)", async ({ page }) => {
     await openDialog(page, "?orchestrator=0");
-    const orchestrator = permissionPresets(page).getByRole("radio", { name: /Orchestrator/ });
+    await openOptions(page);
+    const orchestrator = permissionPresets(page).getByRole("radio", { name: "Orchestrator" });
     // Rendered, not dropped — §11.3. The list used to omit it entirely, so a user could not learn
     // that the reason was their agent.
     await expect(orchestrator).toBeVisible();
     await expect(orchestrator).toHaveAttribute("aria-disabled", "true");
-    await expect(orchestrator).toHaveAccessibleDescription(/does not offer the Orchestrator/);
-    await expect(choiceRow(orchestrator)).toContainText(/does not offer the Orchestrator/);
-    expect((await overflow(choiceRow(orchestrator))).vertical).toBeLessThanOrEqual(1);
+    await expect(orchestrator).toHaveAccessibleDescription("Claude Code doesn't offer the Orchestrator role.");
+    // The reason replaces the row's description rather than hiding in a tooltip.
+    await expect(settingRow(orchestrator).locator(".setting-row-desc")).toHaveText("Claude Code doesn't offer the Orchestrator role.");
+    expect((await overflow(settingRow(orchestrator))).vertical).toBeLessThanOrEqual(1);
+    // And it is in the arrow order, so a keyboard reaches the reason.
+    await permissionPresets(page).getByRole("radio", { name: "Normal" }).focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(orchestrator).toBeFocused();
+    await expect(orchestrator).toHaveAttribute("aria-checked", "false");
   });
 });
 
 test.describe("increased text size", () => {
   test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
 
-  test("presets stay unclipped when the user enlarges text", async ({ page }) => {
+  test("Options' rows stay unclipped when the user enlarges text", async ({ page }) => {
     // The other half of WCAG Reflow, and the half a fixed per-option pixel budget cannot satisfy by
     // construction: at 150% the rows are taller than any constant the estimator could name.
     await openDialog(page);
     await page.addStyleTag({ content: "html { font-size: 150%; }" });
+    await openOptions(page);
     const group = permissionPresets(page);
     await expect(group.getByRole("radio")).toHaveCount(2);
-    for (const option of await group.locator(".choice-row").all()) {
+    for (const option of await group.getByRole("radio").all()) {
       await expect(option).toBeVisible();
-      const clipped = await overflow(option);
-      expect(clipped.vertical).toBeLessThanOrEqual(1);
+      expect((await overflow(option)).vertical).toBeLessThanOrEqual(1);
+    }
+    for (const row of await page.locator(".session-options-body .setting-row").all()) {
+      expect((await overflow(row)).vertical).toBeLessThanOrEqual(1);
     }
     expect((await overflow(group)).vertical).toBeLessThanOrEqual(1);
+    // Closed, the head's meta wraps rather than clipping.
+    const head = page.getByRole("button", { name: "Options", exact: true });
+    await head.click();
+    expect((await overflow(head)).horizontal).toBeLessThanOrEqual(1);
+    expect((await overflow(head)).vertical).toBeLessThanOrEqual(1);
 
     const agent = page.getByRole("button", { name: /^Agent:/ });
     await agent.click();
@@ -710,40 +737,81 @@ test.describe("increased text size", () => {
   });
 });
 
-test.describe("choice rows at 1440px (#1952)", () => {
+test.describe("Options at 1440px (#2954)", () => {
   test.use({ viewport: { width: 1440, height: 1000 } });
 
-  test("each group's markers share one x and sit on their titles' first lines", async ({ page }) => {
-    // The cards this replaced centred a trailing marker on the whole card, so a card with a
-    // one-line description and one with a two-line description (57px and 85px here) put their
-    // markers at different heights. A leading marker on the title's first line makes them one
-    // column whatever each row's height; every size compared is fixed by the stylesheet.
+  test("with every option at its default, the dialog is at most 420px from its description to its footer", async ({ page }) => {
     await openDialog(page);
-    const groups = page.locator('[role="radiogroup"]:has(> .choice-row), [role="group"]:has(> .choice-row)');
-    const names = await groups.evaluateAll((elements) => elements.map((element) => element.getAttribute("aria-label")));
-    for (const name of ["Session Role", "Harness"]) expect(names).toContain(name);
-    for (const group of await groups.all()) {
-      const name = await group.getAttribute("aria-label");
-      const rows = await group.locator(":scope > .choice-row").evaluateAll((elements) => elements.map((row) => {
-        const marker = row.querySelector("input")!.getBoundingClientRect();
-        const title = row.querySelector<HTMLElement>(".choice-row-title")!;
-        const titleBox = title.getBoundingClientRect();
-        return {
-          left: marker.left,
-          markerCentre: marker.top + marker.height / 2,
-          firstLineCentre: titleBox.top + parseFloat(getComputedStyle(title).lineHeight) / 2,
-          markerRight: marker.right,
-          titleLeft: titleBox.left,
-        };
-      }));
-      for (const row of rows) {
-        expect(row.left, `${name}: every marker shares one x`).toBe(rows[0]!.left);
-        expect(Math.abs(row.markerCentre - row.firstLineCentre), `${name}: the marker is on the title's first line`)
-          .toBeLessThanOrEqual(0.5);
-        expect(row.titleLeft, `${name}: the marker leads its title`).toBeGreaterThan(row.markerRight);
-      }
-    }
+    const head = page.getByRole("button", { name: "Options", exact: true });
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+    await expect(head.locator(".session-options-meta-item")).toHaveText(["Normal", "Direct", "In Place", "Harness Default"]);
+    const description = (await page.locator(".modal-desc").boundingBox())!;
+    const footer = (await page.locator(".modal-foot").boundingBox())!;
+    const height = footer.y - (description.y + description.height);
+    expect(height, `${height}px from the description to the footer`).toBeLessThanOrEqual(420);
+    // One closed row: the head is the only thing Options draws.
+    await expect(page.locator(".session-options-body")).toBeHidden();
   });
+
+  test("a container target opens Options by itself and shows the skills notice under Run On", async ({ page }) => {
+    await openDialog(page, "?containerTargets=1");
+    await openOptions(page);
+    await page.getByRole("button", { name: /^Run On:/ }).click();
+    await page.getByRole("option", { name: /Offline Container/ }).click();
+    const notice = page.getByRole("status", { name: "Skills Unavailable" });
+    await expect(notice).toContainText("so release-notes and review-pr can’t be used here.");
+    await expect(notice).toBeInViewport();
+    await expect(settingRow(page.getByRole("button", { name: /^Run On:/ })).locator("xpath=following-sibling::*[1]"))
+      .toContainText(/Skills from .+ aren’t available in container sessions/);
+    await expect(settingRow(page.getByRole("button", { name: /^Run On:/ })).locator(".setting-row-desc"))
+      .toHaveText("No network, secrets or billing. Only the workspace is mounted.");
+    const head = page.getByRole("button", { name: "Options", exact: true });
+    await head.click();
+    await expect(head.locator(".status.t-warning")).toHaveText("Skills Unavailable");
+  });
+
+  test("the cloud budget is a 96px field with its unit inside, and 0 shows its error", async ({ page }) => {
+    await openDialog(page, "?cloudTargets=1");
+    await openOptions(page);
+    await page.getByRole("button", { name: /^Run On:/ }).click();
+    await page.getByRole("option", { name: /Cloud Sandbox/ }).click();
+    const budget = page.getByRole("spinbutton", { name: "Cloud Budget USD" });
+    await expect(budget).toHaveValue("1");
+    const field = (await budget.locator("xpath=..").boundingBox())!;
+    expect(field.width).toBe(96);
+    await expect(budget.locator("xpath=..").locator(".input-affix-text")).toHaveText("USD");
+    await budget.fill("0");
+    await expect(settingRow(budget).locator(".field-error")).toHaveText("Enter an amount from $1 to $50.");
+    await page.getByRole("button", { name: "Options", exact: true }).click();
+    await page.getByRole("button", { name: "Create Session" }).click();
+    await expect(budget).toBeFocused();
+    expect(await page.locator("html").getAttribute("data-create-session-count")).toBeNull();
+  });
+});
+
+test.describe("an ACP agent (#1360)", () => {
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 780 }]) {
+    test(`an ACP Orchestrator's notice says the preset sets its permissions, at ${viewport.width}px`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await openDialog(page, "?acp=1&savedAgent=gemini");
+      const agent = viewport.width > 760
+        ? page.getByRole("combobox", { name: "Agent" })
+        : page.getByRole("button", { name: /^Agent:/ });
+      if (viewport.width > 760) await expect(agent).toHaveValue("Gemini");
+      else await expect(agent).toHaveAccessibleName(/Agent: Gemini/);
+      await openOptions(page);
+      // An ACP agent offers its workspace's extra folders, one checkbox row each.
+      const folders = page.getByRole("group", { name: "Extra Folders" });
+      await expect(folders.getByRole("checkbox")).toHaveCount(2);
+      await expect(settingRow(folders).locator(".setting-row-title")).toHaveText("Extra Folders (Preview)");
+      await permissionPresets(page).getByRole("radio", { name: "Orchestrator" }).click();
+      const notice = page.locator(".session-options-body > .notice.t-warning");
+      await expect(notice).toContainText("Permissions Set by the Orchestrator Preset");
+      await expect(notice).toContainText("This agent's adapter can't run an Orchestrator with normal permissions, so the preset sets them.");
+      await expect(settingRow(page.getByText("Permissions", { exact: true })).locator(".setting-row-value-text"))
+        .toHaveText("Orchestrator Preset");
+    });
+  }
 });
 
 /**

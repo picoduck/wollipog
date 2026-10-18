@@ -6,7 +6,7 @@ test.use({ video: "on" });
 
 /**
  * Create Session refuses a shape the control plane would refuse (#2952): it stays enabled, and
- * pressing it sends nothing and names the problem under Session Role.
+ * pressing it sends nothing and names the problem under the Orchestrator policy.
  */
 async function expectCreateRefused(page: Page, dialog: Locator, problem: RegExp) {
   await dialog.getByRole("button", { name: "Create Session" }).click();
@@ -15,15 +15,31 @@ async function expectCreateRefused(page: Page, dialog: Locator, problem: RegExp)
 }
 
 /**
- * A Session Role card, scoped to its own radiogroup.
+ * A Role option, scoped to its own radiogroup.
  *
- * Scoped because the dialog has three radiogroups — Session Role, Harness and Mode — and a bare
- * `getByRole("radio")` matches across all of them. The name is anchored at the start because a
- * ChoiceRow radio is named by its title, and a looser match could reach another row whose
- * description mentions the same word. The reason and description are its accessible description.
+ * Scoped because Options has three radiogroups — Role, Harness and Working Copy — and a bare
+ * `getByRole("radio")` matches across all of them. An unavailable option's reason is its accessible
+ * description.
  */
 function presetCard(dialog: Locator, name: RegExp): Locator {
-  return dialog.getByRole("radiogroup", { name: "Session Role" }).getByRole("radio", { name });
+  return dialog.getByRole("radiogroup", { name: "Role" }).getByRole("radio", { name });
+}
+
+/** Options (#2954): every choice below Agent is one row, open before its rows can be used. */
+async function openOptions(dialog: Locator): Promise<void> {
+  const head = dialog.getByRole("button", { name: "Options", exact: true });
+  if ((await head.getAttribute("aria-expanded")) !== "true") await head.click();
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+}
+
+/** The read-only Permissions row in Options. */
+function permissionsRow(dialog: Locator): Locator {
+  return dialog.locator(".setting-row").filter({ has: dialog.page().locator(".setting-row-title", { hasText: /^Permissions$/ }) });
+}
+
+/** The warning notice under Permissions that says why the Orchestrator preset sets them. */
+function presetNotice(dialog: Locator): Locator {
+  return dialog.locator(".session-options-body > .notice.t-warning");
 }
 
 
@@ -52,6 +68,7 @@ for (const scenario of [
     await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
+    await openOptions(dialog);
     const orchestratorCard = presetCard(dialog, /^Orchestrator/);
     await expect(orchestratorCard).toHaveAttribute("aria-disabled", "true");
     await expect(orchestratorCard).toHaveAccessibleDescription(/Upgrade Codex to 0\.154\.0 or newer\./);
@@ -74,13 +91,16 @@ for (const theme of ["light", "dark"] as const) {
       await openProjectActions(page, /Alpha/, "Alpha");
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
       const dialog = page.getByRole("dialog", { name: "New Session" });
+      await openOptions(dialog);
+    await openOptions(dialog);
       // A saved Orchestrator harness default selects the role on the user's behalf and names
-      // itself in the always-visible Provider Permissions summary (#1281 separated the two).
+      // itself in the Permissions row (#1281 separated the two).
       await expect(presetCard(dialog, /^Orchestrator/)).toBeChecked();
-      await expect(dialog.getByText(/Saved Default — Orchestrator/)).toBeVisible();
+      await expect(permissionsRow(dialog)).toContainText("Saved Default — Orchestrator");
       await dialog.getByRole("radio", { name: /^Native TUI/ }).click();
-      await expect(dialog.getByText(/Usage Accounting: Unavailable/)).toBeVisible();
-      await expect(dialog.getByText(/Native TUI spending and tool calls are not included/)).toBeVisible();
+      // One sentence (#2954): the five-sentence accounting paragraph is gone.
+      await expect(dialog.getByText("Native TUI opens the provider's own terminal UI. It doesn't track usage or show approval cards, so sessions with budgets must use Direct.")).toBeVisible();
+      await expect(dialog.getByText(/Usage Accounting: Unavailable|spending and tool calls are not included/)).toHaveCount(0);
       await dialog.getByRole("spinbutton", { name: "Maximum Concurrent Children" }).fill("8");
       await page.screenshot({ path: testInfo.outputPath("native-tui-unmetered.png") });
       await dialog.getByRole("button", { name: "Create Session" }).click();
@@ -101,6 +121,8 @@ for (const theme of ["light", "dark"] as const) {
       await openProjectActions(page, /Alpha/, "Alpha");
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
       const dialog = page.getByRole("dialog", { name: "New Session" });
+      await openOptions(dialog);
+    await openOptions(dialog);
       const orchestratorCard = presetCard(dialog, /^Orchestrator/);
       await expect(orchestratorCard).toBeVisible();
       await orchestratorCard.scrollIntoViewIfNeeded();
@@ -123,7 +145,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: testInfo.outputPath("preset-harness-selected.png") });
       const delegatedControl = dialog.getByRole("button", { name: /Descendant Requests: Questions and Approvals/ });
       await expect(delegatedControl).toBeVisible();
-      await expect(orchestratorCard).toHaveAccessibleDescription(/Delegate implementation by default/);
+      await expect(dialog.getByText("An Orchestrator delegates work to child sessions.", { exact: true })).toBeVisible();
       await expect(dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ })).toBeVisible();
       await expect(dialog.getByText(/no read-only operating-system boundary is claimed/)).toBeVisible();
       const tui = dialog.getByRole("radio", { name: /^Native TUI/ });
@@ -169,7 +191,8 @@ for (const scenario of [
     await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
-    const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
+    await openOptions(dialog);
+    const providerPermissions = permissionsRow(dialog);
     await expect(presetCard(dialog, /^Normal/)).toBeChecked();
     await expect(providerPermissions).toContainText("Harness Default");
     await providerPermissions.scrollIntoViewIfNeeded();
@@ -181,15 +204,17 @@ for (const scenario of [
     // #1281: the role is additive. The provider permission summary is unchanged by the role and
     // the harness keeps its ordinary modes, so no preset is announced.
     await expect(providerPermissions).toContainText("Harness Default");
-    await expect(providerPermissions).toContainText(/same permission modes, integrations, and credentials as a normal session/);
+    await expect(providerPermissions).toContainText("An Orchestrator keeps them and its integrations");
     await expect(providerPermissions).not.toContainText("Orchestrator Preset");
+    await expect(presetNotice(dialog)).toHaveCount(0);
     await providerPermissions.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("role-orchestrator-independent.png"), fullPage: true });
 
     await dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ }).click();
     await dialog.getByRole("option", { name: /^Enabled/ }).click();
-    await expect(providerPermissions).toContainText("Orchestrator Preset — Harness-Enforced");
-    await expect(providerPermissions).toContainText("Strict Project Isolation is enforced through the harness-owned Orchestrator preset.");
+    await expect(providerPermissions).toContainText("Orchestrator Preset");
+    await expect(presetNotice(dialog)).toContainText("Permissions Set by the Orchestrator Preset");
+    await expect(presetNotice(dialog)).toContainText("Strict Project Isolation is enforced by the Orchestrator preset, so the preset sets them.");
     await providerPermissions.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("role-orchestrator-strict-preset.png"), fullPage: true });
 
@@ -227,7 +252,8 @@ for (const scenario of [
     await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
-    const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
+    await openOptions(dialog);
+    const providerPermissions = permissionsRow(dialog);
     const orchestratorCard = presetCard(dialog, /^Orchestrator/);
     await expect(orchestratorCard).not.toHaveAttribute("aria-disabled", "true");
     await orchestratorCard.click();
@@ -281,7 +307,8 @@ for (const scenario of [
     await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
-    const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
+    await openOptions(dialog);
+    const providerPermissions = permissionsRow(dialog);
     const orchestratorCard = presetCard(dialog, /^Orchestrator/);
     await expect(orchestratorCard).not.toHaveAttribute("aria-disabled", "true");
     await orchestratorCard.click();
@@ -333,6 +360,7 @@ for (const scenario of [
     await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
+    await openOptions(dialog);
     await presetCard(dialog, /^Orchestrator/).click();
     const control = dialog.getByRole("button", { name: /Integration Isolation: Disabled/ });
     await expect(control).toBeVisible();
@@ -349,7 +377,7 @@ for (const scenario of [
     await page.screenshot({ path: testInfo.outputPath("integration-isolation-enabled.png"), fullPage: true });
     // Independent of the project boundary and of the provider permission mode.
     await expect(dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ })).toBeVisible();
-    await expect(dialog.getByRole("group", { name: "Provider Permissions" })).not.toContainText("Orchestrator Preset");
+    await expect(permissionsRow(dialog)).not.toContainText("Orchestrator Preset");
     await dialog.getByRole("button", { name: "Create Session" }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
       .toMatchObject({ role: "orchestrator", orchestrator: { execution: { integrationIsolation: true } } });

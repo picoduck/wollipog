@@ -359,6 +359,7 @@ export function SegmentedControl<T extends string>({
   label,
   className,
   describedBy,
+  invalid,
 }: {
   options: readonly SegmentedOption<T>[];
   value: T | null;
@@ -368,6 +369,8 @@ export function SegmentedControl<T extends string>({
   className?: string;
   /** The id of text the caller renders outside the group, such as a field error (§8.5). */
   describedBy?: string;
+  /** A form's error is about this choice (§8.5); `describedBy` names it. */
+  invalid?: boolean;
 }) {
   // One stop for the whole group, computed by `rovingChoiceStop`. The rule was inline here across
   // three rounds and each round fixed one branch of it: nothing selected, then selected but
@@ -404,6 +407,7 @@ export function SegmentedControl<T extends string>({
         className={`seg${className ? ` ${className}` : ""}`}
         role="radiogroup"
         aria-label={label}
+        aria-invalid={invalid || undefined}
         aria-describedby={[groupReason ? reasonId : undefined, describedBy].filter(Boolean).join(" ") || undefined}
         // Disabled options stay in the arrow order so their reason is reachable without a mouse;
         // activating one is refused by its own `onClick`, so focus moves and nothing is selected.

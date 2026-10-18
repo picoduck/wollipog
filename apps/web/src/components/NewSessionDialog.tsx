@@ -1,3 +1,4 @@
+import { flushSync } from "react-dom";
 import {
   useEffect,
   useId,
@@ -34,7 +35,7 @@ import {
 } from "@wollipog/protocol";
 import { agentHarnessMachinesDescription, agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
-import { managedSkillsAvailableForTarget, SKILLS_UNAVAILABLE_ON_TARGET } from "./SkillsUnavailableNotice.js";
+import { SKILLS_UNAVAILABLE_ON_TARGET, SkillsUnavailableNotice, useSessionSkillsUnavailable } from "./SkillsUnavailableNotice.js";
 import { ApiError } from "../api.js";
 import { useStore } from "../store.js";
 import { legacyWorkspaceLocationsByName, workspaceLocationKey } from "../projects.js";
@@ -50,7 +51,7 @@ import {
   suggestedProjectLocation,
 } from "../project-session-selection.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
+import { permissionModeLabel, titleCaseLabel } from "../format.js";
 import {
   INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED,
   INTEGRATION_ISOLATION_PRESERVED,
@@ -79,7 +80,6 @@ import { ChooseFolderDialog } from "./ChooseFolderDialog.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
-import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
 import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { FieldError } from "./FieldError.js";
@@ -89,10 +89,12 @@ import { Notice } from "./Notice.js";
 import { FullControlLaunchPanel, OrchestratorControlChoice, type FullControlAuthorization } from "./FullControlPreparation.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
+import { BotIcon, BranchIcon, ComputerIcon, FolderIcon, ShieldIcon, TerminalIcon } from "./Icons.js";
+import { SessionOptions, describeBoundaries, type SessionOptionsAttention } from "./SessionOptions.js";
+import { NumberRow, SegmentedRow, SelectRow, SettingRow, SettingsGroup, ValueRow } from "./ui/SettingsRows.js";
 import {
-  ChoiceRows,
+  Checkbox,
   SearchableCombobox,
-  SegmentedControl,
   Select,
   type PickerFooterAction,
   type SearchableComboboxOption,
@@ -180,6 +182,12 @@ type ProblemControl =
   | "project" | "location" | "add-location" | "machine" | "folder" | "browse" | "agent" | "account"
   | "retained-session" | "open-connections" | "role" | "defaults" | "orchestrator-retry" | "orchestrator"
   | "full-control" | "live-child-limit" | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
+
+/** The controls that live inside Options, which a submit problem opens before focusing. */
+const OPTIONS_CONTROLS: ReadonlySet<ProblemControl> = new Set<ProblemControl>([
+  "role", "defaults", "orchestrator-retry", "orchestrator", "full-control", "live-child-limit",
+  "harness", "mode", "execution-target", "cloud-budget",
+]);
 
 /** Pre-selection for launches from a project's menu ("Create permanent worktree"). */
 export interface NewSessionPreset {
@@ -441,6 +449,9 @@ export function NewSessionDialog({
   const workspaceRowRef = useRef<HTMLDivElement>(null);
   // Use a Workspace unmounts itself; once the commit shows the picker again, focus moves to it.
   const workspacePickerRestoredRef = useRef(false);
+  // Options (#2954): one closed row until something inside needs attention or the person opens it.
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const skillsNoticeRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   // A submit that finds a problem names it under the field it is about (§8.5) and focuses that field.
@@ -512,10 +523,8 @@ export function NewSessionDialog({
   const noMachinesId = `${generatedFormId}-no-machines`;
   const failureSentenceId = `${generatedFormId}-failure`;
   const accountReasonId = `${generatedFormId}-account-reason`;
-  const permissionOptionsId = `${generatedFormId}-session-role`;
   const liveChildLimitInputId = `${generatedFormId}-live-child-limit`;
   const liveChildLimitHelpId = `${generatedFormId}-live-child-limit-help`;
-  const harnessOptionsId = `${generatedFormId}-harnesses`;
   const selectedProjectId = projectSelection && projectSelection !== NO_PROJECT_SELECTION ? projectSelection : null;
   const selectedProject = selectedProjectId ? projects.get(selectedProjectId) ?? null : null;
   const selectedProjectLocation = selectedProject?.locations.find((location) => location.id === projectLocationId) ?? null;
@@ -572,6 +581,20 @@ export function NewSessionDialog({
     executionTargets.find((target) => target.adapter === "host" &&
       target.workspaceStrategy === (useWorktree ? "worktree" : "in_place"));
   const agent = selectedAgentOption?.agent;
+  // Run On is offered only when the machine has more than its two host placements.
+  const runOnOffered = executionTargets.length > 2;
+  // The skills a container or cloud target can't see, named before creation as the session names
+  // them after it (#2954).
+  const skillsUnavailable = useSessionSkillsUnavailable({ runnerId, agentId, adapter: executionTarget?.adapter });
+  // Choosing such a target brings its notice into view once, when it first shows in open Options.
+  const skillsNoticeScrolledRef = useRef(false);
+  useEffect(() => {
+    if (!skillsUnavailable) skillsNoticeScrolledRef.current = false;
+    else if (optionsOpen && !skillsNoticeScrolledRef.current && skillsNoticeRef.current) {
+      skillsNoticeScrolledRef.current = true;
+      skillsNoticeRef.current.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [optionsOpen, skillsUnavailable]);
   // Inside the Agent field (§8.4), so its left edge lines up with Project's and every other field's.
   const agentIcon = <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={16} />;
   const provider = agent?.driver === "claude-code" ? "claude"
@@ -603,7 +626,6 @@ export function NewSessionDialog({
       providerAccounts.find((account) => account.id === preferred)?.id ?? providerAccounts[0]?.id ?? "");
   }, [accountSelectionKey, agent?.defaultProviderAccountId, savedProviderAccount?.accountId,
     savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0")]);
-  const nativeTuiAccountingExplanation = nativeTuiAccountingDetail(agent);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&
     executionTarget.adapter !== "host" && savedPermissionMode !== undefined &&
@@ -697,6 +719,7 @@ export function NewSessionDialog({
     runnerSupportsOrchestration: runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration"),
     agentOffersOrchestrator: agentOffersOrchestratorPreset || agentOffersAdditiveRole,
     agentOrchestratorRequirement: agent?.codexAppServer?.orchestratorApproval?.failure,
+    agentName: selectedAgentOption?.label,
     contextKind: orchestratorContext,
     directWslVerified: directWslOrchestrator,
     hostExecutionTarget,
@@ -1200,7 +1223,7 @@ export function NewSessionDialog({
       : !!selectedProject && projectLocationLaunchable;
   // Independent provider permissions (#1281, #1293): a non-strict native Claude Code or Codex
   // Orchestrator keeps the same permission mode, tools, hooks, and MCP servers as a normal session.
-  const savedPermissionTitle = !defaultsReady ? "Default (Not Loaded)"
+  const savedPermissionTitle = !defaultsReady ? (harnessDefaults?.error ? "Default (Not Loaded)" : "Loading…")
     : savedPiModeUnavailableForTarget ? "Target Default — Full Access"
     : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
     : "Harness Default";
@@ -1292,20 +1315,22 @@ export function NewSessionDialog({
     account: 'button[aria-label^="Account:"]',
     "retained-session": '[data-validation-target="retained-session"]',
     "open-connections": '[data-validation-target="open-connections"]',
-    role: `[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`,
+    role: '.seg[aria-label="Role"] > .seg-option:not([aria-disabled="true"])',
     defaults: '[data-validation-target="defaults"]',
     "orchestrator-retry": 'button[data-validation-target="orchestrator-defaults"]',
     orchestrator: 'div[data-validation-target="orchestrator-defaults"]',
     "full-control": '[data-control-mode="full_control"]',
     "live-child-limit": `[id="${liveChildLimitInputId}"]`,
-    harness: `[id="${harnessOptionsId}"] input:not([aria-disabled="true"])`,
-    mode: '.new-session-mode button[aria-checked="true"]',
-    "execution-target": 'button[aria-label^="Execution Target:"]',
+    harness: '.seg[aria-label="Harness"] > .seg-option:not([aria-disabled="true"])',
+    mode: '.seg[aria-label="Working Copy"] > .seg-option[aria-checked="true"]',
+    "execution-target": 'button[aria-label^="Run On:"]',
     "cloud-budget": `[id="${cloudBudgetInputId}"]`,
     create: '[data-validation-target="create"]',
   };
   /** Focus the first of `controls` that renders now, falling back to Create Session, and say which. */
   const focusValidationProblem = (...controls: ProblemControl[]): ProblemControl => {
+    // A problem inside Options opens it first, in this commit, so its control can take focus.
+    if (controls[0] && OPTIONS_CONTROLS.has(controls[0]) && !optionsOpen) flushSync(() => setOptionsOpen(true));
     const dialog = formRef.current?.closest<HTMLElement>('[role="dialog"]') ?? formRef.current;
     for (const control of [...controls, "create" as const]) {
       const target = dialog?.querySelector<HTMLElement>(problemTargets[control]);
@@ -1455,7 +1480,7 @@ export function NewSessionDialog({
           : "Wait for saved permission defaults to finish loading.",
         ...(harnessDefaults?.error ? ["defaults", "role"] as const : ["role"] as const));
       } else if (orchestrator && !orchestratorSupported) {
-        report("role", "Choose an available Session Role.", "role");
+        report("role", "Choose an available Role.", "role");
       } else if (orchestrator && !orchestratorSettingsReady) {
         // While the policy loads there is nothing of it to focus, so the Session Role answers.
         report("role", orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.",
@@ -1479,9 +1504,10 @@ export function NewSessionDialog({
       } else if (launchSurface === "native_tui" && !nativeTuiSupported) {
         report("harness", "Choose an available Harness.", "harness");
       } else if (executionTarget && !executionTarget.available) {
-        report("mode", "Choose an available Execution Target.", "execution-target", "mode");
+        report("mode", "Choose an available Run On target.", "execution-target", "mode");
       } else if (!cloudBudgetValid) {
-        report("mode", "Enter a Cloud Cost Budget within the allowed range.", "cloud-budget", "execution-target", "mode");
+        // The Cloud Budget field already shows its error, and the focused field is described by it.
+        report("mode", null, "cloud-budget", "execution-target", "mode");
       } else {
         report("form", "Complete the required session settings before creating a session.", "create");
       }
@@ -1961,6 +1987,58 @@ export function NewSessionDialog({
               </p>}
   </>;
 
+  // Options (#2954): the values its closed head lists, what inside needs attention, and the copy of
+  // its rows that depends on more than one choice.
+  const permissionsValue = providerPermissionsPreset && !savedOrchestratorDefault ? "Orchestrator Preset" : savedPermissionTitle;
+  const permissionsDescription = providerPermissionsPreset ? "The Orchestrator preset sets them for this session."
+    : savedPiModeUnavailableForTarget ? "This target can't show Pi's approval prompts, so commands run without them."
+    : orchestrator
+      ? effectiveIntegrationIsolation
+        ? "An Orchestrator keeps them and adds only its orchestration tools. Change them in the composer after the session opens."
+        : "An Orchestrator keeps them and its integrations, which typed decisions can't intercept. Change them in the composer after the session opens."
+      : "Change them in the composer after the session opens.";
+  const defaultsFailureId = `${generatedFormId}-defaults-failure`;
+  const normalUnavailable = !orchestratorRoleSupported && savedOrchestratorDefault
+    ? "Orchestrator is your saved Agent Harness default. Change it in Settings to use another default."
+    : undefined;
+  const roleDescription = roleOverride === undefined && savedOrchestratorDefault && orchestratorRoleSupported
+    ? "Orchestrator is your saved default. Choose Normal to ignore it for this session, or change it in Settings."
+    : "An Orchestrator delegates work to child sessions.";
+  const roleUnavailableId = `${generatedFormId}-role-unavailable`;
+  const roleWslId = `${generatedFormId}-role-wsl`;
+  const savedOrchestratorUnavailable = orchestrator && !orchestratorSupported;
+  const orchestratorRequired = directWslRequiresSafeOrchestrator && !orchestrator;
+  const roleNoteIds = [savedOrchestratorUnavailable && roleUnavailableId, orchestratorRequired && roleWslId]
+    .filter(Boolean).join(" ");
+  const roleNotes = <>
+    {savedOrchestratorUnavailable && <FieldError id={roleUnavailableId}>
+      The saved Orchestrator preset is unavailable here. {orchestratorUnavailable} Choose a compatible target or change the saved default in Settings.
+    </FieldError>}
+    {orchestratorRequired && <FieldError id={roleWslId}>
+      Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.
+    </FieldError>}
+    {/* With a policy to show, the role's problem sits under the policy it is about. */}
+    {!(orchestrator && orchestratorSettingsReady) && problemFor("role")}
+  </>;
+  const optionsSummary = [
+    { key: "role", icon: <BotIcon size={14} />, label: orchestrator ? "Orchestrator" : "Normal" },
+    { key: "harness", icon: <TerminalIcon size={14} />, label: launchSurface === "native_tui" ? "Native TUI" : "Direct" },
+    { key: "working-copy", icon: useWorktree ? <BranchIcon size={14} /> : <FolderIcon size={14} />, label: useWorktree ? "Worktree" : "In Place" },
+    ...(runOnOffered && executionTarget ? [{ key: "run-on", icon: <ComputerIcon size={14} />, label: executionTarget.name }] : []),
+    { key: "permissions", icon: <ShieldIcon size={14} />, label: permissionsValue },
+  ];
+  const optionsAttention: SessionOptionsAttention[] = [
+    ...(skillsUnavailable ? [{ key: "skills", label: "Skills Unavailable" }] : []),
+    ...(!defaultsReady && harnessDefaults?.error ? [{ key: "defaults", label: "Permissions Not Loaded" }] : []),
+    ...(savedOrchestratorUnavailable ? [{ key: "orchestrator-unavailable", label: "Orchestrator Unavailable" }] : []),
+    ...(orchestratorRequired ? [{ key: "orchestrator-required", label: "Orchestrator Required" }] : []),
+    ...(orchestrator && !orchestratorSettingsReady && orchestratorSettings?.error
+      ? [{ key: "policy-error", label: "Policy Not Loaded" }] : []),
+    ...(orchestrator && orchestratorSettingsReady &&
+      !(orchestratorCapabilitiesValid && orchestratorDelegationValid && orchestratorExecutionValid)
+      ? [{ key: "policy-invalid", label: "Policy Needs a Change" }] : []),
+  ];
+
   return (
     <>
     <Modal
@@ -2029,26 +2107,6 @@ export function NewSessionDialog({
             </div>
           </>
         )}
-
-          {directoryGrants.length > 0 && executionTarget?.adapter === "host" && (
-            <fieldset className="field">
-              <legend>Additional Directories (Preview)</legend>
-              <span className="muted">Each directory expands this ACP agent's workspace access for this session only.</span>
-              <ChoiceRows<string>
-                multiple
-                label="Additional Directories"
-                value={additionalDirectories}
-                onChange={(path) => setAdditionalDirectories((current) => current.includes(path)
-                  ? current.filter((item) => item !== path)
-                  : [...current, path])}
-                options={directoryGrants.map((path) => ({
-                  value: path,
-                  title: shortenPath(path),
-                  description: <span title={path}>{path}</span>,
-                }))}
-              />
-            </fieldset>
-          )}
 
           <div className="field">
             <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : agentInputId}>Agent</label>
@@ -2141,221 +2199,186 @@ export function NewSessionDialog({
             </div>
           )}
 
-          <div className="field">
-            <span>Session Role</span>
-            {/* Rows rather than the shared Select: two options that each need a sentence is the
-                shape ChoiceRows exist for, and hiding them behind a trigger is what produced
-                #832's clipping — a 76px menu over 98px of touch targets, with half of one of only
-                two choices below the fold. Always visible, there is no menu to mis-measure. */}
-            <ChoiceRows<"normal" | "orchestrator">
-              id={permissionOptionsId}
-              invalid={controlInvalid("role")}
-              describedBy={controlDescribedBy("role")}
-              label="Session Role"
-              value={orchestrator ? "orchestrator" : "normal"}
-              onChange={setRoleOverride}
-              options={[
-                {
-                  value: "normal",
-                  title: "Normal",
-                  description: "Work directly in this session with the harness's ordinary tools and permissions.",
-                  // An older control plane resolves a saved Orchestrator default itself and cannot
-                  // be told otherwise, so Normal is unavailable rather than silently ignored.
-                  disabled: !orchestratorRoleSupported && savedOrchestratorDefault,
-                  disabledReason: !orchestratorRoleSupported && savedOrchestratorDefault
-                    ? "Orchestrator is your saved Agent Harness default. Change it in Settings to use another default."
-                    : undefined,
-                },
-                {
-                  value: "orchestrator",
-                  title: "Orchestrator",
-                  description: "Delegate implementation by default. Provider permissions, optional Strict Project Isolation, and decision delegation are configured separately below and cannot change after creation.",
-                  // Rendered disabled rather than omitted. The list used to drop this option
-                  // entirely when unsupported, leaving a one-option control that could not say
-                  // whether the runner, the agent, the context or the target was the reason.
-                  disabled: !orchestratorSupported,
-                  disabledReason: orchestratorUnavailable,
-                },
-              ]}
-            />
-            <div className="new-session-provider-permissions" role="group" aria-label="Provider Permissions">
-              <span>Provider Permissions</span>
-              <span className="new-session-provider-permissions-value">
-                {providerPermissionsPreset && !savedOrchestratorDefault ? "Orchestrator Preset — Harness-Enforced" : savedPermissionTitle}
-              </span>
-              <span className="muted">
-                {providerPermissionsPreset
-                  ? orchestratorPresetReason
-                  : savedPiModeUnavailableForTarget
-                    ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
-                    : orchestrator
-                      ? effectiveIntegrationIsolation
-                        ? `The same permission modes and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Integration Isolation is enabled: ${integrationIsolationCopy.removed.charAt(0).toLowerCase()}${integrationIsolationCopy.removed.slice(1)} ${integrationIsolationCopy.kept}${hostExecutionTarget ? "" : ` ${SKILLS_UNAVAILABLE_ON_TARGET}`} Change the mode in the composer after creation.`
-                        : "The same permission modes, integrations, and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Typed workflow decisions do not govern integrations they cannot intercept. Change the mode in the composer after creation."
-                      : "Use the approval behavior saved for this agent harness. Change it in the composer after creation."}
-              </span>
-            </div>
-            {!defaultsReady && (harnessDefaults?.error ? <>
-              <span className="form-error">Could not load saved permission defaults. Retry before using Default.</span>
-              <button
-                type="button"
-                className="btn ghost sm"
-                data-validation-target="defaults"
-                aria-describedby={controlDescribedBy("defaults")}
-                onClick={() => setDefaultsRetry((value) => value + 1)}
-              >
-                Retry Defaults
-              </button>
-            </> : <span className="muted">Loading saved permission defaults…</span>)}
-            {orchestrator && <>
-              {roleOverride === undefined && savedOrchestratorDefault && orchestratorRoleSupported && <span className="muted">Orchestrator is your saved Agent Harness default. Choose Normal to ignore it for this session, or change it in Settings.</span>}
-              {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset is unavailable here. {orchestratorUnavailable} Choose a compatible target or change the saved default in Settings.</span>}
-            </>}
-            {orchestrator && !orchestratorSettingsReady && <div className="orchestrator-policy-unavailable" role="status">
-              <span className={orchestratorSettings?.error ? "form-error" : "muted"}>
-                {orchestratorSettings?.error ?? "Loading effective Orchestrator policy…"}
-              </span>
-              {orchestratorSettings?.error && <button
-                type="button"
-                className="btn ghost sm"
-                data-validation-target="orchestrator-defaults"
-                aria-describedby={controlDescribedBy("orchestrator-retry")}
-                onClick={() => setDefaultsRetry((value) => value + 1)}
-              >Retry Orchestrator Defaults</button>}
-            </div>}
-            {/* Focusable from script, so a policy problem can land here and announce its error. */}
-            {orchestrator && orchestratorSettingsReady && <div
-              className="new-session-orchestrator-policy"
-              data-validation-target="orchestrator-defaults"
-              role="group"
-              aria-label="Orchestrator Policy"
-              aria-describedby={controlDescribedBy("orchestrator") ?? controlDescribedBy("full-control")}
-              tabIndex={-1}
-            >
-              <OrchestratorControlChoice surface="launch" mode={controlPreview} onChange={setControlPreview} disabled={busy} />
-              {controlPreview === "full_control"
-                ? <FullControlLaunchPanel request={buildSessionRequest} selectionValid={launchSelectionValid} disabled={busy}
-                  savedDefaults={orchestratorSettings?.view?.defaults ?? null}
-                  onAuthorization={setFullControlAuthorization}
-                  onCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
-                  onActivity={() => setFieldProblem(null)}
-                  advanced={orchestratorPolicyFields} />
-                : orchestratorPolicyFields}
-            </div>}
-            {directWslRequiresSafeOrchestrator && !orchestrator &&
-              <span className="form-error">Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.</span>}
-            {problemFor("role")}
-          </div>
-
-          <div className="field">
-            <span>Harness</span>
-            {/* Two fixed options that each need a sentence: the shape ChoiceRows exist for.
-                The six mutually exclusive muted spans that used to sit below this group are now the
-                unavailable option's own `disabledReason`, so the control and its explanation arrive
-                together instead of as siblings a screen reader meets separately. */}
-            <ChoiceRows<"direct" | "native_tui">
-              id={harnessOptionsId}
-              invalid={controlInvalid("harness")}
-              describedBy={controlDescribedBy("harness")}
-              label="Harness"
-              value={launchSurface}
-              onChange={setLaunchSurface}
-              options={[
-                {
-                  value: "direct",
-                  title: "Direct",
-                  description: "Use structured chat, tool events, approval cards, and manager controls.",
-                },
-                {
-                  value: "native_tui",
-                  title: "Native TUI",
-                  description: "Open a separate provider conversation in Terminal. Usage accounting is unavailable.",
-                  // `aria-disabled` rather than the `disabled` attribute the bespoke button used:
-                  // that removed the option from the tab order entirely, so a keyboard user could
-                  // not reach the reason it is unavailable.
-                  disabled: !nativeTuiSupported,
-                  disabledReason: nativeTuiUnavailable,
-                },
-              ]}
-            />
-            {launchSurface === "native_tui" && (
-              <span className="muted">Usage Accounting: Unavailable. No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Sessions with cost budgets, cost checkpoints, or tool-call limits must use Direct. {nativeTuiAccountingExplanation && <>{nativeTuiAccountingExplanation} </>}Manager policy hook status appears after launch.</span>
-            )}
-            {problemFor("harness")}
-          </div>
-
-          <div className="field">
-            <span>Mode</span>
-            {/* §11.1's headline example: this dialog used THREE choice patterns at once inside
-                520px — a native select, aria-checked cards, and this bespoke `.seg`. One of them
-                goes here; the rest follow as their screens are migrated. */}
-            <SegmentedControl
-              className="new-session-mode"
-              label="Session Mode"
-              describedBy={controlDescribedBy("mode")}
-              value={useWorktree ? "worktree" : "in-place"}
-              options={[
-                { value: "in-place", label: "In Place" },
-                { value: "worktree", label: "Worktree" },
-              ]}
-              onChange={(mode) => selectHostMode(mode === "worktree")}
-            />
-            {executionTargets.length > 2 && (
-              <div className="field">
-                <span>Execution Target</span>
-                <Select<string>
-                  label="Execution Target"
-                  value={executionTarget?.id ?? null}
+          {/* Everything below Agent is one Options row (#2954), open when something in it needs the
+              person. The request it builds is the same as when every option was on the form. */}
+          <SessionOptions open={optionsOpen} onOpenChange={setOptionsOpen} summary={optionsSummary} attention={optionsAttention}>
+            <SettingsGroup>
+              <SegmentedRow
+                title="Role"
+                description={roleDescription}
+                value={orchestrator ? "orchestrator" : "normal"}
+                onChange={(value) => setRoleOverride(value === "orchestrator" ? "orchestrator" : "normal")}
+                block
+                describedBy={[roleNoteIds, controlDescribedBy("role")].filter(Boolean).join(" ") || undefined}
+                invalid={controlInvalid("role")}
+                error={roleNotes}
+                options={[
+                  // An older control plane resolves a saved Orchestrator default itself and cannot be
+                  // told otherwise, so Normal is unavailable rather than silently ignored.
+                  { value: "normal", label: "Normal", disabled: normalUnavailable !== undefined, disabledReason: normalUnavailable },
+                  // Kept in place while unavailable, so the row can say whether the runner, the agent,
+                  // the context or the target is the reason.
+                  { value: "orchestrator", label: "Orchestrator", disabled: !orchestratorSupported, disabledReason: orchestratorUnavailable },
+                ]}
+              />
+              {orchestrator && (
+                <div className="session-options-inset">
+                  {!orchestratorSettingsReady && <div className="orchestrator-policy-unavailable" role="status">
+                    <span className={orchestratorSettings?.error ? "form-error" : "muted"}>
+                      {orchestratorSettings?.error ?? "Loading effective Orchestrator policy…"}
+                    </span>
+                    {orchestratorSettings?.error && <button
+                      type="button"
+                      className="btn ghost sm"
+                      data-validation-target="orchestrator-defaults"
+                      aria-describedby={controlDescribedBy("orchestrator-retry")}
+                      onClick={() => setDefaultsRetry((value) => value + 1)}
+                    >Retry Orchestrator Defaults</button>}
+                  </div>}
+                  {/* Focusable from script, so a policy problem can land here and announce its error. */}
+                  {orchestratorSettingsReady && <div
+                    className="new-session-orchestrator-policy"
+                    data-validation-target="orchestrator-defaults"
+                    role="group"
+                    aria-label="Orchestrator Policy"
+                    aria-describedby={controlDescribedBy("orchestrator") ?? controlDescribedBy("full-control")}
+                    tabIndex={-1}
+                  >
+                    <OrchestratorControlChoice surface="launch" mode={controlPreview} onChange={setControlPreview} disabled={busy} />
+                    {controlPreview === "full_control"
+                      ? <FullControlLaunchPanel request={buildSessionRequest} selectionValid={launchSelectionValid} disabled={busy}
+                        savedDefaults={orchestratorSettings?.view?.defaults ?? null}
+                        onAuthorization={setFullControlAuthorization}
+                        onCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
+                        onActivity={() => setFieldProblem(null)}
+                        advanced={orchestratorPolicyFields} />
+                      : orchestratorPolicyFields}
+                  </div>}
+                  {orchestratorSettingsReady && problemFor("role")}
+                </div>
+              )}
+              <SegmentedRow
+                title="Harness"
+                value={launchSurface}
+                onChange={(value) => setLaunchSurface(value === "native_tui" ? "native_tui" : "direct")}
+                block
+                describedBy={controlDescribedBy("harness")}
+                invalid={controlInvalid("harness")}
+                error={problemFor("harness")}
+                options={[
+                  { value: "direct", label: "Direct", description: "Direct gives structured chat, approval cards and usage tracking." },
+                  {
+                    value: "native_tui",
+                    label: "Native TUI",
+                    description: "Native TUI opens the provider's own terminal UI. It doesn't track usage or show approval cards, so sessions with budgets must use Direct.",
+                    disabled: !nativeTuiSupported,
+                    disabledReason: nativeTuiUnavailable,
+                  },
+                ]}
+              />
+              <SegmentedRow
+                title="Working Copy"
+                description="A worktree keeps your checkout untouched. Recommended for code changes."
+                value={useWorktree ? "worktree" : "in_place"}
+                onChange={(value) => selectHostMode(value === "worktree")}
+                block
+                describedBy={controlDescribedBy("mode")}
+                invalid={controlInvalid("mode")}
+                error={runOnOffered ? undefined : problemFor("mode")}
+                options={[
+                  { value: "in_place", label: "In Place" },
+                  { value: "worktree", label: "Worktree" },
+                ]}
+              />
+              {runOnOffered && (
+                <SelectRow
+                  title="Run On"
+                  description={executionTarget ? describeBoundaries(executionTarget.boundaries) : undefined}
+                  value={executionTarget?.id ?? ""}
                   onChange={selectExecutionTarget}
-                  invalid={controlInvalid("execution-target")}
-                  describedBy={controlDescribedBy("execution-target")}
+                  error={fieldProblem?.field === "mode" ? fieldProblem.message : null}
                   options={executionTargets.map((target) => ({
                     value: target.id,
                     label: target.name,
-                    // A native <option> cannot render a second line, so the reason used to be
-                    // glued onto the label with an em dash. The shared Select has a slot for it.
+                    // An unavailable target keeps its reason as the option's second line.
                     disabled: !target.available,
-                    disabledReason: target.available
-                      ? undefined
-                      : target.unavailableReason ?? "Unavailable on this runner.",
+                    disabledReason: target.available ? undefined : target.unavailableReason ?? "Unavailable on this machine.",
                   }))}
                 />
-              </div>
-            )}
-            <span className="muted">
-              {useWorktree
-                ? "Runs in an isolated git worktree — recommended for code changes."
-                : "Runs directly in the workspace directory."}
-            </span>
-            {executionTarget && (
-              <span className="muted">
-                Target: {executionTarget.name} · Network {executionTarget.boundaries.network} · Secrets {executionTarget.boundaries.secrets} · Billing {executionTarget.boundaries.billing}
-              </span>
-            )}
-            {!managedSkillsAvailableForTarget(executionTarget?.adapter) && (
-              <span className="muted">{SKILLS_UNAVAILABLE_ON_TARGET}</span>
-            )}
-            {executionTarget?.adapter === "cloud" && executionTarget.policy && (
-              <label>
-                <span>Cloud Cost Budget (USD)</span>
-                <input
-                  id={cloudBudgetInputId}
-                  type="number"
+              )}
+              {skillsUnavailable && (
+                <div className="session-options-inset" ref={skillsNoticeRef}>
+                  <SkillsUnavailableNotice
+                    machine={runner ? runnerDisplay(runner, boxByRunner.get(runner.runnerId), runner.runnerId).name : ""}
+                    adapter={skillsUnavailable.adapter}
+                    skillNames={skillsUnavailable.skillNames}
+                    onOpenSkills={() => { onClose(); navigate({ name: "skills" }); }}
+                  />
+                </div>
+              )}
+              {executionTarget?.adapter === "cloud" && executionTarget.policy && (
+                <NumberRow
+                  title="Cloud Budget"
+                  description={`Stops the session at this amount. Between $${executionTarget.policy.cost.minimumBudgetUsd} and $${executionTarget.policy.cost.maximumBudgetUsd}, at about $${executionTarget.policy.cost.estimatedHourlyRateUsd} an hour.`}
+                  value={cloudBudgetUsd}
+                  onChange={setCloudBudgetUsd}
+                  unit="USD"
                   min={executionTarget.policy.cost.minimumBudgetUsd}
                   max={executionTarget.policy.cost.maximumBudgetUsd}
-                  step="0.01"
-                  aria-invalid={controlInvalid("cloud-budget") || undefined}
-                  aria-describedby={controlDescribedBy("cloud-budget")}
-                  value={cloudBudgetUsd}
-                  onChange={(event) => setCloudBudgetUsd(event.target.value)}
+                  step={0.01}
+                  inputId={cloudBudgetInputId}
+                  error={cloudBudgetValid ? null
+                    : `Enter an amount from $${executionTarget.policy.cost.minimumBudgetUsd} to $${executionTarget.policy.cost.maximumBudgetUsd}.`}
                 />
-                <span className="muted">
-                  Estimated ${executionTarget.policy.cost.estimatedHourlyRateUsd}/Hour · Budget ${executionTarget.policy.cost.minimumBudgetUsd}–${executionTarget.policy.cost.maximumBudgetUsd} · {executionTarget.policy.admission.maxConcurrentSessions} Concurrent
-                </span>
-              </label>
+              )}
+              {directoryGrants.length > 0 && executionTarget?.adapter === "host" && (
+                <SettingRow
+                  title="Extra Folders (Preview)"
+                  description="Also let this agent use these folders, for this session only."
+                  control={(
+                    <div className="session-options-folders" role="group" aria-label="Extra Folders">
+                      {directoryGrants.map((path) => (
+                        <Checkbox
+                          key={path}
+                          className="session-options-folder"
+                          label={path}
+                          checked={additionalDirectories.includes(path)}
+                          onChange={() => setAdditionalDirectories((current) => current.includes(path)
+                            ? current.filter((item) => item !== path)
+                            : [...current, path])}
+                        />
+                      ))}
+                    </div>
+                  )}
+                />
+              )}
+              <ValueRow title="Permissions" value={permissionsValue} description={permissionsDescription} />
+            </SettingsGroup>
+            {providerPermissionsPreset && (
+              <Notice tone="warning" title="Permissions Set by the Orchestrator Preset">
+                <p>{orchestratorPresetReason}</p>
+              </Notice>
             )}
-            {problemFor("mode")}
-          </div>
+            {!defaultsReady && harnessDefaults?.error && (
+              <Notice
+                tone="danger"
+                compact
+                actions={(
+                  <button
+                    type="button"
+                    className="btn sm"
+                    data-validation-target="defaults"
+                    aria-describedby={controlDescribedBy("defaults", defaultsFailureId)}
+                    onClick={() => setDefaultsRetry((value) => value + 1)}
+                  >
+                    Retry
+                  </button>
+                )}
+              >
+                <span id={defaultsFailureId}>Couldn't load your saved permissions.</span>
+              </Notice>
+            )}
+          </SessionOptions>
 
           {problemFor("form")}
           {/* A request failure sits at the body's end, directly above the footer (§7.3, §13.2). */}

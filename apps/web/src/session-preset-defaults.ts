@@ -46,6 +46,8 @@ export function orchestratorUnavailableReason(input: {
   /** Either advertisement: the coupled preset's permission mode, or the additive role (#1294). */
   agentOffersOrchestrator: boolean;
   agentOrchestratorRequirement?: string;
+  /** The agent as the Agent field names it, so the reason says which one ("Claude Code doesn't…"). */
+  agentName?: string;
   /** The agent's execution context. `"wsl"` needs the verified safe launcher; `"native"` does not. */
   contextKind: string;
   directWslVerified: boolean;
@@ -60,7 +62,7 @@ export function orchestratorUnavailableReason(input: {
   // offered, so an installation that can run the role additively is never described as lacking it.
   if (!input.agentOffersOrchestrator &&
       (input.runnerSupportsOrchestration || input.agentOrchestratorRequirement)) {
-    reasons.push(input.agentOrchestratorRequirement ?? "This agent does not offer the Orchestrator role.");
+    reasons.push(input.agentOrchestratorRequirement ?? `${input.agentName || "This agent"} doesn't offer the Orchestrator role.`);
   }
   if (input.contextKind === "wsl" && !input.directWslVerified) {
     reasons.push("WSL agents need the verified Direct WSL bridge and a bubblewrap-isolated runner.");
@@ -69,9 +71,9 @@ export function orchestratorUnavailableReason(input: {
   // silently allowed, and it says which context it refused so a new one is reported rather than
   // merely broken.
   if (input.contextKind !== "native" && input.contextKind !== "wsl") {
-    reasons.push(`Orchestrator runs on a native host or a verified WSL bridge, not a ${input.contextKind} context.`);
+    reasons.push(`Orchestrator runs on this machine or a verified WSL bridge, not in a ${input.contextKind} context.`);
   }
-  if (!input.hostExecutionTarget) reasons.push("Orchestrator runs only on the host execution target.");
+  if (!input.hostExecutionTarget) reasons.push("Orchestrator runs only on this machine's host, not in a container or the cloud.");
   return reasons.length > 0 ? reasons.join(" ") : undefined;
 }
 
@@ -167,25 +169,25 @@ export function orchestratorPresetPermissionsReason(input: {
   savedOrchestratorDefault: boolean;
 }): string | undefined {
   if (input.strictProjectIsolation) {
-    return "Strict Project Isolation is enforced through the harness-owned Orchestrator preset.";
+    return "Strict Project Isolation is enforced by the Orchestrator preset, so the preset sets them.";
   }
   const additiveCapability = orchestratorAdditiveCapability(input.driver);
   if (!additiveCapability) {
     return input.driver === "acp"
-      ? "The Claude ACP adapter's provider permission contract was audited and does not meet the bar for an additive launch, so an ACP Orchestrator uses the harness-owned Orchestrator preset."
-      : "This harness still uses the harness-owned Orchestrator preset; independent provider permissions are available for native Claude Code, Codex, and Pi.";
+      ? "This agent's adapter can't run an Orchestrator with normal permissions, so the preset sets them."
+      : "This agent can't run an Orchestrator with normal permissions, so the preset sets them.";
   }
   if (input.contextKind !== "native" || !input.hostExecutionTarget) {
-    return "Independent provider permissions are available only for a native Claude Code, Codex, or Pi harness on the host execution target.";
+    return "Only Claude Code, Codex and Pi on this machine's host keep normal permissions as an Orchestrator, so the preset sets them.";
   }
   if (input.nativeTui) {
-    return "Native TUI Orchestrators use the harness-owned Orchestrator preset.";
+    return "A Native TUI Orchestrator can't keep normal permissions, so the preset sets them.";
   }
   if (input.savedOrchestratorDefault) {
-    return "Orchestrator is your saved Agent Harness default and selects the Orchestrator preset. Change it in Settings to use ordinary provider permissions.";
+    return "Your saved default is the Orchestrator preset, so the preset sets them. Change it in Settings to keep normal permissions.";
   }
   if (!input.controlPlaneSupportsRole) {
-    return "Update Wollipog to give an Orchestrator ordinary provider permissions.";
+    return "This version of Wollipog can't give an Orchestrator normal permissions, so the preset sets them. Update Wollipog to change that.";
   }
   if (!runnerSupportsProtocol(input.runnerProtocolVersion, additiveCapability)) {
     return runnerCapabilityRequirement(

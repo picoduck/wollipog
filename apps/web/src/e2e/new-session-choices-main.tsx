@@ -47,6 +47,16 @@ const emailAccounts = fixtureParams.get("emailAccounts") === "1";
 /** #1695: host and container execution targets, so target-specific copy can be inspected. */
 const containerTargets = fixtureParams.get("containerTargets") === "1";
 
+/** #2954: a cloud target with a budget policy, beside the host and container targets. */
+const cloudTargets = fixtureParams.get("cloudTargets") === "1";
+
+/**
+ * #1360: an available ACP agent (machine-management-main.tsx's fixture shape), so the ACP-specific
+ * New Session copy has browser coverage. It offers the Orchestrator preset, and its workspace grants
+ * the Extra Folders an ACP agent may also use. `?savedAgent=gemini` makes it the chosen agent.
+ */
+const acpAgent = fixtureParams.get("acp") === "1";
+
 /**
  * #2365: the saved permission defaults' three states under Session Role. `error` shows the field's
  * `span.form-error`, `pending` its "Loading…" `span.muted`, and `orchestrator` the `span.muted` that
@@ -164,6 +174,27 @@ const runner: RunnerView = {
         available: false, authStatus: "unauthenticated" as const,
       },
     ] : []),
+    ...(acpAgent ? [{
+      id: "gemini",
+      name: "Gemini",
+      command: "gemini",
+      args: ["--experimental-acp"],
+      env: {},
+      driver: "acp" as const,
+      context: { kind: "native" as const },
+      source: "config" as const,
+      available: true,
+      authStatus: "authenticated" as const,
+      capabilities: {
+        models: [],
+        effortLevels: [],
+        slashCommands: [],
+        supportsImages: false,
+        supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"],
+      },
+      acp: { logout: false, loadSession: false, sessionList: false, sessionDelete: false, sessionResume: false, sessionClose: false },
+    }] : []),
   ],
   providerAccounts: [
     {
@@ -179,13 +210,21 @@ const runner: RunnerView = {
       authStatus: "unauthenticated",
     },
   ],
-  workspaces: [{ id: "workspace-1", name: "Wollipog", path: "/repos/wollipog" }],
+  workspaces: [{
+    id: "workspace-1",
+    name: "Wollipog",
+    path: "/repos/wollipog",
+    ...(acpAgent ? { additionalDirectoryGrants: ["/shared/reference-docs", "/shared/design-assets"] } : {}),
+  }],
+  // A bubblewrap runner, as an ACP Orchestrator's Strict Project Isolation needs.
+  ...(acpAgent ? { runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+    executionIsolation: { mode: "bwrap" as const, network: "inherit" as const } } } : {}),
   connectedAt: 1,
   lastSeen: 1,
   // A current runner, so `sessionOrchestration` is advertised and the Orchestrator preset is a real
   // choice rather than a disabled card. The disabled path is covered by `?orchestrator=0`.
   protocolVersion: PROTOCOL_VERSION,
-  ...(containerTargets ? {
+  ...(containerTargets || cloudTargets ? {
     executionTargets: [
       {
         id: "host-in-place", runnerId: "runner-1", name: "Runner Host · in place",
@@ -205,6 +244,16 @@ const runner: RunnerView = {
         boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
         available: true,
       },
+      ...(cloudTargets ? [{
+        id: "cloud", runnerId: "runner-1", name: "Cloud Sandbox",
+        kind: "cloud" as const, workspaceStrategy: "snapshot" as const, adapter: "cloud" as const,
+        boundaries: { filesystem: "snapshot" as const, network: "policy" as const, secrets: "references" as const, billing: "target_metered" as const },
+        policy: {
+          cost: { currency: "USD" as const, estimatedHourlyRateUsd: 0.4, minimumBudgetUsd: 1, maximumBudgetUsd: 50 },
+          admission: { maxConcurrentSessions: 2, queue: "fifo" as const },
+        },
+        available: true,
+      }] : []),
     ],
   } satisfies Partial<RunnerView> : {}),
 };
@@ -326,6 +375,14 @@ const client = {
     ? Promise.reject(new Error("Saved defaults are unavailable."))
     : savedDefaults === "pending" ? new Promise<AgentHarnessDefaultsView>(() => undefined) : Promise.resolve(defaults),
   workflowDefinitions: async (): Promise<WorkflowDefinition[]> => [],
+  // The skills assigned to Claude Code on this machine, which a container or cloud target can't see.
+  runnerSkills: async () => ({
+    desired: [
+      { name: "review-pr", versionDigest: "a", targets: [{ agentId: "claude" }] },
+      { name: "release-notes", versionDigest: "b", targets: [{ agentId: "claude" }] },
+    ],
+    reported: null,
+  }) as Awaited<ReturnType<ApiClient["runnerSkills"]>>,
   createSession: async (request: CreateSessionRequest) => {
     const documentRoot = document.documentElement;
     const count = Number(documentRoot.dataset.createSessionCount ?? "0") + 1;
@@ -335,7 +392,7 @@ const client = {
     if (delay > 0) await new Promise((resolve) => window.setTimeout(resolve, delay));
     return { id: `session-${count}` };
   },
-} as ApiClient;
+} as unknown as ApiClient;
 
 /**
  * A bare two-option Select, kept because migrating Permission Preset off it removed the app's only

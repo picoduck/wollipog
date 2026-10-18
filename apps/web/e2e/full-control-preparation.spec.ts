@@ -98,6 +98,14 @@ async function shoot(page: Page, anchor: Locator, path: string) {
 
 /** Deterministic API/Session fixtures for the three surfaces. These are visual and launch-fencing
  * checks only; they never attest live Full Control or evidence-provider readiness. */
+/** New Session's Options (#2954): the Orchestrator policy sits under Role, inside Options. */
+async function openSessionOptions(page: Page): Promise<void> {
+  const head = page.getByRole("button", { name: "Options", exact: true });
+  await expect(head).toBeVisible();
+  if ((await head.getAttribute("aria-expanded")) !== "true") await head.click();
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+}
+
 for (const viewport of viewports) {
   for (const theme of themes) {
     test(`launch ${viewport.name} ${theme}: readiness is checked at once and one action authorizes and starts`, async ({ page }) => {
@@ -120,6 +128,7 @@ for (const viewport of viewports) {
         await route.fulfill({ status: 201, json: { id: "session-full-control" } });
       });
       await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=${theme}`);
+      await openSessionOptions(page);
       await page.getByRole("radio", { name: "Full Control", exact: true }).click();
       const control = page.getByRole("heading", { name: "Orchestrator Control", exact: true });
       await expect(page.getByText("Can't Start Yet", { exact: true })).toBeVisible();
@@ -379,6 +388,7 @@ test.describe("limit entry lifecycle", () => {
       await route.fulfill({ status: 201, json: { id: "session-full-control" } });
     });
     await page.goto("/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=light");
+    await openSessionOptions(page);
     await page.getByRole("radio", { name: "Full Control", exact: true }).click();
     const start = page.getByRole("button", { name: "Authorize and Start", exact: true });
     const children = page.getByLabel("Maximum Issues", { exact: true });

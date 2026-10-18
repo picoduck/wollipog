@@ -303,7 +303,7 @@ test("a fully migrated screen renders a primitive", () => {
   // half — and it looks for a RENDERED element: matching the bare name passed against a screen
   // whose primitive had been renamed and therefore rendered nothing.
   for (const name of FULLY_MIGRATED) {
-    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceRows|ChoiceList|Select|SearchableCombobox)[\s/>]/,
+    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceRows|ChoiceList|Select|SearchableCombobox)[\s/><]/,
       `${name} is listed as fully migrated but renders no choice primitive`);
   }
 });
@@ -311,8 +311,11 @@ test("a fully migrated screen renders a primitive", () => {
 test("New Session completed the shared-choice migration", () => {
   const source = read(join(SRC, "components/NewSessionDialog.tsx"));
   assert.match(source, /<SearchableCombobox/, "Project and Agent use the searchable primitive");
-  assert.match(source, /<ChoiceRows/, "described and multiple choices use shared choice rows");
-  assert.match(source, /<SegmentedControl/, "short fixed modes use the segmented primitive");
+  // Options (#2954): Role, Harness and Working Copy are segmented setting rows, Run On a Select
+  // row, and Extra Folders checkbox rows, each delegating to the shared primitive.
+  assert.match(source, /<SegmentedRow/, "short fixed choices use the segmented setting row");
+  assert.match(source, /<SelectRow/, "a longer list uses the Select setting row");
+  assert.match(source, /<Checkbox/, "multiple choices use the shared checkbox");
   assert.equal(BASELINE.some(([file]) => file === "components/NewSessionDialog.tsx"), false,
     "no bespoke New Session picker remains in the ratchet inventory");
 });

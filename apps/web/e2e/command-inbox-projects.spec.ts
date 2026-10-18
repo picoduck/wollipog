@@ -1175,6 +1175,8 @@ test("Native TUI launch sends the harness intent and opens Terminal only after c
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
 
   const dialog = page.getByRole("dialog", { name: "New Session" });
+  // Harness is one of New Session's Options (#2954).
+  await dialog.getByRole("button", { name: "Options", exact: true }).click();
   const harness = dialog.getByRole("radiogroup", { name: "Harness" });
   await expect(harness.getByRole("radio", { name: /Direct/ })).toBeChecked();
   await harness.getByRole("radio", { name: /Native TUI/ }).click();

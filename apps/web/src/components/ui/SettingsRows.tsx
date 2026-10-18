@@ -211,6 +211,10 @@ export function SegmentedRow({
   disabledReason,
   onChange,
   label,
+  describedBy,
+  error,
+  invalid,
+  block,
   busy,
   busyLabel,
   saved,
@@ -218,7 +222,11 @@ export function SegmentedRow({
   title: string;
   /** Shown only when the selected option has nothing to say for itself — see below. */
   description?: ReactNode;
-  options: ReadonlyArray<{ value: string; label: string; description?: string }>;
+  /**
+   * An option that cannot be chosen here keeps its place, in the arrow order, and its
+   * `disabledReason` replaces the row's description while it is not the selected one.
+   */
+  options: ReadonlyArray<{ value: string; label: string; description?: string; disabled?: boolean; disabledReason?: string }>;
   value: string;
   disabled?: boolean;
   /**
@@ -230,6 +238,14 @@ export function SegmentedRow({
   onChange: (value: string) => void;
   /** The group’s accessible name, where the row’s title is not the right one. Defaults to the title. */
   label?: string;
+  /** The id of text outside the row that describes the group, such as a form's error for it. */
+  describedBy?: string;
+  /** A form's error for this choice (§8.5), under the pills: a `FieldError` the caller renders. */
+  error?: ReactNode;
+  /** The group is what that error is about, and `describedBy` names it. */
+  invalid?: boolean;
+  /** The pills fill the control column as equal options (`.seg.block`, §10.2). */
+  block?: boolean;
 }) {
   /*
    * The SELECTED option’s description becomes the row’s, rather than being dropped.
@@ -237,17 +253,23 @@ export function SegmentedRow({
    * Each option owns a sentence and a pill is too small to carry one. Showing the selected one keeps
    * the row a single line and makes the sentence track the choice — it answers "what am I getting?",
    * which is the question someone reading their own settings actually has.
+   *
+   * An unavailable option's reason outranks it: a pill that cannot be pressed says why where the
+   * row's sentence is, rather than in a tooltip touch cannot reach (§11.3).
    */
   const selected = options.find((option) => option.value === value);
+  const unavailable = disabled ? undefined
+    : options.find((option) => option.disabled && option.disabledReason && option.value !== value);
+  const optionSentence = unavailable?.disabledReason ?? selected?.description;
   return (
     <div className={rowClass("setting-row", { disabled })} aria-busy={busy || undefined}>
       <RowText
         title={title}
-        description={selected?.description ?? description}
+        description={optionSentence ?? description}
         // The pills carry the same sentence, referenced from the radio it belongs to. Left exposed
         // here as well it is announced twice. A row-level description with no option behind it is
         // nobody else’s, and stays exposed.
-        descriptionHidden={Boolean(selected?.description)}
+        descriptionHidden={Boolean(optionSentence)}
         busy={busy}
         busyLabel={busyLabel}
         saved={saved}
@@ -257,17 +279,22 @@ export function SegmentedRow({
           label={label ?? title}
           value={value}
           onChange={onChange}
+          className={block ? "block" : undefined}
+          describedBy={describedBy}
+          invalid={invalid}
           // `disabled` is per OPTION in the primitive, which keeps an unavailable choice in the roving
           // order and able to explain itself. A row-level disable is every option at once — and the
           // reason travels with it.
           options={options.map((option) => ({
             value: option.value,
             label: option.label,
-            description: option.description,
-            disabled,
-            disabledReason: disabled ? disabledReason : undefined,
+            // An unavailable option is described by why, so arrowing onto it says so.
+            description: !disabled && option.disabled && option.disabledReason ? option.disabledReason : option.description,
+            disabled: disabled || option.disabled,
+            disabledReason: disabled ? disabledReason : option.disabledReason,
           }))}
         />
+        {error}
       </span>
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
     </div>

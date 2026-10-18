@@ -23,6 +23,7 @@ import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { NewSessionDialog, type NewSessionPreset } from "./NewSessionDialog.js";
+import { describeBoundaries } from "./SessionOptions.js";
 import { ariaReferencedText, assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { fireDomEvent } from "./test-dom-events.js";
@@ -266,16 +267,15 @@ async function selectProject(container: HTMLDivElement, value: string): Promise<
 }
 
 /**
- * Whether a ChoiceRow option is refused, by the attribute the primitive actually uses.
+ * Whether a segmented option is refused, by the attribute the primitive actually uses.
  *
- * `ChoiceRows` marks an unavailable option's input `aria-disabled` rather than setting `disabled`
- * property, deliberately: the DOM property removes the control from the tab order, so a keyboard
- * user could not reach the option to hear why it is unavailable. The Harness group moved onto the
- * primitive, so its assertions moved onto the same contract.
+ * `SegmentedControl` marks an unavailable option `aria-disabled` rather than setting `disabled`,
+ * deliberately: the DOM property removes the control from the arrow order, so a keyboard user could
+ * not reach the option to hear why it is unavailable (#2954 moved Role and Harness onto it).
  */
 function cardRefused(card: Element | undefined): boolean {
-  assert.ok(card, "the card is rendered even when it cannot be chosen");
-  return card.querySelector("input")?.getAttribute("aria-disabled") === "true";
+  assert.ok(card, "the option is rendered even when it cannot be chosen");
+  return card.getAttribute("aria-disabled") === "true";
 }
 
 function createButton(container: HTMLDivElement): HTMLButtonElement {
@@ -354,21 +354,51 @@ async function chooseSelectOption(container: HTMLDivElement, label: string, opti
 }
 
 function permissionPresetGroup(container: HTMLDivElement): Element {
-  const group = container.querySelector('[role="radiogroup"][aria-label="Session Role"]');
-  assert.ok(group, "Session Role renders an always-visible choice group");
+  const group = container.querySelector('[role="radiogroup"][aria-label="Role"]');
+  assert.ok(group, "Role renders a segmented choice in Options");
   return group;
 }
 
-/** The ChoiceRow — the `<label>` that is the whole target — around each native radio in `scope`. */
-function radioRows(scope: ParentNode): HTMLLabelElement[] {
-  return [...scope.querySelectorAll<HTMLInputElement>('input[type="radio"]')]
-    .map((input) => input.closest("label"))
-    .filter((row): row is HTMLLabelElement => row !== null);
+/** Every segmented option (a `role="radio"` button) in `scope`. */
+function radioRows(scope: ParentNode): HTMLButtonElement[] {
+  return [...scope.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
 }
 
-function permissionPresetCard(container: HTMLDivElement, title: string): HTMLLabelElement | undefined {
+function permissionPresetCard(container: HTMLDivElement, title: string): HTMLButtonElement | undefined {
   return radioRows(permissionPresetGroup(container))
-    .find((row) => row.querySelector(".choice-row-title")?.textContent?.trim() === title);
+    .find((option) => option.textContent?.trim() === title);
+}
+
+/** The setting row a control sits in, whose description says what it does or why it can't (#2954). */
+function settingRowOf(element: Element): HTMLElement {
+  const row = element.closest<HTMLElement>(".setting-row");
+  assert.ok(row, "the control sits in a setting row");
+  return row;
+}
+
+/**
+ * The Permissions row in Options and the notices under it that say why or that its saved value
+ * could not load (#2954), as one text.
+ */
+function permissionsSummary(container: ParentNode): { readonly textContent: string } {
+  const title = [...container.querySelectorAll(".setting-row-title")].find((node) => node.textContent === "Permissions");
+  assert.ok(title, "Options has a Permissions row, always");
+  return {
+    // Read live, so one summary can be asserted before and after a choice.
+    get textContent() {
+      const row = [...container.querySelectorAll(".setting-row-title")]
+        .find((node) => node.textContent === "Permissions")?.closest(".setting-row");
+      const notices = [...container.querySelectorAll(".session-options-body > .notice")];
+      return [row?.textContent ?? "", ...notices.map((notice) => notice.textContent)].join(" ");
+    },
+  };
+}
+
+/** The Options disclosure's head button (#2954). */
+function optionsHead(container: HTMLDivElement): HTMLButtonElement {
+  const head = container.querySelector<HTMLButtonElement>(".session-options-head");
+  assert.ok(head, "New Session renders one Options row");
+  return head;
 }
 
 function submitWithEnter(container: HTMLDivElement): void {
@@ -722,7 +752,7 @@ test("every refused submit lands on a control described by its reason (#2952)", 
         await act(async () => { await selectProject(fixture.container, project.id); });
         await choosePermissionPreset(fixture.container, "Orchestrator");
         const focused = await pressCreateAndHear(fixture, /Wait for Orchestrator defaults to finish loading\./, "policy loading");
-        assert.ok(focused.closest('[role="radiogroup"][aria-label="Session Role"]'), "Session Role answers while nothing else can");
+        assert.ok(focused.closest('[role="radiogroup"][aria-label="Role"]'), "Role answers while nothing else can");
         assert.equal(focused.closest('[role="radiogroup"]')?.getAttribute("aria-invalid"), "true");
       } finally { await unmountFixture(fixture); }
     } },
@@ -741,7 +771,7 @@ test("every refused submit lands on a control described by its reason (#2952)", 
       try {
         await act(async () => { await selectProject(fixture.container, project.id); });
         const focused = await pressCreateAndHear(fixture, /Wait for saved permission defaults to finish loading\./, "defaults loading");
-        assert.ok(focused.closest('[role="radiogroup"][aria-label="Session Role"]'));
+        assert.ok(focused.closest('[role="radiogroup"][aria-label="Role"]'));
       } finally { await unmountFixture(fixture); }
     } },
     { label: "a missing saved account", run: async () => {
@@ -782,23 +812,36 @@ test("an invalid Cloud Cost Budget marks the focused input and describes it by i
   const fixture = await mountFixture({ runners: [cloudRunner] });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const target = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Execution Target:"]');
+    const target = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Run On:"]');
     assert.ok(target);
     await act(async () => { target.click(); });
-    const cloud = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="listbox"][aria-label="Execution Target"] [role="option"]')]
+    const cloud = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="listbox"][aria-label="Run On"] [role="option"]')]
       .find((option) => option.textContent?.includes("Cloud Sandbox"));
     assert.ok(cloud);
     await act(async () => { cloud.click(); });
     const budget = fixture.container.querySelector<HTMLInputElement>('input[type="number"][step="0.01"]');
     assert.ok(budget);
     assert.equal(budget.getAttribute("aria-invalid"), null);
+    assert.ok(budget.closest(".input-affix.w-xs"), "the budget is a 96px field");
+    assert.equal(budget.parentElement?.querySelector(".input-affix-text")?.textContent, "USD", "with its unit inside it");
+    assert.match(settingRowOf(budget).textContent ?? "", /Stops the session at this amount\. Between \$1 and \$20/);
+    // 0 is out of range: the field says so as soon as it holds it.
+    await act(async () => { fireDomEvent.change(budget, { target: { value: "0" } }); });
+    assert.equal(budget.getAttribute("aria-invalid"), "true");
+    assert.match(ariaReferencedText(budget, "aria-describedby") ?? "", /^Enter an amount from \$1 to \$20\./);
     await act(async () => { fireDomEvent.change(budget, { target: { value: "50" } }); });
 
+    // Pressed with Options closed, Create Session opens them and lands on the budget. (A cloud
+    // target opened them by itself: its notice says the machine's skills can't be used there.)
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "true");
+    await act(async () => { optionsHead(fixture.container).click(); });
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 0);
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "true");
     assert.equal((domWindow.document.activeElement as unknown) === budget, true, "validation lands on the budget");
     assert.equal(budget.getAttribute("aria-invalid"), "true");
-    assert.equal(ariaReferencedText(budget, "aria-describedby"), "Enter a Cloud Cost Budget within the allowed range.");
+    assert.equal(ariaReferencedText(budget, "aria-describedby"), "Enter an amount from $1 to $20. Stops the session at this amount. Between $1 and $20, at about $2 an hour.");
     assert.notEqual(fixture.container.querySelector(".field-error")?.getAttribute("role"), "alert",
       "a field error is not an alert; focusing its field announces it");
 
@@ -1003,7 +1046,7 @@ test("Project and Agent options are named by their label and described by their 
   }
 });
 
-test("Additional Directories use shared multiple-choice cards without changing the request", async () => {
+test("Extra Folders are checkbox rows in Options without changing the request (#2954)", async () => {
   const grant = "/shared/reference";
   const acpRunner: RunnerView = {
     ...runner,
@@ -1023,14 +1066,19 @@ test("Additional Directories use shared multiple-choice cards without changing t
   const fixture = await mountFixture({ runners: [acpRunner] });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const group = fixture.container.querySelector('[role="group"][aria-label="Additional Directories"]');
+    const group = fixture.container.querySelector('[role="group"][aria-label="Extra Folders"]');
     assert.ok(group);
+    const row = settingRowOf(group);
+    assert.equal(row.querySelector(".setting-row-title")?.textContent, "Extra Folders (Preview)");
+    assert.equal(row.querySelector(".setting-row-desc")?.textContent, "Also let this agent use these folders, for this session only.");
     const option = group.querySelector('input[type="checkbox"]')?.closest("label");
     assert.ok(option);
-    assert.equal(option.querySelector("input")?.checked.toString(), "false");
+    assert.equal(option.querySelector(".checkbox-label")?.textContent, grant, "each folder is its whole path");
+    assert.ok(option.matches(".session-options-folder"), "drawn in the mono face");
+    assert.equal(option.querySelector("input")?.checked, false);
 
     await act(async () => { option.click(); });
-    assert.equal(option.querySelector("input")?.checked.toString(), "true");
+    assert.equal(option.querySelector("input")?.checked, true);
     await act(async () => { createButton(fixture.container).click(); });
     assert.deepEqual(fixture.requests[0]?.acpSessionContext, { additionalDirectories: [grant] });
   } finally {
@@ -1535,7 +1583,7 @@ test("Decision Delegation is Orchestrator-only and shows effective sources", asy
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
     assertNoDomNode(fixture.container.querySelector('[aria-label^="Descendant Requests:"]'));
-    assert.match(fixture.container.textContent ?? "", /Delegate implementation by default/);
+    assert.match(fixture.container.textContent ?? "", /An Orchestrator delegates work to child sessions\./);
     await choosePermissionPreset(fixture.container, "Orchestrator");
     const descendant = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Descendant Requests:"]');
     assert.match(descendant?.getAttribute("aria-label") ?? "", /Questions and Approvals/);
@@ -1599,7 +1647,7 @@ test("Full Control never falls back to ordinary creation; Custom remains launcha
     await act(async () => submitWithEnter(fixture.container));
     assert.equal(fixture.requests.length, 0);
     assert.match(fixture.container.textContent ?? "", /Full Control isn't ready yet/);
-    const providerPermissions = fixture.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    const providerPermissions = permissionsSummary(fixture.container);
     assert.match(providerPermissions.textContent!, /Orchestrator/, "effective coupled preset replaces the saved provider default");
     assert.doesNotMatch(fixture.container.textContent ?? "", /Activation Unavailable/);
     await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
@@ -2324,16 +2372,16 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
     }] }), undefined, strictOrchestratorDefaults);
     try {
       await act(async () => { await selectProject(fixture.container, project.id); });
-      assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.querySelector("input")?.checked.toString(), "true",
+      assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-checked"), "true",
         "a saved Orchestrator default selects the role without an explicit override");
       assert.match(fixture.container.textContent!, /Saved Default — Orchestrator/,
-        "the saved default names itself in the always-visible Provider Permissions summary");
+        "the saved default names itself in the Permissions row");
       const tui = radioRows(fixture.container)
         .find((button) => button.textContent?.includes("Native TUI"))!;
       assert.equal(cardRefused(tui), protocolVersion < 112);
       if (protocolVersion === 112) {
         await act(async () => { tui.click(); });
-        assert.match(fixture.container.textContent!, /spending and tool calls are not included/);
+        assert.match(settingRowOf(tui).textContent!, /Native TUI opens the provider's own terminal UI\./);
       }
       await act(async () => { createButton(fixture.container).click(); });
       assert.equal(fixture.requests.length, 1);
@@ -2354,10 +2402,18 @@ test("default loading fails closed, retries, and allows old control planes witho
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await assertCreateRefused(fixture);
+    // A defaults load error needs attention: Options opens by itself and its head names it.
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "true");
+    assert.match(permissionsSummary(fixture.container).textContent, /Couldn't load your saved permissions\./);
+    await act(async () => { optionsHead(fixture.container).click(); });
+    assert.match(optionsHead(fixture.container).textContent ?? "", /Permissions Not Loaded/);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "true", "the refused submit opens Options");
     const retry = [...fixture.container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Retry Defaults")!;
+      .find((button) => button.textContent === "Retry")!;
+    assert.ok((domWindow.document.activeElement as unknown) === retry, "focus lands on Retry");
+    assert.match(ariaReferencedText(retry, "aria-describedby") ?? "", /Couldn't load your saved permissions\./);
     await act(async () => { retry.click(); });
     assert.equal(calls, 2);
     assert.equal(createButton(fixture.container).disabled, false);
@@ -2377,7 +2433,7 @@ test("late saved-default response completes before enabling creation", async () 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await assertCreateRefused(fixture);
-    assert.match(fixture.container.textContent!, /Loading saved permission defaults/);
+    assert.match(permissionsSummary(fixture.container).textContent, /Loading…/);
     await act(async () => { resolve({ defaults: [] }); });
     assert.equal(createButton(fixture.container).disabled, false);
   } finally { await unmountFixture(fixture); }
@@ -2559,7 +2615,7 @@ test("a late saved-default failure replaces stale loading validation", async () 
     await act(async () => { reject(new ApiError("Unavailable", 503)); });
     assertNoDomNode(fixture.container.querySelector(".modal-body .field-error"),
       "feedback for the superseded loading state is removed when loading becomes retryable");
-    assert.match(fixture.container.textContent!, /Retry Defaults/);
+    assert.match(permissionsSummary(fixture.container).textContent, /Couldn't load your saved permissions\./);
   } finally {
     await unmountFixture(fixture);
   }
@@ -2761,7 +2817,7 @@ test("container targets hide and omit runner-local provider accounts", async () 
   const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
   try {
     await chooseSelectOption(fixture.container, "Account", "Personal");
-    await chooseSelectOption(fixture.container, "Execution Target", "Offline Container");
+    await chooseSelectOption(fixture.container, "Run On", "Offline Container");
     assertNoDomNode(fixture.container.querySelector('[aria-label^="Account:"]'));
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.executionTargetId, "container");
@@ -2771,7 +2827,7 @@ test("container targets hide and omit runner-local provider accounts", async () 
   }
 });
 
-test("container targets say the Machine's managed skills are unavailable; host targets do not", async () => {
+test("a container target opens Options, names the skills it can't see under Run On, and marks the head (#2954)", async () => {
   const targetRunner: RunnerView = {
     ...runner,
     executionTargets: [
@@ -2795,13 +2851,42 @@ test("container targets say the Machine's managed skills are unavailable; host t
       },
     ],
   };
-  const fixture = await mountFixture({ runners: [targetRunner] }, { projectId: null });
+  const skillRequests: string[] = [];
+  const fixture = await mountFixture({ runners: [targetRunner] }, { projectId: null }, undefined, undefined, undefined, undefined, {
+    runnerSkills: async (runnerId: string) => {
+      skillRequests.push(runnerId);
+      return {
+        desired: [
+          { name: "review", versionDigest: "a", targets: [{ agentId: "claude" }] },
+          { name: "deploy", versionDigest: "b", targets: [{ agentId: "claude" }] },
+          { name: "elsewhere", versionDigest: "c", targets: [{ agentId: "codex" }] },
+        ],
+        reported: null,
+      } as never;
+    },
+  });
+  const notice = () => fixture.container.querySelector<HTMLElement>('[aria-label="Skills Unavailable"]');
   try {
-    assert.doesNotMatch(fixture.container.textContent ?? "", SKILLS_UNAVAILABLE);
-    await chooseSelectOption(fixture.container, "Execution Target", "Offline Container");
-    assert.match(fixture.container.textContent ?? "", SKILLS_UNAVAILABLE);
-    await chooseSelectOption(fixture.container, "Execution Target", "Runner Host · worktree");
-    assert.doesNotMatch(fixture.container.textContent ?? "", SKILLS_UNAVAILABLE);
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false", "defaults keep Options closed");
+    assertNoDomNode(notice());
+    assert.deepEqual(skillRequests, [], "a host target never asks for the machine's skills");
+    await chooseSelectOption(fixture.container, "Run On", "Offline Container");
+    await act(async () => { await Promise.resolve(); });
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "true", "Options opens by itself");
+    const shown = notice();
+    assert.ok(shown, "the session view's skills notice shows before creation");
+    assert.equal(shown.textContent?.includes("Skills from runner-1 aren’t available in container sessions, so deploy and review can’t be used here."), true);
+    const runOn = fixture.container.querySelector('button[aria-label^="Run On:"]')!;
+    assert.ok(settingRowOf(runOn).nextElementSibling?.contains(shown), "the notice sits directly under Run On");
+    assert.doesNotMatch(fixture.container.textContent ?? "", SKILLS_UNAVAILABLE, "the muted line is gone");
+    await act(async () => { optionsHead(fixture.container).click(); });
+    const warning = optionsHead(fixture.container).querySelector(".status.t-warning");
+    assert.equal(warning?.textContent, "Skills Unavailable", "the closed head names it in the warning tone");
+    await act(async () => { optionsHead(fixture.container).click(); });
+    await chooseSelectOption(fixture.container, "Run On", "Runner Host · worktree");
+    assertNoDomNode(notice());
+    await act(async () => { optionsHead(fixture.container).click(); });
+    assertNoDomNode(optionsHead(fixture.container).querySelector(".status.t-warning"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -2921,21 +3006,20 @@ test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal 
     await act(async () => { await selectProject(fixture.container, project.id); });
     const harness = fixture.container.querySelector('[role="radiogroup"][aria-label="Harness"]');
     assert.ok(harness);
-    assert.match(harness.textContent ?? "", /Use structured chat, tool events, approval cards, and manager controls\./);
-    assert.match(harness.textContent ?? "", /Usage accounting is unavailable\./);
+    const description = () => settingRowOf(harness).querySelector(".setting-row-desc")?.textContent;
+    assert.equal(description(), "Direct gives structured chat, approval cards and usage tracking.");
     const native = radioRows(harness)
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
+      .find((button) => button.textContent?.includes("Native TUI"));
     assert.ok(native);
-    // `cardRefused`, not `.disabled`: ChoiceRows never sets the DOM property, so asserting it is
-    // `false` would pass even for a refused card. The click below only means something if the
-    // option is genuinely selectable.
+    // `cardRefused`, not `.disabled`: the segmented option never sets the DOM property, so asserting
+    // it is `false` would pass even for a refused option. The click below only means something if
+    // the option is genuinely selectable.
     assert.equal(cardRefused(native), false);
 
     await act(async () => { native.click(); });
-    assert.match(
-      fixture.container.textContent ?? "",
-      /Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations\./,
-    );
+    assert.equal(description(),
+      "Native TUI opens the provider's own terminal UI. It doesn't track usage or show approval cards, so sessions with budgets must use Direct.");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Usage Accounting: Unavailable/);
     await act(async () => { createButton(fixture.container).click(); });
 
     assert.equal(fixture.requests[0]?.launchSurface, "native_tui");
@@ -2945,7 +3029,7 @@ test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal 
   }
 });
 
-test("Native TUI shows the content-free live provider accounting boundary", async () => {
+test("Native TUI says one sentence, without the accounting paragraph, whatever the runner reports (#2954)", async () => {
   const fixture = await mountFixture({
     capabilities: {
       sessionSubscriptions: false,
@@ -2978,14 +3062,13 @@ test("Native TUI shows the content-free live provider accounting boundary", asyn
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     const native = radioRows(fixture.container)
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
+      .find((button) => button.textContent?.includes("Native TUI"));
     assert.ok(native);
     await act(async () => { native.click(); });
-    assert.match(
-      fixture.container.textContent ?? "",
-      /Provider Contract: Claude Code 2\.1\.261 exposes structured output only outside its interactive Native TUI/,
-    );
-    assert.match(fixture.container.textContent ?? "", /authoritative replay and gap detection are unavailable\./);
+    assert.match(settingRowOf(native).textContent ?? "", /Native TUI opens the provider's own terminal UI\./);
+    for (const retired of [/Provider Contract/, /Usage Accounting/, /Manager policy hook status/, /remaining-budget calculations/]) {
+      assert.doesNotMatch(fixture.container.textContent ?? "", retired);
+    }
   } finally {
     await unmountFixture(fixture);
   }
@@ -2996,14 +3079,14 @@ test("Native TUI is disabled when the control plane does not advertise atomic la
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     const native = radioRows(fixture.container)
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
+      .find((button) => button.textContent?.includes("Native TUI"));
     assert.ok(native);
     assert.equal(cardRefused(native), true);
-    // The reason now lives ON the refused card rather than in a sibling paragraph, so assert it
-    // there — a sentence elsewhere in the dialog would satisfy the old container-wide match while
-    // the control itself explained nothing.
-    const reason = native.querySelector(".choice-row-reason")?.textContent ?? "";
+    // The reason replaces the row's description, and the refused option is described by it, so a
+    // sentence elsewhere in the dialog cannot satisfy this while the control explains nothing.
+    const reason = settingRowOf(native).querySelector(".setting-row-desc")?.textContent ?? "";
     assert.equal(reason, "Native TUI launch requires a newer version of Wollipog. Update Wollipog to use it.");
+    assert.equal(ariaReferencedText(native, "aria-describedby"), reason);
     assert.doesNotMatch(reason, RETIRED_PROJECT_TERMS);
   } finally {
     await unmountFixture(fixture);
@@ -3024,11 +3107,11 @@ test("Native TUI initial launch fails closed against a v66 runner", async () => 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     const native = radioRows(fixture.container)
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
+      .find((button) => button.textContent?.includes("Native TUI"));
     assert.ok(native);
     assert.equal(cardRefused(native), true);
-    // The start-fence hint is the refused card's own reason now, not a sibling paragraph.
-    assert.match(native.textContent ?? "", /This machine needs a newer runner for initial Native TUI launch\. Update and restart the runner\./);
+    // The start-fence hint is the refused option's own reason, in its row's description.
+    assert.match(settingRowOf(native).textContent ?? "", /This machine needs a newer runner for initial Native TUI launch\. Update and restart the runner\./);
   } finally {
     await unmountFixture(fixture);
   }
@@ -3047,7 +3130,7 @@ test("a failed atomic Native TUI launch leaves Terminal closed and surfaces the 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     const native = radioRows(fixture.container)
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
+      .find((button) => button.textContent?.includes("Native TUI"));
     assert.ok(native);
     await act(async () => { native.click(); });
     await act(async () => { createButton(fixture.container).click(); });
@@ -3086,7 +3169,7 @@ test("an ambiguous Native TUI launch retains one session and prevents duplicate 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     const native = radioRows(fixture.container)
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
+      .find((button) => button.textContent?.includes("Native TUI"));
     assert.ok(native);
     await act(async () => { native.click(); });
     await act(async () => { createButton(fixture.container).click(); });
@@ -3134,7 +3217,7 @@ test("failed Native TUI compensation exposes the retained session and disables r
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     const native = radioRows(fixture.container)
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
+      .find((button) => button.textContent?.includes("Native TUI"));
     assert.ok(native);
     await act(async () => { native.click(); });
     await act(async () => { createButton(fixture.container).click(); });
@@ -3180,7 +3263,7 @@ test("both permission presets are on screen without opening anything", async () 
     assertNoDomNode(fixture.container.querySelector(".menu.listbox"), "and opens no list");
 
     assert.ok(permissionPresetCard(fixture.container, "Orchestrator"));
-    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.querySelector("input")?.getAttribute("aria-disabled"), null,
+    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-disabled"), null,
       "a supported Orchestrator is selectable");
   } finally {
     await unmountFixture(fixture);
@@ -3197,16 +3280,18 @@ test("an unsupported Orchestrator is disabled and says why, rather than vanishin
 
     const orchestrator = permissionPresetCard(fixture.container, "Orchestrator");
     assert.ok(orchestrator, "Orchestrator is rendered even where it cannot be chosen");
-    assert.equal(orchestrator.querySelector("input")?.getAttribute("aria-disabled"), "true");
-    assert.match(orchestrator.textContent ?? "", /runner is too old to orchestrate child sessions/);
-    assert.doesNotMatch(orchestrator.textContent ?? "", /agent does not offer/,
+    assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
+    assert.match(settingRowOf(orchestrator).textContent ?? "", /runner is too old to orchestrate child sessions/);
+    assert.doesNotMatch(settingRowOf(orchestrator).textContent ?? "", /doesn't offer the Orchestrator role/,
       "an old runner cannot establish whether its missing capability is agent-specific");
 
     // Disabled, not merely styled: clicking must not select it, and the reason must be readable
     // rather than living in a `title` a touch user cannot reach.
     await act(async () => { orchestrator.click(); });
-    assert.equal(orchestrator.querySelector("input")?.checked.toString(), "false");
-    assert.ok(orchestrator.querySelector(".choice-row-reason"));
+    assert.equal(orchestrator.getAttribute("aria-checked"), "false");
+    assert.equal(ariaReferencedText(orchestrator, "aria-describedby"),
+      settingRowOf(orchestrator).querySelector(".setting-row-desc")?.textContent,
+      "its reason replaces the row's description, and arrowing onto it says the same");
   } finally {
     await unmountFixture(fixture);
   }
@@ -3245,11 +3330,11 @@ test("an old Codex on unverified WSL reports both independent Orchestrator block
     await act(async () => { await selectProject(fixture.container, project.id); });
     const orchestrator = permissionPresetCard(fixture.container, "Orchestrator");
     assert.ok(orchestrator);
-    assert.equal(orchestrator.querySelector("input")?.getAttribute("aria-disabled"), "true");
-    assert.match(orchestrator.textContent ?? "", /Upgrade Codex to 0\.154\.0 or newer/);
-    assert.match(orchestrator.textContent ?? "", /verified Direct WSL bridge and a bubblewrap-isolated runner/);
+    assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
+    assert.match(settingRowOf(orchestrator).textContent ?? "", /Upgrade Codex to 0\.154\.0 or newer/);
+    assert.match(settingRowOf(orchestrator).textContent ?? "", /verified Direct WSL bridge and a bubblewrap-isolated runner/);
     await act(async () => { orchestrator.click(); });
-    assert.equal(orchestrator.querySelector("input")?.checked.toString(), "false", "mixed constraints remain fail closed");
+    assert.equal(orchestrator.getAttribute("aria-checked"), "false", "mixed constraints remain fail closed");
   } finally {
     await unmountFixture(fixture);
   }
@@ -3378,10 +3463,12 @@ test("the Location groups and Harness share one control family", async () => {
   const fixture = await mountFixture();
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    for (const label of ["Session Role", "Harness"]) {
+    for (const label of ["Role", "Harness", "Working Copy"]) {
       const group = fixture.container.querySelector(`[role="radiogroup"][aria-label="${label}"]`);
       assert.ok(group, `${label} is a labelled radiogroup`);
-      assert.ok(group.querySelector(".choice-row"), `${label} uses the shared ChoiceRow`);
+      assert.ok(group.matches(".seg.block"), `${label} is the shared full-width segmented control`);
+      assert.equal(settingRowOf(group).querySelector(".setting-row-title")?.textContent, label,
+        `${label}'s visible title is its accessible name`);
     }
     // And nothing bespoke is left from the families this PR retired.
     assertNoDomNode(fixture.container.querySelector(".loc-pick"));
@@ -3408,13 +3495,13 @@ test("Orchestrator is an additive role that keeps the harness's ordinary provide
   } }, undefined, undefined, savedAcceptEdits);
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const providerPermissions = fixture.container.querySelector('[role="group"][aria-label="Provider Permissions"]');
+    const providerPermissions = permissionsSummary(fixture.container);
     assert.ok(providerPermissions, "Provider Permissions is an independent, always-visible control");
     assert.match(providerPermissions.textContent!, /Saved Default — Auto-?Accept Edits/i);
     await choosePermissionPreset(fixture.container, "Orchestrator");
     assert.match(providerPermissions.textContent!, /Saved Default — Auto-?Accept Edits/i,
       "selecting Orchestrator does not consume the provider permission-mode selection");
-    assert.match(providerPermissions.textContent!, /same permission modes, integrations, and credentials as a normal session/);
+    assert.match(providerPermissions.textContent!, /An Orchestrator keeps them and its integrations/);
     assert.doesNotMatch(providerPermissions.textContent!, /Orchestrator Preset/);
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 1);
@@ -3429,8 +3516,8 @@ test("Orchestrator is an additive role that keeps the harness's ordinary provide
   try {
     await act(async () => { await selectProject(strict.container, project.id); });
     await choosePermissionPreset(strict.container, "Orchestrator");
-    const providerPermissions = strict.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
-    assert.match(providerPermissions.textContent!, /Orchestrator Preset — Harness-Enforced/);
+    const providerPermissions = permissionsSummary(strict.container);
+    assert.match(providerPermissions.textContent!, /Orchestrator Preset/);
     assert.match(providerPermissions.textContent!, /Strict Project Isolation is enforced/,
       "the preset is disclosed with the policy that selects it rather than inferred from the role");
   } finally { await unmountFixture(strict); }
@@ -3439,8 +3526,8 @@ test("Orchestrator is an additive role that keeps the harness's ordinary provide
   try {
     await act(async () => { await selectProject(legacyControlPlane.container, project.id); });
     await choosePermissionPreset(legacyControlPlane.container, "Orchestrator");
-    const providerPermissions = legacyControlPlane.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
-    assert.match(providerPermissions.textContent!, /Update Wollipog to give an Orchestrator ordinary provider permissions\./);
+    const providerPermissions = permissionsSummary(legacyControlPlane.container);
+    assert.match(providerPermissions.textContent!, /can't give an Orchestrator normal permissions, so the preset sets them\. Update Wollipog to change that\./);
     assert.doesNotMatch(providerPermissions.textContent!, RETIRED_PROJECT_TERMS);
     await act(async () => { createButton(legacyControlPlane.container).click(); });
     assert.equal(legacyControlPlane.requests[0]?.role, undefined, "older control planes never receive the field");
@@ -3470,13 +3557,13 @@ test("a non-strict Codex Orchestrator shows the saved harness default rather tha
   } }, undefined, undefined, savedReadOnly);
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const providerPermissions = fixture.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    const providerPermissions = permissionsSummary(fixture.container);
     const normalSummary = providerPermissions.textContent!;
     assert.match(normalSummary, /Saved Default —/);
     await choosePermissionPreset(fixture.container, "Orchestrator");
     assert.match(providerPermissions.textContent!, /Saved Default —/,
       "a non-strict Codex Orchestrator shows the saved harness default");
-    assert.match(providerPermissions.textContent!, /same permission modes, integrations, and credentials as a normal session/);
+    assert.match(providerPermissions.textContent!, /An Orchestrator keeps them and its integrations/);
     assert.doesNotMatch(providerPermissions.textContent!, /Orchestrator Preset/);
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 1);
@@ -3491,8 +3578,8 @@ test("a non-strict Codex Orchestrator shows the saved harness default rather tha
   try {
     await act(async () => { await selectProject(strict.container, project.id); });
     await choosePermissionPreset(strict.container, "Orchestrator");
-    const providerPermissions = strict.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
-    assert.match(providerPermissions.textContent!, /Orchestrator Preset — Harness-Enforced/);
+    const providerPermissions = permissionsSummary(strict.container);
+    assert.match(providerPermissions.textContent!, /Orchestrator Preset/);
     assert.match(providerPermissions.textContent!, /Strict Project Isolation is enforced/);
   } finally { await unmountFixture(strict); }
 
@@ -3503,8 +3590,8 @@ test("a non-strict Codex Orchestrator shows the saved harness default rather tha
   try {
     await act(async () => { await selectProject(outdatedRunner.container, project.id); });
     await choosePermissionPreset(outdatedRunner.container, "Orchestrator");
-    const providerPermissions = outdatedRunner.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
-    assert.match(providerPermissions.textContent!, /Orchestrator Preset — Harness-Enforced/);
+    const providerPermissions = permissionsSummary(outdatedRunner.container);
+    assert.match(providerPermissions.textContent!, /Orchestrator Preset/);
     // This version already satisfies the Claude gate, so the requirement shown is Codex's own.
     assert.ok(RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1 >= RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole);
     assert.match(providerPermissions.textContent!, /needs a newer runner for independent Orchestrator provider permissions\./,
@@ -3537,13 +3624,13 @@ test("an additive Codex Orchestrator is offered where the audited sandbox is una
   } });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.querySelector("input")?.getAttribute("aria-disabled"), null,
+    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-disabled"), null,
       "the role is offered wherever the runner advertises the additive launch");
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const providerPermissions = fixture.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
+    const providerPermissions = permissionsSummary(fixture.container);
     assert.doesNotMatch(providerPermissions.textContent!, /Orchestrator Preset/,
       "the launch keeps the permission mode a normal Codex session would use here");
-    assert.match(providerPermissions.textContent!, /same permission modes, integrations, and credentials as a normal session/);
+    assert.match(providerPermissions.textContent!, /An Orchestrator keeps them and its integrations/);
     for (const error of fixture.container.querySelectorAll('.form-error[role="alert"]')) {
       assert.doesNotMatch(error.textContent ?? "", /Provider-mode orchestration|sandbox/,
         "no platform reason is stated, because the additive launch has no platform condition");
@@ -3605,7 +3692,7 @@ test("an installation that offers only the additive role never submits the coupl
   try {
     await act(async () => { await selectProject(legacy.container, project.id); });
     await choosePermissionPreset(legacy.container, "Orchestrator");
-    assert.match(legacy.container.textContent!, /Update Wollipog to give an Orchestrator ordinary provider permissions\./);
+    assert.match(permissionsSummary(legacy.container).textContent, /Update Wollipog to change that\./);
     await assertCreateRefused(legacy,
       "the coupled preset this control plane would force is not launchable by this installation");
     assert.equal(legacy.requests.length, 0);
@@ -3655,10 +3742,10 @@ test("choosing Normal explicitly overrides a saved Orchestrator harness default 
   }] }));
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.querySelector("input")?.checked.toString(), "true");
+    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-checked"), "true");
     assert.match(fixture.container.textContent!, /Choose Normal to ignore it for this session/);
     await choosePermissionPreset(fixture.container, "Normal");
-    assert.equal(permissionPresetCard(fixture.container, "Normal")?.querySelector("input")?.checked.toString(), "true");
+    assert.equal(permissionPresetCard(fixture.container, "Normal")?.getAttribute("aria-checked"), "true");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.role, "normal");
     assert.equal(fixture.requests[0]?.config?.permissionMode, undefined);
@@ -3733,7 +3820,8 @@ test("an agent offering neither Orchestrator advertisement still says the agent 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     assert.equal(cardRefused(permissionPresetCard(fixture.container, "Orchestrator")), true);
-    assert.match(fixture.container.textContent!, /does not offer the Orchestrator role/);
+    assert.match(settingRowOf(permissionPresetCard(fixture.container, "Orchestrator")!).textContent!, /Pi RPC doesn't offer the Orchestrator role\./,
+      "the reason names the agent and replaces the row's description");
   } finally { await unmountFixture(fixture); }
 });
 
@@ -3903,5 +3991,166 @@ test("an older control plane blocks Integration Isolation even when the runner s
     assert.equal(
       Object.hasOwn(fixture.requests[0]?.orchestrator?.execution ?? {}, "integrationIsolation"), false,
       "the field is never sent to a control plane that does not know it");
+  } finally { await unmountFixture(fixture); }
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * Options (#2954): one row below Agent that opens itself when something in it needs attention.
+ * ---------------------------------------------------------------------------------------------- */
+
+const HOST_BOUNDARIES = { filesystem: "host", network: "inherit", secrets: "runner_local", billing: "agent_account" } as const;
+
+function hostTargets(): NonNullable<RunnerView["executionTargets"]> {
+  return [
+    { id: "host-in-place", runnerId: runner.runnerId, name: "Runner Host · in place", kind: "local",
+      workspaceStrategy: "in_place", adapter: "host", boundaries: HOST_BOUNDARIES, available: true },
+    { id: "host-worktree", runnerId: runner.runnerId, name: "Runner Host · worktree", kind: "local",
+      workspaceStrategy: "worktree", adapter: "host", boundaries: { ...HOST_BOUNDARIES, filesystem: "worktree" }, available: true },
+  ];
+}
+
+function optionsMeta(container: HTMLDivElement): string[] {
+  return [...optionsHead(container).querySelectorAll(".session-options-meta-item")].map((item) => item.textContent ?? "");
+}
+
+test("with every option at its default, Options is one closed row listing Normal, Direct, In Place and the permissions (#2954)", async () => {
+  const fixture = await mountFixture({ runners: [{ ...runner, executionTargets: hostTargets() }] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const head = optionsHead(fixture.container);
+    assert.equal(head.getAttribute("aria-expanded"), "false");
+    assert.deepEqual(optionsMeta(fixture.container), ["Normal", "Direct", "In Place", "Harness Default"],
+      "Run On is listed only when there is a choice");
+    assert.equal(fixture.container.querySelector<HTMLElement>(".session-options-body")?.hidden, true);
+    assertNoDomNode(fixture.container.querySelector('button[aria-label^="Run On:"]'), "two host targets offer no choice");
+    // Every retired line and class is gone, as are the old controls' names.
+    for (const retired of [".new-session-provider-permissions", ".new-session-provider-permissions-value", ".new-session-mode"]) {
+      assertNoDomNode(fixture.container.querySelector(retired));
+    }
+    for (const name of ["Session Role", "Session Mode", "Execution Target", "Provider Permissions"]) {
+      assertNoDomNode(fixture.container.querySelector(`[aria-label="${name}"], [aria-label^="${name}:"]`));
+    }
+    await act(async () => { head.click(); });
+    const titles = [...fixture.container.querySelectorAll(".session-options-body .setting-row-title")].map((title) => title.textContent);
+    assert.deepEqual(titles, ["Role", "Harness", "Working Copy", "Permissions"]);
+    const workingCopy = fixture.container.querySelector('[role="radiogroup"][aria-label="Working Copy"]')!;
+    assert.equal(settingRowOf(workingCopy).querySelector(".setting-row-desc")?.textContent,
+      "A worktree keeps your checkout untouched. Recommended for code changes.");
+    await act(async () => { radioRows(workingCopy).find((radio) => radio.textContent === "Worktree")!.click(); });
+    await act(async () => { head.click(); });
+    assert.deepEqual(optionsMeta(fixture.container), ["Normal", "Direct", "Worktree", "Harness Default"]);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.useWorktree, true);
+    assert.equal(fixture.requests[0]?.executionTargetId, "host-worktree", "the same request as before");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("Run On describes each target in words, and nothing in the dialog prints a raw boundary enum (#2954)", async () => {
+  const values = {
+    filesystem: ["host", "worktree", "container", "snapshot"],
+    network: ["inherit", "deny", "policy"],
+    secrets: ["runner_local", "references", "none"],
+    billing: ["agent_account", "target_metered", "none", "unknown"],
+  } as const;
+  const base = { filesystem: "container", network: "deny", secrets: "none", billing: "none" } as const;
+  const targets = Object.entries(values).flatMap(([key, options]) => options.map((value) => ({
+    id: `${key}-${value}`, runnerId: runner.runnerId, name: `Target ${key} ${value.replace(/_/g, " ")}`, kind: "container" as const,
+    workspaceStrategy: "worktree" as const, adapter: "container" as const,
+    boundaries: { ...base, [key]: value } as RunnerView["executionTargets"] extends (infer T)[] | undefined ? T extends { boundaries: infer B } ? B : never : never,
+    available: true,
+  })));
+  const fixture = await mountFixture({ runners: [{ ...runner, executionTargets: [...hostTargets(), ...targets] }] }, undefined,
+    undefined, undefined, undefined, undefined, { runnerSkills: async () => ({ desired: [], reported: null }) as never });
+  const rawEnum = /runner_local|agent_account|target_metered|Network (?:inherit|deny|policy)|Secrets (?:runner|references|none)|Billing (?:agent|target|none|unknown)|Target: /u;
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await act(async () => { optionsHead(fixture.container).click(); });
+    for (const target of targets) {
+      await chooseSelectOption(fixture.container, "Run On", target.name);
+      const runOn = fixture.container.querySelector('button[aria-label^="Run On:"]')!;
+      assert.equal(settingRowOf(runOn).querySelector(".setting-row-desc")?.textContent, describeBoundaries(target.boundaries),
+        `${target.name} is described by its boundaries in words`);
+      assert.doesNotMatch(fixture.container.querySelector('[role="dialog"]')?.textContent ?? "", rawEnum,
+        `${target.name}: no raw boundary enum renders`);
+    }
+    await act(async () => { optionsHead(fixture.container).click(); });
+    assert.ok(optionsMeta(fixture.container).includes(targets.at(-1)!.name), "with a choice, the head lists where it runs");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a disabled Orchestrator keeps its place, says why in the row, and is reachable with the arrow keys (#2954)", async () => {
+  const fixture = await mountFixture({ runners: [{ ...runner, protocolVersion: 67 }] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const normal = permissionPresetCard(fixture.container, "Normal")!;
+    const orchestrator = permissionPresetCard(fixture.container, "Orchestrator")!;
+    assert.equal(cardRefused(orchestrator), true);
+    assert.equal(settingRowOf(orchestrator).querySelector(".setting-row-desc")?.textContent,
+      "This runner is too old to orchestrate child sessions.");
+    await act(async () => { optionsHead(fixture.container).click(); });
+    normal.focus();
+    await act(async () => {
+      normal.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }) as never);
+    });
+    assert.ok((domWindow.document.activeElement as unknown) === orchestrator, "the arrow lands on the refused option");
+    assert.equal(ariaReferencedText(orchestrator, "aria-describedby"), "This runner is too old to orchestrate child sessions.");
+    await act(async () => { orchestrator.click(); });
+    assert.equal(orchestrator.getAttribute("aria-checked"), "false", "and it cannot be chosen");
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "true",
+      "a refused option the person has not chosen needs no attention of its own");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an ACP Orchestrator's permissions come from the preset, and a warning notice says why in user words (#2954, #1360)", async () => {
+  const acpRunner: RunnerView = {
+    ...runner, protocolVersion: PROTOCOL_VERSION,
+    runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      executionIsolation: { mode: "bwrap", network: "inherit" } },
+    agents: [{ id: "gemini", name: "Gemini", command: "gemini", args: [], env: {}, driver: "acp", available: true,
+      capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"] } }],
+  };
+  const fixture = await mountFixture({ runners: [acpRunner], capabilities: {
+    sessionSubscriptions: false, projects: true, orchestratorRole: true,
+  } }, undefined, undefined, undefined, undefined, strictOrchestratorDefaults);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    assertNoDomNode(fixture.container.querySelector(".session-options-body > .notice.t-warning"));
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    // Non-strict is the case the ACP sentence is for; Strict Project Isolation names itself instead.
+    await chooseSelectOption(fixture.container, "Strict Project Isolation", "Disabled");
+    const notice = fixture.container.querySelector<HTMLElement>(".session-options-body > .notice.t-warning");
+    assert.ok(notice, "the preset is a warning notice under Permissions");
+    assert.match(notice.textContent ?? "", /Permissions Set by the Orchestrator Preset/);
+    assert.match(notice.textContent ?? "",
+      /This agent's adapter can't run an Orchestrator with normal permissions, so the preset sets them\./);
+    assert.match(permissionsSummary(fixture.container).textContent, /Orchestrator Preset/);
+    await act(async () => { optionsHead(fixture.container).click(); });
+    assert.deepEqual(optionsMeta(fixture.container).slice(0, 1), ["Orchestrator"]);
+    assert.ok(optionsMeta(fixture.container).includes("Orchestrator Preset"));
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a saved Orchestrator default this runner can't honor opens Options and names it (#2954)", async () => {
+  const oldRunner: RunnerView = {
+    ...runner, protocolVersion: 67,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture({ runners: [oldRunner] }, undefined, undefined, async () => ({
+    defaults: [{ agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
+      installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" } }],
+  }));
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "true");
+    const roleRow = settingRowOf(permissionPresetGroup(fixture.container));
+    assert.match(roleRow.querySelector(".field-error")?.textContent ?? "",
+      /The saved Orchestrator preset is unavailable here\. This runner is too old to orchestrate child sessions\./);
+    await act(async () => { optionsHead(fixture.container).click(); });
+    assert.equal(optionsHead(fixture.container).querySelector(".status.t-warning")?.textContent, "Orchestrator Unavailable");
+    await assertCreateRefused(fixture);
   } finally { await unmountFixture(fixture); }
 });
