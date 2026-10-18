@@ -35,6 +35,12 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
       await expect(group.getByRole("link", { name: "certification runbook" }))
         .toHaveAttribute("href", "https://github.com/picoduck/wollipog/blob/main/docs/video-review-certification-runbook.md");
       await expectTextFits(group, "Video Evidence Review");
+      // The delegation disclosure states the same certified exception, not that video always goes to a person (#1321).
+      const delegation = page.locator("details.disclosure").filter({ hasText: "About UI Evidence Delegation" });
+      await delegation.locator("summary").click();
+      await expect(delegation).toContainText("Video evidence otherwise requires human review, including video attached as a Session artifact, " +
+        "unless a Full Control campaign's certified media-only reviewer is available.");
+      await expect(delegation).toContainText("Video routes to a human unless a Full Control campaign's certified media-only reviewer is available");
       const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       expect(horizontalOverflow).toBeLessThanOrEqual(0);
       await group.scrollIntoViewIfNeeded();

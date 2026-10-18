@@ -339,6 +339,8 @@ test("the editor has control preparation and three settings groups, and a change
     assert.match(disclosures[1]!.textContent ?? "", /provider may retain images in provider-local transcripts or media logs/);
     assert.match(disclosures[1]!.textContent ?? "", /Video evidence otherwise requires human review, including video attached as a Session artifact, unless a Full Control campaign's certified media-only reviewer is available\./,
       "account settings name no single campaign, so the video sentence names the certified exception");
+    assert.match(disclosures[1]!.textContent ?? "", /Video routes to a human unless a Full Control campaign's certified media-only reviewer is available; an operator may also enable one short-frame validation campaign\./);
+    assert.doesNotMatch(disclosures[1]!.textContent ?? "", /Video normally routes to a human/);
     assert.match(container.querySelector(".orchestrator-human-only")?.textContent ?? "",
       /^Secrets, sign-in, permission grants, governance changes, budgets and guardrails always stay with you\.$/);
     assert.ok(container.querySelector(".orchestrator-human-only > svg"), "with its lock icon");

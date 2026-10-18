@@ -449,16 +449,22 @@ test("under Full Control the video exception follows the server's campaign fact,
     const view = fullControlProjection();
     return { ...view, orchestratorCampaign: { ...view.orchestratorCampaign!,
       decisionOwners: { ...view.orchestratorCampaign!.decisionOwners, ui_evidence_approval: "orchestrator" as const },
+      uiEvidenceReview: { status: "available" as const, effectiveOwner: "orchestrator" as const },
       ...(videoEvidenceReview ? { videoEvidenceReview } : {}) } } as SessionView;
   };
   const certified = "The Orchestrator hands video evidence to the certified media-only reviewer and decides from its verdict.";
   // The retention disclosure's video sentence follows the same fact, so the two never contradict.
   const disclosure = (dialog: Element) => [...dialog.querySelectorAll(".orchestrator-gate-helper")]
     .find((node) => node.textContent?.includes("evidence images are sent to its selected model/provider"))?.textContent ?? "";
+  // So does Campaign Behavior's evidence notice.
+  const behaviorNotice = (dialog: Element) => [...dialog.querySelectorAll(".notice")]
+    .find((node) => node.textContent?.includes("reviews image evidence attached as Session artifacts"))?.textContent ?? "";
   let harness = await open(withVideo({ status: "available", reason: certified }), {});
   let dialog = harness.dialog();
   assert.match(disclosure(dialog), /In this campaign, video evidence attached as a Session artifact goes to the certified media-only reviewer instead/);
   assert.doesNotMatch(disclosure(dialog), /requires human review/, "a certified campaign's disclosure does not send video to a person");
+  assert.match(behaviorNotice(dialog), /Video goes to this campaign's certified media-only reviewer\./);
+  assert.doesNotMatch(behaviorNotice(dialog), /normally goes to a person/);
   assert.doesNotMatch(humanRequired(dialog), /Video Evidence Review/, "a certified campaign does not list video as Human Required");
   assert.match(humanRequired(dialog), /External Evidence Review: Evidence stored outside private Session artifacts \(links only\) needs your review\./);
   assert.ok([...dialog.querySelectorAll(".orchestrator-gate-helper")].some((node) =>
@@ -471,6 +477,7 @@ test("under Full Control the video exception follows the server's campaign fact,
   assert.ok(humanRequired(dialog).includes(`Video Evidence Review: ${uncertified}`), "the server's reason is shown");
   assert.match(disclosure(dialog), /In this campaign, video evidence requires human review, including video attached as a Session artifact\./);
   assert.doesNotMatch(disclosure(dialog), /certified media-only reviewer/);
+  assert.match(behaviorNotice(dialog), /Video normally goes to a person; one operator-enabled short-frame validation campaign may delegate it\./);
   assert.match(humanRequired(dialog), /External Evidence Review:/);
   assert.ok(![...dialog.querySelectorAll(".orchestrator-gate-helper")].some((node) => node.textContent?.startsWith("Video Evidence Review")));
   await harness.unmount();

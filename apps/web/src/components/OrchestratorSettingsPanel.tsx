@@ -722,9 +722,9 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
           <div className="disclosure-body">
             <p>
               The Orchestrator resolves this gate only when its runner, harness, and model can inspect images and the
-              evidence is attached as a Session artifact. Video normally routes to a human; an operator may enable one
-              short-frame validation campaign. Externally stored evidence and unsupported clients route to a human, and
-              the campaign shows why.
+              evidence is attached as a Session artifact. Video routes to a human unless a Full Control campaign's
+              certified media-only reviewer is available; an operator may also enable one short-frame validation campaign.
+              Externally stored evidence and unsupported clients route to a human, and the campaign shows why.
             </p>
             <p>{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>
           </div>

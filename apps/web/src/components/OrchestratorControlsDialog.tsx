@@ -674,9 +674,12 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
       </dl>
       {campaign?.uiEvidenceReview.status === "available" && campaign.uiEvidenceReview.effectiveOwner === "orchestrator" && (
         <Notice tone="info" compact>
-          The Orchestrator reviews image evidence attached as Session artifacts. Video normally goes to a
-          person; one operator-enabled short-frame validation campaign may delegate it. Externally stored
-          evidence goes to a person.
+          The Orchestrator reviews image evidence attached as Session artifacts.{" "}
+          {/* The same server fact as the Video Evidence Review line (#1321). */}
+          {campaign.videoEvidenceReview?.status === "available"
+            ? "Video goes to this campaign's certified media-only reviewer."
+            : "Video normally goes to a person; one operator-enabled short-frame validation campaign may delegate it."}{" "}
+          Externally stored evidence goes to a person.
         </Notice>
       )}
     </section>
