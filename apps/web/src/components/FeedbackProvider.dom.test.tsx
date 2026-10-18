@@ -189,6 +189,34 @@ test("a burst shows three toasts newest on top and keeps the persistent recovery
   container.remove();
 });
 
+test("while the older list is open only the newest toast stays above it, so the list keeps the space (#2954)", async () => {
+  // Over a dialog footer that sits high, three full toasts left an open list no height at all.
+  const { container, root } = await renderHarness();
+  await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="toast-burst"]')!.click(); });
+  const visible = () => [...container.querySelectorAll<HTMLElement>(".toast-region > .toast")]
+    .map((toast) => toast.querySelector(".toast-message")?.textContent);
+  const listed = () => [...container.querySelectorAll<HTMLElement>(".toast-more-list .toast")]
+    .map((toast) => toast.querySelector(".toast-message")?.textContent);
+  const more = () => container.querySelector<HTMLButtonElement>(".toast-more")!;
+  assert.deepEqual(visible(), ["Transient 4.", "Transient 3.", "Transient 2."]);
+
+  await act(async () => { more().click(); });
+  assert.deepEqual(visible(), ["Transient 4."], "only the newest stays above the open list");
+  const older = listed();
+  assert.equal(older.length, 4, "every other toast is in the list, so none is out of reach");
+  assert.deepEqual(older.slice(-2), ["Transient 2.", "Transient 3."],
+    "the two that left the stack sit at the list's newest end, next to Show Fewer");
+  assert.equal(more().textContent, "Show Fewer");
+  assert.equal(more().getAttribute("aria-expanded"), "true");
+
+  await act(async () => { more().click(); });
+  assert.deepEqual(visible(), ["Transient 4.", "Transient 3.", "Transient 2."], "closing restores three");
+  assert.equal(more().textContent, "+2 More");
+  assertNoDomNode(container.querySelector(".toast-more-list"));
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
 test("dismissing the newest toast brings the next one out of +N More", async () => {
   const { container, root } = await renderHarness();
   await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="persistent-burst"]')!.click(); });

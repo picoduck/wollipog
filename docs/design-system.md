@@ -2736,7 +2736,9 @@ scroll to trigger it (#313).
   - `--toast-clear` is the height of whatever is docked at the bottom of the view: the tab bar on
     phones, the composer in a session (measured), 0 elsewhere. A toast never covers Send, the tab bar
     or a dialog footer. Phones show the newest toast only.
-  - The "+N More" list opens upward from the stack.
+  - The "+N More" list opens upward from the stack. While it is open only the newest toast stays
+    below it, and the rest are in the list, so a dialog footer that sits high (a short New Session)
+    never leaves the open list without room.
 - Container recipe of a menu (`--bg-elev`, `--border-strong`, `--radius-md`, `--elev-2`). No colored
   left stripe. Tone is carried by a 16px icon in the tone color (Info, CircleCheck, TriangleAlert,
   CircleAlert).

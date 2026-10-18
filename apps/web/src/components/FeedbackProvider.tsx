@@ -410,12 +410,17 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   // Newest on top. Three are visible on desktop and one on a phone (§13.1); older ones wait behind
   // "+N More", whose list opens upward, so a persistent recovery toast is always reachable.
   const newestFirst = useMemo(() => [...toasts].sort((left, right) => right.id - left.id), [toasts]);
-  const visibleCount = isPhone ? 1 : 3;
+  const restingCount = isPhone ? 1 : 3;
+  const hiddenCount = Math.max(0, newestFirst.length - restingCount);
+  // While the older list is open only the newest toast stays above it. The stack must fit above
+  // whatever it clears, and the list is what gives way, so three full toasts over a dialog footer
+  // that sits high (a short New Session) left the open list no height at all (#2954).
+  const visibleCount = moreOpen && hiddenCount > 0 ? 1 : restingCount;
   const visibleToasts = newestFirst.slice(0, visibleCount);
   const olderToasts = newestFirst.slice(visibleCount);
   useEffect(() => {
-    if (olderToasts.length === 0) setMoreOpen(false);
-  }, [olderToasts.length]);
+    if (hiddenCount === 0) setMoreOpen(false);
+  }, [hiddenCount]);
   useToastClearance(toasts.length > 0);
 
   // Dismissing the focused toast removes the element that held focus, and a removed element fires
@@ -499,10 +504,10 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
             {[...olderToasts].reverse().map((toast) => <li key={toast.id}>{renderToast(toast)}</li>)}
           </ul>
         )}
-        {olderToasts.length > 0 && (
+        {hiddenCount > 0 && (
           <button type="button" className="btn sm toast-more" aria-expanded={moreOpen} aria-controls={moreListId}
             onClick={() => setMoreOpen((open) => !open)}>
-            {moreOpen ? "Show Fewer" : `+${olderToasts.length} More`}
+            {moreOpen ? "Show Fewer" : `+${hiddenCount} More`}
           </button>
         )}
         {visibleToasts.map(renderToast)}

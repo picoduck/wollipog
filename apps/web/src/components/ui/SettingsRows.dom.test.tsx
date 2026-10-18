@@ -1198,6 +1198,50 @@ test("a disabled segmented row says who took it away", async () => {
   }
 });
 
+test("an unavailable option keeps its place, and its reason replaces the row's description (#2954)", async () => {
+  // New Session's Role: Orchestrator can be refused while Normal is chosen. The reason belongs where
+  // the row's sentence is, not in a tooltip, and arrowing onto the option says the same thing.
+  const { container, cleanup } = await render(
+    <SegmentedRow
+      title="Role"
+      description="An Orchestrator delegates work to child sessions."
+      value="normal"
+      block
+      describedBy="role-error"
+      invalid
+      error={<p id="role-error">Choose an available Role.</p>}
+      options={[
+        { value: "normal", label: "Normal" },
+        { value: "orchestrator", label: "Orchestrator", disabled: true, disabledReason: "Claude Code doesn't offer the Orchestrator role." },
+      ]}
+      onChange={() => undefined}
+    />,
+  );
+  try {
+    const group = container.querySelector<HTMLElement>('[role="radiogroup"]')!;
+    assert.ok(group.matches(".seg.block"), "block fills the control column with equal options");
+    assert.equal(group.getAttribute("aria-invalid"), "true");
+    assert.match(group.getAttribute("aria-describedby") ?? "", /role-error/);
+    const [normal, orchestrator] = [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+    assert.equal(orchestrator!.getAttribute("aria-disabled"), "true");
+    assert.equal(normal!.getAttribute("aria-disabled"), null, "only that option is refused");
+    assert.equal(container.querySelector(".setting-row-desc")?.textContent, "Claude Code doesn't offer the Orchestrator role.");
+    assert.equal(container.querySelector(".setting-row-desc")?.getAttribute("aria-hidden"), "true",
+      "the option carries the sentence, so the row does not say it twice");
+    const described = domWindow.document.getElementById(orchestrator!.getAttribute("aria-describedby")!);
+    assert.equal(described?.textContent, "Claude Code doesn't offer the Orchestrator role.");
+    assert.equal(container.querySelector(".setting-row-control #role-error")?.textContent, "Choose an available Role.",
+      "a form's error sits under the pills");
+    normal!.focus();
+    await act(async () => {
+      normal!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }) as never);
+    });
+    assert.ok(domWindow.document.activeElement === (orchestrator as never), "the refused option is in the arrow order");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("the picker's trigger names the setting AND its current value", async () => {
   // `aria-label` naming only the setting was the defect the primitive already fixed: the control
   // read as "Colour Scheme" whether it said Dracula or nothing at all. A row whose closed state
