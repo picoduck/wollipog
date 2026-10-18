@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
+import ts from "typescript";
 import type { AgentDefinition } from "@wollipog/protocol";
 import {
   agentDriverLabel,
   agentMeta,
   agentOptions,
-  codexAppServerSetupReason,
+  agentSetupProblem,
+  agentSetupReason,
+  RUNNER_REASON_PATTERNS,
   currentAgentSelectionIssue,
   firstEnabledAgentId,
   runnableAgentIds,
@@ -61,6 +65,14 @@ test("competing installations remain separate choices and only the Machine selec
   assert.ok(options.some((option) => option.label.includes("/usr/bin/codex")));
   assert.ok(options.some((option) => option.label.includes("/home/u/.local/bin/codex")));
   assert.deepEqual(options.filter((option) => !option.disabled).map((option) => option.agent.id), [local.id]);
+  // New Session shows the folder on its own line (#2953): `name` is the label without it.
+  const localOption = options.find((option) => option.agent.id === local.id)!;
+  assert.equal(localOption.name, "Codex App Server");
+  assert.equal(localOption.installationPath, "/home/u/.local/bin/codex");
+  assert.equal(localOption.label, "Codex App Server · /home/u/.local/bin/codex");
+  const wrapperOption = options.find((option) => option.agent.id === wrapper.id)!;
+  assert.equal(wrapperOption.name, wrapperOption.label);
+  assert.equal(wrapperOption.installationPath, undefined);
 });
 
 test("saved installation follows rediscovered id and stays missing if only a reused id remains", () => {
@@ -170,12 +182,119 @@ test("App Server failing its check leaves no selectable Codex instead of falling
   ]);
   assert.deepEqual(opts.map((option) => [option.agent.id, option.disabled === true]), [["codex", true]]);
   assert.equal(firstEnabledAgentId(opts), "");
-  assert.equal(
-    codexAppServerSetupReason(appServer),
-    "Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
-  );
-  assert.equal(codexAppServerSetupReason({ ...appServer, authStatus: "unauthenticated" }), undefined,
-    "a signed-out row keeps agentMeta's codex login instruction");
+  // New Session names the fix, not the runner's rediscovery wording (#2953).
+  assert.equal(agentSetupProblem(appServer, true), "unchecked");
+  assert.equal(agentSetupReason(appServer, "Studio Mac", true),
+    "Wollipog couldn't check it on Studio Mac. Check it again in Connections.");
+  assert.equal(agentSetupReason({ ...appServer, authStatus: "unauthenticated" }, "Studio Mac", true),
+    "Sign in before the session can start.", "a signed-out App Server asks for a sign-in");
+});
+
+test("a setup reason names another installation, an old Wollipog, a missing install or the agent's update (#2953)", () => {
+  const base = agent({ id: "claude", name: "Claude", driver: "claude-code", available: false });
+  assert.equal(agentSetupReason({ ...base, installation: { id: "i", path: "/a/claude", via: "path", selection: "other" } }, "M", true),
+    "Another installation is selected in Machine Settings.");
+  assert.equal(agentSetupReason(base, "M", false), "Update Wollipog on M to use it.");
+  assert.equal(agentSetupReason(base, "M", true), "Not installed on M.");
+  assert.equal(agentSetupReason({ ...base, claudeCode: {
+    status: "unsupported", effortLevels: [], permissionModes: [], streamJsonInput: false, streamJsonImages: false,
+    controlProtocol: false, forkSession: false, replayUserMessages: false, auth: { status: "authenticated", billingSource: "unknown" },
+    failure: { code: "unsupported_mode", message: "x" },
+  } }, "M", true), "Update Claude Code on M to use it.");
+});
+
+/** Each distinct runner diagnosis, shaped as discovery reports it (apps/runner/src/discovery). */
+function claudeFailure(code: NonNullable<NonNullable<AgentDefinition["claudeCode"]>["failure"]>["code"], message: string) {
+  return {
+    status: "unsupported" as const, effortLevels: [], permissionModes: [], streamJsonInput: false, streamJsonImages: false,
+    controlProtocol: false, forkSession: false, replayUserMessages: false,
+    auth: { status: "authenticated" as const, billingSource: "unknown" as const },
+    failure: { code, message },
+  };
+}
+function codexFailure(
+  code: NonNullable<NonNullable<AgentDefinition["codexAppServer"]>["failure"]>["code"],
+  installedVersion?: string,
+) {
+  return {
+    status: "unsupported" as const, appServerAvailable: true, ...(installedVersion ? { installedVersion } : {}),
+    failure: { code, message: "Update Codex, then rediscover." },
+  };
+}
+
+test("each runner diagnosis keeps its own fix in New Session's words (#2953)", () => {
+  const claude = agent({ id: "claude", name: "Claude", driver: "claude-code", available: false });
+  const codex = agent({ id: "codex", name: "Codex", driver: "codex-app-server", available: false });
+  const pi = agent({ id: "pi", name: "Pi", driver: "pi", available: false, authStatus: "unknown" });
+  const acp = agent({ id: "gemini", name: "Gemini", driver: "acp", available: false });
+  const cases: Array<[AgentDefinition, string, string]> = [
+    [{ ...claude, installation: { id: "i", path: "/a/claude", via: "path", selection: "other" } },
+      "other_installation", "Another installation is selected in Machine Settings."],
+    [{ ...claude, unavailableReason: "The discovered harness executable changed. Rediscover this Machine before using this installation." },
+      "changed", "It changed on M since Wollipog last checked it. Check it again in Connections."],
+    [{ ...claude, context: { kind: "wsl", distro: "Ubuntu" }, unavailableReason: "This WSL launch target is incompatible with a non-Windows runner." },
+      "needs_windows", "Its WSL launch runs only on a Windows machine."],
+    [{ ...claude, claudeCode: { ...claudeFailure("claude_unavailable", "Claude Code was not found in this runner context."), status: "unavailable" } },
+      "not_installed", "Not installed on M."],
+    [{ ...claude, claudeCode: claudeFailure("unsupported_mode",
+      "Native Claude Code requires Git for Windows Bash. Install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH.") },
+    "needs_git_bash", "Install Git for Windows on M to use it."],
+    [{ ...claude, claudeCode: claudeFailure("unsupported_mode", "Claude Code lacks the required stream-json or acceptEdits mode.") },
+      "update_agent", "Update Claude Code on M to use it."],
+    [{ ...claude, claudeCode: claudeFailure("version_unverified", "Claude Code did not report a verifiable version.") },
+      "unchecked", "Wollipog couldn't check it on M. Check it again in Connections."],
+    [{ ...claude, claudeCode: claudeFailure("probe_timeout", "Claude Code capability discovery timed out.") },
+      "unchecked", "Wollipog couldn't check it on M. Check it again in Connections."],
+    [{ ...codex, codexAppServer: codexFailure("version_unverified", "0.142.3") },
+      "update_agent", "Codex 0.142.3 is too old for Wollipog. Update it on M to use it."],
+    [{ ...codex, codexAppServer: codexFailure("version_unverified") },
+      "version_unreadable", "Wollipog couldn't read its version on M. Update Codex, then check it again in Connections."],
+    [{ ...codex, codexAppServer: codexFailure("app_server_unavailable") }, "update_agent", "Update Codex on M to use it."],
+    [{ ...codex, codexAppServer: codexFailure("contract_mismatch") }, "update_agent", "Update Codex on M to use it."],
+    [{ ...codex, codexAppServer: codexFailure("probe_failed") }, "unchecked", "Wollipog couldn't check it on M. Check it again in Connections."],
+    [{ ...codex, authStatus: "unauthenticated" }, "sign_in", "Sign in before the session can start."],
+    [{ ...pi, unavailableReason: "Pi is not installed. Install `@earendil-works/pi-coding-agent`, authenticate a provider, then rediscover." },
+      "not_installed", "Not installed on M."],
+    [{ ...pi, authStatus: "unauthenticated", unavailableReason: "Pi is installed, but it reported no authenticated models. Run `pi` and configure a provider account." },
+      "sign_in", "Sign in before the session can start."],
+    [{ ...pi, unavailableReason: "The installed Pi CLI did not satisfy Wollipog's RPC compatibility probe. Upgrade `@earendil-works/pi-coding-agent` and rediscover." },
+      "update_agent", "Update Pi on M to use it."],
+    [{ ...acp, unavailableReason: "The configured command was not found or could not be started in this execution context." },
+      "not_installed", "Not installed on M."],
+    [{ ...acp, unavailableReason: "The configured launch did not complete an ACP initialize probe before the timeout." },
+      "launch_failed", "Wollipog couldn't start it on M. Check its setup in Connections."],
+    [{ ...acp, unavailableReason: "No completed discovery probe verified this configured launch target." },
+      "launch_failed", "Wollipog couldn't start it on M. Check its setup in Connections."],
+    [{ ...acp, registry: { installStatus: "approval-required" } as NonNullable<AgentDefinition["registry"]> },
+      "approve_install", "Approve its install in Connections first."],
+    [acp, "not_installed", "Not installed on M."],
+  ];
+  for (const [input, problem, reason] of cases) {
+    assert.equal(agentSetupProblem(input, true), problem, reason);
+    assert.equal(agentSetupReason(input, "M", true), reason);
+  }
+  assert.equal(agentSetupReason(claude, "M", false), "Update Wollipog on M to use it.");
+});
+
+test("every runner reason New Session reads by its wording still appears in runner discovery (#2953)", () => {
+  const directory = new URL("../../../runner/src/discovery/", import.meta.url);
+  // The runner's strings, as its source writes them: each pattern must still find one.
+  const literals: string[] = [];
+  const collect = (node: ts.Node) => {
+    if (ts.isStringLiteralLike(node)) literals.push(node.text);
+    else if (ts.isTemplateExpression(node)) literals.push(node.head.text, ...node.templateSpans.map((span) => span.literal.text));
+    ts.forEachChild(node, collect);
+  };
+  for (const name of readdirSync(directory).filter((file) => file.endsWith(".ts") && !file.endsWith(".test.ts"))) {
+    collect(ts.createSourceFile(name, readFileSync(new URL(name, directory), "utf8"), ts.ScriptTarget.Latest, true));
+  }
+  for (const [name, pattern] of Object.entries(RUNNER_REASON_PATTERNS)) {
+    const alternatives = pattern.source.split("|").map((part) => new RegExp(part, pattern.flags));
+    for (const alternative of alternatives) {
+      assert.ok(literals.some((literal) => alternative.test(literal)),
+        `${name}: no runner discovery string matches ${alternative}; the runner's wording changed`);
+    }
+  }
 });
 
 test("a saved retired exec default selects nothing and recommends its App Server sibling", () => {

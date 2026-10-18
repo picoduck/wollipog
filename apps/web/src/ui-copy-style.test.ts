@@ -4,7 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import * as React from "react";
 import ts from "typescript";
-import type { SessionReminderView } from "@wollipog/protocol";
+import type { AgentDefinition, SessionReminderView } from "@wollipog/protocol";
+import { agentSessionLimits, agentSetupProblem, agentSetupReason, type AgentSetupProblem } from "./components/agent-options.js";
 import { ApiError } from "./api.js";
 import { archiveAndStopMessage } from "./archive-actions.js";
 import { projectArchiveMessage } from "./project-actions.js";
@@ -1281,4 +1282,68 @@ test("Settings' section names, scopes and Back are Title Case; its descriptions 
   const settingsView = readFileSync(path.join(SOURCE_ROOT, "components/SettingsView.tsx"), "utf8");
   assert.match(settingsView, /backLabel="Back to Settings"/, "a phone section's Back names the index it returns to");
   assert.ok(isTitleCase("Back to Settings"));
+});
+
+/** The mechanism words New Session's agent and account copy never shows (#2953, epic #3029). */
+const NEW_SESSION_MECHANISM_WORDS = /native host|ACP stdio|\bstdio\b|rediscover|runner host|Logged In|Login Required|Login Unknown/iu;
+
+test("New Session's agent and account strings name the choice, never the mechanism (#2953)", () => {
+  const sourceFile = parseSource(path.join(SOURCE_ROOT, "components/NewSessionDialog.tsx"));
+  // Every literal the dialog can show, wherever it is built, plus the JSX copy; comments are not read.
+  const texts: string[] = uiCopy(sourceFile).map((copy) => copy.value);
+  const visit = (node: ts.Node) => {
+    if (ts.isStringLiteralLike(node)) texts.push(node.text);
+    else if (ts.isTemplateExpression(node)) texts.push(node.head.text, ...node.templateSpans.map((span) => span.literal.text));
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  assert.deepEqual(texts.filter((text) => NEW_SESSION_MECHANISM_WORDS.test(text)), []);
+
+  // Every reason an agent under Needs Setup can give, and every limit a ready one can name.
+  const base: AgentDefinition = { id: "a", name: "Gemini", command: "a", args: [], env: {}, driver: "acp", available: false };
+  const failure = (code: NonNullable<AgentDefinition["codexAppServer"]>["failure"] extends infer F
+    ? F extends { code: infer C } ? C : never : never): AgentDefinition => ({
+    ...base, driver: "codex-app-server",
+    codexAppServer: { status: "unsupported", appServerAvailable: false, failure: { code, message: "Rediscover to try again." } },
+  });
+  const agents: AgentDefinition[] = [
+    { ...base, harnessSelectionBlocked: true },
+    base,
+    { ...base, authStatus: "unauthenticated" },
+    failure("contract_mismatch"),
+    failure("probe_timeout"),
+    { ...base, unavailableReason: "Install it, then rediscover." },
+    { ...base, unavailableReason: "The discovered harness executable changed. Rediscover this Machine." },
+    { ...base, unavailableReason: "This WSL launch target is incompatible with a non-Windows runner." },
+    { ...failure("version_unverified"), codexAppServer: { ...failure("version_unverified").codexAppServer!, installedVersion: "0.1.0" } },
+    failure("version_unverified"),
+    { ...base, driver: "claude-code", claudeCode: {
+      status: "unsupported", effortLevels: [], permissionModes: [], streamJsonInput: false, streamJsonImages: false,
+      controlProtocol: false, forkSession: false, replayUserMessages: false,
+      auth: { status: "authenticated", billingSource: "unknown" },
+      failure: { code: "unsupported_mode", message: "Native Claude Code requires Git for Windows Bash." },
+    } },
+    ...(["approval-required", "manual-only", "unsupported-platform"] as const).map((installStatus) => ({
+      ...base,
+      registry: { installStatus } as NonNullable<AgentDefinition["registry"]>,
+    })),
+  ];
+  const kinds = new Set<AgentSetupProblem>(["update_wollipog"]);
+  const reasons = [agentSetupReason(base, "Studio Mac", false)];
+  for (const agent of agents) {
+    kinds.add(agentSetupProblem(agent, true));
+    reasons.push(agentSetupReason(agent, "Studio Mac", true));
+  }
+  assert.equal(kinds.size, 14, `every setup problem is covered: ${[...kinds].join(", ")}`);
+  for (const reason of reasons) {
+    assert.doesNotMatch(reason, NEW_SESSION_MECHANISM_WORDS, reason);
+    // Proper names (the machine, Wollipog, Codex, the places to go) are checked as one placeholder word.
+    const sentences = reason.replace(/Studio Mac|Wollipog|Machine Settings|Connections|Codex|Git for Windows|Windows/gu, "X")
+      .split(/(?<=[.!?])\s+/u);
+    assert.ok(reason.endsWith(".") && sentences.every(isSentenceCase), reason);
+  }
+  const limits = agentSessionLimits({ ...base, capabilities: {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: false, permissionModes: [],
+  } });
+  assert.deepEqual(limits, ["Text-only model", "No approval cards"]);
 });

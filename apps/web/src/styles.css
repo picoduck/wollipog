@@ -2993,6 +2993,16 @@ button.status { cursor: pointer; }
   color: var(--text-dim);
   font: var(--type-small);
 }
+.field-warn > span {
+  flex: 1;
+  min-width: 0;
+}
+/* FieldWarning's one fix ends the line, at its own size, beside however many lines the words take. */
+.field-warn > .btn {
+  flex: none;
+  align-self: center;
+  margin-left: var(--space-2);
+}
 .field-warn-icon {
   flex: none;
   width: var(--icon-sm);
@@ -12176,26 +12186,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .new-session-choice-control .ui-select-trigger {
   width: 100%;
   min-width: 0;
-}
-.agent-meta {
-  margin-top: 4px;
-  font-size: 12.5px;
-}
-.agent-default-warning {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 6px;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--amber) 8%, transparent);
-  color: var(--text-dim);
-  font-size: 12.5px;
-}
-.agent-default-warning .btn {
-  flex: none;
 }
 
 /* ------------------------------- Misc ----------------------------------- */

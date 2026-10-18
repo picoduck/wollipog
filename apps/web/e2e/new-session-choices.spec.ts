@@ -345,32 +345,42 @@ test.describe("responsive Project and Agent controls", () => {
     await agent.click();
     await expect(page.getByRole("combobox", { name: "Search Agent Options" })).toBeFocused();
 
-    const options = page.getByRole("listbox", { name: "Agent" }).getByRole("option");
+    const options = page.getByRole("listbox", { name: "Agent" }).getByRole("option")
+      .filter({ hasNotText: "Set Up Agents in Connections" });
     // Claude Code, Codex App Server, and Pi; the retired Codex exec agent is never listed (#3259).
     await expect(options).toHaveCount(3);
     await expect(options.filter({ hasText: /Non-Interactive|codex exec/ })).toHaveCount(0);
     await expect(options.filter({ hasText: "Pi" })).toContainText("RPC");
     const unavailable = options.filter({ hasText: "Codex App Server" });
     await expect(unavailable).toHaveAttribute("aria-disabled", "true");
-    await expect(unavailable).toContainText("Needs setup");
+    await expect(unavailable).toContainText("Sign in before the session can start.");
 
     await options.filter({ hasText: "Pi" }).click();
     await expect(agent).toHaveAccessibleName(/Agent: Pi RPC/);
-    await expect(page.locator(".agent-meta")).toContainText("Runs on native host");
+    // No mechanism line under the field (#2953).
+    await expect(page.locator(".agent-meta")).toHaveCount(0);
   });
+});
+
+test.describe("the tap-only Agent list at phone width with a mouse", () => {
+  test.use({ viewport: { width: 390, height: 780 } });
 
   test("a short list grows to its wrapped second lines instead of scrolling", async ({ page }) => {
     // At 390px, in the app font, a long second line wraps. The list's height request counted it as
     // one line, so a short list scrolled to show its last line and clipped it at the bottom edge.
     // This page pins Arial, which may not wrap here, so the test measures in the widest verified
     // face and first proves the line wrapped. Project's "No Project" line was the case until #2952
-    // shortened it; an unavailable Agent's reason is now the longest second line in the dialog.
-    await openDialog(page, "?agentUnavailable=1");
+    // shortened it; an App Server whose check failed has the longest second line in the dialog.
+    // A mouse at phone width keeps the tap-only list with compact rows: on touch, the Ready and Needs
+    // Setup labels and the footer row (#2953) take this list past its 320px cap, where scrolling is
+    // the design rather than a misjudged height.
+    await openDialog(page, "?appServerCheck=timeout");
     const face = await pinWidestFace(page, page.locator("body"));
     await page.getByRole("button", { name: /^Agent:/ }).click();
     // The searchable list's scroll box is its panel, which holds the filter above the listbox.
     const list = page.locator(".menu.listbox");
-    await expect(list.getByRole("option")).toHaveCount(3);
+    // Claude Code, Pi, Codex App Server, and the Set Up Agents in Connections footer row.
+    await expect(list.getByRole("option")).toHaveCount(4);
     const description = list.getByRole("option", { name: /Codex App Server/ }).locator(".ui-select-option-reason");
     const descriptionLines = await description.evaluate((element) => {
       const range = document.createRange();
@@ -422,8 +432,9 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
         // Focus leaves the caret after "Claude Code" rather than selecting it (#1951), so replace
         // the value the way a person would before searching.
         await page.keyboard.press("ControlOrMeta+a");
+        // Typing highlights the first match; Arrow Down from it would reach Set Up Agents in
+        // Connections (#2953).
         await page.keyboard.type("codex app server");
-        await page.keyboard.press("ArrowDown");
         await page.keyboard.press("Enter");
         await expect(agent).toHaveValue(/Codex App Server/);
 
@@ -541,14 +552,12 @@ test.describe("responsive Project and Agent presentation", () => {
 
     const touchAgent = page.getByRole("button", { name: /^Agent:/ });
     await expect(touchAgent).toHaveAccessibleName(/Agent: Pi RPC/);
-    await expect(page.locator(".agent-meta")).toContainText("Runs on native host");
 
     await touchAgent.click();
     await page.getByRole("listbox", { name: "Agent" }).getByRole("option", { name: /Claude Code/ }).click();
     await page.setViewportSize({ width: 1280, height: 900 });
     await expect(page.getByRole("combobox", { name: "Project" })).toHaveValue("Wollipog");
     await expect(page.getByRole("combobox", { name: "Agent" })).toHaveValue("Claude Code");
-    await expect(page.locator(".agent-meta")).toContainText("Runs on native host");
   });
 });
 
@@ -615,8 +624,8 @@ test.describe("New Session dialog keyboard contract", () => {
     const agent = page.getByRole("combobox", { name: "Agent" });
     await expect(agent).toBeFocused();
     await page.keyboard.press("ControlOrMeta+a");
+    // Typing highlights the first match; Arrow Down from it would reach the footer action (#2953).
     await page.keyboard.type("codex app server");
-    await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect(agent).toHaveAttribute("aria-expanded", "true");
     await expect(page.locator("html")).not.toHaveAttribute("data-create-session-count", /.+/);
@@ -693,7 +702,8 @@ test.describe("increased text size", () => {
     expect(listBox.y).toBeGreaterThanOrEqual(0);
     expect(listBox.x + listBox.width).toBeLessThanOrEqual(390);
     expect(listBox.y + listBox.height).toBeLessThanOrEqual(780);
-    const lastOption = list.getByRole("option").last();
+    // The last agent, above the Set Up Agents in Connections footer row (#2953).
+    const lastOption = list.getByRole("option").filter({ hasNotText: "Set Up Agents in Connections" }).last();
     await lastOption.scrollIntoViewIfNeeded();
     await lastOption.click();
     await expect(agent).toHaveAccessibleName(/Agent: Pi RPC/);
@@ -817,9 +827,10 @@ test.describe("searchable pickers at 1440px (#1951)", () => {
       await page.getByRole("combobox", { name: field }).focus();
       // Project's list stays closed on focus (#2952).
       if (field === "Project") await page.keyboard.press("ArrowDown");
-      // The footer action (New Project…) is a row to act on, not a choice with a description.
+      // The footer action (New Project…, Set Up Agents in Connections) is a row to act on, not a
+      // choice with a description.
       const options = page.getByRole("listbox", { name: `${field} Options` }).getByRole("option")
-        .filter({ hasNotText: "New Project…" });
+        .filter({ hasNotText: /^(New Project…|Set Up Agents in Connections)$/ });
       await expect(options.first()).toBeVisible();
       if (process.env.EVIDENCE_DIR) {
         await page.mouse.move(0, 0);
@@ -831,7 +842,9 @@ test.describe("searchable pickers at 1440px (#1951)", () => {
           .map((line) => line.textContent ?? "").join(" "),
         reason: element.querySelector(".ui-select-option-reason") !== null,
       })));
-      expect(rows.every((row) => row.label !== "" && row.lines !== ""), "every option has a label and a second line").toBe(true);
+      // Every Project has a second line; an Agent has one only when it changes the choice (#2953).
+      expect(rows.every((row) => row.label !== "" && (field === "Agent" || row.lines !== "")),
+        "every option has a label, and every Project a second line").toBe(true);
       if (field === "Agent") expect(rows.some((row) => row.reason), "an unavailable Agent shows its reason").toBe(true);
       for (const [index, row] of rows.entries()) {
         await expect(options.nth(index)).toHaveAccessibleName(row.label);
@@ -916,8 +929,11 @@ test.describe("searchable touch pickers at 390px (#1951)", () => {
 
   test("a list that opens above its trigger keeps its filter still as a search empties it", async ({ page }) => {
     // A short phone (a landscape-ish window), so the Agent trigger can sit with no room below it.
-    await page.setViewportSize({ width: 390, height: 420 });
+    await page.setViewportSize({ width: 390, height: 480 });
     await openDialog(page);
+    // Room above it for the whole list, as a longer form above Agent would leave: the Ready group's
+    // label and the footer row (#2953) made the list taller than the fixture's own form offers.
+    await page.addStyleTag({ content: "form.form { padding-top: 160px; }" });
     const agent = page.getByRole("button", { name: /^Agent:/ });
     await agent.evaluate((element) => element.scrollIntoView({ block: "end" }));
     await agent.click();
@@ -942,5 +958,54 @@ test.describe("searchable touch pickers at 390px (#1951)", () => {
     await expect(filter).toBeFocused();
     const heights = await Promise.all([height(trigger), height(filter), height(probe)]);
     for (const value of heights) expect(value).toBeCloseTo(44, 0);
+  });
+});
+
+test.describe("Agent's Ready and Needs Setup groups on a phone (#2953)", () => {
+  test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
+
+  test("at 390px the touch sheet shows both groups and a 44px Set Up Agents in Connections row", async ({ page }) => {
+    await openDialog(page, "?agentSetup=1&savedAgent=pi");
+    const agent = page.getByRole("button", { name: /^Agent:/ });
+    await expect(agent).toHaveAccessibleName("Agent: Pi RPC");
+    await agent.click();
+    const list = page.getByRole("listbox", { name: "Agent", exact: true });
+    await expect(list.getByRole("group")).toHaveCount(2);
+    await expect(list.getByRole("group").nth(0)).toHaveAccessibleName("Ready on Studio Workstation");
+    await expect(list.getByRole("group").nth(0).getByRole("option")).toHaveCount(3);
+    await expect(list.getByRole("group").nth(0).getByRole("option").first()).toHaveAccessibleName("Pi RPC");
+    await expect(list.getByRole("group").nth(0).getByRole("option").first())
+      .toHaveAccessibleDescription("Your default on this machine · No approval cards");
+    const needsSetup = list.getByRole("group").nth(1);
+    await expect(needsSetup).toHaveAccessibleName("Needs Setup");
+    await expect(needsSetup.getByRole("option")).toHaveText([
+      /^Gemini.*Not installed on Studio Workstation\.$/,
+      /^OpenCode.*Sign in before the session can start\.$/,
+    ]);
+    const rows = list.getByRole("option");
+    await expect(rows.last()).toHaveText("Set Up Agents in Connections");
+    await rows.last().scrollIntoViewIfNeeded();
+    expect(Math.round((await rows.last().boundingBox())!.height), "the footer row is a 44px touch row").toBeGreaterThanOrEqual(44);
+  });
+});
+
+test.describe("Agent before a location at 1440px (#2953)", () => {
+  test("at 1440px Agent waits for a location, then lines up with Project", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await openDialog(page, "?agentSetup=1&noPreset=1");
+    const agent = page.getByRole("combobox", { name: "Agent" });
+    await expect(agent).toHaveAttribute("aria-disabled", "true");
+    await expect(agent).toHaveAttribute("placeholder", "Choose a Location First");
+    await agent.click({ force: true });
+    await expect(agent).toHaveAttribute("aria-expanded", "false");
+
+    const project = page.getByRole("combobox", { name: "Project" });
+    await project.focus();
+    await page.keyboard.type("Wollipog");
+    await page.keyboard.press("Enter");
+    await expect(agent).not.toHaveAttribute("aria-disabled", "true");
+    const projectBox = (await project.boundingBox())!;
+    const agentBox = (await agent.boundingBox())!;
+    expect(Math.abs(agentBox.x - projectBox.x), "the Agent field starts where the Project field does").toBeLessThanOrEqual(0.5);
   });
 });

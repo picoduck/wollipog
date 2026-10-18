@@ -384,7 +384,9 @@ for (const searchable of [false, true]) {
       const descendant = () => keys.getAttribute("aria-activedescendant");
       assert.equal(descendant(), view.options()[0]!.id);
       press(keys, "ArrowDown");
-      assert.equal(descendant(), view.options()[2]!.id, "the unavailable option is skipped, as before");
+      assert.equal(descendant(), view.options()[1]!.id, "the unavailable option is reached, so its reason is heard (#2953)");
+      press(keys, "ArrowDown");
+      assert.equal(descendant(), view.options()[2]!.id);
       press(keys, "ArrowDown");
       assert.equal(descendant(), view.options()[3]!.id, "the next row is the footer action");
       press(keys, "ArrowDown");

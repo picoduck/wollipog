@@ -19,7 +19,8 @@ async function agentOptions(page: Page) {
 
 test("a saved exec default asks for a choice and offers Codex App Server", async ({ page }) => {
   await open(page, "savedAgent=codex-exec");
-  const warning = page.locator(".agent-default-warning");
+  // A field warning under Agent with one button naming the fix (#2953).
+  const warning = page.locator(".field", { has: page.getByRole("combobox", { name: "Agent" }) }).locator(".field-warn");
   await expect(warning).toContainText("which is no longer supported");
   await expect(page.getByRole("combobox", { name: "Agent" })).toHaveValue("");
   // No agent chosen yet is not a hard block (#2952): Create Session lands on Agent and names it.
@@ -29,7 +30,7 @@ test("a saved exec default asks for a choice and offers Codex App Server", async
   await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
   await page.keyboard.press("Escape");
 
-  await page.getByRole("button", { name: "Use Codex App Server" }).click();
+  await warning.getByRole("button", { name: "Use Codex App Server" }).click();
   await expect(page.getByRole("combobox", { name: "Agent" })).toHaveValue("Codex App Server");
   await expect(warning).toHaveCount(0);
   const options = await agentOptions(page);
@@ -37,10 +38,11 @@ test("a saved exec default asks for a choice and offers Codex App Server", async
   await expect(options.filter({ hasText: /Non-Interactive|codex exec/ })).toHaveCount(0);
 });
 
-test("an App Server whose check timed out needs setup with the runner's reason", async ({ page }) => {
+test("an App Server whose check timed out needs setup, with the fix in plain words (#2953)", async ({ page }) => {
   await open(page, "appServerCheck=timeout");
   const codex = (await agentOptions(page)).filter({ hasText: "Codex" });
   await expect(codex).toHaveCount(1);
   await expect(codex).toHaveAttribute("aria-disabled", "true");
-  await expect(codex).toContainText("Needs setup. Wollipog couldn't check this Codex installation in time. Rediscover to try again.");
+  await expect(codex).toContainText("Wollipog couldn't check it on runner-1. Check it again in Connections.");
+  await expect(codex).not.toContainText(/rediscover/i);
 });

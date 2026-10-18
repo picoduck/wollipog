@@ -19,7 +19,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import { NO_PROJECT_SELECTION } from "../project-session-selection.js";
-import type { ViewNavigation } from "../navigation.js";
+import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { NewSessionDialog, type NewSessionPreset } from "./NewSessionDialog.js";
@@ -105,9 +105,12 @@ class FakeSocket implements UiSocket {
   }
 }
 
+/** Views the dialog asked the app to show, and how often it asked to close, newest last. */
+const navigated: View[] = [];
+const dialogCloses = { count: 0 };
 const navigation: ViewNavigation = {
   current: () => ({ name: "inbox" }),
-  push() {},
+  push(view) { navigated.push(view); },
   listen: () => () => {},
 };
 
@@ -127,7 +130,9 @@ function snapshot(overrides: Partial<UiSnapshotMessage> = {}): UiSnapshotMessage
 
 function DialogWhenReady({ preset, onOpenTerminal }: { preset?: NewSessionPreset; onOpenTerminal: () => void }) {
   const ready = useStoreSelector((state) => state.snapshotLoaded);
-  return ready ? <NewSessionDialog onClose={() => {}} onOpenTerminal={onOpenTerminal} preset={preset} /> : null;
+  return ready
+    ? <NewSessionDialog onClose={() => { dialogCloses.count += 1; }} onOpenTerminal={onOpenTerminal} preset={preset} />
+    : null;
 }
 
 interface Fixture {
@@ -239,6 +244,12 @@ function comboboxOptions(container: HTMLDivElement, label: string): HTMLButtonEl
   return [...container.querySelectorAll<HTMLButtonElement>(
     `[role="listbox"][aria-label="${label} Options"] [role="option"]`,
   )];
+}
+
+/** A list's options without its footer action row ("Set Up Agents in Connections"), which is an
+ * option to assistive technology but never a value. */
+function choiceOptions(container: HTMLDivElement, label: string): HTMLButtonElement[] {
+  return comboboxOptions(container, label).filter((option) => !option.id.endsWith("-footer"));
 }
 
 async function selectProject(container: HTMLDivElement, value: string): Promise<void> {
@@ -742,7 +753,7 @@ test("every refused submit lands on a control described by its reason (#2952)", 
       };
       const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
       try {
-        const focused = await pressCreateAndHear(fixture, /saved default account is no longer on this Machine/, "account");
+        const focused = await pressCreateAndHear(fixture, /The saved default account isn't on this machine anymore\. Choose an account, or change the default in Machine Settings\./, "account");
         assert.match(focused.getAttribute("aria-label") ?? "", /^Account:/);
         assert.equal(focused.getAttribute("aria-invalid"), "true");
       } finally { await unmountFixture(fixture); }
@@ -916,6 +927,7 @@ test("available and unavailable Agents share one searchable flow, without the re
       { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: false, authStatus: "unauthenticated" },
       { id: "codex-exec", name: "Codex", command: "codex", args: ["exec"], env: {}, driver: "codex", available: true },
     ],
+    protocolVersion: PROTOCOL_VERSION,
   };
   const fixture = await mountFixture({ runners: [agentRunner] });
   try {
@@ -926,18 +938,18 @@ test("available and unavailable Agents share one searchable flow, without the re
 
     await act(async () => { input.focus(); });
     assert.equal(input.getAttribute("aria-expanded"), "true");
-    assert.equal(comboboxOptions(fixture.container, "Agent").length, 2, "Claude Code and Codex App Server only (#3259)");
+    assert.equal(choiceOptions(fixture.container, "Agent").length, 2, "Claude Code and Codex App Server only (#3259)");
 
     await act(async () => { setComboboxQuery(input, "non-interactive"); });
-    assert.equal(comboboxOptions(fixture.container, "Agent").length, 0);
+    assert.equal(choiceOptions(fixture.container, "Agent").length, 0);
 
-    await act(async () => { setComboboxQuery(input, "codex login"); });
-    const unavailable = comboboxOptions(fixture.container, "Agent");
+    await act(async () => { setComboboxQuery(input, "sign in"); });
+    const unavailable = choiceOptions(fixture.container, "Agent");
     assert.equal(unavailable.length, 1);
     assert.equal(unavailable[0]?.getAttribute("aria-disabled"), "true");
-    assert.match(unavailable[0]?.textContent ?? "", /Needs setup.*run `codex login`/);
+    assert.match(unavailable[0]?.textContent ?? "", /Codex App Server.*Sign in before the session can start\./);
     await act(async () => { pressComboboxKey(input, "Enter"); });
-    assert.match(input.value, /codex login/,
+    assert.match(input.value, /sign in/,
       "refusing an unavailable result leaves the search intact instead of committing it");
   } finally {
     await unmountFixture(fixture);
@@ -954,12 +966,14 @@ function optionNamesAndDescriptions(options: HTMLButtonElement[]) {
 }
 
 test("Project and Agent options are named by their label and described by their second lines (#2369)", async () => {
+  domWindow.localStorage.clear();
   const agentRunner: RunnerView = {
     ...runner,
     agents: [
       ...runner.agents,
       { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: false },
     ],
+    protocolVersion: PROTOCOL_VERSION,
   };
   const fixture = await mountFixture({ runners: [agentRunner] });
   try {
@@ -975,14 +989,12 @@ test("Project and Agent options are named by their label and described by their 
 
     const agent = combobox(fixture.container, "Agent");
     await act(async () => { agent.focus(); });
-    const agentOptions = comboboxOptions(fixture.container, "Agent");
-    // An unavailable Agent's reason follows its description, as Select's does.
+    const agentOptions = choiceOptions(fixture.container, "Agent");
+    // A ready agent with nothing that changes the choice has no second line; one that needs setup
+    // is described by its fix (#2953).
     assert.deepEqual(optionNamesAndDescriptions(agentOptions), [
-      { name: "Claude Code", description: "Runs on native host" },
-      {
-        name: "Codex App Server",
-        description: "Needs setup. Interactive target unavailable · runs on native host",
-      },
+      { name: "Claude Code", description: null },
+      { name: "Codex App Server", description: "Not installed on runner-1." },
     ]);
     assert.equal(agentOptions[1]?.getAttribute("aria-disabled"), "true");
     for (const option of agentOptions) assert.equal(option.getAttribute("aria-label"), null);
@@ -1026,7 +1038,7 @@ test("Additional Directories use shared multiple-choice cards without changing t
   }
 });
 
-test("saved-default recovery buttons name the agent they actually select", async () => {
+test("a saved default this machine can't start is an error under Agent naming it and the machine (#2953)", async () => {
   domWindow.localStorage.clear();
   saveAgentDefault({}, runner.runnerId, "codex-app");
   const recoveryRunner: RunnerView = {
@@ -1035,16 +1047,28 @@ test("saved-default recovery buttons name the agent they actually select", async
       ...runner.agents,
       { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: false },
     ],
+    protocolVersion: PROTOCOL_VERSION,
   };
-  const unavailableFixture = await mountFixture(
-    { runners: [recoveryRunner] },
-    { runnerId: runner.runnerId },
-  );
+  const unavailableFixture = await mountFixture({ runners: [recoveryRunner] });
   try {
-    const action = [...unavailableFixture.container.querySelectorAll("button")].find((button) =>
-      button.textContent?.trim() === "Use Claude Code") as HTMLLabelElement | undefined;
-    assert.ok(action, "the recovery action names the usable agent it selects");
-    await act(async () => { action.click(); });
+    await act(async () => { await selectProject(unavailableFixture.container, project.id); });
+    const input = combobox(unavailableFixture.container, "Agent");
+    assert.equal(fieldErrorText(unavailableFixture.container),
+      "Codex App Server isn't installed on runner-1. Choose another agent, or set it up in Connections.");
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.match(ariaReferencedText(input, "aria-describedby") ?? "", /isn't installed on runner-1/);
+    assert.equal(createButton(unavailableFixture.container).disabled, true);
+    assert.equal(footerReason(unavailableFixture.container), "Choose an installed agent to continue.");
+    assertNoDomNode(unavailableFixture.container.querySelector(".agent-default-warning"));
+    assertNoDomNode(unavailableFixture.container.querySelector(".agent-meta"));
+
+    await act(async () => { input.focus(); });
+    const claude = choiceOptions(unavailableFixture.container, "Agent")
+      .find((option) => option.textContent?.startsWith("Claude Code"));
+    assert.ok(claude);
+    await act(async () => { claude.click(); });
+    assertNoDomNode(unavailableFixture.container.querySelector(".modal-body .field-error"),
+      "choosing an agent that can start clears the error");
     const saved = loadAgentDefaults()[runner.runnerId];
     assert.equal(typeof saved === "string" ? saved : saved?.agentId, "claude");
   } finally {
@@ -1052,12 +1076,18 @@ test("saved-default recovery buttons name the agent they actually select", async
     domWindow.localStorage.clear();
   }
 
-  saveAgentDefault({}, runner.runnerId, "missing-agent");
-  const missingFixture = await mountFixture({}, { runnerId: runner.runnerId });
+  // A saved installation this machine no longer lists is named by its harness.
+  saveAgentDefault({}, runner.runnerId, "claude-old", undefined, {
+    id: "claude-old", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code",
+    installation: { id: "installation-old", path: "/opt/claude-old", via: "path" },
+  });
+  const missingFixture = await mountFixture({ runners: [{ ...runner, protocolVersion: PROTOCOL_VERSION }] });
   try {
-    const action = [...missingFixture.container.querySelectorAll("button")].find((button) =>
-      button.textContent?.trim() === "Use Claude Code") as HTMLLabelElement | undefined;
-    assert.ok(action, "the recovery action names Claude Code when that is the actual fallback");
+    await act(async () => { await selectProject(missingFixture.container, project.id); });
+    assert.equal(combobox(missingFixture.container, "Agent").value, "", "nothing is chosen for the person");
+    assert.equal(fieldErrorText(missingFixture.container),
+      "Claude Code isn't installed on runner-1. Choose another agent, or set it up in Connections.");
+    assert.equal(footerReason(missingFixture.container), "Choose an installed agent to continue.");
   } finally {
     await unmountFixture(missingFixture);
     domWindow.localStorage.clear();
@@ -1081,22 +1111,26 @@ test("a saved Codex exec default is not offered or started without a choice (#32
     const input = combobox(fixture.container, "Agent");
     assert.equal(input.value, "", "the saved exec default is not preselected");
     await assertCreateRefused(fixture);
-    assert.match(fixture.container.querySelector(".agent-default-warning")?.textContent ?? "",
-      /non-interactive mode, which is no longer supported/);
+    const warning = fixture.container.querySelector(".modal-body .field-warn");
+    assert.match(warning?.textContent ?? "", /non-interactive mode, which is no longer supported/);
+    assert.match(ariaReferencedText(input, "aria-describedby") ?? "", /non-interactive mode/,
+      "Agent is described by the warning's words");
+    assert.doesNotMatch(ariaReferencedText(input, "aria-describedby") ?? "", /Use Codex App Server/,
+      "the fix's button is not part of the description");
 
     await act(async () => { input.focus(); });
-    assert.deepEqual(comboboxOptions(fixture.container, "Agent").map((option) => option.textContent?.match(/^Codex App Server|^Claude Code/)?.[0]),
+    assert.deepEqual(choiceOptions(fixture.container, "Agent").map((option) => option.textContent?.match(/^Codex App Server|^Claude Code/)?.[0]),
       ["Claude Code", "Codex App Server"]);
     assert.doesNotMatch(comboboxOptions(fixture.container, "Agent").map((option) => option.textContent).join(" "), /Non-Interactive/);
 
-    const action = [...fixture.container.querySelectorAll("button")].find((button) =>
+    const action = [...(warning?.querySelectorAll("button.btn.sm") ?? [])].find((button) =>
       button.textContent?.trim() === "Use Codex App Server") as HTMLButtonElement | undefined;
-    assert.ok(action, "the recovery action selects Codex App Server");
+    assert.ok(action, "the warning's one action selects Codex App Server");
     await act(async () => { action.click(); });
     assert.equal(input.value, "Codex App Server");
     const saved = loadAgentDefaults()[runner.runnerId];
     assert.equal(typeof saved === "string" ? saved : saved?.agentId, "codex-app");
-    assertNoDomNode(fixture.container.querySelector(".agent-default-warning"));
+    assertNoDomNode(fixture.container.querySelector(".modal-body .field-warn"));
     assert.equal(createButton(fixture.container).disabled, false);
   } finally {
     await unmountFixture(fixture);
@@ -1104,7 +1138,7 @@ test("a saved Codex exec default is not offered or started without a choice (#32
   }
 });
 
-test("Codex App Server that failed its check needs setup with the runner's reason, not an exec fallback (#3224)", async () => {
+test("Codex App Server that failed its check needs setup with a plain reason, not an exec fallback (#3224, #2953)", async () => {
   domWindow.localStorage.clear();
   const codexOnly: RunnerView = {
     ...runner,
@@ -1124,6 +1158,7 @@ test("Codex App Server that failed its check needs setup with the runner's reaso
       },
       { id: "codex-exec", name: "Codex (Non-Interactive)", command: "codex", args: [], env: {}, driver: "codex", available: true, source: "discovered" },
     ],
+    protocolVersion: PROTOCOL_VERSION,
   };
   const fixture = await mountFixture({ runners: [codexOnly] });
   try {
@@ -1131,13 +1166,289 @@ test("Codex App Server that failed its check needs setup with the runner's reaso
     const input = combobox(fixture.container, "Agent");
     assert.equal(input.value, "");
     await act(async () => { input.focus(); });
-    const options = comboboxOptions(fixture.container, "Agent");
+    const options = choiceOptions(fixture.container, "Agent");
     assert.deepEqual(optionNamesAndDescriptions(options), [{
       name: "Codex App Server",
-      description: "Needs setup. Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
+      description: "Wollipog couldn't check it on runner-1. Check it again in Connections.",
     }]);
     assert.equal(options[0]?.getAttribute("aria-disabled"), "true");
     await assertCreateRefused(fixture);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+/** An Agent list's groups as they read: each section label and the names of its options. */
+function agentGroups(listbox: Element): Array<{ label: string; options: string[] }> {
+  return [...listbox.querySelectorAll('[role="group"]')].map((group) => ({
+    label: ariaReferencedText(group as HTMLElement, "aria-labelledby") ?? "",
+    options: [...group.querySelectorAll<HTMLElement>('[role="option"]')]
+      .map((option) => ariaReferencedText(option, "aria-labelledby") ?? ""),
+  }));
+}
+
+/** Three agents that can start and two that need setup, with Pi saved as this machine's default. */
+const setupRunner: RunnerView = {
+  ...runner,
+  protocolVersion: PROTOCOL_VERSION,
+  agents: [
+    ...runner.agents,
+    { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true },
+    {
+      id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi", available: true,
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: false, permissionModes: [],
+      },
+    },
+    { id: "gemini", name: "Gemini", command: "gemini", args: [], env: {}, driver: "acp", available: false },
+    { id: "opencode", name: "OpenCode", command: "opencode", args: [], env: {}, driver: "acp", available: false, authStatus: "unauthenticated" },
+  ],
+};
+const SETUP_GROUPS = [
+  { label: "Ready on runner-1", options: ["Pi RPC", "Claude Code", "Codex App Server"] },
+  { label: "Needs Setup", options: ["Gemini", "OpenCode"] },
+];
+
+test("Agent waits for a location: disabled, says so, and opens by neither click nor keyboard (#2953)", async () => {
+  domWindow.localStorage.clear();
+  const fixture = await mountFixture({ runners: [setupRunner] });
+  try {
+    const input = combobox(fixture.container, "Agent");
+    assert.equal(input.getAttribute("aria-disabled"), "true");
+    assert.equal(input.placeholder, "Choose a Location First");
+    assert.equal(input.value, "");
+    await act(async () => { input.click(); });
+    await act(async () => { input.focus(); pressComboboxKey(input, "ArrowDown"); });
+    await act(async () => {
+      input.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", altKey: true, bubbles: true }) as never);
+    });
+    await act(async () => { setComboboxQuery(input, "claude"); });
+    assert.equal(input.getAttribute("aria-expanded"), "false");
+    assertNoDomNode(fixture.container.querySelector('[role="listbox"][aria-label="Agent Options"]'));
+
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    assert.equal(input.getAttribute("aria-disabled"), null, "a chosen location enables Agent");
+    assert.equal(input.value, "Claude Code");
+  } finally {
+    await unmountFixture(fixture);
+  }
+
+  const restoreMatchMedia = setTouchChoicePicker(true);
+  try {
+    const touch = await mountFixture({ runners: [setupRunner] });
+    try {
+      const trigger = touch.container.querySelector<HTMLButtonElement>('button[aria-label^="Agent:"]');
+      assert.ok(trigger);
+      assert.equal(trigger.getAttribute("aria-disabled"), "true");
+      assert.match(trigger.textContent ?? "", /Choose a Location First/);
+      await act(async () => { trigger.click(); });
+      await act(async () => {
+        trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
+      });
+      assertNoDomNode(touch.container.querySelector('[role="listbox"][aria-label="Agent"]'));
+    } finally {
+      await unmountFixture(touch);
+    }
+  } finally {
+    restoreMatchMedia();
+  }
+
+  // A chosen location whose machine is offline asks for an online one.
+  const offline = await mountFixture(
+    { runners: [{ ...setupRunner, status: "offline" }] },
+    { projectId: project.id, projectLocationId: "location-1" },
+  );
+  try {
+    const input = combobox(offline.container, "Agent");
+    assert.equal(input.getAttribute("aria-disabled"), "true");
+    assert.equal(input.placeholder, "Choose an Online Location First");
+  } finally {
+    await unmountFixture(offline);
+  }
+});
+
+test("Agent lists Ready on the machine first, led by the saved default, then Needs Setup with each fix (#2953)", async () => {
+  domWindow.localStorage.clear();
+  saveAgentDefault({}, runner.runnerId, "pi");
+  const fixture = await mountFixture({ runners: [setupRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    assert.equal(input.value, "Pi RPC", "the saved default is chosen");
+    await act(async () => { input.focus(); });
+    const listbox = fixture.container.querySelector('[role="listbox"][aria-label="Agent Options"]');
+    assert.ok(listbox);
+    assert.deepEqual(agentGroups(listbox), SETUP_GROUPS);
+    const options = choiceOptions(fixture.container, "Agent");
+    assert.deepEqual(optionNamesAndDescriptions(options), [
+      { name: "Pi RPC", description: "Your default on this machine · No approval cards" },
+      { name: "Claude Code", description: null },
+      { name: "Codex App Server", description: null },
+      { name: "Gemini", description: "Not installed on runner-1." },
+      { name: "OpenCode", description: "Sign in before the session can start." },
+    ]);
+    // The reasons are visible text, not only accessible descriptions.
+    assert.match(options[3]!.textContent ?? "", /Not installed on runner-1\./);
+    assert.deepEqual(options.map((option) => option.getAttribute("aria-disabled")), [null, null, null, "true", "true"]);
+    const footer = comboboxOptions(fixture.container, "Agent").at(-1)!;
+    assert.equal(footer.textContent, "Set Up Agents in Connections", "the footer action is the list's last row");
+
+    const active = () => input.getAttribute("aria-activedescendant");
+    for (let step = 0; step < 3; step += 1) await act(async () => { pressComboboxKey(input, "ArrowDown"); });
+    assert.equal(active(), options[3]!.id, "the arrows reach a Needs Setup option");
+    await act(async () => { pressComboboxKey(input, "Enter"); });
+    assert.equal(input.getAttribute("aria-expanded"), "true", "Enter does not choose it");
+    await act(async () => { pressComboboxKey(input, "ArrowDown"); });
+    assert.equal(active(), options[4]!.id);
+    await act(async () => { pressComboboxKey(input, "Enter"); });
+    await act(async () => { pressComboboxKey(input, "Escape"); });
+    assert.equal(input.value, "Pi RPC");
+    const saved = loadAgentDefaults()[runner.runnerId];
+    assert.equal(typeof saved === "string" ? saved : saved?.agentId, "pi", "nothing unavailable was saved");
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.localStorage.clear();
+  }
+});
+
+test("on a coarse pointer the Agent sheet shows the same groups, and arrows reach what Enter refuses (#2953)", async () => {
+  domWindow.localStorage.clear();
+  saveAgentDefault({}, runner.runnerId, "pi");
+  const restoreMatchMedia = setTouchChoicePicker(true);
+  try {
+    const fixture = await mountFixture({ runners: [setupRunner] }, { projectId: project.id });
+    try {
+      const trigger = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Agent:"]');
+      assert.ok(trigger);
+      assert.equal(trigger.getAttribute("aria-label"), "Agent: Pi RPC");
+      await act(async () => { trigger.click(); });
+      const listbox = fixture.container.querySelector('[role="listbox"][aria-label="Agent"]');
+      assert.ok(listbox);
+      assert.deepEqual(agentGroups(listbox), SETUP_GROUPS);
+      const rows = [...listbox.querySelectorAll<HTMLElement>('[role="option"]')];
+      assert.equal(rows.at(-1)?.textContent, "Set Up Agents in Connections");
+      const filter = fixture.container.querySelector<HTMLInputElement>('input[role="combobox"][aria-label="Search Agent Options"]');
+      assert.ok(filter);
+      const press = async (key: string) => act(async () => {
+        filter.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }) as never);
+      });
+      for (let step = 0; step < 3; step += 1) await press("ArrowDown");
+      assert.equal(filter.getAttribute("aria-activedescendant"), rows[3]!.id, "the arrows reach a Needs Setup option");
+      assert.equal(rows[3]!.getAttribute("aria-disabled"), "true");
+      await press("Enter");
+      assert.equal(trigger.getAttribute("aria-label"), "Agent: Pi RPC", "Enter does not choose it");
+      assert.ok(fixture.container.querySelector('[role="listbox"][aria-label="Agent"]'), "and the sheet stays open");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  } finally {
+    restoreMatchMedia();
+    domWindow.localStorage.clear();
+  }
+});
+
+test("two installations of one agent name their folder on the second line, not in the label (#2953)", async () => {
+  domWindow.localStorage.clear();
+  const installed = (id: string, path: string) => ({
+    id, name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true,
+    installation: { id, path, via: "path" as const },
+  });
+  const fixture = await mountFixture({ runners: [{
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: [installed("system", "/usr/local/bin/claude"), installed("local", "/home/me/.local/bin/claude")],
+  }] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    await act(async () => { input.focus(); });
+    const options = optionNamesAndDescriptions(choiceOptions(fixture.container, "Agent"));
+    assert.deepEqual(options.map((option) => option.name), ["Claude Code — Native", "Claude Code — Native"]);
+    assert.deepEqual(options.map((option) => option.description).sort(), ["…/.local/bin", "…/local/bin"]);
+    assert.ok(options.every((option) => !option.name?.includes("/")), "no path in an option's label");
+    await act(async () => { pressComboboxKey(input, "Escape"); });
+    assert.match(input.value, /^Claude Code — Native · …\/\.?local\/bin$/,
+      "the chosen one is told apart by its folder");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Set Up Agents in Connections closes New Session and opens the machines in Connections (#2953)", async () => {
+  domWindow.localStorage.clear();
+  const fixture = await mountFixture({ runners: [setupRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    await act(async () => { input.focus(); });
+    const closesBefore = dialogCloses.count;
+    navigated.length = 0;
+    await act(async () => { pressComboboxKey(input, "End"); });
+    const footer = comboboxOptions(fixture.container, "Agent").at(-1)!;
+    assert.equal(input.getAttribute("aria-activedescendant"), footer.id, "End reaches the footer action");
+    await act(async () => { pressComboboxKey(input, "Enter"); });
+    assert.equal(dialogCloses.count, closesBefore + 1, "New Session is asked to close");
+    assert.deepEqual(navigated, [{ name: "runners", section: "machines" }]);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("no agent text in New Session names the mechanism (#2953)", async () => {
+  domWindow.localStorage.clear();
+  const mechanism = /native host|ACP stdio|stdio|rediscover|runner host/iu;
+  const fixture = await mountFixture({ runners: [{
+    ...setupRunner,
+    agents: [
+      ...setupRunner.agents,
+      {
+        id: "codex-wsl", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: false,
+        context: { kind: "wsl", distro: "Ubuntu" }, authStatus: "unauthenticated",
+      },
+      {
+        id: "registry", name: "Registry Agent", command: "npx", args: [], env: {}, driver: "acp", available: false,
+        acpTransport: "stdio",
+        registry: { installStatus: "approval-required", transport: "stdio", adapterVersion: "1.0.0" } as NonNullable<RunnerView["agents"][number]["registry"]>,
+      },
+    ],
+  }] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    await act(async () => { input.focus(); });
+    assert.ok(comboboxOptions(fixture.container, "Agent").length > 5);
+    assert.doesNotMatch(fixture.container.textContent ?? "", mechanism);
+    for (const option of comboboxOptions(fixture.container, "Agent")) {
+      assert.doesNotMatch(ariaReferencedText(option, "aria-describedby") ?? "", mechanism);
+    }
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Account options read Signed In, Sign-In Required or Status Unknown, never Logged In (#2953)", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, defaultProviderAccountId: "work" })),
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "claude", authStatus: "unauthenticated" },
+      { id: "spare", label: "Spare", provider: "claude", authStatus: "unknown" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    const trigger = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Account:"]');
+    assert.ok(trigger);
+    await act(async () => { trigger.click(); });
+    const options = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="listbox"][aria-label="Account"] [role="option"]')];
+    assert.deepEqual(optionNamesAndDescriptions(options), [
+      { name: "Work", description: "Signed In" },
+      { name: "Personal", description: "Sign-In Required · Sign in again before using it." },
+      { name: "Spare", description: "Status Unknown" },
+    ]);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Logged In|Login Required|Login Unknown/u);
   } finally {
     await unmountFixture(fixture);
   }
@@ -2377,7 +2688,7 @@ test("a missing saved default requires an explicit account choice", async () => 
   const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
   try {
     await assertCreateRefused(fixture);
-    assert.match(fixture.container.textContent ?? "", /saved default account is no longer on this Machine/u);
+    assert.match(fixture.container.textContent ?? "", /The saved default account isn't on this machine anymore\. Choose an account, or change the default in Machine Settings\./u);
     await chooseSelectOption(fixture.container, "Account", "Work");
     assert.equal(createButton(fixture.container).disabled, false);
     await act(async () => { createButton(fixture.container).click(); });
