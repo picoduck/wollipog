@@ -250,23 +250,21 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Browser End-to-End Tests
     runs-on: ubuntu-24.04
-    # A recovered six-minute install timeout plus 377 passing tests still exhausted 25 minutes
-    # (#2700, run 37478932815). Thirty-six identified jobs on 2026-10-06 include all five shards
-    # on current main: the slowest non-install remainder was 1448 seconds, including other setup,
-    # tests, shard 1's production pass and cleanup. Queue wait is separate. The active cache-hit OR
-    # cache-miss install path allows two six-minute attempts; do not add both exclusive paths.
-    # 720s attempts + 1450s rounded remainder + 105s timeout enforcement + 180s reserve
-    # + 480s diagnostics = 2935s. Forty-nine minutes leaves 5s more rounding slack.
-    # This replaces the stale 16.3-minute envelope
-    # behind #2067's below-thirty goal; it remains finite so hung or doubled workloads fail loudly.
-    # scripts/workflow-browser-budget.test.mjs derives the allowance from the actual steps and
-    # recorded phase evidence. Remeasure when changing the workload; docs/ci-browser-budget.md
-    # records the cold-cache uncertainty and the five-natural-run delivery requirement.
-    # Failure sanitization/upload each have a one-minute cap, and the linux settings-rows baseline
-    # regeneration (#3215) four minutes plus a minute each to upload and summarise. All five run
-    # only after a failure. Include their timeout-enforcement allowance too, preserving the
-    # measured reserve within a finite forty-nine-minute limit.
-    timeout-minutes: 49
+    # A recovered install timeout plus passing tests exhausted the old budget (#2700).
+    # Remeasured 2026-10-18: 25 jobs across five recent natural main/merge-group runs,
+    # Runs: 39135469681, 39138757428, 39141574932, 39142428503, 39142667230.
+    # Per-shard non-install maxima (1–5): 1731 / 1731 / 1585 / 1910 / 2016s.
+    # Maximum non-install remainder: 2016s (previous envelope: 1448s),
+    # including other setup, suite, shard-1 production checks and cleanup; queue wait excluded.
+    # Cache-hit OR cache-miss path: two six-minute attempts, not both exclusive paths.
+    # 720s attempts + 2020s rounded remainder + 105s enforcement + 480s failure diagnostics
+    # + 180s reserve = 3505s. A finite 59m (3540s) leaves 215s modeled residual reserve.
+    # Same five concurrent browser jobs; successful execution is unchanged. Hung jobs can
+    # hold runners 10m longer than the prior 49m limit in the shared 20-job pool.
+    # scripts/workflow-browser-budget.test.mjs derives this from actual step deadlines and
+    # identified phases. Remeasure after workload/setup changes; do not grow blindly.
+    # docs/ci-browser-budget.md records warm/cold-cache uncertainty and natural-run delivery.
+    timeout-minutes: 59
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be
