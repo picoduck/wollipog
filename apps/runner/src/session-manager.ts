@@ -158,7 +158,7 @@ import type { ReviewSessionHooks } from "./review-sessions.js";
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_WORKTREE_PORTS } from "./config.js";
 import type { RunnerAdmissionPolicy, RunnerExecutionIsolation, RunnerWorktreePorts } from "./config.js";
-import { executionTargetLaunchError } from "./execution-target.js";
+import { executionTargetLaunchError, validateHostExecutionTarget } from "./execution-target.js";
 import type { ContainerTargetRegistry } from "./container-target.js";
 import type { CloudTargetRegistry } from "./cloud-target.js";
 import {
@@ -17656,6 +17656,13 @@ export class SessionManager {
     };
   }
 
+  private campaignHostTargetError(meta: SessionMeta): string | null {
+    // Placement describes the original launch. Selecting or retiring a worktree later does not
+    // change that placement; validate its own strategy rather than the current selected path.
+    return validateHostExecutionTarget(meta.executionTarget, this.runnerId,
+      meta.executionTarget?.workspaceStrategy === "worktree", this.executionIsolation);
+  }
+
   /** Read-only GitHub status of the pull requests a campaign's work items name (#2417 slice 8),
    * through this runner's `gh` login in the root Orchestrator's repository context. Only status
    * data crosses; a failure is a fixed reason, never `gh` output. */
@@ -17665,7 +17672,7 @@ export class SessionManager {
   ): Promise<CampaignForgeObserveResultMessage> {
     const base = { type: "campaign_forge_observe_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
-    if (!meta?.orchestrator || !meta.repoPath || (meta.executionTarget && meta.executionTarget.kind !== "local")) {
+    if (!meta?.orchestrator || !meta.repoPath || this.campaignHostTargetError(meta)) {
       return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
     }
     try {
@@ -17683,8 +17690,14 @@ export class SessionManager {
   async campaignIssueScope(message: import("@wollipog/protocol").CampaignIssueScopeMessage): Promise<import("@wollipog/protocol").CampaignIssueScopeResultMessage> {
     const base = { type: "campaign_issue_scope_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
-    if (!meta?.orchestrator || !meta.repoPath || (meta.executionTarget && meta.executionTarget.kind !== "local")) {
+    if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, error: "Campaign issue scope requires a runner-local Orchestrator repository" };
+    }
+    if (this.campaignHostTargetError(meta)) {
+      this.log(JSON.stringify({ event: "campaign_issue_scope_refused", entryPoint: message.operation,
+        requestId: message.requestId, sessionId: message.sessionId, failure: "unsupported_execution_target" }));
+      return { ...base, ok: false, failure: "unsupported_execution_target",
+        error: "Campaign issue scope requires a valid local or SSH host execution target belonging to its runner" };
     }
     try {
       const run = issueClosureRun(meta.context, meta.repoPath);
@@ -17728,9 +17741,11 @@ export class SessionManager {
   async githubIssueClosure(message: GithubIssueClosureMessage): Promise<GithubIssueClosureResultMessage> {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
-    if (!meta?.orchestrator || !meta.repoPath ||
-        (meta.executionTarget && meta.executionTarget.kind !== "local")) {
+    if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, error: "Issue closure requires a runner-local Orchestrator repository" };
+    }
+    if (this.campaignHostTargetError(meta)) {
+      return { ...base, ok: false, error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
     }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
     if (!meta.orchestrator.issueNumbers?.includes(issue)) {

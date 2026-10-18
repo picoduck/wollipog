@@ -60,6 +60,24 @@ function harness(full = true, maximum = 5) {
   return { db, svc, hub, metadata, principal, state, approve, proposal, item };
 }
 
+test("scope reads and proposals explain unsupported runner targets without exposing runner error text", async () => {
+  const h = harness(false);
+  try {
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      assert.equal(message.type, "campaign_issue_scope");
+      return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: false,
+        failure: "unsupported_execution_target", error: "private runner path and credential text" };
+    };
+    for (const result of [await h.svc.campaignIssueScope("root", 100), await h.proposal("unsupported")]) {
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 409);
+      assert.equal(result.error, "Campaign scope requires a valid local or SSH host execution target belonging to its runner. Container and cloud targets are not supported.");
+      assert.equal(JSON.stringify(result).includes("private runner"), false);
+      assert.equal(JSON.stringify(result).includes("gh authentication"), false);
+    }
+  } finally { h.db.close(); }
+});
+
 test("bounded epic scope records lineage, preserves the authorizing human and revokes outstanding grants atomically", async () => {
   const h = harness();
   try {
