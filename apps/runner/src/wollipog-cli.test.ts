@@ -149,7 +149,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["service", ["service install", "service status", "service restart", "service logs", "service upgrade", "service uninstall"]],
     ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
     ["session", ["session list", "session capabilities", "session create", "session wait", "session guardrails", "--effort"]],
-    ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
+    ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard", "worktree delete-refs", "packed-refs.lock"]],
     ["issue-closure", ["request --proposal", "execute <occurrence-id>", "protocol v194+", "uncertain"]],
     ["campaign", ["plan --input", "update-item <work-item-id>", "assign <work-item-id>", "adjudicate <recommendation-id>", "work-items", "protocol v196+", "grant no authority"]],
     ["decision", ["decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision", "--snapshot"]],
@@ -1104,6 +1104,48 @@ test("CLI artifact attach uploads a file by path and prints only its metadata", 
     process.chdir(previous);
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("CLI worktree delete-refs acts only on the injected session and checks the control plane first (#3316)", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  let protocolVersion: number = PROTOCOL_VERSION;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    const body = url.endsWith("/api/compatibility") ? { protocolVersion }
+      : { refDeletion: { worktreePath: "/repo/wt", deleted: ["CHERRY_PICK_HEAD"], absent: ["AUTO_MERGE"] } };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "self" };
+  let stdout = "";
+  const io = { stdout: (text: string) => { stdout += text; }, stderr: () => {} };
+  const pick = "a".repeat(40);
+  const tree = "b".repeat(40);
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "worktree", "delete-refs",
+    "--ref", `CHERRY_PICK_HEAD=${pick}`, `--ref=AUTO_MERGE=${tree}`, "--json"], env, io, fetch), 0);
+  const request = calls.find((call) => call.url === "http://cp/api/sessions/self/worktrees/delete-refs");
+  assert.ok(request, "the session's own route is used");
+  assert.deepEqual(JSON.parse(request.body!), { refs: [{ ref: "CHERRY_PICK_HEAD", oldOid: pick }, { ref: "AUTO_MERGE", oldOid: tree }] });
+  assert.deepEqual(JSON.parse(stdout), { worktreePath: "/repo/wt", deleted: ["CHERRY_PICK_HEAD"], absent: ["AUTO_MERGE"] });
+
+  for (const argv of [
+    ["worktree", "delete-refs", "--json"],
+    ["worktree", "delete-refs", "--ref", "CHERRY_PICK_HEAD", "--json"],
+    ["worktree", "delete-refs", "--ref", `=${pick}`, "--json"],
+    ["worktree", "delete-refs", "--session", "other", "--ref", `CHERRY_PICK_HEAD=${pick}`, "--json"],
+  ]) {
+    calls.length = 0;
+    stdout = "";
+    assert.notEqual(await runWollipogCli(["node", "cli.js", "--wollipog-cli", ...argv], env, io, fetch), 0, argv.join(" "));
+    assert.equal(calls.length, 0, `${argv.join(" ")} issues no request`);
+  }
+
+  calls.length = 0;
+  stdout = "";
+  protocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion - 1;
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "worktree", "delete-refs",
+    "--ref", `CHERRY_PICK_HEAD=${pick}`, "--json"], env, io, fetch), 1);
+  assert.match(JSON.parse(stdout).error, new RegExp(`requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion}`, "u"));
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "an older control plane receives no request");
 });
 
 test("CLI artifact help is discoverable and malformed artifact commands issue no request", async () => {

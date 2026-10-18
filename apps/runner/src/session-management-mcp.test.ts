@@ -507,6 +507,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "attach_worktree",
       "select_worktree",
       "discard_worktree",
+      "delete_worktree_refs",
       "create_session",
       "prompt_session",
       "list_steering_attempts",
@@ -1561,6 +1562,37 @@ test("discard_worktree refuses peers that cannot report deferred retirement", as
     error: "Managed worktree retirement needs a newer version of Wollipog. Update Wollipog before discarding a runner-owned worktree.",
     requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement,
     controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement - 1,
+  });
+  assert.equal(calls.length, 0);
+});
+
+test("delete_worktree_refs targets only the calling session and relays the runner's result (#3316)", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 200,
+    body: { session: { id: SELF_ID }, refDeletion: { worktreePath: "/repo/wt", deleted: ["CHERRY_PICK_HEAD"], absent: [] } },
+  }));
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const oid = "a".repeat(40);
+  const result = await callTool(deps, "delete_worktree_refs", { refs: [{ ref: "CHERRY_PICK_HEAD", oldOid: oid }] });
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/worktrees/delete-refs`);
+  assert.deepEqual(calls[0]!.body, { refs: [{ ref: "CHERRY_PICK_HEAD", oldOid: oid }] });
+  assert.deepEqual(resultJson(result), { worktreePath: "/repo/wt", deleted: ["CHERRY_PICK_HEAD"], absent: [] });
+  await callTool(deps, "delete_worktree_refs", { path: "/repo/second", refs: [{ ref: "AUTO_MERGE", oldOid: oid }] });
+  assert.deepEqual(calls[1]!.body, { path: "/repo/second", refs: [{ ref: "AUTO_MERGE", oldOid: oid }] });
+  const tool = TOOLS.find((entry) => entry.name === "delete_worktree_refs")!;
+  assert.equal((tool.inputSchema.properties as Record<string, unknown>).sessionId, undefined,
+    "the tool cannot name another session");
+});
+
+test("delete_worktree_refs refuses a control plane that predates it", async () => {
+  const { deps, calls } = makeDeps();
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion - 1;
+  const result = await callTool(deps, "delete_worktree_refs", { refs: [{ ref: "CHERRY_PICK_HEAD", oldOid: "a".repeat(40) }] });
+  assert.equal(result.isError, true);
+  assert.deepEqual(resultJson(result), {
+    error: "Runner-managed ref deletion needs a newer version of Wollipog. Update Wollipog before asking the runner to delete this session's refs.",
+    requiredControlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion,
+    controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion - 1,
   });
   assert.equal(calls.length, 0);
 });

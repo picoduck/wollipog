@@ -152,6 +152,8 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "GET /api/sessions/:id/cross-model-reviews/:jobId",
   "GET /api/sessions/:id/cross-model-reviews/:jobId/artifacts",
   "POST /api/sessions/:id/cross-model-reviews/:jobId/cancel",
+  // A session's own runner-managed ref deletion (#3316); the route refuses other sessions.
+  "POST /api/sessions/:id/worktrees/delete-refs",
   // A session's own review sessions (#3368); the routes refuse other sessions.
   "POST /api/sessions/:id/review-sessions",
   "GET /api/sessions/:id/review-sessions",
@@ -205,6 +207,7 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "POST /api/sessions/:id/video-evidence-review/provenance",
   "POST /api/sessions/:id/worktrees", "POST /api/sessions/:id/worktrees/attach",
   "POST /api/sessions/:id/worktrees/select", "POST /api/sessions/:id/worktrees/discard",
+  "POST /api/sessions/:id/worktrees/delete-refs",
 ]);
 
 /** `role` is the credential session's current role; the legacy preset literal is accepted for it. */

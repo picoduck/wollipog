@@ -163,6 +163,7 @@ wollipog worktree create [--session ID] --branch NAME [--base REF] --json
 wollipog worktree attach [--session ID] --path PATH --json
 wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
+wollipog worktree delete-refs [--path PATH] --ref REF=OBJECT_ID [--ref REF=OBJECT_ID ...] --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
 wollipog pr wait PR [--repo OWNER/NAME] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
 wollipog review run --repo OWNER/NAME --pr N --head SHA [--brief-file PATH] [--scope delta|full] [--full-reason TEXT] --json
@@ -655,7 +656,7 @@ builds to write inside the worktree or another authorized scratch path.
 An ACP provider in a selected managed Linux worktree cannot launch under `provider` mode because
 the runner does not know which provider state root to preserve. Git commands that write shared
 administration outside `objects`, `refs`, and `logs` can also fail inside this boundary. These
-include deleting a ref (so a rebase or cherry-pick leaves `CHERRY_PICK_HEAD` behind; #3316),
+include deleting a ref (see [Deleting the Session's Own Refs](#deleting-the-sessions-own-refs)),
 repository config changes, setting an upstream with `git push -u`, and creating a worktree
 directly with Git; use the runner's managed worktree operation for the latter. Git layouts that
 cannot supply canonical linked-worktree administration and all four narrow writable Git roots fail
@@ -689,6 +690,39 @@ Codex App Server's own workspace sandbox grants the same set: each turn's `writa
 root and admin directory of every worktree this launch's boundary binds, and only those, so a Codex
 turn can commit there too. Codex keeps each root's `.git` link read-only. A worktree retired since
 launch is left out of the turn's roots.
+
+### Deleting the Session's Own Refs
+
+Git takes `packed-refs.lock` in the shared Git directory before it deletes any ref: a worktree's
+own `CHERRY_PICK_HEAD` or `AUTO_MERGE`, and a ref that exists only as a loose file, included. Inside
+the boundary that directory stays read-only, because making it writable would let the sandbox
+create files host Git reads, such as `commondir` or `config.worktree`. No layout that Git 2.43
+through 2.55 accepts lets the sandbox take the lock without such a path: a bind of `packed-refs`
+still needs the lock beside it and pins a stale copy once host Git repacks, a symlinked
+`packed-refs` fails `git fsck`, and `git refs migrate` to reftable refuses repositories with
+worktrees. So, inside the sandbox, `git rebase` and `git cherry-pick` still print
+`Unable to create '…/packed-refs.lock'` and leave `CHERRY_PICK_HEAD` or `AUTO_MERGE` behind, and
+`git cherry-pick --quit`, `git branch -d` and `git update-ref -d` fail with the same error (#3316).
+
+The runner deletes those refs instead, outside the sandbox, through `delete_worktree_refs` (CLI
+`wollipog worktree delete-refs`, protocol v227). Only the session's own credential can call it,
+and only for the session's runner-recorded, runner-created worktrees:
+
+- the worktree's `CHERRY_PICK_HEAD`, `REVERT_HEAD` and `AUTO_MERGE`, cleared as
+  `git cherry-pick --quit` would. It is refused while a rebase or merge is in progress there, and
+  while a cherry-pick or revert sequence is recorded: run `git cherry-pick --quit` (or `--abort`)
+  first, which removes the sequence and leaves only the refs it could not delete;
+- `refs/heads/<branch>` for a branch the runner recorded for one of the session's worktrees, while
+  no worktree has it checked out or is rebasing it;
+- `refs/remotes/<remote>/<branch>` for such a branch and a configured remote.
+
+Every ref names the object id the caller expects, and one `git update-ref --no-deref --stdin`
+transaction deletes all of them or none; a ref already gone is reported as absent, so a repeated
+call succeeds. A call names at most 16 refs. Host Git runs as plumbing with explicit `GIT_DIR` and
+`GIT_COMMON_DIR`, no hooks, no fsmonitor, no global or system config and a minimal environment, and
+a ref path the sandbox redirected through a symlink is refused before Git runs. Each call, refused
+or not, records a `worktree_refs_deleted` session event; its refusal reasons are fixed runner
+strings that never echo repository content.
 
 ## Runner Hook State at the Sandbox Boundary
 

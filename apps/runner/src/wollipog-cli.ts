@@ -70,6 +70,15 @@ function option(args: string[], name: string): string | undefined {
   return undefined;
 }
 
+function options(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name && args[i + 1] !== undefined) values.push(args[++i]!);
+    else if (args[i]?.startsWith(`${name}=`)) values.push(args[i]!.slice(name.length + 1));
+  }
+  return values;
+}
+
 function flag(args: string[], name: string): boolean {
   return args.includes(name);
 }
@@ -85,7 +94,7 @@ function positional(args: string[], extraValueOptions: readonly string[] = []): 
     "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
     "--max-child-sessions", "--offset", "--event-epoch", "--work-item",
-    "--revision",
+    "--revision", "--ref",
     ...extraValueOptions,
   ]);
   for (let i = 0; i < args.length; i++) {
@@ -436,6 +445,20 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
             : {}),
         },
       };
+    }
+    if (verb === "delete-refs") {
+      if (sessionId) return { error: "worktree delete-refs acts only on the injected session and does not accept --session" };
+      const refs: Array<{ ref: string; oldOid: string }> = [];
+      for (const value of options(args, "--ref")) {
+        const separator = value.lastIndexOf("=");
+        if (separator <= 0 || separator === value.length - 1) {
+          return { error: "each --ref must be <ref>=<expected-object-id>" };
+        }
+        refs.push({ ref: value.slice(0, separator), oldOid: value.slice(separator + 1) });
+      }
+      if (!refs.length) return { error: "worktree delete-refs requires at least one --ref <ref>=<expected-object-id>" };
+      const path = option(args, "--path");
+      return { tool: "delete_worktree_refs", input: { ...(path ? { path } : {}), refs } };
     }
     if (verb === "attach" || verb === "select" || verb === "discard") {
       const path = option(args, "--path");
@@ -842,6 +865,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.descendantWorkflowDecisionInspection
     : parsed.tool === "discard_worktree"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement
+    : parsed.tool === "delete_worktree_refs"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion
     : parsed.tool === "attach_session_artifact"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
     : parsed.tool === "reconcile_workflow_decision"

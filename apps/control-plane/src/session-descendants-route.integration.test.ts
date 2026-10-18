@@ -303,6 +303,34 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     assert.deepEqual(await stopJob("orchestrator-child", "device-policy-admin"), {
       status: 403, error: "only the session owner or its controlling Orchestrator may stop its background jobs",
     }, "an organization admin who can see another user's session is not its owner");
+    // #3316: only a session's own credential may ask the runner to delete its refs. An admitted
+    // request reaches the runner, which is offline in this fixture.
+    const deleteRefs = async (target: string, token: string, agent?: string,
+      body: unknown = { refs: [{ ref: "CHERRY_PICK_HEAD", oldOid: "a".repeat(40) }] }) => {
+      const response = await fetch(`http://127.0.0.1:${port}/api/sessions/${target}/worktrees/delete-refs`, {
+        method: "POST", signal: AbortSignal.timeout(3000),
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json",
+          ...(agent ? { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: agent } : {}) },
+        body: JSON.stringify(body),
+      });
+      return { status: response.status, error: (await response.json() as { error?: string }).error };
+    };
+    assert.deepEqual(await deleteRefs("normal", "token-normal", "normal"), { status: 409, error: "runner is offline" },
+      "a session's own credential is admitted");
+    assert.ok([403, 404].includes((await deleteRefs("normal-child", "token-normal", "normal")).status),
+      "a parent cannot delete its child's refs");
+    assert.ok([403, 404].includes((await deleteRefs("orchestrator-child", "token-orchestrator", "orchestrator")).status),
+      "an Orchestrator cannot delete its child's refs");
+    assert.equal((await deleteRefs("orchestrator", "token-orchestrator", "orchestrator")).status, 403,
+      "Strict Project Isolation keeps an Orchestrator out of its own worktrees");
+    assert.deepEqual(await deleteRefs("normal", `device-${ownerId}`), {
+      status: 403, error: "a matching session credential is required",
+    }, "a person, even the owner, cannot use another session's credential path");
+    for (const body of [{}, { refs: [] }, { refs: [{ ref: "CHERRY_PICK_HEAD" }] },
+      { refs: [{ ref: "CHERRY_PICK_HEAD", oldOid: "abc" }] }, { path: 7, refs: [{ ref: "AUTO_MERGE", oldOid: "a".repeat(40) }] },
+      { refs: Array.from({ length: 17 }, (_, index) => ({ ref: `refs/heads/b${index}`, oldOid: "a".repeat(40) })) }]) {
+      assert.equal((await deleteRefs("normal", "token-normal", "normal", body)).status, 400, JSON.stringify(body));
+    }
     for (const mode of ["normal", "orchestrator"]) {
       const request = (target: string, operation: string, body: unknown, method = "POST") => fetch(
         `http://127.0.0.1:${port}/api/sessions/${target}${operation ? `/${operation}` : ""}`, {

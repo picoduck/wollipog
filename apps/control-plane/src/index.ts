@@ -46,6 +46,7 @@ import {
 } from "./automation-trigger-ingress.js";
 import {
   PROTOCOL_VERSION,
+  MAX_SESSION_WORKTREE_REF_DELETIONS,
   PACED_VIDEO_REVIEW_CONTRACT_ID,
   SPAWN_APPROVAL_ABANDONMENT_MS,
   POLICY_HOOK_POLL_CAPABILITY,
@@ -5360,7 +5361,8 @@ async function runSessionWorktreeRequest(
   request:
     | { operation: "create"; baseRef?: string; branch: string; progress?: boolean }
     | { operation: "attach" | "select" | "discard" | "retry_setup"; path: string }
-    | { operation: "generate_setup" },
+    | { operation: "generate_setup" }
+    | { operation: "delete_refs"; path?: string; refs: import("@wollipog/protocol").SessionWorktreeRefDeletion[] },
   principal: AuthPrincipal | null,
   reply: FastifyReply,
 ) {
@@ -5378,10 +5380,12 @@ async function runSessionWorktreeRequest(
     session.runnerId,
     request.operation === "discard" ? "sessionWorktreeDiscard"
       : request.operation === "retry_setup" ? "worktreeSetup"
-      : request.operation === "generate_setup" ? "worktreeSetupConfig" : "sessionWorktrees",
+      : request.operation === "generate_setup" ? "worktreeSetupConfig"
+      : request.operation === "delete_refs" ? "sessionWorktreeRefDeletion" : "sessionWorktrees",
     request.operation === "discard" ? "session worktree discard"
       : request.operation === "retry_setup" ? "worktree setup"
-      : request.operation === "generate_setup" ? "worktree setup generation" : "session worktrees",
+      : request.operation === "generate_setup" ? "worktree setup generation"
+      : request.operation === "delete_refs" ? "runner-managed worktree ref deletion" : "session worktrees",
   );
   if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
@@ -5447,12 +5451,13 @@ async function runSessionWorktreeRequest(
       return reply.code(409).send(legacy ?? { error });
     }
     db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
-    if (request.operation !== "create") worktreeCreates.invalidateSession(sessionId);
+    if (request.operation !== "create" && request.operation !== "delete_refs") worktreeCreates.invalidateSession(sessionId);
     // v133+ runners say whether a live platform sandbox can already write to an attached path.
     // A pre-v133 runner omits it, and the field stays absent rather than being guessed here.
     return { worktree: res.worktree, session: db.getSession(sessionId),
       ...(res.isolation ? { isolation: res.isolation } : {}),
       ...(res.retirement ? { retirement: res.retirement } : {}),
+      ...(res.refDeletion ? { refDeletion: res.refDeletion } : {}),
       ...(res.generatedSetup ? { generatedSetup: res.generatedSetup } : {}) };
   } catch (error) {
     return reply.code(502).send({ error: (error as Error).message });
@@ -5521,6 +5526,35 @@ app.post("/api/sessions/:id/worktrees/retry-setup", async (req, reply) => {
     return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
   }
   return runSessionWorktreeRequest(id, { operation: "retry_setup", path }, requestPrincipal(req), reply);
+});
+
+// An isolated session cannot delete refs itself (#3316), so the runner deletes its own on its
+// behalf. Only the session's own credential may ask: the runner then scopes the request to that
+// session's recorded worktrees and branches, so nobody can reach another session's refs this way.
+app.post("/api/sessions/:id/worktrees/delete-refs", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { path?: unknown; refs?: unknown } | null;
+  if (body?.path !== undefined && (typeof body.path !== "string" || !body.path || body.path.length > 4096)) {
+    return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
+  }
+  const refs = body?.refs;
+  if (!Array.isArray(refs) || refs.length === 0 || refs.length > MAX_SESSION_WORKTREE_REF_DELETIONS ||
+      !refs.every((entry) => typeof entry?.ref === "string" && entry.ref && entry.ref.length <= 1024 &&
+        typeof entry.oldOid === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(entry.oldOid))) {
+    return reply.code(400).send({
+      error: `refs must name 1 to ${MAX_SESSION_WORKTREE_REF_DELETIONS} refs, each with its expected full object id as oldOid`,
+    });
+  }
+  return runSessionWorktreeRequest(id, {
+    operation: "delete_refs",
+    ...(typeof body?.path === "string" ? { path: body.path } : {}),
+    refs: refs.map((entry: { ref: string; oldOid: string }) => ({ ref: entry.ref, oldOid: entry.oldOid })),
+  }, principal, reply);
 });
 
 app.post("/api/sessions/:id/worktrees/generate-setup", async (req, reply) => {

@@ -84,6 +84,7 @@ import type {
   SessionWorktreeIsolationNotice,
   SessionWorktreeProgressPhase,
   SessionWorktreeRetirementResult,
+  SessionWorktreeRefDeletionResult,
   SessionWorktreeView,
   WorktreePortBlock,
   WorktreeSetupConfigStatus,
@@ -123,8 +124,13 @@ import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
 import {
-  managedWorktreeAdminMatches, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths,
+  managedWorktreeAdminMatches, managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths,
 } from "./managed-worktree-sandbox.js";
+import {
+  deleteOwnedWorktreeRefs,
+  validateWorktreeRefDeletionRequests,
+  WorktreeRefDeletionRefusal,
+} from "./worktree-ref-deletion.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundJobStopResult,
@@ -4441,6 +4447,61 @@ export class SessionManager {
         throw new Error(`worktree retained: ${result.reason ?? "cleanup did not complete"}`);
       }
       return { snapshot: result.snapshot, retirement: result.retirement };
+    });
+  }
+
+  /**
+   * Delete refs an isolated session owns but cannot delete itself (#3316): Git takes
+   * `packed-refs.lock` in the read-only shared Git directory before deleting any ref. Only this
+   * session's runner-recorded, runner-created worktrees and their branches are in scope; the path
+   * selects one of them and is never used as a Git directory. Every call, refused or not, leaves a
+   * `worktree_refs_deleted` audit event whose text is fixed by the runner.
+   */
+  async deleteWorktreeRefs(
+    sessionId: string,
+    path: string | undefined,
+    refs: unknown,
+  ): Promise<{ snapshot: SessionSnapshot; refDeletion: SessionWorktreeRefDeletionResult }> {
+    return this.runWorktreeOperation(sessionId, async () => {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      let worktreePath: string | undefined;
+      try {
+        const requests = validateWorktreeRefDeletionRequests(refs);
+        if (meta.context.kind !== "native") {
+          throw new WorktreeRefDeletionRefusal("runner-managed ref deletion is available only for native sessions");
+        }
+        const requested = path ?? meta.worktreePath;
+        const target = requested ? this.attributedWorktreeForPath(meta, requested) : undefined;
+        if (!target || target.source === "attached") {
+          throw new WorktreeRefDeletionRefusal("the worktree is not a runner-created worktree of this session");
+        }
+        worktreePath = target.path;
+        const layout = managedWorktreeGitLayout(target.path, meta.repoPath);
+        if (!layout) throw new WorktreeRefDeletionRefusal("the worktree's Git registration could not be verified");
+        const ownedBranches = this.attributedWorktrees(meta)
+          .filter((worktree) => worktree.source !== "attached" && worktree.branch !== worktree.defaultBranch)
+          .map((worktree) => worktree.branch);
+        const result = await deleteOwnedWorktreeRefs({
+          worktreePath: target.path,
+          worktreeGitDir: layout.worktreeGitDir,
+          commonGitDir: layout.commonGitDir,
+          ownedBranches,
+        }, requests);
+        this.emitEvent(sessionId, { kind: "worktree_refs_deleted", worktreePath, outcome: "deleted", ...result });
+        return { snapshot: this.snapshot(this.store.readMeta(sessionId) ?? meta), refDeletion: { worktreePath, ...result } };
+      } catch (error) {
+        const reason = error instanceof WorktreeRefDeletionRefusal ? error.message : "the refs could not be deleted";
+        this.emitEvent(sessionId, {
+          kind: "worktree_refs_deleted",
+          ...(worktreePath ? { worktreePath } : {}),
+          outcome: "refused",
+          deleted: [],
+          absent: [],
+          reason,
+        });
+        throw new Error(reason);
+      }
     });
   }
 

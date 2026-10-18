@@ -695,7 +695,11 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `RunnerRuntimeInfo.reviewSession` and the `review_session_update` reply. The control plane
 //      creates a review session only on a v226+ runner that advertises the reviewer, and the
 //      session tools refuse against an older control plane.
-export const PROTOCOL_VERSION = 226;
+// 227: runner-managed deletion of an isolated session's own refs (#3316): the `delete_refs`
+//      `session_worktree` operation, `SessionWorktreeResultMessage.refDeletion` and the
+//      `worktree_refs_deleted` audit event. The control plane sends it only to a v227+ runner, and
+//      the session tools refuse against an older control plane.
+export const PROTOCOL_VERSION = 227;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -939,6 +943,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
    * same floor against the connected control plane. */
   reviewSession: 226,
+  /** v227 runner deletes an isolated session's own sequencer leftovers and recorded branches
+   * (#3316); the session tools check the same floor against the connected control plane. */
+  sessionWorktreeRefDeletion: 227,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -5716,6 +5723,11 @@ export type SessionEventPayload =
     }
   | { kind: "checkpoint"; turn: number; tree: string }
   | { kind: "checkpoint_restored"; turn: number }
+  /** Protocol v227 audit record of one runner-managed ref deletion call (#3316), refused or not.
+   * Ref names appear only once validated as this session's own; `reason` is a fixed runner string.
+   * A client that predates the kind skips it. */
+  | { kind: "worktree_refs_deleted"; worktreePath?: string; outcome: "deleted" | "refused";
+      deleted: string[]; absent: string[]; reason?: string }
   | { kind: "conversation_checkpoint"; turn: number }
   | { kind: "conversation_forked"; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
   | { kind: "provider_account_switched"; providerAccountId: string; providerAccountLabel: string; automatic?: boolean }
@@ -9765,7 +9777,30 @@ export type SessionWorktreeRequestMessage =
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "discard"; path: string;
       /** Protocol v193: require proof the exact checkout head was delivered before removal. */
       requireDelivered?: boolean }
-  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "generate_setup" };
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "generate_setup" }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "delete_refs";
+      /** One of the session's recorded worktrees; the selected one when absent. Never a Git path. */
+      path?: string;
+      /** Protocol v227. Each ref with the full object id the caller expects it to hold. */
+      refs: SessionWorktreeRefDeletion[] };
+
+/** Protocol v227 (#3316). A ref an isolated session asks the runner to delete for it: one of the
+ * worktree's `CHERRY_PICK_HEAD`, `REVERT_HEAD` or `AUTO_MERGE`, or `refs/heads/<branch>` or
+ * `refs/remotes/<remote>/<branch>` for a branch the runner recorded for the session's worktrees. */
+export interface SessionWorktreeRefDeletion {
+  ref: string;
+  oldOid: string;
+}
+
+/** Most refs one `delete_refs` call may name. */
+export const MAX_SESSION_WORKTREE_REF_DELETIONS = 16;
+
+export interface SessionWorktreeRefDeletionResult {
+  worktreePath: string;
+  deleted: string[];
+  /** Requested refs that were already gone, so a repeated call succeeds. */
+  absent: string[];
+}
 
 /** Protocol v146. Inspect or generate the canonical config for one runner-owned workspace. The workspace id is
  * resolved by the runner; callers cannot supply a filesystem destination. */
@@ -9873,7 +9908,7 @@ export interface SessionWorktreeResultMessage {
   requestId: string;
   /** Protocol v113+: exact request coordinates echoed for cross-operation correlation. */
   sessionId?: string;
-  operation?: "create" | "attach" | "select" | "discard" | "retry_setup" | "generate_setup";
+  operation?: "create" | "attach" | "select" | "discard" | "retry_setup" | "generate_setup" | "delete_refs";
   ok: boolean;
   error?: string;
   worktree?: SessionWorktreeView;
@@ -9884,6 +9919,8 @@ export interface SessionWorktreeResultMessage {
   isolation?: SessionWorktreeIsolationNotice;
   /** Protocol v159+, discard only. */
   retirement?: SessionWorktreeRetirementResult;
+  /** Protocol v227+, delete_refs only. */
+  refDeletion?: SessionWorktreeRefDeletionResult;
 }
 
 /** Control plane asks the runner to re-probe installed agents and push the result. */
