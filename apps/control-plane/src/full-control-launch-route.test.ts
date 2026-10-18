@@ -35,7 +35,7 @@ const pacedVideoContract = { id: "wollipog-paced-video-review-v1", revision: 1 }
 const reviewerAttestation = syntheticMediaReviewerAttestation("claude");
 
 function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: number; priced?: boolean; images?: boolean; pacedVideo?: boolean;
-  hostingVideo?: boolean } = {}) {
+  hostingVideo?: boolean; videoPort?: boolean } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const human: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -79,7 +79,9 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
     undefined, undefined, false, undefined, undefined, video?.workflowVideoApprovals, disclosures, undefined, video?.preparedMediaActiveStops);
   const scope = { organizationId: human.organizationId, owner: { kind: "user" as const, userId: human.userId } };
   const settings = new OrchestratorSettings(db);
-  return { db, hub, sent, starts, state, sessions, human, scope, settings, disclosures, reconnect, video };
+  // `videoPort` also gives the launch route hosting's certification port, as index.ts does.
+  const videoCertification = video && options.videoPort ? (runnerId: string) => video.launchCertification(runnerId) : undefined;
+  return { db, hub, sent, starts, state, sessions, human, scope, settings, disclosures, reconnect, video, videoCertification };
 }
 
 async function app(f: ReturnType<typeof fixture>, inspectionTimeoutMs?: number) {
@@ -317,6 +319,96 @@ test("the hosting video composition flips no launch capability: video stays with
     assert.equal(videoCapability.reason, "Video evidence needs your review until production video review is available.");
     assert.ok(checked.summary.humanRequired.some((item) => item.exception === "Video Evidence Review" && item.reason === videoCapability.reason));
     assert.equal(checked.summary.evidence.statement, expected.summary.evidence.statement);
+  } finally {
+    await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
+  }
+});
+
+test("a current live proof makes launch video review delegable only when the envelope names the certified reviewer", async () => {
+  const plain = fixture({ pacedVideo: true });
+  const hosted = fixture({ pacedVideo: true, hostingVideo: true, videoPort: true });
+  const video = hosted.video!;
+  const plainApp = await app(plain), hostedApp = await app(hosted);
+  const videoRow = (checked: CampaignLaunchPreflight) => checked.capabilities.find((item) => item.id === "video_evidence")!;
+  try {
+    const expected = (await preflight(plainApp.server, launch)).preflight!;
+    const unchanged = async () => {
+      const checked = (await preflight(hostedApp.server, launch)).preflight!;
+      assert.deepEqual(checked.capabilities, expected.capabilities, "without a current proof the preflight is exactly as before");
+      assert.deepEqual(checked.summary.evidence, expected.summary.evidence);
+      assert.deepEqual(checked.summary.humanRequired, expected.summary.humanRequired);
+    };
+    await unchanged();
+    const peer = video.pacedPeers()[0]!;
+    const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", attestation: reviewerAttestation });
+    // An expired proof is no certification.
+    assert.ok(video.liveValidation.recordInspectedRuns(hosted.human, target, syntheticInspectedVideoRuns(target, hosted.human.userId),
+      Date.now() - 31 * 24 * 60 * 60 * 1000));
+    await unchanged();
+    const proof = video.liveValidation.recordInspectedRuns(hosted.human, target, syntheticInspectedVideoRuns(target, hosted.human.userId))!;
+    assert.ok(proof);
+
+    const detached = (await preflight(hostedApp.server, launch)).preflight!;
+    assert.equal(videoRow(detached).state, "human_required");
+    assert.equal(videoRow(detached).reason, "Video evidence needs your review because this control plane's video review adapters are not attached yet.");
+    assert.ok(detached.summary.humanRequired.some((item) => item.exception === "Video Evidence Review" && item.reason === videoRow(detached).reason));
+
+    video.attach(hosted.sessions, hosted.hub);
+    const ready = (await preflight(hostedApp.server, launch)).preflight!;
+    assert.equal(videoRow(ready).state, "verified", videoRow(ready).reason);
+    assert.match(videoRow(ready).reason, /certified claude-code claude-opus-5-5 \(high effort\) media-only reviewer/u);
+    assert.ok(videoRow(ready).reason.includes(new Date(proof.expiresAt).toISOString()));
+    assert.ok(!ready.summary.humanRequired.some((item) => item.exception === "Video Evidence Review"));
+    assert.equal(ready.summary.evidence.statement,
+      "The Orchestrator reviews screenshots, and video through the certified media-only reviewer. External evidence needs your review.");
+    assert.equal(ready.summary.evidence.envelope, true);
+    assert.equal(ready.ready, true);
+    // Delegable video changes no other capability.
+    assert.deepEqual(ready.capabilities.filter((item) => item.id !== "video_evidence"),
+      expected.capabilities.filter((item) => item.id !== "video_evidence"));
+
+    const sonnet = { ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session,
+      config: { model: "claude-sonnet-5-5", permissionMode: "orchestrator" as const } } } };
+    assert.equal(videoRow((await preflight(hostedApp.server, sonnet)).preflight!).reason,
+      "Video evidence needs your review because the evidence envelope would name claude-code claude-sonnet-5-5, not the certified claude-code claude-opus-5-5 reviewer.");
+    const humanEvidence = { ...launch, overrides: { ...launch.overrides, operations: ["implementation_question" as const, "pr_merge" as const] } };
+    assert.equal(videoRow((await preflight(hostedApp.server, humanEvidence)).preflight!).reason,
+      "Video evidence needs your review because UI evidence approval is not delegated to the Orchestrator.");
+    const unbudgeted = { ...launch, overrides: { ...launch.overrides, budget: undefined } };
+    assert.equal(videoRow((await preflight(hostedApp.server, unbudgeted)).preflight!).reason,
+      "Video evidence needs your review because the launch is blocked, so no evidence envelope is minted.");
+  } finally {
+    await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
+  }
+});
+
+test("a revoked proof or a changed attestation returns launch video review to the Human exactly as before", async () => {
+  const plain = fixture({ pacedVideo: true });
+  const hosted = fixture({ pacedVideo: true, hostingVideo: true, videoPort: true });
+  const video = hosted.video!;
+  video.attach(hosted.sessions, hosted.hub);
+  const plainApp = await app(plain), hostedApp = await app(hosted);
+  const videoState = async () => (await preflight(hostedApp.server, launch)).preflight!.capabilities.find((item) => item.id === "video_evidence")!.state;
+  try {
+    const peer = video.pacedPeers()[0]!;
+    const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", attestation: reviewerAttestation });
+    const runs = () => syntheticInspectedVideoRuns(target, hosted.human.userId);
+    const proof = video.liveValidation.recordInspectedRuns(hosted.human, target, runs())!;
+    assert.equal(await videoState(), "verified");
+    assert.ok(video.liveValidation.revoke(hosted.human, proof.proofId));
+    const [expected, checked] = [(await preflight(plainApp.server, launch)).preflight!, (await preflight(hostedApp.server, launch)).preflight!];
+    assert.deepEqual(checked.capabilities, expected.capabilities);
+    assert.deepEqual(checked.summary.evidence, expected.summary.evidence);
+
+    assert.ok(video.liveValidation.recordInspectedRuns(hosted.human, target, runs()));
+    assert.equal(await videoState(), "verified");
+    // The runner re-registers with a different attestation: the proof no longer certifies it.
+    const runner = hosted.db.getRunner("r")!;
+    hosted.db.registerRunner({ runnerId: runner.runnerId, hostname: "fixture", os: "linux", version: "test", workspaces: runner.workspaces,
+      agents: runner.agents.map((agent) => ({ ...agent, capabilities: { ...agent.capabilities!,
+        mediaReviewerAttestation: syntheticMediaReviewerAttestation("claude", "changed") } })), runtime: runner.runtime } as never,
+    Date.now(), PROTOCOL_VERSION);
+    assert.equal(await videoState(), "human_required");
   } finally {
     await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
   }

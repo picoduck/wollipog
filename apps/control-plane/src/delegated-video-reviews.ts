@@ -168,12 +168,17 @@ export function rootReviewerTarget(db: ControlPlaneDb, root: SessionView,
   const provider = authority?.providers.find((p) => p.reviewers.some((r) => r.driver === "claude-code" && r.modelId === VIDEO_REVIEWER_MODEL));
   if (!provider) return null;
   const targets = mediaReviewerInstallations(db, root.runnerId).filter((installation) => agentId === undefined ||
-    installation.agentId === agentId).map((installation): EvidenceReviewerTarget => ({
-    agentId: installation.agentId, driver: "claude-code", modelId: VIDEO_REVIEWER_MODEL, effort: VIDEO_REVIEWER_EFFORT,
-    providerId: provider.providerId, runnerId: installation.runnerId, runnerProtocolVersion: installation.protocolVersion,
-    pacedVideoReviewContract: installation.contract, capabilitiesSha256: mediaReviewerAttestationSha256(installation.attestation),
-    auditedAllFrameDelivery: true, reviewerNamespaceSha256: installation.attestation.namespacePolicySha256, mediaOnlyNamespaceVerified: true }));
+    installation.agentId === agentId).map((installation) => installationReviewerTarget(installation, provider.providerId));
   return targets.find(proven) ?? targets[0] ?? null;
+}
+
+/** The exact reviewer target an attested installation presents under one disclosed provider. */
+export function installationReviewerTarget(installation: ReturnType<typeof mediaReviewerInstallations>[number],
+  providerId: string): EvidenceReviewerTarget {
+  return { agentId: installation.agentId, driver: "claude-code", modelId: VIDEO_REVIEWER_MODEL, effort: VIDEO_REVIEWER_EFFORT,
+    providerId, runnerId: installation.runnerId, runnerProtocolVersion: installation.protocolVersion,
+    pacedVideoReviewContract: installation.contract, capabilitiesSha256: mediaReviewerAttestationSha256(installation.attestation),
+    auditedAllFrameDelivery: true, reviewerNamespaceSha256: installation.attestation.namespacePolicySha256, mediaOnlyNamespaceVerified: true };
 }
 
 const reviewerPrompt = (criteria: readonly VideoReviewCriterion[]) => [

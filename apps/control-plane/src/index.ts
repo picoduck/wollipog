@@ -1017,7 +1017,8 @@ const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
-registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures });
+registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures,
+  videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) });
 registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });
 registerArtifactUploadSettingsRoutes(app, db, hub, requestPrincipal);
 

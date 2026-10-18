@@ -173,7 +173,9 @@ constructs the review store and runtime, `WorkflowVideoEvidenceApprovals`, `Prep
 `DelegatedVideoReviews` adapters (`delegated-video-reviews.ts`), and passes the prepared-media
 resolver, approvals, permits and dedicated Stop coordinator to `SessionsService`. `attach` then
 connects the Session service and runner hub. Construction creates the durable schema and admits
-nothing. The Full Control launch preflight still reports video as `human_required`.
+nothing. The Full Control launch preflight reports video as `verified` only through
+`launchCertification` (a current proof for an installation on the root's runner) and the conditions in
+`docs/full-control-launch-preparation.md`; without a proof it is `human_required` exactly as before.
 
 Readiness refuses in this order, and every review route returns `409` with the matching code:
 

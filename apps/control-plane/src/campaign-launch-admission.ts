@@ -119,6 +119,14 @@ export function launchSessionRequest(request: FullControlLaunchRequest, runner: 
   };
 }
 
+/** The certified video reviewer a launch on one runner could use, read from current server records. */
+export interface VideoLaunchCertification {
+  reviewer: { driver: string; model: string; effort: string };
+  proofExpiresAt: number;
+  /** The control plane's video review adapters are attached to Sessions and the runner hub. */
+  adaptersReady: boolean;
+}
+
 export interface CampaignLaunchFacts {
   request: FullControlLaunchRequest;
   plan: PreparedCampaignLaunch;
@@ -137,6 +145,9 @@ export interface CampaignLaunchFacts {
   pacedVideoPeer: boolean;
   /** Hosting disclosure port is wired. */
   disclosuresAvailable: boolean;
+  /** A current Human-recorded live proof certifies an attested media-only reviewer installation on
+   * the root's runner (#1321). Absent or null keeps video evidence with the Human exactly as before. */
+  videoCertification?: VideoLaunchCertification | null;
   /** The authorizing Human's saved Full Control campaign envelope, if any. */
   savedBudget?: OrchestratorCampaignBudgetDefault | null;
   /** Enabling Full Control on an existing campaign: its Human-established issue scope stands in for
@@ -160,6 +171,31 @@ export function campaignLaunchDigest(value: unknown): string {
 /** Readiness comes from current server and runner facts. `unsupported` blocks the launch with an
  * actionable reason; `human_required` is a disclosed exception that routes that decision class to
  * the Human. No caller field, preset, protocol number alone or fixture can mark a capability verified. */
+const blockersBeforeVideo = (capabilities: CampaignLaunchCapability[]) =>
+  capabilities.some((item) => item.mandatory && item.state !== "verified");
+
+/** Delegable only when a current proof certifies a reviewer on the root's runner and the launch
+ * mints an evidence envelope that names that exact reviewer: the paced contract is advertised only
+ * by an attested Claude Code agent, so the root itself must be one, at the certified model. Without
+ * a proof the row is exactly what it was before certification existed. */
+function videoEvidenceCapability(facts: CampaignLaunchFacts, imageDelegated: boolean, blocked: boolean,
+  proposal: boolean): { state: CampaignLaunchCapability["state"]; reason: string } {
+  const certification = facts.videoCertification;
+  if (!certification) return { state: "human_required",
+    reason: FULL_CONTROL_EVIDENCE_EXCEPTIONS.find((item) => item.id === "video_evidence")!.reason };
+  const { reviewer } = certification;
+  const human = (reason: string) => ({ state: "human_required" as const, reason: `Video evidence needs your review because ${reason}` });
+  if (!imageDelegated) return human("UI evidence approval is not delegated to the Orchestrator.");
+  if (!facts.pacedVideoPeer) return human(`this Orchestrator's agent does not declare the paced video review contract; only an attested ${reviewer.driver} media-only agent does.`);
+  if (facts.plan.driver !== reviewer.driver || facts.plan.config.model !== reviewer.model) {
+    return human(`the evidence envelope would name ${facts.plan.driver} ${facts.plan.config.model ?? "with no fixed model"}, not the certified ${reviewer.driver} ${reviewer.model} reviewer.`);
+  }
+  if (!facts.disclosuresAvailable) return human("this control plane has no provider disclosures to mint the evidence envelope.");
+  if (!certification.adaptersReady) return human("this control plane's video review adapters are not attached yet.");
+  if (blocked || !proposal) return human("the launch is blocked, so no evidence envelope is minted.");
+  return { state: "verified", reason: `MP4 and WebM recordings attached as private Session artifacts are reviewed by the certified ${reviewer.driver} ${reviewer.model} (${reviewer.effort} effort) media-only reviewer, and the Orchestrator decides from its verdict. Children must also run on an attested agent. The live proof expires ${new Date(certification.proofExpiresAt).toISOString()}.` };
+}
+
 export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight: CampaignLaunchPreflight; proposal: CampaignLaunchProposal | null } {
   const { request, plan, runner, inspection, campaignScope } = facts;
   const overrides = request.overrides ?? {};
@@ -262,7 +298,13 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     ? "Screenshots attached as private Session artifacts are reviewed by the Orchestrator."
     : facts.imageReview.effectiveOwner === "human" && facts.imageReview.fallback ? `Screenshots need your review: ${facts.imageReview.fallback.reason}`
     : "Screenshots need your review because UI evidence approval is not delegated.", false);
-  for (const item of FULL_CONTROL_EVIDENCE_EXCEPTIONS) add(item.id, item.exception, "human_required", item.reason, false);
+  // Video is the one exception a current live proof can lift (#1321); without one it is exactly the
+  // shared Human Required row.
+  const video = videoEvidenceCapability(facts, imageDelegated, blockersBeforeVideo(capabilities), proposal !== null);
+  for (const item of FULL_CONTROL_EVIDENCE_EXCEPTIONS) {
+    if (item.id === "video_evidence") add(item.id, item.exception, video.state, video.reason, false);
+    else add(item.id, item.exception, "human_required", item.reason, false);
+  }
 
   const blockers = capabilities.filter((item) => item.mandatory && item.state !== "verified");
   const ready = blockers.length === 0 && proposal !== null;
@@ -278,7 +320,9 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
       reviewIncluded: Boolean(controlledReview) },
     followUps: { policy: behavior.followUps, relatedFollowUps, maxIssues, closureReasons },
     evidence: {
-      statement: imageDelegated
+      statement: video.state === "verified"
+        ? "The Orchestrator reviews screenshots, and video through the certified media-only reviewer. External evidence needs your review."
+        : imageDelegated
         ? "The Orchestrator reviews screenshots. Video and external evidence need your review."
         : "Screenshots, video and external evidence need your review.",
       destination: { kind: "private_session_artifacts", configurationId: campaignSessionArtifactDestinationId(facts.organizationId),

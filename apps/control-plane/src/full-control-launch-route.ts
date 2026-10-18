@@ -14,7 +14,7 @@ import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { authorizeFullControl } from "./campaign-authority.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
 import { campaignLaunchDigest, campaignLaunchPreflight, launchSessionRequest, parseFullControlEnableRequest,
-  parseFullControlLaunchRequest } from "./campaign-launch-admission.js";
+  parseFullControlLaunchRequest, type VideoLaunchCertification } from "./campaign-launch-admission.js";
 
 export const CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS = 60_000;
 
@@ -55,6 +55,8 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
   db: ControlPlaneDb; hub: Hub; sessions: SessionsService; settings: OrchestratorSettings;
   requestPrincipal: (request: FastifyRequest) => AuthPrincipal | null;
   evidenceDisclosures?: EvidenceAuthorityDisclosures;
+  /** The certified video reviewer on a runner, if a current Human-recorded proof exists (#1321). */
+  videoCertification?: (runnerId: string) => VideoLaunchCertification | null;
   inspectionTimeoutMs?: number;
 }): void {
   const { db, hub, sessions, settings, requestPrincipal } = dependencies;
@@ -156,6 +158,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
         driver: plan.driver, model: plan.config.model ?? null }, "orchestrator")),
       pacedVideoPeer: supportsPacedVideoReviewPeer(runnerNow.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
       disclosuresAvailable: dependencies.evidenceDisclosures !== undefined,
+      videoCertification: dependencies.videoCertification?.(runnerNow.runnerId) ?? null,
       savedBudget: creationContext.orchestratorDefaults.defaults.campaignBudget ?? null,
     });
     request.log.info({ event: "full_control_launch_preflight", requestId: request.id,
@@ -255,6 +258,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         driver: session.driver, model: plan.config.model ?? null }, "orchestrator")),
       pacedVideoPeer: supportsPacedVideoReviewPeer(runner.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
       disclosuresAvailable: dependencies.evidenceDisclosures !== undefined,
+      videoCertification: dependencies.videoCertification?.(runner.runnerId) ?? null,
       savedBudget: settings.view(principal).defaults.campaignBudget ?? null,
     });
     // The reviewed digest also binds this campaign and its current policy revision.

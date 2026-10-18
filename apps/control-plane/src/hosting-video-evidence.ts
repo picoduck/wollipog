@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { supportsPacedVideoReviewPeer, type PacedVideoReviewPeerContract } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
-import { DelegatedVideoReviews, mediaReviewerAttestationSha256, mediaReviewerInstallations, VIDEO_REVIEWER_EFFORT,
+import type { VideoLaunchCertification } from "./campaign-launch-admission.js";
+import { DelegatedVideoReviews, installationReviewerTarget, mediaReviewerAttestationSha256, mediaReviewerInstallations, VIDEO_REVIEWER_EFFORT,
   VIDEO_REVIEWER_MODEL, type DelegatedVideoHub, type DelegatedVideoSessions } from "./delegated-video-reviews.js";
 import { EvidenceReviewService } from "./evidence-review-service.js";
 import type { EvidenceReviewerTarget } from "./evidence-review-worker.js";
@@ -74,10 +75,22 @@ export function composeHostingVideoEvidence(db: ControlPlaneDb, options: {
     return delegated.ready ? { available: true } : refusal("reviewer_unavailable");
   };
 
+  /** The certified reviewer a Full Control launch rooted on this runner could use: an attested
+   * installation there whose exact target, under the provider a launch envelope discloses for the
+   * Claude Code harness, holds a current Human-recorded proof. Admission still rechecks everything. */
+  const launchCertification = (runnerId: string, now = Date.now()): VideoLaunchCertification | null => {
+    const expiries = mediaReviewerInstallations(db, runnerId).flatMap((installation) => {
+      const proof = liveValidation.current(installationReviewerTarget(installation, "claude-code"), now);
+      return proof ? [proof.expiresAt] : [];
+    });
+    return expiries.length ? { reviewer: { driver: "claude-code", model: VIDEO_REVIEWER_MODEL, effort: VIDEO_REVIEWER_EFFORT },
+      proofExpiresAt: Math.max(...expiries), adaptersReady: delegated.ready } : null;
+  };
+
   const attach = (sessions: DelegatedVideoSessions, hub: DelegatedVideoHub) => delegated.attach(sessions, hub, reviewService);
 
   return { liveValidation, reviewStore, runtime, workflowVideoApprovals, preparedMediaActiveStops, reviewService, delegated,
-    preparedMediaRuntime: delegated.runtimeResolver, operatorValidationPermits, pacedPeers, readiness, attach,
+    preparedMediaRuntime: delegated.runtimeResolver, operatorValidationPermits, pacedPeers, readiness, launchCertification, attach,
     reviewerInstallations: () => mediaReviewerInstallations(db) };
 }
 export type HostingVideoEvidence = ReturnType<typeof composeHostingVideoEvidence>;
