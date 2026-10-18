@@ -46,25 +46,40 @@ export function redactDetail(text: string): string {
     .slice(0, MAX_DETAIL);
 }
 
-function privateDirectory(path: string, uid: bigint, fs: StagingFilesystem, create: boolean): void {
+/**
+ * A private directory pinned by descriptor. Children are addressed through `/proc/self/fd/<fd>/`,
+ * which resolves to the pinned inode, so replacing the directory's path (for example by a service
+ * account that owns the data directory in system mode) cannot redirect root's writes.
+ */
+export interface PinnedDirectory { path: string; fd: number; base: string; dev: bigint; ino: bigint }
+
+export function pinPrivateDirectory(path: string, uid: bigint, fs: StagingFilesystem, create: boolean): PinnedDirectory {
   if (create) {
     try { fs.mkdir(path, { mode: 0o700 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   }
-  const stat = fs.lstat(path);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o7777n) !== 0o700n) {
-    throw new Error(`${path} is not a private directory owned by the updater`);
+  const fd = fs.open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const stat = fs.fstat(fd);
+    const named = fs.lstat(path);
+    if (!stat.isDirectory() || stat.uid !== uid || (stat.mode & 0o7777n) !== 0o700n || named.dev !== stat.dev || named.ino !== stat.ino) {
+      throw new Error(`${path} is not a private directory owned by the updater`);
+    }
+    return { path, fd, base: `/proc/self/fd/${fd}`, dev: stat.dev, ino: stat.ino };
+  } catch (error) {
+    fs.close(fd);
+    throw error;
   }
 }
 
-function syncDirectory(path: string, fs: StagingFilesystem): void {
-  const fd = fs.open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try { fs.sync(fd); } finally { fs.close(fd); }
+export function withPinnedDirectory<T>(path: string, uid: bigint, fs: StagingFilesystem, create: boolean, use: (dir: PinnedDirectory) => T): T {
+  const dir = pinPrivateDirectory(path, uid, fs, create);
+  try { return use(dir); } finally { fs.close(dir.fd); }
 }
 
 /** Write `bytes` to `dir/name` through an exclusive private temporary file and a rename. */
-export function writePrivateRecord(dir: string, name: string, bytes: Buffer, fs: StagingFilesystem): void {
-  const temporary = join(dir, `.${name}.${randomUUID()}.tmp`);
+export function writePrivateRecord(dir: PinnedDirectory, name: string, bytes: Buffer, fs: StagingFilesystem): void {
+  const temporary = join(dir.base, `.${name}.${randomUUID()}.tmp`);
   const fd = fs.open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
   let renamed = false;
   try {
@@ -77,9 +92,9 @@ export function writePrivateRecord(dir: string, name: string, bytes: Buffer, fs:
       }
       fs.sync(fd);
     } finally { fs.close(fd); }
-    fs.rename(temporary, join(dir, name));
+    fs.rename(temporary, join(dir.base, name));
     renamed = true;
-    syncDirectory(dir, fs);
+    fs.sync(dir.fd);
   } finally {
     if (!renamed) { try { fs.unlink(temporary); } catch { /* the temporary may not exist */ } }
   }
@@ -145,8 +160,9 @@ export class StagingJournal {
   static open(dataDir: string, header: Omit<JournalRecord, "schema" | "events">, fs: StagingFilesystem, now: () => string): StagingJournal {
     const journal = new StagingJournal(dataDir, header, fs, now);
     try {
-      journal.uid = stagingUid(fs);
-      privateDirectory(journal.dir, journal.uid, fs, true);
+      const uid = stagingUid(fs);
+      withPinnedDirectory(journal.dir, uid, fs, true, () => undefined);
+      journal.uid = uid;
     } catch (error) {
       journal.problemText = `phase journal unavailable: ${redactDetail((error as Error).message)}`;
     }
@@ -156,26 +172,44 @@ export class StagingJournal {
   get path(): string { return join(this.dir, `${this.record.nonce}.json`); }
   get problem(): string | null { return this.problemText; }
 
+  /**
+   * Record a phase the caller must not pass unrecorded. With a usable journal, a failed write
+   * throws, so a surviving record without `installing` proves executables were never replaced.
+   * Without a journal there is no record to mislead, and the caller proceeds.
+   */
+  require(phase: JournalPhase): void {
+    if (this.uid === null) return;
+    const before = this.problemText;
+    this.problemText = null;
+    this.note(phase);
+    const problem = this.problemText;
+    this.problemText = before ?? problem;
+    if (problem) throw new Error(`${problem}; nothing was installed`);
+  }
+
   note(phase: JournalPhase, detail?: string): void {
+    // A directory that failed validation is never written, now or later.
     if (this.uid === null) return;
     const event: JournalEvent = { phase, at: this.now(), ...(detail ? { detail: redactDetail(detail) } : {}) };
     if (this.record.events.length >= MAX_EVENTS) this.record.events[MAX_EVENTS - 1] = event;
     else this.record.events.push(event);
     try {
-      writePrivateRecord(this.dir, `${this.record.nonce}.json`, encode(this.record), this.fs);
-      if (phase === "reserved") this.prune();
+      withPinnedDirectory(this.dir, this.uid, this.fs, false, (dir) => {
+        writePrivateRecord(dir, `${this.record.nonce}.json`, encode(this.record), this.fs);
+        if (phase === "reserved") this.prune(dir);
+      });
     } catch (error) {
       this.problemText ??= `phase journal could not record ${phase}: ${redactDetail((error as Error).message)}`;
     }
   }
 
   /** Keep the newest records and drop crash-orphaned temporaries; never touches other names. */
-  private prune(): void {
+  private prune(pinned: PinnedDirectory): void {
     const records: Array<{ name: string; mtime: bigint }> = [];
     const stale: string[] = [];
     // File times come from the real clock, so staleness does too.
     const now = BigInt(Date.now()) * 1_000_000n;
-    const dir = this.fs.directory(this.dir);
+    const dir = this.fs.directory(pinned.base);
     try {
       for (let i = 0; i < MAX_LISTED; i++) {
         const entry = dir.readSync();
@@ -183,15 +217,15 @@ export class StagingJournal {
         const record = RECORD_NAME_RE.exec(entry.name);
         if (!record && !TEMP_NAME_RE.test(entry.name)) continue;
         if (record?.[1] === this.record.nonce) continue;
-        const stat = this.fs.lstat(join(this.dir, entry.name));
+        const stat = this.fs.lstat(join(pinned.base, entry.name));
         if (!stat.isFile() || stat.nlink !== 1n || stat.uid !== this.uid) continue;
         if (record) records.push({ name: entry.name, mtime: stat.mtimeNs });
         else if (now - stat.mtimeNs > STALE_TEMP_NS) stale.push(entry.name);
       }
     } finally { dir.closeSync(); }
     records.sort((a, b) => (a.mtime < b.mtime ? 1 : a.mtime > b.mtime ? -1 : 0));
-    for (const { name } of records.slice(JOURNAL_KEEP - 1)) this.fs.unlink(join(this.dir, name));
-    for (const name of stale) this.fs.unlink(join(this.dir, name));
+    for (const { name } of records.slice(JOURNAL_KEEP - 1)) this.fs.unlink(join(pinned.base, name));
+    for (const name of stale) this.fs.unlink(join(pinned.base, name));
   }
 }
 
@@ -219,7 +253,7 @@ export function appendJournalEvent(dataDir: string, nonce: string, event: Journa
   if (record.events.length >= MAX_EVENTS) record.events[MAX_EVENTS - 1] = event;
   else record.events.push({ ...event, ...(event.detail ? { detail: redactDetail(event.detail) } : {}) });
   try {
-    writePrivateRecord(join(dataDir, JOURNAL_DIR), `${nonce}.json`, encode(record), fs);
+    withPinnedDirectory(join(dataDir, JOURNAL_DIR), stagingUid(fs), fs, false, (dir) => writePrivateRecord(dir, `${nonce}.json`, encode(record), fs));
     return null;
   } catch (error) {
     return redactDetail((error as Error).message);

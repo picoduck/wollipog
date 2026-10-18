@@ -1094,6 +1094,23 @@ test("upgrade journals distinguish pre-installation failure and rollback, and a 
   assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], unhealthy, makeIo().io), 1);
   assert.deepEqual(journalPhases(newest()), ["reserved", "staged", "installing", "installed", "rolled-back", "cleaned"]);
 
+  // Executables are never replaced unrecorded: a journal that stops accepting writes after
+  // `staged` aborts before the swap, so its surviving record truthfully ends before installation.
+  let journalWrites = 0;
+  const failingJournal: ServiceHost = { ...unhealthy, stagingFilesystem: { ...f.host.stagingFilesystem!, rename: (from, to) => {
+    if (/\/[0-9a-f-]{36}\.json$/u.test(String(to)) && ++journalWrites > 2) throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
+    stagingFilesystem.rename(from, to);
+  } } };
+  const before = f.execs.length;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const aborted = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], failingJournal, aborted.io), 1);
+  assert.match(JSON.parse(aborted.stdout()).error, /could not record installing: fixture ENOSPC; nothing was installed/u);
+  assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n");
+  assert.equal(f.execs.slice(before).some((line) => line.includes("restart")), false);
+  assert.deepEqual(journalPhases(newest()), ["reserved", "staged"]);
+  assert.equal(existsSync(join(f.layout.dataDir, "upgrades", "download-attempt-v1")), false, "staging still retires");
+
   // An updater still running with its recorded identity keeps its slot even with a token.
   const live = { pid: 5001, startTime: "9", bootId: "fixture-boot" };
   const manifest = { name: "SHA256SUMS", size: 1, digest: `sha256:${"a".repeat(64)}`, url: "" };

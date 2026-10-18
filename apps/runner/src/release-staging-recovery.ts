@@ -20,8 +20,8 @@ import {
   type StagingContext, type StagingFilesystem,
 } from "./release-staging.js";
 import {
-  NONCE_RE, appendJournalEvent, describeJournal, readJournal, readPrivateRecord, redactDetail, writePrivateRecord,
-  type JournalSummary, type ProcessIdentity,
+  NONCE_RE, appendJournalEvent, describeJournal, pinPrivateDirectory, readJournal, readPrivateRecord, redactDetail, writePrivateRecord,
+  type JournalSummary, type PinnedDirectory, type ProcessIdentity,
 } from "./release-staging-journal.js";
 
 export const RECOVERY_DIR = "upgrade-recovery";
@@ -228,7 +228,11 @@ function readOwner(slot: string, slotStat: BigIntStats, parentStat: BigIntStats,
 function unrecognized({ entry, stat }: Observed, owner: OwnerEvidence, uid: bigint): string | null {
   const name = entry.name;
   if (name === STAGING_OWNER) return null;
-  if (name === "web") return stat.isDirectory() && !stat.isSymbolicLink() ? null : "web is not a real directory";
+  if (name === "web") {
+    // Only an attempt that selected the web archive ever extracts one.
+    if (!owner.declared.has("wollipog-web.tar.gz")) return "web exists although this attempt selected no web archive";
+    return stat.isDirectory() && !stat.isSymbolicLink() ? null : "web is not a real directory";
+  }
   const asset = owner.declared.has(name) ? name : owner.partials.get(name);
   if (!asset) return `${name} is not an object of this attempt`;
   if (!stat.isFile() || stat.isSymbolicLink()) return `${name} is not a regular file`;
@@ -439,17 +443,25 @@ export function recoverStaging(
   if (!/^sa1-[0-9a-f]{32}$/u.test(token)) throw new RecoveryRefusedError("the attempt token is malformed; copy it from `wollipog service staging inspect`", null);
   const parent = join(dataDir, STAGING_PARENT);
   const slot = join(parent, STAGING_SLOT);
+  // Every mutation below is addressed through a pinned directory descriptor, so replacing a path
+  // (for example by a service account that owns the data directory) cannot redirect it.
   const pins: number[] = [];
-  const pin = (path: string): BigIntStats => {
+  const pin = (path: string): { fd: number; stat: BigIntStats } => {
     const fd = fs.open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     pins.push(fd);
     const stat = fs.fstat(fd);
     if (!sameIdentity(stat, fs.lstat(path))) throw new RecoveryRefusedError(`${path} changed while it was opened; inspect again`, null);
-    return stat;
+    return { fd, stat };
+  };
+  const pinPrivate = (path: string, uid: bigint, create: boolean): PinnedDirectory => {
+    const dir = pinPrivateDirectory(path, uid, fs, create);
+    pins.push(dir.fd);
+    return dir;
   };
   try {
+    let pinnedParent: { fd: number; stat: BigIntStats };
     let pinnedSlot: BigIntStats;
-    try { pin(parent); pinnedSlot = pin(slot); }
+    try { pinnedParent = pin(parent); pinnedSlot = pin(slot).stat; }
     catch (error) {
       if (error instanceof RecoveryRefusedError) throw error;
       const inspection = inspectStaging(dataDir, context, fs, procs, options);
@@ -465,47 +477,45 @@ export function recoverStaging(
     const uid = first.uid!;
     const at = now();
     const destination = join(dataDir, RECOVERY_DIR);
-    try { fs.mkdir(destination, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-    const destinationStat = fs.lstat(destination);
-    if (!destinationStat.isDirectory() || destinationStat.isSymbolicLink() || destinationStat.uid !== uid || (destinationStat.mode & 0o7777n) !== 0o700n || destinationStat.dev !== first.parentStat!.dev) {
-      throw new RecoveryRefusedError(`recovery refused: ${destination} is not a private directory on the staging filesystem`, inspection);
-    }
-    const container = join(destination, `${compactTime(at)}-${inspection.owner.nonce!.slice(0, 8)}-${randomUUID().slice(0, 8)}`);
-    fs.mkdir(container, { mode: 0o700 });
-    const containerStat = fs.lstat(container);
-    if (!containerStat.isDirectory() || containerStat.isSymbolicLink() || containerStat.uid !== uid || (containerStat.mode & 0o7777n) !== 0o700n) {
-      throw new RecoveryRefusedError(`recovery refused: ${container} was not created as a private directory`, inspection);
-    }
+    let destinationDir: PinnedDirectory;
+    try { destinationDir = pinPrivate(destination, uid, true); }
+    catch (error) { throw new RecoveryRefusedError(`recovery refused: ${redactDetail((error as Error).message)}`, inspection); }
+    if (destinationDir.dev !== first.parentStat!.dev) throw new RecoveryRefusedError(`recovery refused: ${destination} is not on the staging filesystem`, inspection);
+    const name = `${compactTime(at)}-${inspection.owner.nonce!.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
+    const container = join(destination, name);
+    fs.mkdir(join(destinationDir.base, name), { mode: 0o700 });
+    let containerDir: PinnedDirectory;
+    try { containerDir = pinPrivate(join(destinationDir.base, name), uid, false); }
+    catch (error) { throw new RecoveryRefusedError(`recovery refused: ${container} was not created as a private directory (${redactDetail((error as Error).message)})`, inspection); }
+    const parentBase = `/proc/self/fd/${pinnedParent.fd}`;
     const record = {
       schema: 1, state: "moving", token, requestedAt: at, source: slot, mode: context.mode,
       acknowledged: inspection.recovery.acknowledgement,
       tag: inspection.owner.tag, nonce: inspection.owner.nonce, entries: inspection.slotEntries,
       phase: { outcome: inspection.journal.outcome, conclusion: inspection.journal.conclusion, events: inspection.journal.events },
     };
-    writePrivateRecord(container, RECOVERY_RECORD, Buffer.from(`${JSON.stringify(record)}\n`), fs);
+    writePrivateRecord(containerDir, RECOVERY_RECORD, Buffer.from(`${JSON.stringify(record)}\n`), fs);
     // Revalidate immediately before the move: same pinned slot, same evidence, still no holder.
     const second = examine(dataDir, context, fs, procs, options).inspection;
-    if (!second.recovery.eligible || second.recovery.token !== token || !sameIdentity(pinnedSlot, fs.lstat(slot))) {
+    const source = join(parentBase, STAGING_SLOT);
+    if (!second.recovery.eligible || second.recovery.token !== token || !sameIdentity(pinnedSlot, fs.lstat(source)) || !sameIdentity(pinnedParent.stat, fs.lstat(parent))) {
       throw new RecoveryRefusedError(`recovery refused: the attempt changed while recovery was preparing (${second.recovery.reasons.join("; ") || "evidence changed"}); nothing was moved`, second);
     }
     const preservedPath = join(container, STAGING_SLOT);
-    fs.rename(slot, preservedPath);
-    const moved = fs.lstat(preservedPath);
-    if (!sameIdentity(moved, pinnedSlot)) {
+    const target = join(containerDir.base, STAGING_SLOT);
+    fs.rename(source, target);
+    if (!sameIdentity(fs.lstat(target), pinnedSlot)) {
       let restored = false;
-      try { fs.rename(preservedPath, slot); restored = true; } catch { /* leave both for the operator */ }
+      try { fs.rename(target, source); restored = true; } catch { /* leave both for the operator */ }
       throw new RecoveryRefusedError(`recovery stopped: the moved object is not the pinned attempt slot${restored ? "; it was moved back" : `; it remains at ${preservedPath}`}`, null);
     }
     const warnings: string[] = [];
-    for (const path of [parent, container, destination]) {
-      try {
-        const fd = fs.open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-        try { fs.sync(fd); } finally { fs.close(fd); }
-      } catch (error) { warnings.push(`could not flush ${path}: ${redactDetail((error as Error).message)}`); }
+    for (const [path, fd] of [[parent, pinnedParent.fd], [container, containerDir.fd], [destination, destinationDir.fd]] as const) {
+      try { fs.sync(fd); }
+      catch (error) { warnings.push(`could not flush ${path}: ${redactDetail((error as Error).message)}`); }
     }
     try {
-      writePrivateRecord(container, RECOVERY_RECORD, Buffer.from(`${JSON.stringify({ ...record, state: "preserved", preservedAt: now() })}\n`), fs);
+      writePrivateRecord(containerDir, RECOVERY_RECORD, Buffer.from(`${JSON.stringify({ ...record, state: "preserved", preservedAt: now() })}\n`), fs);
     } catch (error) {
       warnings.push(`the attempt was preserved, but its recovery record could not be finalized: ${redactDetail((error as Error).message)}`);
     }

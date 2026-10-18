@@ -67,8 +67,9 @@ function fixture(t: TestContext) {
   return {
     root, data, slot, assets, asset, ...processes(),
     /** Start an attempt in this process and abandon it like a killed updater (its handles stay open until teardown). */
-    async abandoned(options: { publish?: string[]; partial?: string; moveOut?: string[]; journal?: boolean; holder?: ProcessIdentity } = {}) {
-      const attempt = ReleaseStaging.create(data, context, "v0.32.0", assets, stagingFilesystem, options.holder ?? null);
+    async abandoned(options: { publish?: string[]; partial?: string; moveOut?: string[]; journal?: boolean; holder?: ProcessIdentity; selected?: string[] } = {}) {
+      const selected = options.selected ? assets.filter((candidate) => options.selected!.includes(candidate.name)) : assets;
+      const attempt = ReleaseStaging.create(data, context, "v0.32.0", selected, stagingFilesystem, options.holder ?? null);
       open.push(attempt);
       if (options.journal) {
         const journal = StagingJournal.open(data, { nonce: attempt.nonce, tag: "v0.32.0", mode: "user", process: { pid: 4242, startTime: "77", bootId: "boot" } }, stagingFilesystem, now);
@@ -189,10 +190,11 @@ test("unknown, linked, symlinked, substituted and foreign objects stay protected
       for (const name of readdirSync(join(f.root, "original"))) writeFileSync(join(f.slot, name), readFileSync(join(f.root, "original", name)), { mode: 0o600 });
     },
     "wrong permissions": (f) => { writeFileSync(join(f.slot, "SHA256SUMS"), readFileSync(join(f.slot, "SHA256SUMS")), { mode: 0o644 }); },
+    "web without a selected web archive": (f) => mkdirSync(join(f.slot, "web"), { mode: 0o700 }),
   };
   for (const [name, mutate] of Object.entries(cases)) await t.test(name, async (t) => {
     const f = fixture(t);
-    await f.abandoned({ publish: ["SHA256SUMS"] });
+    await f.abandoned({ publish: ["SHA256SUMS"], ...(name.startsWith("web") ? { selected: ["SHA256SUMS", "wollipog-runner-x86_64-unknown-linux-gnu"] } : {}) });
     mutate(f);
     if (name === "wrong permissions") (await import("node:fs")).chmodSync(join(f.slot, "SHA256SUMS"), 0o644);
     const before = snapshot(f.root);
@@ -306,7 +308,7 @@ test("interruption during recovery leaves either the slot in place or a preserve
     await f.abandoned({ publish: ["SHA256SUMS"] });
     const token = f.inspect().recovery.token!;
     const crash: StagingFilesystem = { ...stagingFilesystem, rename: (from, to) => {
-      if (String(from) === f.slot) throw new Error("fixture crash before the move");
+      if (String(from).endsWith("/download-attempt-v1")) throw new Error("fixture crash before the move");
       stagingFilesystem.rename(from, to);
     } };
     assert.throws(() => f.recover(token, crash), /fixture crash/u);
@@ -326,7 +328,7 @@ test("interruption during recovery leaves either the slot in place or a preserve
     const crash: StagingFilesystem = { ...stagingFilesystem, rename: (from, to) => {
       if (moved && String(to).endsWith("/recovery.json")) throw new Error("fixture crash before finalizing");
       stagingFilesystem.rename(from, to);
-      if (String(from) === f.slot) moved = true;
+      if (String(from).endsWith("/download-attempt-v1")) moved = true;
     } };
     const result = f.recover(token, crash);
     assert.match(result.warnings.join(" "), /could not be finalized/u);
@@ -378,6 +380,25 @@ test("the phase journal is bounded, private and distinguishes attempt outcomes",
   assert.equal(complete.cleanup, "complete");
   const rolled = outcome(["reserved", "staged", "installing", "rolled-back", "cleaned"]);
   assert.equal(rolled.outcome, "rolled-back");
+
+  // A journal path that fails validation is never written, at open or later.
+  for (const swap of ["symlink at open", "symlink after open", "shared permissions"]) {
+    const g = fixture(t);
+    const target = join(g.root, "elsewhere");
+    mkdirSync(target, { mode: 0o700 });
+    const journalPath = join(g.data, JOURNAL_DIR);
+    const nonce = "33333333-0000-4000-8000-000000000000";
+    if (swap === "symlink at open") symlinkSync(target, journalPath);
+    if (swap === "shared permissions") mkdirSync(journalPath, { mode: 0o755 });
+    const journal = StagingJournal.open(g.data, { nonce, tag: "v1.0.0", mode: "user", process: null }, stagingFilesystem, now);
+    if (swap === "symlink after open") { rmSync(journalPath, { recursive: true }); symlinkSync(target, journalPath); }
+    journal.note("reserved");
+    assert.ok(journal.problem, swap);
+    assert.deepEqual(readdirSync(target), [], `${swap}: nothing is written through the rejected path`);
+    if (swap === "shared permissions") assert.deepEqual(readdirSync(journalPath), []);
+    if (swap === "symlink after open") assert.throws(() => journal.require("installing"), /nothing was installed/u, "a journal that stops working blocks unrecorded installation");
+    else assert.doesNotThrow(() => journal.require("installing"), "a journal unavailable from the start never blocks installation");
+  }
 
   writeFileSync(join(f.data, JOURNAL_DIR, `${"2".repeat(8)}-0000-4000-8000-000000000000.json`), '{"schema":1', { mode: 0o600 });
   assert.equal(readJournal(f.data, `${"2".repeat(8)}-0000-4000-8000-000000000000`, stagingFilesystem).state, "unreadable");
