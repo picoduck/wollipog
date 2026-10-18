@@ -19,7 +19,7 @@ concurrency:
 jobs:
   codex-sandbox:
     name: Real Codex Sandbox (${{ matrix.codex }})
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -37,6 +37,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap
+          bash scripts/configure-ci-bubblewrap.sh
           npm install --prefix "$RUNNER_TEMP/codex" --no-save --package-lock=false "@openai/codex@${{ matrix.codex }}"
       - name: Exercise Every Real Sandbox Case
         env:
@@ -47,24 +48,41 @@ jobs:
           "$CODEX_BIN" --version
           node --version
           uname -sm
-          probe() {
-            local label="$1" parent="$2" configuration="$3"
-            local probe_root
-            probe_root=$(mktemp -d "$parent/wollipog-write-control-XXXXXX")
-            mkdir "$probe_root/workspace" "$probe_root/codex-home"
-            local environment=()
-            if [ "$configuration" = clean ]; then
-              environment=("HOME=$probe_root/codex-home" "CODEX_HOME=$probe_root/codex-home")
-            fi
-            printf '%s: ' "$label"
-            env "${environment[@]}" "$CODEX_BIN" sandbox -P :workspace -C "$probe_root/workspace" -- node -e 'try { require("fs").writeFileSync(process.argv[1], "probe"); console.log("written"); } catch (error) { console.log(error.code); }' "$probe_root/outside-workspace"
+          control_home="$RUNNER_TEMP/root-control-home"
+          mkdir "$control_home"
+          placement() {
+            local parent="$1" expected="$2" probe_root observed
+            probe_root=$(mktemp -d "$parent/wollipog-placement-XXXXXX")
+            mkdir "$probe_root/workspace"
+            observed=$(env HOME="$control_home" CODEX_HOME="$control_home" "$CODEX_BIN" sandbox -P :workspace -C "$probe_root/workspace" -- node -e 'try { require("fs").writeFileSync(process.argv[1], "probe"); console.log("written"); } catch (error) { console.log(error.code); }' "$probe_root/outside-workspace")
+            printf 'Workspace profile outside its workspace, parent=%s: %s\n' "$parent" "$observed"
+            test "$observed" = "$expected"
           }
-          probe temp-default /tmp inherited
-          probe temp-clean /tmp clean
-          probe outside-temp-clean "$RUNNER_TEMP" clean
-          rc=0
-          node --import tsx --test --test-reporter=tap --test-timeout=180000 apps/runner/src/agent-control-sandbox-cli.integration.test.ts > "$RUNNER_TEMP/codex-sandbox.tap" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/codex-sandbox.tap"
-          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
-          grep -qx '# pass 6' "$RUNNER_TEMP/codex-sandbox.tap"
-          grep -qx '# skipped 0' "$RUNNER_TEMP/codex-sandbox.tap"
+          # Same empty configuration; only fixture placement changes.
+          placement /tmp written
+          placement "$RUNNER_TEMP" EROFS
+          invalid_home="$RUNNER_TEMP/invalid-codex-home"
+          mkdir "$invalid_home"
+          printf '%s\n' 'invalid = [ configuration' > "$invalid_home/config.toml"
+          # Verify that this operator configuration prevents an ordinary launch.
+          if env HOME="$invalid_home" CODEX_HOME="$invalid_home" "$CODEX_BIN" sandbox -P :workspace -- /bin/true > "$RUNNER_TEMP/invalid-config.log" 2>&1; then
+            echo 'the malformed configuration was unexpectedly accepted' >&2
+            exit 1
+          fi
+          grep -F 'TOML parse error' "$RUNNER_TEMP/invalid-config.log"
+          verify() {
+            local configuration="$1" output="$RUNNER_TEMP/codex-sandbox-$1.tap"
+            local environment=()
+            if [ "$configuration" = invalid ]; then
+              environment=("HOME=$invalid_home" "CODEX_HOME=$invalid_home")
+            fi
+            local rc=0
+            env "${environment[@]}" node --import tsx --test --test-reporter=tap --test-timeout=180000 apps/runner/src/agent-control-sandbox-cli.integration.test.ts > "$output" 2>&1 || rc=$?
+            cat "$output"
+            if [ "$rc" -ne 0 ]; then return "$rc"; fi
+            for expected in '# pass 6' '# fail 0' '# cancelled 0' '# skipped 0'; do
+              grep -qx "$expected" "$output" || return 1
+            done
+          }
+          verify clean || exit $?
+          verify invalid || exit $?

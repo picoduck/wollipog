@@ -77,12 +77,14 @@ created in that one directory:
 
 | Codex mode | Before | After |
 | --- | --- | --- |
-| Auto-review (default), on-request, untrusted, on-failure, legacy workspace-write | No sockets; writes only in the workspace | Unchanged, plus the session's FIFO channel |
+| Auto-review (default), on-request, untrusted, on-failure, legacy workspace-write | No sockets; writes in the workspace and permitted temporary directories | Unchanged, plus the session's FIFO channel |
 | Read-only | No sockets; no writes | Unchanged, plus the session's FIFO channel |
 | Full access without a managed worktree, Orchestrator preset | Network on | Unchanged; the CLI takes the FIFO channel there too |
 
 No network access, writable root, socket, port, seccomp rule or namespace setting changes. The
-directory is not a writable root, and the sandbox cannot create files there.
+channel directory is not added as a writable root. When runner state is outside the policy's
+existing writable roots, the sandbox cannot create files there. Codex's built-in `:workspace`
+profile permits `/tmp`, so state deliberately placed there retains that existing write permission.
 
 Every other session's sandboxed commands run as the same user and can read the whole disk, so a
 channel must not be findable. The channel layout:
@@ -127,9 +129,19 @@ discards what it writes there. Node's own `child_process` pipes are socketpairs,
 that spawns the CLI inside the sandbox must give it a real pipe or a file. A shell pipeline or
 command substitution already does, as does Codex's own command runner.
 
-`agent-control-sandbox-cli.integration.test.ts` proves all of this on a real kernel in the Platform
-Isolation Ubuntu job, which fails if the test skips. Opt-in variants run the same probes under the
-real `codex sandbox` wherever a Codex install can start one.
+`agent-control-sandbox-cli.integration.test.ts` proves the explicit bubblewrap profiles on a real
+kernel in the Platform Isolation Ubuntu job, which requires all three modeled cases without skips.
+Additional variants run the same probes under the real `codex sandbox` when it is available.
+The Codex Sandbox workflow pins 0.162.1 and 0.163.0 and requires all six cases without skips, both
+with ordinary parent configuration and with a deliberately malformed parent configuration.
+
+The read-only FIFO fixture lives outside `/tmp`; the test separately verifies that real
+`:workspace` permits temporary writes and `:read-only` refuses them. Synthetic `HOME`, `CODEX_HOME`
+and `TMPDIR` values prevent operator configuration from changing the measurement. The capability
+probe and actual command use the same working directory, profile and synthetic environment.
+Diagnostics identify the measured version, profile and fixture locations. If neither the checkout
+nor `HOME` can hold a fixture outside `/tmp`, the real workspace case explicitly skips; the native
+CI job treats that skip as a failure rather than coverage.
 
 ## Commands
 
