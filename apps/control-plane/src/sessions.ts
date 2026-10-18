@@ -10314,11 +10314,12 @@ export class SessionsService {
    * controls: available only when its root can hand video to a certified media-only reviewer, else
    * the first reason it cannot. Each gate still rechecks its child, source and audience
    * (`productionVideoReviewAvailable`); this grants nothing. */
-  campaignVideoReview(controllerId: string, uiEvidenceOwner: WorkflowDecisionAuthority):
+  campaignVideoReview(controller: SessionView, uiEvidenceOwner: WorkflowDecisionAuthority):
     { status: "available" | "unavailable"; reason: string } | null {
-    const controller = this.db.getSession(controllerId);
-    const control = controller?.orchestratorPolicy?.control;
-    if (!controller || control?.mode !== "full_control" || !this.workflowVideoApprovals) return null;
+    // `controller` is the projection-free root the campaign projection passes in. Never read the
+    // root's Session view here: that view embeds the projection this fact is part of.
+    const control = controller.orchestratorPolicy?.control;
+    if (control?.mode !== "full_control" || !this.workflowVideoApprovals) return null;
     const human = (reason: string) => ({ status: "unavailable" as const, reason: `Video evidence comes to you because ${reason}` });
     if (uiEvidenceOwner !== "orchestrator") return human("UI evidence approval is not delegated to the Orchestrator.");
     if (!control.boundary.evidenceAuthority) return human("this campaign has no evidence envelope for a media-only reviewer.");

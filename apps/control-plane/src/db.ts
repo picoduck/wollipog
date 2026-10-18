@@ -5434,13 +5434,32 @@ export class ControlPlaneDb {
     this.liveTurnSource = source;
   }
   /** Delegated video review's campaign-level fact (#1321), which only the Session service and the
-   * hosting video composition can derive. Unset, campaign projections omit it. */
-  private campaignVideoReviewSource: ((campaignSessionId: string, uiEvidenceOwner: WorkflowDecisionAuthority) =>
+   * hosting video composition can derive. It receives the root as a view built without any campaign
+   * projection, so it can never read the projection it is part of. Unset, projections omit it. */
+  private campaignVideoReviewSource: ((root: SessionView, uiEvidenceOwner: WorkflowDecisionAuthority) =>
     OrchestratorCampaignProjection["videoEvidenceReview"] | null) | null = null;
+  /** Campaigns whose video fact is being derived right now: re-entering one is a bug, never a loop. */
+  private readonly derivingCampaignVideoReview = new Set<string>();
 
-  setCampaignVideoReviewSource(source: (campaignSessionId: string, uiEvidenceOwner: WorkflowDecisionAuthority) =>
+  setCampaignVideoReviewSource(source: (root: SessionView, uiEvidenceOwner: WorkflowDecisionAuthority) =>
     OrchestratorCampaignProjection["videoEvidenceReview"] | null): void {
     this.campaignVideoReviewSource = source;
+  }
+
+  private campaignVideoReview(campaignSessionId: string, uiEvidenceOwner: WorkflowDecisionAuthority):
+    OrchestratorCampaignProjection["videoEvidenceReview"] | null {
+    if (!this.campaignVideoReviewSource) return null;
+    if (this.derivingCampaignVideoReview.has(campaignSessionId)) {
+      throw new Error("Campaign video review was derived from inside its own campaign projection.");
+    }
+    const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignSessionId) as unknown as SessionRow | undefined;
+    if (!row) return null;
+    this.derivingCampaignVideoReview.add(campaignSessionId);
+    try {
+      const root = this.sessionView(row, undefined, this.sessionStopIntent(campaignSessionId), false,
+        this.childSessionAllocations(campaignSessionId).liveCount, false);
+      return this.campaignVideoReviewSource(root, uiEvidenceOwner);
+    } finally { this.derivingCampaignVideoReview.delete(campaignSessionId); }
   }
 
   private derivedSessionRevision = 0;
@@ -19164,9 +19183,8 @@ export class ControlPlaneDb {
       ...(recovery ? { recovery } : {}),
       decisionOwners: effectiveOwners,
       ...(() => {
-        let video: OrchestratorCampaignProjection["videoEvidenceReview"] | null = null;
-        try { video = policy.control?.mode === "full_control" ? this.campaignVideoReviewSource?.(resolvedCampaignId,
-          effectiveOwners.ui_evidence_approval) ?? null : null; } catch { video = null; }
+        const video = policy.control?.mode === "full_control"
+          ? this.campaignVideoReview(resolvedCampaignId, effectiveOwners.ui_evidence_approval) : null;
         return video ? { videoEvidenceReview: video } : {};
       })(),
       limits: {
@@ -23831,6 +23849,8 @@ export class ControlPlaneDb {
     stopIntent?: SessionStopIntentRecord,
     includeBackgroundJobs = true,
     liveChildSessions = 0,
+    /** False only for the campaign video fact's root view, which must not embed its own projection. */
+    includeCampaignProjection = true,
   ): SessionView {
     const agentName = row.agent_id
       ? ((this.stmt("SELECT name FROM agent_definitions WHERE id=?").get(row.agent_id) as
@@ -23978,7 +23998,7 @@ export class ControlPlaneDb {
         return policy ? { orchestratorPolicy: policy } : {};
       })(),
       ...(() => {
-        const campaign = orchestratorCampaignPolicyFromJson(row.orchestrator_policy)
+        const campaign = includeCampaignProjection && orchestratorCampaignPolicyFromJson(row.orchestrator_policy)
           ? this.campaignProjection(row.id)
           : null;
         return campaign ? { orchestratorCampaign: campaign } : {};
