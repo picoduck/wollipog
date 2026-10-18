@@ -639,6 +639,118 @@ test("same-named projects on one machine are told apart by folder, then path, th
   assert.equal(new Set(byId.values).size, 2, "a unique visible fallback when everything else matches");
 });
 
+/**
+ * What a person hears after pressing Create Session (#2952): focus is on a control in the dialog, never
+ * left behind, and that control, or the choice group it is in, is described by `expected`.
+ */
+async function pressCreateAndHear(fixture: Fixture, expected: RegExp, label: string): Promise<HTMLElement> {
+  const before = fixture.requests.length;
+  await act(async () => { createButton(fixture.container).click(); });
+  assert.equal(fixture.requests.length, before, `${label}: nothing is sent`);
+  const focused = domWindow.document.activeElement as unknown as HTMLElement;
+  const dialog = fixture.container.querySelector('[role="dialog"]');
+  assert.ok(dialog?.contains(focused as never), `${label}: focus is in the dialog`);
+  const described = [focused, focused.closest('[role="radiogroup"], [role="group"]')]
+    .filter((element): element is HTMLElement => element !== null)
+    .map((element) => ariaReferencedText(element, "aria-describedby") ?? "")
+    .join(" ");
+  assert.match(described, expected, `${label}: the focused control is described by why`);
+  return focused;
+}
+
+test("every refused submit lands on a control described by its reason (#2952)", async () => {
+  const orchestratorRunner: RunnerView = {
+    ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const cases: Array<{ label: string; run: () => Promise<void> }> = [
+    { label: "no project chosen", run: async () => {
+      const fixture = await mountFixture();
+      try {
+        const focused = await pressCreateAndHear(fixture, /Choose a project, or choose No Project\./, "no project");
+        assert.equal(focused, combobox(fixture.container, "Project"));
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "no machines online", run: async () => {
+      const fixture = await mountFixture({ runners: [{ ...runner, status: "offline" }] });
+      try {
+        await act(async () => { submitWithEnter(fixture.container); });
+        const focused = domWindow.document.activeElement as unknown as HTMLElement;
+        assert.equal(focused.textContent, "Open Connections");
+        assert.equal(ariaReferencedText(focused, "aria-describedby"), "Start Wollipog on one of your machines, or connect a new one.");
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "a project with no locations", run: async () => {
+      const fixture = await mountFixture({ projects: [{ ...project, locations: [] }] });
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        await act(async () => { submitWithEnter(fixture.container); });
+        const focused = domWindow.document.activeElement as unknown as HTMLElement;
+        assert.equal(focused.textContent, "Add Location…");
+        assert.match(ariaReferencedText(focused, "aria-describedby") ?? "", /This project has no locations yet/);
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "a project with no locations that you can't manage", run: async () => {
+      const fixture = await mountFixture({ projects: [{ ...project, locations: [], canManage: false }] });
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        await act(async () => { submitWithEnter(fixture.container); });
+        const focused = domWindow.document.activeElement as unknown as HTMLElement;
+        assert.equal(focused, combobox(fixture.container, "Project"));
+        assert.equal(ariaReferencedText(focused, "aria-describedby"),
+          "This project has no locations, and you can't add one. Choose another project.");
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "Orchestrator policy still loading", run: async () => {
+      const fixture = await mountFixture({ runners: [orchestratorRunner] }, undefined, undefined, undefined, undefined,
+        () => new Promise<OrchestratorSettingsView>(() => {}));
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        await choosePermissionPreset(fixture.container, "Orchestrator");
+        const focused = await pressCreateAndHear(fixture, /Wait for Orchestrator defaults to finish loading\./, "policy loading");
+        assert.ok(focused.closest('[role="radiogroup"][aria-label="Session Role"]'), "Session Role answers while nothing else can");
+        assert.equal(focused.closest('[role="radiogroup"]')?.getAttribute("aria-invalid"), "true");
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "Orchestrator policy failed to load", run: async () => {
+      const fixture = await mountFixture({ runners: [orchestratorRunner] }, undefined, undefined, undefined, undefined,
+        async () => { throw new Error("Policy service unavailable."); });
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        await choosePermissionPreset(fixture.container, "Orchestrator");
+        const focused = await pressCreateAndHear(fixture, /Policy service unavailable\./, "policy failed");
+        assert.equal(focused.textContent, "Retry Orchestrator Defaults");
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "saved permission defaults still loading", run: async () => {
+      const fixture = await mountFixture({}, undefined, undefined, () => new Promise<AgentHarnessDefaultsView>(() => {}));
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        const focused = await pressCreateAndHear(fixture, /Wait for saved permission defaults to finish loading\./, "defaults loading");
+        assert.ok(focused.closest('[role="radiogroup"][aria-label="Session Role"]'));
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "a missing saved account", run: async () => {
+      const accountRunner: RunnerView = {
+        ...runner,
+        protocolVersion: PROTOCOL_VERSION,
+        providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
+        providerAccountDefaults: [{ provider: "claude", accountId: "removed", revision: 1 }],
+      };
+      const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+      try {
+        const focused = await pressCreateAndHear(fixture, /saved default account is no longer on this Machine/, "account");
+        assert.match(focused.getAttribute("aria-label") ?? "", /^Account:/);
+        assert.equal(focused.getAttribute("aria-invalid"), "true");
+      } finally { await unmountFixture(fixture); }
+    } },
+  ];
+  for (const { run } of cases) await run();
+});
+
 test("an invalid Cloud Cost Budget marks the focused input and describes it by its error (#2952)", async () => {
   const boundaries = { filesystem: "host", network: "inherit", secrets: "runner_local", billing: "agent_account" } as const;
   const cloudRunner: RunnerView = {

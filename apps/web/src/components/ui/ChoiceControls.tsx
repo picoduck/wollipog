@@ -358,6 +358,7 @@ export function SegmentedControl<T extends string>({
   onChange,
   label,
   className,
+  describedBy,
 }: {
   options: readonly SegmentedOption<T>[];
   value: T | null;
@@ -365,6 +366,8 @@ export function SegmentedControl<T extends string>({
   /** The group's accessible name. Required: an unlabelled radiogroup announces only its options. */
   label: string;
   className?: string;
+  /** The id of text the caller renders outside the group, such as a field error (§8.5). */
+  describedBy?: string;
 }) {
   // One stop for the whole group, computed by `rovingChoiceStop`. The rule was inline here across
   // three rounds and each round fixed one branch of it: nothing selected, then selected but
@@ -401,7 +404,7 @@ export function SegmentedControl<T extends string>({
         className={`seg${className ? ` ${className}` : ""}`}
         role="radiogroup"
         aria-label={label}
-        aria-describedby={groupReason ? reasonId : undefined}
+        aria-describedby={[groupReason ? reasonId : undefined, describedBy].filter(Boolean).join(" ") || undefined}
         // Disabled options stay in the arrow order so their reason is reachable without a mouse;
         // activating one is refused by its own `onClick`, so focus moves and nothing is selected.
         onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}

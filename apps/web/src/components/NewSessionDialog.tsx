@@ -163,9 +163,11 @@ function createFailureSentence(error: unknown, kept: boolean): string {
  */
 /** The field a submit's validation problem is shown under. `form` is the rare problem no field owns. */
 type ProblemField = "project" | "location" | "machine" | "folder" | "agent" | "role" | "harness" | "mode" | "form";
-/** Inside a field with several controls, the control a problem is about. */
+/** The control a submit problem moved focus to, which is described by the problem's error. */
 type ProblemControl =
-  | "role" | "defaults" | "orchestrator" | "live-child-limit" | "harness" | "execution-target" | "cloud-budget";
+  | "project" | "location" | "add-location" | "machine" | "folder" | "browse" | "agent" | "account"
+  | "retained-session" | "open-connections" | "role" | "defaults" | "orchestrator-retry" | "orchestrator"
+  | "full-control" | "live-child-limit" | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
 
 /** Pre-selection for launches from a project's menu ("Create permanent worktree"). */
 export interface NewSessionPreset {
@@ -493,6 +495,11 @@ export function NewSessionDialog({
   const locationHelperId = `${generatedFormId}-location-helper`;
   const blockedReasonId = `${generatedFormId}-blocked-reason`;
   const cloudBudgetInputId = `${generatedFormId}-cloud-budget`;
+  // Sentences that describe the control a problem with no field error of its own lands on.
+  const noLocationsId = `${generatedFormId}-no-locations`;
+  const noMachinesId = `${generatedFormId}-no-machines`;
+  const failureSentenceId = `${generatedFormId}-failure`;
+  const accountReasonId = `${generatedFormId}-account-reason`;
   const permissionOptionsId = `${generatedFormId}-session-role`;
   const liveChildLimitInputId = `${generatedFormId}-live-child-limit`;
   const liveChildLimitHelpId = `${generatedFormId}-live-child-limit-help`;
@@ -1197,14 +1204,40 @@ export function NewSessionDialog({
     }
   };
 
-  const focusValidationProblem = (...selectors: Array<string | undefined>) => {
-    for (const selector of selectors) {
-      if (!selector) continue;
-      const target = formRef.current?.querySelector<HTMLElement>(selector);
+  /** Where each control a submit problem can land on is found, in the dialog (the form or its footer). */
+  const problemTargets: Record<ProblemControl, string> = {
+    project: '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
+    location: 'button[aria-label^="Location:"]:not([aria-disabled="true"])',
+    "add-location": '[data-validation-target="add-location"]',
+    machine: 'button[aria-label^="Machine:"]',
+    folder: 'button[aria-label^="Workspace:"]',
+    browse: '[data-validation-target="browse"]:not(:disabled)',
+    agent: '[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]',
+    account: 'button[aria-label^="Account:"]',
+    "retained-session": '[data-validation-target="retained-session"]',
+    "open-connections": '[data-validation-target="open-connections"]',
+    role: `[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`,
+    defaults: '[data-validation-target="defaults"]',
+    "orchestrator-retry": 'button[data-validation-target="orchestrator-defaults"]',
+    orchestrator: 'div[data-validation-target="orchestrator-defaults"]',
+    "full-control": '[data-control-mode="full_control"]',
+    "live-child-limit": `[id="${liveChildLimitInputId}"]`,
+    harness: `[id="${harnessOptionsId}"] input:not([aria-disabled="true"])`,
+    mode: '.new-session-mode button[aria-checked="true"]',
+    "execution-target": 'button[aria-label^="Execution Target:"]',
+    "cloud-budget": `[id="${cloudBudgetInputId}"]`,
+    create: '[data-validation-target="create"]',
+  };
+  /** Focus the first of `controls` that renders now, falling back to Create Session, and say which. */
+  const focusValidationProblem = (...controls: ProblemControl[]): ProblemControl => {
+    const dialog = formRef.current?.closest<HTMLElement>('[role="dialog"]') ?? formRef.current;
+    for (const control of [...controls, "create" as const]) {
+      const target = dialog?.querySelector<HTMLElement>(problemTargets[control]);
       if (!target) continue;
       target.focus();
-      return;
+      return control;
     }
+    return "create";
   };
 
   const buildSessionRequest = (): CreateSessionRequest => {
@@ -1281,22 +1314,17 @@ export function NewSessionDialog({
     setFieldProblem(null);
     // A kept session's failure stays: its Open Session is the way forward.
     if (!retainedSessionId) setRequestFailure(null);
-    // Each problem is shown under its field, and focus moves to the first control that can fix it.
-    const flag = (field: ProblemField, message: string | null, ...selectors: Array<string | undefined>) => {
-      if (message) setFieldProblem({ field, message });
-      focusValidationProblem(...selectors);
+    // Each problem is shown under its field, and focus moves to the first of its controls that renders
+    // now. That control carries `aria-invalid` where it has one, and its `aria-describedby` names the
+    // error, so focusing it announces why (§8.5). A problem with no message is already explained by
+    // what its control is described by (a notice, the account's reason).
+    const report = (field: ProblemField, message: string | null, ...controls: ProblemControl[]) => {
+      const control = focusValidationProblem(...controls);
+      setFieldProblem(message ? { field, message, control } : null);
     };
-    // A field holding several controls also names the one the problem is about, which carries
-    // `aria-invalid` and points `aria-describedby` at the error, so focusing it announces why (§8.5).
-    const flagControl = (field: ProblemField, control: ProblemControl, message: string, selector: string) => {
-      setFieldProblem({ field, control, message });
-      focusValidationProblem(selector);
-    };
-    const projectControl = '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]';
     if (fullControlLaunch) {
       if (!fullControlAuthorization?.ready) {
-        flagControl("role", "orchestrator", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.",
-          '[data-control-mode="full_control"]');
+        report("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.", "full-control");
         return;
       }
       busyRef.current = true;
@@ -1307,72 +1335,79 @@ export function NewSessionDialog({
     }
     if (!valid) {
       if (orchestrator && controlPreview === "full_control") {
-        flagControl("role", "orchestrator", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.",
-          '[data-control-mode="full_control"]');
+        report("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.",
+          "full-control", "orchestrator-retry", "role");
       } else if (retainedSessionId) {
         // The failure notice above the footer already says a session was kept; Open Session is next.
-        flag("form", null, '[data-validation-target="retained-session"]');
+        report("form", null, "retained-session");
+      } else if (online.length === 0) {
+        // No Machines Online says why; Open Connections is the way forward.
+        report("form", null, "open-connections");
       } else if (projectsSupported && !projectSelection) {
-        flag("project", "Choose a project, or choose No Project.", projectControl);
+        report("project", "Choose a project, or choose No Project.", "project");
       } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !selectedProject) {
-        flag("project", "This project is no longer available. Choose another project.", projectControl);
+        report("project", "This project is no longer available. Choose another project.", "project");
+      } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && selectedProject &&
+          selectedProject.locations.length === 0) {
+        // The No Locations notice explains, and its Add Location… is next, unless only someone who
+        // manages the project can add one.
+        if (cannotAddLocation) {
+          report("project", "This project has no locations, and you can't add one. Choose another project.", "project");
+        } else {
+          report("location", null, "add-location");
+        }
       } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !projectLocationLaunchable) {
-        // No locations: the notice in the field's place explains, and its Add Location… is next.
-        // An unavailable choice already shows its own error; an unchosen one needs one.
-        const unchosen = selectedProject && selectedProject.locations.length > 0 && !selectedProjectLocation;
-        flag("location", unchosen
-          ? projectLocationsAvailable.length > 0
+        // An unavailable choice already shows its own error under Location; an unchosen one needs one.
+        report("location", selectedProjectLocation
+          ? null
+          : projectLocationsAvailable.length > 0
             ? "Choose where this session runs."
-            : "No location of this project is online. Start its machine, or add a location on another machine."
-          : null,
-        'button[aria-label^="Location:"]', '[data-validation-target="add-location"]', projectControl);
+            : "No location of this project is online. Start its machine, or add a location on another machine.",
+        "location", "project");
       } else if (!runnerId) {
-        flag("machine", "Choose a machine.", 'button[aria-label^="Machine:"]', projectControl);
+        report("machine", "Choose a machine.", "machine", "project");
       } else if (!workspaceId && !browsedPath) {
-        flag("folder", "Choose a workspace, or browse for a folder.",
-          'button[aria-label^="Workspace:"]', '[data-validation-target="browse"]:not(:disabled)');
+        report("folder", "Choose a workspace, or browse for a folder.", "folder", "browse");
       } else if (!agentId || !selectedAgentOption || selectedAgentOption.disabled) {
-        flag("agent", "Choose an installed agent.", '[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]');
+        report("agent", "Choose an installed agent.", "agent");
       } else if (missingRequiredAccountChoice) {
-        // The Account field already says why under its control.
-        flag("form", null, 'button[aria-label^="Account:"]');
+        // The Account field already says why, and its control is described by it.
+        report("form", null, "account");
       } else if (!defaultsReady && !orchestrator) {
-        flagControl("role", harnessDefaults?.error ? "defaults" : "role", harnessDefaults?.error
+        report("role", harnessDefaults?.error
           ? "Retry loading saved permission defaults before creating a session."
           : "Wait for saved permission defaults to finish loading.",
-        harnessDefaults?.error ? '[data-validation-target="defaults"]' : `[id="${permissionOptionsId}"] input:checked`);
+        ...(harnessDefaults?.error ? ["defaults", "role"] as const : ["role"] as const));
       } else if (orchestrator && !orchestratorSupported) {
-        flagControl("role", "role", "Choose an available Session Role.",
-          `[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
+        report("role", "Choose an available Session Role.", "role");
       } else if (orchestrator && !orchestratorSettingsReady) {
-        flagControl("role", "orchestrator", orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.",
-          '[data-validation-target="orchestrator-defaults"]');
+        // While the policy loads there is nothing of it to focus, so the Session Role answers.
+        report("role", orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.",
+          "orchestrator-retry", "role");
       } else if (orchestrator && !orchestratorCapabilitiesValid) {
-        flagControl("role", "orchestrator", orchestratorCapabilities?.reason ??
+        report("role", orchestratorCapabilities?.reason ??
           "Choose available Child Model and Child Effort values before creating this campaign.",
-        '[data-validation-target="orchestrator-defaults"]');
+        "orchestrator", "role");
       } else if (orchestrator && !orchestratorDelegationValid) {
-        flagControl("role", "orchestrator", effectiveParentControl !== "off" && !parentControlSupported
+        report("role", effectiveParentControl !== "off" && !parentControlSupported
           ? parentControlUnavailable ?? "Choose Human for Descendant Requests on this runner."
           : typedDelegationUnavailable ?? "Choose Human for typed decisions on this runner.",
-        '[data-validation-target="orchestrator-defaults"]');
+        "orchestrator", "role");
       } else if (orchestrator && !orchestratorExecutionValid) {
-        flagControl("role", "orchestrator", orchestratorExecutionUnavailable, '[data-validation-target="orchestrator-defaults"]');
+        report("role", orchestratorExecutionUnavailable, "orchestrator", "role");
       } else if (!liveChildLimitValid) {
-        flagControl("role", "live-child-limit", `Enter a Live Child Limit from ${minimumLiveChildLimit} to ${MAX_LIVE_CHILD_LIMIT}.`,
-          `[id="${liveChildLimitInputId}"]`);
+        report("role", `Enter a Live Child Limit from ${minimumLiveChildLimit} to ${MAX_LIVE_CHILD_LIMIT}.`,
+          "live-child-limit", "orchestrator", "role");
       } else if (directWslRequiresSafeOrchestrator && !orchestrator) {
-        flagControl("role", "role", "Choose Orchestrator or another execution context.",
-          `[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
+        report("role", "Choose Orchestrator or another execution context.", "role");
       } else if (launchSurface === "native_tui" && !nativeTuiSupported) {
-        flagControl("harness", "harness", "Choose an available Harness.",
-          `[id="${harnessOptionsId}"] input:not([aria-disabled="true"])`);
+        report("harness", "Choose an available Harness.", "harness");
       } else if (executionTarget && !executionTarget.available) {
-        flagControl("mode", "execution-target", "Choose an available Execution Target.", 'button[aria-label^="Execution Target:"]');
+        report("mode", "Choose an available Execution Target.", "execution-target", "mode");
       } else if (!cloudBudgetValid) {
-        flagControl("mode", "cloud-budget", "Enter a Cloud Cost Budget within the allowed range.", `[id="${cloudBudgetInputId}"]`);
+        report("mode", "Enter a Cloud Cost Budget within the allowed range.", "cloud-budget", "execution-target", "mode");
       } else {
-        flag("form", "Complete the required session settings before creating a session.");
+        report("form", "Complete the required session settings before creating a session.", "create");
       }
       return;
     }
@@ -1405,7 +1440,6 @@ export function NewSessionDialog({
   const problemFor = (field: ProblemField) => fieldProblem?.field === field
     ? <FieldError id={problemId(field)}>{fieldProblem.message}</FieldError>
     : null;
-  const problemDescribedBy = (field: ProblemField) => fieldProblem?.field === field ? problemId(field) : undefined;
   /** Whether a submit's problem is about `control`, and its description: `own` plus the error. */
   const controlInvalid = (control: ProblemControl) => fieldProblem?.control === control;
   const controlDescribedBy = (control: ProblemControl, own?: string) =>
@@ -1433,8 +1467,8 @@ export function NewSessionDialog({
           searchable
           noun="projects"
           footerAction={newProjectAction}
-          invalid={fieldProblem?.field === "project"}
-          describedBy={problemDescribedBy("project")}
+          invalid={controlInvalid("project")}
+          describedBy={controlDescribedBy("project")}
         />
       ) : (
         <SearchableCombobox<string>
@@ -1450,8 +1484,8 @@ export function NewSessionDialog({
           emptyLabel="No Projects Available"
           noun="projects"
           footerAction={newProjectAction}
-          invalid={fieldProblem?.field === "project"}
-          describedBy={problemDescribedBy("project")}
+          invalid={controlInvalid("project")}
+          describedBy={controlDescribedBy("project")}
         />
       )}
       {problemFor("project")}
@@ -1489,13 +1523,14 @@ export function NewSessionDialog({
               type="button"
               className="btn sm"
               data-validation-target="add-location"
+              aria-describedby={noLocationsId}
               onClick={() => setAddingLocation(true)}
             >
               Add Location…
             </button>
           )}
         >
-          This project has no locations yet. Add the folder where its sessions run.
+          <span id={noLocationsId}>This project has no locations yet. Add the folder where its sessions run.</span>
         </Notice>
       ) : (
         <Select<string>
@@ -1533,8 +1568,8 @@ export function NewSessionDialog({
           label: machineLabels.get(r.runnerId) ?? r.runnerId,
         }))}
         placeholder="Choose a Machine…"
-        invalid={fieldProblem?.field === "machine"}
-        describedBy={problemDescribedBy("machine")}
+        invalid={controlInvalid("machine")}
+        describedBy={controlDescribedBy("machine")}
       />
       {problemFor("machine")}
     </div>
@@ -1562,8 +1597,8 @@ export function NewSessionDialog({
             value={workspaceId || null}
             onChange={(value) => { setWorkspaceId(value); setAdditionalDirectories([]); }}
             options={(runner?.workspaces ?? []).map((w) => ({ value: w.id, label: w.name }))}
-            invalid={fieldProblem?.field === "folder"}
-            describedBy={problemDescribedBy("folder")}
+            invalid={controlInvalid("folder")}
+            describedBy={controlDescribedBy("folder")}
           />
         )}
         <button
@@ -1866,7 +1901,8 @@ export function NewSessionDialog({
             ? <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Starting the campaign…"
               disabled={!fullControlAuthorization?.ready}>Authorize and Start</BusyButton>
             : <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Creating the session…"
-              disabled={!!blockedReason} aria-describedby={blockedReason ? blockedReasonId : undefined}>Create Session</BusyButton>}
+              disabled={!!blockedReason} data-validation-target="create"
+              aria-describedby={controlDescribedBy("create", blockedReason ? blockedReasonId : undefined)}>Create Session</BusyButton>}
         </>
       }
     >
@@ -1881,9 +1917,19 @@ export function NewSessionDialog({
           <Notice
             tone="neutral"
             title="No Machines Online"
-            actions={<button type="button" className="btn sm" onClick={openConnections}>Open Connections</button>}
+            actions={(
+              <button
+                type="button"
+                className="btn sm"
+                data-validation-target="open-connections"
+                aria-describedby={noMachinesId}
+                onClick={openConnections}
+              >
+                Open Connections
+              </button>
+            )}
           >
-            Start Wollipog on one of your machines, or connect a new one.
+            <span id={noMachinesId}>Start Wollipog on one of your machines, or connect a new one.</span>
           </Notice>
         )}
         {/* Where (§8.1): Project and Location share one row; with No Project, Project and Machine do,
@@ -1941,8 +1987,8 @@ export function NewSessionDialog({
                   leadingIcon={agentIcon}
                   searchable
                   noun="agents"
-                  invalid={fieldProblem?.field === "agent"}
-                  describedBy={problemDescribedBy("agent")}
+                  invalid={controlInvalid("agent")}
+                  describedBy={controlDescribedBy("agent")}
                 />
               ) : (
                 <SearchableCombobox<string>
@@ -1956,8 +2002,8 @@ export function NewSessionDialog({
                   emptyLabel="No Agents Available"
                   leadingIcon={agentIcon}
                   noun="agents"
-                  invalid={fieldProblem?.field === "agent"}
-                  describedBy={problemDescribedBy("agent")}
+                  invalid={controlInvalid("agent")}
+                  describedBy={controlDescribedBy("agent")}
                 />
               )}
             </div>
@@ -2009,9 +2055,11 @@ export function NewSessionDialog({
                     account.authStatus === "unauthenticated" ? "Login Required" : "Login Unknown",
                 }))}
                 placeholder="Choose an Account…"
+                invalid={missingRequiredAccountChoice}
+                describedBy={missingRequiredAccountChoice ? accountReasonId : undefined}
               />
               {missingRequiredAccountChoice && (
-                <p className="hint" role="alert">The saved default account is no longer on this Machine. Choose an account or change the default in Machine settings.</p>
+                <p className="hint" id={accountReasonId} role="alert">The saved default account is no longer on this Machine. Choose an account or change the default in Machine settings.</p>
               )}
             </div>
           )}
@@ -2094,7 +2142,7 @@ export function NewSessionDialog({
                 type="button"
                 className="btn ghost sm"
                 data-validation-target="orchestrator-defaults"
-                aria-describedby={controlDescribedBy("orchestrator")}
+                aria-describedby={controlDescribedBy("orchestrator-retry")}
                 onClick={() => setDefaultsRetry((value) => value + 1)}
               >Retry Orchestrator Defaults</button>}
             </div>}
@@ -2104,7 +2152,7 @@ export function NewSessionDialog({
               data-validation-target="orchestrator-defaults"
               role="group"
               aria-label="Orchestrator Policy"
-              aria-describedby={controlDescribedBy("orchestrator")}
+              aria-describedby={controlDescribedBy("orchestrator") ?? controlDescribedBy("full-control")}
               tabIndex={-1}
             >
               <OrchestratorControlChoice surface="launch" mode={controlPreview} onChange={setControlPreview} disabled={busy} />
@@ -2167,6 +2215,7 @@ export function NewSessionDialog({
             <SegmentedControl
               className="new-session-mode"
               label="Session Mode"
+              describedBy={controlDescribedBy("mode")}
               value={useWorktree ? "worktree" : "in-place"}
               options={[
                 { value: "in-place", label: "In Place" },
@@ -2243,6 +2292,7 @@ export function NewSessionDialog({
                   type="button"
                   className="btn sm"
                   data-validation-target="retained-session"
+                  aria-describedby={failureSentenceId}
                   onClick={() => {
                     navigate({ name: "session", id: retainedSessionId });
                     onClose();
@@ -2253,7 +2303,7 @@ export function NewSessionDialog({
               ) : undefined}
               details={requestFailure ? <code>{requestFailure.detail}</code> : undefined}
             >
-              {requestFailure?.sentence}
+              <span id={failureSentenceId}>{requestFailure?.sentence}</span>
             </Notice>
           )}
         </form>
