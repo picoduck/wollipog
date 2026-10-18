@@ -9,6 +9,7 @@ import type { McpFetch } from "./session-management-mcp.js";
 import { executableFromUnit, runServiceCli, type ServiceHost, type ServiceIo } from "./service-cli.js";
 import { CONTROL_PLANE_UNIT, RUNNER_UNIT, serviceLayout } from "./systemd-service.js";
 import { ReleaseStaging, stagingFilesystem } from "./release-staging.js";
+import { describeJournal } from "./release-staging-journal.js";
 
 const LOCAL_TOKEN = "L".repeat(43);
 const RUNNER_TOKEN = `wollipogr_${"r".repeat(43)}`;
@@ -1094,22 +1095,35 @@ test("upgrade journals distinguish pre-installation failure and rollback, and a 
   assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], unhealthy, makeIo().io), 1);
   assert.deepEqual(journalPhases(newest()), ["reserved", "staged", "installing", "installed", "rolled-back", "cleaned"]);
 
-  // Executables are never replaced unrecorded: a journal that stops accepting writes after
-  // `staged` aborts before the swap, so its surviving record truthfully ends before installation.
+  // Journaling is best effort: a journal that stops accepting writes after `staged` never fails
+  // the upgrade, and its stale record does not claim the installation was untouched.
   let journalWrites = 0;
-  const failingJournal: ServiceHost = { ...unhealthy, stagingFilesystem: { ...f.host.stagingFilesystem!, rename: (from, to) => {
-    if (/\/[0-9a-f-]{36}\.json$/u.test(String(to)) && ++journalWrites > 2) throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
-    stagingFilesystem.rename(from, to);
-  } } };
-  const before = f.execs.length;
+  const failingJournal: ServiceHost = {
+    ...unhealthy,
+    stagingFilesystem: { ...f.host.stagingFilesystem!, rename: (from, to) => {
+      if (/\/[0-9a-f-]{36}\.json$/u.test(String(to)) && ++journalWrites > 2) throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
+      stagingFilesystem.rename(from, to);
+    } },
+    fetch: async (url, init) => {
+      const response = await fixture.host.fetch(url, init);
+      if (!url.endsWith("/api/admin/status")) return response;
+      const body = JSON.parse(await response.text());
+      return { ...response, text: async () => JSON.stringify({ ...body, appVersion: fixture.version }) };
+    },
+  };
   await new Promise((resolve) => setTimeout(resolve, 5));
-  const aborted = makeIo();
-  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], failingJournal, aborted.io), 1);
-  assert.match(JSON.parse(aborted.stdout()).error, /could not record installing: fixture ENOSPC; nothing was installed/u);
-  assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n");
-  assert.equal(f.execs.slice(before).some((line) => line.includes("restart")), false);
-  assert.deepEqual(journalPhases(newest()), ["reserved", "staged"]);
+  const degraded = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], failingJournal, degraded.io), 0, degraded.stdout());
+  const degradedReport = JSON.parse(degraded.stdout());
+  assert.equal(degradedReport.upgraded, true);
+  assert.match(degradedReport.diagnostics.problem, /could not record installing: fixture ENOSPC/u);
+  assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "runner 9.9.9");
   assert.equal(existsSync(join(f.layout.dataDir, "upgrades", "download-attempt-v1")), false, "staging still retires");
+  const stale = JSON.parse(readFileSync(newest(), "utf8"));
+  assert.deepEqual(stale.events.map((event: { phase: string }) => event.phase), ["reserved", "staged"]);
+  const summary = describeJournal({ state: "recorded", record: stale, reason: null });
+  assert.equal(summary.outcome, "unknown");
+  assert.match(summary.conclusion, /may still have been replaced/u);
 
   // An updater still running with its recorded identity keeps its slot even with a token.
   const live = { pid: 5001, startTime: "9", bootId: "fixture-boot" };

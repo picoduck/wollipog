@@ -157,6 +157,10 @@ test("interrupted downloads with a partial are recoverable; interrupted initiali
     await f.abandoned({ publish: ["SHA256SUMS"], partial: "wollipog-runner-x86_64-unknown-linux-gnu" });
     const inspection = f.inspect();
     assert.ok(inspection.slotEntries!.some((entry) => entry.name.endsWith(".partial")));
+    // Even without any phase record, a download still in progress proves nothing was replaced.
+    assert.equal(inspection.journal.evidence, "absent");
+    assert.equal(inspection.journal.outcome, "pre-installation-failure");
+    assert.match(inspection.journal.conclusion, /a download was still in progress.*not replaced/u);
     assert.deepEqual(inspection.recovery.reasons, []);
     f.recover(inspection.recovery.token!);
     f.admitsNext();
@@ -287,6 +291,20 @@ test("active attempts and concurrent recoveries are protected; unavailable proof
     assert.ok(existsSync(f.slot));
     assert.throws(() => f.recover("not-a-token"), /malformed/u);
   });
+  await t.test("the preservation directory renamed during recovery", async (t) => {
+    const f = fixture(t);
+    await f.abandoned({ publish: ["SHA256SUMS", "wollipog-runner-x86_64-unknown-linux-gnu"], journal: true });
+    const inspection = f.inspect();
+    assert.equal(inspection.journal.outcome, "pre-installation-failure", "every selected executable is still staged");
+    assert.match(inspection.journal.conclusion, /every selected executable is still staged/u);
+    const displaced = join(f.data, "displaced");
+    const racing: StagingFilesystem = { ...stagingFilesystem, rename: (from, to) => {
+      stagingFilesystem.rename(from, to);
+      if (String(to).endsWith("/recovery.json") && !existsSync(displaced)) renameSync(join(f.data, RECOVERY_DIR), displaced);
+    } };
+    assert.throws(() => f.recover(inspection.recovery.token!, racing), /was moved or replaced while recovery was preparing; nothing was moved/u);
+    assert.ok(existsSync(join(f.slot, "owner.json")), "the attempt stays in place rather than landing in the displaced directory");
+  });
   await t.test("a change between preparation and the move", async (t) => {
     const f = fixture(t);
     await f.abandoned({ publish: ["SHA256SUMS"] });
@@ -366,7 +384,8 @@ test("the phase journal is bounded, private and distinguishes attempt outcomes",
   assert.equal(failed.cleanup, "complete");
   assert.equal(failed.uncertain, false);
   const interrupted = outcome(["reserved", "staged"]);
-  assert.equal(interrupted.outcome, "pre-installation-failure");
+  assert.equal(interrupted.outcome, "unknown", "best-effort journaling cannot prove an unrecorded installation did not start");
+  assert.match(interrupted.conclusion, /may still have been replaced/u);
   assert.equal(interrupted.uncertain, true);
   const awaiting = outcome(["reserved", "staged", "installing", "installed"]);
   assert.equal(awaiting.outcome, "installation-awaiting-verification");
@@ -396,8 +415,7 @@ test("the phase journal is bounded, private and distinguishes attempt outcomes",
     assert.ok(journal.problem, swap);
     assert.deepEqual(readdirSync(target), [], `${swap}: nothing is written through the rejected path`);
     if (swap === "shared permissions") assert.deepEqual(readdirSync(journalPath), []);
-    if (swap === "symlink after open") assert.throws(() => journal.require("installing"), /nothing was installed/u, "a journal that stops working blocks unrecorded installation");
-    else assert.doesNotThrow(() => journal.require("installing"), "a journal unavailable from the start never blocks installation");
+    assert.doesNotThrow(() => journal.note("installing"), "journal problems never throw into the upgrade");
   }
 
   writeFileSync(join(f.data, JOURNAL_DIR, `${"2".repeat(8)}-0000-4000-8000-000000000000.json`), '{"schema":1', { mode: 0o600 });
@@ -411,7 +429,7 @@ test("a recorded attempt's phases survive recovery in its journal and recovery r
   await f.abandoned({ publish: ["SHA256SUMS"], journal: true });
   const inspection = f.inspect();
   assert.equal(inspection.journal.evidence, "recorded");
-  assert.equal(inspection.journal.outcome, "pre-installation-failure");
+  assert.equal(inspection.journal.outcome, "unknown", "the selected runner is neither staged nor downloading, so the slot proves nothing");
   assert.equal(inspection.journal.uncertain, true);
   const result = f.recover(inspection.recovery.token!);
   const journal = describeJournal(readJournal(f.data, result.nonce, stagingFilesystem));

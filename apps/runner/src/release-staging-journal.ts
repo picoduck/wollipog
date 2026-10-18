@@ -172,21 +172,6 @@ export class StagingJournal {
   get path(): string { return join(this.dir, `${this.record.nonce}.json`); }
   get problem(): string | null { return this.problemText; }
 
-  /**
-   * Record a phase the caller must not pass unrecorded. With a usable journal, a failed write
-   * throws, so a surviving record without `installing` proves executables were never replaced.
-   * Without a journal there is no record to mislead, and the caller proceeds.
-   */
-  require(phase: JournalPhase): void {
-    if (this.uid === null) return;
-    const before = this.problemText;
-    this.problemText = null;
-    this.note(phase);
-    const problem = this.problemText;
-    this.problemText = before ?? problem;
-    if (problem) throw new Error(`${problem}; nothing was installed`);
-  }
-
   note(phase: JournalPhase, detail?: string): void {
     // A directory that failed validation is never written, now or later.
     if (this.uid === null) return;
@@ -315,13 +300,30 @@ export function describeJournal(read: JournalRead): JournalSummary {
       ? "new executables were installed, but restart and health verification did not complete; check service health"
       : "executable replacement started but did not finish; the installation may be partly replaced, so check installed versions";
   } else {
-    outcome = "pre-installation-failure";
+    // `failed` is recorded only before replacement starts, so it proves the installation was
+    // untouched. Journaling is best effort: without it, a later `installing` may simply be unrecorded.
     const failure = events.find((event) => event.phase === "failed");
-    conclusion = `the attempt ${failure ? `failed before installation${failure.detail ? ` (${failure.detail})` : ""}` : "stopped before installation"}; installed executables were not replaced by it`;
+    if (failure) {
+      outcome = "pre-installation-failure";
+      conclusion = `the attempt failed before installation${failure.detail ? ` (${failure.detail})` : ""}; installed executables were not replaced by it`;
+    } else {
+      outcome = "unknown";
+      conclusion = `the record ends at "${attemptLast ?? "nothing"}" before any installation was recorded; if later phases could not be recorded, executables may still have been replaced, so compare the installed versions`;
+    }
   }
   if (!seen.has("verified")) {
     if (cleanup === "complete") conclusion += "; staging cleanup completed";
     else if (cleanupFailure) conclusion += `; staging cleanup then failed: ${cleanupFailure.detail ?? "no detail"}`;
   }
   return { evidence: "recorded", uncertain: !terminal, lastPhase: last, outcome, cleanup, conclusion: `${conclusion}${stopped}`, events, process: read.record.process };
+}
+
+/**
+ * Strengthen an unknown conclusion with proof from the retained slot itself: replacement starts
+ * only after every download is published, and it moves each executable out of the slot.
+ */
+export function withSlotEvidence(summary: JournalSummary, untouched: string | null): JournalSummary {
+  const replacing = summary.events.some((event) => ["installing", "installed", "verified", "rolled-back"].includes(event.phase));
+  if (!untouched || summary.outcome !== "unknown" || replacing) return summary;
+  return { ...summary, outcome: "pre-installation-failure", conclusion: `the attempt stopped before installation (${untouched}); installed executables were not replaced by it` };
 }

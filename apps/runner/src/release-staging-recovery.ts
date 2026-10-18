@@ -20,7 +20,7 @@ import {
   type StagingContext, type StagingFilesystem,
 } from "./release-staging.js";
 import {
-  NONCE_RE, appendJournalEvent, describeJournal, pinPrivateDirectory, readJournal, readPrivateRecord, redactDetail, writePrivateRecord,
+  NONCE_RE, appendJournalEvent, describeJournal, pinPrivateDirectory, readJournal, readPrivateRecord, redactDetail, withSlotEvidence, writePrivateRecord,
   type JournalSummary, type PinnedDirectory, type ProcessIdentity,
 } from "./release-staging-journal.js";
 
@@ -363,9 +363,18 @@ function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesyst
     refuse(`${owner.reason}; legacy, incomplete or unverifiable metadata grants no recovery authority`);
     return evidence;
   }
+  let recognized = true;
   for (const observed of slotList.observed) {
     const reason = unrecognized(observed, owner, uid);
-    if (reason) refuse(`${reason}; unrecognized objects are protected`);
+    if (reason) { recognized = false; refuse(`${reason}; unrecognized objects are protected`); }
+  }
+  if (recognized) {
+    // Replacement starts only after every download is published, then moves each executable out.
+    const names = new Set(slotList.observed.map(({ entry }) => entry.name));
+    const executables = [...owner.declared.keys()].filter((name) => /^wollipog-(?:runner|control-plane)-/u.test(name));
+    const untouched = [...names].some((name) => owner.partials.has(name)) ? "a download was still in progress"
+      : executables.length > 0 && executables.every((name) => names.has(name)) ? "every selected executable is still staged" : null;
+    inspection.journal = withSlotEvidence(inspection.journal, untouched);
   }
   const recorded = owner.process ?? inspection.journal.process;
   let updaterGone = false;
@@ -498,10 +507,19 @@ export function recoverStaging(
     // Revalidate immediately before the move: same pinned slot, same evidence, still no holder.
     const second = examine(dataDir, context, fs, procs, options).inspection;
     const source = join(parentBase, STAGING_SLOT);
+    // The descriptors decide where bytes go; the reported paths must still name those directories.
+    const named = (path: string, dir: PinnedDirectory) => {
+      try { const stat = fs.lstat(path); return !stat.isSymbolicLink() && stat.dev === dir.dev && stat.ino === dir.ino; }
+      catch { return false; }
+    };
     if (!second.recovery.eligible || second.recovery.token !== token || !sameIdentity(pinnedSlot, fs.lstat(source)) || !sameIdentity(pinnedParent.stat, fs.lstat(parent))) {
       throw new RecoveryRefusedError(`recovery refused: the attempt changed while recovery was preparing (${second.recovery.reasons.join("; ") || "evidence changed"}); nothing was moved`, second);
     }
-    const preservedPath = join(container, STAGING_SLOT);
+    if (!named(destination, destinationDir) || !named(container, containerDir)) {
+      throw new RecoveryRefusedError(`recovery refused: ${destination} or ${container} was moved or replaced while recovery was preparing; nothing was moved`, second);
+    }
+    let preservedPath = join(container, STAGING_SLOT);
+    let preservedContainer = container;
     const target = join(containerDir.base, STAGING_SLOT);
     fs.rename(source, target);
     if (!sameIdentity(fs.lstat(target), pinnedSlot)) {
@@ -510,6 +528,13 @@ export function recoverStaging(
       throw new RecoveryRefusedError(`recovery stopped: the moved object is not the pinned attempt slot${restored ? "; it was moved back" : `; it remains at ${preservedPath}`}`, null);
     }
     const warnings: string[] = [];
+    if (!named(container, containerDir)) {
+      // Renamed in the instant after the check: report where the pinned directory actually is.
+      let actual: string | null = null;
+      try { actual = readlinkSync(containerDir.base); } catch { /* unknown */ }
+      if (actual) { preservedContainer = actual; preservedPath = join(actual, STAGING_SLOT); }
+      warnings.push(`the preservation directory was moved during recovery; the attempt is now at ${actual ? preservedPath : "an unknown path (inspect the data directory)"}`);
+    }
     for (const [path, fd] of [[parent, pinnedParent.fd], [container, containerDir.fd], [destination, destinationDir.fd]] as const) {
       try { fs.sync(fd); }
       catch (error) { warnings.push(`could not flush ${path}: ${redactDetail((error as Error).message)}`); }
@@ -523,7 +548,7 @@ export function recoverStaging(
     if (journalProblem && inspection.journal.evidence === "recorded") warnings.push(`the phase journal was not updated: ${journalProblem}`);
     let admissible = false;
     try { admissible = list(parent, fs, 1).observed.length === 0; } catch { /* reported as not admissible */ }
-    return { preservedPath, container, tag: inspection.owner.tag!, nonce: inspection.owner.nonce!, admissible, warnings };
+    return { preservedPath, container: preservedContainer, tag: inspection.owner.tag!, nonce: inspection.owner.nonce!, admissible, warnings };
   } finally {
     for (const fd of pins) { try { fs.close(fd); } catch { /* descriptor authority is retired either way */ } }
   }

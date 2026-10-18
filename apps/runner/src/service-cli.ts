@@ -1035,10 +1035,8 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     };
 
     journal.note("staged");
-    // Never replace executables unrecorded: an attempt whose record lacks `installing` provably
-    // left the installation untouched.
-    journal.require("installing");
     installing = true;
+    journal.note("installing");
     try {
       for (const target of targets) replace(target.path, staged.get(target.component)!, false);
       for (const alias of aliases) {

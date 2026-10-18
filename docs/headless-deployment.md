@@ -376,13 +376,15 @@ Inspection turns the record into one of these conclusions:
 
 A record that ends before `cleaned` or `cleanup-failed` is marked uncertain: the process stopped
 or could not record later phases. A missing record (any attempt from an updater older than this
-journal, or one whose journal could not be written) is reported as unknown. A journal that is
-unavailable from the start never fails an upgrade, and a successful upgrade reports journal
-problems as a warning. One rule is strict: once the journal is in use, the updater replaces no
-executable before recording `installing`. If that write fails, the upgrade stops before the
-swap with nothing installed, so a record without `installing` proves the installation was left
-untouched. The journal directory is pinned by descriptor for every write, and a path that fails
-validation is never written. The record is evidence only and never grants cleanup authority.
+journal, or one whose journal could not be written) is reported as unknown. Journaling is best
+effort: journal problems never fail an upgrade, and a successful upgrade reports them as a
+warning. Inspection therefore reads records conservatively. Only a recorded `failed`, which is
+written before replacement starts, proves on its own that executables were not replaced. A
+record that simply stops before `installing` is reported as unknown, unless the retained slot
+itself proves the installation was untouched: a download still in progress, or every selected
+executable still staged. The journal directory is pinned by descriptor for every write, and a
+path that fails validation is never written. The record is evidence only and never grants
+cleanup authority.
 
 The owner record of new attempts also stores the updater's PID, kernel start time, and boot ID,
 so a later recovery can prove that the exact process is gone. A reused PID with a different
@@ -435,7 +437,8 @@ holder still refuses recovery even with the flag.
 Recovery then creates `<data-dir>/upgrade-recovery/<time>-<nonce>-<random>/`, writes its
 `recovery.json` intent record, verifies the evidence once more, and atomically renames the slot
 into that directory. Every write and the rename go through pinned directory descriptors, so
-replacing a path in a service-owned data directory cannot redirect them. Nothing is deleted. The staging parent is left empty, so the next
+replacing a path in a service-owned data directory cannot redirect them. If the preservation
+directory is moved or replaced while recovery is preparing, recovery refuses before the rename. Nothing is deleted. The staging parent is left empty, so the next
 `wollipog update` is admitted without manual filesystem edits. If recovery is interrupted
 before the rename, the slot stays in place and a later run can use the same token. If it is
 interrupted after the rename, the attempt is already preserved and only its record is marked
