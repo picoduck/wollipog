@@ -227,17 +227,19 @@ test("requested cleanup acts while all CI jobs are queued and duplicate same-hea
   }
 });
 
-test("draft requests supersede nothing, but a ready-for-review request on the same head does", async () => {
+test("cleanup reads live readiness when the same request is delivered before and after a draft-to-ready transition", async () => {
   const runs = [workflowRun({ id: 150, head_sha: older })];
-  const draft = fakeApi({ pulls: [pull({ draft: true })], runs });
-  assert.deepEqual(await deliver(event(), draft), []);
-  assert.deepEqual(draft.cancels(), []);
-  // CI admits ready_for_review even when its own payload still says draft; cleanup must instead
-  // use the PR API's live draft state. The triggering PR payload is not trusted evidence here.
-  const ready = fakeApi({ pulls: [pull({ draft: false })], runs });
-  assert.deepEqual(await deliver(event(), ready), [150]);
-  const delayedDraft = fakeApi({ pulls: [pull({ draft: false })], runs });
-  assert.deepEqual(await deliver(event(), delayedDraft), [150], "a delayed event uses live readiness");
+  const livePulls = [pull({ draft: true })];
+  const fake = fakeApi({ pulls: livePulls, runs });
+  const request = event();
+  assert.deepEqual(await deliver(request, fake), []);
+  assert.deepEqual(fake.cancels(), []);
+  // workflow_run carries no source PR draft flag. Re-delivering the identical request after
+  // readiness changes must read the live API state. The separate PR-event contract tests cover
+  // CI's ready_for_review admission when its original PR payload still says draft.
+  livePulls[0] = pull({ draft: false });
+  assert.deepEqual(await deliver(request, fake), [150]);
+  assert.deepEqual(fake.cancels(), ["/repos/example/project/actions/runs/150/cancel"]);
 });
 
 test("reordered requests use the live head, and a later draft change stops a pending cancel", async () => {
