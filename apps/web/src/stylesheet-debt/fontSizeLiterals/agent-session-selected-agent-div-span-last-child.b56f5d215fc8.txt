@@ -1,1 +1,0 @@
-|.agent-session-selected-agent>div>span:last-child|font-size|11.5
