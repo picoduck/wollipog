@@ -37,6 +37,11 @@ export function duplicateProjectNameWarning(name: string, projects: readonly Pic
  * the primary off with the reason in the footer (§7.3). A failed request is a danger notice above the
  * footer with the server's words behind Show Details.
  *
+ * Only a refusal (a 4xx answer) proves nothing was created: the server commits a project, with a new
+ * id each time, before it answers. A timeout, a lost connection, a 5xx or an unreadable reply may
+ * follow a commit, so the dialog reloads the projects and, if one with the submitted name appeared,
+ * carries on as created; otherwise it says the outcome is unknown rather than inviting a duplicate.
+ *
  * `stacked` is New Session's: the new project is selected there, so the description says so instead
  * of promising the folders that the Projects page's hand-off asks for next.
  */
@@ -51,8 +56,9 @@ export function CreateProjectDialog({
   onClose: () => void;
   onCreated: (project: ProjectView) => void;
   accessScopeManagementSupported: boolean;
-  /** The projects the person can see, to warn about a name already in use. */
-  projects: readonly Pick<ProjectView, "name">[];
+  /** The projects the person can see: to warn about a name already in use, and to tell a project a
+   * lost reply created from one that was already there. */
+  projects: readonly ProjectView[];
   /** Opened over New Session, which selects the project once it's created. */
   stacked?: boolean;
   /** The control that opened this dialog, for focus to return to (a button inside New Session). */
@@ -66,6 +72,9 @@ export function CreateProjectDialog({
   const warningId = `${ids}-name-warning`;
   const reasonId = `${ids}-reason`;
   const nameRef = useRef<HTMLInputElement>(null);
+  // The live list as of now, which may already carry a project whose create reply was lost.
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
   const [name, setName] = useState("");
   const [edited, setEdited] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
@@ -106,6 +115,9 @@ export function CreateProjectDialog({
       nameRef.current?.focus();
       return;
     }
+    // The name as the server stores it, and the projects that already had it.
+    const storedName = name.trim().replace(/\s+/g, " ");
+    const existingIds = new Set(projects.filter((project) => project.name === storedName).map((project) => project.id));
     setBusy(true);
     setFailure(null);
     try {
@@ -116,16 +128,36 @@ export function CreateProjectDialog({
       onCreated(project);
     } catch (cause) {
       const raw = cause instanceof Error ? cause.message.trim() : String(cause).trim();
-      // A response means the server refused it; anything else never reached a reply (§8.5).
+      if (cause instanceof ApiError && cause.status < 500) {
+        setFailure({ sentence: "Wollipog refused the request. Nothing was created.", detail: raw || null });
+        return;
+      }
+      const created = await findCreatedProject(storedName, existingIds);
+      if (created) {
+        onCreated(created);
+        return;
+      }
       setFailure({
-        sentence: cause instanceof ApiError
-          ? "Wollipog refused the request. Nothing was created."
-          : "Wollipog didn't respond. Nothing was created.",
+        sentence: "Wollipog didn't answer, so it may have been created. Check the Projects list before trying again.",
         detail: raw || null,
       });
     } finally {
       setBusy(false);
     }
+  };
+  /** The newest project named `storedName` that wasn't there before the request, from a fresh read
+   * and from the live list; null when neither shows one. */
+  const findCreatedProject = async (storedName: string, existingIds: ReadonlySet<string>) => {
+    let reloaded: readonly ProjectView[] = [];
+    try {
+      reloaded = (await api.projects()).projects;
+    } catch {
+      // The live list below can still show it; otherwise the notice says the outcome is unknown.
+    }
+    const appeared = [...reloaded, ...projectsRef.current]
+      .filter((project) => project.name === storedName && !existingIds.has(project.id))
+      .sort((left, right) => right.createdAt - left.createdAt);
+    return appeared[0] ?? null;
   };
   const describedBy = [nameError ? errorId : helperId, !nameError && duplicate ? warningId : null]
     .filter(Boolean).join(" ");

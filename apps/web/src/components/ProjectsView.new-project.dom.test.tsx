@@ -11,7 +11,7 @@ import {
   type RunnerView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
@@ -144,7 +144,7 @@ async function render(client: Partial<ApiClient>): Promise<{ body: HTMLElement; 
     projectLocationWorktreeSetup: async (_projectId: string, locationId: string) => ({ locationId, status: { status: "absent" } }),
     generateProjectLocationWorktreeSetup: async (_projectId: string, locationId: string) => {
       calls.generated.push(locationId);
-      throw new Error("EACCES: permission denied");
+      throw new ApiError("EACCES: permission denied", 422);
     },
     dismissWorktreeSetupNotice: async () => { calls.dismissed += 1; return { dismissed: true as const }; },
     listDirectory: async (_runnerId: string, path: string) => ({ path: path || "/home/ada/docs-site", parent: "/home/ada", entries: [] }),
@@ -284,6 +284,31 @@ test("adding a new folder whose starter setup file fails is a partial success, r
     await settle();
     assert.deepEqual(created, [{ runnerId: "runner-1", name: "Docs Site", path: "/home/ada/docs-site" }]);
     await assertSetupWarningAndRetry(view.body, view.calls);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a starter setup file whose reply is lost says Wollipog couldn't confirm it, not that it failed", async () => {
+  const view = await render({
+    addProjectLocation: async () => ({ project: docs([docsLocation({})], 4) }),
+    generateProjectLocationWorktreeSetup: async () => { throw new TypeError("Failed to fetch"); },
+  });
+  try {
+    await createDocsSite(view.body);
+    const [dialog] = dialogs();
+    await checkStarterSetup(dialog!);
+    const row = [...dialog!.querySelectorAll<HTMLElement>(".add-location-list .choice-row")]
+      .find((candidate) => text(candidate.querySelector(".choice-row-title")).startsWith("Docs Checkout"))!;
+    await act(async () => { row.querySelector<HTMLInputElement>('input[type="radio"]')!.click(); });
+    await act(async () => { button(dialog!, "Add Location").click(); });
+    await settle();
+    assert.equal(dialogs().length, 0, "Add Location closes: the location exists");
+    assert.doesNotMatch(text(view.body), /Couldn't Add the Location/u);
+    assert.deepEqual(toasts.at(-1), {
+      message: "Location added, but Wollipog couldn't confirm its starter setup file.",
+      options: { tone: "warning", detail: "If the location has none, its ⋯ menu offers Create Starter Setup File. Failed to fetch" },
+    });
   } finally {
     await view.unmount();
   }

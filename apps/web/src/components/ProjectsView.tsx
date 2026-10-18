@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { BoxView, ProjectLocationView, ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { archiveProjectWithFeedback, projectArchiveMessage } from "../project-actions.js";
 import { ProjectMemorySharingSettings } from "./ProjectMemorySharing.js";
@@ -341,17 +342,27 @@ export function ProjectsView({
 
   /** The starter setup file onboarding offers for the location it just added. The location exists
    * whatever happens here, so a failure is a warning about the file, not Add Location's error, and
-   * the location's ⋯ offers Create Starter Setup File again (#2965). */
-  const createStarterSetup = async (project: ProjectView, added: ProjectView["locations"][number] | undefined) => {
+   * the location's ⋯ offers Create Starter Setup File again (#2965). Only a refusal proves there is
+   * no file; after a lost reply the warning says so, and the row's own read decides whether its ⋯
+   * still offers one. */
+  const createStarterSetup = async (project: ProjectView, added: ProjectLocationView | undefined) => {
+    const warn = (refused: boolean, raw: string) => showToast(refused
+      ? "Location added, but its starter setup file couldn't be created."
+      : "Location added, but Wollipog couldn't confirm its starter setup file.", {
+      tone: "warning",
+      detail: `${refused
+        ? "Try again from the location's ⋯ menu."
+        : "If the location has none, its ⋯ menu offers Create Starter Setup File."}${raw ? ` ${raw}` : ""}`,
+    });
+    if (!added) {
+      warn(true, "The new location wasn't in Wollipog's reply.");
+      return;
+    }
     try {
-      if (!added) throw new Error("The new location wasn't in Wollipog's reply.");
       await api.generateProjectLocationWorktreeSetup(project.id, added.id);
     } catch (cause) {
-      const raw = cause instanceof Error ? cause.message.trim() : String(cause).trim();
-      showToast("Location added, but its starter setup file couldn't be created.", {
-        tone: "warning",
-        detail: `Try again from the location's ⋯ menu.${raw ? ` ${raw}` : ""}`,
-      });
+      warn(cause instanceof ApiError && cause.status < 500,
+        cause instanceof Error ? cause.message.trim() : String(cause).trim());
       return;
     }
     // Best effort, as from the location's ⋯: the session's setup suggestion keeps its own Dismiss.

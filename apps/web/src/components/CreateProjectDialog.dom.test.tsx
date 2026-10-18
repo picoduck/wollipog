@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { IdentityAdministrationView, ProjectView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
+import { RequestTimeoutError } from "../api-transport.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -56,9 +57,9 @@ function identityAs(role: "admin" | "operator" | "viewer"): IdentityAdministrati
   };
 }
 
-const createdProject = (name: string): ProjectView => ({
-  id: "project-new", name, hidden: false, locations: [],
-  activeSessionCount: 0, unarchivedSessionCount: 0, totalSessionCount: 0, createdAt: 1, updatedAt: 1,
+const createdProject = (name: string, id = "project-new", createdAt = 5): ProjectView => ({
+  id, name, hidden: false, locations: [],
+  activeSessionCount: 0, unarchivedSessionCount: 0, totalSessionCount: 0, createdAt, updatedAt: createdAt,
 });
 
 interface Rendered {
@@ -70,7 +71,7 @@ interface Rendered {
 async function render(options: {
   client?: Partial<ApiClient>;
   accessScopeManagementSupported?: boolean;
-  projects?: readonly Pick<ProjectView, "name">[];
+  projects?: readonly ProjectView[];
   stacked?: boolean;
 } = {}): Promise<Rendered> {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -85,6 +86,7 @@ async function render(options: {
       requests.push(request);
       return { project: createdProject(request.name) };
     },
+    projects: async () => ({ projects: [] }),
     ...options.client,
   } as ApiClient;
   await act(async () => {
@@ -179,7 +181,9 @@ test("Create Project with an empty name shows the field error, focuses the name 
 });
 
 test("a name another project uses warns with the count and that name, and creating stays allowed", async () => {
-  const view = await render({ projects: [{ name: "Docs Site" }, { name: "docs site" }, { name: "Payments" }] });
+  const view = await render({ projects: [
+    createdProject("Docs Site", "docs-1", 1), createdProject("docs site", "docs-2", 1), createdProject("Payments", "payments", 1),
+  ] });
   try {
     await typeName("DOCS SITE");
     const warning = dialog().querySelector(".field-warn");
@@ -277,12 +281,73 @@ test("a failed request is Couldn't Create the Project above the footer, with the
   }
 });
 
-test("a request that never reached Wollipog says it didn't respond", async () => {
-  const view = await render({ client: { createProject: async () => { throw new TypeError("Failed to fetch"); } } });
+/** A server that commits the project, then whose reply is lost with `failure`: what the projects
+ * read afterwards returns, and every project it committed. */
+function lostReply(failure: () => Error, options: { reload?: "shows" | "fails" } = {}) {
+  const committed: ProjectView[] = [];
+  return {
+    committed,
+    client: {
+      createProject: async (request: { name: string }) => {
+        // The server stores the name trimmed with its spaces collapsed.
+        committed.push(createdProject(request.name.trim().replace(/\s+/g, " "), `project-${committed.length + 1}`, 10));
+        throw failure();
+      },
+      projects: async () => {
+        if (options.reload === "fails") throw new TypeError("Failed to fetch");
+        return { projects: options.reload === "shows" ? committed : [] };
+      },
+    } as Partial<ApiClient>,
+  };
+}
+
+test("a lost reply whose project the reload shows carries on as created, with no notice", async () => {
+  const server = lostReply(() => new RequestTimeoutError(60_000), { reload: "shows" });
+  // A project already named alike is not the one this request created.
+  const existing = createdProject("Docs Site", "docs-old", 1);
+  const view = await render({ client: server.client, projects: [existing] });
+  try {
+    await typeName("  Docs   Site ");
+    await submit();
+    assert.equal(server.committed.length, 1);
+    assert.deepEqual(view.created.map((project) => project.id), ["project-1"], "the committed project, not the older namesake");
+    assertNoDomNode(dialog().querySelector('[role="alert"]'), "nothing failed");
+  } finally {
+    await view.unmount();
+  }
+});
+
+for (const [label, failure] of [
+  ["a timeout", () => new RequestTimeoutError(60_000)],
+  ["a lost connection", () => new TypeError("Failed to fetch")],
+  ["a 503", () => new ApiError("upstream unavailable", 503)],
+] as const) {
+  test(`after ${label} that the reload can't confirm, the notice says the outcome is unknown`, async () => {
+    const server = lostReply(failure);
+    const view = await render({ client: server.client });
+    try {
+      await typeName("Docs Site");
+      await submit();
+      const alert = dialog().querySelector('[role="alert"]');
+      assert.equal(text(alert?.querySelector(".notice-title")), "Couldn't Create the Project");
+      assert.match(text(alert), /Wollipog didn't answer, so it may have been created\. Check the Projects list before trying again\./);
+      assert.doesNotMatch(text(alert), /Nothing was created/, "a lost reply proves nothing either way");
+      assert.ok(alert?.querySelector("button"), "the raw message is behind Show Details");
+      assert.deepEqual(view.created, []);
+    } finally {
+      await view.unmount();
+    }
+  });
+}
+
+test("when the reload fails too, the outcome stays unknown", async () => {
+  const server = lostReply(() => new TypeError("Failed to fetch"), { reload: "fails" });
+  const view = await render({ client: server.client });
   try {
     await typeName("Docs Site");
     await submit();
-    assert.match(text(dialog().querySelector('[role="alert"]')), /^Couldn't Create the Project ?Wollipog didn't respond\. Nothing was created\./);
+    assert.match(text(dialog().querySelector('[role="alert"]')), /may have been created/);
+    assert.deepEqual(view.created, []);
   } finally {
     await view.unmount();
   }

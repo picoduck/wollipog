@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { IdentityAdministrationView, ProjectView } from "@wollipog/protocol";
-import type { ApiClient } from "../api.js";
+import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { CreateProjectDialog } from "../components/CreateProjectDialog.js";
 import { Modal } from "../components/Modal.js";
@@ -13,7 +13,8 @@ import "../styles.css";
  *
  * Two projects are already named Docs Site, so typing it shows the duplicate warning. Query string,
  * so every state is a clean reload: `?theme=light`; `?role=viewer` is a Viewer; `?scopes=loading`
- * never answers the access levels; `?fail=1` never reaches Wollipog when creating; `?parent=1`
+ * never answers the access levels; `?fail=refused` is a server that refuses the name; `?fail=1` loses
+ * the reply, so the dialog can't tell whether the project was created; `?parent=1`
  * opens it over a New Session dialog, whose phone sheet it takes over with Back.
  */
 
@@ -40,8 +41,13 @@ const identity: IdentityAdministrationView = {
   ],
 };
 
-const projects: Pick<ProjectView, "name">[] = [
-  { name: "Docs Site" }, { name: "docs site" }, { name: "Storefront" }, { name: "Billing Service" },
+const project = (id: string, name: string): ProjectView => ({
+  id, name, hidden: false, locations: [],
+  activeSessionCount: 0, unarchivedSessionCount: 0, totalSessionCount: 0, createdAt: 1, updatedAt: 1,
+});
+const projects: ProjectView[] = [
+  project("docs-1", "Docs Site"), project("docs-2", "docs site"), project("storefront", "Storefront"),
+  project("billing", "Billing Service"),
 ];
 
 declare global {
@@ -54,15 +60,12 @@ window.__NEW_PROJECT_E2E__ = { created: [], closed: 0 };
 const client = {
   getIdentity: () => params.get("scopes") === "loading" ? new Promise(() => {}) : Promise.resolve(identity),
   createProject: async (request: { name: string }) => {
+    if (params.get("fail") === "refused") throw new ApiError("A project name can't contain control characters.", 400);
     if (params.get("fail") === "1") throw new TypeError("Failed to fetch");
     window.__NEW_PROJECT_E2E__.created.push(request);
-    return {
-      project: {
-        id: "project-new", name: request.name, hidden: false, locations: [],
-        activeSessionCount: 0, unarchivedSessionCount: 0, totalSessionCount: 0, createdAt: 1, updatedAt: 1,
-      },
-    };
+    return { project: project("project-new", request.name) };
   },
+  projects: async () => ({ projects }),
 } as unknown as ApiClient;
 
 function Harness() {
