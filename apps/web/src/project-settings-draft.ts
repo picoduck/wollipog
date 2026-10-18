@@ -116,6 +116,17 @@ export function projectSettingsChanges(project: ProjectView, values: ProjectSett
 }
 
 /**
+ * `values` with Memory Sharing at the saved choice: what a Save queued behind another request sends
+ * when the choice changed after it was pressed. Sharing is only ever sent by a Save pressed while its
+ * consent notice showed (#2963), so a later choice waits in the draft for a Save of its own.
+ */
+export function withSavedMemorySharing(project: ProjectView, values: ProjectSettingsValues): ProjectSettingsValues {
+  const next: ProjectSettingsValues = { name: values.name, cost: values.cost, tools: values.tools };
+  if (project.memorySharing !== undefined) next.memorySharing = project.memorySharing;
+  return next;
+}
+
+/**
  * The draft after `sent` was saved: a field still showing what was sent is now saved, so it leaves
  * the draft; one typed into while the request ran keeps what was typed.
  */

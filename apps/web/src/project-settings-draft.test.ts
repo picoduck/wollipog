@@ -8,6 +8,7 @@ import {
   projectSettingsErrors,
   projectSettingsValues,
   revealedAfterSave,
+  withSavedMemorySharing,
 } from "./project-settings-draft.js";
 
 function project(options: Partial<ProjectView> = {}): ProjectView {
@@ -103,4 +104,14 @@ test("a server with no memory policy is never sent one, and a choice left in the
   assert.equal(projectSettingsDirty(older, { memorySharing: "shared" }), false);
   assert.deepEqual(projectSettingsChanges(older, projectSettingsValues(older, { name: "Beta", memorySharing: "shared" })),
     { name: "Beta" });
+});
+
+test("a queued save's values keep the typed fields and put Memory Sharing back at the saved choice", () => {
+  const separate = project({ memorySharing: "separate" });
+  const values = projectSettingsValues(separate, { name: "Beta", memorySharing: "shared" });
+  assert.deepEqual(withSavedMemorySharing(separate, values), { name: "Beta", cost: "5", tools: "100", memorySharing: "separate" });
+  assert.deepEqual(projectSettingsChanges(separate, withSavedMemorySharing(separate, values)), { name: "Beta" });
+  assert.deepEqual(draftAfterSave({ name: "Beta", memorySharing: "shared" }, withSavedMemorySharing(separate, values)),
+    { memorySharing: "shared" }, "the later choice stays in the draft");
+  assert.deepEqual(withSavedMemorySharing(project({ memorySharing: undefined }), values), { name: "Beta", cost: "5", tools: "100" });
 });

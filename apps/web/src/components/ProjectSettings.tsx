@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
-import type { ProjectView, RunnerView, UpdateProjectRequest } from "@wollipog/protocol";
+import type { ProjectMemorySharing, ProjectView, RunnerView, UpdateProjectRequest } from "@wollipog/protocol";
 import { useLeaveGuard } from "../leave-guard.js";
 import type { RunnerDisplay } from "../runners.js";
 import {
@@ -10,6 +10,7 @@ import {
   projectSettingsErrors,
   projectSettingsValues,
   revealedAfterSave,
+  withSavedMemorySharing,
   type ProjectSettingsDraft,
   type ProjectSettingsField,
 } from "../project-settings-draft.js";
@@ -78,6 +79,12 @@ export function ProjectSettings({
   const leaveAfterSave = useRef<(() => void) | null>(null);
   /** Save pressed while another request for this project ran: it runs once that one settles. */
   const saveWhenFree = useRef(false);
+  /**
+   * The Memory Sharing choice on screen when that Save was last pressed. The queued save takes the typed
+   * fields as they are when it runs, but never a Memory Sharing choice made after the press: sharing
+   * is only sent by a Save pressed while its consent notice showed (#2963).
+   */
+  const queuedMemorySharing = useRef<ProjectMemorySharing | undefined>(undefined);
 
   const values = projectSettingsValues(project, draft);
   const dirty = projectSettingsDirty(project, draft);
@@ -102,14 +109,19 @@ export function ProjectSettings({
     saveWhenFree.current = false;
   };
 
-  const save = async () => {
+  /** `queued` is the run of a press kept while another request ran, rather than a press now. */
+  const save = async (queued = false) => {
     if (savingRef.current || readOnly) return;
     // Another request for this project is still running (a Sessions tab change); the press is kept
-    // and Save runs once that request settles, on the draft as it is then.
+    // and Save runs once that request settles, on the draft as it is then, except Memory Sharing.
     if (busy !== null) {
+      queuedMemorySharing.current = values.memorySharing;
       saveWhenFree.current = true;
       return;
     }
+    // A Memory Sharing choice made since a queued press stays in the draft, with its notice, for a
+    // Save of its own; the rest of the draft saves now.
+    const heldBack = queued && values.memorySharing !== queuedMemorySharing.current;
     saveWhenFree.current = false;
     setRevealed(new Set(PROJECT_SETTINGS_FIELDS));
     edited.current.clear();
@@ -119,12 +131,12 @@ export function ProjectSettings({
       document.getElementById(inputIds[invalid])?.focus();
       return;
     }
-    const changes = projectSettingsChanges(project, values);
+    const sent = heldBack ? withSavedMemorySharing(project, values) : values;
+    const changes = projectSettingsChanges(project, sent);
     if (Object.keys(changes).length === 0) {
-      reset();
+      if (!heldBack) reset();
       return;
     }
-    const sent = values;
     savingRef.current = true;
     setSaving(true);
     setSaveError(null);
@@ -145,7 +157,7 @@ export function ProjectSettings({
     }
   };
   useEffect(() => {
-    if (busy === null && saveWhenFree.current) void save();
+    if (busy === null && saveWhenFree.current) void save(true);
   // `save` reads this render's draft, which is the point: it saves what is on screen now.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy]);
