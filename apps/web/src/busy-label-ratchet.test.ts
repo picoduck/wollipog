@@ -43,7 +43,6 @@ const BASELINE: Readonly<Record<string, number>> = {
   "components/NewRunDialog.tsx": 1,
   "components/NewSessionDialog.tsx": 1,
   "components/OfflineBanner.tsx": 1,
-  "components/OnboardRunnerDialog.tsx": 3,
   "components/OutboundEventSubscriptions.tsx": 1,
   // Moved with the pairing banner from App.tsx (#2303), which kept its behaviour as it was.
   "components/PairingBanner.tsx": 2,
