@@ -205,6 +205,26 @@ test("the Settings review status names each machine's gap and its installation's
   assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM video_profile_live_validation").get()!.n, 3, "reading status writes nothing");
 });
 
+test("a machine's proof history is found by its exact target, however many other proofs are newer", async (t) => {
+  const h = await harness(t);
+  h.register(true);
+  const peer = h.video.pacedPeers()[0]!;
+  const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", attestation });
+  const expired = h.video.liveValidation.recordInspectedRuns(h.owner, target, syntheticInspectedVideoRuns(target, h.owner.userId),
+    Date.now() - 31 * 24 * 60 * 60 * 1000)!;
+  assert.ok(expired);
+  // 100 newer proofs for another installation's attestation push it out of the inventory's newest 100.
+  const other = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5",
+    attestation: syntheticMediaReviewerAttestation("claude", "another installation") });
+  for (let i = 0; i < 100; i++) {
+    assert.ok(h.video.liveValidation.recordInspectedRuns(h.owner, other, syntheticInspectedVideoRuns(other, h.owner.userId)));
+  }
+  assert.ok(!h.video.liveValidation.list(h.owner)!.some((proof) => proof.proofId === expired.proofId));
+  const response = await h.call("owner", "GET", "/api/video-evidence/review-status");
+  assert.deepEqual((response.body as unknown as VideoReviewSettingsStatus).machines[0]!.proof,
+    { state: "expired", proofId: expired.proofId, expiresAt: expired.expiresAt });
+});
+
 test("recording matches the advertised contract by field, whatever its key order", async (t) => {
   const h = await harness(t);
   h.register(true);

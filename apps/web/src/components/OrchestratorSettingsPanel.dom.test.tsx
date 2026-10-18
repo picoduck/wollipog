@@ -1209,6 +1209,33 @@ test("Video Evidence Review shows each machine's live proof state and why review
   }
 });
 
+test("a status with a narrower or malformed shape hides Video Evidence Review and leaves Settings usable", async () => {
+  const valid = videoStatus();
+  const malformed: Array<[string, unknown]> = [
+    ["no reviewer", { ...valid, reviewer: undefined }],
+    ["no reviewer model", { ...valid, reviewer: { driver: "claude-code", effort: "high" } }],
+    ["no media types", { ...valid, mediaTypes: undefined }],
+    ["an unknown media type", { ...valid, mediaTypes: ["video/quicktime"] }],
+    ["a null machine", { ...valid, machines: [null] }],
+    ["a machine without a name", { ...valid, machines: [{ ...valid.machines[0]!, machineName: undefined }] }],
+    ["an invalid certified date", { ...valid, machines: [{ ...valid.machines[0]!,
+      proof: { state: "certified", proofId: "p1", validatedAt: Number.NaN, expiresAt: 1 } }] }],
+    ["an out-of-range expiry", { ...valid, machines: [{ ...valid.machines[1]!, proof: { state: "expired", proofId: "p2", expiresAt: 9e15 } }] }],
+    ["an unknown proof state", { ...valid, machines: [{ ...valid.machines[0]!, proof: { state: "pending" } }] }],
+    ["a gap with a proof", { ...valid, machines: [{ ...valid.machines[4]!, proof: { state: "missing" } }] }],
+    ["no readiness reason", { ...valid, readiness: { available: false, code: "live_validation" } }],
+  ];
+  for (const [label, body] of malformed) {
+    const { transport, state } = server(settings());
+    state.video = { status: 200, body };
+    const view = await mount(panel(transport));
+    try {
+      assert.equal(videoGroup(view.container), undefined, `${label} hides the group`);
+      assert.ok(view.container.querySelector("#orchestrator-max-children"), `${label} leaves the rest of Settings usable`);
+    } finally { await view.cleanup(); }
+  }
+});
+
 test("Video Evidence Review states availability, admin-only access and an older server plainly", async () => {
   const { transport, state } = server(settings());
   state.video = { status: 200, body: videoStatus({ readiness: { available: true } }) };

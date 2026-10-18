@@ -92,8 +92,7 @@ export function composeHostingVideoEvidence(db: ControlPlaneDb, options: {
   /** Settings view for an owner/admin: each machine's installation gap, or for an attested
    * installation the newest proof for its exact attestation (certified, expired, revoked, missing). */
   const settingsStatus = (principal: HumanPrincipal, now = Date.now()): VideoReviewSettingsStatus | null => {
-    const proofs = liveValidation.list(principal, now);
-    if (!proofs) return null;
+    if (!administrator(principal)) return null;
     const installations = mediaReviewerInstallations(db);
     const machines = mediaReviewerInstallationGaps(db).map((machine) => {
       const installation = machine.gap ? undefined : installations.find((candidate) =>
@@ -101,13 +100,12 @@ export function composeHostingVideoEvidence(db: ControlPlaneDb, options: {
       if (!installation) return { ...machine, proof: null };
       const target = installationReviewerTarget(installation, "claude-code");
       const current = liveValidation.current(target, now);
-      const newest = proofs.find((proof) => proof.driver === target.driver && proof.modelId === target.modelId &&
-        proof.capabilitiesSha256 === target.capabilitiesSha256);
+      const newest = liveValidation.newest(target);
       const proof: VideoReviewerProofState = current
         ? { state: "certified", proofId: current.proofId, validatedAt: current.validatedAt, expiresAt: current.expiresAt }
         : !newest ? { state: "missing" }
-        : newest.revoked ? { state: "revoked", proofId: newest.proofId }
-        : newest.expired ? { state: "expired", proofId: newest.proofId, expiresAt: newest.expiresAt }
+        : newest.revoked ? { state: "revoked", proofId: newest.proof.proofId }
+        : newest.proof.expiresAt <= now ? { state: "expired", proofId: newest.proof.proofId, expiresAt: newest.proof.expiresAt }
         : { state: "missing" };
       return { ...machine, proof };
     });

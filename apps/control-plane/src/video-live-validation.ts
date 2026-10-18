@@ -145,6 +145,15 @@ export class VideoLiveValidationRegistry {
     });
   }
 
+  /** The newest proof, revoked or not, recorded for exactly this reviewer target, for the Settings
+   * history only. Readiness and admission never use it; they use `current`. */
+  newest(target: EvidenceReviewerTarget): { proof: VideoProfileLiveProof; revoked: boolean } | null {
+    const row = this.db.prepare("SELECT proof, revoked FROM video_profile_live_validation WHERE driver=? AND model_id=? " +
+      "AND provider_id=? AND capabilities_sha256=? ORDER BY rowid DESC LIMIT 1")
+      .get(target.driver, target.modelId, target.providerId, target.capabilitiesSha256) as { proof: string; revoked: number } | undefined;
+    return row ? { proof: JSON.parse(row.proof) as VideoProfileLiveProof, revoked: row.revoked !== 0 } : null;
+  }
+
   revoke(principal: AuthPrincipal, proofId: string): boolean {
     return administrator(principal) &&
       Number(this.db.prepare("UPDATE video_profile_live_validation SET revoked=1 WHERE proof_id=? AND revoked=0")

@@ -23,6 +23,35 @@ const UNAVAILABLE: Record<string, string> = {
 
 const date = (ms: number) => new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(ms));
 
+const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const text = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+/** A timestamp `Intl.DateTimeFormat` can format: finite and inside the Date range. */
+const time = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && !Number.isNaN(new Date(value).getTime());
+function validProof(proof: unknown): boolean {
+  if (!record(proof)) return false;
+  switch (proof.state) {
+    case "certified": return text(proof.proofId) && time(proof.validatedAt) && time(proof.expiresAt);
+    case "expired": return text(proof.proofId) && time(proof.expiresAt);
+    case "revoked": return text(proof.proofId);
+    case "missing": return true;
+    default: return false;
+  }
+}
+/** Every field the group renders, checked before it renders: a server answering with a narrower or
+ * different shape (a mixed-version deployment, for example) shows nothing instead of breaking Settings. */
+export function validVideoReviewStatus(value: unknown): value is VideoReviewSettingsStatus {
+  if (!record(value) || !record(value.readiness) || !record(value.reviewer) || !Array.isArray(value.mediaTypes) ||
+    !Array.isArray(value.machines)) return false;
+  const readiness = value.readiness, reviewer = value.reviewer;
+  return (readiness.available === true || (readiness.available === false && text(readiness.code) && typeof readiness.reason === "string")) &&
+    text(reviewer.driver) && text(reviewer.model) && text(reviewer.effort) &&
+    value.mediaTypes.every((type) => type === "video/mp4" || type === "video/webm") &&
+    value.machines.every((machine) => record(machine) && text(machine.runnerId) && text(machine.machineName) &&
+      (machine.agentId === null || text(machine.agentId)) &&
+      (machine.gap === null ? validProof(machine.proof)
+        : record(machine.gap) && text(machine.gap.code) && text(machine.gap.reason) && machine.proof === null));
+}
+
 /** The badge and sentence for one machine: its installation gap, or its live proof state. */
 function machineState(machine: VideoReviewerMachineStatus): { label: string; tone: StatusTone; sentence: string } {
   if (machine.gap || !machine.proof) return { label: "Unavailable", tone: "neutral", sentence: machine.gap?.reason ?? "" };
@@ -47,9 +76,8 @@ export function VideoReviewStatusGroup() {
     let current = true;
     api.videoReviewStatus().then((status) => {
       if (!current) return;
-      // A server that answers the path with something else predates the route: show nothing.
-      const valid = status && typeof status.readiness === "object" && status.readiness !== null && Array.isArray(status.machines);
-      setLoad(valid ? { kind: "loaded", status } : { kind: "unsupported" });
+      // A server that answers the path with anything else, or with a narrower shape, shows nothing.
+      setLoad(validVideoReviewStatus(status) ? { kind: "loaded", status } : { kind: "unsupported" });
     }, (caught: unknown) => {
       if (!current) return;
       const status = caught instanceof ApiError ? caught.status : 0;
