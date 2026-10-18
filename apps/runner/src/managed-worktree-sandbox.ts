@@ -56,6 +56,19 @@ export function managedWorktreeAdminMatches(worktreePath: string, worktreeGitDir
 }
 
 /**
+ * The canonical shared Git directory and admin directory of a runner-created linked worktree, or
+ * null. The shared directory comes from the runner-recorded repository, and the admin directory
+ * counts only when its read-only `gitdir` back-pointer names this worktree (#3316).
+ */
+export function managedWorktreeGitLayout(
+  worktreePath: string,
+  repoPath: string,
+): { commonGitDir: string; worktreeGitDir: string } | null {
+  const layout = linkedWorktreeGitLayout(worktreePath, repoPath);
+  return layout && managedWorktreeAdminMatches(worktreePath, layout.worktreeGitDir) ? layout : null;
+}
+
+/**
  * Absolute paths a sandbox should present read-only while the rest of each managed worktree stays
  * writable. Attached operator worktrees never reach this list: the caller derives `protections`
  * from runner-created identities only, exactly as the command-approval boundary does.

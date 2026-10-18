@@ -34,6 +34,7 @@ wollipog worktree create --branch <name> [--base <ref>] --json
 wollipog worktree attach --path <absolute-path> --json
 wollipog worktree select --path <absolute-path> --json
 wollipog worktree discard --path <absolute-path> --json
+wollipog worktree delete-refs [--path <absolute-path>] --ref <ref>=<object-id> [--ref ...] --json
 wollipog decision request --request-id <id> --resource-key <key> --snapshot '<json>' --json
 wollipog decision get <occurrence-id> [--session <descendant-id>] --json
 wollipog decision list [--session <descendant-id>] [--limit <1-100>] [--cursor <occurrence-id>] --json
@@ -316,6 +317,31 @@ file does not approve evidence or a merge. External evidence URLs and review rul
 Attach the exact completed capture you intend to cite. Re-attaching an unchanged identical file
 returns the existing artifact; a changed file needs new metadata and any applicable new review.
 Keep files within the authorized task scope and respect privacy, retention, and approval policies.
+
+## Deleting Refs From an Isolated Session
+
+In a sandboxed session, Git may be unable to delete any ref, because it cannot take
+`packed-refs.lock` in the read-only shared Git directory. A `git rebase` or `git cherry-pick` then
+prints that lock error yet finishes, but leaves `CHERRY_PICK_HEAD` or `AUTO_MERGE` behind, so
+`git status` still reports a cherry-pick in progress; `git cherry-pick --quit`, `git branch -d` and
+`git update-ref -d` fail the same way. Do not delete those files by hand. Ask the runner instead,
+with `wollipog worktree delete-refs` or the `delete_worktree_refs` MCP tool, giving each ref with
+the object id it holds now (`git rev-parse <ref>`):
+
+```text
+wollipog worktree delete-refs --ref CHERRY_PICK_HEAD=<object-id> --ref AUTO_MERGE=<object-id> --json
+```
+
+It deletes only this session's refs: a worktree's `CHERRY_PICK_HEAD`, `REVERT_HEAD` and
+`AUTO_MERGE` (not while a rebase or merge is in progress; after an interrupted cherry-pick
+sequence, run `git cherry-pick --quit` first), and `refs/heads/<branch>` or
+`refs/remotes/<remote>/<branch>` for a branch Wollipog recorded for this session's worktrees, once
+no worktree has it checked out. A changed value deletes nothing; refs already gone are reported as
+absent. `--path` names another of this session's worktrees; the default is the selected one. Only
+Linux runners with bubblewrap support it; other runners refuse, and then the leftovers stay until a
+person removes them. While it deletes a branch, a checkout or commit in another worktree of the
+repository can fail briefly on `HEAD.lock` or `index.lock`; retry it. The result lists every
+deleted ref with the object id it held.
 
 ## Retiring a Worktree
 

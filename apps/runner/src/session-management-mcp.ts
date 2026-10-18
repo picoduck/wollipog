@@ -9,6 +9,7 @@ import {
   PACED_VIDEO_REVIEW_MIN_PROTOCOL,
   supportsPacedVideoReviewPeer,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  MAX_SESSION_WORKTREE_REF_DELETIONS,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
@@ -424,6 +425,23 @@ async function worktreeRetirementCompatibilityError(deps: McpDeps): Promise<Tool
     ? null
     : controlPlaneUpdateRequired(needsNewerWollipog("Managed worktree retirement needs",
       "Update Wollipog before discarding a runner-owned worktree."), required, actual);
+}
+
+/** A pre-v227 control plane has no ref deletion route, and its refusal would not say why. */
+async function worktreeRefDeletionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("runner-managed ref deletion", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Runner-managed ref deletion needs",
+      "Update Wollipog before asking the runner to delete this session's refs."), required, actual);
 }
 
 /** A pre-v190 control plane has no stop route, and its refusal would not say why. */
@@ -995,7 +1013,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
-  "attach_worktree", "select_worktree", "discard_worktree"]);
+  "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "allocate_campaign_budget",
   "run_campaign_review_job",
@@ -2896,6 +2914,43 @@ export const TOOLS: McpTool[] = [
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees/discard`, { path: args.path });
       if (!r.ok) return errorResult(r.message);
       return textResult(mapWorktreeResult(r.data));
+    },
+  },
+  {
+    name: "delete_worktree_refs",
+    description: "Ask the runner to delete refs this session owns but cannot delete from inside its sandbox. In an isolated session Git cannot take packed-refs.lock in the shared Git directory, so a rebase or cherry-pick prints that lock error and leaves CHERRY_PICK_HEAD or AUTO_MERGE behind, and git cherry-pick --quit, git branch -d and git update-ref -d fail. The runner deletes, outside the sandbox and in one all-or-nothing transaction: this worktree's CHERRY_PICK_HEAD, REVERT_HEAD and AUTO_MERGE (as git cherry-pick --quit would, refused while a rebase or merge is in progress; run git cherry-pick --quit first if a cherry-pick sequence is still recorded), refs/heads/<branch> for a branch recorded for this session's worktrees that no worktree has checked out, and refs/remotes/<remote>/<branch> for such a branch. Nothing else, and only for this session. Give each ref with the full object id it holds now (git rev-parse <ref>); a changed value deletes nothing. Refs already gone are reported as absent, so repeating a call is safe. Only Linux runners with bubblewrap support it; other runners refuse.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "One of this session's worktrees; defaults to the selected one" },
+        refs: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_SESSION_WORKTREE_REF_DELETIONS,
+          items: {
+            type: "object",
+            properties: {
+              ref: { type: "string", description: "CHERRY_PICK_HEAD, REVERT_HEAD, AUTO_MERGE, refs/heads/<branch> or refs/remotes/<remote>/<branch>" },
+              oldOid: { type: "string", pattern: "^([0-9a-f]{40}|[0-9a-f]{64})$", description: "The full object id the ref holds now" },
+            },
+            required: ["ref", "oldOid"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["refs"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (!Array.isArray(args?.refs) || args.refs.length === 0) return errorResult("refs is required");
+      if (args.path !== undefined && (typeof args.path !== "string" || !args.path)) return errorResult("path must be a non-empty string");
+      const compatibilityError = await worktreeRefDeletionCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/worktrees/delete-refs`,
+        { ...(typeof args.path === "string" ? { path: args.path } : {}), refs: args.refs });
+      if (!r.ok) return errorResult(r.message);
+      return textResult(r.data?.refDeletion ?? r.data);
     },
   },
   {

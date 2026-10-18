@@ -323,3 +323,22 @@ test("only the session owner and its controlling Orchestrator may stop one of it
   assert.match(backgroundJobStopAuthorizationError({ ...owner, role: "admin" as const }, child, false)!, refused);
   assert.deepEqual(backgroundJobStopActor(owner, "usr_local"), { kind: "user", userId: "usr_1" });
 });
+
+test("only a session's own credential reaches runner-managed ref deletion, never a descendant (#3316)", () => {
+  const route = "/api/sessions/:id/worktrees/delete-refs";
+  for (const orchestrator of [true, false]) {
+    const credential: AgentPrincipal = {
+      kind: "agent", actorId: "s_parent", credentialSessionId: "s_parent", orchestrator,
+      organizationId: "org_1", delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
+    };
+    assert.equal(agentCredentialSessionTargetError(route, credential, "s_parent"), null);
+    for (const [target, descendant] of [["s_child", true], ["s_other", false]] as const) {
+      assert.match(agentCredentialSessionTargetError(route, credential, target, descendant)!, /only its own session's refs/u);
+    }
+  }
+  const sessionless: AgentPrincipal = {
+    kind: "agent", actorId: "a", organizationId: "org_1",
+    delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
+  };
+  assert.match(agentCredentialSessionTargetError(route, sessionless, "s_parent")!, /only its own session's refs/u);
+});

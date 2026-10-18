@@ -154,6 +154,7 @@ import {
 } from "./git-ops.js";
 import { flushProjectedOutbox, Outbox } from "./outbox.js";
 import { SessionManager } from "./session-manager.js";
+import { REF_DELETION_DRAIN_MS } from "./worktree-ref-deletion.js";
 import {
   inspectCheckoutWorktreeSetupConfig,
   resolveWorktreeSetupRepositoryRoot,
@@ -2903,6 +2904,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         worktree?: SessionWorktreeView;
         isolation?: import("@wollipog/protocol").SessionWorktreeIsolationNotice;
         retirement?: import("@wollipog/protocol").SessionWorktreeRetirementResult;
+        refDeletion?: import("@wollipog/protocol").SessionWorktreeRefDeletionResult;
         path?: ".wollipog.json";
         detected?: string[];
       }> = msg.operation === "create"
@@ -2918,7 +2920,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               ? sessions.retryWorktreeSetup(msg.sessionId, msg.path)
               : msg.operation === "generate_setup"
                 ? sessions.generateWorktreeSetupConfig(msg.sessionId)
-                : sessions.discardWorktree(msg.sessionId, msg.path, {
+                : msg.operation === "delete_refs"
+                  ? sessions.deleteWorktreeRefs(msg.sessionId, msg.path, msg.refs)
+                  : sessions.discardWorktree(msg.sessionId, msg.path, {
                   requireDelivered: msg.operation === "discard" && msg.requireDelivered === true,
                 });
       void operation.then((result) => {
@@ -2936,6 +2940,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           ...(result.worktree ? { worktree: result.worktree } : {}),
           ...(result.isolation ? { isolation: result.isolation } : {}),
           ...(result.retirement ? { retirement: result.retirement } : {}),
+          ...(result.refDeletion ? { refDeletion: result.refDeletion } : {}),
           ...(result.path && result.detected ? { generatedSetup: { path: result.path, detected: result.detected } } : {}),
         });
       }).catch((error) => sendUp({
@@ -4237,7 +4242,17 @@ function shutdown(exitCode = 0): void {
       }
     })
     .catch((error) => log(`pending-kill drain failed: ${errText(error)}`))
-    .finally(() => process.exit(exitCode));
+    .finally(async () => {
+      // A ref deletion holds worktrees' HEAD and index locks; none may outlive the runner (#3316).
+      try {
+        if (!await sessions.drainWorktreeRefDeletions(REF_DELETION_DRAIN_MS)) {
+          log("a ref deletion did not stop in time; its worktree locks are journaled and removed at the next start");
+        }
+      } catch (error) {
+        log(`ref deletion drain failed: ${errText(error)}`);
+      }
+      process.exit(exitCode);
+    });
 }
 
 // Wrapped so the signal name Node passes as the listener's first argument is never mistaken for

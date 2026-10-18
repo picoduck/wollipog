@@ -104,8 +104,10 @@ export function worktreeHelp(): string {
     "  worktree attach [--session <session-id>] --path <absolute-path> [--json]",
     "  worktree select [--session <session-id>] --path <absolute-path> [--json]",
     "  worktree discard [--session <session-id>] --path <absolute-path> [--json]",
+    "  worktree delete-refs [--path <absolute-path>] --ref <ref>=<expected-object-id> [--ref ...] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
     "An injected agent session defaults --session to itself. Use discard, not raw Git removal, for runner-owned worktrees; active retirement is durably deferred until provider exit and then replays on its own.",
+    "delete-refs asks the runner to delete refs an isolated session cannot delete itself, because Git cannot take packed-refs.lock in its read-only shared Git directory: the worktree's CHERRY_PICK_HEAD, REVERT_HEAD and AUTO_MERGE, and refs/heads/<branch> or refs/remotes/<remote>/<branch> for a branch recorded for this session's worktrees. It acts only on the injected session and its selected worktree unless --path names another of its worktrees. Each --ref names the object id the ref holds now; a changed value deletes nothing. Only Linux runners with bubblewrap support it.",
   ].join("\n");
 }
 

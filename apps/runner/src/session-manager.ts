@@ -84,6 +84,7 @@ import type {
   SessionWorktreeIsolationNotice,
   SessionWorktreeProgressPhase,
   SessionWorktreeRetirementResult,
+  SessionWorktreeRefDeletionResult,
   SessionWorktreeView,
   WorktreePortBlock,
   WorktreeSetupConfigStatus,
@@ -123,8 +124,17 @@ import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } from "./hook-settings.js";
 import {
-  managedWorktreeAdminMatches, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths,
+  managedWorktreeAdminMatches, managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths,
 } from "./managed-worktree-sandbox.js";
+import {
+  deleteOwnedWorktreeRefs,
+  RefDeletionLockJournal,
+  refDeletionGitRunner,
+  validateWorktreeRefDeletionRequests,
+  WorktreeRefDeletionRefusal,
+  type GitRunner,
+  type WorktreeRefDeletionScope,
+} from "./worktree-ref-deletion.js";
 import type {
   CompletedCommandReconciliationProof,
   DriverBackgroundJobStopResult,
@@ -1586,6 +1596,12 @@ export class SessionManager {
   private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
+  /** The runner's ref-deleting Git runs only in its own confined mount view (#3316), because the
+   * session can race the runner's path checks; a runner that cannot confine it refuses. */
+  private worktreeRefDeletionGit: (scope: WorktreeRefDeletionScope) => Promise<GitRunner> =
+    (scope) => refDeletionGitRunner(scope);
+  /** The HEAD and index locks ref deletions hold, journaled so none outlives the runner (#3316). */
+  private readonly refDeletionLocks: RefDeletionLockJournal;
   /** Test seam keeps provider-home discovery deterministic without writing into a real Claude home. */
   private discoverClaudeTasks: typeof discoverIncompleteClaudeTasks = discoverIncompleteClaudeTasks;
   /** Disk scan for a Claude Code init list's new plugin roots (#1224); a test seam. */
@@ -1727,6 +1743,9 @@ export class SessionManager {
       expectedProfileIdForHome: (home) => this.providerProfileExpectation(home),
     }) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
+    this.refDeletionLocks = new RefDeletionLockJournal(join(this.stateDir, "ref-deletion-locks"), runnerId);
+    // Locks a previous runner process left are removed before this one deletes anything.
+    void this.refDeletionLocks.recover();
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
     this.worktreeSetupTrust = new WorktreeSetupTrustStore(this.stateDir);
     this.worktreePortAllocator = new WorktreePortAllocator(this.stateDir, this.worktreePorts);
@@ -4441,6 +4460,71 @@ export class SessionManager {
         throw new Error(`worktree retained: ${result.reason ?? "cleanup did not complete"}`);
       }
       return { snapshot: result.snapshot, retirement: result.retirement };
+    });
+  }
+
+  /**
+   * Delete refs an isolated session owns but cannot delete itself (#3316): Git takes
+   * `packed-refs.lock` in the read-only shared Git directory before deleting any ref. Only this
+   * session's runner-recorded, runner-created worktrees and their branches are in scope; the path
+   * selects one of them and is never used as a Git directory. Every call, refused or not, leaves a
+   * `worktree_refs_deleted` audit event whose text is fixed by the runner.
+   */
+  async deleteWorktreeRefs(
+    sessionId: string,
+    path: string | undefined,
+    refs: unknown,
+  ): Promise<{ snapshot: SessionSnapshot; refDeletion: SessionWorktreeRefDeletionResult }> {
+    // Refused before the worktree lane, which a deletion being drained may still hold.
+    if (this.shuttingDown) {
+      const reason = "the runner is shutting down; try again once it is back";
+      this.emitEvent(sessionId, { kind: "worktree_refs_deleted", outcome: "refused", deleted: [], absent: [], reason });
+      throw new Error(reason);
+    }
+    return this.runWorktreeOperation(sessionId, async () => {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      let worktreePath: string | undefined;
+      try {
+        const requests = validateWorktreeRefDeletionRequests(refs);
+        if (meta.context.kind !== "native") {
+          throw new WorktreeRefDeletionRefusal("runner-managed ref deletion is available only for native sessions");
+        }
+        const requested = path ?? meta.worktreePath;
+        const target = requested ? this.attributedWorktreeForPath(meta, requested) : undefined;
+        if (!target || target.source === "attached") {
+          throw new WorktreeRefDeletionRefusal("the worktree is not a runner-created worktree of this session");
+        }
+        worktreePath = target.path;
+        const layout = managedWorktreeGitLayout(target.path, meta.repoPath);
+        if (!layout) throw new WorktreeRefDeletionRefusal("the worktree's Git registration could not be verified");
+        const ownedBranches = this.attributedWorktrees(meta)
+          .filter((worktree) => worktree.source !== "attached" && worktree.branch !== worktree.defaultBranch)
+          .map((worktree) => worktree.branch);
+        const scope = {
+          worktreePath: target.path,
+          worktreeGitDir: layout.worktreeGitDir,
+          commonGitDir: layout.commonGitDir,
+          ownedBranches,
+        };
+        const git = await this.worktreeRefDeletionGit(scope);
+        const result = await this.refDeletionLocks.run((locks) => deleteOwnedWorktreeRefs(scope, requests, git, locks));
+        this.emitEvent(sessionId, { kind: "worktree_refs_deleted", worktreePath, outcome: "deleted", ...result });
+        return { snapshot: this.snapshot(this.store.readMeta(sessionId) ?? meta), refDeletion: { worktreePath, ...result } };
+      } catch (error) {
+        const reason = error instanceof WorktreeRefDeletionRefusal ? error.message : "the refs could not be deleted";
+        const stillDeleted = error instanceof WorktreeRefDeletionRefusal ? error.deletedRefs : [];
+        this.emitEvent(sessionId, {
+          kind: "worktree_refs_deleted",
+          ...(worktreePath ? { worktreePath } : {}),
+          outcome: "refused",
+          deleted: stillDeleted.map((entry) => entry.ref),
+          absent: [],
+          reason,
+          ...(stillDeleted.length ? { deletedRefs: stillDeleted } : {}),
+        });
+        throw new Error(reason);
+      }
     });
   }
 
@@ -17115,6 +17199,8 @@ export class SessionManager {
    * lease (fail closed) — releasing it could let a replacement runner share the same HOME. */
   shutdownAll(): boolean {
     this.shuttingDown = true;
+    // No new ref deletion starts; drainWorktreeRefDeletions releases the running ones' locks.
+    this.refDeletionLocks.close();
     this.providerHomeLeases?.stopAcquisitions();
     for (const sessionId of this.worktreeSetupRuns.keys()) void this.abortWorktreeSetup(sessionId);
     for (const [key, resolveApproval] of this.worktreeSetupApprovals) {
@@ -17241,6 +17327,13 @@ export class SessionManager {
       this.log(`shutdown flushAll failed: ${errText(error)}`);
     }
     return clean;
+  }
+
+  /** Cancel running ref deletions and wait, bounded, for them to stop and release their worktree
+   * locks (#3316). False when one did not stop in time: its journal entry stays, and the next
+   * runner process removes its marked locks before deleting anything. */
+  drainWorktreeRefDeletions(timeoutMs: number): Promise<boolean> {
+    return this.refDeletionLocks.drain(timeoutMs);
   }
 
   /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree
