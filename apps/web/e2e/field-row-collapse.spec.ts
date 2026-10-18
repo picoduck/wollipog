@@ -27,7 +27,8 @@ const dialogs: Array<{ name: string; rows?: number; open: (page: Page) => Promis
         runnerWsUrl: "ws://127.0.0.1:8787/runner", host: "127.0.0.1", port: 8787, lanIps: [], existingRunnerIds: [],
       } }));
       await page.goto("/machine-management-e2e.html");
-      await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+      // The machine's row: a phone shows the list alone, without its detail (#2985).
+      await expect(page.getByRole("complementary", { name: "Machines" }).getByText("Design Workstation")).toBeVisible();
       await choosePageAction(page, "Install Manually…", "Add Machine");
       return page.getByRole("dialog", { name: "Install Manually" });
     },
