@@ -43,13 +43,21 @@ for (const viewport of [
         const humanRequired = dialog.locator("section").filter({ has: page.getByRole("heading", { name: "Human Required", exact: true }) });
         await expect(humanRequired).toContainText("External Evidence Review: Evidence stored outside private Session artifacts (links only) needs your review.");
         const helper = dialog.locator(".orchestrator-gate-helper").filter({ hasText: "Video Evidence Review:" });
+        // The retention disclosure's video sentence follows the same server fact as the delegation line.
+        const disclosure = dialog.locator(".orchestrator-gate-helper").filter({ hasText: "evidence images are sent to its selected model/provider" });
+        await expect(disclosure).toHaveCount(1);
         if (video === "certified") {
           await expect(humanRequired).not.toContainText("Video Evidence Review");
           await expect(helper).toContainText("The Orchestrator hands video evidence to the certified media-only reviewer");
+          await expect(disclosure).toContainText("In this campaign, video evidence attached as a Session artifact goes to the certified media-only reviewer instead");
+          await expect(disclosure).not.toContainText("requires human review");
         } else {
           await expect(humanRequired).toContainText("Video Evidence Review: Video evidence comes to you because no current live proof certifies");
           await expect(helper).toHaveCount(0);
+          await expect(disclosure).toContainText("In this campaign, video evidence requires human review, including video attached as a Session artifact.");
         }
+        await disclosure.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
+        await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-video-${video}-disclosure.png` });
         await humanRequired.scrollIntoViewIfNeeded();
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         expect(overflow).toBeLessThanOrEqual(0);

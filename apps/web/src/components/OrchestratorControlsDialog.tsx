@@ -22,7 +22,7 @@ import { titleCaseLabel } from "../format.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
-import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
+import { uiEvidenceRetentionDisclosure } from "../ui-evidence-disclosure.js";
 import { FieldWarning } from "./FieldWarning.js";
 import { CheckIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
@@ -444,7 +444,9 @@ export function OrchestratorControlsDialog({
                       });
                     }}
                   />
-                  {evidence && <p className="orchestrator-gate-helper">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>}
+                  {evidence && <p className="orchestrator-gate-helper">
+                    {uiEvidenceRetentionDisclosure(session.orchestratorCampaign?.videoEvidenceReview)}
+                  </p>}
                   {routedReason && <FieldWarning>Goes to a person here: {routedReason}</FieldWarning>}
                 </div>
               );
@@ -567,7 +569,7 @@ function EffectiveOwnerFacts({ campaign, reasonFor }: {
       })}
     </dl>
     {campaign?.decisionOwners.ui_evidence_approval === "orchestrator" &&
-      <p className="orchestrator-gate-helper">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>}
+      <p className="orchestrator-gate-helper">{uiEvidenceRetentionDisclosure(campaign.videoEvidenceReview)}</p>}
     {/* Only the server's campaign fact states video as delegated (#1321). */}
     {campaign?.videoEvidenceReview?.status === "available" &&
       <p className="orchestrator-gate-helper"><strong>Video Evidence Review:</strong> {campaign.videoEvidenceReview.reason}</p>}
@@ -672,9 +674,12 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
       </dl>
       {campaign?.uiEvidenceReview.status === "available" && campaign.uiEvidenceReview.effectiveOwner === "orchestrator" && (
         <Notice tone="info" compact>
-          The Orchestrator reviews image evidence attached as Session artifacts. Video normally goes to a
-          person; one operator-enabled short-frame validation campaign may delegate it. Externally stored
-          evidence goes to a person.
+          The Orchestrator reviews image evidence attached as Session artifacts.{" "}
+          {/* The same server fact as the Video Evidence Review line (#1321). */}
+          {campaign.videoEvidenceReview?.status === "available"
+            ? "Video goes to this campaign's certified media-only reviewer."
+            : "Video normally goes to a person; one operator-enabled short-frame validation campaign may delegate it."}{" "}
+          Externally stored evidence goes to a person.
         </Notice>
       )}
     </section>

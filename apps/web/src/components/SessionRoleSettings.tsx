@@ -93,6 +93,6 @@ export function SessionRoleSettings({ value, capabilities, disabled, onChange }:
       onChange={(mode) => onChange({ ...value, execution: { ...value.execution, integrationIsolation: mode === "enabled" } })} />
     <p>Integration Isolation loads Wollipog management tools as the only integration. Disabling it keeps this harness's normal integrations.</p>
     <p>{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>
-    <p>Secrets, authentication, persistent permission grants, governance, budgets, and tool guardrails remain human-owned. Video and unsupported UI evidence routes to a human.</p>
+    <p>Secrets, authentication, persistent permission grants, governance, budgets, and tool guardrails remain human-owned. Unsupported UI evidence routes to a human.</p>
   </fieldset>;
 }
