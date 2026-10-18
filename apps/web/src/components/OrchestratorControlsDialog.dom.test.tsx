@@ -27,6 +27,7 @@ import {
   WORKFLOW_DECISION_LABELS,
   childSessionRequestsNote,
   orchestratorControlsSummary,
+  workflowDecisionsNote,
   workflowDecisionsSummary,
 } from "./OrchestratorControlsDialog.js";
 
@@ -301,6 +302,26 @@ test("choosing Full Control on a live campaign checks readiness at once and asks
   assert.deepEqual(harness.changed, []);
 });
 
+const footerButtons = (dialog: HTMLElement) => [...dialog.querySelectorAll<HTMLButtonElement>(".modal-foot button")].map((button) => button.textContent);
+
+test("the Enable action sits in the footer beside Done while Full Control is chosen, so a long summary never hides it", async () => {
+  const harness = await open(orchestrator(), {
+    orchestratorSettings: settings(),
+    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(false), expectedRevision: 2 }),
+  });
+  const dialog = harness.dialog();
+  assert.deepEqual(footerButtons(dialog), ["Done"]);
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  await settle();
+  assert.deepEqual(footerButtons(dialog), ["Done", "Enable Full Control"]);
+  const enable = dialog.querySelector<HTMLButtonElement>(".modal-foot .btn.primary")!;
+  assert.equal(enable.textContent, "Enable Full Control");
+  assert.equal(enable.disabled, true, "the footer action keeps the panel's readiness");
+  assertNoDomNode(dialog.querySelector('section[aria-label="Enable Full Control"] button.primary'), "there is no second Enable action in the body");
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+  assert.deepEqual(footerButtons(dialog), ["Done"], "Custom closes the panel and its action");
+});
+
 test("a ready campaign enables Full Control through one reviewed action bound to the exact digest and revision", async () => {
   const enables: unknown[] = [];
   const bodies: unknown[] = [];
@@ -338,6 +359,7 @@ test("a ready campaign enables Full Control through one reviewed action bound to
   assert.deepEqual(saved, [], "enabling never rewrites the saved budget");
   assert.equal(harness.changed.at(-1)!.orchestratorPolicy!.control!.mode, "full_control");
   assert.match(dialog.textContent ?? "", /Effective Mode: Full Control/);
+  assert.deepEqual(footerButtons(dialog), ["Done"], "an enabled campaign has nothing left to enable");
   assert.ok([...dialog.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"));
 });
 
@@ -396,6 +418,46 @@ test("under Full Control without a reported projection, owners are Not Reported 
   assertNoDomNode(harness.dialog().querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]'));
 });
 
+/** A descendant whose root's control the server does not report: its copied policy delegates two
+ * gates, while the server's effective owners keep every gate but PR Merge Approval with a person. */
+function unknownRootDescendant(campaign: OrchestratorCampaignProjection | null = { ...CAMPAIGN, decisionOwners: { ...HUMAN_ONLY, pr_merge: "orchestrator" } }): SessionView {
+  return { ...fullCampaign(), id: "nested", parentSessionId: "root", parentControl: "questions_and_approvals", orchestratorCampaign: campaign ?? undefined } as SessionView;
+}
+
+test("a descendant whose root control is unknown shows the effective owners read-only and offers nothing editable", async () => {
+  const writes: unknown[] = [];
+  const harness = await open(unknownRootDescendant(), {
+    setParentControl: async (...args) => { writes.push(args); return unknownRootDescendant(); },
+    setParentControlPolicy: async (...args) => { writes.push(args); return unknownRootDescendant(); },
+  });
+  const dialog = harness.dialog();
+  const text = dialog.textContent ?? "";
+  assert.match(text, /Effective Mode: Current Root State Not Reported/);
+  assertNoDomNode(dialog.querySelector('[role="radiogroup"]'), "no Child Session Requests rows and no gate is editable");
+  assertNoDomNode(dialog.querySelector("input"), "nothing in the dialog takes input");
+  assert.deepEqual(sectionTitles(dialog), ["Orchestrator Control", "Child Session Requests", "Workflow Decisions", "Campaign Behavior"]);
+  assert.match(text, /The root campaign's control isn't reported\. Who answers these isn't known here, so they can't be changed until it is\./);
+  assert.match(text, /These are the owners Wollipog applies, and they can't be changed here until it is\./);
+  const fact = (term: string) => [...dialog.querySelectorAll("dt")].find((node) => node.textContent === term)?.nextElementSibling?.textContent;
+  assert.equal(fact("PR Merge Approval"), "Orchestrator", "the server's effective owner, not the copied Human choice");
+  assert.equal(fact("Implementation Questions"), "HumanSet by the root campaign.", "a copied Orchestrator choice is not shown as current");
+  assert.equal(fact("UI Evidence Approval"), "HumanNo image reader.", "the evidence fallback keeps the server's reason");
+  assert.deepEqual(writes, []);
+  await harness.unmount();
+
+  // No projection at all: nothing is reported, so nothing is guessed either.
+  const bare = await open(unknownRootDescendant(null), {});
+  const bareFact = (term: string) => [...bare.dialog().querySelectorAll("dt")].find((node) => node.textContent === term)?.nextElementSibling?.textContent;
+  for (const label of Object.values(WORKFLOW_DECISION_LABELS)) assert.equal(bareFact(label), "Not Reported", label);
+  assertNoDomNode(bare.dialog().querySelector('[role="radiogroup"]'));
+});
+
+test("a descendant with a reported Custom root keeps its editable gates", async () => {
+  const harness = await open({ ...unknownRootDescendant(), orchestratorCampaign: { ...CAMPAIGN, control: { mode: "custom" }, policyRevision: 3 } } as SessionView, {});
+  assert.ok(harness.dialog().querySelector('[role="radiogroup"][aria-label="Child Session Requests"]'));
+  gate(harness.dialog(), "PR Merge Approval");
+});
+
 test("the summaries count the gates that stay with a person", () => {
   assert.equal(workflowDecisionsSummary(HUMAN_ONLY), "5 of 5 decisions stay with a person.");
   assert.equal(
@@ -416,6 +478,18 @@ test("the summaries count the gates that stay with a person", () => {
   assert.equal(orchestratorControlsSummary(full), "Full Control: 4 of 5 decisions stay with a person.");
   assert.equal(childSessionRequestsNote(full), "Full Control");
   assert.equal(orchestratorControlsSummary({ ...full, orchestratorCampaign: undefined }), "Full Control.");
+  // Under Custom the summaries count the effective owners too: the saved choices delegate two gates,
+  // but the server reports one of them routed to a person.
+  const custom = orchestrator({ orchestratorCampaign: { ...CAMPAIGN, decisionOwners: { ...HUMAN_ONLY, implementation_question: "orchestrator" } } });
+  assert.equal(workflowDecisionsNote(custom), "4 of 5 decisions stay with a person.");
+  assert.equal(workflowDecisionsNote({ ...custom, orchestratorCampaign: undefined }), "3 of 5 decisions stay with a person.",
+    "without a projection the saved choices are all there is");
+  // An unknown root: the effective owners when reported, and never the descendant's copied choices.
+  assert.equal(workflowDecisionsNote(unknownRootDescendant()), "4 of 5 decisions stay with a person.");
+  assert.equal(childSessionRequestsNote(unknownRootDescendant()), "Not Reported");
+  assert.equal(workflowDecisionsNote(unknownRootDescendant(null)), "The root campaign's control isn't reported.");
+  assert.equal(orchestratorControlsSummary({ ...unknownRootDescendant(null), parentControlPolicy: undefined }),
+    "Child session requests: Not Reported.");
 });
 
 test("the dialog has three titled sections, the campaign's facts and a close-only footer", async () => {
