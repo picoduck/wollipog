@@ -30,6 +30,8 @@ Each recent `completeRunAttempts` entry records head, event, creation time,
 workflow conclusion and a workload fingerprint: SHA-256 of
 `git ls-tree -r HEAD -- apps/web/e2e playwright.config.ts playwright.production.config.ts playwright.ports.ts`
 at that run's head. All five shards of each selected workload are measured.
+These fingerprints identify the measured workloads; they are provenance data,
+not a pre-merge requirement that a future tree match an earlier measurement.
 
 Durations below are seconds from read-only Actions job/step metadata:
 
@@ -103,7 +105,9 @@ bounds cover installation, while cache save consumes reserve and has no separate
 step deadline. The 15-second enforcement assumption is not a hosted-runner
 guarantee. Inert recovery fixtures execute the retry shell with stubs, no real
 apt/dpkg commands, process signals, network or sleeps. Arithmetic near-bound
-replay is not simultaneous worst-case hosted evidence. Remeasure after changes.
+replay is not simultaneous worst-case hosted evidence. The remainder is a dated
+snapshot; use natural-run phases and margins to assess workload/setup changes
+and trigger remeasurement, rather than treating the snapshot as a runtime guarantee.
 
 The limit remains below the general 60-minute workflow ceiling. The same five
 concurrent browser jobs perform unchanged normal execution work. A hang can hold
@@ -147,16 +151,21 @@ GITHUB_TOKEN=$(gh auth token) node scripts/merge-queue-wait-report.mjs --repo pi
 `scripts/workflow-browser-budget.test.mjs` derives both attempt paths and diagnostic
 allowances from the workflow, and the remainder from the fixture. It rejects
 tested reduced budgets through 58 minutes, longer attempts on either path,
-omitted production/cleanup, inconsistent sums, stale envelope, and missing or
-duplicated full-run shards. It recomputes the committed e2e/config tree fingerprint
-and compares it with the baseline's recorded hash, including a negative replay of
-an older measured workload. A larger timeout cannot mask a changed committed
-workload: remeasure all five shards and update the identified baseline before
-reusing the remainder. This check needs only the current Git tree, so shallow CI
-checkouts do not need the historical commit. Queue-only changes cannot alter the equation. The
+omitted production/cleanup, inconsistent sums, and missing or duplicated full-run
+shards. These checks catch lost modeled reserve and inconsistent shard coverage;
+they do not predict the duration of future workloads or require a Git checkout.
+Queue-only changes cannot alter the equation. The
 existing contract pins matrix/denominator agreement. Inert shell checks retain
 successful recovery, apt/dpkg cleanup order, and second-install/repair failure
 propagation; success and cancellation do not trigger retry.
+
+The 2016-second measured remainder is a dated snapshot. Natural-run margin
+evidence triggers remeasurement: collect the five consecutive complete runs
+below, retaining phase timings and at least 180 seconds spare on every shard.
+If a shard loses that margin, remeasure all five shards and revisit the finite
+budget or distribution using those observations. A pre-merge exact tree-hash
+gate would block new e2e work before its natural integration measurements exist;
+authors must not edit a provenance hash to imply a measurement that never happened.
 
 Local checks and PR/merge-group CI do not complete #2700. Observe **five consecutive
 naturally occurring complete main or merge-group runs containing this change**,
