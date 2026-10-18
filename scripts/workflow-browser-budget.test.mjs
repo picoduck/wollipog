@@ -60,6 +60,13 @@ function measuredRemainder(rows) {
   }));
 }
 
+function assertFullShardCoverage(rows) {
+  for (const { runId, attempt } of evidence.completeRunAttempts) {
+    assert.deepEqual(rows.filter((row) => row.runId === runId && row.attempt === attempt)
+      .map((row) => row.shard).sort(), [1, 2, 3, 4, 5], `${runId}/${attempt}: missing or duplicated shard`);
+  }
+}
+
 function budgetAccounting(source, rows = evidence.samples) {
   const job = browserJob(source);
   const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]) * 60;
@@ -109,14 +116,11 @@ test("identified browser phases include every full-run shard and reconcile activ
   assert.equal(evidence.units, "seconds");
   const identities = new Set(evidence.samples.map((row) => `${row.runId}/${row.attempt}/${row.shard}`));
   assert.equal(identities.size, evidence.samples.length, "do not count carried-forward successes as fresh retry measurements");
-  for (const { runId, attempt } of evidence.completeRunAttempts) {
-    assert.deepEqual(evidence.samples.filter((row) => row.runId === runId && row.attempt === attempt)
-      .map((row) => row.shard).sort(), [1, 2, 3, 4, 5], `${runId}/${attempt}: missing or duplicated shard`);
-  }
+  assertFullShardCoverage(evidence.samples);
   const retry = evidence.samples.filter((row) => row.runId === 37478932815 && row.attempt === 2);
   assert.deepEqual(retry.map((row) => row.shard), [4], "only the genuinely rerun job is a new measurement");
-  assert.equal(measuredRemainder(evidence.samples), 1448, "retain the slower historical workload envelope");
-  const current = evidence.samples.filter((row) => row.runId === 37489739075);
+  assert.equal(measuredRemainder(evidence.samples), 2016, "refresh the workload envelope from the identified recent jobs");
+  const current = evidence.samples.filter((row) => row.runId === evidence.baselineRunId);
   assert.equal(current.length, 5, "remeasure all shards after the baseline workload changes");
   assert.ok(current.every((row) => row.headSha === evidence.baselineHead));
   assert.ok(evidence.samples.some((row) => row.shard === 1 && row.productionSeconds > 0));
@@ -124,9 +128,26 @@ test("identified browser phases include every full-run shard and reconcile activ
     "non-shard-1 production skips are intentional");
 });
 
+test("recent sizing evidence covers five natural full runs and rejects incomplete shard samples", () => {
+  assert.equal(evidence.recentSample.runIds.length, 5);
+  assert.equal(new Set(evidence.recentSample.runIds).size, 5);
+  for (const runId of evidence.recentSample.runIds) {
+    const run = evidence.completeRunAttempts.find((run) => run.runId === runId);
+    assert.equal(run.attempt, 1);
+    assert.ok(["push", "merge_group"].includes(run.event));
+    assert.equal(run.workflowConclusion, "success");
+    assert.match(run.workloadTreeSha256, /^[a-f0-9]{64}$/);
+    const rows = evidence.samples.filter((row) => row.runId === runId);
+    assert.ok(rows.every((row) => row.headSha === run.headSha && row.event === run.event && row.conclusion === "success"));
+  }
+  const missing = evidence.samples.filter((row) => !(row.runId === evidence.baselineRunId && row.shard === 5));
+  assert.throws(() => assertFullShardCoverage(missing), /missing or duplicated shard/);
+  assert.throws(() => assertFullShardCoverage([...evidence.samples, evidence.samples[0]]), /missing or duplicated shard/);
+});
+
 test("browser budget covers either bounded install path, measured remainder, enforcement and three minutes spare", () => {
   const result = budgetAccounting(workflow);
-  assert.deepEqual(result, { budget: 2940, install: 720, remainder: 1450, enforcement: 105, diagnostics: 480, required: 2935 });
+  assert.deepEqual(result, { budget: 3540, install: 720, remainder: 2020, enforcement: 105, diagnostics: 480, required: 3505 });
   const timedOut = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(timedOut);
   assert.ok(timedOut.firstInstallSeconds - 360 <= enforcementSecondsPerAttempt,
@@ -138,7 +159,7 @@ test("browser budget covers either bounded install path, measured remainder, enf
 });
 
 test("lost margin is detected for reduced job budgets or longer first and retry limits on either path", () => {
-  for (const minutes of [25, 30, 35, 39, 40, 42, 43, 48]) {
+  for (const minutes of [25, 40, 48, 49, 50, 55, 58]) {
     assert.throws(() => budgetAccounting(withBudget(minutes)), /must cover/, `${minutes}m is insufficient`);
   }
   for (const name of paths.flatMap((name) => [name, `Retry ${name}`])) {
