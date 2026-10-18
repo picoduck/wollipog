@@ -86,7 +86,6 @@ async function render(options: {
       requests.push(request);
       return { project: createdProject(request.name) };
     },
-    projects: async () => ({ projects: [] }),
     ...options.client,
   } as ApiClient;
   await act(async () => {
@@ -281,53 +280,34 @@ test("a failed request is Couldn't Create the Project above the footer, with the
   }
 });
 
-/** A server that commits the project, then whose reply is lost with `failure`: what the projects
- * read afterwards returns, and every project it committed. */
-function lostReply(failure: () => Error, options: { reload?: "shows" | "fails" } = {}) {
+/** A server that commits the project and then loses the reply with `failure`. Its project list
+ * afterwards holds `listed`: what another person's namesake or a rename would put there. */
+function lostReply(failure: () => Error, listed: ProjectView[] = []) {
   const committed: ProjectView[] = [];
   return {
     committed,
     client: {
       createProject: async (request: { name: string }) => {
-        // The server stores the name trimmed with its spaces collapsed.
-        committed.push(createdProject(request.name.trim().replace(/\s+/g, " "), `project-${committed.length + 1}`, 10));
+        committed.push(createdProject(request.name, `project-${committed.length + 1}`, 10));
         throw failure();
       },
-      projects: async () => {
-        if (options.reload === "fails") throw new TypeError("Failed to fetch");
-        return { projects: options.reload === "shows" ? committed : [] };
-      },
+      projects: async () => ({ projects: listed }),
     } as Partial<ApiClient>,
   };
 }
-
-test("a lost reply whose project the reload shows carries on as created, with no notice", async () => {
-  const server = lostReply(() => new RequestTimeoutError(60_000), { reload: "shows" });
-  // A project already named alike is not the one this request created.
-  const existing = createdProject("Docs Site", "docs-old", 1);
-  const view = await render({ client: server.client, projects: [existing] });
-  try {
-    await typeName("  Docs   Site ");
-    await submit();
-    assert.equal(server.committed.length, 1);
-    assert.deepEqual(view.created.map((project) => project.id), ["project-1"], "the committed project, not the older namesake");
-    assertNoDomNode(dialog().querySelector('[role="alert"]'), "nothing failed");
-  } finally {
-    await view.unmount();
-  }
-});
 
 for (const [label, failure] of [
   ["a timeout", () => new RequestTimeoutError(60_000)],
   ["a lost connection", () => new TypeError("Failed to fetch")],
   ["a 503", () => new ApiError("upstream unavailable", 503)],
 ] as const) {
-  test(`after ${label} that the reload can't confirm, the notice says the outcome is unknown`, async () => {
+  test(`after ${label} the notice says the outcome is unknown, and nothing is treated as created`, async () => {
     const server = lostReply(failure);
     const view = await render({ client: server.client });
     try {
       await typeName("Docs Site");
       await submit();
+      assert.equal(server.committed.length, 1, "the server may have committed it");
       const alert = dialog().querySelector('[role="alert"]');
       assert.equal(text(alert?.querySelector(".notice-title")), "Couldn't Create the Project");
       assert.match(text(alert), /Wollipog didn't answer, so it may have been created\. Check the Projects list before trying again\./);
@@ -340,14 +320,30 @@ for (const [label, failure] of [
   });
 }
 
-test("when the reload fails too, the outcome stays unknown", async () => {
-  const server = lostReply(() => new TypeError("Failed to fetch"), { reload: "fails" });
+test("another owner's new namesake after a lost reply is not taken for this project", async () => {
+  const namesake = { ...createdProject("Docs Site", "someone-elses", 20),
+    scope: { organizationId: ORG, owner: { kind: "user" as const, userId: "user-ben" } } };
+  const server = lostReply(() => new RequestTimeoutError(60_000), [namesake]);
   const view = await render({ client: server.client });
   try {
     await typeName("Docs Site");
     await submit();
+    assert.deepEqual(view.created, [], "nothing ties the namesake to this request");
     assert.match(text(dialog().querySelector('[role="alert"]')), /may have been created/);
-    assert.deepEqual(view.created, []);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a known project renamed to the submitted name after a lost reply is not taken for this project", async () => {
+  const known = createdProject("Docs Draft", "docs-draft", 1);
+  const server = lostReply(() => new TypeError("Failed to fetch"), [{ ...known, name: "Docs Site", updatedAt: 20 }]);
+  const view = await render({ client: server.client, projects: [known] });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    assert.deepEqual(view.created, [], "a rename is not this create");
+    assert.match(text(dialog().querySelector('[role="alert"]')), /may have been created/);
   } finally {
     await view.unmount();
   }

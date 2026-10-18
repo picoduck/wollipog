@@ -65,7 +65,6 @@ const client = {
     window.__NEW_PROJECT_E2E__.created.push(request);
     return { project: project("project-new", request.name) };
   },
-  projects: async () => ({ projects }),
 } as unknown as ApiClient;
 
 function Harness() {
