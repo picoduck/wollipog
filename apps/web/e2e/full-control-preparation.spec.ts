@@ -21,6 +21,9 @@ function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean,
         cliVersion: "2.1.296", accounting: "provider_list_estimate", account: "runner_default_claude", agentId: "claude" } } : {}) },
   } as unknown as RunnerView;
   const policy = { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), version: 1 } as unknown as OrchestratorCampaignPolicy;
+  // The server resolves the session's behavior overrides into the plan it evaluates.
+  const children = launch.overrides?.session?.orchestrator?.behavior?.maximumConcurrentChildren;
+  if (children !== undefined) policy.behavior.maximumConcurrentChildren = children;
   const plan = { runnerId: "runner-1", workspaceId: launch.workspaceId, agentId: "claude", driver: "claude-code" as const,
     config: { model: "source-fixture-model", effort: "high", permissionMode: "orchestrator" }, useWorktree: true,
     executionTarget: { adapter: "host" as const }, policy, scope: { organizationId: "org", owner: { kind: "user" as const, userId: "user" } } };
@@ -56,8 +59,10 @@ const settle = (page: Page) => page.evaluate(() => Promise.all(document.getAnima
   .map((animation) => animation.finished))
   .then(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))));
 /** Real typing of text a number field cannot read is an entry error on every limit, never a default. */
-async function expectUnreadableLimitsBlock(page: Page, action: Locator) {
-  for (const label of ["Cost Limit (USD)", "Tool Call Limit", "Concurrent Children", "Accepted Follow-Ups", "Maximum Issues"]) {
+const LAUNCH_LIMITS = ["Cost Limit (USD)", "Tool Call Limit", "Accepted Follow-Ups", "Maximum Issues"];
+const ENABLE_LIMITS = ["Cost Limit (USD)", "Tool Call Limit", "Concurrent Children", "Accepted Follow-Ups", "Maximum Issues"];
+async function expectUnreadableLimitsBlock(page: Page, action: Locator, labels: readonly string[]) {
+  for (const label of labels) {
     const field = page.getByLabel(label, { exact: true }).first();
     const before = await field.inputValue();
     await field.fill("");
@@ -137,7 +142,21 @@ for (const viewport of viewports) {
       await expect(page.getByText("Campaign Limits", { exact: true })).toBeVisible();
       await expect(page.getByText(/Controlled Cross-Model Review \(Verified\)/)).toBeVisible();
       await shoot(page, advanced, `${prefix}-advanced.png`);
-      await expectUnreadableLimitsBlock(page, start);
+      await expectUnreadableLimitsBlock(page, start, LAUNCH_LIMITS);
+      // One concurrency control: Behavior's Maximum Concurrent Children is the campaign's concurrency.
+      await expect(page.getByLabel("Concurrent Children", { exact: true })).toHaveCount(0);
+      const children = page.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
+      await expect(children).toHaveCount(1);
+      await expect(page.getByText(/· 4 at a time/)).toBeVisible();
+      await children.fill("0");
+      await expect(page.getByText("Enter a whole number from 1 to 64.", { exact: true })).toBeVisible();
+      await expect(start).toBeDisabled();
+      await shoot(page, children.locator("xpath=ancestor::label[1]"), `${prefix}-concurrency-invalid.png`);
+      await children.fill("3");
+      await expect(page.getByText(/· 3 at a time/)).toBeVisible();
+      await expect(page.getByText(/This is also the campaign's concurrency\./)).toBeVisible();
+      await expect(start).toBeEnabled();
+      await shoot(page, children.locator("xpath=ancestor::label[1]"), `${prefix}-concurrency.png`);
       await advanced.click();
 
       await start.click();
@@ -150,6 +169,9 @@ for (const viewport of viewports) {
       await settle(page);
       await page.screenshot({ path: `${prefix}-started.png` });
       expect(admissions).toHaveLength(1);
+      const admitted0 = admissions[0] as unknown as { overrides: { session: { orchestrator: { behavior: Record<string, unknown> } }; budget: Record<string, unknown> } };
+      expect(admitted0.overrides.session.orchestrator.behavior.maximumConcurrentChildren).toBe(3);
+      expect(admitted0.overrides.budget.concurrency).toBeUndefined();
       expect(admissions[0]!.preflightDigest).toBe(serverPreflight(admissions[0] as unknown as FullControlLaunchRequest, true).digest);
       expect(admissions[0]!.requestId).toMatch(/^[a-f0-9]{32}$/);
       expect((writes[0] as { defaults: { campaignBudget: unknown } }).defaults.campaignBudget).toEqual({ costUsd: 20, toolCalls: 200 });
@@ -203,6 +225,10 @@ for (const viewport of viewports) {
       await expect(page.getByText("Can't Enable Yet", { exact: true })).toBeVisible();
       const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
       await expect(enable).toBeDisabled();
+      // The action sits in the footer beside Done, in view without scrolling past the summary.
+      const footer = page.locator(".modal-foot");
+      await expect(footer.getByRole("button")).toHaveText(["Done", "Enable Full Control"]);
+      await expect(enable).toBeInViewport();
       await shoot(page, heading, `${prefix}-enable-blocked.png`);
       await page.getByLabel("Cost Limit (USD)", { exact: true }).first().fill("30");
       await page.getByLabel("Tool Call Limit", { exact: true }).first().fill("300");
@@ -210,15 +236,19 @@ for (const viewport of viewports) {
       await expect(ready).toBeVisible();
       await expect(page.getByText("example/full-control-fixture · #12", { exact: true })).toBeVisible();
       await expect(enable).toBeEnabled();
+      await expect(enable).toBeInViewport();
       await shoot(page, ready, `${prefix}-enable-ready.png`);
       const advanced = page.locator("summary").filter({ hasText: "Advanced" });
       await advanced.click();
-      await expectUnreadableLimitsBlock(page, enable);
+      await expectUnreadableLimitsBlock(page, enable, ENABLE_LIMITS);
+      await expect(enable).toBeInViewport();
+      await shoot(page, advanced, `${prefix}-enable-advanced.png`);
       await advanced.click();
       await enable.click();
       await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
       await expect(page.getByRole("button", { name: "Revoke Full Control", exact: true })).toBeVisible();
       await expectFullControlOwnersReadOnly(page);
+      await expect(footer.getByRole("button")).toHaveText(["Done"]);
       await shoot(page, heading, `${prefix}-enabled.png`);
     });
   }
@@ -251,7 +281,43 @@ for (const viewport of viewports) {
     await expect(page.getByText(/Effective Mode: Current Root State Not Reported/)).toBeVisible();
     await expect(page.getByRole("button", { name: "Revoke Full Control", exact: true })).toHaveCount(0);
     await expect(page.locator('[data-control-mode="full_control"]')).toHaveCount(0);
+    // Nothing editable until the root's control is known; the server's effective owners, read-only.
+    const dialog = page.getByRole("dialog", { name: "Orchestrator Controls" });
+    await expect(dialog.getByRole("radiogroup")).toHaveCount(0);
+    await expect(dialog.getByText("The root campaign's control isn't reported. Who answers these isn't known here, so they can't be changed until it is.")).toBeVisible();
+    const fact = (term: string) => dialog.locator("dt", { hasText: new RegExp(`^${term}$`) }).locator("xpath=following-sibling::dd[1]");
+    await expect(fact("PR Merge Approval")).toHaveText("Orchestrator");
+    await expect(fact("Merged Branch Deletion")).toHaveText("HumanSet by the root campaign.");
+    await expect(fact("UI Evidence Approval")).toHaveText(/^Human.*does not accept image input\.$/);
     await shoot(page, page.getByRole("heading", { name: "Orchestrator Control", exact: true }), `${captures}/legacy-${viewport.name}-${theme}-unknown.png`);
+    await shoot(page, dialog.getByRole("heading", { name: "Workflow Decisions", exact: true }), `${captures}/legacy-${viewport.name}-${theme}-owners.png`);
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Attach and Settings" }).click();
+    await expect(page.getByRole("menuitem", { name: "Orchestrator Controls…" })).toHaveAccessibleDescription("3 of 5 decisions stay with a person.");
+  });
+  for (const theme of themes) test(`routed owner ${viewport.name} ${theme}: summaries count the server's effective owners`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto(`/session-usage-e2e.html?width=${viewport.width}&height=${viewport.height}&composer=orchestrator&owners=routed${viewport.name === "desktop" ? "&pinned=1" : ""}`);
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    // Saved: two gates delegated plus UI Evidence Approval; effective: that one goes to a person here.
+    const effective = "3 of 5 decisions stay with a person.";
+    if (viewport.name === "desktop") {
+      const summary = page.locator('aside.ps[aria-label="Pinned Summary"]');
+      await expect(summary.getByRole("button", { name: /^Workflow Decisions/ })).toContainText(effective);
+      await settle(page);
+      await summary.screenshot({ path: `${captures}/routed-${viewport.name}-${theme}-pinned-summary.png` });
+    }
+    await page.getByRole("button", { name: "Attach and Settings" }).click();
+    const row = page.getByRole("menuitem", { name: "Orchestrator Controls…" });
+    await expect(row).toHaveAccessibleDescription(effective);
+    await settle(page);
+    await page.screenshot({ path: `${captures}/routed-${viewport.name}-${theme}-plus-menu.png` });
+    await row.click();
+    const dialog = page.getByRole("dialog", { name: "Orchestrator Controls" });
+    // Custom keeps the saved choice editable and says where it goes instead.
+    await expect(dialog.getByRole("radiogroup", { name: "UI Evidence Approval" }).getByRole("radio", { name: "Orchestrator" })).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByText(/Goes to a person here: The Orchestrator model "text-only" does not accept image input\./)).toBeVisible();
+    await shoot(page, dialog.getByRole("radiogroup", { name: "UI Evidence Approval" }), `${captures}/routed-${viewport.name}-${theme}-gate.png`);
   });
 }
 
@@ -274,7 +340,7 @@ test.describe("limit entry lifecycle", () => {
     await page.goto("/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=light");
     await page.getByRole("radio", { name: "Full Control", exact: true }).click();
     const start = page.getByRole("button", { name: "Authorize and Start", exact: true });
-    const children = page.getByLabel("Concurrent Children", { exact: true });
+    const children = page.getByLabel("Maximum Issues", { exact: true });
     // L1: empty entries are the derived values.
     await expect(children).toHaveValue("");
     await page.getByLabel("Task", { exact: true }).fill("Review the source fixture");
@@ -314,7 +380,7 @@ test.describe("limit entry lifecycle", () => {
     await expect(start).toBeDisabled();
     await page.getByRole("radio", { name: "Custom", exact: true }).click();
     await page.getByRole("radio", { name: "Full Control", exact: true }).click();
-    await expect(page.getByLabel("Concurrent Children", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("Maximum Issues", { exact: true })).toHaveValue("");
     await expect(invalidNotice(page)).toHaveCount(0);
     expect(admissions).toHaveLength(0);
   });

@@ -30,7 +30,7 @@ import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import { SAVED_MS } from "./ui/SettingsRows.js";
-import { FullControlEnablePanel, OrchestratorControlChoice } from "./FullControlPreparation.js";
+import { FullControlEnableButton, FullControlEnablePanel, OrchestratorControlChoice, type FullControlEnableAction } from "./FullControlPreparation.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
  * matching each gate's Human | Orchestrator (#2192). */
@@ -78,19 +78,31 @@ export function effectiveCampaignControl(session: ControlView): CampaignControl 
   return projected ?? (session.parentSessionId ? undefined : session.orchestratorPolicy?.control);
 }
 
-/** Under Full Control the saved Custom choices have no effect, so summaries describe the server's
- * effective owners instead, or say only "Full Control" while those are not reported. */
-export function workflowDecisionsNote(session: ControlView & Pick<SessionView, "parentControlPolicy">): string | null {
-  if (effectiveCampaignControl(session)?.mode === "full_control") {
-    const owners = session.orchestratorCampaign?.decisionOwners;
-    return owners ? `Full Control: ${workflowDecisionsSummary(owners)}` : "Full Control.";
-  }
-  return session.parentControlPolicy ? workflowDecisionsSummary(session.parentControlPolicy.decisions) : null;
+/** The root's control mode, or "unknown" for a descendant the server has not told it to. Until it
+ * is known nothing may be offered as editable: under Full Control the saved choices have no effect. */
+export function campaignControlMode(session: ControlView): CampaignControl["mode"] | "unknown" {
+  return effectiveCampaignControl(session)?.mode ?? (session.parentSessionId ? "unknown" : "custom");
 }
 
-/** The Child Session Requests summary: "Full Control" while Full Control decides them. */
+export const ROOT_CONTROL_NOT_REPORTED = "The root campaign's control isn't reported.";
+
+/** Summaries count the server's effective owners whenever it reports them: a saved choice can be
+ * routed elsewhere (Full Control, or UI evidence this Orchestrator can't inspect). Without them,
+ * Full Control says only "Full Control", and an unknown root never shows the copied choices. */
+export function workflowDecisionsNote(session: ControlView & Pick<SessionView, "parentControlPolicy">): string | null {
+  const mode = campaignControlMode(session);
+  const owners = session.orchestratorCampaign?.decisionOwners;
+  if (mode === "full_control") return owners ? `Full Control: ${workflowDecisionsSummary(owners)}` : "Full Control.";
+  if (owners) return workflowDecisionsSummary(owners);
+  if (!session.parentControlPolicy) return null;
+  return mode === "unknown" ? ROOT_CONTROL_NOT_REPORTED : workflowDecisionsSummary(session.parentControlPolicy.decisions);
+}
+
+/** The Child Session Requests summary: "Full Control" while Full Control decides them, and "Not
+ * Reported" while the root's control is unknown. */
 export function childSessionRequestsNote(session: ControlView & Pick<SessionView, "parentControl">): string {
-  return effectiveCampaignControl(session)?.mode === "full_control" ? "Full Control" : childSessionRequestsLabel(session.parentControl);
+  const mode = campaignControlMode(session);
+  return mode === "full_control" ? "Full Control" : mode === "unknown" ? "Not Reported" : childSessionRequestsLabel(session.parentControl);
 }
 
 /** The second line of the + menu's Orchestrator Controls… row. A control plane without typed
@@ -306,8 +318,7 @@ export function OrchestratorControlsDialog({
   const fullControl = control?.mode === "full_control";
   const canRevoke = fullControl && !session.parentSessionId && policy !== undefined && refusal === null;
   // A descendant's copied policy is not authoritative; only the projected root state is.
-  const effectiveMode = projectedControl ? projectedControl.mode
-    : session.parentSessionId ? "unknown" : session.orchestratorPolicy?.control?.mode ?? "custom";
+  const effectiveMode = campaignControlMode(session);
   // The choice follows the root whenever its effective mode changes (enabled, revoked, reloaded), so a
   // revoked campaign shows Custom instead of offering Full Control back with a fresh readiness check.
   const [choiceFollows, setChoiceFollows] = useState(effectiveMode);
@@ -318,6 +329,8 @@ export function OrchestratorControlsDialog({
   // The saved Full Control budget is proposed when enabling; Revoke never needs it.
   const [savedDefaults, setSavedDefaults] = useState<OrchestratorDefaults | null>(null);
   const canEnable = !fullControl && !session.parentSessionId && session.orchestratorPolicy !== undefined;
+  // The panel's Enable action, shown in the footer so it stays in view below the long summary.
+  const [enableAction, setEnableAction] = useState<FullControlEnableAction | null>(null);
   useEffect(() => {
     if (!canEnable || controlPreview !== "full_control") return;
     let live = true;
@@ -334,7 +347,10 @@ export function OrchestratorControlsDialog({
       onClose={onClose}
       returnFocusRef={returnFocusRef}
       className="orchestrator-controls"
-      footer={<button type="button" className="btn" onClick={onClose}>Done</button>}
+      footer={<>
+        <button type="button" className="btn" onClick={onClose}>Done</button>
+        {canEnable && controlPreview === "full_control" && enableAction && <FullControlEnableButton {...enableAction} />}
+      </>}
     >
       {refusal !== null && <Notice tone="neutral" compact>{refusal}</Notice>}
       {session.orchestratorPolicy && <section className="section" aria-labelledby={`${ids}-control`}>
@@ -346,7 +362,7 @@ export function OrchestratorControlsDialog({
         {canEnable && <>
           <OrchestratorControlChoice surface="campaign" embedded mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null} />
           {controlPreview === "full_control" && <FullControlEnablePanel session={session} savedDefaults={savedDefaults}
-            disabled={refusal !== null || Object.keys(pending).length > 0}
+            disabled={refusal !== null || Object.keys(pending).length > 0} onAction={setEnableAction}
             onEnabled={(next) => { onSessionChanged(next); showSaved("control"); }} />}
         </>}
         {fullControl && <>
@@ -365,6 +381,9 @@ export function OrchestratorControlsDialog({
           {saved === "parentControl" && <SavedCheck />}
         </div>
         {control?.mode === "full_control" ? <FullControlRequests control={control} customChoice={childSessionRequestsLabel(parentControl)} />
+          : effectiveMode === "unknown" ? <p className="section-note">
+            {ROOT_CONTROL_NOT_REPORTED} Who answers these isn't known here, so they can't be changed until it is.
+          </p>
           : <ChoiceRows<ParentControlMode>
             label="Child Session Requests"
             options={refusal === null
@@ -383,7 +402,11 @@ export function OrchestratorControlsDialog({
           driver={session.parentSessionId ? null : session.driver} titleId={`${ids}-decisions`} />
       )}
 
-      {policy && control?.mode !== "full_control" && (
+      {policy && effectiveMode === "unknown" && (
+        <UnknownRootDecisions campaign={session.orchestratorCampaign} titleId={`${ids}-decisions`} />
+      )}
+
+      {policy && effectiveMode === "custom" && (
         <section className="section" aria-labelledby={`${ids}-decisions`}>
           <div className="section-head">
             <h3 className="section-title" id={`${ids}-decisions`}>Workflow Decisions</h3>
@@ -487,20 +510,7 @@ function FullControlDecisions({ control, campaign, driver, titleId }: {
       <p className="section-note">
         Full Control decides these for this campaign. Your per-gate choices apply again only after you revoke to Custom.
       </p>
-      <dl className="facts orchestrator-facts">
-        {WORKFLOW_DECISION_CATEGORIES.map((category) => {
-          const owner = campaign?.decisionOwners[category];
-          return <div key={category}>
-            <dt>{WORKFLOW_DECISION_LABELS[category]}</dt>
-            <dd>
-              {owner === undefined ? "Not Reported" : owner === "orchestrator" ? "Orchestrator" : "Human"}
-              {owner === "human" && <small className="orchestrator-fact-source">{reasonFor(category)}</small>}
-            </dd>
-          </div>;
-        })}
-      </dl>
-      {campaign?.decisionOwners.ui_evidence_approval === "orchestrator" &&
-        <p className="orchestrator-gate-helper">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>}
+      <EffectiveOwnerFacts campaign={campaign} reasonFor={reasonFor} />
     </section>
     <section className="section" aria-labelledby={`${titleId}-human-required`}>
       <div className="section-head">
@@ -512,6 +522,46 @@ function FullControlDecisions({ control, campaign, driver, titleId }: {
         {standing.map((id) => <li key={id}><strong>{FULL_CONTROL_HUMAN_REQUIRED_LABELS[id] ?? id}:</strong> {FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON}</li>)}
       </ul>
     </section>
+  </>;
+}
+
+/** A descendant whose root's control isn't reported: the server's effective owners, read-only, since
+ * a per-gate choice made here might have no effect. */
+function UnknownRootDecisions({ campaign, titleId }: { campaign: OrchestratorCampaignProjection | undefined; titleId: string }) {
+  const reasonFor = (category: DelegatableWorkflowDecisionCategory) =>
+    category === "ui_evidence_approval" && campaign?.uiEvidenceReview.status === "unavailable"
+      ? campaign.uiEvidenceReview.reason ?? "This Orchestrator can't inspect the evidence images."
+      : "Set by the root campaign.";
+  return <section className="section" aria-labelledby={titleId}>
+    <div className="section-head">
+      <h3 className="section-title" id={titleId}>Workflow Decisions</h3>
+    </div>
+    <p className="section-note">
+      {ROOT_CONTROL_NOT_REPORTED} These are the owners Wollipog applies, and they can't be changed here until it is.
+    </p>
+    <EffectiveOwnerFacts campaign={campaign} reasonFor={reasonFor} />
+  </section>;
+}
+
+/** Each gate's effective owner as the server reports it, with why a person decides it. */
+function EffectiveOwnerFacts({ campaign, reasonFor }: {
+  campaign: OrchestratorCampaignProjection | undefined; reasonFor: (category: DelegatableWorkflowDecisionCategory) => string;
+}) {
+  return <>
+    <dl className="facts orchestrator-facts">
+      {WORKFLOW_DECISION_CATEGORIES.map((category) => {
+        const owner = campaign?.decisionOwners[category];
+        return <div key={category}>
+          <dt>{WORKFLOW_DECISION_LABELS[category]}</dt>
+          <dd>
+            {owner === undefined ? "Not Reported" : owner === "orchestrator" ? "Orchestrator" : "Human"}
+            {owner === "human" && <small className="orchestrator-fact-source">{reasonFor(category)}</small>}
+          </dd>
+        </div>;
+      })}
+    </dl>
+    {campaign?.decisionOwners.ui_evidence_approval === "orchestrator" &&
+      <p className="orchestrator-gate-helper">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>}
   </>;
 }
 

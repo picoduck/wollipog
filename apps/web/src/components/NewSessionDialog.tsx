@@ -997,9 +997,12 @@ export function NewSessionDialog({
     Number.isFinite(cloudBudget) && cloudBudget >= executionTarget.policy.cost.minimumBudgetUsd &&
     cloudBudget <= executionTarget.policy.cost.maximumBudgetUsd);
   const liveChildLimit = Number(liveChildLimitDraft);
+  // Under Full Control this one field is also the campaign's concurrency, which the server derives
+  // from it and which must be at least 1, so 0 (pause admission) cannot be authorized there.
+  const minimumLiveChildLimit = orchestrator && controlPreview === "full_control" ? 1 : 0;
   const liveChildLimitValid = !orchestrator || (
     liveChildLimitDraft.trim() !== "" && Number.isSafeInteger(liveChildLimit) &&
-    liveChildLimit >= 0 && liveChildLimit <= MAX_LIVE_CHILD_LIMIT
+    liveChildLimit >= minimumLiveChildLimit && liveChildLimit <= MAX_LIVE_CHILD_LIMIT
   );
   const projectPlacementValid = !projectsSupported
     ? !!runnerId && (!!workspaceId || !!browsedPath)
@@ -1221,7 +1224,7 @@ export function NewSessionDialog({
         setValidationError(orchestratorExecutionUnavailable);
         focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
       } else if (!liveChildLimitValid) {
-        setValidationError(`Enter a Live Child Limit from 0 to ${MAX_LIVE_CHILD_LIMIT}.`);
+        setValidationError(`Enter a Live Child Limit from ${minimumLiveChildLimit} to ${MAX_LIVE_CHILD_LIMIT}.`);
         focusValidationProblem(`[id="${liveChildLimitInputId}"]`);
       } else if (directWslRequiresSafeOrchestrator && !orchestrator) {
         setValidationError("Choose Orchestrator or another execution context.");
@@ -1340,7 +1343,7 @@ export function NewSessionDialog({
                     id={liveChildLimitInputId}
                     type="number"
                     inputMode="numeric"
-                    min="0"
+                    min={String(minimumLiveChildLimit)}
                     max={String(MAX_LIVE_CHILD_LIMIT)}
                     step="1"
                     required
@@ -1355,7 +1358,9 @@ export function NewSessionDialog({
                   />
                 </label>
                 <span id={liveChildLimitHelpId} className={liveChildLimitValid ? "muted" : "form-error"} role={liveChildLimitValid ? undefined : "alert"}>
-                  {liveChildLimitValid ? "Choose 0 to pause admission, or up to 64 live children." : "Enter a whole number from 0 to 64."}
+                  {!liveChildLimitValid ? `Enter a whole number from ${minimumLiveChildLimit} to ${MAX_LIVE_CHILD_LIMIT}.`
+                    : minimumLiveChildLimit ? `Choose up to ${MAX_LIVE_CHILD_LIMIT} live children. This is also the campaign's concurrency.`
+                    : `Choose 0 to pause admission, or up to ${MAX_LIVE_CHILD_LIMIT} live children.`}
                 </span>
                 <div className="orchestrator-policy-control">
                   <span>Follow-Ups <small aria-hidden="true">{orchestratorSource("behavior.followUps")}</small></span>

@@ -231,9 +231,12 @@ function BudgetEntry({ draft, onChange, errors, disabled }: {
   </fieldset>;
 }
 
-function LimitFields({ budget, onBudget, limits, onLimits, errors, derivedRelated, disabled, savedBudget }: {
+function LimitFields({ budget, onBudget, limits, onLimits, errors, derivedRelated, disabled, savedBudget, concurrency = true }: {
   budget: BudgetDraft; onBudget: (draft: BudgetDraft) => void; limits: LimitDrafts; onLimits: (limits: LimitDrafts) => void;
   errors: DraftErrors;
+  /** False when the surface already shows Maximum Concurrent Children: the server derives the
+   * campaign's concurrency from it, so a second entry could only disagree. */
+  concurrency?: boolean;
   /** The server's last answer when the person has not chosen: the switch must show what will be
    * authorized, so it waits for a first answer rather than guessing. */
   derivedRelated: boolean | null;
@@ -247,7 +250,7 @@ function LimitFields({ budget, onBudget, limits, onLimits, errors, derivedRelate
     <p className="muted">Leave a field empty to use the derived value. Changes check readiness again.</p>
     {savedBudget && field("Cost Limit (USD)", budget.cost, (cost) => onBudget({ ...budget, cost }), "decimal", errors.cost)}
     {savedBudget && field("Tool Call Limit", budget.tools, (tools) => onBudget({ ...budget, tools }), "numeric", errors.tools)}
-    {field("Concurrent Children", limits.concurrency, (concurrency) => onLimits({ ...limits, concurrency }), "numeric", errors.concurrency)}
+    {concurrency && field("Concurrent Children", limits.concurrency, (concurrency) => onLimits({ ...limits, concurrency }), "numeric", errors.concurrency)}
     {field("Accepted Follow-Ups", limits.followUps, (followUps) => onLimits({ ...limits, followUps }), "numeric", errors.followUps)}
     {field("Maximum Issues", limits.maxIssues, (maxIssues) => onLimits({ ...limits, maxIssues }), "numeric", errors.maxIssues)}
     <div className="field"><span id={`${id}-related`}>Related Follow-Ups</span>
@@ -343,7 +346,7 @@ export function FullControlLaunchPanel({ request, selectionValid, disabled, save
       budgetEntry={!savedBudget ? <BudgetEntry draft={budget} onChange={setBudget} errors={errors} disabled={disabled} /> : undefined}
       advanced={<>
         <LimitFields budget={budget} onBudget={setBudget} limits={limits} onLimits={setLimits} errors={errors}
-          derivedRelated={derivedRelated.current} disabled={disabled} savedBudget={savedBudget} />
+          derivedRelated={derivedRelated.current} disabled={disabled} savedBudget={savedBudget} concurrency={false} />
         {advanced}
       </>} />
     {!hasWork && <p className="muted">Describe the task or enter issue numbers to authorize.</p>}
@@ -351,9 +354,14 @@ export function FullControlLaunchPanel({ request, selectionValid, disabled, save
   </section>;
 }
 
-/** Active campaign: the same summary and one Enable action through the existing control operation. */
-export function FullControlEnablePanel({ session, disabled, savedDefaults, onEnabled }: {
+/** The Enable action's current state, for a dialog that shows it in its footer. */
+export interface FullControlEnableAction { ready: boolean; busy: boolean; enable: () => void }
+
+/** Active campaign: the same summary and one Enable action through the existing control operation.
+ * The caller renders that action from `onAction`, in its footer, so it stays in view below the summary. */
+export function FullControlEnablePanel({ session, disabled, savedDefaults, onEnabled, onAction }: {
   session: SessionView; disabled: boolean; savedDefaults: OrchestratorDefaults | null; onEnabled: (session: SessionView) => void;
+  onAction: (action: FullControlEnableAction | null) => void;
 }) {
   const api = useApi();
   const [budget, setBudget] = useState<BudgetDraft>({ cost: "", tools: "", save: true });
@@ -380,6 +388,11 @@ export function FullControlEnablePanel({ session, disabled, savedDefaults, onEna
     } catch (cause) { setEnableError(cause instanceof Error ? cause.message : "Full Control was not enabled."); }
     finally { setBusy(false); }
   };
+  const enableRef = useRef(enable);
+  enableRef.current = enable;
+  const actionReady = ready && !disabled;
+  useEffect(() => { onAction({ ready: actionReady, busy, enable: () => void enableRef.current() }); }, [actionReady, busy]);
+  useEffect(() => () => onAction(null), []);
   const scopeLabel = (preflight: CampaignLaunchPreflight) => `${preflight.summary.repository ?? "No Repository Scope"} · ${
     preflight.summary.issueNumbers.length ? preflight.summary.issueNumbers.map((n) => `#${n}`).join(", ") : "No Issues"}`;
   return <section className="section" aria-label="Enable Full Control">
@@ -388,7 +401,10 @@ export function FullControlEnablePanel({ session, disabled, savedDefaults, onEna
       advanced={<LimitFields budget={budget} onBudget={setBudget} limits={limits} onLimits={setLimits} errors={errors}
         derivedRelated={derivedRelated.current} disabled={disabled || busy} savedBudget={savedBudget} />} />
     {enableError && <Notice tone="danger" role="alert">{enableError}</Notice>}
-    <BusyButton className="btn primary" busy={busy} progress="Enabling Full Control…" disabled={!ready || disabled}
-      onClick={() => void enable()}>Enable Full Control</BusyButton>
   </section>;
+}
+
+export function FullControlEnableButton({ ready, busy, enable }: FullControlEnableAction) {
+  return <BusyButton className="btn primary" busy={busy} progress="Enabling Full Control…" disabled={!ready}
+    onClick={enable}>Enable Full Control</BusyButton>;
 }

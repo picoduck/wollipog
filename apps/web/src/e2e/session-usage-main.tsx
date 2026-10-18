@@ -355,6 +355,12 @@ if (composerFixture) {
         followUps: { unique: 2, duplicates: 1 },
       };
     }
+    // A saved delegation the server routes to a person, because this Orchestrator can't read the
+    // evidence images: the effective owners above keep the Human, as the server's projection does.
+    if (params.get("owners") === "routed" && session.orchestratorCampaign) {
+      session.parentControlPolicy.decisions.ui_evidence_approval = "orchestrator";
+      session.orchestratorPolicy.delegation.decisions.ui_evidence_approval = "orchestrator";
+    }
     const fullFixture = params.get("fullControlFixture");
     if (["1", "legacy", "enable"].includes(fullFixture ?? "") && session.orchestratorCampaign) {
       // Opt-in source UI fixture only: no authenticated Human/account/profile is created.
