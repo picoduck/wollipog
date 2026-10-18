@@ -350,7 +350,7 @@ test("a current live proof makes launch video review delegable only when the env
 
     const detached = (await preflight(hostedApp.server, launch)).preflight!;
     assert.equal(videoRow(detached).state, "human_required");
-    assert.equal(videoRow(detached).reason, "Video evidence needs your review because this control plane's video review adapters are not attached yet.");
+    assert.equal(videoRow(detached).reason, "Video evidence needs your review because Wollipog's video review service is not attached yet.");
     assert.ok(detached.summary.humanRequired.some((item) => item.exception === "Video Evidence Review" && item.reason === videoRow(detached).reason));
 
     video.attach(hosted.sessions, hosted.hub);

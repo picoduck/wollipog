@@ -18,6 +18,28 @@ async function inView(page: Page, selector: string) {
 }
 
 for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844 }]) {
+  for (const theme of ["dark", "light"]) {
+    test(`Video Evidence Review shows each machine's certification at ${viewport.width}px in ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/settings-rows-e2e.html?theme=${theme}&section=orchestrator&video=status`);
+      const group = page.locator("section.settings-group").filter({ has: page.getByRole("heading", { name: "Video Evidence Review", exact: true }) });
+      await expect(group).toBeVisible();
+      await expect(group).toContainText("The Orchestrator can delegate video evidence to a certified media-only reviewer.");
+      const rows = group.locator(".setting-row");
+      await expect(rows).toHaveCount(6);
+      await expect(rows.locator(".status")).toHaveText(["Certified", "Expired", "Revoked", "Not Certified", "Unavailable", "Unavailable"]);
+      await expect(rows.locator(".setting-row-title")).toHaveText(["Studio Workstation", "Travel Laptop", "Build Server",
+        "Spare Mac mini", "Codex Host", "Old Desktop"]);
+      await group.getByText("About Video Evidence Review").click();
+      await expect(group.locator(".disclosure-body")).toContainText("Only MP4 and WebM recordings attached as private Session artifacts can be delegated.");
+      await expectTextFits(group, "Video Evidence Review");
+      const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      expect(horizontalOverflow).toBeLessThanOrEqual(0);
+      await group.scrollIntoViewIfNeeded();
+      await group.screenshot({ path: testInfo.outputPath(`video-evidence-review-${viewport.width}-${theme}.png`) });
+    });
+  }
+
   test(`Orchestrator settings are responsive and keyboard operable at ${viewport.width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/settings-rows-e2e.html?theme=dark&section=orchestrator");

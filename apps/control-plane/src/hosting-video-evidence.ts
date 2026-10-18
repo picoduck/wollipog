@@ -1,8 +1,10 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { supportsPacedVideoReviewPeer, type PacedVideoReviewPeerContract } from "@wollipog/protocol";
+import { supportsPacedVideoReviewPeer, type PacedVideoReviewPeerContract, type VideoReviewerProofState,
+  type VideoReviewSettingsStatus } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { VideoLaunchCertification } from "./campaign-launch-admission.js";
-import { DelegatedVideoReviews, installationReviewerTarget, mediaReviewerAttestationSha256, mediaReviewerInstallations, VIDEO_REVIEWER_EFFORT,
+import { DelegatedVideoReviews, installationReviewerTarget, mediaReviewerAttestationSha256, mediaReviewerInstallationGaps,
+  mediaReviewerInstallations, VIDEO_REVIEWER_EFFORT,
   VIDEO_REVIEWER_MODEL, type DelegatedVideoHub, type DelegatedVideoSessions } from "./delegated-video-reviews.js";
 import { EvidenceReviewService } from "./evidence-review-service.js";
 import type { EvidenceReviewerTarget } from "./evidence-review-worker.js";
@@ -87,10 +89,36 @@ export function composeHostingVideoEvidence(db: ControlPlaneDb, options: {
       proofExpiresAt: Math.max(...expiries), adaptersReady: delegated.ready } : null;
   };
 
+  /** Settings view for an owner/admin: each machine's installation gap, or for an attested
+   * installation the newest proof for its exact attestation (certified, expired, revoked, missing). */
+  const settingsStatus = (principal: HumanPrincipal, now = Date.now()): VideoReviewSettingsStatus | null => {
+    const proofs = liveValidation.list(principal, now);
+    if (!proofs) return null;
+    const installations = mediaReviewerInstallations(db);
+    const machines = mediaReviewerInstallationGaps(db).map((machine) => {
+      const installation = machine.gap ? undefined : installations.find((candidate) =>
+        candidate.runnerId === machine.runnerId && candidate.agentId === machine.agentId);
+      if (!installation) return { ...machine, proof: null };
+      const target = installationReviewerTarget(installation, "claude-code");
+      const current = liveValidation.current(target, now);
+      const newest = proofs.find((proof) => proof.driver === target.driver && proof.modelId === target.modelId &&
+        proof.capabilitiesSha256 === target.capabilitiesSha256);
+      const proof: VideoReviewerProofState = current
+        ? { state: "certified", proofId: current.proofId, validatedAt: current.validatedAt, expiresAt: current.expiresAt }
+        : !newest ? { state: "missing" }
+        : newest.revoked ? { state: "revoked", proofId: newest.proofId }
+        : newest.expired ? { state: "expired", proofId: newest.proofId, expiresAt: newest.expiresAt }
+        : { state: "missing" };
+      return { ...machine, proof };
+    });
+    return { readiness: readiness(now), reviewer: { driver: "claude-code", model: VIDEO_REVIEWER_MODEL, effort: VIDEO_REVIEWER_EFFORT },
+      mediaTypes: ["video/mp4", "video/webm"], machines };
+  };
+
   const attach = (sessions: DelegatedVideoSessions, hub: DelegatedVideoHub) => delegated.attach(sessions, hub, reviewService);
 
   return { liveValidation, reviewStore, runtime, workflowVideoApprovals, preparedMediaActiveStops, reviewService, delegated,
-    preparedMediaRuntime: delegated.runtimeResolver, operatorValidationPermits, pacedPeers, readiness, launchCertification, attach,
+    preparedMediaRuntime: delegated.runtimeResolver, operatorValidationPermits, pacedPeers, readiness, launchCertification, settingsStatus, attach,
     reviewerInstallations: () => mediaReviewerInstallations(db) };
 }
 export type HostingVideoEvidence = ReturnType<typeof composeHostingVideoEvidence>;
@@ -120,6 +148,14 @@ export function registerHostingVideoEvidenceRoutes(app: FastifyInstance, deps: {
     if (!administrator(principal) || !proofs) return reply.code(403).send({ error: ADMIN_ONLY });
     reply.header("cache-control", "private, no-store");
     return { proofs, readiness: video.readiness() };
+  });
+
+  app.get("/api/video-evidence/review-status", async (req, reply) => {
+    const principal = deps.requestPrincipal(req);
+    const status = administrator(principal) ? video.settingsStatus(principal) : null;
+    if (!status) return reply.code(403).send({ error: ADMIN_ONLY });
+    reply.header("cache-control", "private, no-store");
+    return status;
   });
 
   app.post("/api/video-evidence/live-validations", async (req, reply) => {

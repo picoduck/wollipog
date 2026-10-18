@@ -16,6 +16,7 @@ import {
   type AgentHarnessDefaultConfig,
   type AgentHarnessDefaultsView,
   type ArchivedHistoryRetentionView,
+  type VideoReviewSettingsStatus,
 } from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
 import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
@@ -304,6 +305,14 @@ const harnessDefaultsTransport: ApiTransport = {
         },
       ] });
     }
+    if (path === "/api/video-evidence/review-status") {
+      // `video=status`: one machine in each live proof state and one that cannot host the reviewer;
+      // `video=admins-only`: a member who is not an owner or admin. Otherwise an older server.
+      const video = new URLSearchParams(window.location.search).get("video");
+      if (video === "status") return Response.json(VIDEO_REVIEW_STATUS_FIXTURE);
+      if (video === "admins-only") return Response.json({ error: "Owners and admins only." }, { status: 403 });
+      return Response.json({ error: "Not Found" }, { status: 404 });
+    }
     if (path === "/api/identity") return Response.json({ context: { userId: "fixture-user", organizationId: "fixture-org" } });
     if (path === "/api/orchestrator-settings") {
       const params = new URLSearchParams(window.location.search);
@@ -428,6 +437,26 @@ const harnessDefaultsTransport: ApiTransport = {
   },
 };
 const harnessDefaultsApi = createApiClient(harnessDefaultsTransport);
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Fixed dates, so every capture reads the same. */
+const VIDEO_REVIEW_STATUS_FIXTURE: VideoReviewSettingsStatus = {
+  readiness: { available: true },
+  reviewer: { driver: "claude-code", model: "claude-opus-5-5", effort: "high" },
+  mediaTypes: ["video/mp4", "video/webm"],
+  machines: [
+    { runnerId: "studio", machineName: "Studio Workstation", agentId: "claude", gap: null,
+      proof: { state: "certified", proofId: "video_live_proof_1", validatedAt: Date.UTC(2026, 9, 1, 12), expiresAt: Date.UTC(2026, 9, 1, 12) + 30 * DAY_MS } },
+    { runnerId: "laptop", machineName: "Travel Laptop", agentId: "claude", gap: null,
+      proof: { state: "expired", proofId: "video_live_proof_2", expiresAt: Date.UTC(2026, 8, 14, 12) } },
+    { runnerId: "build", machineName: "Build Server", agentId: "claude", gap: null, proof: { state: "revoked", proofId: "video_live_proof_3" } },
+    { runnerId: "spare", machineName: "Spare Mac mini", agentId: "claude", gap: null, proof: { state: "missing" } },
+    { runnerId: "codex", machineName: "Codex Host", agentId: null, proof: null,
+      gap: { code: "no_claude_code_agent", reason: "This machine has no native Claude Code agent, the only harness that can host the media-only reviewer." } },
+    { runnerId: "old", machineName: "Old Desktop", agentId: "claude", proof: null,
+      gap: { code: "no_attestation", reason: "Its Claude Code agent has no media-only reviewer attestation. Install the pinned Claude Code CLI, provision the dedicated reviewer API key and restart the runner." } },
+  ],
+};
 
 function Harness() {
   const params = new URLSearchParams(window.location.search);

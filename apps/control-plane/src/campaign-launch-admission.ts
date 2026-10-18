@@ -190,8 +190,8 @@ function videoEvidenceCapability(facts: CampaignLaunchFacts, imageDelegated: boo
   if (facts.plan.driver !== reviewer.driver || facts.plan.config.model !== reviewer.model) {
     return human(`the evidence envelope would name ${facts.plan.driver} ${facts.plan.config.model ?? "with no fixed model"}, not the certified ${reviewer.driver} ${reviewer.model} reviewer.`);
   }
-  if (!facts.disclosuresAvailable) return human("this control plane has no provider disclosures to mint the evidence envelope.");
-  if (!certification.adaptersReady) return human("this control plane's video review adapters are not attached yet.");
+  if (!facts.disclosuresAvailable) return human("Wollipog has no provider disclosures to mint the evidence envelope.");
+  if (!certification.adaptersReady) return human("Wollipog's video review service is not attached yet.");
   if (blocked || !proposal) return human("the launch is blocked, so no evidence envelope is minted.");
   return { state: "verified", reason: `MP4 and WebM recordings attached as private Session artifacts are reviewed by the certified ${reviewer.driver} ${reviewer.model} (${reviewer.effort} effort) media-only reviewer, and the Orchestrator decides from its verdict. Children must also run on an attested agent. The live proof expires ${new Date(certification.proofExpiresAt).toISOString()}.` };
 }

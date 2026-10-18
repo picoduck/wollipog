@@ -356,6 +356,7 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   orchestratorSettings: () => req<OrchestratorSettingsView>("/api/orchestrator-settings"),
+  videoReviewStatus: () => req<import("@wollipog/protocol").VideoReviewSettingsStatus>("/api/video-evidence/review-status"),
   fullControlLaunchPreflight: (input: import("@wollipog/protocol").FullControlLaunchRequest, signal?: AbortSignal) =>
     req<{ preflight: import("@wollipog/protocol").CampaignLaunchPreflight }>("/api/full-control-campaigns/preflight", {
       method: "POST", body: JSON.stringify(input), signal,

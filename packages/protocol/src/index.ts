@@ -704,6 +704,7 @@ export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
+export * from "./video-review-settings.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
-import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, PROTOCOL_VERSION, type RunnerMetadata } from "@wollipog/protocol";
+import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, PROTOCOL_VERSION, type RunnerMetadata, type VideoReviewSettingsStatus } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
@@ -149,6 +149,60 @@ test("readiness advances only through a paced peer and a Human proof, and still 
   assert.equal((await h.call("admin", "POST", `/api/video-evidence/live-validations/${proof.proofId}/revoke`)).body.code, "no_current_proof");
   h.register(false);
   assert.equal(code(h.video.readiness()), "no_paced_video_peer", "removing the contract withdraws readiness at once");
+});
+
+test("the Settings review status names each machine's gap and its installation's proof state, for owners and admins only", async (t) => {
+  const h = await harness(t);
+  const status = async (as = "owner") => {
+    const response = await h.call(as, "GET", "/api/video-evidence/review-status");
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    return response.body as unknown as VideoReviewSettingsStatus;
+  };
+  for (const as of [null, "operator", "viewer", "orchestrator", "reviewer", "foreignOwner"]) {
+    assert.equal((await h.call(as, "GET", "/api/video-evidence/review-status")).status, 403, `status as ${as}`);
+  }
+  const initial = await status("admin");
+  assert.deepEqual(initial.reviewer, { driver: "claude-code", model: "claude-opus-5-5", effort: "high" });
+  assert.deepEqual(initial.mediaTypes, ["video/mp4", "video/webm"]);
+  assert.equal(code(initial.readiness), "no_paced_video_peer");
+  assert.deepEqual(initial.machines.map((machine) => [machine.runnerId, machine.machineName, machine.agentId, machine.gap?.code, machine.proof]),
+    [["r", "fixture", "claude", "no_attestation", null]]);
+  assert.match(initial.machines[0]!.gap!.reason, /^Its Claude Code agent has no media-only reviewer attestation\./u);
+
+  h.register(true, PACED_VIDEO_REVIEW_MIN_PROTOCOL - 1);
+  assert.equal((await status()).machines[0]!.gap!.code, "runner_protocol");
+  h.db.registerRunner({ ...runner(true), agents: runner(true).agents.map((agent) => ({ ...agent,
+    capabilities: { ...agent.capabilities!, models: [{ id: "claude-sonnet-5-5", default: true }] } })) }, Date.now(), PROTOCOL_VERSION);
+  assert.equal((await status()).machines[0]!.gap!.code, "reviewer_model");
+  h.db.registerRunner({ ...runner(true), agents: [] }, Date.now(), PROTOCOL_VERSION);
+  assert.deepEqual((await status()).machines.map((machine) => [machine.agentId, machine.gap?.code]), [[null, "no_claude_code_agent"]]);
+
+  h.register(true);
+  const attested = await status();
+  assert.equal(attested.machines[0]!.gap, null);
+  assert.deepEqual(attested.machines[0]!.proof, { state: "missing" });
+  assert.equal(code(attested.readiness), "live_validation");
+
+  const peer = h.video.pacedPeers()[0]!;
+  const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", attestation });
+  const day = 24 * 60 * 60 * 1000;
+  const expired = h.video.liveValidation.recordInspectedRuns(h.owner, target, syntheticInspectedVideoRuns(target, h.owner.userId), Date.now() - 31 * day)!;
+  assert.deepEqual((await status()).machines[0]!.proof, { state: "expired", proofId: expired.proofId, expiresAt: expired.expiresAt });
+  const proof = h.video.liveValidation.recordInspectedRuns(h.owner, target, syntheticInspectedVideoRuns(target, h.owner.userId))!;
+  assert.deepEqual((await status()).machines[0]!.proof,
+    { state: "certified", proofId: proof.proofId, validatedAt: proof.validatedAt, expiresAt: proof.expiresAt });
+  assert.equal(proof.expiresAt - proof.validatedAt, 30 * day);
+  assert.equal(code((await status()).readiness), "reviewer_unavailable");
+  h.attach();
+  assert.equal(code((await status()).readiness), "available");
+
+  assert.ok(h.video.liveValidation.revoke(h.owner, proof.proofId));
+  assert.deepEqual((await status()).machines[0]!.proof, { state: "revoked", proofId: proof.proofId });
+  // A proof certifies one exact attestation: a changed one starts again from missing.
+  assert.ok(h.video.liveValidation.recordInspectedRuns(h.owner, target, syntheticInspectedVideoRuns(target, h.owner.userId)));
+  h.register(true, PROTOCOL_VERSION, syntheticMediaReviewerAttestation("claude", "changed"));
+  assert.deepEqual((await status()).machines[0]!.proof, { state: "missing" });
+  assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM video_profile_live_validation").get()!.n, 3, "reading status writes nothing");
 });
 
 test("recording matches the advertised contract by field, whatever its key order", async (t) => {

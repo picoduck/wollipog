@@ -4,7 +4,7 @@ import { after, before, test } from "node:test";
 import React, { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { OrchestratorSettingsView } from "@wollipog/protocol";
+import type { OrchestratorSettingsView, VideoReviewSettingsStatus } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
@@ -120,10 +120,13 @@ function json(body: unknown, status = 200): Response {
 function server(initial: OrchestratorSettingsView) {
   let current = initial;
   const writes: Array<{ defaults: Defaults }> = [];
-  const state = { reject: null as string | null, current: () => current, set: (next: OrchestratorSettingsView) => { current = next; } };
+  const state = { reject: null as string | null, current: () => current, set: (next: OrchestratorSettingsView) => { current = next; },
+    // Video review status: an older server without the route by default, so the group stays hidden.
+    video: { status: 404, body: { error: "Not Found" } as unknown } };
   const transport: ApiTransport = {
     instanceId: "test", publicOrigin: "http://localhost", close() {},
     async request(path, init) {
+      if (path === "/api/video-evidence/review-status") return json(state.video.body, state.video.status);
       assert.equal(path, "/api/orchestrator-settings");
       if (init?.method === "PUT") {
         const body = JSON.parse(String(init.body)) as { defaults: Defaults };
@@ -529,7 +532,9 @@ test("a server without the settings route asks for a newer Wollipog; another fai
   let attempts = 0;
   const transport: ApiTransport = {
     instanceId: "test", publicOrigin: "http://localhost", close() {},
-    async request() {
+    async request(path) {
+      // Only the settings load counts; the Video Evidence Review group reads its own route.
+      if (path !== "/api/orchestrator-settings") return json({ error: "Not Found" }, 404);
       attempts += 1;
       return answer ?? json(settings());
     },
@@ -1154,4 +1159,73 @@ test("closing the window with a dirty draft asks the browser to confirm", async 
   } finally {
     await view.cleanup();
   }
+});
+
+const DAY = 24 * 60 * 60 * 1000;
+function videoStatus(overrides: Partial<VideoReviewSettingsStatus> = {}): VideoReviewSettingsStatus {
+  return { readiness: { available: false, code: "live_validation", reason: "server sentence" },
+    reviewer: { driver: "claude-code", model: "claude-opus-5-5", effort: "high" }, mediaTypes: ["video/mp4", "video/webm"],
+    machines: [
+      { runnerId: "r1", machineName: "Studio", agentId: "claude", gap: null,
+        proof: { state: "certified", proofId: "p1", validatedAt: Date.UTC(2026, 9, 1), expiresAt: Date.UTC(2026, 9, 1) + 30 * DAY } },
+      { runnerId: "r2", machineName: "Laptop", agentId: "claude", gap: null, proof: { state: "expired", proofId: "p2", expiresAt: Date.UTC(2026, 8, 1) } },
+      { runnerId: "r3", machineName: "Build Box", agentId: "claude", gap: null, proof: { state: "revoked", proofId: "p3" } },
+      { runnerId: "r4", machineName: "Spare", agentId: "claude", gap: null, proof: { state: "missing" } },
+      { runnerId: "r5", machineName: "Codex Host", agentId: null, proof: null,
+        gap: { code: "no_claude_code_agent", reason: "This machine has no native Claude Code agent, the only harness that can host the media-only reviewer." } },
+    ], ...overrides };
+}
+const videoGroup = (container: Element) => [...container.querySelectorAll("section.settings-group")]
+  .find((section) => section.querySelector(".settings-group-title")?.textContent === "Video Evidence Review");
+
+test("Video Evidence Review shows each machine's live proof state and why review is unavailable", async () => {
+  const { transport, state } = server(settings());
+  state.video = { status: 200, body: videoStatus() };
+  const view = await mount(panel(transport));
+  try {
+    const group = videoGroup(view.container);
+    assert.ok(group, "the group renders once the status loads");
+    assert.match(group.textContent ?? "", /No current live proof certifies a media-only reviewer, so video evidence stays with you\./u);
+    assert.doesNotMatch(group.textContent ?? "", /server sentence|control plane/u, "readiness is dashboard copy, not the server's sentence");
+    const rows = [...group.querySelectorAll(".setting-row")].map((row) => ({
+      title: row.querySelector(".setting-row-title")?.textContent, badge: row.querySelector(".status")?.textContent?.trim(),
+      description: row.querySelector(".setting-row-desc")?.textContent }));
+    assert.deepEqual(rows.map((row) => [row.title, row.badge]), [["Studio", "Certified"], ["Laptop", "Expired"],
+      ["Build Box", "Revoked"], ["Spare", "Not Certified"], ["Codex Host", "Unavailable"]]);
+    assert.match(rows[0]!.description ?? "", /^Certified on .+ until .+\.$/u);
+    assert.match(rows[1]!.description ?? "", /^The live proof expired on .+\. Record a new certification to delegate video review\.$/u);
+    assert.equal(rows[2]!.description, "The live proof was revoked. Record a new certification to delegate video review.");
+    assert.equal(rows[3]!.description, "No live proof certifies this reviewer's current attestation yet.");
+    assert.equal(rows[4]!.description, "This machine has no native Claude Code agent, the only harness that can host the media-only reviewer.");
+    const about = group.querySelector("details summary")?.textContent;
+    assert.equal(about, "About Video Evidence Review");
+    const body = group.querySelector("details .disclosure-body")?.textContent?.replace(/\s+/gu, " ") ?? "";
+    assert.match(body, /separate Claude Code reviewer on claude-opus-5-5 at high effort/u);
+    assert.match(body, /expires after 30 days/u);
+    assert.match(body, /a different harness or model keeps video with you/u);
+    assert.match(body, /Only MP4 and WebM recordings attached as private Session artifacts can be delegated\./u);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("Video Evidence Review states availability, admin-only access and an older server plainly", async () => {
+  const { transport, state } = server(settings());
+  state.video = { status: 200, body: videoStatus({ readiness: { available: true } }) };
+  let view = await mount(panel(transport));
+  try {
+    assert.match(videoGroup(view.container)?.textContent ?? "", /The Orchestrator can delegate video evidence to a certified media-only reviewer\./u);
+  } finally { await view.cleanup(); }
+  state.video = { status: 403, body: { error: "admins only" } };
+  view = await mount(panel(transport));
+  try {
+    const group = videoGroup(view.container);
+    assert.match(group?.textContent ?? "", /Only an owner or admin of the personal organization can see video review certification\./u);
+    assertNoDomNode(group?.querySelector(".setting-row") ?? null, "no machine rows without access");
+  } finally { await view.cleanup(); }
+  state.video = { status: 404, body: { error: "Not Found" } };
+  view = await mount(panel(transport));
+  try {
+    assert.equal(videoGroup(view.container), undefined, "an older server shows no group");
+  } finally { await view.cleanup(); }
 });

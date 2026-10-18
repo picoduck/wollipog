@@ -31,6 +31,7 @@ import { useSettingsPanelHead } from "./SettingsView.js";
 import type { SelectOption } from "./ui/ChoiceControls.js";
 import { NumberRow, SegmentedRow, SelectRow, SettingsGroup } from "./ui/SettingsRows.js";
 import { FullControlModeChoice, readLimitText } from "./FullControlPreparation.js";
+import { VideoReviewStatusGroup } from "./VideoReviewStatusGroup.js";
 
 const AUTO = "__automatic__";
 const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
@@ -766,6 +767,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         onChange={(value) => updateDelegation(category, value as "human" | "orchestrator")}
       />)}
     </SettingsGroup>
+
+    <VideoReviewStatusGroup />
 
     <SaveBar
       dirty={dirty}
