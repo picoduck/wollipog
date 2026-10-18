@@ -137,7 +137,9 @@ function useLocationSetup(project: ProjectView, location: ProjectLocationView, r
 /** The setup status as one meta item (§11.3), or null when there is nothing to say. */
 function setupMeta(state: SetupState, machine: string): ReactNode {
   const meta = (icon: ReactNode, text: string, title?: string) => (
-    <span key="setup" className="project-location-setup" title={title}>{icon}{text}</span>
+    <span key="setup" className="project-location-setup" title={title ?? text}>
+      {icon}<span className="project-location-setup-text">{text}</span>
+    </span>
   );
   switch (state.kind) {
     case "hidden": return null;

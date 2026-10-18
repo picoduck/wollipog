@@ -12677,7 +12677,13 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   align-items: center;
   gap: var(--space-1);
 }
+.project-location-setup > :is(svg, .spinner) { flex: none; }
 .project-location-setup > .spinner { width: 12px; height: 12px; }
+.project-location-setup-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .project-location-setup-ready { color: var(--green); }
 @media (forced-colors: active) {
   .project-location-setup-ready { color: inherit; }
@@ -12693,6 +12699,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   }
   .project-location-meta { flex-wrap: wrap; row-gap: 0; }
   .project-location-path { flex-basis: 100%; }
+  /* A long setup sentence that wraps to a line of its own truncates there rather than clipping. */
+  .project-location-setup { flex-shrink: 1; min-width: 0; }
 }
 /* No Locations (§12.1): one inline row, its sentence wrapping rather than squeezing its action. */
 .project-locations-empty {

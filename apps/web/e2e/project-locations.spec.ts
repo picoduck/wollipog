@@ -114,6 +114,19 @@ test.describe("on a phone", () => {
     const alpha = locationRow(page, "alpha");
     const geometry = await rowGeometry(alpha);
     expect(geometry.row.height).toBeGreaterThanOrEqual(64);
+    // The longest setup sentence takes a line of its own and truncates inside the row, never clipped.
+    const setup = await locationRow(page, "legacy").evaluate((element) => {
+      const text = element.querySelector(".project-location-setup-text")!;
+      const body = element.querySelector(".row-body")!;
+      return {
+        right: text.getBoundingClientRect().right,
+        bodyRight: body.getBoundingClientRect().right,
+        overflow: getComputedStyle(text).textOverflow,
+        truncated: text.scrollWidth > text.clientWidth,
+      };
+    });
+    expect(setup).toMatchObject({ overflow: "ellipsis", truncated: true });
+    expect(setup.right).toBeLessThanOrEqual(setup.bodyRight + 0.5);
     await alpha.getByRole("button", { name: "alpha Actions" }).click();
     const menu = page.getByRole("menu", { name: "alpha Actions" });
     await expect(menu.getByRole("menuitem")).toHaveText(["New Session Here", "Copy Path", "Make Default", "Remove Location…"]);
