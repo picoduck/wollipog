@@ -37,7 +37,6 @@ export const LABEL_SWAP = new RegExp(
 const BASELINE: Readonly<Record<string, number>> = {
   "components/AutomationsView.tsx": 2,
   "components/Board.tsx": 1,
-  "components/CreateProjectDialog.tsx": 1,
   "components/InstancesPanel.tsx": 1,
   "components/NewRunDialog.tsx": 1,
   "components/OfflineBanner.tsx": 1,

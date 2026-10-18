@@ -576,6 +576,16 @@ test("the Sessions header's New Session uses the active tab's preset, and ⋯ ex
   const items = () => [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
   assert.deepEqual(items().map((item) => item.querySelector(".menu-text")?.textContent), ["New Project…", "Keyboard Shortcuts"]);
   assert.equal(items()[0]!.disabled, false);
+  // #2965: New Project… opens the dialog of that name, with Create Project and a one-line description.
+  await act(async () => { items()[0]!.click(); });
+  const newProjectDialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+  assert.equal(newProjectDialog.querySelector(".modal-title")?.textContent, "New Project");
+  assert.equal(newProjectDialog.querySelector(".modal-desc")?.textContent, "Groups sessions by repository. You'll add its folders next.");
+  const newProjectFooter = [...newProjectDialog.querySelectorAll<HTMLButtonElement>(".modal-foot button")];
+  assert.deepEqual(newProjectFooter.map((button) => button.textContent?.trim()), ["Cancel", "Create Project"]);
+  await act(async () => { newProjectFooter[0]!.click(); });
+  assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'), "Cancel closes New Project");
+  menu = await openMenu();
   await act(async () => { items()[1]!.click(); });
   assert.equal(shortcutsOpened, 1);
   // The opener reads an argument as the element to return focus to, so ⋯ must not hand it its choice.

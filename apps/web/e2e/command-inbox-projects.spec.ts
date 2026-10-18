@@ -1243,7 +1243,7 @@ test("the Sessions header opens both existing workflows with the active Project 
 
   await more.click();
   await page.getByRole("menuitem", { name: "New Project…", exact: true }).click();
-  const projectDialog = page.getByRole("dialog", { name: "Create Project" });
+  const projectDialog = page.getByRole("dialog", { name: "New Project" });
   await expect(projectDialog).toBeVisible();
   await projectDialog.getByRole("button", { name: "Cancel" }).click();
   await expect(more).toBeFocused();
@@ -1265,7 +1265,7 @@ test("the Sessions header's creation actions remain usable at a mobile viewport"
 
   await more.click();
   await page.getByRole("menuitem", { name: "New Project…", exact: true }).click();
-  const projectDialog = page.getByRole("dialog", { name: "Create Project" });
+  const projectDialog = page.getByRole("dialog", { name: "New Project" });
   await expect(projectDialog).toBeVisible();
   await projectDialog.getByRole("button", { name: "Cancel" }).click();
   await expect(more).toBeFocused();
@@ -1415,7 +1415,7 @@ test("New Session creates a durable Project and links its first Location inline"
   await newSession.getByRole("listbox", { name: "Project Options" }).getByRole("option", { name: "New Project…" }).click();
 
   // New Session stays open under its child, under one shared dim (§7.1).
-  const createProject = page.getByRole("dialog", { name: "Create Project" });
+  const createProject = page.getByRole("dialog", { name: "New Project" });
   await expect(createProject).toBeVisible();
   await expect(newSession).toBeVisible();
   await expect(page.locator(".modal-backdrop")).toHaveCount(2);
@@ -1455,7 +1455,7 @@ test("an inline Project fallback cannot revive the Project after a later live de
   const newSession = page.getByRole("dialog", { name: "New Session" });
   await newSession.getByRole("combobox", { name: "Project" }).click();
   await newSession.getByRole("listbox", { name: "Project Options" }).getByRole("option", { name: "New Project…" }).click();
-  const createProject = page.getByRole("dialog", { name: "Create Project" });
+  const createProject = page.getByRole("dialog", { name: "New Project" });
   await createProject.getByLabel("Project Name").fill("Temporary Inline Project");
   await createProject.getByRole("button", { name: "Create Project" }).click();
 
@@ -2006,7 +2006,7 @@ test.describe("coarse pointer Project actions", () => {
 test("Project management creates, hides, reloads, and reveals durable empty Projects", async ({ page }) => {
   await page.locator(".page-header").getByRole("button", { name: "More Actions" }).click();
   await page.getByRole("menuitem", { name: "New Project…", exact: true }).click();
-  const createDialog = page.getByRole("dialog", { name: "Create Project" });
+  const createDialog = page.getByRole("dialog", { name: "New Project" });
   await createDialog.getByLabel("Project Name").fill("Durable Empty");
   await createDialog.getByRole("button", { name: "Create Project" }).click();
   await expect(page.getByRole("tab", { name: /Durable Empty/ })).toBeVisible();

@@ -222,6 +222,7 @@ export function InboxView({
   const markResultReviewed = useMarkResultReviewed();
   const sessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
+  const allProjects = useMemo(() => [...projects.values()], [projects]);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const sessionRemindersSupported = useStoreSelector((state) => state.sessionRemindersSupported);
   const indefiniteSessionRemindersSupported = useStoreSelector((state) => state.indefiniteSessionRemindersSupported);
@@ -1959,6 +1960,7 @@ export function InboxView({
       {creatingProject && (
         <CreateProjectDialog
           accessScopeManagementSupported={accessScopeManagementSupported}
+          projects={allProjects}
           onClose={() => setCreatingProject(false)}
           onCreated={(project) => {
             setCreatingProject(false);

@@ -88,7 +88,7 @@ for (const width of [1440, 834]) {
       const start = section(page, "Get Started");
       await expect(start.getByRole("button")).toHaveText(["New Project", "Connect a Machine"]);
       await start.getByRole("button", { name: "New Project", exact: true }).click();
-      await expect(page.getByRole("dialog", { name: "Create Project" })).toBeVisible();
+      await expect(page.getByRole("dialog", { name: "New Project" })).toBeVisible();
     });
   });
 }

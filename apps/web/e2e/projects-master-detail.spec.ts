@@ -142,7 +142,7 @@ test.describe("at desktop widths", () => {
     await expect(page.locator(".page-header").getByRole("button", { name: "New Project" })).toHaveCount(0);
     await expect(state.getByRole("button", { name: "Connect a Machine", exact: true })).toBeVisible();
     await state.getByRole("button", { name: "New Project", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Create Project" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "New Project" })).toBeVisible();
   });
 
   test("an older server shows the Projects Need an Update notice", async ({ page }) => {

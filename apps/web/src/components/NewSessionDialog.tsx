@@ -1987,6 +1987,8 @@ export function NewSessionDialog({
     {creatingProject && (
       <CreateProjectDialog
         accessScopeManagementSupported={accessScopeManagementSupported}
+        projects={projectList}
+        stacked
         returnFocusRef={projectPickerFocusRef}
         onClose={() => setCreatingProject(false)}
         onCreated={(project) => {

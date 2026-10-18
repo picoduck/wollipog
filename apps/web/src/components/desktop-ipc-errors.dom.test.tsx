@@ -43,15 +43,27 @@ async function render(children: React.ReactNode, activeClient: ApiClient = clien
   return { container, mountPoint, unmount: async () => { await act(async () => root.unmount()); mountPoint.remove(); } };
 }
 
-test("Create Project shows a native IPC string rejection and stops loading access scopes", async () => {
+/** Opens a notice's Show Details and returns what it reveals. */
+async function noticeDetails(notice: Element | null): Promise<string> {
+  const toggle = [...(notice?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
+    .find((button) => button.textContent?.trim() === "Show Details");
+  assert.ok(toggle, "the raw message is behind Show Details");
+  await act(async () => { toggle.click(); });
+  return notice?.textContent ?? "";
+}
+
+test("New Project shows a native IPC string rejection and stops loading access scopes", async () => {
   const { container, unmount } = await render(<CreateProjectDialog
     accessScopeManagementSupported
+    projects={[]}
     onClose={() => {}}
     onCreated={() => {}}
   />);
   try {
-    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /binary request frame/u);
-    assert.doesNotMatch(container.textContent ?? "", /Loading permitted access scopes/u);
+    const alert = container.querySelector('[role="alert"]');
+    assert.match(alert?.textContent ?? "", /Couldn't Load Access Levels/u);
+    assert.match(await noticeDetails(alert), /binary request frame/u);
+    assert.doesNotMatch(container.textContent ?? "", /Loading access levels/u);
     const create = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Create Project");
     assert.ok(create);
     assert.equal(create.disabled, true);
@@ -60,7 +72,7 @@ test("Create Project shows a native IPC string rejection and stops loading acces
   }
 });
 
-test("Create Project shows an IPC string error when submission fails", async () => {
+test("New Project shows an IPC string error when submission fails", async () => {
   const desktop: NativeInvokeRuntime = {
     async invoke<T>(): Promise<T> { throw "native request failed"; },
   };
@@ -72,6 +84,7 @@ test("Create Project shows an IPC string error when submission fails", async () 
   });
   const { container, unmount } = await render(<CreateProjectDialog
     accessScopeManagementSupported={false}
+    projects={[]}
     onClose={() => {}}
     onCreated={() => {}}
   />, createApiClient(transport));
@@ -88,7 +101,9 @@ test("Create Project shows an IPC string error when submission fails", async () 
       fireDomEvent.submit(container.querySelector<HTMLFormElement>("form")!);
       await Promise.resolve();
     });
-    assert.equal(container.querySelector('[role="alert"]')?.textContent, "native request failed");
+    const alert = container.querySelector('[role="alert"]');
+    assert.match(alert?.textContent ?? "", /^Couldn't Create the Project/u);
+    assert.match(await noticeDetails(alert), /native request failed/u);
     assert.equal(create.disabled, false);
   } finally {
     await unmount();

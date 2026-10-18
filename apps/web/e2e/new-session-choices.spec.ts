@@ -965,7 +965,7 @@ test.describe("searchable pickers at 1440px (#1951)", () => {
     // A search that found nothing never highlights the footer for Enter; Arrow Down reaches it.
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
-    const create = page.getByRole("dialog", { name: "Create Project" });
+    const create = page.getByRole("dialog", { name: "New Project" });
     await expect(create).toBeVisible();
     // Cancelling returns to the picker whose row opened it.
     await create.getByRole("button", { name: "Cancel" }).click();
@@ -1015,7 +1015,7 @@ test.describe("searchable touch pickers at 390px (#1951)", () => {
     await expect(options).toHaveText(["New Project…"]);
 
     await options.click();
-    const create = page.getByRole("dialog", { name: "Create Project" });
+    const create = page.getByRole("dialog", { name: "New Project" });
     await expect(create).toBeVisible();
     await create.getByRole("button", { name: "Cancel" }).click();
     await expect(create).toHaveCount(0);
