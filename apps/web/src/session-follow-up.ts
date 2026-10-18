@@ -3,21 +3,30 @@ import { attentionRequestRank, pendingRequests, type SessionView } from "@wollip
 
 export type SessionFollowUpGroup = "needs_input" | "ready_for_review" | "working" | "quiet";
 
-type CampaignFacts = Partial<Pick<SessionView, "parentSessionId" | "orchestratorCampaign" | "orchestratorPolicy">>;
+type CampaignFacts = Partial<Pick<SessionView, "parentSessionId" | "orchestratorCampaign" | "orchestratorPolicy" |
+  "fullControlCampaignStatus">>;
+
+/** The revision of the result a fired reminder stands in for while the ordinary list sorts: it is the
+ * person's own follow-up, so a completed campaign never hides it. */
+export const FIRED_REMINDER_RESULT_REVISION = "reminder";
 
 /** A Full Control root whose campaign the server reports Verified Complete (#2940): its normal
- * completion is informational, never review work. Only the server's projection decides this; any
- * other campaign state, a Custom campaign or a descendant keeps its ordinary follow-up. */
+ * completion is informational, never review work. Only the server decides this, through the root's
+ * `fullControlCampaignStatus` (present on summary, detail and live rows) or, from an older control
+ * plane, its campaign projection. Any other campaign state, a Custom campaign or a descendant keeps
+ * its ordinary follow-up. */
 export function completedFullControlCampaign(session: CampaignFacts): boolean {
+  if (session.parentSessionId) return false;
+  if (session.fullControlCampaignStatus !== undefined) return session.fullControlCampaignStatus === "verified_complete";
   const campaign = session.orchestratorCampaign;
-  if (session.parentSessionId || campaign?.status !== "verified_complete") return false;
+  if (campaign?.status !== "verified_complete") return false;
   return (campaign.control ?? session.orchestratorPolicy?.control)?.mode === "full_control";
 }
 
 export function outstandingSessionResult(session: Pick<SessionView, "attention"> & CampaignFacts) {
   const facts = session.attention;
   return facts?.result?.owner === "human" && facts.result.revision !== facts.acknowledgedRevision &&
-    !completedFullControlCampaign(session)
+    (facts.result.revision === FIRED_REMINDER_RESULT_REVISION || !completedFullControlCampaign(session))
     ? facts.result : null;
 }
 

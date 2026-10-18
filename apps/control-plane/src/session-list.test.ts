@@ -82,6 +82,41 @@ test("summary snapshots retain live hold and turn state while detail retains hea
   } finally { db.close(); }
 });
 
+test("a verified-complete Full Control root's hub snapshot row carries its campaign status without a projection (#2940)", async () => {
+  const db=ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,0);
+    const policy=resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS,"system_default");
+    policy.behavior.completion="retain";
+    policy.issueScope={ repository: "owner/repo",issueNumbers: [12],revision: 1,authorizedByUserId: LOCAL_OWNER_USER_ID,authorizedAt: 1 };
+    policy.issueNumbers=[12];
+    db.createSession({ id: "campaign",runnerId: "r",workspaceId: null,agentId: null,title: "Campaign",useWorktree: false,
+      driver: "codex-app-server",config: { permissionMode: "orchestrator" },orchestratorPolicy: policy,
+      parentControlPolicy: { decisions: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.decisions } },now: 1 });
+    assert.equal(db.updateSessionCampaignControl("campaign",{ mode: "full_control",boundary: { version: 1,revision: 2,issueScopeRevision: 1,
+      repository: "owner/repo",objective: "Deliver #12",authorizedByUserId: LOCAL_OWNER_USER_ID,authorizedAt: 2,
+      operations: ["implementation_question"],delegatablePolicyIds: [] } },1,2),true);
+    db.createSession({ id: "child",runnerId: "r",workspaceId: null,agentId: null,title: "Child",useWorktree: false,
+      driver: "codex-app-server",config: {},parentSessionId: "campaign",now: 2 });
+    db.updateSessionStatus("child","idle",3);
+    const report=db.appendEvent("child",{ kind: "agent_message",text: "Report",final: true },4);
+    db.verifyCampaignChildReport("campaign","child",report.seq,5);
+    const frames: string[]=[];
+    let complete=false;
+    new Hub(db).addUiClient({ send(data) { frames.push(data); if (JSON.parse(data).complete) complete=true; } },{
+      principal: sessionListPrincipal,deviceId: null,uiProtocolVersion: PROTOCOL_VERSION,close() { assert.fail("closed"); },
+    });
+    while (!complete) await new Promise<void>((resolve) => setImmediate(resolve));
+    const rows: SessionView[]=frames.flatMap((frame) => JSON.parse(frame).sessions ?? []);
+    const campaign=rows.find((session) => session.id==="campaign")!;
+    assert.equal(campaign.projection,"summary");
+    assert.equal(campaign.orchestratorCampaign,undefined,"summaries still carry no campaign projection");
+    assert.equal(campaign.fullControlCampaignStatus,"verified_complete");
+    assert.equal(campaign.fullControlCampaignStatus,db.campaignProjection("campaign")!.status);
+    assert.equal(rows.find((session) => session.id==="child")!.fullControlCampaignStatus,undefined);
+  } finally { db.close(); }
+});
+
 test("team membership changes invalidate cached REST JSON, including other SQLite connections", () => {
   const directory = mkdtempSync(join(tmpdir(), "session-summary-access-"));
   const path = join(directory, "sessions.db");

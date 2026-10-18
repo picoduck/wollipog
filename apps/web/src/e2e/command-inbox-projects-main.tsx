@@ -7,8 +7,7 @@ import {
   removePendingRequest,
   type AgentCapabilities,
   type AgentSlashCommand,
-  type CampaignControl,
-  type OrchestratorCampaignProjection,
+  type OrchestratorCampaignStatus,
   type CreateSessionRequest,
   type CreateWorkspaceReferenceRequest,
   type ControlPlaneToUi,
@@ -334,25 +333,22 @@ function initialModel(): FixtureModel {
     initial.projects[0]!.totalSessionCount = 4;
   }
   if (SCENARIO === "campaign-complete") {
-    // Three at-rest Orchestrator roots with the same unacknowledged result (#2940): only the Full
-    // Control campaign the server reports Verified Complete is informational.
+    // Three at-rest Orchestrator roots with the same unacknowledged result (#2940), shaped as the
+    // list snapshot sends them: summaries carry no campaign projection, only a Full Control root's
+    // server-derived `fullControlCampaignStatus`. Only the verified-complete one is informational.
     const base = Date.now() - 3000;
-    const fullControl = { mode: "full_control" as const, boundary: { version: 1 as const, revision: 3, issueScopeRevision: 1,
-      repository: "example/repo", objective: "Deliver the fixture", authorizedByUserId: "user", authorizedAt: 1,
-      operations: ["pr_merge" as const], delegatablePolicyIds: [] } };
-    const make = (id: string, title: string, at: number, status: OrchestratorCampaignProjection["status"],
-      control: CampaignControl) => ({
-      ...session(id, title, "alpha", "alpha-workspace"), status: "idle" as const, role: "orchestrator" as const,
-      createdAt: base, updatedAt: base + at, lastEventAt: base + at,
+    const make = (id: string, title: string, at: number, fullControlCampaignStatus?: OrchestratorCampaignStatus) => ({
+      ...session(id, title, "alpha", "alpha-workspace"), projection: "summary" as const, status: "idle" as const,
+      role: "orchestrator" as const, createdAt: base, updatedAt: base + at, lastEventAt: base + at,
       attention: { version: 1 as const, meaningfulAt: base + at, humanActions: [],
         result: { revision: `${id}-result`, at: base + at, owner: "human" as const },
         acknowledgedRevision: null } as NonNullable<SessionView["attention"]>,
-      orchestratorCampaign: { status, policyRevision: 3, control } as unknown as OrchestratorCampaignProjection,
+      ...(fullControlCampaignStatus ? { fullControlCampaignStatus } : {}),
     });
     initial.sessions = [
-      make("session-complete", "Full Control Campaign Delivered", 300, "verified_complete", fullControl),
-      make("session-custom", "Custom Campaign Delivered", 200, "verified_complete", { mode: "custom" }),
-      make("session-blocked", "Full Control Campaign Blocked", 100, "blocked", fullControl),
+      make("session-complete", "Full Control Campaign Delivered", 300, "verified_complete"),
+      make("session-custom", "Custom Campaign Delivered", 200),
+      make("session-blocked", "Full Control Campaign Blocked", 100, "blocked"),
     ];
     initial.projects[0]!.unarchivedSessionCount = 3;
     initial.projects[0]!.totalSessionCount = 3;

@@ -3286,6 +3286,58 @@ test("verified campaign children survive an event cache reset without a history 
   }
 });
 
+test("a Full Control root's summary carries its campaign status, identical to the projection, in both directions (#2940)", () => {
+  const db = withRunner();
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    const userId = db.localIdentityContext().userId;
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    policy.behavior.completion = "retain";
+    policy.issueScope = { repository: "owner/repo", issueNumbers: [12], revision: 1, authorizedByUserId: userId, authorizedAt: 1 };
+    policy.issueNumbers = [12];
+    db.createSession(newSession({ id: "campaign", role: "orchestrator", config: { permissionMode: "orchestrator" }, orchestratorPolicy: policy,
+      parentControlPolicy: { decisions: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.decisions } } }));
+    db.createSession(newSession({ id: "custom", role: "orchestrator", config: { permissionMode: "orchestrator" }, orchestratorPolicy: policy }));
+    assert.equal(db.updateSessionCampaignControl("campaign", { mode: "full_control", boundary: { version: 1, revision: 2, issueScopeRevision: 1,
+      repository: "owner/repo", objective: "Deliver #12", authorizedByUserId: userId, authorizedAt: 2,
+      operations: ["implementation_question"], delegatablePolicyIds: [] } }, 1, 2), true);
+    db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    db.updateSessionStatus("child", "idle", 999);
+    const report = db.appendEvent("child", { kind: "agent_message", text: "Final report", final: true }, 1_000);
+    db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+
+    const summaryOf = (id: string) => db.listSessionSummaries().find((session) => session.id === id)!;
+    const facts = (id: string) => {
+      const summary = summaryOf(id), detail = db.getSession(id)!;
+      return { summary: summary.fullControlCampaignStatus, summaryProjection: summary.orchestratorCampaign,
+        detail: detail.fullControlCampaignStatus, projection: detail.orchestratorCampaign?.status };
+    };
+    assert.equal(summaryOf("campaign").projection, "summary");
+    assert.deepEqual(facts("campaign"), { summary: "verified_complete", summaryProjection: undefined,
+      detail: "verified_complete", projection: "verified_complete" }, "summary, detail and projection agree");
+    assert.equal(db.campaignStatusOnly("campaign"), db.campaignProjection("campaign")!.status);
+    assert.equal(facts("custom").summary, undefined, "a Custom root carries no Full Control status");
+    assert.equal(facts("custom").detail, undefined);
+    assert.equal(facts("child").summary, undefined, "a descendant carries none");
+    assert.equal(facts("child").detail, undefined);
+
+    // New work reopens the campaign: the summary follows, and so does completion again.
+    db.createSession(newSession({ id: "second", parentSessionId: "campaign" }));
+    db.updateSessionStatus("second", "running", 1_002);
+    assert.deepEqual(facts("campaign"), { summary: "active", summaryProjection: undefined, detail: "active", projection: "active" });
+    db.updateSessionStatus("second", "idle", 1_003);
+    const second = db.appendEvent("second", { kind: "agent_message", text: "Second report", final: true }, 1_004);
+    db.verifyCampaignChildReport("campaign", "second", second.seq, 1_005);
+    assert.equal(facts("campaign").summary, "verified_complete");
+    // Revoking Full Control removes the fact rather than leaving a stale completion.
+    assert.equal(db.updateSessionCampaignControl("campaign", { mode: "custom" }, 2, 3), true);
+    assert.equal(facts("campaign").summary, undefined);
+    assert.equal(facts("campaign").detail, undefined);
+  } finally {
+    db.close();
+  }
+});
+
 test("a failed or result-less campaign continuation is visible at the projection root (#1352)", () => {
   const db = withRunner();
   try {

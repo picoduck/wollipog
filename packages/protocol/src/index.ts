@@ -7249,6 +7249,11 @@ export interface SessionView {
   orchestratorPolicy?: OrchestratorCampaignPolicy;
   /** Current effective campaign state. Omitted by older control planes and non-Orchestrators. */
   orchestratorCampaign?: OrchestratorCampaignProjection;
+  /** A Full Control campaign root's status, derived exactly as `orchestratorCampaign.status`, on
+   * summary, detail and live rows alike: summaries carry no campaign projection, and a completed
+   * campaign's result is informational rather than review work (#2940). Omitted for every other
+   * session and by older control planes. */
+  fullControlCampaignStatus?: OrchestratorCampaignStatus;
   /** Audience-scoped child-request counts, consistent across summary, detail and live rows.
    * Full campaign inventory remains detail-only. */
   campaignRequests?: { human: number; orchestrator: number; humanRequestTokens?: string[] };

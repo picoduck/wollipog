@@ -480,8 +480,8 @@ export interface SessionStatusContext {
 
 /** The session fields the ranking reads. */
 export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-  Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "orchestratorPolicy" | "parentSessionId" | "campaignRequests" |
-    "pendingRequestOwners" | "archived" |
+  Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "orchestratorPolicy" | "parentSessionId" |
+    "fullControlCampaignStatus" | "campaignRequests" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
     "queueHold" | "holds" | "backgroundWorkState" | "backgroundDeliveries">>;
 
