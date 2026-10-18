@@ -1,8 +1,18 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { openProjectActions } from "./session-groups.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 
 test.use({ video: "on" });
+
+/**
+ * Create Session refuses a shape the control plane would refuse (#2952): it stays enabled, and
+ * pressing it sends nothing and names the problem under Session Role.
+ */
+async function expectCreateRefused(page: Page, dialog: Locator, problem: RegExp) {
+  await dialog.getByRole("button", { name: "Create Session" }).click();
+  await expect(dialog.locator(".field-error")).toHaveText(problem);
+  expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest())).toBeFalsy();
+}
 
 /**
  * A Session Role card, scoped to its own radiogroup.
@@ -235,7 +245,7 @@ for (const scenario of [
     await expect(blocked).toBeVisible();
     await blocked.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("pi-strict-blocked.png"), fullPage: true });
-    await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
+    await expectCreateRefused(page, dialog, /Strict Project Isolation is delivered by the Orchestrator preset/);
 
     await dialog.getByRole("button", { name: /Strict Project Isolation: Enabled/ }).click();
     await dialog.getByRole("option", { name: /^Disabled/ }).click();
@@ -292,7 +302,7 @@ for (const scenario of [
     await expect(blocked).toBeVisible();
     await blocked.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("codex-strict-blocked-without-audited-sandbox.png"), fullPage: true });
-    await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
+    await expectCreateRefused(page, dialog, /Strict Project Isolation is delivered by the Orchestrator preset/);
 
     await dialog.getByRole("button", { name: /Strict Project Isolation: Enabled/ }).click();
     await dialog.getByRole("option", { name: /^Disabled/ }).click();

@@ -1,4 +1,5 @@
 import React, {
+  Fragment,
   useEffect,
   useId,
   useLayoutEffect,
@@ -77,6 +78,7 @@ export function InlineListbox<T>({
   onActiveChange,
   isOptionDisabled,
   isOptionChosen,
+  isOptionSeparated,
   getGroup,
   className,
   before,
@@ -92,6 +94,8 @@ export function InlineListbox<T>({
   onActiveChange?: (index: number) => void;
   isOptionDisabled?: (option: T) => boolean;
   isOptionChosen?: (option: T) => boolean;
+  /** Draws a separator (`.menu-sep`) before the option, unless it is the first one shown. */
+  isOptionSeparated?: (option: T) => boolean;
   getGroup?: (option: T) => string | undefined;
   className?: string;
   before?: ReactNode;
@@ -106,7 +110,7 @@ export function InlineListbox<T>({
     const chosen = isOptionChosen?.(option) ?? false;
     const optionId = `${id}-${index}`;
     const text = optionText ? optionTextParts(optionId, optionText(option)) : null;
-    return (
+    const button = (
       <button
         type="button"
         role="option"
@@ -127,6 +131,9 @@ export function InlineListbox<T>({
         {chosen && <CheckIcon size={14} />}
       </button>
     );
+    return index > 0 && isOptionSeparated?.(option)
+      ? <Fragment key={getKey(option)}><div className="menu-sep" aria-hidden="true" />{button}</Fragment>
+      : button;
   };
   return (
     <div
@@ -893,9 +900,15 @@ export interface SearchableComboboxOption<T extends string> {
   label: string;
   /** Visible context that distinguishes duplicate or similarly named choices. */
   description?: string;
+  /** What the closed field shows once this option is chosen, where the label alone would not tell
+   * two chosen values apart ("Docs Site · Studio Mac"). The list still shows the label. */
+  selectedLabel?: string;
   /** The Title Case section this option belongs to, as SelectOption's `group` (§9.1). A search
    * keeps a section's label only while one of its options matches. */
   group?: string;
+  /** Draws a separator before this option, setting it apart from the ones above (New Session's
+   * No Project, the list's last option). Not drawn while it is the first option shown. */
+  separator?: boolean;
   /** Additional already-authorized terms that are useful to search but need not be repeated. */
   keywords?: readonly string[];
   disabled?: boolean;
@@ -1095,6 +1108,11 @@ function groupLabelCount(options: readonly { group?: string }[]): number {
   return selectOptionRuns(options).filter((run) => run.group !== undefined).length;
 }
 
+/** How many option separators a list draws: one before each separated option except the first. */
+function optionSeparatorCount(options: readonly { separator?: boolean }[]): number {
+  return options.filter((option, index) => index > 0 && option.separator).length;
+}
+
 /**
  * The leading and trailing slots a picker's field draws INSIDE its own edge (§8.4): a 16px icon
  * before the value, and the 14px chevron after it. Inside rather than beside, so the field's left
@@ -1134,6 +1152,7 @@ export function SearchableCombobox<T extends string>({
   footerAction,
   leadingIcon,
   disabled = false,
+  invalid = false,
   className,
   inputId,
   autoFocus,
@@ -1156,6 +1175,9 @@ export function SearchableCombobox<T extends string>({
   /** A 16px decoration drawn inside the field, before the value. Hidden from assistive technology. */
   leadingIcon?: ReactNode;
   disabled?: boolean;
+  /** The chosen value is invalid (§8.5), as Select's `invalid`: the field carries `aria-invalid`.
+   * Pair it with `describedBy` pointing at the field's error. */
+  invalid?: boolean;
   className?: string;
   /** Optional DOM id for associating a visible label with the editable owner. */
   inputId?: string;
@@ -1179,7 +1201,8 @@ export function SearchableCombobox<T extends string>({
     () => filterSearchableComboboxOptions(options, searching ? query : ""),
     [options, query, searching],
   );
-  const inputValue = searching ? query : selected?.label ?? "";
+  const shownValue = selected?.selectedLabel ?? selected?.label ?? "";
+  const inputValue = searching ? query : shownValue;
   const noMatch = searching && query.trim() !== "" && results.length === 0;
   const showCreate = noMatch && Boolean(createOption);
   const rows = pickerRows(results.length, showCreate, Boolean(footerAction));
@@ -1192,6 +1215,7 @@ export function SearchableCombobox<T extends string>({
       + (option.description ? 1 : 0)
       + (option.disabled && option.disabledReason ? 1 : 0)), 1),
     groupLabelCount: groupLabelCount(results),
+    separatorCount: optionSeparatorCount(results),
     footerAction: Boolean(footerAction),
     coarsePointer,
   });
@@ -1311,6 +1335,7 @@ export function SearchableCombobox<T extends string>({
         aria-controls={open ? listboxId : undefined}
         aria-activedescendant={open ? activeDescendant : undefined}
         aria-disabled={disabled || undefined}
+        aria-invalid={invalid || undefined}
         readOnly={disabled}
         autoComplete="off"
         className="ui-searchable-combobox-input"
@@ -1330,9 +1355,8 @@ export function SearchableCombobox<T extends string>({
           const typed = event.target.value;
           // A field focused without opening still shows the chosen label, with the caret after it.
           // What the person typed there is the start of a search, not an edit of that label.
-          const shown = selected?.label ?? "";
-          const startsQuery = !openOnFocus && !open && !searching && shown !== "" && typed.startsWith(shown);
-          setQuery(startsQuery ? typed.slice(shown.length) : typed);
+          const startsQuery = !openOnFocus && !open && !searching && shownValue !== "" && typed.startsWith(shownValue);
+          setQuery(startsQuery ? typed.slice(shownValue.length) : typed);
           revealActive.current = true;
           setSearching(true);
           setActive(0);
@@ -1402,6 +1426,7 @@ export function SearchableCombobox<T extends string>({
           onActiveChange={(index) => { revealActive.current = false; setActive(index); }}
           isOptionDisabled={(option) => Boolean(option.disabled)}
           isOptionChosen={(option) => option.value === value}
+          isOptionSeparated={(option) => Boolean(option.separator)}
           getGroup={(option) => option.group}
           onSelect={commit}
           className="ui-searchable-combobox-list menu listbox"
@@ -1452,6 +1477,10 @@ export interface SelectOption<T extends string> {
   value: T;
   label: string;
   description?: string;
+  /** What the trigger shows once this option is chosen, as SearchableComboboxOption's. */
+  selectedLabel?: string;
+  /** Draws a separator before this option, as SearchableComboboxOption's. */
+  separator?: boolean;
   /**
    * The Title Case section this option belongs to. Consecutive options with the same group are
    * listed under one section label (§9.1) inside a `role="group"` named by it; options without one
@@ -1658,6 +1687,8 @@ export function selectMenuDesiredHeight(input: {
   estimatedOptionHeight?: number;
   /** How many section labels the list draws, each one {@link MENU_LABEL_HEIGHT_PX} row. */
   groupLabelCount?: number;
+  /** How many separators the options draw between them, each {@link MENU_SEPARATOR_PX}. */
+  separatorCount?: number;
   /** Whether the list ends with a footer action: one single-line option and the separator above it. */
   footerAction?: boolean;
   coarsePointer: boolean;
@@ -1672,7 +1703,8 @@ export function selectMenuDesiredHeight(input: {
   // alone — the sliver a bare `optionCount` of 0 produced had nowhere to put the sentence that is
   // the whole reason an empty list stays open.
   const rows = Math.max(1, input.optionCount);
-  const labels = (input.groupLabelCount ?? 0) * MENU_LABEL_HEIGHT_PX;
+  const labels = (input.groupLabelCount ?? 0) * MENU_LABEL_HEIGHT_PX +
+    (input.separatorCount ?? 0) * MENU_SEPARATOR_PX;
   // The footer row is its label alone, so it is one line whatever the options' estimate says.
   const footer = input.footerAction
     ? (input.coarsePointer ? TOUCH_OPTION_MIN_HEIGHT_PX : COMPACT_OPTION_HEIGHT_PX) + MENU_SEPARATOR_PX
@@ -1918,6 +1950,7 @@ export function Select<T extends string>({
         + (option.disabled && option.disabledReason ? 1 : 0)), 1),
       estimatedOptionHeight,
       groupLabelCount: groupLabelCount(options),
+      separatorCount: optionSeparatorCount(options),
       footerAction: Boolean(footerAction),
       coarsePointer,
     }) + (searchable ? selectFilterRowHeight(coarsePointer) : 0)),
@@ -2044,7 +2077,7 @@ export function Select<T extends string>({
       description: option.description,
       reason: option.disabled ? option.disabledReason : undefined,
     });
-    return (
+    const button = (
       <button
         key={option.value}
         id={id}
@@ -2065,6 +2098,9 @@ export function Select<T extends string>({
         {option.value === value && <CheckIcon size={14} />}
       </button>
     );
+    return index > 0 && option.separator
+      ? <Fragment key={option.value}><div className="menu-sep" aria-hidden="true" />{button}</Fragment>
+      : button;
   };
 
   const rows = (
@@ -2153,7 +2189,7 @@ export function Select<T extends string>({
         // The trigger's accessible name is the LABEL AND THE VALUE. `aria-label` alone replaced the
         // content, so the chosen option was never announced — the control read as "Project" whether
         // it said Alpha or nothing at all.
-        aria-label={`${label}: ${selected?.label ?? placeholder}`}
+        aria-label={`${label}: ${selected?.selectedLabel ?? selected?.label ?? placeholder}`}
         aria-describedby={describedBy}
         aria-disabled={disabled || undefined}
         aria-invalid={invalid || undefined}
@@ -2172,7 +2208,7 @@ export function Select<T extends string>({
         {leadingIcon && <LeadingIcon icon={leadingIcon} />}
         {selected?.swatch}
         <span className={`ui-select-value${selected ? "" : " is-placeholder"}`}>
-          {selected?.label ?? placeholder}
+          {selected?.selectedLabel ?? selected?.label ?? placeholder}
         </span>
         <ChevronDownIcon size={14} className="ui-select-caret" />
       </button>

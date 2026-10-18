@@ -22,7 +22,12 @@ test("a saved exec default asks for a choice and offers Codex App Server", async
   const warning = page.locator(".agent-default-warning");
   await expect(warning).toContainText("which is no longer supported");
   await expect(page.getByRole("combobox", { name: "Agent" })).toHaveValue("");
-  await expect(page.getByRole("button", { name: "Create Session" })).toBeDisabled();
+  // No agent chosen yet is not a hard block (#2952): Create Session lands on Agent and names it.
+  await page.getByRole("button", { name: "Create Session" }).click();
+  await expect(page.locator(".modal-body .field-error")).toHaveText("Choose an installed agent.");
+  await expect(page.getByRole("combobox", { name: "Agent" })).toBeFocused();
+  await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
+  await page.keyboard.press("Escape");
 
   await page.getByRole("button", { name: "Use Codex App Server" }).click();
   await expect(page.getByRole("combobox", { name: "Agent" })).toHaveValue("Codex App Server");

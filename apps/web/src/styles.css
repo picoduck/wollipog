@@ -7296,8 +7296,9 @@ body.shell-dock-dragging * {
    Hand Off (#2186) says why Create Handoff is disabled: "Choose a supported service tier." Snooze
    (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." Open
    Pull Request (#2847) says why it can't open the request: offline, a Viewer's refusal, or a partial
-   stage ("Commit the staged changes first."). */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason) {
+   stage ("Commit the staged changes first."). New Session (#2952) says what nothing further down
+   its form can fix: "Choose an online location to continue." */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -7308,7 +7309,7 @@ body.shell-dock-dragging * {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > .snooze-blocked-reason { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -7380,12 +7381,6 @@ body.shell-dock-dragging * {
 .folder-field-path { font-family: var(--font-mono); }
 /* New Session's way back from a browsed folder to the workspace picker, under the field. */
 .new-session-use-workspace { align-self: flex-start; }
-.cctx-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--text-faint);
-}
 /* Composer bar (#2174): every control is a `ComposerButton`, one recipe on the shared button
    variants (§3.1): ghost squares, Send the one primary, Stop Turn the neutral secondary, and no
    circles or pills. `--composer-ctl` is their height: the default control on a fine pointer, and the
@@ -12057,20 +12052,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .field [aria-invalid="true"]:hover {
   border-color: var(--red);
 }
-/* Read-only pick shown when a field has exactly one possible value (e.g. one online runner). */
-.static-pick {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  padding: 8px 10px;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-}
-.static-pick .online-dot {
-  background: var(--green);
-}
 /* Choose Folder's folder browser (DirectoryPicker.tsx, #2956, §4.8, §5.2, §12.3): a breadcrumb
    with Edit Path, then one --row-h row per folder. The list has no height of its own, so the dialog
    body is the only scroller. */
@@ -12177,18 +12158,13 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   color: var(--text-dim);
   font: var(--type-body);
 }
-.new-session-hint {
-  margin: 4px 0 0;
-  font-size: 12.5px;
+/* New Session's No Locations notice (#2952) takes Location's place in a half-width column, where its
+   sentence wraps: the icon stays on the sentence's first line, as a full notice's does. */
+.notice.compact.new-session-no-locations {
+  align-items: start;
+  padding-block: var(--space-2);
 }
-/* New Session picks one agent from a shared list; the provider icon adorns its responsive owner.
-   Create Project… and Add Location… share their field row with the pickers, so they are the same
-   control height (§3.2) rather than small buttons. */
-.btn.new-session-project-control {
-  /* Segoe UI's visible ink sits high inside its line box. Keep the control's total padding while
-     moving that line box one pixel toward the optical centre. */
-  padding-block: 6px 4px;
-}
+/* New Session picks one agent from a shared list; the provider icon adorns its responsive owner. */
 .new-session-choice-control {
   width: 100%;
   min-width: 0;
@@ -12220,15 +12196,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .agent-default-warning .btn {
   flex: none;
 }
-/* New-Session "Location" quick-pick — a project's machines/directories (Q2a). */
-.new-session-project-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.new-session-project-actions .muted { flex: 1; }
 
 /* ------------------------------- Misc ----------------------------------- */
 .muted {
@@ -12715,7 +12682,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   color: var(--text-dim);
   text-align: center;
 }
-.project-manager-empty.compact { min-height: 140px; padding: 14px; font-size: 12px; }
 .project-manager-empty.location-empty { min-height: 180px; border: 1px dashed var(--border); border-radius: 9px; }
 .project-manager-empty > div { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .project-location-picker { display: grid; gap: 14px; }

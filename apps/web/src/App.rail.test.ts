@@ -365,11 +365,11 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   for (const label of ["New Project", "Add Location", "Make Default", "Archive Sessions", "Delete Project"]) {
     assert.equal(projectsView.includes(label), true, label);
   }
-  // #2957 retired the Projects list's compact empty state; New Session's no-locations state still
-  // uses it, and without its own rule it took the 260px placeholder minimum.
-  assert.match(newSessionDialog, /className="project-manager-empty compact"/);
-  assert.match(css, /\.project-manager-empty\.compact\s*\{[^}]*min-height:\s*140px;/,
-    "New Session's compact empty state keeps its own height");
+  // #2957 retired the Projects list's compact empty state, and #2952 New Session's: a project with
+  // no locations is a compact Notice in the Location field's place, with Add Location….
+  assert.doesNotMatch(newSessionDialog, /project-manager-empty/);
+  assert.doesNotMatch(css, /\.project-manager-empty\.compact/,
+    "the compact empty state has no user left");
   assert.match(projectsView, /its sessions move to No Project[\s\S]*Sessions and files are not deleted/,
     "Project deletion states its non-destructive consequences");
   // #2220: a group whose authoritative count says sessions are coming shows skeleton rows, never a

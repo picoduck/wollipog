@@ -137,8 +137,10 @@ async function selectCommonProjectWithoutPointer(page: Page, touch = false) {
     await page.keyboard.press("Enter");
     await expect(project).toHaveAccessibleName(/Project: Wollipog/);
   } else {
+    // Focus leaves the list closed (#2952); typing opens it with the first match highlighted.
+    await expect(project).toHaveAttribute("aria-expanded", "false");
     await page.keyboard.type("Wollipog");
-    await page.keyboard.press("ArrowDown");
+    await expect(project).toHaveAttribute("aria-expanded", "true");
     await page.keyboard.press("Enter");
     await expect(project).toHaveValue(/Wollipog/);
   }
@@ -328,7 +330,9 @@ test.describe("responsive Project and Agent controls", () => {
     await expect(page.getByRole("combobox", { name: "Search Project Options" })).toBeFocused();
 
     const projects = page.getByRole("listbox", { name: "Project" }).getByRole("option");
-    await expect(projects).toHaveCount(2);
+    // Wollipog, No Project and the New Project… footer row (#2952).
+    await expect(projects).toHaveCount(3);
+    await expect(projects.last()).toHaveText("New Project…");
     await expect(projects.filter({ hasText: "Wollipog" })).toHaveCount(1);
     await projects.filter({ hasText: "No Project" }).click();
     await expect(project).toHaveAccessibleName("Project: No Project");
@@ -355,18 +359,19 @@ test.describe("responsive Project and Agent controls", () => {
     await expect(page.locator(".agent-meta")).toContainText("Runs on native host");
   });
 
-  test("a short Project list grows to its wrapped descriptions instead of scrolling", async ({ page }) => {
-    // At 390px, in the app font, "No Project"'s description wraps to two lines. The list's height
-    // request counted it as one, so a two-option list scrolled to show its last line and clipped it
-    // at the bottom edge. This page pins Arial, which does not wrap here, so the test measures in
-    // the widest verified face and first proves the description wrapped.
-    await openDialog(page);
+  test("a short list grows to its wrapped second lines instead of scrolling", async ({ page }) => {
+    // At 390px, in the app font, a long second line wraps. The list's height request counted it as
+    // one line, so a short list scrolled to show its last line and clipped it at the bottom edge.
+    // This page pins Arial, which may not wrap here, so the test measures in the widest verified
+    // face and first proves the line wrapped. Project's "No Project" line was the case until #2952
+    // shortened it; an unavailable Agent's reason is now the longest second line in the dialog.
+    await openDialog(page, "?agentUnavailable=1");
     const face = await pinWidestFace(page, page.locator("body"));
-    await page.getByRole("button", { name: /^Project:/ }).click();
+    await page.getByRole("button", { name: /^Agent:/ }).click();
     // The searchable list's scroll box is its panel, which holds the filter above the listbox.
     const list = page.locator(".menu.listbox");
-    await expect(list.getByRole("option")).toHaveCount(2);
-    const description = list.getByRole("option", { name: /No Project/ }).locator(".ui-select-option-desc");
+    await expect(list.getByRole("option")).toHaveCount(3);
+    const description = list.getByRole("option", { name: /Codex App Server/ }).locator(".ui-select-option-reason");
     const descriptionLines = await description.evaluate((element) => {
       const range = document.createRange();
       range.selectNodeContents(element);
@@ -397,14 +402,9 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
       await selectCommonProjectWithoutPointer(page, viewport.touch);
 
       // Every step between the two data-backed selectors remains keyboard-reachable and ordered:
-      // Project management, the required Location, then Agent.
+      // Project, then the Location beside it, then Agent (#2952).
       await page.keyboard.press("Tab");
-      await expect(page.getByRole("button", { name: "Create Project…" })).toBeFocused();
-      await page.keyboard.press("Tab");
-      await expect(page.getByRole("radiogroup", { name: "Project Location" }).getByRole("radio"))
-        .toBeFocused();
-      await page.keyboard.press("Tab");
-      await expect(page.getByRole("button", { name: "Add Location…" })).toBeFocused();
+      await expect(page.getByRole("button", { name: /^Location:/ })).toBeFocused();
       await page.keyboard.press("Tab");
 
       if (viewport.touch) {
@@ -446,7 +446,10 @@ test.describe("responsive Project and Agent presentation", () => {
     await openDialog(page);
     const fits = (name: string) => page.getByRole("listbox", { name }).evaluate((element) =>
       element.scrollHeight <= element.clientHeight + 1);
-    // The Project combobox opens its list with initial focus.
+    // The Project combobox has initial focus with its list closed (#2952); Arrow Down opens it.
+    await expect(page.getByRole("combobox", { name: "Project" })).toBeFocused();
+    await expect(page.getByRole("listbox", { name: "Project Options" })).toHaveCount(0);
+    await page.keyboard.press("ArrowDown");
     await expect(page.getByRole("listbox", { name: "Project Options" })).toBeVisible();
     expect(await fits("Project Options")).toBe(true);
     await page.keyboard.press("Escape");
@@ -461,6 +464,7 @@ test.describe("responsive Project and Agent presentation", () => {
     const desktopProject = page.getByRole("combobox", { name: "Project" });
     await desktopProject.focus();
     await expect(desktopProject).toBeFocused();
+    await page.keyboard.press("ArrowDown");
     const desktopProjectOptions = page.getByRole("listbox", { name: "Project Options" });
     await expect(desktopProjectOptions).toBeVisible();
 
@@ -551,16 +555,20 @@ test.describe("responsive Project and Agent presentation", () => {
 test.describe("New Session dialog keyboard contract", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
-  test("plain Enter reports an invalid closed combobox even while the submit button is disabled", async ({ page }) => {
+  test("plain Enter in the closed Project field names its problem under the field", async ({ page }) => {
     await openDialogWithoutPointer(page);
     const project = page.getByRole("combobox", { name: "Project" });
     await expect(project).toBeFocused();
-    await page.keyboard.press("Escape");
     await expect(project).toHaveAttribute("aria-expanded", "false");
+    // Not a hard block (#2952): Create Session stays enabled and pressing it finds the field.
+    await expect(page.getByRole("button", { name: "Create Session" })).toBeEnabled();
 
     await page.keyboard.press("Enter");
-    await expect(page.locator('.form-error[role="alert"]')).toHaveText("Choose a Project or No Project.");
+    await expect(page.locator(".modal-body .field-error")).toHaveText("Choose a project, or choose No Project.");
+    await expect(project).toHaveAttribute("aria-invalid", "true");
+    await expect(project).toHaveAccessibleDescription("Choose a project, or choose No Project.");
     await expect(project).toBeFocused();
+    await expect(page.locator(".modal-foot .form-error")).toHaveCount(0);
   });
 
   test("traps focus, validates, closes the selector before the dialog, and restores its opener", async ({ page }) => {
@@ -568,17 +576,24 @@ test.describe("New Session dialog keyboard contract", () => {
 
     await page.keyboard.press("Shift+Tab");
     await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
+    // Create Session stays enabled with no project chosen yet (#2952), so it ends the trap.
+    await page.keyboard.press("Shift+Tab");
+    await expect(page.getByRole("button", { name: "Create Session" })).toBeFocused();
     await page.keyboard.press("Shift+Tab");
     await expect(page.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await page.keyboard.press("Tab");
     await page.keyboard.press("Tab");
     await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
 
     await page.keyboard.press("ControlOrMeta+Enter");
     const project = page.getByRole("combobox", { name: "Project" });
-    await expect(page.locator('.form-error[role="alert"]')).toHaveText("Choose a Project or No Project.");
+    await expect(page.locator(".modal-body .field-error")).toHaveText("Choose a project, or choose No Project.");
     await expect(project).toBeFocused();
-    await expect(project).toHaveAttribute("aria-expanded", "true");
+    // Validation focus leaves the list closed, as opening focus does (#2952).
+    await expect(project).toHaveAttribute("aria-expanded", "false");
 
+    await page.keyboard.press("ArrowDown");
+    await expect(project).toHaveAttribute("aria-expanded", "true");
     await page.keyboard.press("Escape");
     await expect(project).toHaveAttribute("aria-expanded", "false");
     await expect(dialog).toBeVisible();
@@ -595,7 +610,8 @@ test.describe("New Session dialog keyboard contract", () => {
     await project.dispatchEvent("keydown", { key: "Enter", metaKey: true, isComposing: true });
     await expect(page.locator("html")).not.toHaveAttribute("data-create-session-count", /.+/);
 
-    for (let index = 0; index < 4; index += 1) await page.keyboard.press("Tab");
+    // Project, then Location beside it, then Agent (#2952).
+    for (let index = 0; index < 2; index += 1) await page.keyboard.press("Tab");
     const agent = page.getByRole("combobox", { name: "Agent" });
     await expect(agent).toBeFocused();
     await page.keyboard.press("ControlOrMeta+a");
@@ -618,8 +634,8 @@ test.describe("New Session dialog keyboard contract", () => {
     await openDialogWithoutPointer(page);
     const project = page.getByRole("combobox", { name: "Project" });
     await expect(project).toBeFocused();
+    // Typing highlights the first match; Arrow Down from it would reach New Project… (#2952).
     await page.keyboard.type("No Project");
-    await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
     await expect(project).toHaveValue("No Project");
 
@@ -695,7 +711,7 @@ test.describe("choice rows at 1440px (#1952)", () => {
     await openDialog(page);
     const groups = page.locator('[role="radiogroup"]:has(> .choice-row), [role="group"]:has(> .choice-row)');
     const names = await groups.evaluateAll((elements) => elements.map((element) => element.getAttribute("aria-label")));
-    for (const name of ["Project Location", "Session Role", "Harness"]) expect(names).toContain(name);
+    for (const name of ["Session Role", "Harness"]) expect(names).toContain(name);
     for (const group of await groups.all()) {
       const name = await group.getAttribute("aria-label");
       const rows = await group.locator(":scope > .choice-row").evaluateAll((elements) => elements.map((row) => {
@@ -784,9 +800,7 @@ test.describe("searchable pickers at 1440px (#1951)", () => {
     await expect(agent).toHaveAttribute("aria-expanded", "false");
     await expect(agent).toBeFocused();
 
-    await page.getByRole("button", { name: "Create Project…" }).focus();
-    await page.keyboard.press("Tab");
-    await page.keyboard.press("Tab");
+    await page.getByRole("button", { name: /^Location:/ }).focus();
     await page.keyboard.press("Tab");
     await expect(agent).toBeFocused();
     const selection = await agent.evaluate((element: HTMLInputElement) =>
@@ -801,7 +815,11 @@ test.describe("searchable pickers at 1440px (#1951)", () => {
     await openDialog(page, "?agentUnavailable=1");
     for (const field of ["Project", "Agent"]) {
       await page.getByRole("combobox", { name: field }).focus();
-      const options = page.getByRole("listbox", { name: `${field} Options` }).getByRole("option");
+      // Project's list stays closed on focus (#2952).
+      if (field === "Project") await page.keyboard.press("ArrowDown");
+      // The footer action (New Project…) is a row to act on, not a choice with a description.
+      const options = page.getByRole("listbox", { name: `${field} Options` }).getByRole("option")
+        .filter({ hasNotText: "New Project…" });
       await expect(options.first()).toBeVisible();
       if (process.env.EVIDENCE_DIR) {
         await page.mouse.move(0, 0);
@@ -822,23 +840,25 @@ test.describe("searchable pickers at 1440px (#1951)", () => {
     }
     // One concrete pair, so the comparison above cannot pass by reading the wrong elements.
     await page.getByRole("combobox", { name: "Project" }).focus();
+    await page.keyboard.press("ArrowDown");
     const noProject = page.getByRole("option", { name: "No Project", exact: true });
-    await expect(noProject).toHaveAccessibleDescription("Run in the selected folder without adding this session to a Project.");
+    await expect(noProject).toHaveAccessibleDescription("Run in any folder on a machine, outside a project.");
   });
 
-  test("a Project search with no results says so in a sentence and offers Create Project", async ({ page }) => {
+  test("a Project search with no results says so in a sentence and still offers New Project…", async ({ page }) => {
     await openDialog(page);
     const project = page.getByRole("combobox", { name: "Project" });
     await expect(project).toBeFocused();
-    await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.type("wolipogx");
     const list = page.getByRole("listbox", { name: "Project Options" });
     await expect(list).toContainText("No projects match “wolipogx”.");
-    await expect(list.getByRole("option")).toHaveText(["Create Project…"]);
+    await expect(list.getByRole("option")).toHaveText(["New Project…"]);
+    // A search that found nothing never highlights the footer for Enter; Arrow Down reaches it.
+    await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
     const create = page.getByRole("dialog", { name: "Create Project" });
     await expect(create).toBeVisible();
-    // Cancelling returns to the picker whose row opened it, not to the Create Project button.
+    // Cancelling returns to the picker whose row opened it.
     await create.getByRole("button", { name: "Cancel" }).click();
     await expect(create).toHaveCount(0);
     await expect(project).toBeFocused();
@@ -869,7 +889,7 @@ test.describe("searchable touch pickers at 390px (#1951)", () => {
 
     const panel = page.locator(".menu.listbox");
     const options = page.getByRole("listbox", { name: "Project" }).getByRole("option");
-    await expect(options).toHaveCount(2);
+    await expect(options).toHaveCount(3);
     const filterBox = (await filter.boundingBox())!;
     const panelBox = (await panel.boundingBox())!;
     const firstOptionBox = (await options.first().boundingBox())!;
@@ -877,14 +897,13 @@ test.describe("searchable touch pickers at 390px (#1951)", () => {
     expect(filterBox.y + filterBox.height, "the filter leads the options").toBeLessThanOrEqual(firstOptionBox.y);
 
     await page.keyboard.type("no proj");
-    await expect(options).toHaveCount(1);
-    await expect(options).toContainText("No Project");
+    await expect(options).toHaveText(["No Project", "New Project…"].map((text) => new RegExp(`^${text}`)));
     expect((await filter.boundingBox())!.y, "the filter being typed into stays put as the list narrows")
       .toBeCloseTo(filterBox.y, 0);
 
     await filter.fill("wolipogx");
     await expect(panel).toContainText("No projects match “wolipogx”.");
-    await expect(options).toHaveText(["Create Project…"]);
+    await expect(options).toHaveText(["New Project…"]);
 
     await options.click();
     const create = page.getByRole("dialog", { name: "Create Project" });
@@ -897,7 +916,7 @@ test.describe("searchable touch pickers at 390px (#1951)", () => {
 
   test("a list that opens above its trigger keeps its filter still as a search empties it", async ({ page }) => {
     // A short phone (a landscape-ish window), so the Agent trigger can sit with no room below it.
-    await page.setViewportSize({ width: 390, height: 560 });
+    await page.setViewportSize({ width: 390, height: 420 });
     await openDialog(page);
     const agent = page.getByRole("button", { name: /^Agent:/ });
     await agent.evaluate((element) => element.scrollIntoView({ block: "end" }));

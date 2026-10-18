@@ -168,6 +168,10 @@ const ACP_LOGOUT = FIXTURE_QUERY.get("acpLogout") === "1";
 /** `?machineName=<name>` names the fixture runner; `?remoteMachine=1` reaches it over SSH (#2277). */
 const MACHINE_NAME = FIXTURE_QUERY.get("machineName");
 const REMOTE_MACHINE = FIXTURE_QUERY.get("remoteMachine") === "1";
+/** `?createError=kept` fails New Session's request after the session was kept (#2952). */
+const CREATE_ERROR = FIXTURE_QUERY.get("createError");
+/** `?offlineMachine=1` adds an offline second machine, Build Server 02, for its locations (#2952). */
+const OFFLINE_MACHINE = FIXTURE_QUERY.get("offlineMachine") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 /**
  * A routed session that is not in the snapshot is looked up by id (#2202). `?lookup=pending` never
@@ -1390,7 +1394,10 @@ function snapshot(): UiSnapshotMessage {
     },
     runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner]
       : SHELL_SKILLS_MODE === "notices" ? [noticeStudio, noticeLaptop]
-      : shellOfflineRunner ? [runner, shellOfflineRunner] : [runner],
+      : shellOfflineRunner ? [runner, shellOfflineRunner]
+        : OFFLINE_MACHINE ? [runner, { ...structuredClone(runner), runnerId: "runner-3", hostname: "build-02",
+          displayName: "Build Server 02", status: "offline" as const, providerLogins: undefined }]
+          : [runner],
     boxes: REMOTE_MACHINE ? [{
       boxId: "box-fixture", sshTarget: "pat@build.example.com", runnerId: runner.runnerId, status: "online",
       lastError: null, createdAt: 1,
@@ -2326,6 +2333,14 @@ const client = {
   } : {}),
   createSession: async (request: CreateSessionRequest) => {
     lastCreateSessionRequest = structuredClone(request);
+    if (CREATE_ERROR === "kept") {
+      throw new ApiError(
+        "Session session-kept was retained because the Native TUI launch outcome is unknown.",
+        504,
+        "NATIVE_TUI_LAUNCH_AMBIGUOUS",
+        { sessionId: "session-kept" },
+      );
+    }
     const created = session(
       `session-created-${model.sessions.length + 1}`,
       "Created Session",

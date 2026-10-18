@@ -554,3 +554,74 @@ test("by default focus still opens the list, and typing still edits from the sho
     view.unmount();
   }
 });
+
+/* ------------------------------------------------------------------------------------------------
+ * #2952: a separated option, a closed field that says more than the label, and an invalid combobox
+ * ---------------------------------------------------------------------------------------------- */
+
+const DOCS: readonly SearchableComboboxOption<string>[] = [
+  { value: "docs-1", label: "Docs Site", description: "Studio Mac · 1 location", selectedLabel: "Docs Site · Studio Mac" },
+  { value: "docs-2", label: "Docs Site", description: "Build Server · 2 locations", selectedLabel: "Docs Site · Build Server" },
+  { value: "none", label: "No Project", description: "Run in any folder.", separator: true },
+];
+
+test("a separated option follows a separator, which a search drops while it leads the list", () => {
+  const view = mountCombobox({ options: DOCS, value: null, footerAction: { label: "New Project…", onSelect: () => {} } });
+  try {
+    act(() => fireDomEvent.click(view.input));
+    assert.deepEqual(rowSummary(view.listbox()!), [
+      "option:Docs Site", "option:Docs Site", "sep", "option:No Project", "sep", "option:New Project…",
+    ]);
+    type(view.input, "no");
+    assert.deepEqual(rowSummary(view.listbox()!), ["option:No Project", "sep", "option:New Project…"],
+      "a separator never leads the list");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the closed field shows the chosen option's selected label, and a typed search starts after it", () => {
+  const view = mountCombobox({ options: DOCS, value: "docs-2", openOnFocus: false });
+  try {
+    assert.equal(view.input.value, "Docs Site · Build Server");
+    act(() => view.input.focus());
+    type(view.input, "Docs Site · Build Serverj");
+    assert.deepEqual(view.options().map((option) => ariaReferencedText(option, "aria-labelledby")), ["No Project"],
+      "the first character typed after the shown value starts the query");
+    press(view.input, "Escape");
+    assert.equal(view.input.value, "Docs Site · Build Server");
+    act(() => fireDomEvent.click(view.input));
+    assert.deepEqual(view.options().map((option) => ariaReferencedText(option, "aria-labelledby")),
+      ["Docs Site", "Docs Site", "No Project"], "the list still shows each label alone");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an invalid combobox carries aria-invalid, and Select's trigger shows the selected label", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host as unknown as Element);
+  try {
+    act(() => root.render(<>
+      <SearchableCombobox label="Project" options={DOCS} value="docs-1" onChange={() => {}} invalid describedBy="project-error" />
+      <Select label="Location" options={DOCS} value="docs-1" onChange={() => {}} />
+    </>));
+    const input = host.querySelector<HTMLInputElement>('[role="combobox"]')!;
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.equal(input.getAttribute("aria-describedby"), "project-error");
+    const trigger = host.querySelector<HTMLButtonElement>(".ui-select-trigger")!;
+    assert.equal(trigger.getAttribute("aria-label"), "Location: Docs Site · Studio Mac");
+    assert.equal(trigger.querySelector(".ui-select-value")?.textContent, "Docs Site · Studio Mac");
+    act(() => fireDomEvent.click(trigger));
+    assert.deepEqual(rowSummary(host.querySelector('[role="listbox"]')!),
+      ["option:Docs Site", "option:Docs Site", "sep", "option:No Project"]);
+    act(() => root.render(
+      <SearchableCombobox label="Project" options={DOCS} value="docs-1" onChange={() => {}} />,
+    ));
+    assert.equal(host.querySelector('[role="combobox"]')?.getAttribute("aria-invalid"), null);
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+  }
+});
