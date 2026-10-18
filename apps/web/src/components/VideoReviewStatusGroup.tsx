@@ -14,6 +14,10 @@ type Load =
   | { kind: "unsupported" }
   | { kind: "failed" };
 
+/** The Human's procedure for minting permits, running the validations and recording a proof. */
+export const VIDEO_REVIEW_CERTIFICATION_RUNBOOK_URL =
+  "https://github.com/picoduck/wollipog/blob/main/docs/video-review-certification-runbook.md";
+
 /** Readiness in dashboard copy; the server's sentences name its own internals. */
 const UNAVAILABLE: Record<string, string> = {
   no_paced_video_peer: "No machine advertises the media-only video reviewer yet, so video evidence stays with you.",
@@ -105,7 +109,8 @@ export function VideoReviewStatusGroup() {
         <p>
           Video is reviewed by a separate Claude Code reviewer on {status.reviewer.model} at {status.reviewer.effort} effort
           that can see only the recording&apos;s frames. Its machine must hold a live proof that you recorded after inspecting three
-          metered validation runs. A proof certifies one exact reviewer attestation and expires after 30 days.
+          metered validation runs. A proof certifies one exact reviewer attestation and expires after 30 days. To record one,
+          follow the <a href={VIDEO_REVIEW_CERTIFICATION_RUNBOOK_URL} target="_blank" rel="noreferrer">certification runbook</a>.
         </p>
         <p>
           The Orchestrator and its children must also run on attested Claude Code agents, and the campaign&apos;s evidence envelope

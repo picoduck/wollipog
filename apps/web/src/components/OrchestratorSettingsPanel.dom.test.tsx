@@ -1202,6 +1202,9 @@ test("Video Evidence Review shows each machine's live proof state and why review
     const body = group.querySelector("details .disclosure-body")?.textContent?.replace(/\s+/gu, " ") ?? "";
     assert.match(body, /separate Claude Code reviewer on claude-opus-5-5 at high effort/u);
     assert.match(body, /expires after 30 days/u);
+    const runbook = group.querySelector<HTMLAnchorElement>("details .disclosure-body a");
+    assert.equal(runbook?.textContent, "certification runbook");
+    assert.equal(runbook?.getAttribute("href"), "https://github.com/picoduck/wollipog/blob/main/docs/video-review-certification-runbook.md");
     assert.match(body, /a different harness or model keeps video with you/u);
     assert.match(body, /Only MP4 and WebM recordings attached as private Session artifacts can be delegated\./u);
   } finally {

@@ -32,6 +32,8 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
         "Spare Mac mini", "Codex Host", "Old Desktop"]);
       await group.getByText("About Video Evidence Review").click();
       await expect(group.locator(".disclosure-body")).toContainText("Only MP4 and WebM recordings attached as private Session artifacts can be delegated.");
+      await expect(group.getByRole("link", { name: "certification runbook" }))
+        .toHaveAttribute("href", "https://github.com/picoduck/wollipog/blob/main/docs/video-review-certification-runbook.md");
       await expectTextFits(group, "Video Evidence Review");
       const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       expect(horizontalOverflow).toBeLessThanOrEqual(0);
