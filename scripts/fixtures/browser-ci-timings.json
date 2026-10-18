@@ -98,9 +98,52 @@
         "head_sha": "174a1a440c52d8393ded12f212761301600ae9a3",
         "conclusion": "cancelled",
         "created_at": "2026-10-18T16:29:10Z",
-        "run_attempt": 1
+        "run_attempt": 1,
+        "reason": "Completed and cancelled before the sizing cutoff"
+      },
+      {
+        "id": 39148645626,
+        "event": "push",
+        "headSha": "b697f9c60a4d1d248f7662d667b69ec1d6fc63b6",
+        "attempt": 1,
+        "stateAtCutoff": "incomplete",
+        "reason": "First attempt did not complete by the sizing cutoff; later observed last-job completion establishes exclusion",
+        "observedLastJobCompletedAt": "2026-10-18T17:35:06Z",
+        "observedFinalConclusion": "cancelled"
+      },
+      {
+        "id": 39146876130,
+        "event": "push",
+        "headSha": "f338dddc404aeb55512209cc02aeb17c952c5ca9",
+        "attempt": 1,
+        "stateAtCutoff": "incomplete",
+        "reason": "First attempt did not complete by the sizing cutoff; later observed last-job completion establishes exclusion",
+        "observedLastJobCompletedAt": "2026-10-18T17:18:15Z",
+        "observedFinalConclusion": "cancelled"
+      },
+      {
+        "id": 39145913020,
+        "event": "merge_group",
+        "headSha": "19fff289ba3fe1ec23a3239ce96679ee3198fb27",
+        "attempt": 1,
+        "stateAtCutoff": "incomplete",
+        "reason": "First attempt did not complete by the sizing cutoff; later observed last-job completion establishes exclusion",
+        "observedLastJobCompletedAt": "2026-10-18T17:49:23Z",
+        "observedFinalConclusion": "success"
+      },
+      {
+        "id": 39144938863,
+        "event": "merge_group",
+        "headSha": "803ffb6c8e1b4f65618ac8ee50850d9ed8d61ebe",
+        "attempt": 1,
+        "stateAtCutoff": "incomplete",
+        "reason": "First attempt did not complete by the sizing cutoff; later observed last-job completion establishes exclusion",
+        "observedLastJobCompletedAt": "2026-10-18T17:26:38Z",
+        "observedFinalConclusion": "success"
       }
-    ]
+    ],
+    "cutoff": "2026-10-18T17:15:00Z",
+    "exclusionInventory": "Eligible main-push/merge-group runs created after the oldest selected run and by the cutoff, with both completed non-successes and incomplete attempts recorded; later observations are explicitly distinguished"
   },
   "samples": [
     {"runId": 37478932815, "attempt": 1, "event": "pull_request", "headSha": "695c1d4df46969789ec35afdb0a62929ca6f80eb", "jobId": 112321655414, "shard": 1, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 1270, "installPath": "system-dependencies", "firstInstallSeconds": 17, "retryInstallSeconds": 0, "otherSetupSeconds": 40, "suiteSeconds": 1168, "productionSeconds": 42, "cleanupSeconds": 3, "nonInstallSeconds": 1253},

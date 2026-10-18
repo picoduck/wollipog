@@ -18,8 +18,12 @@ carried-forward successes are not independent measurements.
 
 The refresh adds 25 jobs: the five most recently created successful, complete,
 first-attempt natural main-push or merge-group runs available at
-2026-10-18T17:15:00Z. Cancelled run 39145208011 is explicitly excluded; this sizing
-sample is not a consecutive post-change delivery streak. No CI was dispatched,
+2026-10-18T17:15:00Z. Cancelled run 39145208011 is explicitly excluded. Four newer
+runs were incomplete at that cutoff: main pushes 39148645626 and 39146876130,
+and merge groups 39145913020 and 39144938863. Their first attempts' last jobs
+completed at 17:35:06Z, 17:18:15Z, 17:49:23Z and 17:26:38Z respectively; those
+later read-only observations are recorded separately from status at the cutoff.
+This sizing sample is not a consecutive post-change delivery streak. No CI was dispatched,
 rerun or cancelled to collect evidence. Latest baseline:
 `b697f9c60a4d1d248f7662d667b69ec1d6fc63b6` (run 39142667230).
 Each recent `completeRunAttempts` entry records head, event, creation time,
@@ -144,7 +148,12 @@ GITHUB_TOKEN=$(gh auth token) node scripts/merge-queue-wait-report.mjs --repo pi
 allowances from the workflow, and the remainder from the fixture. It rejects
 tested reduced budgets through 58 minutes, longer attempts on either path,
 omitted production/cleanup, inconsistent sums, stale envelope, and missing or
-duplicated full-run shards. Queue-only changes cannot alter the equation. The
+duplicated full-run shards. It recomputes the committed e2e/config tree fingerprint
+and compares it with the baseline's recorded hash, including a negative replay of
+an older measured workload. A larger timeout cannot mask a changed committed
+workload: remeasure all five shards and update the identified baseline before
+reusing the remainder. This check needs only the current Git tree, so shallow CI
+checkouts do not need the historical commit. Queue-only changes cannot alter the equation. The
 existing contract pins matrix/denominator agreement. Inert shell checks retain
 successful recovery, apt/dpkg cleanup order, and second-install/repair failure
 propagation; success and cancellation do not trigger retry.
