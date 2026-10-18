@@ -393,6 +393,14 @@ if (composerFixture) {
         session.parentControlPolicy = { ...session.parentControlPolicy!, revision: 3 };
         session.orchestratorCampaign.policyRevision = 3;
       }
+      // A stored Maximum Concurrent Children other than the fixture's 3, such as 0 (paused).
+      if (fullFixture === "enable" && params.get("maxChildren") !== null) {
+        const children = Number(params.get("maxChildren"));
+        session.orchestratorPolicy.behavior.maximumConcurrentChildren = children;
+        session.orchestratorCampaign.limits = { ...session.orchestratorCampaign.limits, maximumConcurrentChildren: children,
+          remaining: Math.max(0, children - session.orchestratorCampaign.limits.occupied) };
+        session.maxChildSessions = children;
+      }
       if (fullFixture === "legacy") {
         session.parentSessionId = "fixture-root-not-loaded";
         delete session.orchestratorCampaign.control;

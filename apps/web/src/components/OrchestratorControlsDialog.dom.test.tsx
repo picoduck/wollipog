@@ -302,6 +302,37 @@ test("choosing Full Control on a live campaign checks readiness at once and asks
   assert.deepEqual(harness.changed, []);
 });
 
+test("enabling states the campaign's Maximum Concurrent Children as its one concurrency and never sends a second", async () => {
+  const bodies: unknown[] = [];
+  const harness = await open(orchestrator(), {
+    orchestratorSettings: settings(),
+    fullControlEnablePreflight: async (_id, body) => { bodies.push(structuredClone(body)); return { preflight: enablePreflight(false), expectedRevision: 2 }; },
+  });
+  const dialog = harness.dialog();
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  await settle();
+  const limits = [...dialog.querySelectorAll("fieldset")].find((node) => node.querySelector("legend")?.textContent === "Campaign Limits")!;
+  assert.ok(limits, "Campaign Limits is under Advanced");
+  assert.equal([...limits.querySelectorAll("label span")].some((node) => node.textContent === "Concurrent Children"), false,
+    "no editable concurrency entry");
+  const fact = [...limits.querySelectorAll("dt")].find((node) => node.textContent === "Concurrent Children")?.nextElementSibling;
+  assert.equal(fact?.textContent, "6This campaign's Maximum Concurrent Children. Change it with Live Child Limit in Guardrails.",
+    "the stored policy's value, read-only, with where to change it");
+  for (const body of bodies) assert.equal((body as { overrides?: { budget?: { concurrency?: number } } }).overrides?.budget?.concurrency, undefined);
+  await harness.unmount();
+
+  // A paused campaign (0 live children) says why it can't enable, at the concurrency line.
+  const paused = await open(orchestrator({ orchestratorPolicy: { ...POLICY, behavior: { ...POLICY.behavior, maximumConcurrentChildren: 0 } } }), {
+    orchestratorSettings: settings(),
+    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(false), expectedRevision: 2 }),
+  });
+  await act(async () => paused.dialog().querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  await settle();
+  const pausedFact = [...paused.dialog().querySelectorAll("details dt")].find((node) => node.textContent === "Concurrent Children")?.nextElementSibling;
+  assert.equal(pausedFact?.textContent, "0This campaign pauses new children. Raise Live Child Limit in Guardrails to enable Full Control.");
+  assert.ok(pausedFact?.querySelector(".form-error"), "the reason reads as an error");
+});
+
 const footerButtons = (dialog: HTMLElement) => [...dialog.querySelectorAll<HTMLButtonElement>(".modal-foot button")].map((button) => button.textContent);
 
 test("the Enable action sits in the footer beside Done while Full Control is chosen, so a long summary never hides it", async () => {
