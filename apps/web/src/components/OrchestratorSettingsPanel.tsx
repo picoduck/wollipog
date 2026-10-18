@@ -10,6 +10,15 @@ import {
 import { agentHarnessMachinesDescription, agentHarnessOptionLabel, modelDriftText, pinnedModelChoices } from "../agent-presentation.js";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import {
+  COMPLETION_OPTIONS,
+  FOLLOW_UP_OPTIONS,
+  HUMAN_ONLY_DECISIONS,
+  INTEGRATION_ISOLATION_OPTIONS,
+  ORCHESTRATOR_DECISION_LABELS as DECISION_LABELS,
+  PARENT_CONTROL_OPTIONS,
+  STRICT_ISOLATION_OPTIONS,
+} from "../orchestrator-policy.js";
 import { effortLabel } from "../format.js";
 import { useLeaveGuard } from "../leave-guard.js";
 import { viewPath } from "../navigation.js";
@@ -28,59 +37,11 @@ import { Notice } from "./Notice.js";
 import { SkeletonRows } from "./QuestionPoliciesPanel.js";
 import { SaveBar } from "./SaveBar.js";
 import { useSettingsPanelHead } from "./SettingsView.js";
-import type { SelectOption } from "./ui/ChoiceControls.js";
 import { NumberRow, SegmentedRow, SelectRow, SettingsGroup } from "./ui/SettingsRows.js";
 import { FullControlModeChoice, readLimitText } from "./FullControlPreparation.js";
 import { VideoReviewStatusGroup } from "./VideoReviewStatusGroup.js";
 
 const AUTO = "__automatic__";
-const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
-  implementation_question: "Implementation Questions",
-  pr_merge: "PR Merge Approval",
-  merged_branch_deletion: "Merged Branch Deletion",
-  follow_up_issue_publication: "Follow-Up Issue Publication",
-  ui_evidence_approval: "UI Evidence Approval",
-};
-/*
- * A listbox rather than pills, by SettingsRows' own split: these options each need a sentence to
- * choose between, and "Questions and Approvals" is no short label. As three equal pills in the old
- * 260px value column they were 83px each, so that label drew over its neighbour at every width
- * (#2413). New Session offers the same choice as a Select.
- */
-const PARENT_CONTROL_OPTIONS: SelectOption<OrchestratorDefaults["delegation"]["parentControl"]>[] = [
-  { value: "off", label: "Human", description: "Keep descendant questions and ordinary approvals human-owned." },
-  { value: "questions", label: "Questions", description: "Delegate non-secret descendant implementation questions." },
-  { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
-];
-
-/**
- * Follow-Ups, as a Select for the same reason: in the 240px control column two equal pills are
- * 116px each, and "Execute Approved" measured 118.5px in the widest verified face, so it drew past
- * its pill at 900px and wider (#3019's check). Session Role Settings offers the same choice as a
- * Select.
- */
-const FOLLOW_UP_OPTIONS: SelectOption<OrchestratorDefaults["behavior"]["followUps"]>[] = [
-  { value: "recommend_only", label: "Recommend Only", description: "Report justified follow-ups and wait for approval." },
-  { value: "execute_approved", label: "Execute Approved", description: "Continue with follow-ups after their required approval." },
-];
-
-/*
- * Off | On rather than a switch: this is a draft that saves from the save bar, and a switch means
- * "applies now" (§8.4, §8.6). The same two pills as New Session's Orchestrator Policy dialog.
- *
- * Both policies bound the Orchestrator session itself, not its children: the control plane attaches
- * them to the Orchestrator's launch only, and children keep their own permissions and integrations.
- * The sentences say so rather than promising a boundary children do not have.
- */
-const STRICT_ISOLATION_OPTIONS = [
-  { value: "off", label: "Off", description: "The Orchestrator uses its agent's own permissions and governance." },
-  { value: "on", label: "On", description: "The Orchestrator can't write to the project. Needs a supported sandbox." },
-];
-const INTEGRATION_ISOLATION_OPTIONS = [
-  { value: "off", label: "Off", description: "The Orchestrator loads the same integrations as any other session." },
-  { value: "on", label: "On", description: "The Orchestrator gets Wollipog's management tools and no other integration." },
-];
-
 const PANEL_DESCRIPTION = "Defaults for new campaigns. Running campaigns keep their own.";
 const SKELETON_DELAY_MS = 300;
 const HARNESS_UNSUPPORTED = "Update Wollipog on a machine to choose a fixed Child Harness.";
@@ -664,10 +625,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       />
       <SegmentedRow
         title="Completion"
-        options={[
-          { value: "retain", label: "Retain", description: "Leave verified finished child sessions available for inspection." },
-          { value: "stop_and_archive", label: "Stop and Archive", description: "Stop and archive children only after verified completion." },
-        ]}
+        options={COMPLETION_OPTIONS}
         value={draft.behavior.completion}
         onChange={(value) => updateBehavior("completion", value as OrchestratorDefaults["behavior"]["completion"])}
       />
@@ -731,7 +689,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         </details>
         <p className="orchestrator-human-only">
           <LockIcon size={14} aria-hidden="true" />
-          Secrets, sign-in, permission grants, governance changes, budgets and guardrails always stay with you.
+          {HUMAN_ONLY_DECISIONS}
         </p>
       </>}
     >

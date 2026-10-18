@@ -401,6 +401,82 @@ function optionsHead(container: HTMLDivElement): HTMLButtonElement {
   return head;
 }
 
+/** The Orchestrator Policy row's Customize… (#2955), or null while there is no policy to show. */
+function customizeButton(container: ParentNode): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>('button[data-validation-target="orchestrator-policy"]');
+}
+
+/** The Orchestrator Policy row under Role (#2955). */
+function policyRow(container: ParentNode): HTMLElement {
+  const button = customizeButton(container);
+  assert.ok(button, "an Orchestrator shows its policy row with Customize…");
+  return settingRowOf(button);
+}
+
+/** The open Orchestrator Policy dialog (#2955). */
+function policyDialog(container: ParentNode): HTMLElement {
+  const dialog = [...container.querySelectorAll<HTMLElement>('[role="dialog"]')]
+    .find((candidate) => candidate.querySelector(".modal-title")?.textContent === "Orchestrator Policy");
+  assert.ok(dialog, "Orchestrator Policy is open");
+  return dialog;
+}
+
+const POLICY_TABS = { behavior: "Behavior", permissions: "Permissions", decisions: "Decisions" } as const;
+
+/** Customize… opens Orchestrator Policy, on `tab` when given. */
+async function openPolicy(container: HTMLDivElement, tab?: keyof typeof POLICY_TABS): Promise<HTMLElement> {
+  const button = customizeButton(container);
+  assert.ok(button, "Customize… is rendered");
+  await act(async () => { button.click(); });
+  const dialog = policyDialog(container);
+  if (tab) await choosePolicyTab(container, tab);
+  return dialog;
+}
+
+async function choosePolicyTab(container: HTMLDivElement, tab: keyof typeof POLICY_TABS): Promise<void> {
+  const button = [...policyDialog(container).querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+    .find((candidate) => candidate.firstChild?.textContent === POLICY_TABS[tab]);
+  assert.ok(button, `Orchestrator Policy has a ${POLICY_TABS[tab]} tab`);
+  await act(async () => { button.click(); });
+}
+
+async function applyPolicy(container: HTMLDivElement): Promise<void> {
+  const apply = buttonNamed(policyDialog(container), "Apply Policy");
+  assert.equal(apply.disabled, false, "Apply Policy is enabled");
+  await act(async () => { apply.click(); });
+}
+
+/** Opens Orchestrator Policy, lets `edit` change it, and applies it. */
+async function editPolicy(container: HTMLDivElement, tab: keyof typeof POLICY_TABS, edit: (dialog: HTMLElement) => Promise<void>): Promise<void> {
+  const dialog = await openPolicy(container, tab);
+  await edit(dialog);
+  await applyPolicy(container);
+}
+
+/** Custom or Full Control, chosen on Orchestrator Policy's Decisions tab and applied (#2955). */
+async function chooseControlMode(container: HTMLDivElement, mode: "Custom" | "Full Control"): Promise<void> {
+  await editPolicy(container, "decisions", (dialog) => chooseSegment(dialog, "Orchestrator Control", mode));
+}
+
+/** A segmented row's option by group and label, such as Strict Project Isolation's On. */
+function segment(scope: ParentNode, group: string, label: string): HTMLButtonElement {
+  const option = radioRows(scope.querySelector(`[role="radiogroup"][aria-label="${group}"]`) ?? scope)
+    .find((candidate) => candidate.textContent?.trim() === label);
+  assert.ok(option, `${group} offers ${label}`);
+  return option;
+}
+
+async function chooseSegment(scope: ParentNode, group: string, label: string): Promise<void> {
+  const option = segment(scope, group, label);
+  await act(async () => { option.click(); });
+}
+
+/** The number field a setting row names by its title, as Maximum Concurrent Children is. */
+function rowNumberInput(scope: ParentNode, title: string): HTMLInputElement | null {
+  return [...scope.querySelectorAll<HTMLInputElement>(".setting-row-number input")]
+    .find((input) => ariaReferencedText(input, "aria-labelledby") === title) ?? null;
+}
+
 function submitWithEnter(container: HTMLDivElement): void {
   const form = container.querySelector("form.form") as HTMLFormElement | null;
   assert.ok(form, "dialog form is rendered");
@@ -751,7 +827,7 @@ test("every refused submit lands on a control described by its reason (#2952)", 
       try {
         await act(async () => { await selectProject(fixture.container, project.id); });
         await choosePermissionPreset(fixture.container, "Orchestrator");
-        const focused = await pressCreateAndHear(fixture, /Wait for Orchestrator defaults to finish loading\./, "policy loading");
+        const focused = await pressCreateAndHear(fixture, /Wait for your Orchestrator defaults to finish loading\./, "policy loading");
         assert.ok(focused.closest('[role="radiogroup"][aria-label="Role"]'), "Role answers while nothing else can");
         assert.equal(focused.closest('[role="radiogroup"]')?.getAttribute("aria-invalid"), "true");
       } finally { await unmountFixture(fixture); }
@@ -762,8 +838,11 @@ test("every refused submit lands on a control described by its reason (#2952)", 
       try {
         await act(async () => { await selectProject(fixture.container, project.id); });
         await choosePermissionPreset(fixture.container, "Orchestrator");
-        const focused = await pressCreateAndHear(fixture, /Policy service unavailable\./, "policy failed");
-        assert.equal(focused.textContent, "Retry Orchestrator Defaults");
+        // The raw error never reaches the person (#2955): one sentence in user words, then Retry.
+        const focused = await pressCreateAndHear(fixture, /Couldn't load your Orchestrator defaults\./, "policy failed");
+        assert.equal(focused.textContent, "Retry");
+        assert.doesNotMatch(fixture.container.textContent ?? "", /Policy service unavailable/);
+        assert.ok(focused.closest(".notice.t-danger"), "a compact danger notice holds Retry");
       } finally { await unmountFixture(fixture); }
     } },
     { label: "saved permission defaults still loading", run: async () => {
@@ -1513,23 +1592,26 @@ test("native orchestrator selection is sent at creation", async () => {
   const fixture = await mountFixture({ runners: [enabledRunner] });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assertNoDomNode(labelledNumberInput(fixture.container, "Maximum Concurrent Children"),
-      "ordinary creation does not show an orchestration-only guardrail");
+    assertNoDomNode(customizeButton(fixture.container), "ordinary creation does not show an orchestration-only policy");
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const limit = labelledNumberInput(fixture.container, "Maximum Concurrent Children");
+    assert.match(policyRow(fixture.container).textContent ?? "", /Up to 4 Children/,
+      "the compatible effective default is visible rather than implicit");
+    const dialog = await openPolicy(fixture.container);
+    const limit = rowNumberInput(dialog, "Maximum Concurrent Children");
     assert.ok(limit);
-    assert.equal(limit.value, "4", "the compatible effective default is visible rather than implicit");
+    assert.equal(limit.value, "4");
     assert.equal(limit.min, "0");
     assert.equal(limit.max, "64");
     assert.equal(limit.step, "1");
     await act(async () => { fireDomEvent.change(limit, { target: { value: "9" } }); });
+    await applyPolicy(fixture.container);
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
     assert.equal(fixture.requests[0]?.orchestrator?.behavior?.maximumConcurrentChildren, 9);
   } finally { await unmountFixture(fixture); }
 });
 
-test("Maximum Concurrent Children rejects fractional and out-of-range creation values accessibly", async () => {
+test("Maximum Concurrent Children is a 96px row field whose invalid values block Apply Policy with the reason (#2955)", async () => {
   const enabledRunner: RunnerView = {
     ...runner, protocolVersion: PROTOCOL_VERSION,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
@@ -1541,33 +1623,36 @@ test("Maximum Concurrent Children rejects fractional and out-of-range creation v
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const limit = labelledNumberInput(fixture.container, "Maximum Concurrent Children");
+    const dialog = await openPolicy(fixture.container);
+    const limit = rowNumberInput(dialog, "Maximum Concurrent Children");
     assert.ok(limit);
+    assert.ok(limit.closest(".input-affix.w-xs"), "the limit is a 96px field in its row");
+    assert.equal(ariaReferencedText(limit, "aria-describedby"), "0 pauses new children. Up to 64.");
+    const apply = () => buttonNamed(policyDialog(fixture.container), "Apply Policy");
 
     for (const invalid of ["4.5", "-1", "65", ""]) {
       await act(async () => { fireDomEvent.change(limit, { target: { value: invalid } }); });
       assert.equal(limit.getAttribute("aria-invalid"), "true", invalid);
-      await assertCreateRefused(fixture, invalid);
-      assert.equal(fixture.container.querySelector(
-        `[id="${limit.getAttribute("aria-describedby")?.split(" ")[0]}"]`,
-      )?.getAttribute("role"), "alert");
-      await act(async () => { submitWithEnter(fixture.container); });
-      assert.equal(fixture.requests.length, 0, invalid);
-      assert.equal((domWindow.document.activeElement as unknown) === limit, true, invalid);
-      // The submit's field error is part of the focused input's description (#2952).
-      assert.match(ariaReferencedText(limit, "aria-describedby") ?? "", /Enter a Live Child Limit from 0 to 64\./, invalid);
+      // The error replaces the description (§8.5), in the row, and is what the field is described by.
+      assert.equal(ariaReferencedText(limit, "aria-describedby"), "Enter a whole number from 0 to 64.", invalid);
+      assert.doesNotMatch(settingRowOf(limit).textContent ?? "", /0 pauses new children/, invalid);
+      assert.equal(apply().disabled, true, invalid);
+      assert.equal(ariaReferencedText(apply(), "aria-describedby"), "Enter a whole number from 0 to 64.", invalid);
+      assert.equal(policyDialog(fixture.container).querySelector(".modal-foot .orchestrator-policy-reason")?.textContent,
+        "Enter a whole number from 0 to 64.", `${invalid}: the footer says why Apply Policy is disabled`);
     }
 
     await act(async () => { fireDomEvent.change(limit, { target: { value: "0" } }); });
-    assert.equal(limit.getAttribute("aria-invalid"), "false");
-    assert.equal(createButton(fixture.container).disabled, false);
+    assert.equal(limit.getAttribute("aria-invalid"), null);
+    await applyPolicy(fixture.container);
+    assert.match(policyRow(fixture.container).textContent ?? "", /New Children Paused/);
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.orchestrator?.behavior?.maximumConcurrentChildren, 0,
       "zero is persisted as a deliberate pause rather than treated as empty");
   } finally { await unmountFixture(fixture); }
 });
 
-test("Decision Delegation is Orchestrator-only and shows effective sources", async () => {
+test("Decisions is Orchestrator-only, shows no source labels, and sends nothing it did not change", async () => {
   const enabledRunner: RunnerView = {
     ...runner, protocolVersion: PROTOCOL_VERSION,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
@@ -1582,17 +1667,24 @@ test("Decision Delegation is Orchestrator-only and shows effective sources", asy
   }));
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
-    assertNoDomNode(fixture.container.querySelector('[aria-label^="Descendant Requests:"]'));
+    assertNoDomNode(customizeButton(fixture.container));
     assert.match(fixture.container.textContent ?? "", /An Orchestrator delegates work to child sessions\./);
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const descendant = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Descendant Requests:"]');
+    assert.match(policyRow(fixture.container).textContent ?? "", /From your Orchestrator defaults in Settings\./);
+    const dialog = await openPolicy(fixture.container, "decisions");
+    const descendant = dialog.querySelector<HTMLButtonElement>('[aria-label^="Descendant Requests:"]');
     assert.match(descendant?.getAttribute("aria-label") ?? "", /Questions and Approvals/);
-    assert.match(fixture.container.textContent ?? "", /User Default/);
-    assert.match(fixture.container.textContent ?? "", /no read-only operating-system boundary is claimed/i);
-    assert.ok(fixture.container.querySelector('[aria-label^="PR Merge Approval:"]'));
+    assert.ok(dialog.querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]'));
+    assert.match(dialog.textContent ?? "", /Secrets, sign-in, permission grants, governance changes, budgets and guardrails always stay with you\./);
+    for (const tab of ["behavior", "permissions", "decisions"] as const) {
+      await choosePolicyTab(fixture.container, tab);
+      assert.doesNotMatch(policyDialog(fixture.container).textContent ?? "", /User Default|Session Override|Wollipog Default|Compatibility Fallback/, tab);
+    }
+    assert.doesNotMatch(fixture.container.textContent ?? "", /User Default|Session Override/);
+    await act(async () => { buttonNamed(policyDialog(fixture.container), "Cancel").click(); });
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.orchestrator?.delegation?.parentControl, undefined,
-      "an inherited effective value is not mislabeled or sent as an explicit override");
+      "an inherited effective value is not sent as an explicit override");
     assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
     assert.equal(fixture.requests[0]?.orchestrator?.behavior?.maximumConcurrentChildren, undefined);
   } finally {
@@ -1639,7 +1731,7 @@ test("Full Control never falls back to ordinary creation; Custom remains launcha
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
     assert.equal(createButton(fixture.container).disabled, false);
-    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await chooseControlMode(fixture.container, "Full Control");
     await settlePreflight();
     assert.equal([...fixture.container.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Create Session"), false,
       "no second create button");
@@ -1650,7 +1742,7 @@ test("Full Control never falls back to ordinary creation; Custom remains launcha
     const providerPermissions = permissionsSummary(fixture.container);
     assert.match(providerPermissions.textContent!, /Orchestrator/, "effective coupled preset replaces the saved provider default");
     assert.doesNotMatch(fixture.container.textContent ?? "", /Activation Unavailable/);
-    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+    await chooseControlMode(fixture.container, "Custom");
     assert.equal(createButton(fixture.container).disabled, false);
     assert.equal([...fixture.container.querySelectorAll('[role="alert"]')]
       .find((node) => node.textContent?.includes("Full Control isn't ready yet")), undefined, "returning to Custom clears stale validation");
@@ -1669,12 +1761,13 @@ test("a saved Full Control preference opens the launch summary without granting 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    assert.equal(fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.checked, true);
+    assert.match(policyRow(fixture.container).textContent ?? "", /Full Control/, "the saved preference is the policy's choice");
+    assert.ok(fixture.container.querySelector('section[aria-label="Full Control Launch"]'), "and its launch summary shows");
     await settlePreflight();
     assert.equal(authorizeButton(fixture.container).disabled, true);
     await act(async () => submitWithEnter(fixture.container));
     assert.equal(fixture.requests.length, 0);
-    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+    await chooseControlMode(fixture.container, "Custom");
     await act(async () => createButton(fixture.container).click());
     assert.equal(fixture.requests.length, 1);
     assert.equal(Object.hasOwn(fixture.requests[0]!.orchestrator ?? {}, "controlMode"), false);
@@ -1699,7 +1792,7 @@ test("choosing Full Control checks readiness at once, asks only for the budget, 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await chooseControlMode(fixture.container, "Full Control");
     await settlePreflight();
     assert.equal(preflights.length, 1, "readiness is checked before anything is typed");
     assert.equal(preflights[0]!.overrides!.session!.config!.permissionMode, "orchestrator");
@@ -1827,7 +1920,7 @@ test("Full Control limits keep exactly what was typed through mount, remount, ou
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await chooseControlMode(fixture.container, "Full Control");
     await settlePreflight();
     const field = (label: string, advanced: boolean) => [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
       .find((node) => node.querySelector("span")?.textContent === label && Boolean(node.closest("details")) === advanced)
@@ -1911,7 +2004,7 @@ test("switching away from Full Control and back starts its limits fresh", async 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const choose = (mode: string) => act(async () => fixture.container.querySelector<HTMLInputElement>(`[data-control-mode="${mode}"]`)!.click());
+    const choose = (mode: string) => chooseControlMode(fixture.container, mode === "full_control" ? "Full Control" : "Custom");
     const children = () => [...fixture.container.querySelectorAll<HTMLLabelElement>("details label")]
       .find((node) => node.querySelector("span")?.textContent === "Maximum Issues")!.querySelector("input")!;
     await choose("full_control");
@@ -1938,35 +2031,38 @@ test("Full Control shows one concurrency control, Maximum Concurrent Children, w
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const limit = () => labelledNumberInput(fixture.container, "Maximum Concurrent Children")!;
-    const help = () => fixture.container.querySelector(`[id="${limit().getAttribute("aria-describedby")}"]`)!;
+    const limit = () => rowNumberInput(policyDialog(fixture.container), "Maximum Concurrent Children")!;
     // Custom: 0 pauses admission.
-    await act(async () => { fireDomEvent.change(limit(), { target: { value: "0" } }); });
-    assert.equal(limit().getAttribute("aria-invalid"), "false");
-    assert.equal(limit().min, "0");
-    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await editPolicy(fixture.container, "behavior", async () => {
+      assert.equal(limit().min, "0");
+      await act(async () => { fireDomEvent.change(limit(), { target: { value: "0" } }); });
+      assert.equal(limit().getAttribute("aria-invalid"), null);
+    });
+    // Full Control: the campaign's concurrency is this value, and a campaign cannot authorize 0.
+    await openPolicy(fixture.container, "decisions");
+    await chooseSegment(policyDialog(fixture.container), "Orchestrator Control", "Full Control");
+    await choosePolicyTab(fixture.container, "behavior");
+    assert.equal(limit().getAttribute("aria-invalid"), "true");
+    assert.equal(limit().min, "1");
+    assert.equal(ariaReferencedText(limit(), "aria-describedby"), "Enter a whole number from 1 to 64.");
+    assert.equal(buttonNamed(policyDialog(fixture.container), "Apply Policy").disabled, true);
+    await act(async () => { fireDomEvent.change(limit(), { target: { value: "6" } }); });
+    assert.equal(limit().getAttribute("aria-invalid"), null);
+    assert.match(ariaReferencedText(limit(), "aria-describedby") ?? "", /This is also the campaign's concurrency\./);
+    await applyPolicy(fixture.container);
     await settlePreflight();
     const concurrencyLabels = [...fixture.container.querySelectorAll("label span:first-child")]
       .map((node) => node.firstChild?.textContent?.trim() ?? "").filter((text) => /Concurren/.test(text));
-    assert.deepEqual(concurrencyLabels, ["Maximum Concurrent Children"], "one concurrency control, not a second Campaign Limits entry");
-    assert.ok(limit().closest("details"), "it stays under Advanced");
-    // Full Control: the campaign's concurrency is this value, and a campaign cannot authorize 0.
-    assert.equal(limit().getAttribute("aria-invalid"), "true");
-    assert.equal(limit().min, "1");
-    assert.equal(help().textContent, "Enter a whole number from 1 to 64.");
-    assert.equal(help().getAttribute("role"), "alert");
-    assert.equal(preflights.length, 0, "no readiness check runs for a launch that cannot be authorized");
-    await act(async () => { fireDomEvent.change(limit(), { target: { value: "6" } }); });
-    await settlePreflight();
-    assert.equal(limit().getAttribute("aria-invalid"), "false");
-    assert.match(help().textContent ?? "", /This is also the campaign's concurrency\./);
+    assert.deepEqual(concurrencyLabels, [], "Full Control's launch has no second concurrency entry");
     const latest = preflights.at(-1)!;
     assert.equal(latest.overrides!.session!.orchestrator!.behavior!.maximumConcurrentChildren, 6);
     assert.equal(latest.overrides!.budget?.concurrency, undefined, "the server derives the budget concurrency from the one control");
     // Back to Custom: 0 is allowed again.
-    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+    await openPolicy(fixture.container, "decisions");
+    await chooseSegment(policyDialog(fixture.container), "Orchestrator Control", "Custom");
+    await choosePolicyTab(fixture.container, "behavior");
     await act(async () => { fireDomEvent.change(limit(), { target: { value: "0" } }); });
-    assert.equal(limit().getAttribute("aria-invalid"), "false");
+    assert.equal(limit().getAttribute("aria-invalid"), null);
   } finally { await unmountFixture(fixture); }
 });
 
@@ -2009,13 +2105,19 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    assert.match(fixture.container.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Test Model/);
-    assert.equal(labelledNumberInput(fixture.container, "Maximum Concurrent Children")?.value, "5");
-    assert.match(fixture.container.textContent ?? "", /These effective values are resolved and stored before the campaign's first turn/);
+    const dialog = await openPolicy(fixture.container);
+    assert.match(dialog.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Test Model/);
+    assert.equal(rowNumberInput(dialog, "Maximum Concurrent Children")?.value, "5");
     await chooseSelectOption(fixture.container, "Child Harness", "Pi · Native");
     await chooseSelectOption(fixture.container, "Child Model", "Sol");
-    await chooseSelectOption(fixture.container, "PR Merge Approval", "Orchestrator");
-    assert.match(fixture.container.textContent ?? "", /Session Override/);
+    // A new harness starts its model and effort over: three Behavior rows differ from the defaults.
+    assert.match(policyDialog(fixture.container).querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? "", /^Behavior3 Changed$/);
+    await choosePolicyTab(fixture.container, "decisions");
+    await chooseSegment(policyDialog(fixture.container), "PR Merge Approval", "Orchestrator");
+    assert.doesNotMatch(policyDialog(fixture.container).textContent ?? "", /Session Override|User Default/);
+    await applyPolicy(fixture.container);
+    assert.match(policyRow(fixture.container).textContent ?? "", /4 changes/);
+    assert.match(policyRow(fixture.container).textContent ?? "", /1 Decision Delegated/);
     await act(async () => { createButton(fixture.container).click(); });
     assert.deepEqual(fixture.requests[0]?.orchestrator, {
       behavior: {
@@ -2030,7 +2132,7 @@ test("new Orchestrator sessions send only explicit overrides after showing effec
   }
 });
 
-test("a fixed Child Harness on an older runner shows the server's refusal sentence", async () => {
+test("a fixed Child Harness on an older runner names the machine to update, in the row and in the footer (#2955)", async () => {
   const olderRunner: RunnerView = {
     ...runner,
     protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorChildHarnessPolicy - 1,
@@ -2058,13 +2160,17 @@ test("a fixed Child Harness on an older runner shows the server's refusal senten
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
-      .map((node) => node.textContent ?? "").join(" ");
-    assert.ok(alerts.includes(
-      "This machine needs a newer runner for a fixed child harness. Update and restart the runner. To start now, choose Automatic for Child Harness.",
-    ), alerts);
-    assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
-    assert.doesNotMatch(alerts, /saved Child Model or Child Effort is no longer advertised/i);
+    const sentence = "Update Wollipog on runner-1 to choose a fixed Child Harness.";
+    assert.match(policyRow(fixture.container).querySelector(".field-error")?.textContent ?? "", new RegExp(sentence.replaceAll(".", "\\.")));
+    assert.ok(ariaReferencedText(customizeButton(fixture.container)!, "aria-describedby")?.includes(sentence),
+      "Customize… is described by the problem");
+    assert.equal(createButton(fixture.container).disabled, true);
+    assert.equal(footerReason(fixture.container), sentence, "the footer says why Create Session is disabled");
+    const dialog = await openPolicy(fixture.container);
+    const harness = dialog.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]')!;
+    assert.equal(ariaReferencedText(harness, "aria-describedby")?.startsWith(sentence), true, "the row says it too");
+    assert.doesNotMatch(fixture.container.textContent!, /protocol-v|newer runner/);
+    assert.doesNotMatch(fixture.container.textContent!, /saved Child Model or Child Effort is no longer advertised/i);
     await assertCreateRefused(fixture);
   } finally {
     await unmountFixture(fixture);
@@ -2086,23 +2192,24 @@ test("Orchestrator defaults without Child Harness policy name Wollipog as the th
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const control = [...fixture.container.querySelectorAll(".orchestrator-policy-control")]
-      .find((candidate) => candidate.querySelector(":scope > span")?.textContent?.startsWith("Child Harness"));
+    const dialog = await openPolicy(fixture.container);
+    const control = [...dialog.querySelectorAll(".setting-row")]
+      .find((candidate) => candidate.querySelector(".setting-row-title")?.textContent === "Child Harness");
     assert.ok(control, "Child Harness is rendered");
-    const note = control.querySelector(":scope > small.muted")?.textContent ?? "";
-    assert.equal(note, "Update or restart Wollipog to configure fixed Child Harness policy.");
+    const note = control.querySelector(".setting-row-reason")?.textContent ?? "";
+    assert.equal(note, "Update Wollipog to choose a fixed Child Harness.");
     assert.doesNotMatch(note, RETIRED_PROJECT_TERMS);
 
     // The Select is disabled in this state, so the Automatic option's description never opens and
     // the note above is what a person reads. Pin that the list stays shut, then pin the option's
     // own sentence in source, since no interaction can render it.
-    const trigger = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]');
+    const trigger = dialog.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]');
     assert.ok(trigger, "Child Harness select is rendered");
     assert.equal(trigger.getAttribute("aria-disabled"), "true");
     await act(async () => { trigger.click(); });
     assertNoDomNode(fixture.container.querySelector('[role="listbox"][aria-label="Child Harness"]'),
       "the disabled Child Harness list does not open");
-    const source = readFileSync(new URL("./NewSessionDialog.tsx", import.meta.url), "utf8");
+    const source = readFileSync(new URL("../orchestrator-policy.ts", import.meta.url), "utf8");
     assert.ok(source.includes(': "Update Wollipog to configure a fixed Child Harness.",'),
       "the Automatic option names Wollipog when fixed Child Harness policy is unavailable");
     assert.doesNotMatch(source, /"Update the control plane to configure a fixed Child Harness\."/);
@@ -2113,8 +2220,10 @@ test("Orchestrator defaults without Child Harness policy name Wollipog as the th
 
 test("New Session copy names no runner protocol numbers", () => {
   // docs/design-system.md §17.2: refusals use the shared runner sentence; versions travel as fields.
-  const source = readFileSync(new URL("./NewSessionDialog.tsx", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /protocol-v\d|protocol v\d/i);
+  for (const file of ["./NewSessionDialog.tsx", "./OrchestratorPolicyDialog.tsx", "../orchestrator-policy.ts"]) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /protocol-v\d|protocol v\d/i, file);
+  }
 });
 
 test("unsupported control-plane combinations explain the upgrade and block Orchestrator creation", async () => {
@@ -2133,10 +2242,15 @@ test("unsupported control-plane combinations explain the upgrade and block Orche
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const unavailable = fixture.container.querySelector(".orchestrator-policy-unavailable .form-error")?.textContent ?? "";
-    assert.equal(unavailable,
-      "This version of Wollipog does not support campaign policy. Update or restart Wollipog so it matches this dashboard.");
-    assert.doesNotMatch(unavailable, RETIRED_PROJECT_TERMS);
+    // A compact danger notice with Retry in the policy row's place (#2955), never the raw error.
+    const notice = fixture.container.querySelector(".session-options-body .notice.t-danger");
+    assert.ok(notice, "the failure is a danger notice");
+    assert.ok(notice.classList.contains("compact"), "a compact one");
+    assert.equal(notice.querySelector(".notice-body, span[id]")?.textContent, "Couldn't load your Orchestrator defaults.");
+    assert.ok(buttonNamed(notice, "Retry"));
+    assertNoDomNode(customizeButton(fixture.container), "there is no policy to customize");
+    assert.doesNotMatch(notice.textContent ?? "", RETIRED_PROJECT_TERMS);
+    assert.doesNotMatch(notice.textContent ?? "", /Missing|404/);
     await assertCreateRefused(fixture);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
@@ -2170,7 +2284,9 @@ test("a session override can repair drifted defaults without rewriting the accou
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
     await assertCreateRefused(fixture);
+    await openPolicy(fixture.container);
     await chooseSelectOption(fixture.container, "Child Model", "Automatic");
+    await applyPolicy(fixture.container);
     assert.equal(createButton(fixture.container).disabled, false,
       "a compatible explicit override repairs only this new campaign");
     await act(async () => { createButton(fixture.container).click(); });
@@ -2198,11 +2314,13 @@ test("Parent Control opt-ins stay disabled on an older runner", async () => {
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const descendant = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Descendant Requests:"]')!;
-    assert.match(descendant.getAttribute("aria-label") ?? "", /Human/);
-    assert.match(descendant.parentElement?.parentElement?.textContent ?? "", /Compatibility Fallback/);
     assert.equal(createButton(fixture.container).disabled, false,
       "an inherited authority default safely downgrades without blocking an older supported runner");
+    const dialog = await openPolicy(fixture.container, "decisions");
+    const descendant = dialog.querySelector<HTMLButtonElement>('[aria-label^="Descendant Requests:"]')!;
+    assert.match(descendant.getAttribute("aria-label") ?? "", /Human/);
+    assert.doesNotMatch(settingRowOf(descendant).textContent ?? "", /Compatibility Fallback|Changed/,
+      "the downgrade is not a change this session made");
     await act(async () => { descendant.click(); });
     const questions = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
       .find((option) => option.textContent?.includes("Questions"));
@@ -3631,10 +3749,8 @@ test("an additive Codex Orchestrator is offered where the audited sandbox is una
     assert.doesNotMatch(providerPermissions.textContent!, /Orchestrator Preset/,
       "the launch keeps the permission mode a normal Codex session would use here");
     assert.match(providerPermissions.textContent!, /An Orchestrator keeps them and its integrations/);
-    for (const error of fixture.container.querySelectorAll('.form-error[role="alert"]')) {
-      assert.doesNotMatch(error.textContent ?? "", /Provider-mode orchestration|sandbox/,
-        "no platform reason is stated, because the additive launch has no platform condition");
-    }
+    assertNoDomNode(policyRow(fixture.container).querySelector(".field-error"),
+      "no platform reason is stated, because the additive launch has no platform condition");
     assert.equal(createButton(fixture.container).disabled, false);
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 1);
@@ -3651,9 +3767,7 @@ test("an additive Codex Orchestrator is offered where the audited sandbox is una
   try {
     await act(async () => { await selectProject(strict.container, project.id); });
     await choosePermissionPreset(strict.container, "Orchestrator");
-    const errors = [...strict.container.querySelectorAll('.form-error[role="alert"]')]
-      .map((error) => error.textContent ?? "").join(" ");
-    assert.match(errors, /Strict Project Isolation is delivered by the Orchestrator preset/);
+    assert.match(policyRow(strict.container).textContent ?? "", /This agent can't run with Strict Project Isolation\. To start now, turn it off\./);
     await assertCreateRefused(strict);
   } finally { await unmountFixture(strict); }
 });
@@ -3799,7 +3913,13 @@ test("an additive-only Pi Orchestrator refuses Strict Project Isolation with a r
     await choosePermissionPreset(strict.container, "Orchestrator");
     // Strict Project Isolation is delivered only by the coupled preset, which this installation
     // cannot launch. The dialog must say so and refuse, not submit a shape the server rejects.
-    assert.match(strict.container.textContent!, /Strict Project Isolation is delivered by the Orchestrator preset/);
+    assert.match(policyRow(strict.container).textContent!, /This agent can't run with Strict Project Isolation\. To start now, turn it off\./);
+    // The dialog names it under the row it is about.
+    const dialog = await openPolicy(strict.container);
+    assert.equal(dialog.querySelector('[role="tab"][aria-selected="true"]')?.firstChild?.textContent, "Permissions",
+      "Customize… opens on the tab with the problem");
+    assert.match(settingRowOf(segment(dialog, "Strict Project Isolation", "On")).textContent ?? "", /This agent can't run with Strict Project Isolation/);
+    await act(async () => { buttonNamed(dialog, "Cancel").click(); });
     await assertCreateRefused(strict,
       "a shape the control plane would refuse is never submittable");
     await act(async () => { createButton(strict.container).click(); });
@@ -3832,18 +3952,22 @@ test("Integration Isolation is an independent control that discloses what it rem
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    // Off by default, and the dialog says integrations load as they would for a normal session.
-    assert.match(fixture.container.textContent!,
-      /Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would/);
-    await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
+    const dialog = await openPolicy(fixture.container, "permissions");
+    // Off by default, and About Integration Isolation says integrations load as for a normal session.
+    const about = () => policyDialog(fixture.container).querySelector("details.orchestrator-about")?.textContent ?? "";
+    assert.match(about(), /^About Integration Isolation/);
+    assert.match(about(), /Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would/);
+    await chooseSegment(dialog, "Integration Isolation", "On");
+    // The row says what it does in one sentence; the full explanation is behind About.
+    assert.equal(settingRowOf(segment(dialog, "Integration Isolation", "On")).querySelector(".setting-row-desc")?.textContent,
+      "The Orchestrator gets Wollipog's management tools and no other integration.");
     // The copy follows the SELECTED agent's harness, because the policy genuinely differs by
     // harness. This fixture is Pi.
-    assert.match(fixture.container.textContent!,
-      /Removes discovered extensions, skills, prompt templates, and ambient context files/);
-    assert.doesNotMatch(fixture.container.textContent!, /cannot drop hooks/,
-      "the Claude-specific caveat must not be shown for a Pi launch");
-    assert.match(fixture.container.textContent!,
+    assert.match(about(), /Removes discovered extensions, skills, prompt templates, and ambient context files/);
+    assert.doesNotMatch(about(), /cannot drop hooks/, "the Claude-specific caveat must not be shown for a Pi launch");
+    assert.match(about(),
       /provider permission mode, built-in tool inventory, sandbox and approval behavior, and the project boundary are unchanged/);
+    await applyPolicy(fixture.container);
     assert.equal(createButton(fixture.container).disabled, false);
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.orchestrator?.execution?.integrationIsolation, true);
@@ -3865,13 +3989,15 @@ test("an older runner blocks Integration Isolation rather than letting it be sub
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
-    const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
-      .map((node) => node.textContent ?? "").join(" ");
-    assert.ok(alerts.includes(
-      "This machine needs a newer runner for integration isolation. Update and restart the runner. To start now, turn off Integration Isolation.",
-    ), alerts);
-    assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
+    await editPolicy(fixture.container, "permissions", async (dialog) => {
+      await chooseSegment(dialog, "Integration Isolation", "On");
+      const group = dialog.querySelector('[role="radiogroup"][aria-label="Integration Isolation"]')!;
+      assert.equal(group.getAttribute("aria-invalid"), "true");
+      assert.match(ariaReferencedText(group as HTMLElement, "aria-describedby") ?? "",
+        /^Update Wollipog on .+ to turn on Integration Isolation\. To start now, turn it off\.$/);
+    });
+    assert.match(policyRow(fixture.container).textContent ?? "", /Update Wollipog on .+ to turn on Integration Isolation\./);
+    assert.doesNotMatch(fixture.container.textContent!, /protocol-v|newer runner/);
     await assertCreateRefused(fixture,
       "the dialog never advertises a shape the control plane refuses");
     await act(async () => { createButton(fixture.container).click(); });
@@ -3879,7 +4005,7 @@ test("an older runner blocks Integration Isolation rather than letting it be sub
   } finally { await unmountFixture(fixture); }
 });
 
-test("an Orchestrator without Strict Project Isolation on an older runner shows the server's refusal sentence", async () => {
+test("an Orchestrator without Strict Project Isolation on an older runner says which machine to update", async () => {
   const oldRunner: RunnerView = {
     ...runner,
     protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorExecutionPolicy - 1,
@@ -3892,12 +4018,10 @@ test("an Orchestrator without Strict Project Isolation on an older runner shows 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const alerts = [...fixture.container.querySelectorAll('[role="alert"]')]
-      .map((node) => node.textContent ?? "").join(" ");
-    assert.ok(alerts.includes(
-      "This machine needs a newer runner for an Orchestrator without strict project isolation. Update and restart the runner. To start now, turn on Strict Project Isolation.",
-    ), alerts);
-    assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
+    const sentence = "Update Wollipog on runner-1 to run an Orchestrator without Strict Project Isolation. To start now, turn it on.";
+    assert.equal(policyRow(fixture.container).querySelector(".field-error")?.textContent, sentence);
+    assert.equal(footerReason(fixture.container), sentence);
+    assert.doesNotMatch(fixture.container.textContent!, /protocol-v|newer runner/);
     await assertCreateRefused(fixture);
   } finally { await unmountFixture(fixture); }
 });
@@ -3909,13 +4033,14 @@ test("Strict Project Isolation shows Integration Isolation as implied and not se
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const trigger = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Integration Isolation:"]');
-    assert.ok(trigger, "the control is still shown, so the effective value is visible");
-    assert.equal(trigger.getAttribute("aria-disabled"), "true",
-      "it is implied rather than independently selectable");
-    assert.match(trigger.getAttribute("aria-label")!, /Enabled/);
+    const dialog = await openPolicy(fixture.container, "permissions");
+    const on = segment(dialog, "Integration Isolation", "On");
+    assert.equal(on.getAttribute("aria-checked"), "true", "the control is still shown, so the effective value is visible");
+    assert.equal(on.getAttribute("aria-disabled"), "true", "it is implied rather than independently selectable");
+    assert.equal(segment(dialog, "Integration Isolation", "Off").getAttribute("aria-disabled"), "true");
+    assert.match(settingRowOf(on).textContent ?? "", /Implied by Strict Project Isolation, so it can't be turned off\./);
     assert.match(fixture.container.textContent!,
-      /already launches without provider integrations, so this policy is implied and cannot be disabled/);
+      /already launches without provider integrations, so Integration Isolation is implied/);
     // A strict launch is a coupled preset, which fixes the tool inventory and approval behavior,
     // so the additive launch's "everything else is unchanged" promise must not appear here.
     assert.match(fixture.container.textContent!, /harness-owned Orchestrator preset replaces the provider surface/);
@@ -3942,7 +4067,7 @@ test("the Claude Integration Isolation copy says MCP servers go and hooks, plugi
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    await chooseSelectOption(fixture.container, "Integration Isolation", "Enabled");
+    await chooseSegment(await openPolicy(fixture.container, "permissions"), "Integration Isolation", "On");
     // Claude Code isolates MCP servers ONLY. The copy must under-promise exactly, and say why.
     assert.match(fixture.container.textContent!,
       /Removes configured MCP servers, so Wollipog's management tools are the only MCP integration/);
@@ -3978,11 +4103,12 @@ test("an older control plane blocks Integration Isolation even when the runner s
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    const trigger = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Integration Isolation:"]');
-    assert.ok(trigger, "the setting is still shown rather than hidden");
-    assert.equal(trigger.getAttribute("aria-disabled"), "true");
-    assert.match(fixture.container.textContent!, /Update Wollipog to configure Integration Isolation\./);
+    const dialog = await openPolicy(fixture.container, "permissions");
+    const off = segment(dialog, "Integration Isolation", "Off");
+    assert.equal(off.getAttribute("aria-disabled"), "true", "the setting is still shown rather than hidden");
+    assert.match(settingRowOf(off).textContent!, /Update Wollipog to configure Integration Isolation\./);
     assert.doesNotMatch(fixture.container.textContent!, /Update the control plane/);
+    await act(async () => { buttonNamed(dialog, "Cancel").click(); });
     // An unrelated Orchestrator session must still be creatable, and the request must not carry a
     // key this control plane would reject as an unknown override.
     await act(async () => { createButton(fixture.container).click(); });
@@ -4101,6 +4227,194 @@ test("a disabled Orchestrator keeps its place, says why in the row, and is reach
   } finally { await unmountFixture(fixture); }
 });
 
+/* ------------------------------------------------------------------------------------------------
+ * Orchestrator Policy (#2955): a summary row under Role, and a stacked dialog with three tabs.
+ * ---------------------------------------------------------------------------------------------- */
+
+const policyRunner = (): RunnerView => ({
+  ...runner, protocolVersion: PROTOCOL_VERSION,
+  agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+    permissionModes: ["default", "orchestrator"],
+  } })),
+});
+
+/** A bubblewrap runner whose Claude Code can enforce Strict Project Isolation. */
+const strictPolicyRunner = (protocolVersion = PROTOCOL_VERSION): RunnerView => ({
+  ...runner, protocolVersion,
+  runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+    executionIsolation: { mode: "bwrap", network: "inherit" } },
+  agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+    permissionModes: ["default", "dontAsk", "orchestrator"],
+  } })),
+});
+
+/** Saved defaults that execute approved follow-ups and run up to six children. */
+async function executeApprovedDefaults(): Promise<OrchestratorSettingsView> {
+  const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+  defaults.behavior.followUps = "execute_approved";
+  defaults.behavior.maximumConcurrentChildren = 6;
+  return {
+    defaults,
+    source: "user_default",
+    capabilities: {
+      models: [{ id: "test-model", efforts: ["high"] }], effortLevels: ["high"],
+      installations: 1, compatibleInstallations: 1, status: "available",
+    },
+  };
+}
+
+function selectedTab(dialog: ParentNode): HTMLElement {
+  const tab = dialog.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+  assert.ok(tab, "a tab is selected");
+  return tab;
+}
+
+test("the policy row states five facts with Customize…, and Customize… opens Orchestrator Policy over New Session (#2955)", async () => {
+  const fixture = await mountFixture({ runners: [policyRunner()] }, undefined, undefined, undefined, undefined, executeApprovedDefaults);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const row = policyRow(fixture.container);
+    assert.deepEqual([...row.querySelectorAll(".orchestrator-policy-facts > span")].map((fact) => fact.textContent), [
+      "Up to 6 Children", "Executes Approved Follow-Ups", "Keeps Finished Children", "Integration Isolation", "No Decisions Delegated",
+    ]);
+    assert.match(row.textContent ?? "", /From your Orchestrator defaults in Settings\./);
+    assert.doesNotMatch(row.textContent ?? "", /change/, "nothing differs from the defaults yet");
+    assert.equal(customizeButton(fixture.container)?.textContent, "Customize…");
+    assert.equal(customizeButton(fixture.container)?.getAttribute("aria-haspopup"), "dialog");
+    assert.match(ariaReferencedText(customizeButton(fixture.container)!, "aria-describedby") ?? "", /^Up to 6 Children/,
+      "Customize… is described by what it would change");
+
+    const dialog = await openPolicy(fixture.container);
+    assert.equal(fixture.container.querySelectorAll('[role="dialog"]').length, 2, "New Session stays open under it");
+    assert.equal(dialog.querySelector(".modal-desc")?.textContent, "For this session only. Your defaults live in Settings.");
+    assert.deepEqual([...dialog.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent), ["Behavior", "Permissions", "Decisions"]);
+    assert.equal(selectedTab(dialog).textContent, "Behavior");
+    assert.deepEqual([...dialog.querySelectorAll(".modal-foot button")].map((button) => button.textContent),
+      ["Reset to Defaults", "Cancel", "Apply Policy"], "Reset to Defaults is a ghost button before Cancel (§7.3)");
+    assert.ok(buttonNamed(dialog, "Reset to Defaults").classList.contains("ghost"));
+    assert.equal(buttonNamed(dialog, "Reset to Defaults").disabled, true, "nothing to reset yet");
+    assert.deepEqual([...dialog.querySelectorAll('[role="tabpanel"] .setting-row-title')].map((title) => title.textContent),
+      ["Child Harness", "Child Model", "Child Effort", "Maximum Concurrent Children", "Follow-Ups", "Completion"]);
+    await choosePolicyTab(fixture.container, "permissions");
+    assert.deepEqual([...policyDialog(fixture.container).querySelectorAll('[role="tabpanel"] .setting-row-title')].map((title) => title.textContent),
+      ["Strict Project Isolation", "Integration Isolation", "Effective Boundary"]);
+    // Off | On segments, as in Settings.
+    for (const group of ["Strict Project Isolation", "Integration Isolation"]) {
+      assert.deepEqual(radioRows(policyDialog(fixture.container).querySelector(`[role="radiogroup"][aria-label="${group}"]`)!)
+        .map((option) => option.textContent), ["Off", "On"], group);
+    }
+    await choosePolicyTab(fixture.container, "decisions");
+    assert.deepEqual([...policyDialog(fixture.container).querySelectorAll('[role="tabpanel"] .setting-row-title')].map((title) => title.textContent), [
+      "Orchestrator Control", "Descendant Requests", "Implementation Questions", "PR Merge Approval", "Merged Branch Deletion",
+      "Follow-Up Issue Publication", "UI Evidence Approval",
+    ]);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a changed row says Changed with Reset to its default, its tab counts it, Apply Policy counts it in the summary, and Cancel discards it (#2955)", async () => {
+  const fixture = await mountFixture({ runners: [policyRunner()] }, undefined, undefined, undefined, undefined, executeApprovedDefaults);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    let dialog = await openPolicy(fixture.container);
+    const followUps = () => policyDialog(fixture.container).querySelector<HTMLButtonElement>('[aria-label^="Follow-Ups:"]')!;
+    assertNoDomNode(policyDialog(fixture.container).querySelector(".changed-mark"), "no row is marked before a change");
+    await chooseSelectOption(fixture.container, "Follow-Ups", "Recommend Only");
+    const mark = settingRowOf(followUps()).querySelector(".changed-mark");
+    assert.ok(mark, "the row is marked");
+    assert.equal(mark.textContent, "ChangedReset to Execute Approved");
+    assert.equal(selectedTab(policyDialog(fixture.container)).textContent, "Behavior1 Changed");
+    assert.equal(selectedTab(policyDialog(fixture.container)).querySelector(".count")?.textContent, "1 Changed", "a plain count");
+    assert.equal(buttonNamed(policyDialog(fixture.container), "Reset to Defaults").disabled, false);
+
+    // Reset to <value> puts the row back.
+    await act(async () => { buttonNamed(policyDialog(fixture.container), "Reset to Execute Approved").click(); });
+    assert.match(followUps().getAttribute("aria-label") ?? "", /Execute Approved/);
+    assertNoDomNode(policyDialog(fixture.container).querySelector(".changed-mark"));
+    assert.equal(selectedTab(policyDialog(fixture.container)).textContent, "Behavior");
+
+    // Apply Policy carries the change to the summary.
+    await chooseSelectOption(fixture.container, "Follow-Ups", "Recommend Only");
+    await applyPolicy(fixture.container);
+    assertNoDomNode(fixture.container.querySelector('[role="dialog"] .modal-title:not(:first-child)'));
+    assert.equal(fixture.container.querySelectorAll('[role="dialog"]').length, 1, "Apply Policy closes the dialog");
+    assert.match(policyRow(fixture.container).textContent ?? "", /Recommends Follow-Ups/);
+    assert.match(policyRow(fixture.container).textContent ?? "", /1 change(?!s)/);
+
+    // Cancel discards what changed since: the applied change stays, the new one does not.
+    dialog = await openPolicy(fixture.container);
+    await chooseSegment(dialog, "Completion", "Stop and Archive");
+    assert.equal(selectedTab(policyDialog(fixture.container)).textContent, "Behavior2 Changed");
+    await act(async () => { buttonNamed(policyDialog(fixture.container), "Cancel").click(); });
+    assert.equal(fixture.container.querySelectorAll('[role="dialog"]').length, 1);
+    assert.match(policyRow(fixture.container).textContent ?? "", /1 change(?!s)/);
+    assert.match(policyRow(fixture.container).textContent ?? "", /Keeps Finished Children/);
+
+    // Reset to Defaults clears every override, and nothing is sent once applied.
+    dialog = await openPolicy(fixture.container);
+    await act(async () => { buttonNamed(dialog, "Reset to Defaults").click(); });
+    assertNoDomNode(policyDialog(fixture.container).querySelector(".changed-mark"));
+    await applyPolicy(fixture.container);
+    assert.doesNotMatch(policyRow(fixture.container).textContent ?? "", /change/);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.deepEqual(fixture.requests[0]?.orchestrator, { behavior: {}, delegation: {} });
+  } finally { await unmountFixture(fixture); }
+});
+
+test("each tab's changes reach the create request as the same overrides as before (#2955)", async () => {
+  const fixture = await mountFixture({ runners: [strictPolicyRunner()] }, undefined, undefined, undefined, undefined, executeApprovedDefaults);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await editPolicy(fixture.container, "behavior", async (dialog) => {
+      await chooseSelectOption(fixture.container, "Follow-Ups", "Recommend Only");
+      await chooseSegment(dialog, "Completion", "Stop and Archive");
+      await act(async () => { fireDomEvent.change(rowNumberInput(dialog, "Maximum Concurrent Children")!, { target: { value: "3" } }); });
+    });
+    await editPolicy(fixture.container, "permissions", (dialog) => chooseSegment(dialog, "Strict Project Isolation", "On"));
+    await editPolicy(fixture.container, "decisions", async (dialog) => {
+      await chooseSelectOption(fixture.container, "Descendant Requests", "Questions");
+      await chooseSegment(dialog, "Merged Branch Deletion", "Orchestrator");
+    });
+    const row = policyRow(fixture.container).textContent ?? "";
+    assert.match(row, /Up to 3 Children/);
+    assert.match(row, /Strict Project Isolation/);
+    assert.match(row, /1 Decision Delegated/);
+    assert.match(row, /6 changes/);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.deepEqual(fixture.requests[0]?.orchestrator, {
+      behavior: { maximumConcurrentChildren: 3, followUps: "recommend_only", completion: "stop_and_archive" },
+      delegation: { parentControl: "questions", decisions: { merged_branch_deletion: "orchestrator" } },
+      execution: { strictProjectIsolation: true },
+    });
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an older runner keeps an inherited delegation human and says which machine to update to delegate (#2955)", async () => {
+  const oldRunner = strictPolicyRunner(RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation - 1);
+  const delegated = async (): Promise<OrchestratorSettingsView> => {
+    const view = await executeApprovedDefaults();
+    view.defaults.delegation.parentControl = "off";
+    view.defaults.execution.strictProjectIsolation = true;
+    return view;
+  };
+  const fixture = await mountFixture({ runners: [oldRunner] }, undefined, undefined, undefined, undefined, delegated);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assertNoDomNode(policyRow(fixture.container).querySelector(".field-error"), "an inherited default downgrades quietly");
+    const dialog = await openPolicy(fixture.container, "decisions");
+    const orchestrator = segment(dialog, "PR Merge Approval", "Orchestrator");
+    assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
+    assert.equal(orchestrator.title, "Update Wollipog on runner-1 to delegate decisions to the Orchestrator.");
+    await act(async () => { buttonNamed(dialog, "Cancel").click(); });
+    assert.equal(createButton(fixture.container).disabled, false);
+  } finally { await unmountFixture(fixture); }
+});
+
 test("an ACP Orchestrator's permissions come from the preset, and a warning notice says why in user words (#2954, #1360)", async () => {
   const acpRunner: RunnerView = {
     ...runner, protocolVersion: PROTOCOL_VERSION,
@@ -4118,7 +4432,7 @@ test("an ACP Orchestrator's permissions come from the preset, and a warning noti
     assertNoDomNode(fixture.container.querySelector(".session-options-body > .notice.t-warning"));
     await choosePermissionPreset(fixture.container, "Orchestrator");
     // Non-strict is the case the ACP sentence is for; Strict Project Isolation names itself instead.
-    await chooseSelectOption(fixture.container, "Strict Project Isolation", "Disabled");
+    await editPolicy(fixture.container, "permissions", (dialog) => chooseSegment(dialog, "Strict Project Isolation", "Off"));
     const notice = fixture.container.querySelector<HTMLElement>(".session-options-body > .notice.t-warning");
     assert.ok(notice, "the preset is a warning notice under Permissions");
     assert.match(notice.textContent ?? "", /Permissions Set by the Orchestrator Preset/);
@@ -4166,7 +4480,7 @@ test("a Full Control launch that fails with Options closed opens Options and sho
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    await act(async () => fixture.container.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+    await chooseControlMode(fixture.container, "Full Control");
     await settlePreflight();
     assert.equal(authorizeButton(fixture.container).disabled, true);
     // Closed while it can't start, the head says so: the disabled footer action has no reason of its own.

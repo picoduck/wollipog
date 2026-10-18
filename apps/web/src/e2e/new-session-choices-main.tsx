@@ -1,8 +1,10 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   type AgentHarnessDefaultsView,
+  type OrchestratorSettingsView,
   type CreateSessionRequest,
   type ProjectLocationView,
   type ProjectView,
@@ -40,6 +42,38 @@ const fixtureParams = new URLSearchParams(window.location.search);
 
 /** The runner decides which presets are offered, which is the whole subject of the spec. */
 const orchestratorCapable = fixtureParams.get("orchestrator") !== "0";
+
+/**
+ * #2955: the saved Orchestrator defaults the policy row and the Orchestrator Policy dialog start
+ * from. `?policy=1` answers with defaults that execute approved follow-ups and two child harnesses;
+ * `?policy=error` fails the request the way a dropped connection does. Without it the request goes
+ * to the network, as the Full Control spec intercepts it.
+ */
+const policyFixture = fixtureParams.get("policy");
+const policyView: OrchestratorSettingsView = {
+  defaults: {
+    ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
+    behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior, maximumConcurrentChildren: 6, followUps: "execute_approved" },
+  },
+  source: "user_default",
+  controlModeSupported: true,
+  capabilities: {
+    harnesses: [
+      {
+        agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude Code",
+        models: [{ id: "claude-opus", displayName: "Claude Opus", efforts: ["high", "medium"] }], effortLevels: ["high", "medium"],
+        supportedPairs: [{ modelId: "claude-opus", effortLevels: ["high", "medium"] }], installations: 1,
+      },
+      {
+        agentId: "codex", driver: "codex-app-server", context: { kind: "native" }, name: "Codex App Server",
+        models: [{ id: "gpt-sol", displayName: "GPT Sol", efforts: ["high"] }], effortLevels: ["high"],
+        supportedPairs: [{ modelId: "gpt-sol", effortLevels: ["high"] }], installations: 1,
+      },
+    ],
+    models: [{ id: "claude-opus", displayName: "Claude Opus", efforts: ["high", "medium"] }, { id: "gpt-sol", displayName: "GPT Sol", efforts: ["high"] }],
+    effortLevels: ["high", "medium"], installations: 2, compatibleInstallations: 2, status: "available",
+  },
+};
 
 /** #1648: accounts people named after their email, which the picker must mask by default. */
 const emailAccounts = fixtureParams.get("emailAccounts") === "1";
@@ -376,6 +410,11 @@ const client = {
     ? Promise.reject(new Error("Saved defaults are unavailable."))
     : savedDefaults === "pending" ? new Promise<AgentHarnessDefaultsView>(() => undefined) : Promise.resolve(defaults),
   workflowDefinitions: async (): Promise<WorkflowDefinition[]> => [],
+  ...(policyFixture ? {
+    orchestratorSettings: () => policyFixture === "error"
+      ? Promise.reject(new TypeError("Failed to fetch"))
+      : Promise.resolve(structuredClone(policyView)),
+  } : {}),
   // The skills assigned to Claude Code on this machine, which a container or cloud target can't see.
   runnerSkills: async () => ({
     desired: [

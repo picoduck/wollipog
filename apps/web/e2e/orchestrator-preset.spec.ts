@@ -5,13 +5,28 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 test.use({ video: "on" });
 
 /**
- * Create Session refuses a shape the control plane would refuse (#2952): it stays enabled, and
- * pressing it sends nothing and names the problem under the Orchestrator policy.
+ * Create Session refuses a shape the control plane would refuse: the Orchestrator Policy row names
+ * the problem, and Create Session is disabled with the same sentence in the footer (#2955).
  */
 async function expectCreateRefused(page: Page, dialog: Locator, problem: RegExp) {
-  await dialog.getByRole("button", { name: "Create Session" }).click();
-  await expect(dialog.locator(".field-error")).toHaveText(problem);
+  await expect(dialog.locator(".orchestrator-policy-summary .field-error")).toHaveText(problem);
+  await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
+  await expect(dialog.locator(".modal-foot .new-session-reason")).toHaveText(problem);
   expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest())).toBeFalsy();
+}
+
+/**
+ * Orchestrator Policy (#2955): Customize… opens it over New Session, on `tab`; `edit` changes it and
+ * Apply Policy returns the change to New Session.
+ */
+async function editPolicy(dialog: Locator, tab: "Behavior" | "Permissions" | "Decisions", edit: (policy: Locator) => Promise<void>) {
+  await dialog.getByRole("button", { name: "Customize…" }).click();
+  const policy = dialog.page().getByRole("dialog", { name: "Orchestrator Policy" });
+  await expect(policy).toBeVisible();
+  await policy.getByRole("tab", { name: new RegExp(`^${tab}`) }).click();
+  await edit(policy);
+  await policy.getByRole("button", { name: "Apply Policy" }).click();
+  await expect(policy).toHaveCount(0);
 }
 
 /**
@@ -104,7 +119,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(harnessRow.locator(".setting-row-desc")).toHaveText("Native TUI opens the provider's own terminal UI. It doesn't track usage or show approval cards, so sessions with budgets must use Direct.");
       await expect(dialog.getByRole("radio", { name: /^Native TUI/ })).toHaveAccessibleDescription("Native TUI opens the provider's own terminal UI. It doesn't track usage or show approval cards, so sessions with budgets must use Direct.");
       await expect(dialog.getByText(/Usage Accounting: Unavailable|spending and tool calls are not included/)).toHaveCount(0);
-      await dialog.getByRole("spinbutton", { name: "Maximum Concurrent Children" }).fill("8");
+      await editPolicy(dialog, "Behavior", (policy) => policy.getByRole("spinbutton", { name: "Maximum Concurrent Children" }).fill("8"));
       await page.screenshot({ path: testInfo.outputPath("native-tui-unmetered.png") });
       await dialog.getByRole("button", { name: "Create Session" }).click();
       await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
@@ -135,26 +150,31 @@ for (const theme of ["light", "dark"] as const) {
       await expect(orchestratorCard).not.toBeChecked();
       await orchestratorCard.click();
       await expect(orchestratorCard).toBeChecked();
-      const liveChildLimit = dialog.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
-      await expect(liveChildLimit).toHaveValue("4");
-      await liveChildLimit.fill("7");
-      await dialog.getByRole("button", { name: /Child Harness: Automatic/ }).click();
-      await dialog.getByRole("option", { name: /Codex App Server · Native/ }).click();
-      await dialog.getByRole("button", { name: /Child Model: Automatic/ }).click();
-      await dialog.getByRole("option", { name: /GPT-5.6 Sol/ }).click();
-      await dialog.getByRole("button", { name: /Child Effort: Automatic/ }).click();
-      await dialog.getByRole("option", { name: /High/ }).click();
-      await dialog.getByRole("button", { name: /Child Harness: Codex App Server · Native/ }).scrollIntoViewIfNeeded();
-      await page.screenshot({ path: testInfo.outputPath("preset-harness-selected.png") });
-      const delegatedControl = dialog.getByRole("button", { name: /Descendant Requests: Questions and Approvals/ });
-      await expect(delegatedControl).toBeVisible();
+      await expect(dialog.locator(".orchestrator-policy-summary")).toContainText("Up to 4 Children");
+      await editPolicy(dialog, "Behavior", async (policy) => {
+        const liveChildLimit = policy.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
+        await expect(liveChildLimit).toHaveValue("4");
+        await liveChildLimit.fill("7");
+        await policy.getByRole("button", { name: /Child Harness: Automatic/ }).click();
+        await page.getByRole("option", { name: /Codex App Server · Native/ }).click();
+        await policy.getByRole("button", { name: /Child Model: Automatic/ }).click();
+        await page.getByRole("option", { name: /GPT-5.6 Sol/ }).click();
+        await policy.getByRole("button", { name: /Child Effort: Automatic/ }).click();
+        await page.getByRole("option", { name: /High/ }).click();
+        await expect(policy.getByRole("tab", { name: /^Behavior/ })).toHaveText("Behavior4 Changed");
+        await page.screenshot({ path: testInfo.outputPath("preset-harness-selected.png") });
+        await policy.getByRole("tab", { name: /^Decisions/ }).click();
+        await expect(policy.getByRole("button", { name: /Descendant Requests: Questions and Approvals/ })).toBeVisible();
+        await policy.getByRole("tab", { name: /^Permissions/ }).click();
+        await expect(policy.getByRole("radiogroup", { name: "Strict Project Isolation" }).getByRole("radio", { name: "Off" })).toBeChecked();
+        await expect(policy.locator(".setting-row-desc").getByText("The Orchestrator uses its agent's own permissions and governance.", { exact: true })).toBeVisible();
+      });
+      await expect(dialog.locator(".orchestrator-policy-summary")).toContainText("Up to 7 Children");
+      await expect(dialog.locator(".orchestrator-policy-summary")).toContainText("4 changes");
       await expect(dialog.getByText("An Orchestrator delegates work to child sessions.", { exact: true })).toBeVisible();
-      await expect(dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ })).toBeVisible();
-      await expect(dialog.getByText(/no read-only operating-system boundary is claimed/)).toBeVisible();
       const tui = dialog.getByRole("radio", { name: /^Native TUI/ });
       await expect(tui).toBeEnabled();
       if (surface === "native_tui") await tui.click();
-      if (viewport.width === 390) await delegatedControl.scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath("preset-selected.png") });
       await dialog.getByRole("button", { name: "Create Session" }).click();
       await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
@@ -213,16 +233,16 @@ for (const scenario of [
     await providerPermissions.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("role-orchestrator-independent.png"), fullPage: true });
 
-    await dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ }).click();
-    await dialog.getByRole("option", { name: /^Enabled/ }).click();
+    await editPolicy(dialog, "Permissions", (policy) =>
+      policy.getByRole("radiogroup", { name: "Strict Project Isolation" }).getByRole("radio", { name: "On" }).click());
     await expect(providerPermissions).toContainText("Orchestrator Preset");
     await expect(presetNotice(dialog)).toContainText("Permissions Set by the Orchestrator Preset");
     await expect(presetNotice(dialog)).toContainText("Strict Project Isolation is enforced by the Orchestrator preset, so the preset sets them.");
     await providerPermissions.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("role-orchestrator-strict-preset.png"), fullPage: true });
 
-    await dialog.getByRole("button", { name: /Strict Project Isolation: Enabled/ }).click();
-    await dialog.getByRole("option", { name: /^Disabled/ }).click();
+    await editPolicy(dialog, "Permissions", (policy) =>
+      policy.getByRole("radiogroup", { name: "Strict Project Isolation" }).getByRole("radio", { name: "Off" }).click());
     await expect(providerPermissions).not.toContainText("Orchestrator Preset");
     await dialog.getByRole("button", { name: "Create Session" }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
@@ -268,16 +288,17 @@ for (const scenario of [
 
     // Strict isolation is delivered by the preset this installation cannot launch: it must block
     // with a reason rather than let the user submit a shape the control plane refuses.
-    await dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ }).click();
-    await dialog.getByRole("option", { name: /^Enabled/ }).click();
-    const blocked = dialog.getByText(/Strict Project Isolation is delivered by the Orchestrator preset, which this agent installation cannot launch here/);
+    await editPolicy(dialog, "Permissions", (policy) =>
+      policy.getByRole("radiogroup", { name: "Strict Project Isolation" }).getByRole("radio", { name: "On" }).click());
+    const blocked = dialog.locator(".orchestrator-policy-summary .field-error");
+    await expect(blocked).toHaveText("This agent can't run with Strict Project Isolation. To start now, turn it off.");
     await expect(blocked).toBeVisible();
     await blocked.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("pi-strict-blocked.png"), fullPage: true });
-    await expectCreateRefused(page, dialog, /Strict Project Isolation is delivered by the Orchestrator preset/);
+    await expectCreateRefused(page, dialog, /This agent can't run with Strict Project Isolation\./);
 
-    await dialog.getByRole("button", { name: /Strict Project Isolation: Enabled/ }).click();
-    await dialog.getByRole("option", { name: /^Disabled/ }).click();
+    await editPolicy(dialog, "Permissions", (policy) =>
+      policy.getByRole("radiogroup", { name: "Strict Project Isolation" }).getByRole("radio", { name: "Off" }).click());
     await dialog.getByRole("button", { name: "Create Session" }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
       .toMatchObject({ role: "orchestrator" });
@@ -326,16 +347,17 @@ for (const scenario of [
     await page.screenshot({ path: testInfo.outputPath("codex-additive-without-audited-sandbox.png"), fullPage: true });
 
     // The preset's own precondition is untouched, so Strict Project Isolation still blocks here.
-    await dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ }).click();
-    await dialog.getByRole("option", { name: /^Enabled/ }).click();
-    const blocked = dialog.getByText(/Strict Project Isolation is delivered by the Orchestrator preset, which this agent installation cannot launch here/);
+    await editPolicy(dialog, "Permissions", (policy) =>
+      policy.getByRole("radiogroup", { name: "Strict Project Isolation" }).getByRole("radio", { name: "On" }).click());
+    const blocked = dialog.locator(".orchestrator-policy-summary .field-error");
+    await expect(blocked).toHaveText("This agent can't run with Strict Project Isolation. To start now, turn it off.");
     await expect(blocked).toBeVisible();
     await blocked.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("codex-strict-blocked-without-audited-sandbox.png"), fullPage: true });
-    await expectCreateRefused(page, dialog, /Strict Project Isolation is delivered by the Orchestrator preset/);
+    await expectCreateRefused(page, dialog, /This agent can't run with Strict Project Isolation\./);
 
-    await dialog.getByRole("button", { name: /Strict Project Isolation: Enabled/ }).click();
-    await dialog.getByRole("option", { name: /^Disabled/ }).click();
+    await editPolicy(dialog, "Permissions", (policy) =>
+      policy.getByRole("radiogroup", { name: "Strict Project Isolation" }).getByRole("radio", { name: "Off" }).click());
     await dialog.getByRole("button", { name: "Create Session" }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
       .toMatchObject({ role: "orchestrator" });
@@ -365,21 +387,20 @@ for (const scenario of [
     const dialog = page.getByRole("dialog", { name: "New Session" });
     await openOptions(dialog);
     await presetCard(dialog, /^Orchestrator/).click();
-    const control = dialog.getByRole("button", { name: /Integration Isolation: Disabled/ });
-    await expect(control).toBeVisible();
-    await control.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: testInfo.outputPath("integration-isolation-disabled.png"), fullPage: true });
-    await control.click();
-    await dialog.getByRole("option", { name: /^Enabled/ }).click();
-    // #1295: the disclosure is per harness. For Claude Code only configured MCP servers go;
-    // hooks and permission rules stay, and the dialog says why.
-    await expect(dialog.getByText(/configured MCP servers/).first()).toBeVisible();
-    await expect(dialog.getByText(/permission rules/).first()).toBeVisible();
-    const enabled = dialog.getByRole("button", { name: /Integration Isolation: Enabled/ });
-    await enabled.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: testInfo.outputPath("integration-isolation-enabled.png"), fullPage: true });
-    // Independent of the project boundary and of the provider permission mode.
-    await expect(dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ })).toBeVisible();
+    await editPolicy(dialog, "Permissions", async (policy) => {
+      const control = policy.getByRole("radiogroup", { name: "Integration Isolation" });
+      await expect(control.getByRole("radio", { name: "Off" })).toBeChecked();
+      await page.screenshot({ path: testInfo.outputPath("integration-isolation-disabled.png"), fullPage: true });
+      await control.getByRole("radio", { name: "On" }).click();
+      // #1295: the disclosure is per harness. For Claude Code only configured MCP servers go;
+      // hooks and permission rules stay, and About Integration Isolation says why.
+      await policy.getByText("About Integration Isolation", { exact: true }).click();
+      await expect(policy.getByText(/configured MCP servers/).first()).toBeVisible();
+      await expect(policy.getByText(/permission rules/).first()).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath("integration-isolation-enabled.png"), fullPage: true });
+      // Independent of the project boundary and of the provider permission mode.
+      await expect(policy.getByRole("radiogroup", { name: "Strict Project Isolation" }).getByRole("radio", { name: "Off" })).toBeChecked();
+    });
     await expect(permissionsRow(dialog)).not.toContainText("Orchestrator Preset");
     await dialog.getByRole("button", { name: "Create Session" }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))

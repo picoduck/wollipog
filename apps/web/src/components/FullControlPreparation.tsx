@@ -217,7 +217,7 @@ function BudgetEntry({ draft, onChange, errors, disabled }: {
   draft: BudgetDraft; onChange: (draft: BudgetDraft) => void; errors: DraftErrors; disabled: boolean;
 }) {
   const id = useId();
-  return <fieldset className="orchestrator-policy-area">
+  return <fieldset className="full-control-limits">
     <legend>Campaign Budget</legend>
     <p className="muted">Choose the most this campaign may spend. The Orchestrator stops admitting new work at either limit.</p>
     <LimitInput label="Cost Limit (USD)" value={draft.cost} mode="decimal" error={errors.cost} disabled={disabled}
@@ -247,7 +247,7 @@ function LimitFields({ budget, onBudget, limits, onLimits, errors, derivedRelate
   const id = useId();
   const field = (label: string, value: string, change: (value: string) => void, mode: "decimal" | "numeric", error?: string) =>
     <LimitInput label={label} value={value} onChange={change} mode={mode} error={error} disabled={disabled} placeholder="Use Default" />;
-  return <fieldset className="orchestrator-policy-area">
+  return <fieldset className="full-control-limits">
     <legend>Campaign Limits</legend>
     <p className="muted">Leave a field empty to use the derived value. Changes check readiness again.</p>
     {savedBudget && field("Cost Limit (USD)", budget.cost, (cost) => onBudget({ ...budget, cost }), "decimal", errors.cost)}
