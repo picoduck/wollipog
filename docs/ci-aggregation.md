@@ -41,7 +41,7 @@ A second run of the same head waits for the first and then runs to completion, s
 no cancelled required check is left on a head that is still current.
 
 Runs of an older head are cancelled by `.github/workflows/pr-ci-supersede.yml`
-instead. On `workflow_run` `in_progress` for a CI `pull_request` run, it runs the
+instead. On `workflow_run` `requested` for a CI `pull_request` run, it queues the
 default branch's `scripts/pr-ci-supersede.mjs`, never the pull request's code. That
 script acts only when every open pull request from the run's head repository and
 branch is ready and has that run's head commit. It re-reads that just before
@@ -50,6 +50,31 @@ repository and branch on other head commits. A draft head supersedes nothing, as
 draft events never displaced a ready run before. If the evidence is unavailable or
 a cancel is refused, older-head CI simply runs to completion: that costs runner
 time, never the current head's required check.
+
+`requested` lets cleanup queue before the new CI run receives its first runner,
+rather than waiting for `in_progress`. GitHub [does not emit `requested` on
+reruns](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run),
+so `in_progress` remains admitted for `run_attempt > 1`. First-attempt
+`in_progress` invocations are skipped by the job condition, before requesting a
+runner, to avoid doing the same cleanup twice. Both entry points use the same
+live-head and readiness checks, including before every cancellation. A delayed
+event after a force-push back to an earlier SHA cannot supersede that current SHA.
+
+This is partial mitigation for #3420: cleanup still runs on `ubuntu-24.04` in
+the contended hosted pool. Earlier queue admission provides an opportunity to act
+sooner; it does not provide a runner-independent cancellation bound. That issue's
+runner-independent criterion remains open pending a human infrastructure decision.
+Neither fixture tests nor the trigger change prove a production latency improvement.
+
+For before/after observation, measure first-attempt CI creation (the request-time
+proxy) to the corresponding supersede job's `started_at`, as well as that job's
+own `created_at` to `started_at` runner wait. The structured supersede log's
+`runId` identifies its source CI run; read that run's `created_at` from the Actions
+API. Exclude reruns from this request-time comparison, since their run creation
+predates the rerun. Keep skipped jobs and missing source evidence separate.
+Use `scripts/merge-queue-wait-report.mjs` for merge-group runner wait over the
+same window (see [Merge-Queue Wait](merge-queue-wait.md)). Collect natural
+post-merge traffic; do not manufacture runs or cancellations to measure this change.
 
 ## Bounds and Evidence Limits
 
