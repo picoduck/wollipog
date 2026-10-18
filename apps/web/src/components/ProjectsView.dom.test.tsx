@@ -613,24 +613,25 @@ test("leaving a project with unsaved settings asks first, and Keep Editing stays
 });
 
 /** A client whose project updates wait until the test settles each one, in order. */
+/** `settleNext(elsewhere)` answers with `elsewhere` applied too: a change another client made meanwhile. */
 function heldClient(base: ProjectView) {
   const updates: unknown[] = [];
-  const held: (() => void)[] = [];
+  const held: ((elsewhere: Partial<ProjectView>) => void)[] = [];
   let current = base;
   const client = {
     ...api,
     updateProject: (_id: string, body: Record<string, unknown>) => {
       updates.push(body);
       return new Promise((resolve) => {
-        held.push(() => {
-          current = { ...current, ...body, updatedAt: current.updatedAt + 1 } as ProjectView;
+        held.push((elsewhere) => {
+          current = { ...current, ...body, ...elsewhere, updatedAt: current.updatedAt + 1 } as ProjectView;
           resolve({ project: current });
         });
       });
     },
   } as unknown as ApiClient;
-  const settleNext = async () => {
-    await act(async () => { held.shift()!(); });
+  const settleNext = async (elsewhere: Partial<ProjectView> = {}) => {
+    await act(async () => { held.shift()!(elsewhere); });
     await settle();
   };
   return { client, updates, settleNext };
@@ -1216,4 +1217,27 @@ test("a Save queued while the consent notice showed sends sharing, and a choice 
   await settleNext();
   assert.deepEqual(updates.slice(2), [{ hidden: false }], "the press asked for Keep Separate; the choice was taken back, so nothing is sent");
   assertNoDomNode(saveBar(body), "and the draft reads the saved choice again");
+});
+
+test("a queued Save pressed while no consent notice showed never shares, even once another client turns sharing off", async () => {
+  const alpha = memoryProject({ memorySharing: "shared" });
+  const { client, updates, settleNext } = heldClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", { runners: memoryRunners }, client);
+  // An explicit shared choice that matches the saved one: clean, and no notice.
+  await chooseMemorySharing(body, "Keep Account Memories Separate");
+  await chooseMemorySharing(body, "Share Project Memory");
+  assertNoDomNode(consentNotice(body));
+  await type(fieldOf(body, "Name"), "Beta");
+  await act(async () => { settingRow(body, "Show as a Sessions Tab").querySelector<HTMLButtonElement>('[role="switch"]')!.click(); });
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  assertNoDomNode(consentNotice(body), "no consent notice at the press");
+  await settleNext({ memorySharing: "separate" });
+  assert.deepEqual(updates, [{ hidden: true }, { name: "Beta" }], "the queued request carries only the name");
+  await settleNext();
+  assert.ok(consentNotice(body), "the shared choice now needs consent, and waits for it");
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Unsaved changes");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  assert.deepEqual(updates.at(-1), { memorySharing: "shared" }, "a Save pressed while it shows shares");
+  await settleNext();
+  assertNoDomNode(saveBar(body));
 });

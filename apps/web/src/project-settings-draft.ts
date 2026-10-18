@@ -116,14 +116,30 @@ export function projectSettingsChanges(project: ProjectView, values: ProjectSett
 }
 
 /**
- * `values` with Memory Sharing at the saved choice: what a Save queued behind another request sends
- * when the choice changed after it was pressed. Sharing is only ever sent by a Save pressed while its
- * consent notice showed (#2963), so a later choice waits in the draft for a Save of its own.
+ * Whether Memory Sharing's consent notice shows (#2963): the draft shares project memory and the saved
+ * choice does not. Turning sharing off, or keeping it, needs no consent.
+ */
+export function memorySharingNeedsConsent(project: ProjectView, values: ProjectSettingsValues): boolean {
+  return project.memorySharing !== undefined && project.memorySharing !== "shared" && values.memorySharing === "shared";
+}
+
+/**
+ * `values` with Memory Sharing at the saved choice, so the typed fields can save without it.
  */
 export function withSavedMemorySharing(project: ProjectView, values: ProjectSettingsValues): ProjectSettingsValues {
   const next: ProjectSettingsValues = { name: values.name, cost: values.cost, tools: values.tools };
   if (project.memorySharing !== undefined) next.memorySharing = project.memorySharing;
   return next;
+}
+
+/**
+ * What a save may send (#2963): sharing only for a Save pressed while the consent notice showed
+ * (`consented`). Without that, Memory Sharing stays at the saved choice in the request and the shared
+ * choice stays in the draft, with its notice, for a Save of its own. Every request the editor builds,
+ * pressed, queued or retried, goes through here.
+ */
+export function sendableProjectSettings(project: ProjectView, values: ProjectSettingsValues, consented: boolean): ProjectSettingsValues {
+  return memorySharingNeedsConsent(project, values) && !consented ? withSavedMemorySharing(project, values) : values;
 }
 
 /**

@@ -1,16 +1,17 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
-import type { ProjectMemorySharing, ProjectView, RunnerView, UpdateProjectRequest } from "@wollipog/protocol";
+import type { ProjectView, RunnerView, UpdateProjectRequest } from "@wollipog/protocol";
 import { useLeaveGuard } from "../leave-guard.js";
 import type { RunnerDisplay } from "../runners.js";
 import {
   draftAfterSave,
+  memorySharingNeedsConsent,
   PROJECT_SETTINGS_FIELDS,
   projectSettingsChanges,
   projectSettingsDirty,
   projectSettingsErrors,
   projectSettingsValues,
   revealedAfterSave,
-  withSavedMemorySharing,
+  sendableProjectSettings,
   type ProjectSettingsDraft,
   type ProjectSettingsField,
 } from "../project-settings-draft.js";
@@ -80,13 +81,13 @@ export function ProjectSettings({
   /** Save pressed while another request for this project ran: it runs once that one settles. */
   const saveWhenFree = useRef(false);
   /**
-   * The Memory Sharing choice on screen when that Save was last pressed. The queued save takes the typed
-   * fields as they are when it runs, but never a Memory Sharing choice made after the press: sharing
-   * is only sent by a Save pressed while its consent notice showed (#2963).
+   * Whether Memory Sharing's consent notice showed when Save was last pressed (#2963). A request may
+   * share project memory only for such a press, whenever it is sent: at once, queued, or retried.
    */
-  const queuedMemorySharing = useRef<ProjectMemorySharing | undefined>(undefined);
+  const sharingConsented = useRef(false);
 
   const values = projectSettingsValues(project, draft);
+  const consentShown = memorySharingNeedsConsent(project, values);
   const dirty = projectSettingsDirty(project, draft);
   const errors = projectSettingsErrors(values);
   const shownError = (field: ProjectSettingsField) => (revealed.has(field) ? errors[field] ?? null : null);
@@ -112,16 +113,13 @@ export function ProjectSettings({
   /** `queued` is the run of a press kept while another request ran, rather than a press now. */
   const save = async (queued = false) => {
     if (savingRef.current || readOnly) return;
+    if (!queued) sharingConsented.current = consentShown;
     // Another request for this project is still running (a Sessions tab change); the press is kept
-    // and Save runs once that request settles, on the draft as it is then, except Memory Sharing.
+    // and Save runs once that request settles, on the draft as it is then.
     if (busy !== null) {
-      queuedMemorySharing.current = values.memorySharing;
       saveWhenFree.current = true;
       return;
     }
-    // A Memory Sharing choice made since a queued press stays in the draft, with its notice, for a
-    // Save of its own; the rest of the draft saves now.
-    const heldBack = queued && values.memorySharing !== queuedMemorySharing.current;
     saveWhenFree.current = false;
     setRevealed(new Set(PROJECT_SETTINGS_FIELDS));
     edited.current.clear();
@@ -131,7 +129,10 @@ export function ProjectSettings({
       document.getElementById(inputIds[invalid])?.focus();
       return;
     }
-    const sent = heldBack ? withSavedMemorySharing(project, values) : values;
+    // A shared choice without a press that showed its notice stays in the draft, with the notice, for a
+    // Save of its own; the rest of the draft saves now.
+    const sent = sendableProjectSettings(project, values, sharingConsented.current);
+    const heldBack = sent !== values;
     const changes = projectSettingsChanges(project, sent);
     if (Object.keys(changes).length === 0) {
       if (!heldBack) reset();
@@ -280,6 +281,7 @@ export function ProjectSettings({
         runners={runners}
         machine={machine}
         value={values.memorySharing ?? "separate"}
+        consentShown={consentShown}
         readOnly={readOnly}
         onChange={(memorySharing) => setDraft((current) => ({ ...current, memorySharing }))}
       />

@@ -47,13 +47,15 @@ export function memorySharingMachineStatus(runner: RunnerView | undefined): stri
  * Choosing Share Project Memory while it is not the saved choice shows the consent notice under the
  * row, so it is read before Save is pressed: sharing is only ever saved from there.
  */
-export function ProjectMemorySharingSection({ project, runners, machine, value, readOnly, onChange }: {
+export function ProjectMemorySharingSection({ project, runners, machine, value, consentShown, readOnly, onChange }: {
   project: ProjectView;
   runners: ReadonlyMap<string, RunnerView>;
   /** The name and kind a machine is shown with, as its locations show it. */
   machine: (runnerId: string) => RunnerDisplay;
   /** The draft's choice: the saved one until the person picks another. */
   value: ProjectMemorySharing;
+  /** The consent notice shows: `value` shares project memory and the saved choice does not. */
+  consentShown: boolean;
   readOnly: boolean;
   onChange: (sharing: ProjectMemorySharing) => void;
 }) {
@@ -79,7 +81,7 @@ export function ProjectMemorySharingSection({ project, runners, machine, value, 
               />
             )}
           </SettingsGroup>
-          {value === "shared" && saved !== "shared" && (
+          {consentShown && (
             <Notice tone="info">
               A conversation keeps its history when it switches accounts, and that history may already contain
               memories. Sharing can't remove it, or stop a provider learning from the conversation under its own
