@@ -235,11 +235,14 @@ export function SegmentedRow({
   error,
   invalid,
   block,
+  badge,
   busy,
   busyLabel,
   saved,
 }: InstantRowProps & {
   title: string;
+  /** A short mark after the title (a draft's "Changed" with its reset), outside the title's name. */
+  badge?: ReactNode;
   /** Shown only when the selected option has nothing to say for itself — see below. */
   description?: ReactNode;
   /**
@@ -285,6 +288,7 @@ export function SegmentedRow({
     <div className={rowClass("setting-row", { disabled })} aria-busy={busy || undefined}>
       <RowText
         title={title}
+        badge={badge}
         description={optionSentence ?? description}
         // The pills carry the same sentence, referenced from the radio it belongs to. Left exposed
         // here as well it is announced twice. A row-level description with no option behind it is
@@ -347,11 +351,14 @@ export function SelectRow({
   label,
   menuWidth,
   estimatedOptionHeight,
+  badge,
   busy,
   busyLabel,
   saved,
 }: InstantRowProps & {
   title: string;
+  /** A short mark after the title, outside the title's name. */
+  badge?: ReactNode;
   description?: ReactNode;
   options: readonly SelectOption<string>[];
   value: string;
@@ -381,6 +388,7 @@ export function SelectRow({
     <div className={rowClass("setting-row", { disabled })} aria-busy={busy || undefined}>
       <RowText
         title={title}
+        badge={badge}
         description={description}
         descriptionId={description ? descriptionId : undefined}
         busy={busy}
@@ -438,11 +446,14 @@ export function NumberRow({
   errorPlacement = "field",
   inputId,
   textEntry = false,
+  badge,
   busy,
   busyLabel,
   saved,
 }: InstantRowProps & {
   title: string;
+  /** A short mark after the title, outside the title's name. */
+  badge?: ReactNode;
   description?: ReactNode;
   value: string | number;
   onChange: (value: string) => void;
@@ -482,6 +493,7 @@ export function NumberRow({
       <RowText
         title={title}
         titleId={titleId}
+        badge={badge}
         description={description}
         descriptionId={description ? descriptionId : undefined}
         busy={busy}

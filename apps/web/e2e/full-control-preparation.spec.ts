@@ -106,6 +106,17 @@ async function openSessionOptions(page: Page): Promise<void> {
   await expect(head).toHaveAttribute("aria-expanded", "true");
 }
 
+/** Orchestrator Policy (#2955): Customize… opens it over New Session; `edit` changes it on `tab`,
+ * and Apply Policy returns the change. Full Control is chosen on its Decisions tab. */
+async function editSessionPolicy(page: Page, tab: "Behavior" | "Decisions", edit: (policy: Locator) => Promise<void>): Promise<void> {
+  await page.getByRole("button", { name: "Customize…" }).click();
+  const policy = page.getByRole("dialog", { name: "Orchestrator Policy" });
+  await policy.getByRole("tab", { name: new RegExp(`^${tab}`) }).click();
+  await edit(policy);
+  await policy.getByRole("button", { name: "Apply Policy" }).click();
+  await expect(policy).toHaveCount(0);
+}
+
 for (const viewport of viewports) {
   for (const theme of themes) {
     test(`launch ${viewport.name} ${theme}: readiness is checked at once and one action authorizes and starts`, async ({ page }) => {
@@ -129,8 +140,10 @@ for (const viewport of viewports) {
       });
       await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=${theme}`);
       await openSessionOptions(page);
-      await page.getByRole("radio", { name: "Full Control", exact: true }).click();
-      const control = page.getByRole("heading", { name: "Orchestrator Control", exact: true });
+      await editSessionPolicy(page, "Decisions", (policy) =>
+        policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click());
+      await expect(page.locator(".orchestrator-policy-summary")).toContainText("Full Control");
+      const control = page.locator(".orchestrator-policy-summary");
       await expect(page.getByText("Can't Start Yet", { exact: true })).toBeVisible();
       await expect(page.getByText(/This runner does not advertise the controlled native reviewer\. It needs executionIsolation\.mode "provider" \(current: bwrap\)/).first()).toBeVisible();
       await expect(page.getByText("No campaign budget yet: enter a cost limit and a tool-call limit.").first()).toBeVisible();
@@ -158,21 +171,24 @@ for (const viewport of viewports) {
       await expect(page.getByText(/Controlled Cross-Model Review \(Verified\)/)).toBeVisible();
       await shoot(page, advanced, `${prefix}-advanced.png`);
       await expectUnreadableLimitsBlock(page, start, LIMITS);
-      // One concurrency control: Behavior's Maximum Concurrent Children is the campaign's concurrency.
+      // One concurrency control: Behavior's Maximum Concurrent Children is the campaign's concurrency,
+      // in Orchestrator Policy, never a second entry under Advanced.
       await expect(page.getByLabel("Concurrent Children", { exact: true })).toHaveCount(0);
-      const children = page.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
-      await expect(children).toHaveCount(1);
+      await expect(page.getByRole("spinbutton", { name: "Maximum Concurrent Children" })).toHaveCount(0);
       await expect(page.getByText(/· 4 at a time/)).toBeVisible();
-      await children.fill("0");
-      await expect(page.getByText("Enter a whole number from 1 to 64.", { exact: true })).toBeVisible();
-      await expect(start).toBeDisabled();
-      await shoot(page, children.locator("xpath=ancestor::label[1]"), `${prefix}-concurrency-invalid.png`);
-      await children.fill("3");
-      await expect(page.getByText(/· 3 at a time/)).toBeVisible();
-      await expect(page.getByText(/This is also the campaign's concurrency\./)).toBeVisible();
-      await expect(start).toBeEnabled();
-      await shoot(page, children.locator("xpath=ancestor::label[1]"), `${prefix}-concurrency.png`);
       await advanced.click();
+      await editSessionPolicy(page, "Behavior", async (policy) => {
+        const children = policy.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
+        await children.fill("0");
+        await expect(policy.locator(".field-error")).toHaveText("Enter a whole number from 1 to 64.");
+        await expect(policy.getByRole("button", { name: "Apply Policy" })).toBeDisabled();
+        await shoot(page, children, `${prefix}-concurrency-invalid.png`);
+        await children.fill("3");
+        await expect(policy.getByText(/This is also the campaign's concurrency\./)).toBeVisible();
+        await shoot(page, children, `${prefix}-concurrency.png`);
+      });
+      await expect(page.getByText(/· 3 at a time/)).toBeVisible();
+      await expect(start).toBeEnabled();
 
       await start.click();
       await expect(start).toHaveAttribute("aria-busy", "true");
@@ -389,7 +405,8 @@ test.describe("limit entry lifecycle", () => {
     });
     await page.goto("/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=light");
     await openSessionOptions(page);
-    await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+    await editSessionPolicy(page, "Decisions", (policy) =>
+      policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click());
     const start = page.getByRole("button", { name: "Authorize and Start", exact: true });
     const children = page.getByLabel("Maximum Issues", { exact: true });
     // L1: empty entries are the derived values.
@@ -429,8 +446,10 @@ test.describe("limit entry lifecycle", () => {
     // L2: a surface switch mounts a fresh panel without stale entries or errors.
     await children.fill("1e");
     await expect(start).toBeDisabled();
-    await page.getByRole("radio", { name: "Custom", exact: true }).click();
-    await page.getByRole("radio", { name: "Full Control", exact: true }).click();
+    await editSessionPolicy(page, "Decisions", (policy) =>
+      policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Custom", exact: true }).click());
+    await editSessionPolicy(page, "Decisions", (policy) =>
+      policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click());
     await expect(page.getByLabel("Maximum Issues", { exact: true })).toHaveValue("");
     await expect(invalidNotice(page)).toHaveCount(0);
     expect(admissions).toHaveLength(0);

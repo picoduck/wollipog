@@ -7311,18 +7311,18 @@ body.shell-dock-dragging * {
    stage ("Commit the staged changes first."). New Session (#2952) says what nothing further down
    its form can fix: "Choose an online location to continue." Add Location (#2966) says what its one
    Add Location waits for: "Choose a location or a folder." or "Match the access levels to continue." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason) {
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
   color: var(--text-dim);
   font: var(--type-small);
 }
-/* Snooze's footer also holds Remove Reminder, so its reason takes the room left beside the three
+/* Snooze's footer also holds Remove Reminder, and Orchestrator Policy's holds Reset to Defaults, so its reason takes the room left beside the three
    buttons and wraps there, rather than pushing the primary onto a second row. */
-.modal-foot > .snooze-blocked-reason { flex: 1 1 0; }
+.modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason) { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -17274,17 +17274,32 @@ button.setting-row { cursor: pointer; }
 /* On the first line's centre when the sentence wraps on a phone. */
 .orchestrator-human-only > svg { flex: none; margin-top: 2px; }
 .orchestrator-about[open] + .orchestrator-human-only { margin-top: var(--space-3); }
-.orchestrator-policy-control input {
-  width: 100%;
-  color: var(--text);
-  background: var(--bg-elev-2);
-  border: 1px solid var(--control-outline);
-  border-radius: var(--radius-sm);
-  padding: 7px 9px;
-  font: inherit;
+/* New Session's Orchestrator Policy row (#2955, OrchestratorPolicyDialog.tsx): the policy as §11.3
+   meta, 12px apart and wrapping, then one line about where it comes from, or the problem that keeps
+   it from launching. */
+.orchestrator-policy-summary .setting-row-desc { display: flex; flex-direction: column; gap: var(--space-1); }
+.orchestrator-policy-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
 }
-
-.new-session-orchestrator-policy { display: grid; gap: var(--space-3); }
+/* A draft row's "Changed" and its Reset to <value> (#2955), quiet beside the title. */
+.changed-mark {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* The tab row and its panel keep their height in a body that scrolls: a shrinkable flex child with
+   its own sideways scroll collapsed to nothing once the sheet's rows overflowed it. */
+.modal-body > :is(.orchestrator-policy-tabs, .orchestrator-policy-panel) { flex: none; }
+/* A phone sheet's footer holds two buttons (§7.5); each row's Reset to <value> still resets it there. */
+@media (max-width: 760px) {
+  .modal-foot > .orchestrator-policy-reset { display: none; }
+}
 
 /* New Session's Options (#2954, SessionOptions.tsx): one disclosure (§5.5) whose closed head lists
    the current values as §11.3 meta, 14px icons 12px apart, wrapping rather than clipping. The rows
@@ -17328,15 +17343,16 @@ button.setting-row { cursor: pointer; }
    although this 560px dialog stacks every row: under its sentence, at the row's start, rather than
    stretched across it as a stacked number row otherwise is. */
 @container (max-width: 559px) {
-  .session-options-body .setting-row-number .input-affix { align-self: flex-start; }
-  .session-options-body .setting-row-number .w-xs { width: 96px; }
+  :is(.session-options-body, .orchestrator-policy-panel) .setting-row-number .input-affix { align-self: flex-start; }
+  :is(.session-options-body, .orchestrator-policy-panel) .setting-row-number .w-xs { width: 96px; }
 }
 @media (max-width: 760px), (pointer: coarse) {
   @container (max-width: 559px) {
-    .session-options-body .setting-row-number .w-xs:has(> .input-affix-text:last-child) { width: 120px; }
+    :is(.session-options-body, .orchestrator-policy-panel) .setting-row-number .w-xs:has(> .input-affix-text:last-child) { width: 120px; }
   }
 }
-.orchestrator-policy-area {
+/* Full Control's Campaign Budget and Campaign Limits (FullControlPreparation.tsx). */
+.full-control-limits {
   display: grid;
   gap: var(--space-3);
   min-width: 0;
@@ -17345,14 +17361,9 @@ button.setting-row { cursor: pointer; }
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
 }
-.orchestrator-policy-area legend { padding: 0 var(--space-1); font-weight: var(--weight-semibold); }
-.facts + .orchestrator-policy-area { margin-top: var(--space-3); }
-.orchestrator-policy-area > p { margin: 0; }
-.orchestrator-policy-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 220px); align-items: center; gap: var(--space-3); }
-.orchestrator-policy-control > span { display: flex; flex-direction: column; gap: 2px; font-weight: var(--weight-medium); }
-.orchestrator-policy-control small { color: var(--text-faint); font-size: var(--text-xs); font-weight: var(--weight-normal); }
-.orchestrator-policy-control .ui-select-trigger { width: 100%; }
-.orchestrator-policy-unavailable { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.full-control-limits legend { padding: 0 var(--space-1); font-weight: var(--weight-semibold); }
+.facts + .full-control-limits { margin-top: var(--space-3); }
+.full-control-limits > p { margin: 0; }
 /* Orchestrator Controls (#2192): Child Session Requests, one segmented control per workflow gate,
    and the campaign's stored behavior. Below 560px the gate's control sits under its label and each
    fact reads label over value. */
@@ -17408,11 +17419,6 @@ button.setting-row { cursor: pointer; }
   }
   .orchestrator-facts { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-1); }
   .orchestrator-facts > div:not(:first-child) > dt { margin-top: var(--space-2); }
-}
-
-@media (max-width: 760px) {
-  .orchestrator-policy-control { grid-template-columns: minmax(0, 1fr); }
-  .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {
