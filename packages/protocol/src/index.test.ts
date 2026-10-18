@@ -371,8 +371,6 @@ test("PROTOCOL_VERSION is 226", () => {
   assert.equal(runnerSupportsProtocol(138, "sessionAgentControlReasoningEffort"), true);
   assert.equal(runnerSupportsProtocol(138, "typedWorkflowDecisionDelegation"), false);
   assert.equal(runnerSupportsProtocol(139, "typedWorkflowDecisionDelegation"), true);
-  assert.equal(runnerSupportsProtocol(139, "orchestratorCampaignManagement"), false);
-  assert.equal(runnerSupportsProtocol(140, "orchestratorCampaignManagement"), true);
   assert.equal(runnerSupportsProtocol(150, "workflowDecisionActionAdmission"), false);
   assert.equal(runnerSupportsProtocol(151, "workflowDecisionActionAdmission"), true);
   assert.equal(runnerSupportsProtocol(148, "campaignContinuations"), false);
@@ -405,8 +403,6 @@ test("PROTOCOL_VERSION is 226", () => {
   assert.equal(runnerSupportsProtocol(132, "machineRunnerCapacity"), true);
   assert.equal(runnerSupportsProtocol(127, "providerHistoryQuarantine"), false);
   assert.equal(runnerSupportsProtocol(128, "providerHistoryQuarantine"), true);
-  assert.equal(runnerSupportsProtocol(121, "contextWindowVariants"), false);
-  assert.equal(runnerSupportsProtocol(122, "contextWindowVariants"), true);
   assert.equal(runnerSupportsProtocol(122, "wslAgentControlBridge"), false);
   assert.equal(runnerSupportsProtocol(123, "wslAgentControlBridge"), true);
   assert.equal(runnerSupportsProtocol(123, "wslSafeLauncher"), false);
@@ -465,12 +461,6 @@ test("PROTOCOL_VERSION is 226", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.workspaceReferences, 106);
   assert.equal(runnerSupportsProtocol(105, "workspaceReferences"), false);
   assert.equal(runnerSupportsProtocol(106, "workspaceReferences"), true);
-  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.usageEventModel, 104);
-  assert.equal(runnerSupportsProtocol(103, "usageEventModel"), false);
-  assert.equal(runnerSupportsProtocol(104, "usageEventModel"), true);
-  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.usageTokenBuckets, 103);
-  assert.equal(runnerSupportsProtocol(102, "usageTokenBuckets"), false);
-  assert.equal(runnerSupportsProtocol(103, "usageTokenBuckets"), true);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees, 101);
   assert.equal(runnerSupportsProtocol(100, "sessionWorktrees"), false);
   assert.equal(runnerSupportsProtocol(101, "sessionWorktrees"), true);
