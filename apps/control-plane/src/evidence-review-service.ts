@@ -2,7 +2,7 @@ import type { AuthPrincipal } from "./identity.js";
 import { supportsPacedVideoReviewPeer } from "@wollipog/protocol";
 import type { VideoProfileLiveProof, EvidenceReviewerTarget } from "./evidence-review-worker.js";
 import { validVideoLiveProof } from "./evidence-review-worker.js";
-import { VideoEvidenceRuntime, type VideoReviewBinding,
+import { VideoEvidenceRuntime, VideoReviewRefused, type VideoReviewBinding,
   type VideoReviewCriterion, type VideoReviewRecord, type VideoReviewStore, type VideoReviewVerdict } from "./video-evidence-runtime.js";
 import { planEvidenceRecovery, type EvidenceRecoveryPlan } from "./evidence-review-recovery.js";
 import type { EvidenceRecoveryExecutor, RecoveryExecutionResult } from "./evidence-review-recovery-executor.js";
@@ -25,7 +25,7 @@ export interface ResolvedVideoReviewRequest {
 export interface EvidenceReviewAuditEvent {
   event: "video_evidence_prepared" | "video_evidence_recovery" | "video_evidence_delivery" |
     "video_evidence_acknowledged" | "video_evidence_verdict" | "video_evidence_provenance";
-  entryPoint: "owner_prepare" | "reviewer_media" | "reviewer_verdict" | "owner_provenance";
+  entryPoint: "owner_prepare" | "reviewer_media" | "reviewer_verdict" | "owner_provenance" | "human_validation";
   occurrenceId: string;
   rootSessionId: string;
   childSessionId: string;
@@ -140,6 +140,26 @@ export class EvidenceReviewService {
       await this.delay(recovery.delayMs);
     }
     return { ok: false, code: "preparation" };
+  }
+
+  /** Human validation derivation (#1321): server-internal, after the Human route authenticated the
+   * permit's minting Human. The binding is the permit's own server binding, never caller JSON, and
+   * must carry its validation purpose; the runtime rechecks it and selects the permit's profile. */
+  async deriveValidation(binding: VideoReviewBinding, mediaType: "video/webm" | "video/mp4", criteria: readonly VideoReviewCriterion[]) {
+    if (!binding.operatorValidation) throw new VideoReviewRefused("stale");
+    const result = await this.runtime.derive(binding, mediaType, criteria);
+    if (result.ok) this.audit(result.review, "video_evidence_prepared", "human_validation", {});
+    return result;
+  }
+
+  /** The finished validation run's verified observation for the Human's own inspection. It is
+   * never approval provenance, and the runtime refuses it for any production review. */
+  validationObservation(reviewId: string): VideoReviewVerdict {
+    const review = this.store.getReview(reviewId);
+    if (!review?.binding.operatorValidation) throw new VideoReviewRefused("verdict");
+    const verdict = this.runtime.validationObservation(reviewId, review.binding.reviewerSessionId);
+    this.audit(review, "video_evidence_provenance", "human_validation", { verdictId: verdict.verdictId });
+    return verdict;
   }
 
   private authenticatedReviewer(principal: AuthPrincipal, reviewId: string): string {

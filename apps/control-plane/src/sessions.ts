@@ -3782,6 +3782,19 @@ export class SessionsService {
     } catch { return null; }
   }
 
+  /** Human video validation (#1321): the Human-owned original gate for `occurrenceId`, when it is
+   * still current, with its controlling root and child. Never a grant by itself. */
+  validationVideoGate(occurrenceId: string, statuses: readonly WorkflowDecisionView["status"][]):
+    { root: SessionView; child: SessionView; decision: WorkflowDecisionView } | null {
+    try {
+      const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+      const root = decision ? this.db.getSession(decision.controllingSessionId) : undefined;
+      const child = decision ? this.db.getSession(decision.sessionId) : undefined;
+      return decision && root && child && this.mediaGateCurrent(root, child, decision, "human", statuses)
+        ? { root, child, decision } : null;
+    } catch { return null; }
+  }
+
   /** Both registries agree this Session's selected installation declares the paced contract. */
   sessionPacedVideoPeer(sessionId: string): boolean {
     const session = this.db.getSession(sessionId);

@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { supportsPacedVideoReviewPeer, type PacedVideoReviewPeerContract, type VideoReviewerProofState,
   type VideoReviewSettingsStatus } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
@@ -57,9 +57,11 @@ export function composeHostingVideoEvidence(db: ControlPlaneDb, options: {
   const workflowVideoApprovals = new WorkflowVideoEvidenceApprovals(db, runtime, delegated.gateAccess);
   const preparedMediaActiveStops = new PreparedMediaActiveStops(db.raw(), delegated.activeStopPorts);
   const reviewService = new EvidenceReviewService(runtime, reviewStore, delegated.serviceAdapter);
-  // Human validation permits need a trusted scope adapter that no hosting route provides yet, so
-  // none can be minted here; the store exists so materialization can refuse unknown permits.
-  const operatorValidationPermits = new OperatorVideoValidationPermits(db.raw(), { current: () => null });
+  // Human validation permits (#1321): the trusted scope port resolves every fact from current
+  // records and the server's own derivation; only an authenticated Human route mints or starts one.
+  const operatorValidationPermits = new OperatorVideoValidationPermits(db.raw(),
+    { current: (identity, subject) => delegated.validationScope(identity, subject) }, options.clock);
+  delegated.useValidation(operatorValidationPermits, runtime);
 
   const pacedPeers = (): PacedVideoPeer[] => db.listRunners().flatMap((runner) => runner.agents
     .filter((agent) => supportsPacedVideoReviewPeer(runner.protocolVersion, agent.capabilities?.pacedVideoReviewContract))
@@ -135,9 +137,13 @@ export function registerHostingVideoEvidenceRoutes(app: FastifyInstance, deps: {
 }): void {
   const { video } = deps;
   registerVideoEvidenceReviewRoutes(app, { service: video.reviewService, owner: video.delegated,
-    requestPrincipal: deps.requestPrincipal, unavailable: () => {
+    requestPrincipal: deps.requestPrincipal, unavailable: (sessionId, route) => {
       const readiness = video.readiness();
-      return readiness.available ? null : readiness;
+      // A current Human validation run's reviewer reaches the media routes before any proof exists:
+      // that run is how the first proof is made. Owner routes and every other gap still refuse.
+      if (readiness.available || (route === "reviewer" && readiness.code === "live_validation" &&
+        video.delegated.ready && video.delegated.isValidationReviewer(sessionId))) return null;
+      return readiness;
     } });
 
   app.get("/api/video-evidence/live-validations", async (req, reply) => {
@@ -192,6 +198,71 @@ export function registerHostingVideoEvidenceRoutes(app: FastifyInstance, deps: {
         error: "The inspected runs do not prove the candidate, paced and maximum profiles for this exact reviewer target." });
     }
     return reply.code(201).send({ proof: video.liveValidation.list(principal)!.find((item) => item.proofId === proof.proofId) });
+  });
+
+  // ---- Human validation permits and runs (#1321). Owners and admins only; never a Session credential. ----
+  const human = (req: FastifyRequest, reply: FastifyReply): HumanPrincipal | null => {
+    const principal = deps.requestPrincipal(req);
+    if (administrator(principal)) return principal;
+    void reply.code(403).send({ error: ADMIN_ONLY });
+    return null;
+  };
+  const answer = (reply: FastifyReply, result: { ok: boolean; code?: string }, success = 200) => {
+    reply.header("cache-control", "private, no-store");
+    return reply.code(result.ok ? success : result.code === "not_authorized" ? 403 : 409).send(result);
+  };
+  const exact = (value: unknown, keys: string[]): value is Record<string, unknown> =>
+    Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.keys(value as object).length === keys.length &&
+    Object.keys(value as object).every((key) => keys.includes(key));
+  const id = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/u.test(value);
+
+  app.post("/api/video-evidence/validation-permits/preview", async (req, reply) => {
+    if (!human(req, reply)) return reply;
+    const body = req.body;
+    if (!exact(body, ["occurrenceId", "evidenceId", "profile", "privateOracleCommitmentSha256"]) || !id(body.occurrenceId) ||
+      !id(body.evidenceId) || typeof body.profile !== "string" || typeof body.privateOracleCommitmentSha256 !== "string") {
+      return reply.code(400).send({ error: "An exact occurrence, evidence, profile and oracle commitment are required." });
+    }
+    return answer(reply, await video.delegated.previewValidation(body as Parameters<typeof video.delegated.previewValidation>[0]));
+  });
+
+  app.post("/api/video-evidence/validation-permits", async (req, reply) => {
+    const principal = human(req, reply);
+    if (!principal) return reply;
+    const body = req.body;
+    if (!exact(body, ["identity", "subject", "expectedScopeSha256", "expiresAt"])) {
+      return reply.code(400).send({ error: "The previewed identity, subject, scope digest and an expiry are required." });
+    }
+    let permit;
+    try { permit = video.operatorValidationPermits.mint(principal, body as Parameters<typeof video.operatorValidationPermits.mint>[1]); }
+    catch { permit = null; }
+    if (!permit) {
+      return answer(reply, { ok: false, code: "invalid_permit" as const,
+        error: "The permit was refused: the scope changed since the preview, the expiry is not within an hour, you did not establish this campaign's boundary, or this evidence and profile already had a permit." } as never);
+    }
+    return answer(reply, { ok: true, permit: { permitId: permit.permitId, scopeSha256: permit.scopeSha256, expiresAt: permit.expiresAt,
+      profile: permit.scope.subject.profile } } as never, 201);
+  });
+
+  app.post("/api/video-evidence/validation-permits/:permitId/run", async (req, reply) => {
+    const principal = human(req, reply);
+    if (!principal) return reply;
+    return answer(reply, await video.delegated.startValidation(principal, (req.params as { permitId: string }).permitId));
+  });
+
+  app.get("/api/video-evidence/validation-permits/:permitId", async (req, reply) => {
+    const principal = human(req, reply);
+    if (!principal) return reply;
+    return answer(reply, video.delegated.validationRun(principal, (req.params as { permitId: string }).permitId));
+  });
+
+  app.post("/api/video-evidence/validation-permits/:permitId/revoke", async (req, reply) => {
+    const principal = human(req, reply);
+    if (!principal) return reply;
+    let revoked = false;
+    try { revoked = video.operatorValidationPermits.revoke(principal, (req.params as { permitId: string }).permitId); } catch { revoked = false; }
+    return answer(reply, revoked ? { ok: true } : { ok: false, code: "no_current_permit",
+      error: "No unrevoked validation permit minted by you has this identifier." } as never);
   });
 
   app.post("/api/video-evidence/live-validations/:proofId/revoke", async (req, reply) => {

@@ -7,7 +7,7 @@ import { RUNNER_REPORTED_STOP, sessionStopRestorable, type ControlPlaneDb } from
 import { EvidenceReviewBudgetProvenance } from "./evidence-review-budget-provenance.js";
 import type { EvidenceReviewService, EvidenceReviewServiceAdapter, ResolvedVideoReviewRequest } from "./evidence-review-service.js";
 import { validVideoLiveProof, type EvidenceReviewerTarget, type ReviewerAdmissionContext } from "./evidence-review-worker.js";
-import type { AgentPrincipal, AuthPrincipal } from "./identity.js";
+import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedMediaActiveStopPorts } from "./prepared-media-active-stops.js";
 import { PreparedMediaReservationRelease } from "./prepared-media-reservation-release.js";
 import type { PreparedMediaSessionRuntime, PreparedMediaSubject } from "./prepared-media-session-runtime.js";
@@ -16,6 +16,11 @@ import { PreparedMediaSessions, type MaterializedMediaSession, type PreparedMedi
 import { videoReviewBindingDigest, type VideoReviewBinding, type VideoReviewCriterion, type VideoReviewRecord,
   type VideoReviewRuntimeAccess, type VideoReviewStore, type VideoReviewVerdict } from "./video-evidence-runtime.js";
 import type { VideoLiveValidationRegistry } from "./video-live-validation.js";
+import { OPERATOR_VIDEO_VALIDATION_PROFILES, operatorVideoValidationDigest, type OperatorVideoValidationPermits,
+  type OperatorVideoValidationProfile, type OperatorVideoValidationScope, type OperatorVideoValidationSubject } from "./operator-video-validation.js";
+import type { VideoEvidenceRuntime } from "./video-evidence-runtime.js";
+import { VIDEO_VALIDATION_CRITERIA, VideoValidationDerivations, videoValidationIdentity, videoValidationLaunchSha256,
+  videoValidationPrompt } from "./video-validation-runs.js";
 import type { WorkflowVideoEvidenceAccess } from "./workflow-video-evidence-approvals.js";
 
 const sha = (value: unknown) => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
@@ -51,11 +56,15 @@ interface ReviewRow {
   /** Busy-host requeues so far for this original subject; a new attempt never resets it. */
   busyRequeues: number;
   finished: MediaReviewFinished | null; updatedAt: number;
+  /** A Human validation run (#1321): one-shot under its permit, never requeued, never production. */
+  validation?: { permitId: string; profile: OperatorVideoValidationProfile };
 }
 
 /** The SessionsService surface this composition uses. Each method re-reads current records. */
 export interface DelegatedVideoSessions {
   delegatedVideoGate(occurrenceId: string, statuses: readonly WorkflowDecisionView["status"][]):
+    { root: SessionView; child: SessionView; decision: WorkflowDecisionView } | null;
+  validationVideoGate(occurrenceId: string, statuses: readonly WorkflowDecisionView["status"][]):
     { root: SessionView; child: SessionView; decision: WorkflowDecisionView } | null;
   sessionPacedVideoPeer(sessionId: string): boolean;
   preflightPreparedMediaSession(identity: PreparedMediaIdentity, subject: PreparedMediaSubject): { ok: boolean; error?: string };
@@ -126,8 +135,9 @@ class ReviewLedger {
   }
 }
 
-const identityFor = (row: Pick<ReviewRow, "rootSessionId" | "childSessionId" | "occurrenceId" | "evidenceId" | "attempt">,
-  resourceDigest: string): PreparedMediaIdentity => ({
+const identityFor = (row: Pick<ReviewRow, "rootSessionId" | "childSessionId" | "occurrenceId" | "evidenceId" | "attempt" | "validation">,
+  resourceDigest: string): PreparedMediaIdentity => row.validation ? videoValidationIdentity({ rootSessionId: row.rootSessionId,
+  childSessionId: row.childSessionId, occurrenceId: row.occurrenceId, resourceDigest }, row.evidenceId, row.validation.profile) : ({
   rootSessionId: row.rootSessionId, childSessionId: row.childSessionId,
   admissionId: `video_review_${sha(`${row.occurrenceId}\0${row.evidenceId}`).slice(0, 32)}_${row.attempt}`,
   requestSha256: sha({ occurrenceId: row.occurrenceId, evidenceId: row.evidenceId, resourceDigest, attempt: row.attempt }),
@@ -210,6 +220,12 @@ export function installationReviewerTarget(installation: ReturnType<typeof media
     auditedAllFrameDelivery: true, reviewerNamespaceSha256: installation.attestation.namespacePolicySha256, mediaOnlyNamespaceVerified: true };
 }
 
+/** The authority a reviewer grant names: the original gate's revision and the campaign boundary. */
+const authorityDigest = (decision: Pick<WorkflowDecisionView, "resourceDigest" | "policyRevision">,
+  boundary: { revision: number; evidenceAuthority?: { revision: number } }, audienceSha256: string) =>
+  sha({ resourceDigest: decision.resourceDigest, policyRevision: decision.policyRevision, boundaryRevision: boundary.revision,
+    evidenceAuthorityRevision: boundary.evidenceAuthority!.revision, audienceSha256 });
+
 const reviewerPrompt = (criteria: readonly VideoReviewCriterion[]) => [
   "Review a silent screen recording that a child Session attached as UI evidence. Judge it against each pinned criterion:",
   ...criteria.map((c) => `- ${c.criterionId}: ${c.description}`),
@@ -228,6 +244,8 @@ export class DelegatedVideoReviews {
   /** Subjects with an attempt running in this process; a `preparing` row without one is stale. */
   private readonly inFlight = new Set<string>();
   private readonly lastReadback = new Map<string, number>();
+  private validation: { permits: OperatorVideoValidationPermits; runtime: VideoEvidenceRuntime } | null = null;
+  private readonly derivations: VideoValidationDerivations;
 
   constructor(private readonly db: ControlPlaneDb, private readonly store: VideoReviewStore,
     private readonly liveValidation: VideoLiveValidationRegistry,
@@ -236,6 +254,7 @@ export class DelegatedVideoReviews {
     private readonly schedule: (run: () => void, ms: number) => ReturnType<typeof setTimeout> =
       (run, ms) => { const timer = setTimeout(run, ms); timer.unref?.(); return timer; }) {
     this.ledger = new ReviewLedger(db);
+    this.derivations = new VideoValidationDerivations(db.raw());
     this.prepared = new PreparedMediaSessions(db.raw(), this.preparedPorts(), clock);
     this.budgetProvenance = new EvidenceReviewBudgetProvenance({
       preflight: (rootSessionId, sessionId) => this.attached?.sessions.campaignBudgetWorkerPreflight(rootSessionId,
@@ -260,6 +279,11 @@ export class DelegatedVideoReviews {
   }
   private target(root: SessionView): EvidenceReviewerTarget | null {
     return rootReviewerTarget(this.db, root, (target) => this.proven(target));
+  }
+
+  /** Connects the Human validation permits and the runtime that derives their manifests (#1321). */
+  useValidation(permits: OperatorVideoValidationPermits, runtime: VideoEvidenceRuntime): void {
+    this.validation = { permits, runtime };
   }
 
   /** Called once SessionsService and the hub exist. Resumes queued busy-host retries. */
@@ -382,6 +406,13 @@ export class DelegatedVideoReviews {
 
   readonly runtimeResolver: PreparedMediaSessionRuntime = {
     resolve: (identity, subject) => {
+      const own = this.subjectFor(identity);
+      if (own?.validation) {
+        const basis = own.occurrenceId === subject.occurrenceId && own.evidenceId === subject.evidenceId
+          ? this.validationBasis(own.occurrenceId, own.evidenceId) : null;
+        return basis ? { request: basis.request, context: basis.context, target: basis.target, liveProof: null,
+          operatorValidation: { permitId: own.validation.permitId } } : null;
+      }
       const gate = this.attached?.sessions.delegatedVideoGate(subject.occurrenceId, ["pending"]);
       if (!gate || gate.root.id !== identity.rootSessionId || gate.child.id !== identity.childSessionId ||
         !videoItem(gate.decision, subject.evidenceId)) return null;
@@ -395,7 +426,8 @@ export class DelegatedVideoReviews {
     },
   };
 
-  private admissionContext(root: SessionView, child: SessionView): ReviewerAdmissionContext | null {
+  private admissionContext(root: SessionView, child: SessionView,
+    uiEvidenceOwner: "human" | "orchestrator" = "orchestrator"): ReviewerAdmissionContext | null {
     const control = root.orchestratorPolicy?.control, scope = root.orchestratorPolicy?.issueScope;
     if (control?.mode !== "full_control" || !control.boundary.evidenceAuthority || !scope) return null;
     const assignment = this.db.campaignWorkLedger.currentAssignment(child.id);
@@ -411,7 +443,7 @@ export class DelegatedVideoReviews {
       runner.agents.find((agent) => agent.id === agentId)?.capabilities?.pacedVideoReviewContract;
     return { mode: "full_control", rootSessionId: root.id, childSessionId: child.id, repository: scope.repository, issue,
       issueScopeRevision: scope.revision, policyRevision: control.boundary.revision, boundary: control.boundary,
-      evidenceAuthority: authority, uiEvidenceOwner: "orchestrator", taskEvidenceVerified: scope.issueNumbers.includes(issue),
+      evidenceAuthority: authority, uiEvidenceOwner, taskEvidenceVerified: scope.issueNumbers.includes(issue),
       destinationConfigurationId: authority.destination.configurationId, organizationId: authority.destination.organizationId,
       audienceSha256: sha(audience), controllerProtocolVersion: controllerRunner.protocolVersion,
       childProtocolVersion: childRunner.protocolVersion,
@@ -425,6 +457,15 @@ export class DelegatedVideoReviews {
    * so any changed authority, reviewer, attestation, audience or source revokes the review. */
   private currentBinding(row: ReviewRow, statuses: readonly WorkflowDecisionView["status"][],
     reviewer: "unsent" | "live" | "historical" = "unsent"): VideoReviewBinding | null {
+    if (row.validation) {
+      const gate = this.attached?.sessions.validationVideoGate(row.occurrenceId, statuses);
+      const binding = this.validation?.permits.binding(row.validation.permitId) ?? null;
+      if (!gate || !binding || gate.root.id !== row.rootSessionId || gate.child.id !== row.childSessionId ||
+        !row.reviewerSessionId || binding.reviewerSessionId !== row.reviewerSessionId) return null;
+      const session = this.db.getSession(row.reviewerSessionId);
+      if (reviewer === "live" && (!session || isTerminal(session.status) || !this.attached!.sessions.dedicatedMediaReviewerOpen(row.reviewerSessionId))) return null;
+      return binding;
+    }
     const gate = this.attached?.sessions.delegatedVideoGate(row.occurrenceId, statuses);
     const item = gate ? videoItem(gate.decision, row.evidenceId) : null;
     const control = gate?.root.orchestratorPolicy?.control;
@@ -450,6 +491,7 @@ export class DelegatedVideoReviews {
   }
 
   readonly runtimeAccess: VideoReviewRuntimeAccess = {
+    validationProfile: (binding) => this.validation?.permits.validationProfile(binding) ?? null,
     currentBinding: (binding, phase) => {
       const row = this.ledger.byReviewer(binding.reviewerSessionId);
       return row && row.occurrenceId === binding.occurrenceId
@@ -590,6 +632,14 @@ export class DelegatedVideoReviews {
     if (phase === "reconcile") return true;
     const row = this.subjectFor(record);
     if (!row || row.reviewerSessionId !== record.sessionId) return false;
+    if (row.validation) {
+      const review = row.reviewId ? this.store.getReview(row.reviewId) : null;
+      const grant = record.binding?.grant;
+      return Boolean(this.validation?.permits.authorize(record) && review && review.status === "pending" && grant &&
+        grant.reviewId === review.reviewId && grant.bindingSha256 === videoReviewBindingDigest(review.binding) &&
+        grant.deliveryPlanSha256 === review.deliveryPlanSha256 && grant.manifestSha256 === review.manifestSha256 &&
+        grant.criteriaSha256 === review.criteriaSha256 && JSON.stringify(grant.frames) === JSON.stringify(review.manifest.frames));
+    }
     const binding = this.currentBinding(row, ["pending"]);
     if (!binding) return false;
     const review = row.reviewId ? this.store.getReview(row.reviewId) : null;
@@ -731,7 +781,14 @@ export class DelegatedVideoReviews {
     const principal = this.ownerPrincipal(row.rootSessionId);
     let derived: Awaited<ReturnType<EvidenceReviewService["prepare"]>>;
     try {
-      derived = principal ? await this.service!.prepare(principal, { childSessionId: row.childSessionId,
+      if (row.validation) {
+        // The permit's own server binding, bound to this exact reviewer at materialization.
+        const binding = this.validation?.permits.binding(row.validation.permitId) ?? null;
+        const item = binding ? videoItem(decision, row.evidenceId) : null;
+        const result = binding && item ? await this.service!.deriveValidation(binding, item.mediaType as "video/webm" | "video/mp4",
+          [...VIDEO_VALIDATION_CRITERIA]) : null;
+        derived = !result ? { ok: false, code: "not_authorized" } : result.ok ? result : { ok: false, code: "preparation" };
+      } else derived = principal ? await this.service!.prepare(principal, { childSessionId: row.childSessionId,
         occurrenceId: row.occurrenceId, evidenceId: row.evidenceId }) : { ok: false, code: "not_authorized" };
     } catch (error) { derived = { ok: false, code: "preparation" }; this.log("video_evidence_review_derive_failed", { message: (error as Error).message }); }
     if (!derived.ok) {
@@ -744,7 +801,7 @@ export class DelegatedVideoReviews {
     const review = derived.review;
     row.reviewId = review.reviewId; row.reviewIds = [...row.reviewIds, review.reviewId]; this.ledger.save(row);
     try {
-      await this.prepared.bind(identity, this.grantBinding(record, review));
+      await this.prepared.bind(identity, this.grantBinding(record, review, row));
       await this.prepared.dispatch(identity);
     } catch (error) {
       if (this.cancelUnsent(identity)) this.store.settle(review.reviewId, "revoked");
@@ -775,7 +832,24 @@ export class DelegatedVideoReviews {
       organizationId: scope.organizationId, delegatedScope: scope } : null;
   }
 
-  private grantBinding(record: PreparedMediaRecord, review: VideoReviewRecord): PreparedMediaBinding {
+  private grantBinding(record: PreparedMediaRecord, review: VideoReviewRecord, row: ReviewRow): PreparedMediaBinding {
+    if (row.validation) {
+      const permit = this.validation!.permits.current(row.validation.permitId);
+      if (!permit) throw new Error("The validation permit is no longer current.");
+      return {
+        grant: { operatorValidation: this.validation!.permits.purpose(permit.permitId)!, reviewId: review.reviewId,
+          reviewerSessionId: record.sessionId, childSessionId: record.childSessionId,
+          occurrenceId: review.binding.occurrenceId, policyRevision: review.binding.policyRevision,
+          sourceEvidenceId: review.binding.sourceEvidenceId, sourceArtifactId: review.binding.sourceArtifactId,
+          sourceSha256: review.binding.sourceSha256, manifestSha256: review.manifestSha256,
+          bindingSha256: videoReviewBindingDigest(review.binding), criteriaSha256: review.criteriaSha256,
+          deliveryPlanSha256: review.deliveryPlanSha256, expiresAt: Math.min(review.expiresAt, permit.expiresAt),
+          frames: structuredClone(review.manifest.frames) },
+        namespaceLaunchSha256: permit.scope.namespaceLaunchSha256,
+        namespacePolicySha256: permit.scope.target.reviewerNamespaceSha256,
+        authoritySha256: permit.scope.authoritySha256,
+      };
+    }
     const gate = this.attached!.sessions.delegatedVideoGate(review.binding.occurrenceId, ["pending"])!;
     const target = this.target(gate.root)!;
     const control = gate.root.orchestratorPolicy!.control as Extract<NonNullable<SessionView["orchestratorPolicy"]>["control"], { mode: "full_control" }>;
@@ -790,9 +864,7 @@ export class DelegatedVideoReviews {
       namespaceLaunchSha256: sha({ namespacePolicySha256: target.reviewerNamespaceSha256, sessionId: record.sessionId,
         generation: record.admission.dispatch.generation }),
       namespacePolicySha256: target.reviewerNamespaceSha256,
-      authoritySha256: sha({ resourceDigest: gate.decision.resourceDigest, policyRevision: gate.decision.policyRevision,
-        boundaryRevision: control.boundary.revision, evidenceAuthorityRevision: control.boundary.evidenceAuthority!.revision,
-        audienceSha256: review.binding.audienceSha256 }),
+      authoritySha256: authorityDigest(gate.decision, control.boundary, review.binding.audienceSha256),
     };
   }
 
@@ -849,6 +921,173 @@ export class DelegatedVideoReviews {
       // A rejection is the owner's evidence for denying the decision; it can never approve it.
       ...(verdict.outcome === "accept" ? { resolveWith: { evidenceId: row.evidenceId, reviewId: verdict.reviewId,
         verdictId: verdict.verdictId, reviewerSessionId: verdict.reviewerSessionId } } : {}) };
+  }
+
+  // ---- Human validation runs (#1321) ----
+  // A Human owner or admin certifies the media-only reviewer through three metered runs. Each run
+  // reviews one Human-owned pending video gate under a one-shot permit the Human minted for its exact
+  // server-derived scope. The routes authenticate the Human; nothing here accepts an agent.
+
+  /** The Human-owned gate, its evidence, the attested reviewer target on the root's runner and the
+   * exact request a validation reviewer is created with, all from current records. */
+  private validationBasis(occurrenceId: string, evidenceId: string) {
+    const gate = this.attached?.sessions.validationVideoGate(occurrenceId, ["pending"]);
+    const item = gate ? videoItem(gate.decision, evidenceId) : null;
+    const control = gate?.root.orchestratorPolicy?.control;
+    if (!gate || !item?.artifactId || !gate.root.workspaceId || control?.mode !== "full_control" || !control.boundary.evidenceAuthority) return null;
+    const target = rootReviewerTarget(this.db, gate.root);
+    const context = this.admissionContext(gate.root, gate.child, "human");
+    if (!target || !context) return null;
+    const request: CreateSessionRequest = { runnerId: gate.root.runnerId, workspaceId: gate.root.workspaceId, agentId: target.agentId,
+      title: "Video Validation Review", prompt: videoValidationPrompt(VIDEO_VALIDATION_CRITERIA),
+      config: { model: VIDEO_REVIEWER_MODEL, effort: VIDEO_REVIEWER_EFFORT, ...VIDEO_REVIEW_CEILINGS } };
+    return { gate, item: { ...item, artifactId: item.artifactId }, target, context, request, boundary: control.boundary };
+  }
+
+  /** The trusted scope port of `OperatorVideoValidationPermits`: every fact from current server
+   * records and the server's own derivation of the source, except the Human's oracle commitment,
+   * which is theirs to pin. Null whenever anything is missing or changed, so a permit fails closed. */
+  validationScope(identity: PreparedMediaIdentity, subject: OperatorVideoValidationSubject): OperatorVideoValidationScope | null {
+    try {
+      if (!subject || !Object.hasOwn(OPERATOR_VIDEO_VALIDATION_PROFILES, subject.profile) ||
+        !/^[a-f0-9]{64}$/u.test(subject.privateOracleCommitmentSha256)) return null;
+      const basis = this.validationBasis(subject.occurrenceId, subject.evidenceId);
+      if (!basis) return null;
+      const { gate, item, target, context, request, boundary } = basis;
+      const expected = videoValidationIdentity({ rootSessionId: gate.root.id, childSessionId: gate.child.id,
+        occurrenceId: gate.decision.occurrenceId, resourceDigest: gate.decision.resourceDigest }, item.evidenceId, subject.profile);
+      if (!identity || sha(identityOf(identity)) !== sha(expected)) return null;
+      const artifact = this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact;
+      const derived = this.derivations.get(item.sha256, subject.profile);
+      const installation = mediaReviewerInstallations(this.db, target.runnerId).find((candidate) => candidate.agentId === target.agentId);
+      if (!artifact || artifact.sessionId !== gate.child.id || artifact.kind !== "video" || artifact.sha256 !== item.sha256 ||
+        artifact.mimeType !== item.mediaType || !derived || !installation) return null;
+      return { identity: expected, subject: { occurrenceId: subject.occurrenceId, evidenceId: subject.evidenceId, profile: subject.profile,
+          privateOracleCommitmentSha256: subject.privateOracleCommitmentSha256 },
+        authorizedByUserId: boundary.authorizedByUserId, organizationId: context.organizationId,
+        gate: { authority: "human", status: "pending", resourceDigest: gate.decision.resourceDigest, policyRevision: gate.decision.policyRevision },
+        source: { artifactId: item.artifactId, sha256: item.sha256, sizeBytes: artifact.sizeBytes, manifestSha256: derived.manifestSha256,
+          orderedFramesSha256: derived.orderedFramesSha256, criteriaSha256: sha(VIDEO_VALIDATION_CRITERIA),
+          privateOracleCommitmentSha256: subject.privateOracleCommitmentSha256, frames: derived.frames, width: derived.width,
+          height: derived.height, durationUs: derived.durationUs },
+        context, target, request, providerExecutableSha256: installation.attestation.executableSha256,
+        nativeToolProfileSha256: sha(installation.attestation.tools),
+        namespaceLaunchSha256: videoValidationLaunchSha256(target.reviewerNamespaceSha256, expected.admissionId),
+        authoritySha256: authorityDigest(gate.decision, boundary, context.audienceSha256) };
+    } catch { return null; }
+  }
+
+  /** Step one for the Human: derive the source with the server's isolated decoder (cached by source
+   * and profile) and show the exact scope a permit would pin, with its digest to mint against. */
+  async previewValidation(request: { occurrenceId: string; evidenceId: string; profile: OperatorVideoValidationProfile;
+    privateOracleCommitmentSha256: string }) {
+    if (!this.attached || !this.validation) return this.refuse("reviewer_unavailable", "Video validation is not attached on this server yet.");
+    if (!Object.hasOwn(OPERATOR_VIDEO_VALIDATION_PROFILES, request.profile) || !/^[a-f0-9]{64}$/u.test(request.privateOracleCommitmentSha256)) {
+      return this.refuse("preparation", "A candidate, paced or maximum profile and a sha256 oracle commitment are required.");
+    }
+    const basis = this.validationBasis(request.occurrenceId, request.evidenceId);
+    if (!basis) return this.refuse("not_authorized", "No current Human-owned pending video evidence decision has that evidence on an attested reviewer runner.");
+    if (this.ledger.get(request.occurrenceId, request.evidenceId)) {
+      return this.refuse("not_authorized", "That evidence already has a review or validation run; attach a fresh capture.");
+    }
+    if (!this.derivations.get(basis.item.sha256, request.profile)) {
+      let bytes: Buffer | null;
+      try { bytes = this.db.readWorkflowArtifactBytes(basis.item.artifactId); } catch { bytes = null; }
+      if (!bytes || createHash("sha256").update(bytes).digest("hex") !== basis.item.sha256) return this.refuse("preparation", "The source artifact no longer matches its digest.");
+      const derived = await this.validation.runtime.validationManifest(bytes, basis.item.mediaType as "video/webm" | "video/mp4", request.profile);
+      if (!derived.ok) return this.refuse("preparation", `The source cannot be derived for this profile: ${derived.code}.`);
+      if (!this.derivations.save(basis.item.sha256, request.profile, derived.manifest, derived.manifestSha256)) {
+        return this.refuse("preparation", "The source does not match the profile's exact frame count, size and duration.");
+      }
+    }
+    const identity = videoValidationIdentity({ rootSessionId: basis.gate.root.id, childSessionId: basis.gate.child.id,
+      occurrenceId: basis.gate.decision.occurrenceId, resourceDigest: basis.gate.decision.resourceDigest }, request.evidenceId, request.profile);
+    const scope = this.validationScope(identity, { occurrenceId: request.occurrenceId, evidenceId: request.evidenceId,
+      profile: request.profile, privateOracleCommitmentSha256: request.privateOracleCommitmentSha256 });
+    if (!scope) return this.refuse("preparation", "The validation scope is incomplete; check the reviewer attestation and the campaign boundary.");
+    return { ok: true as const, identity: scope.identity, subject: scope.subject, scope, scopeSha256: operatorVideoValidationDigest(scope) };
+  }
+
+  /** Step two, after the Human minted the permit: materialize, derive, bind and dispatch its one
+   * reviewer. Only the Human who minted it can start it, once, while it is current. */
+  async startValidation(principal: HumanPrincipal, permitId: string) {
+    const permit = this.validation?.permits.current(permitId) ?? null;
+    if (!this.attached || !this.service || !permit || permit.mintedByUserId !== principal.userId ||
+      permit.scope.organizationId !== principal.organizationId) {
+      return this.refuse("not_authorized", "No current validation permit minted by you has this identifier.");
+    }
+    const { subject, identity } = permit.scope;
+    const existing = this.recoverStale(this.ledger.get(subject.occurrenceId, subject.evidenceId));
+    if (existing) return existing.validation?.permitId === permitId ? this.status(existing)
+      : this.refuse("not_authorized", "That evidence already has another review or validation run.");
+    if (permit.state !== "authorized") return this.refuse("not_authorized", "This permit was already used.");
+    const row: ReviewRow = { occurrenceId: subject.occurrenceId, evidenceId: subject.evidenceId, rootSessionId: identity.rootSessionId,
+      childSessionId: identity.childSessionId, attempt: 0, state: "preparing", reason: null, reviewId: null, reviewIds: [],
+      reviewerSessionId: null, firstBusyAt: null, nextAttemptAt: null, busyRequeues: 0, finished: null, updatedAt: this.clock(),
+      validation: { permitId, profile: subject.profile } };
+    this.ledger.save(row);
+    return this.attempt(row);
+  }
+
+  private validationRow(permitId: string): ReviewRow | null {
+    const row = this.db.raw().prepare("SELECT record FROM delegated_video_reviews WHERE json_extract(record,'$.validation.permitId')=?")
+      .get(permitId) as { record: string } | undefined;
+    return row ? JSON.parse(row.record) as ReviewRow : null;
+  }
+
+  /** The run's state for the Human who minted it, and once it finished with priced usage, its
+   * verified observation with a run record to complete and record. Grants nothing. */
+  validationRun(principal: HumanPrincipal, permitId: string) {
+    let permit;
+    try { permit = this.validation?.permits.get(permitId) ?? null; } catch { permit = null; }
+    if (!permit || permit.mintedByUserId !== principal.userId || permit.scope.organizationId !== principal.organizationId) {
+      return this.refuse("not_authorized", "No validation permit minted by you has this identifier.");
+    }
+    this.reconcileSubjects();
+    const summary = { permitId, profile: permit.scope.subject.profile, state: permit.state, expiresAt: permit.expiresAt,
+      occurrenceId: permit.scope.subject.occurrenceId, evidenceId: permit.scope.subject.evidenceId };
+    const row = this.validationRow(permitId);
+    if (!row) return { ok: true as const, status: permit.state === "revoked" ? "revoked" as const : "minted" as const, permit: summary };
+    if (row.state !== "finished") {
+      if (row.state === "dispatched") this.readbackIfStale(row);
+      return { ...this.status(row), permit: summary };
+    }
+    const finished = row.finished!;
+    if (finished.outcome !== "completed" || !finished.verdictConfirmed) {
+      return { ok: true as const, status: "failed" as const, permit: summary, reason: finished.reason ?? "The reviewer did not confirm a verdict." };
+    }
+    if (!finished.priced) return { ok: true as const, status: "withheld" as const, permit: summary, reason: "unpriced_usage" as const };
+    let verdict: VideoReviewVerdict;
+    try { verdict = this.service!.validationObservation(row.reviewId!); }
+    catch { return { ok: true as const, status: "withheld" as const, permit: summary, reason: "observation_unavailable" as const }; }
+    const review = this.store.getReview(row.reviewId!)!;
+    const source = permit.scope.source;
+    return { ok: true as const, status: "complete" as const, permit: summary,
+      verdict: { verdictId: verdict.verdictId, outcome: verdict.outcome, criteria: verdict.criteria, rationale: verdict.rationale,
+        recordedAt: verdict.recordedAt },
+      deliveryPlanSha256: verdict.deliveryPlanSha256, receiptCount: verdict.receiptIds.length,
+      usage: this.db.campaignBudgets.completedAttestation(verdict.reviewerSessionId)?.actual ?? null,
+      finished: { windowsCompleted: finished.windowsCompleted, toolCalls: finished.toolCalls, costUsd: finished.costUsd,
+        receiptSha256: finished.receiptSha256 },
+      // The server-verifiable half of one inspected run. The Human fills every null from evidence
+      // outside Wollipog (provider usage and pricing, the namespace probe, the oracle comparison).
+      run: { runId: row.reviewId!, kind: permit.scope.subject.profile, target: permit.scope.target, sourceSha256: source.sha256,
+        manifestSha256: review.manifestSha256, orderedReceiptSetSha256: sha(verdict.receiptIds),
+        privateOracleCommitmentSha256: source.privateOracleCommitmentSha256, blindTemporalVerdictSha256: sha(verdict),
+        modelDeliveryEvidenceSha256: sha({ deliveryPlanSha256: verdict.deliveryPlanSha256, receiptIds: verdict.receiptIds,
+          finishedReceiptSha256: finished.receiptSha256 }),
+        frameCount: source.frames, width: source.width, height: source.height, durationUs: source.durationUs,
+        actualCostUsd: finished.costUsd!, latencyMs: Math.max(1, verdict.recordedAt - review.createdAt),
+        usageEvidenceSha256: null, pricingEvidenceSha256: null, oracleIsolationEvidenceSha256: null,
+        actualInputTokens: null, actualOutputTokens: null, allSourceFramesDelivered: null, blindOracleMatched: null,
+        privateOracleExcludedFromReviewerContext: null, oracleNamespaceInaccessibleVerified: null, providerUsageVerified: null,
+        currentOfficialPricingVerified: null, sourceAndArtifactsStillMatch: null, inspectedByUserId: principal.userId } };
+  }
+
+  /** A reviewer of a current validation run may use the media routes before any proof exists. */
+  isValidationReviewer(sessionId: string): boolean {
+    const row = this.ledger.byReviewer(sessionId);
+    return Boolean(row?.validation && this.validation?.permits.binding(row.validation.permitId)?.reviewerSessionId === sessionId);
   }
 
   // ---- Authenticated runner ingress ----
@@ -930,6 +1169,11 @@ export class DelegatedVideoReviews {
   private settleCancelled(row: ReviewRow, reason: "host_busy" | null, observedAt: number): void {
     if (row.reviewId) this.store.settle(row.reviewId, "revoked");
     const now = this.clock();
+    if (row.validation) {
+      this.settleRefusal(row, this.refuse(reason === "host_busy" ? "reviewer_busy_exhausted" : "reviewer_unavailable",
+        "The runner did not dispatch the validation reviewer; its permit cannot be reused."));
+      return;
+    }
     if (reason === "host_busy") {
       row.firstBusyAt ??= observedAt;
       const delay = VIDEO_REVIEW_BUSY_BACKOFF_MS[row.busyRequeues ?? 0];

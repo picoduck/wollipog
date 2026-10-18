@@ -291,15 +291,41 @@ currently advertises the contract for that exact runner, agent, driver, model, p
 revision, and with `attestation_mismatch` unless the target names that installation's current
 attestation. Admission still matches the proof against the server-derived target with `validVideoLiveProof`.
 
-Human validation permits need a trusted scope adapter that no hosting route provides yet, so
-hosting composes the permit store with a scope port that returns nothing and none can be minted.
+Human validation permits and runs (#1321 PR E) are composed in hosting. Every route below is for
+owners and admins of the personal organization only; Session credentials are refused:
+
+- `POST /api/video-evidence/validation-permits/preview` derives the Human-owned gate's capture with
+  the server's isolated decoder. The result is cached by source and profile in
+  `video_validation_derivations`, and only when it fits the profile's exact frame count, size and
+  duration. It returns the exact scope and `scopeSha256`.
+- `POST /api/video-evidence/validation-permits` mints a permit for that scope
+  (`OperatorVideoValidationPermits.mint`). Only the Human who established the boundary can mint, and
+  the expiry is at most one hour ahead.
+- `POST /api/video-evidence/validation-permits/:permitId/run` materializes, derives, binds and
+  dispatches the permit's one reviewer.
+- `GET /api/video-evidence/validation-permits/:permitId` returns the run's state. Once the run
+  completes with priced usage, it adds the verified `validationObservation` and a run record whose
+  Human-adjudicated fields are `null`.
+- `POST /api/video-evidence/validation-permits/:permitId/revoke` revokes the permit.
+
+The trusted scope port is `DelegatedVideoReviews.validationScope`. It resolves every fact from
+current records: the Human-owned pending gate, its source, the cached derivation, the context with
+the Human as UI evidence owner, the attested target on the root's runner, the request (with the
+pinned blind-challenge criteria and the $10 and 120 tool-call ceilings), the executable and tool
+digests, and the authority digest. The one exception is the Human's oracle commitment, which is
+part of the minted subject.
+
+The admission identity is fixed per gate, evidence and profile (`videoValidationIdentity`). The
+launch digest binds the namespace policy and that admission, so both are known before the reviewer
+Session exists. A validation reviewer reaches the media routes before any proof exists only while
+its permit binding is current. A busy host refuses the run instead of requeueing it, because a
+permit is one-shot.
 
 Still required before delegated video review can run in production:
 
 - The remaining #1321 integration work tracked on the issue.
 - A Human certification: three inspected live runs recorded through the ingress for the exact
-  attested target. `docs/video-review-certification-runbook.md` is the exact procedure; its permit
-  and run steps need the PR E stacked on #1321 PR D.
+  attested target. `docs/video-review-certification-runbook.md` is the exact procedure.
 
 `GET /api/video-evidence/review-status` (owners and admins of the personal organization) reports
 readiness and, for each machine, the first reason it cannot host the media-only reviewer or its
@@ -308,8 +334,8 @@ installation's newest proof state (certified, expired, revoked or missing). Sett
 ## Remaining Integration
 
 The private `operator-video-validation.ts` permit path prepares first-proof admission without
-claiming that a production profile has passed live validation. It is code/interface preparation,
-with no hosting route or installed native sender/driver registration. Only an authenticated Human
+claiming that a production profile has passed live validation. Hosting composes it through the
+Human-only routes above. Only an authenticated Human
 owner/admin who established the current boundary may mint a finite permit after the trusted server
 adapter has verified the original **Human-owned** pending UI occurrence and its exact source,
 complete native manifest/ordered frame set, criteria, private destination/provider disclosure,

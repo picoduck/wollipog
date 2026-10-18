@@ -5,15 +5,12 @@ Claude Code media-only video reviewer on the deployed Wollipog. Only that Human 
 Agents, including the Orchestrator and its children, never mint permits, record proofs or revoke
 them; every route below refuses a Session credential.
 
-**Dependency.** Steps 1–3 and 7–8 work with PR C (#3401) and this PR. Steps 4–6 need **PR E of the
-#1321 PR D slice** (Human validation permits and validation runs), stacked on this PR: it adds the
-Human-only permit mint route, the trusted scope adapter and the validation dispatch and inspection
-path. Until PR E is merged and deployed, no permit can be minted, and the metered runs in step 5
-cannot be started.
+**Dependency.** Every step needs PR C (#3401), PR D (Settings, preflight and this runbook) and PR E
+(Human validation permits and runs) merged and deployed.
 
 ## Prerequisites
 
-- The deployed control plane and runner include PR C, this PR and PR E.
+- The deployed control plane and runner include PR C, PR D and PR E.
 - The reviewer machine is a non-root Linux runner with unprivileged user namespaces and a Node
   runtime (not a single-executable runner).
 - It has a native Claude Code agent on CLI `2.1.296` offering `claude-opus-5-5` at `high` effort.
@@ -55,42 +52,80 @@ cannot be started.
    `oracleCommitmentSha256`. Do not open, paste or attach `oracle.json` anywhere an agent can read it
    until step 6. Never reuse a challenge, a fixture recipe or an earlier oracle.
 
-3. **Attach the three captures as UI evidence.** In a campaign whose UI Evidence Approval stays with
-   you, a child Session attaches each `.webm` file as a private Session artifact and requests one
-   `ui_evidence_approval` gate per capture. Each gate must be Human-owned and pending, with the exact
-   `artifactId`, `video/webm` and `sha256`. Leave all three gates pending.
+3. **Attach the three captures as UI evidence.** Launch a Full Control campaign yourself, with UI
+   Evidence Approval delegated and its root on the attested Claude Code agent at `claude-opus-5-5`, so
+   that its evidence envelope names that reviewer under provider `claude-code`. A child Session
+   attaches each `.webm` as a private Session artifact and requests one `ui_evidence_approval` gate
+   per capture, with the exact `artifactId`, `video/webm` and `sha256` from `challenge.json`. While
+   no proof exists, each video gate is Human-owned. Leave the gates pending and keep the child Session
+   running until the runs finish, because a pending gate needs a live child.
 
-4. **Mint one permit per run (PR E).** For each gate, mint a validation permit for its profile
-   (`candidate`, `paced` or `maximum`) with the exact scope digest that the PR E route shows you,
-   including the step 2 oracle commitment. A permit expires within one hour, is single-use and cannot
-   be replayed. A changed source, criteria, policy revision or reviewer attestation invalidates it.
+4. **Mint one permit per run.** Every call below is made signed in as you; Session credentials are
+   refused. For each gate, first preview the exact scope. The server derives the capture with its
+   isolated decoder and refuses a capture that does not fit the profile:
 
-5. **Run the three metered validations (PR E).** Start each run from its permit, in the order
-   candidate, paced, maximum. Each run must deliver every source frame in order and finish with a
-   verdict tool call. A run that stops early, reports `unknown`, or has unpriced usage counts as a
-   failure (see below).
+   ```http
+   POST /api/video-evidence/validation-permits/preview
+   { "occurrenceId": "<gate occurrence>", "evidenceId": "<evidence id>", "profile": "candidate",
+     "privateOracleCommitmentSha256": "<step 2 oracleCommitmentSha256>" }
+   ```
 
-6. **Inspect each run yourself.** Only after a run finishes, open `oracle.json` and compare it with
-   the verdict. Every transient's colour, geometry, frame order and exact source presentation time
-   must match. Using PR E's inspection view, also confirm:
+   Check the returned `scope`:
+   - `gate.authority` is `human` and its status is `pending`;
+   - `source.sha256` is the capture's digest, and its frame count, size and duration match the
+     profile;
+   - `target` is the step 1 attestation;
+   - `request` carries the $10 and 120 tool-call ceilings.
 
-   - the complete ordered receipt set and the model-visible delivery evidence;
-   - provider-reported usage, latency and cost at current official pricing;
-   - that the source and artifacts still match their digests;
-   - that the step 1 probe still holds for the attestation the run used.
+   Then mint with the returned digest and an expiry at most one hour ahead (epoch milliseconds):
 
-7. **Record the proof.** Post the exact reviewer target and the three inspected runs to the
+   ```http
+   POST /api/video-evidence/validation-permits
+   { "identity": <identity>, "subject": <subject>, "expectedScopeSha256": "<scopeSha256>", "expiresAt": <ms> }
+   ```
+
+   Only the Human who established the campaign's Full Control boundary can mint. A changed scope,
+   an expiry over an hour, or a second permit for the same gate, evidence and profile is refused.
+   A permit is single-use. A later change to the source, policy revision or reviewer attestation
+   stops it from starting.
+
+5. **Run the three metered validations,** one at a time, in the order candidate, paced, maximum:
+
+   ```http
+   POST /api/video-evidence/validation-permits/<permitId>/run
+   GET  /api/video-evidence/validation-permits/<permitId>
+   ```
+
+   Poll the second call until `status` is `complete`, `failed` or `withheld`. The run and your
+   inspection must both finish before the permit's `expiresAt`. After that, media access ends and the
+   observation is withheld. A run that stops early, reports `unknown`, or has unpriced usage counts
+   as a failure (see below).
+
+6. **Inspect each run yourself.** Only after a run is `complete`, open `oracle.json` and compare it
+   with the returned `verdict`. Every transient's colour, geometry, frame order and exact source
+   presentation time must match.
+
+   The response's `run` already holds the server-verifiable fields. Fill each `null` from your own
+   evidence:
+   - `usageEvidenceSha256`, `actualInputTokens` and `actualOutputTokens`: the provider console's
+     usage record for this run, and its sha256.
+   - `pricingEvidenceSha256`: the sha256 of the current official pricing you checked.
+   - `oracleIsolationEvidenceSha256`: the sha256 of the step 1 probe output.
+   - Each boolean: `true` only if you verified it. `allSourceFramesDelivered` is checked against
+     `receiptCount`, and `blindOracleMatched` against the oracle comparison.
+
+7. **Record the proof.** Post the three completed `run` objects and their shared `target` to the
    Human-only ingress, signed in as the owner or admin who inspected them:
 
    ```http
    POST /api/video-evidence/live-validations
-   { "target": { ..., "providerId": "claude-code", "modelId": "claude-opus-5-5", "effort": "high" }, "runs": [candidate, paced, maximum] }
+   { "target": <run.target>, "runs": [<candidate run>, <paced run>, <maximum run>] }
    ```
 
    The target's `capabilitiesSha256` and `reviewerNamespaceSha256` must equal the step 1
    `attestationSha256` and `namespacePolicySha256`, which are the runner's current attestation.
-   Otherwise the route answers `attestation_mismatch`. Each run's
-   `inspectedByUserId` must be your own user ID.
+   Otherwise the route answers `attestation_mismatch`. Each run's `inspectedByUserId` must be your
+   own user ID.
 
 8. **Confirm.** Settings shows the machine as **Certified** with its dates. The proof expires 30
    days after recording. Re-certify before then with a fresh challenge (steps 1–7). A changed CLI,
@@ -101,8 +136,11 @@ cannot be started.
 
 - Do not record a proof. A mismatch, missing frame, early stop, unknown dispatch or unpriced usage
   leaves video evidence with you, which is the safe state.
+- Revoke a permit you will not use: `POST /api/video-evidence/validation-permits/<permitId>/revoke`.
+  It also ends a running reviewer's media access.
 - Leave an `unknown` run's reservation alone; it reconciles from the runner's durable record and is
-  never replayed. Resolve the three gates yourself.
+  never replayed. Resolve the gates yourself.
+- Each gate's evidence admits one run ever, so a retry needs freshly attached captures and new gates.
 - Revoke any proof you are no longer sure of: `POST /api/video-evidence/live-validations/<proofId>/revoke`.
   Revocation ends media access, verdicts and provenance for that reviewer at once.
 - Discard the challenge and oracle directories, generate a new challenge and start again from step 1.
