@@ -338,6 +338,32 @@ test("bounded not-planned closure needs a recorded supported disposition and kee
   } finally { h.db.close(); }
 });
 
+test("a human-owned recovery exception makes the campaign Waiting for a Person in detail and summary (#2938)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId:h.item.id,commitment:{state:"cancelled",reason:"Replaced by a verified alternative"}}).ok);
+    const c = await h.svc.requestGithubIssueClosure("root",{requestId:"closure",issue:100,reason:"not_planned",
+      explanation:"Supported retirement",evidence:["Recorded cancellation"]});
+    assert.ok(c.ok, c.error ?? "closure"); const d = c.data!.decision!; assert.ok(h.approve(d).ok);
+    const executed = await h.svc.executeGithubIssueClosure("root",d.occurrenceId,d.resourceDigest);
+    assert.equal(executed.data!.issueClosureResult!.outcome,"uncertain");
+    // An unverified child at rest with nothing pending would otherwise read as an active campaign.
+    for (const id of ["root", "child"]) h.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal(h.db.getSession("child")!.pendingApproval, null);
+    new CampaignRecoveryService(h.db, () => {}, { info() {} }).maintain(Date.now());
+    const projection = h.db.campaignProjection("root")!;
+    const record = projection.recovery!.records.find(item => item.resource.occurrenceId === recoveryCoordinate(d.occurrenceId))!;
+    assert.deepEqual([record.effectiveOwner, record.state, record.reason], ["human", "waiting_human", "uncertain_outcome"]);
+    assert.equal(projection.pendingRequests?.human ?? 0, 0, "no request is pending; only the recovery exception waits");
+    assert.equal(projection.status, "waiting_human");
+    assert.equal(h.db.campaignStatusOnly("root"), "waiting_human");
+    const summary = h.db.listSessionSummaries().find(session => session.id === "root")!;
+    assert.deepEqual([summary.projection, summary.fullControlCampaignStatus], ["summary", "waiting_human"],
+      "summary rows, which carry no recovery records, read the same status");
+    assert.equal(h.db.getSession("root")!.fullControlCampaignStatus, "waiting_human");
+  } finally { h.db.close(); }
+});
+
 test("pending and consumed publications reserve capacity against other publications and epic scope changes", async () => {
   const h=harness(true,2);
   try {

@@ -178,7 +178,16 @@ export class CampaignRecoveryService {
         }
       }
     }
-    const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now);
+    // A dispatched wake is unanswered only while nothing could still be answering it: the root is
+    // idle with nothing pending, and neither it nor any live descendant has unfinished work in the
+    // foreground, a pending Stop or background work still returning (as the web's sessionWorking).
+    const working = (session: SessionView) => ["queued", "starting", "running"].includes(session.status) ||
+      session.stopOperation?.status === "stop_pending" ||
+      session.backgroundWorkState === "running" || session.backgroundWorkState === "continuation_pending";
+    const quiet = root.status === "idle" && !root.pendingApproval && !working(root) &&
+      sessions.slice(1).every(session => session.archived || !working(session));
+    const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now,
+      quiet ? record => this.db.campaignRecoveryWakeSettledAt(root.id, `${record.id}:${record.attempts}`) : undefined);
     const admission = this.db.campaignContinuationAdmission(root.id);
     const admissionKey = `${revision}:${admission.state}`;
     if (this.admissionStates.get(root.id) !== admissionKey) {

@@ -354,13 +354,16 @@ function initialModel(): FixtureModel {
         acknowledgedRevision: null } as NonNullable<SessionView["attention"]>,
       ...(fullControlCampaignStatus ? { fullControlCampaignStatus } : {}),
     });
+    // An active campaign's at-rest root continues automatically, so its intermediate result is
+    // informational too (#2938); a blocked campaign keeps Ready for Review.
     initial.sessions = [
       make("session-complete", "Full Control Campaign Delivered", 300, "verified_complete"),
+      make("session-active", "Full Control Campaign Continuing", 250, "active"),
       make("session-custom", "Custom Campaign Delivered", 200),
       make("session-blocked", "Full Control Campaign Blocked", 100, "blocked"),
     ];
-    initial.projects[0]!.unarchivedSessionCount = 3;
-    initial.projects[0]!.totalSessionCount = 3;
+    initial.projects[0]!.unarchivedSessionCount = 4;
+    initial.projects[0]!.totalSessionCount = 4;
   }
   if (SCENARIO === "inbox-live-scroll") {
     initial.sessions = Array.from({ length: 36 }, (_, index) => {
@@ -2572,6 +2575,12 @@ const client = {
     const value = model.sessions.find((candidate) => candidate.id === id);
     // The control plane answers a missing or hidden session with a fail-closed 404.
     if (!value) throw new ApiError("Session not found", 404);
+    if (SCENARIO === "campaign-complete" && value.projection === "summary") {
+      // The detail endpoint returns the full row with the root's own stored control, not a summary.
+      const { projection: _summary, ...detail } = structuredClone(value);
+      return { session: { ...detail, orchestratorPolicy: { control: { mode: value.fullControlCampaignStatus ? "full_control" : "custom" } },
+      } as unknown as SessionView };
+    }
     return { session: structuredClone(value) };
   },
   unarchiveAndRestart: async (id: string) => {

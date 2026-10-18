@@ -531,6 +531,24 @@ test("a verified-complete Full Control root reads Campaign Complete in a success
 });
 
 
+test("an active Full Control root reads Campaign Active, then Campaign Complete or Ready for Review as its server status moves (#2938)", async () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: NOW,
+    result: { revision: "r1", at: NOW, owner: "human" as const }, acknowledgedRevision: null };
+  const campaign = (status: string) => ({ status, policyRevision: 3,
+    control: { mode: "full_control", boundary: {} } }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
+  await withRow(baseSession({ attention, orchestratorCampaign: campaign("active") }), (container) => {
+    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Campaign Active"]);
+    assert.ok(badges(container)[0]!.classList.contains("t-info"));
+    assertNoDomNode(container.querySelector(".status.t-review"));
+  });
+  for (const [status, shown] of [["verified_complete", "Campaign Complete"], ["waiting_human", "Ready for Review"]] as const) {
+    await withRow(baseSession({ attention, orchestratorCampaign: campaign(status) }), (container) => {
+      assert.deepEqual(badges(container).map((badge) => badge.textContent), [shown], status);
+    });
+  }
+});
+
+
 test("a filtered family keeps its active chip without an empty expand control (#3328)", async () => {
   await withRow(baseSession(), (container) => {
     assertNoDomNode(container.querySelector(".inbox-thread-toggle"));
