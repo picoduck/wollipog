@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { types } from "node:util";
 
 /** Isolated executable specification, not a production retirement authority. Its in-memory
  * records model publication/acknowledgement; they prove no real durability, owner or process fact.
@@ -17,8 +18,11 @@ export class RetirementModelRefusal extends Error {
 function need(condition: unknown, reason: string): asserts condition {
   if (!condition) throw new RetirementModelRefusal(reason);
 }
-/** Canonical bounded JSON. Accessors, exotic prototypes, sparse arrays and non-JSON values refuse
- * before their values can be read; object key order has no semantic meaning, array order does. */
+/** Canonical JSON with bounded output, visited nodes and depth. Native Proxy detection precedes
+ * reflection; data accessors are never invoked. This assumes the supported Node realm's intrinsics
+ * are intact, not arbitrary hostile JavaScript. Ordinary-object own-key enumeration still requires
+ * work/allocation proportional to the supplied key count; already-allocated input is not bounded.
+ * Object key order has no semantic meaning; array order does. */
 export function canonicalModelJson(value: unknown): string {
   let nodes = 0, bytes = 0;
   const token = (text: string): string => {
@@ -31,21 +35,23 @@ export function canonicalModelJson(value: unknown): string {
     if (typeof v === "string") { need(v.length <= RETIREMENT_MODEL_LIMITS.bytes, "string bound"); return token(JSON.stringify(v)); }
     if (typeof v === "number") { need(Number.isSafeInteger(v) && !Object.is(v, -0), "noncanonical number"); return token(String(v)); }
     need(typeof v === "object", "non-JSON value");
-    const descriptors = Object.getOwnPropertyDescriptors(v);
+    need(!types.isProxy(v), "Proxy input");
     if (Array.isArray(v)) {
       need(Object.getPrototypeOf(v) === Array.prototype && v.length <= RETIREMENT_MODEL_LIMITS.events, "array bound/prototype");
       need(Reflect.ownKeys(v).length === v.length + 1, "array keys");
       token("[]" + ",".repeat(Math.max(0, v.length - 1)));
       return `[${Array.from({ length: v.length }, (_, i) => {
-        const d = descriptors[String(i)]; need(d && "value" in d && d.enumerable, "array entry");
+        const d = Object.getOwnPropertyDescriptor(v, String(i)); need(d && "value" in d && d.enumerable, "array entry");
         return visit(d.value, depth + 1);
       }).join(",")}]`;
     }
-    need(Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null, "object prototype");
-    const keys = Reflect.ownKeys(v); need(keys.every(k => typeof k === "string") && keys.length <= 256, "object keys");
+    const prototype = Object.getPrototypeOf(v);
+    need(prototype === Object.prototype || prototype === null, "object prototype");
+    const keys = Reflect.ownKeys(v); need(keys.length <= 256 && keys.every(k => typeof k === "string"), "object keys");
     token("{}" + ",".repeat(Math.max(0, keys.length - 1)));
     return `{${(keys as string[]).sort().map(k => {
-      const d = descriptors[k]!; need("value" in d && d.enumerable, "object entry");
+      need(k.length <= RETIREMENT_MODEL_LIMITS.bytes, "key bound");
+      const d = Object.getOwnPropertyDescriptor(v, k); need(d && "value" in d && d.enumerable, "object entry");
       return `${token(JSON.stringify(k) + ":")}${visit(d.value, depth + 1)}`;
     }).join(",")}}`;
   };

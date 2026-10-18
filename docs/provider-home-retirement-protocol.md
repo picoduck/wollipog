@@ -29,7 +29,7 @@ history; derived state is replayed rather than accepted from caller flags. Genes
 modeled premise, not evidence that a real HOME was created this way. An untrusted party can invent
 a consistent alternate model; that does not prove any external fact.
 
-Each event has a nonce, exact prior revision/digest and strict action schema. Canonical bounded JSON
+Each event has a nonce, exact prior revision/digest and strict action schema. Canonical JSON
 sorts object keys, preserves array order and refuses unknown schema fields/versions, accessors,
 exotic prototypes, sparse arrays and non-JSON values. SHA-256 digests use distinct versioned domains
 for genesis, state, roster, manifest, grants, publication, barrier and retirement. Counters use
@@ -41,6 +41,16 @@ historical-owner, consumer and intent rows, 256 successful events/nonces, JSON d
 visited JSON nodes. Canonicalization charges UTF-8 bytes incrementally before hashing. Reaching any
 bound refuses without truncation, eviction or credential cleanup. Small histories can exhaust the
 byte bound before the row/event bounds; the model deliberately offers no evidence compaction.
+
+The input contract is synthetic JSON data in the supported Node realm with intact intrinsics,
+not arbitrary hostile JavaScript. Native `node:util` Proxy detection refuses direct, nested, array
+and revoked Proxies before prototype, length, key or descriptor reflection, without executing their
+traps. Accessor descriptors refuse without invoking getters. Array length is checked before key
+enumeration; own-key counts are checked before fetching individual descriptors. Ordinary-object
+key enumeration still allocates and performs work proportional to the supplied own-key count,
+including on rejected objects. Already-allocated input memory is outside these bounds. Output,
+visited-node, depth and replay bounds therefore do not bound all input reflection work or establish
+a hostile-code sandbox, and replaced intrinsics are outside this contract.
 
 Modeled transitions:
 
@@ -81,7 +91,12 @@ adapter cannot authenticate that anchor or detect a real owner restoring both re
 
 Focused tests exercise positive no-process traces, missing-owner and unresolved-intent schedules,
 late publication, source/store rollback, every freeze/ack binding, replay, identity substitution in
-modeled records, strict schema/work/byte/row/history/counter bounds and refusal without mutation.
+modeled records, strict schema/node/depth/byte/row/history/counter bounds and refusal without mutation.
+Additional schedules cover pending intents resolved committed-and-retired, cross-owner resolution
+refusal and publication after grant revocation. Plain terminal actions independently test sticky
+process/unknown-history exclusion; an extra caller `noProcesses` field tests unknown-key refusal.
+Small oversized ordinary objects/arrays and trap-counted Proxy inputs exercise the input contract
+without claiming a production hostile-input resource boundary.
 Existing fast-check generates canonical records, owner/intent schedules and command interleavings
 against an independent flag/counter oracle. These tests never create/delete a HOME or establish
 native concurrency, crash durability, cohort exclusion or complete provider process containment.
@@ -119,7 +134,7 @@ A removed configured account returns `credentialsRetained: true`.
 A future positive physical path would need a newly created, completely enrolled cohort, durable
 creation provenance, exact private ownership and complete lifetime proof for every consumer.
 The model only explores the no-process branch. An actual completed sign-in/reference is insufficient:
-`spawn.ts:889` documents a detached, scrubbed/unobserved descendant blind spot in existing process
+`spawn.ts:895-897` documents a detached, scrubbed/unobserved descendant blind spot in existing process
 tracking. Unknown or historical readers and paused old cleanup cannot be retroactively fenced by
 a marker. Actual provider-used HOMEs require a stronger complete containment contract; none is
 implemented here. Failure/duplicate sign-in continues to retain credentials and evidence.

@@ -19,9 +19,10 @@ function fixture(input = genesis) {
   let sequence = 0;
   const event = (action: ModelAction): ModelTransition => ({ nonce: `event-${++sequence}`, preimage: retirementModelReference(store.read()), action });
   const run = (action: ModelAction) => store.compareAndSwap(event(action));
-  const refuse = (action: ModelAction | unknown) => {
+  const refuse = (action: ModelAction | unknown, reason?: RegExp) => {
     const before = store.read();
-    assert.throws(() => store.compareAndSwap({ nonce: `event-${++sequence}`, preimage: retirementModelReference(before), action }), RetirementModelRefusal);
+    assert.throws(() => store.compareAndSwap({ nonce: `event-${++sequence}`, preimage: retirementModelReference(before), action }),
+      (error: unknown) => error instanceof RetirementModelRefusal && (!reason || reason.test(error.message)));
     assert.deepEqual(store.read(), before, "refusal must not consume a nonce or mutate storage");
   };
   const enroll = (name: string, ownerId = "owner", consumerKind: "session" | "history" | "account" = "session") => {
@@ -96,6 +97,55 @@ test("tickets issued before freeze survive lost writes and cannot publish across
     sourceRevision: "3", sourceDigest: hash("post-terminal-write") });
 });
 
+test("a pending intent may be committed-and-retired only through its source barrier", () => {
+  const f = fixture(); f.enroll("ambiguous-publication"); f.freeze();
+  f.refuse(f.terminalAction());
+  const barrier = f.barrierAction();
+  f.run({ ...barrier, resolutions: barrier.resolutions.map(r => ({ ...r, outcome: "retired" })) });
+  const v = inspectRetirementModel(f.store.read());
+  assert.equal(v.intents[0]!.status, "retired");
+  assert.equal(v.consumers[0]!.status, "retired");
+  assert.equal(v.owners[0]!.grantStatus, "revoked");
+  assert.equal(v.phase, "frozen");
+  f.refuse(f.terminalAction());
+  f.ack(); f.run(f.terminalAction());
+  assert.equal(inspectRetirementModel(f.store.read()).phase, "terminal_eligible");
+});
+
+test("a source barrier cannot resolve another owner's valid intent and ticket", () => {
+  const f = fixture();
+  f.run({ type: "enroll_owner", ownerId: "foreign", storeEpoch: "foreign-store" });
+  f.enroll("local"); f.enroll("foreign", "foreign"); f.freeze();
+  const local = f.barrierAction(), foreign = f.barrierAction("foreign");
+  assert.equal(local.resolutions.length, foreign.resolutions.length);
+  f.refuse({ ...local, resolutions: foreign.resolutions }, /intent\/source barrier mismatch/);
+  f.run(local); f.ack(); f.refuse(f.terminalAction());
+  f.run(foreign); f.refuse(f.terminalAction()); f.ack("foreign");
+  f.run(f.terminalAction());
+  const v = inspectRetirementModel(f.store.read());
+  assert.equal(v.phase, "terminal_eligible");
+  assert.deepEqual(v.intents.map(i => i.status), ["aborted", "aborted"]);
+  assert.equal(v.acknowledgements.length, 2);
+});
+
+test("grant revocation refuses publication while retaining the enrolled intent and owner", () => {
+  const f = fixture(); f.enroll("revoked-publication");
+  f.run({ type: "set_grant", ownerId: "owner", storeEpoch: "store", grantRevision: "0", status: "revoked" });
+  const before = inspectRetirementModel(f.store.read()), i = before.intents[0]!, o = before.owners[0]!;
+  f.refuse({ type: "publish", ownerId: o.ownerId, storeEpoch: o.storeEpoch, intentId: i.intentId, ticket: i.ticket,
+    sourceRevision: nextModelCounter(o.sourceRevision), sourceDigest: hash("revoked-publication") }, /publication preimage/);
+  assert.equal(before.intents[0]!.status, "pending");
+  assert.equal(before.consumers[0]!.status, "pending");
+  assert.equal(before.owners.length, 1);
+  assert.equal(before.owners[0]!.grantStatus, "revoked");
+  f.freeze(); f.refuse(f.terminalAction()); f.barrier(); f.refuse(f.terminalAction());
+  f.ack(); f.run(f.terminalAction());
+  const after = inspectRetirementModel(f.store.read());
+  assert.equal(after.phase, "terminal_eligible");
+  assert.equal(after.intents[0]!.status, "aborted");
+  assert.equal(after.owners.length, 1);
+});
+
 test("revocation cannot forget historical/foreign owners, disconnected stores or their acknowledgements", () => {
   const f = fixture();
   f.run({ type: "enroll_owner", ownerId: "foreign", storeEpoch: "foreign-store" });
@@ -142,10 +192,9 @@ test("no-process eligibility comes from genesis/admission history, and process/u
   for (const evidence of ["process", "unknown"] as const) {
     const f = fixture(); f.enroll("used"); f.publish("used");
     f.run(evidence === "process" ? { type: "process_started", consumerId: "consumer-used" } : { type: "unknown_history" });
-    f.freeze(); f.barrier(); f.ack(); f.refuse(f.terminalAction());
+    f.freeze(); f.barrier(); f.ack(); f.refuse(f.terminalAction(), /no-process history unproved/);
     const v = inspectRetirementModel(f.store.read());
     assert.equal(v.processStarts.length > 0 || v.unknownHistory, true);
-    f.refuse({ type: "terminal", freezeNonce: v.freeze!.nonce, noProcesses: true });
     const tampered = f.store.read(); tampered.events.splice(2, 1);
     assert.throws(() => inspectRetirementModel(tampered), RetirementModelRefusal);
   }
@@ -153,7 +202,14 @@ test("no-process eligibility comes from genesis/admission history, and process/u
   f.refuse({ type: "process_started", consumerId: "unadmitted" });
   assert.throws(() => createRetirementModel({ ...genesis, noProcess: true } as ModelGenesis), /keys/);
   f.freeze(); f.barrier(); f.ack();
-  f.run({ type: "unknown_history" }); f.refuse(f.terminalAction());
+  f.run({ type: "unknown_history" }); f.refuse(f.terminalAction(), /no-process history unproved/);
+});
+
+test("a caller noProcesses flag is an unknown schema key even when modeled history permits terminal", () => {
+  const f = fixture(); f.freeze(); f.barrier(); f.ack();
+  f.refuse({ ...f.terminalAction(), noProcesses: true }, /unknown or missing keys/);
+  f.run(f.terminalAction());
+  assert.equal(inspectRetirementModel(f.store.read()).phase, "terminal_eligible");
 });
 
 test("synthetic CAS rejects stale preimages, nonce reuse and cross-root replay; exact lost-reply retries are inert", () => {
@@ -205,7 +261,7 @@ test("unknown keys and versions refuse at every schema layer, including unused h
     consumerKind: "other", baseSourceRevision: "0", grantRevision: "0" });
 });
 
-test("canonical JSON refuses exotic/accessor/cyclic/oversized inputs before invoking user code", () => {
+test("canonical JSON refuses exotic/cyclic/oversized inputs and accessors without invoking their getters", () => {
   let read = false;
   const accessor = Object.defineProperty({}, "type", { enumerable: true, get() { read = true; return "unknown_history"; } });
   const sparse = new Array(2), extra = Object.assign([1], { named: 2 });
@@ -218,8 +274,25 @@ test("canonical JSON refuses exotic/accessor/cyclic/oversized inputs before invo
   assert.throws(() => canonicalModelJson("a".repeat(RETIREMENT_MODEL_LIMITS.bytes - 1)), /byte bound/);
   assert.throws(() => canonicalModelJson(Array.from({ length: 256 }, () => "é".repeat(1000))), /byte bound/);
   assert.throws(() => canonicalModelJson(new Array(257).fill(0)), /array bound/);
+  assert.throws(() => canonicalModelJson(Object.fromEntries(Array.from({ length: 257 }, (_, n) => [`key-${n}`, 0]))), /object keys/);
+  assert.throws(() => canonicalModelJson({ ["k".repeat(RETIREMENT_MODEL_LIMITS.bytes + 1)]: 0 }), /key bound/);
   let deep: unknown = null; for (let n = 0; n < 18; n++) deep = { deep };
   assert.throws(() => canonicalModelJson(deep), /work bound/);
+});
+
+test("native Proxy refusal precedes all reflection traps for direct, nested, array and revoked inputs", () => {
+  let traps = 0;
+  const trap = () => { traps++; throw new Error("Proxy trap must not run"); };
+  const handler: ProxyHandler<object> = { getPrototypeOf: trap, ownKeys: trap, getOwnPropertyDescriptor: trap, get: trap };
+  const direct = new Proxy({}, handler), array = new Proxy([], handler);
+  const revokedObject = Proxy.revocable({}, handler), revokedArray = Proxy.revocable([], handler);
+  revokedObject.revoke(); revokedArray.revoke();
+  for (const input of [direct, { nested: direct }, [direct], array, { nested: array }, revokedObject.proxy, revokedArray.proxy,
+    { nested: revokedObject.proxy }, [revokedArray.proxy]]) {
+    assert.throws(() => canonicalModelJson(input), (error: unknown) =>
+      error instanceof RetirementModelRefusal && error.message === "Retirement model refused: Proxy input");
+    assert.equal(traps, 0);
+  }
 });
 
 test("combined row and replay-history bounds never evict evidence", () => {
