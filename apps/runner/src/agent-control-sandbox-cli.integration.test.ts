@@ -11,8 +11,9 @@
  * and an outbound IP connect are all refused with EPERM. A control run of the same probes outside
  * the sandbox shows each of them otherwise succeeds, so those refusals are the sandbox's doing.
  *
- * The Platform Isolation job runs this on a real kernel and fails if it skips. An opt-in variant
- * runs the same probes under the real `codex sandbox`, wherever a Codex install can start one.
+ * The Platform Isolation job requires the modeled cases on a real kernel without skips. The
+ * Codex Sandbox job also requires the real-Codex variants on pinned versions. Its :workspace
+ * profile permits /tmp, unlike the explicit bwrap profile, so read-only probes live elsewhere.
  */
 
 import assert from "node:assert/strict";
@@ -27,12 +28,13 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -119,8 +121,8 @@ const SKIP_BWRAP = bubblewrapUnavailable();
 const CODEX = process.env.CODEX_BIN || "codex";
 function codexSandboxUnavailable(profileArgs: string[]): string | false {
   if (process.platform !== "linux") return "the Codex network sandbox is Linux-specific";
-  const smoke = spawnSync(CODEX, ["sandbox", ...profileArgs, "--", "/bin/true"],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, env: codexEnvironment() });
+  const smoke = spawnSync(CODEX, ["sandbox", "-C", workspace, ...profileArgs, "--", "/bin/true"],
+    { cwd: workspace, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, env: codexEnvironment() });
   if (smoke.error) return `codex is not installed (${smoke.error.message})`;
   if (smoke.status !== 0) return `codex cannot start this sandbox here: ${smoke.stderr.trim().split("\n").at(-1)}`;
   return false;
@@ -138,6 +140,7 @@ interface ProbeResult {
   outbound: string;
   fifoDirectoryWrite: string;
   workspaceWrite: string;
+  temporaryWrite: string;
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -146,6 +149,9 @@ interface ProbeResult {
 
 let root = "";
 let workspace = "";
+let temporaryDirectory = "";
+let fixtureHome = "";
+let readOnlyFixtureUnavailable: string | false = false;
 let unixSocketPath = "";
 let controlPlane: Server | undefined;
 let unixServer: NetServer | undefined;
@@ -158,11 +164,39 @@ const controlPlaneSaw: Array<{ path: string; bearerHash: string; actor: string }
 const loopbackRelays = new AgentControlRelaySockets(relayAgentControlRequest);
 let fifoRelays: AgentControlFifoRelays | undefined;
 
+function createFixtureRoot(): string {
+  const slashTmp = realpathSync("/tmp");
+  // :workspace intentionally grants /tmp. A fixture there cannot prove that the
+  // runner-owned FIFO directory is read-only. Prefer the writable checkout, then HOME.
+  for (const parent of [process.cwd(), homedir()]) {
+    try {
+      const canonical = realpathSync(parent);
+      if (canonical === slashTmp || canonical.startsWith(`${slashTmp}/`)) continue;
+      return mkdtempSync(join(canonical, ".wg-sbox-"));
+    } catch (error) {
+      if (!["EACCES", "EROFS", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    }
+  }
+  // Controls and explicit-bwrap profiles still work here, but the real workspace
+  // profile cannot make an honest read-only assertion about a directory under /tmp.
+  readOnlyFixtureUnavailable = "no writable fixture parent outside /tmp; use a checkout or HOME outside /tmp";
+  return mkdtempSync(join(slashTmp, "wg-sbox-"));
+}
+
 before(async () => {
   if (process.platform !== "linux") return;
-  root = mkdtempSync(join(tmpdir(), "wollipog-sandbox-cli-"));
+  root = createFixtureRoot();
+  temporaryDirectory = mkdtempSync(join(realpathSync("/tmp"), "wg-cli-"));
+  fixtureHome = join(root, "home");
   workspace = join(root, "workspace");
+  mkdirSync(fixtureHome);
   mkdirSync(workspace);
+  // Bound project discovery at the synthetic workspace instead of this checkout.
+  const initialized = spawnSync("git", ["-c", "init.templateDir=", "init", "--quiet", "--initial-branch=main", workspace], {
+    env: { PATH: process.env.PATH, HOME: fixtureHome, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+    encoding: "utf8", timeout: 10_000,
+  });
+  assert.equal(initialized.status, 0, `could not initialize the synthetic workspace: ${initialized.stderr}`);
   controlPlane = createServer((request, response) => {
     const bearer = (request.headers.authorization ?? "").replace(/^Bearer /u, "");
     controlPlaneSaw.push({
@@ -178,7 +212,8 @@ before(async () => {
   controlPlanePort = await new Promise<number>((resolve) => {
     controlPlane!.listen(0, "127.0.0.1", () => resolve((controlPlane!.address() as { port: number }).port));
   });
-  unixSocketPath = join(root, "host.sock");
+  // Keep the socket short even when the checkout path exceeds sockaddr_un's limit.
+  unixSocketPath = join(temporaryDirectory, "host.sock");
   unixServer = createNetServer((socket) => socket.end());
   await new Promise<void>((resolve) => unixServer!.listen(unixSocketPath, () => resolve()));
 
@@ -224,12 +259,13 @@ after(async () => {
     relax(root);
     rmSync(root, { recursive: true, force: true });
   }
+  if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
 });
 
 function sessionEnvironment(): NodeJS.ProcessEnv {
   return {
     PATH: process.env.PATH,
-    HOME: process.env.HOME,
+    HOME: fixtureHome,
     // A read-only sandbox has no writable temporary directory for the development loader's cache.
     TSX_DISABLE_CACHE: "1",
     ...launch.env,
@@ -237,7 +273,9 @@ function sessionEnvironment(): NodeJS.ProcessEnv {
 }
 
 function codexEnvironment(): NodeJS.ProcessEnv {
-  return { PATH: process.env.PATH, HOME: process.env.HOME, ...(process.env.CODEX_HOME ? { CODEX_HOME: process.env.CODEX_HOME } : {}) };
+  // No operator configuration, hooks, credentials or temporary-root settings enter
+  // these measurements. Smoke and execution use the same synthetic environment.
+  return { PATH: process.env.PATH, HOME: fixtureHome, CODEX_HOME: fixtureHome, TMPDIR: temporaryDirectory };
 }
 
 function run(command: string, args: string[], seccomp?: Buffer): Promise<ProbeResult> {
@@ -277,7 +315,7 @@ function run(command: string, args: string[], seccomp?: Buffer): Promise<ProbeRe
 }
 
 function probeArgs(): string[] {
-  return [PROBE, String(controlPlanePort), String(relayPort), unixSocketPath, fifoDirectory];
+  return [PROBE, String(controlPlanePort), String(relayPort), unixSocketPath, fifoDirectory, temporaryDirectory];
 }
 
 function bubblewrap(shape: "workspace-write" | "read-only"): Promise<ProbeResult> {
@@ -293,6 +331,7 @@ function bubblewrap(shape: "workspace-write" | "read-only"): Promise<ProbeResult
 
 function cleanProbeFiles(): void {
   rmSync(join(workspace, "probe-file"), { force: true });
+  rmSync(join(temporaryDirectory, "probe-file"), { force: true });
   chmodSync(fifoDirectory, 0o700);
   rmSync(join(fifoDirectory, "probe-file"), { force: true });
   chmodSync(fifoDirectory, 0o300);
@@ -328,6 +367,7 @@ test("control: outside any sandbox every probe connects, so the refusals below a
     assert.notEqual(result.outbound, "EPERM", "outside the sandbox nothing refuses an outbound socket");
     assert.equal(result.fifoDirectoryWrite, "written", "the runner's owner can write there; the sandbox below cannot");
     assert.equal(result.workspaceWrite, "written");
+    assert.equal(result.temporaryWrite, "written");
   } finally {
     cleanProbeFiles();
   }
@@ -343,6 +383,7 @@ for (const shape of ["workspace-write", "read-only"] as const) {
       // The FIFO channel is not a writable root: its directory stays read-only like the rest.
       assert.equal(result.fifoDirectoryWrite, "EROFS", `${shape}: a file in the FIFO channel directory`);
       assert.equal(result.workspaceWrite, shape === "workspace-write" ? "written" : "EROFS", `${shape}: the workspace`);
+      assert.equal(result.temporaryWrite, "EROFS", `${shape}: the temporary directory`);
       // The control plane saw the runner's memory-held bearer and this session as the actor.
       const fromCli = controlPlaneSaw.filter((request) => request.bearerHash === registeredHashes[0]);
       assert.ok(fromCli.some((request) => request.path === "/api/compatibility"), shape);
@@ -357,7 +398,7 @@ for (const shape of ["workspace-write", "read-only"] as const) {
 }
 
 /* ---------------------------------------------------------------------------------------------
- * Opt-in: the same probes under the real `codex sandbox`, where a Codex install can start one.
+ * The same probes under the real `codex sandbox`, where a Codex install can start one.
  * ------------------------------------------------------------------------------------------ */
 
 const CODEX_PROFILES = {
@@ -374,14 +415,27 @@ const CODEX_PROFILES = {
 } as const;
 
 for (const [name, profile] of Object.entries(CODEX_PROFILES)) {
-  const skip = process.platform !== "linux" ? "Linux only" : codexSandboxUnavailable([...profile]);
-  test(`real codex sandbox (${name}): the CLI works and no socket reaches out`, { skip }, async () => {
+  test(`real codex sandbox (${name}): the CLI works and no socket reaches out`, { skip: process.platform !== "linux" && "Linux only" }, async (t) => {
+    if (name === ":workspace" && readOnlyFixtureUnavailable) {
+      t.skip(readOnlyFixtureUnavailable);
+      return;
+    }
+    const skip = codexSandboxUnavailable([...profile]);
+    if (skip) { t.skip(skip); return; }
+    const version = spawnSync(CODEX, ["--version"], {
+      cwd: workspace, env: codexEnvironment(), encoding: "utf8", timeout: 10_000,
+    });
+    assert.equal(version.status, 0, `could not identify the measured Codex binary: ${version.stderr}`);
+    t.diagnostic(JSON.stringify({ codex: version.stdout.trim(), profile: name, workspace, fifoDirectory,
+      temporaryDirectory, home: fixtureHome }));
     controlPlaneSaw.length = 0;
     const result = await run(CODEX, ["sandbox", "-C", workspace, ...profile, "--", process.execPath, ...probeArgs()]);
     try {
       assertCliSucceeded(result, name);
       assertNoNetworkOrLoopback(result, name);
-      if (name !== "network-off seccomp only") assert.equal(result.fifoDirectoryWrite, "EROFS", name);
+      assert.equal(result.fifoDirectoryWrite, name === "network-off seccomp only" ? "written" : "EROFS", `${name}: the FIFO directory`);
+      assert.equal(result.workspaceWrite, name === ":read-only" ? "EROFS" : "written", `${name}: the workspace`);
+      assert.equal(result.temporaryWrite, name === ":read-only" ? "EROFS" : "written", `${name}: the temporary directory`);
       assert.ok(controlPlaneSaw.some((request) => request.path === "/api/compatibility" &&
         request.bearerHash === registeredHashes[0] && request.actor === SESSION), name);
     } finally {

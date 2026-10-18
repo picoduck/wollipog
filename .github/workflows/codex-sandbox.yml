@@ -1,0 +1,88 @@
+name: Codex Sandbox
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "apps/runner/src/agent-control-sandbox-cli*"
+      - "apps/runner/src/fixtures/sandboxed-cli-probe.mjs"
+      - ".github/workflows/codex-sandbox.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codex-sandbox:
+    name: Real Codex Sandbox (${{ matrix.codex }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        codex: ["0.162.1", "0.163.0"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Real Sandbox Prerequisites
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap
+          bash scripts/configure-ci-bubblewrap.sh
+          npm install --prefix "$RUNNER_TEMP/codex" --no-save --package-lock=false "@openai/codex@${{ matrix.codex }}"
+      - name: Exercise Every Real Sandbox Case
+        env:
+          CODEX_BIN: ${{ runner.temp }}/codex/node_modules/.bin/codex
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$CODEX_BIN" --version
+          node --version
+          uname -sm
+          control_home="$RUNNER_TEMP/root-control-home"
+          mkdir "$control_home"
+          placement() {
+            local parent="$1" expected="$2" probe_root observed
+            probe_root=$(mktemp -d "$parent/wollipog-placement-XXXXXX")
+            mkdir "$probe_root/workspace"
+            observed=$(env HOME="$control_home" CODEX_HOME="$control_home" TMPDIR=/tmp "$CODEX_BIN" sandbox -P :workspace -C "$probe_root/workspace" -- node -e 'try { require("fs").writeFileSync(process.argv[1], "probe"); console.log("written"); } catch (error) { console.log(error.code); }' "$probe_root/outside-workspace")
+            printf 'Workspace profile outside its workspace, parent=%s: %s\n' "$parent" "$observed"
+            test "$observed" = "$expected"
+          }
+          # Same empty configuration; only fixture placement changes.
+          placement /tmp written
+          placement "$RUNNER_TEMP" EROFS
+          invalid_home="$RUNNER_TEMP/invalid-codex-home"
+          mkdir "$invalid_home"
+          printf '%s\n' 'invalid = [ configuration' > "$invalid_home/config.toml"
+          # Verify that this operator configuration prevents an ordinary launch.
+          if env HOME="$invalid_home" CODEX_HOME="$invalid_home" "$CODEX_BIN" sandbox -P :workspace -- /bin/true > "$RUNNER_TEMP/invalid-config.log" 2>&1; then
+            echo 'the malformed configuration was unexpectedly accepted' >&2
+            exit 1
+          fi
+          grep -F 'TOML parse error' "$RUNNER_TEMP/invalid-config.log"
+          verify() {
+            local configuration="$1" output="$RUNNER_TEMP/codex-sandbox-$1.tap"
+            local environment=()
+            if [ "$configuration" = invalid ]; then
+              environment=("HOME=$invalid_home" "CODEX_HOME=$invalid_home")
+            fi
+            local rc=0
+            env "${environment[@]}" node --import tsx --test --test-reporter=tap --test-timeout=180000 apps/runner/src/agent-control-sandbox-cli.integration.test.ts > "$output" 2>&1 || rc=$?
+            cat "$output"
+            if [ "$rc" -ne 0 ]; then return "$rc"; fi
+            for expected in '# pass 6' '# fail 0' '# cancelled 0' '# skipped 0'; do
+              grep -qx "$expected" "$output" || return 1
+            done
+          }
+          verify clean || exit $?
+          verify invalid || exit $?
