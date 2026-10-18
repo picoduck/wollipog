@@ -122,7 +122,10 @@ export class EvidenceReviewService {
           durationMs: Math.max(0, this.clock() - started), attempt });
         return result;
       }
-      const recovery = planEvidenceRecovery(current.mode, result.code, attempt);
+      // `attempt` counts bounded decoder-busy retries of this one source. It is never a replacement
+      // capture count, so any other refusal plans as the source's first; capture exhaustion is
+      // decided only by the owner's durable lineage (#2938).
+      const recovery = planEvidenceRecovery(current.mode, result.code, result.code === "decoder_busy" ? attempt : 0);
       this.adapter.audit({ event: "video_evidence_recovery", entryPoint: "owner_prepare",
         occurrenceId: current.binding.occurrenceId, rootSessionId: current.binding.rootSessionId,
         childSessionId: current.binding.childSessionId, reviewerSessionId: current.binding.reviewerSessionId,

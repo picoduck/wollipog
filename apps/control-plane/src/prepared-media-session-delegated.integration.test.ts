@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import Fastify from "fastify";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, isTerminal, PACED_VIDEO_REVIEW_CONTRACT_ID, PROTOCOL_VERSION,
   pacedVideoReviewWindowPlan, pacedVideoReviewWindowPlanBody, type ControlPlaneToRunner, type MediaReviewDispatch,
   type MediaReviewFinished, type RunnerMetadata, type SessionSnapshot } from "@wollipog/protocol";
@@ -10,6 +11,7 @@ import { RunnerMediaDispatchFences } from "../../runner/src/media-dispatch-fence
 import { ControlPlaneDb } from "./db.js";
 import { mintCampaignEvidenceAuthority } from "./evidence-authority.js";
 import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
+import { registerVideoEvidenceReviewRoutes } from "./video-evidence-review-routes.js";
 import { Hub } from "./hub.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -443,17 +445,18 @@ type RepairRefusal = { ok: false; code: string; reason: string; recovery: Record
 const members = (h: Awaited<ReturnType<typeof harness>>) =>
   h.db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_budget_members").get()!.n as number;
 /** The child attaches a new capture and requests a fresh occurrence under the same resource key. */
-function recapture(h: Awaited<ReturnType<typeof harness>>, n: number, bytes = Buffer.concat([source, Buffer.from(`repair ${n}`)])) {
+function recapture(h: Awaited<ReturnType<typeof harness>>, n: number, bytes = Buffer.concat([source, Buffer.from(`repair ${n}`)]),
+  evidenceId = `repair-video-${n}`) {
   const artifactId = `repair-source-${n}`;
   h.db.createWorkflowArtifactBytes({ artifactId, sessionId: "child", kind: "video", name: `Repair ${n}.webm`, mimeType: "video/webm",
     encoding: "base64", sha256: sha(bytes), sizeBytes: bytes.length, createdBy: { kind: "agent", id: "child" },
     metadata: { purpose: "session_attachment" }, createdAt: 10 + n }, bytes);
   const created = h.sessions.createWorkflowDecision("child", { requestId: `repair-${n}`, resourceKey: "synthetic",
-    resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: `repair-video-${n}`, artifactId, sha256: sha(bytes),
+    resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId, artifactId, sha256: sha(bytes),
       mediaType: "video/webm" }] } });
   assert.ok(created.ok && created.data, JSON.stringify(created));
   assert.equal(created.data.authority, "orchestrator", "a repaired capture stays with the Orchestrator, never the Human");
-  return { bytes, request: { childSessionId: "child", occurrenceId: created.data.occurrenceId, evidenceId: `repair-video-${n}` } };
+  return { bytes, request: { childSessionId: "child", occurrenceId: created.data.occurrenceId, evidenceId } };
 }
 const decline = (h: Awaited<ReturnType<typeof harness>>, occurrenceId: string, childMessage: string) =>
   h.sessions.resolveWorkflowDecision("root", "child", occurrenceId, { outcome: "deny", childMessage }, "orchestrator",
@@ -534,6 +537,37 @@ test("an evidence lineage gets two replacement captures; then it is exhausted an
   const projection = h.sessions.campaignProjection("root");
   assert.ok(projection.ok && projection.data);
   assert.equal(projection.data.pendingDecisions.human, 0, "an exhausted repair is not escalated to the Human");
+});
+
+test("decoder-busy retries of one source never become capture exhaustion: busy, busy, split plans the first repair", async (t) => {
+  let calls = 0;
+  const h = await harness(t, { decoder: { ...syntheticDecoder, paced: async () => ++calls <= 2
+    ? { ok: false, code: "decoder_busy", reason: "Synthetic busy decoder.", retryable: true }
+    : { ok: false, code: "split_capture", reason: "Synthetic source exceeds the conversion envelope.", retryable: false } } });
+  const refused = await h.video.delegated.prepare(h.owner, h.request) as RepairRefusal;
+  assert.equal(calls, 3, "two bounded busy retries, then the inadequate refusal, in one preparation");
+  assert.deepEqual([refused.recovery.action, refused.recovery.repairAttempt, refused.recovery.reprepare], ["split", 1, false]);
+  assert.doesNotMatch(refused.recovery.requiredInput, /exhausted/u);
+});
+
+test("a child-authored evidence id never enters the repair exception, its stored record or the HTTP refusal", async (t) => {
+  const marker = "/home/child/.config/SENSITIVE-MARKER-token https://private.example/SENSITIVE-MARKER";
+  const bytes = Buffer.concat([source, Buffer.from("sensitive evidence id")]);
+  const h = await harness(t, { decoder: inadequateDecoder(new Set([sha(bytes)])) });
+  const fresh = recapture(h, 1, bytes, marker);
+  const app = Fastify();
+  t.after(async () => { await app.close(); });
+  registerVideoEvidenceReviewRoutes(app, { service: h.video.reviewService, owner: h.video.delegated, requestPrincipal: () => h.owner });
+  for (const round of [1, 2]) {
+    const response = await app.inject({ method: "POST", url: "/api/sessions/root/video-evidence-review/prepare", payload: fresh.request });
+    assert.equal(response.statusCode, 409, `round ${round}`);
+    const body = response.json() as RepairRefusal & { error: string };
+    assert.deepEqual([body.recovery.action, body.recovery.evidenceRef, body.error], ["split", `sha256:${sha(marker)}`, body.recovery.summary]);
+    assert.doesNotMatch(response.body, /SENSITIVE-MARKER/u, "the refusal identifies the evidence only by digest");
+  }
+  const stored = h.db.raw().prepare("SELECT record FROM delegated_video_reviews WHERE occurrence_id=?").get(fresh.request.occurrenceId) as
+    { record: string };
+  assert.doesNotMatch(JSON.stringify((JSON.parse(stored.record) as { recovery: unknown }).recovery), /SENSITIVE-MARKER/u);
 });
 
 test("a busy decoder keeps its occurrence preparable and does not count toward the repair limit", async (t) => {

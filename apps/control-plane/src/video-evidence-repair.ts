@@ -1,3 +1,4 @@
+import { recoveryCoordinate } from "./campaign-recovery.js";
 import { planEvidenceRecovery, type EvidenceRecoveryPlan } from "./evidence-review-recovery.js";
 import type { VideoPreparationFailureCode } from "./video-evidence-preparation.js";
 
@@ -8,12 +9,14 @@ export const VIDEO_EVIDENCE_REPAIR_LIMIT = 2;
  * EvidenceRecoveryExecutor stays unregistered until trusted capture ports exist, so repair runs
  * through the existing typed gate. The Orchestrator owns ui_evidence_approval, declines the exact
  * occurrence with this reason, and the child splits or recaptures and requests a fresh occurrence
- * under the same resource key. Every field is a server enum, identifier, count or fixed planner
- * sentence, never frame bytes, paths, request bodies or credentials. */
+ * under the same resource key. Every field is a server enum, server-issued identifier, digest, count
+ * or fixed planner sentence, never frame bytes, paths, request bodies or credentials. */
 export interface VideoEvidenceRepairException {
   blockedAction: "delegated_video_review";
   occurrenceId: string;
-  evidenceId: string;
+  /** `sha256:` digest of the child-authored evidence id. The id is bounded but otherwise free text,
+   * so it is identified exactly without being repeated (as campaign recovery treats coordinates). */
+  evidenceRef: string;
   childSessionId: string;
   preparationCode: VideoPreparationFailureCode;
   /** `split` and `recapture` route to the child, `reject` means the lineage's repairs are exhausted,
@@ -39,8 +42,11 @@ export const countsTowardRepairLimit = (exception: VideoEvidenceRepairException 
  * a third inadequate capture is exhausted, so it is declined, not repaired again. */
 export function videoEvidenceRepairException(subject: { occurrenceId: string; evidenceId: string; childSessionId: string },
   code: VideoPreparationFailureCode, plan: EvidenceRecoveryPlan, priorInadequate: number): VideoEvidenceRepairException {
-  const exhausted = (plan.action === "split" || plan.action === "recapture") && priorInadequate >= VIDEO_EVIDENCE_REPAIR_LIMIT;
-  const effective = exhausted ? planEvidenceRecovery("full_control", code, VIDEO_EVIDENCE_REPAIR_LIMIT) : plan;
+  // Exhaustion comes only from the durable lineage count. A planner `reject` reached by counting
+  // decoder retries of one source is re-planned as that source's first refusal.
+  const base = plan.action === "reject" ? planEvidenceRecovery("full_control", code, 0) : plan;
+  const exhausted = (base.action === "split" || base.action === "recapture") && priorInadequate >= VIDEO_EVIDENCE_REPAIR_LIMIT;
+  const effective = exhausted ? planEvidenceRecovery("full_control", code, VIDEO_EVIDENCE_REPAIR_LIMIT) : base;
   const action = effective.action === "retry" ? "wait" : effective.action;
   const decline = `Decline occurrence ${subject.occurrenceId} with resolve_descendant_workflow_decision (deny) and give this reason as childMessage`;
   const requiredInput = action === "split"
@@ -53,7 +59,7 @@ export function videoEvidenceRepairException(subject: { occurrenceId: string; ev
           ? "None. Prepare this occurrence again later; unrelated campaign work may continue."
           : "A Human must review this video evidence; automation cannot verify its coverage.";
   const repairAttempt = action === "split" || action === "recapture" ? priorInadequate + 1 : Math.min(priorInadequate, VIDEO_EVIDENCE_REPAIR_LIMIT);
-  return { blockedAction: "delegated_video_review", occurrenceId: subject.occurrenceId, evidenceId: subject.evidenceId,
+  return { blockedAction: "delegated_video_review", occurrenceId: subject.occurrenceId, evidenceRef: recoveryCoordinate(subject.evidenceId),
     childSessionId: subject.childSessionId, preparationCode: code, action, owner: action === "human" ? "human" : "orchestrator",
     repairAttempt, repairLimit: VIDEO_EVIDENCE_REPAIR_LIMIT, reprepare: action === "wait" || action === "human",
     reason: effective.reason, requiredInput,
@@ -66,7 +72,7 @@ export function exhaustedVideoEvidenceLineage(subject: { occurrenceId: string; e
   last: VideoEvidenceRepairException): VideoEvidenceRepairException {
   const requiredInput = `Decline occurrence ${subject.occurrenceId} with resolve_descendant_workflow_decision (deny). This evidence lineage already used its ${VIDEO_EVIDENCE_REPAIR_LIMIT} replacement captures, so no reviewer is reserved for it; report the evidence requirement as an exhausted exception instead of requesting another capture.`;
   const reason = "The bounded replacement captures for this evidence are exhausted.";
-  return { blockedAction: "delegated_video_review", occurrenceId: subject.occurrenceId, evidenceId: subject.evidenceId,
+  return { blockedAction: "delegated_video_review", occurrenceId: subject.occurrenceId, evidenceRef: recoveryCoordinate(subject.evidenceId),
     childSessionId: subject.childSessionId, preparationCode: last.preparationCode, action: "reject", owner: "orchestrator",
     repairAttempt: VIDEO_EVIDENCE_REPAIR_LIMIT, repairLimit: VIDEO_EVIDENCE_REPAIR_LIMIT, reprepare: false, reason, requiredInput,
     summary: `Video review preparation was refused: ${reason} Next: ${requiredInput}` };

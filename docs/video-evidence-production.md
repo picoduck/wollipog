@@ -543,9 +543,11 @@ Hosting does not register that coordinator. It has no trusted capture trace, own
 disposition, capture allowance or server-created replacement occurrence. Inadequate video evidence
 is repaired through the existing typed gate instead. When the isolated decoder needs a split or a
 recapture, `prepare` persists a content-safe repair exception on the refused subject: the blocked
-action, the exact occurrence and evidence, the decoder code, the planner's fixed reason, the owner
-and the smallest next input. Repeated `prepare` and `provenance` reads, and the refusal's HTTP
-`error` that the Orchestrator's tool shows, all return the same exception. Under Full Control the
+action, the exact occurrence, a digest of the child-authored evidence id, the decoder code, the
+planner's fixed reason, the owner and the smallest next input. Preparing the same occurrence again
+returns the same exception, as does the refusal's HTTP `error` that the Orchestrator's tool shows.
+A refusal before any review has no review id, so `provenance` cannot look it up; `prepare` is the
+lookup. Decoder-busy retries of one source never count as replacement captures. Under Full Control the
 Orchestrator owns `ui_evidence_approval`, so it denies that occurrence with the reason as
 `childMessage`. The child records adjacent shorter clips or a simpler recapture and requests a
 fresh occurrence under the same resource key. Nothing reaches the Human, and the inadequate

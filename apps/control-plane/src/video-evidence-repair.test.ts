@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { planEvidenceRecovery } from "./evidence-review-recovery.js";
 import { countsTowardRepairLimit, exhaustedVideoEvidenceLineage, VIDEO_EVIDENCE_REPAIR_LIMIT,
@@ -23,6 +24,21 @@ test("repair exceptions route inadequate captures to the child and cap them per 
   }
   const blocked = exhaustedVideoEvidenceLineage(subject, exhausted);
   assert.deepEqual([blocked.action, blocked.reprepare, countsTowardRepairLimit(blocked)], ["reject", false, true]);
+});
+
+test("exhaustion comes only from the lineage count, never from a planner attempt counting decoder retries", () => {
+  // planEvidenceRecovery's attempt 2 means two busy retries of one source, not two replacement captures.
+  const retried = videoEvidenceRepairException(subject, "split_capture", planEvidenceRecovery("full_control", "split_capture", 2), 0);
+  assert.deepEqual([retried.action, retried.repairAttempt, retried.reprepare], ["split", 1, false]);
+});
+
+test("the exception identifies child-authored evidence only by digest", () => {
+  const marker = "/home/child/.secret SENSITIVE-MARKER https://private.example/";
+  const exception = videoEvidenceRepairException({ ...subject, evidenceId: marker }, "split_capture",
+    planEvidenceRecovery("full_control", "split_capture", 0), 0);
+  assert.equal(exception.evidenceRef, `sha256:${createHash("sha256").update(marker).digest("hex")}`);
+  assert.doesNotMatch(JSON.stringify(exception), /SENSITIVE-MARKER/u);
+  assert.doesNotMatch(JSON.stringify(exhaustedVideoEvidenceLineage({ ...subject, evidenceId: marker }, exception)), /SENSITIVE-MARKER/u);
 });
 
 test("busy and unverifiable decoders are not inadequate captures and keep their exact occurrence", () => {
