@@ -199,6 +199,10 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "GET /api/sessions/:id/descendant-requests", "POST /api/sessions/:id/descendant-requests/resolve",
   "POST /api/sessions/:id/descendant-requests/review-ui-evidence",
   "POST /api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge",
+  // Delegated video review (#1321): Orchestrator credentials only. Reviewer credentials reach only
+  // the media methods, and child or implementation credentials reach neither.
+  "POST /api/sessions/:id/video-evidence-review/prepare",
+  "POST /api/sessions/:id/video-evidence-review/provenance",
   "POST /api/sessions/:id/worktrees", "POST /api/sessions/:id/worktrees/attach",
   "POST /api/sessions/:id/worktrees/select", "POST /api/sessions/:id/worktrees/discard",
 ]);

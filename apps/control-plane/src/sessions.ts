@@ -3697,18 +3697,8 @@ export class SessionsService {
     const validation = resolved?.operatorValidation;
     if (validation && (Object.keys(validation).length !== 1 || typeof validation.permitId !== "string" ||
       !validation.permitId || resolved.liveProof !== null)) return fail("Validation admission cannot borrow or fabricate production proof.", 409);
-    const owner = validation ? "human" : "orchestrator";
-    if (!resolved || !root || !child || control?.mode !== "full_control" || !control.boundary.evidenceAuthority ||
-      !campaignEvidenceDisclosuresCurrent(control.boundary.evidenceAuthority, this.evidenceAuthorityDisclosures) ||
-      !campaignBoundaryCurrent(root) || !decision || decision.status !== "pending" || decision.authority !== owner ||
-      decision.category !== "ui_evidence_approval" || decision.resourceSnapshot.category !== "ui_evidence_approval" ||
-      decision.controllingSessionId !== root.id || decision.sessionId !== child.id ||
-      decision.policyRevision !== root.parentControlPolicy?.revision ||
-      !this.workflowDecisionRelationship(root.id, child.id) || this.workflowDecisionChildEnded(child) ||
-      (validation ? !root.parentControlPolicy || !this.workflowDecisionAuthorityCurrent(root, root.parentControlPolicy, decision) :
-        evaluateCampaignAuthority(root, child, this.db.getRunner(child.runnerId)?.protocolVersion,
-          decision.resourceSnapshot, root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion,
-          this.campaignPeerContracts(root, child.id)).owner !== owner)) {
+    if (!resolved || !root || !child || !decision || control?.mode !== "full_control" ||
+      !this.mediaGateCurrent(root, child, decision, validation ? "human" : "orchestrator", ["pending"])) {
       return fail("The exact original media gate has no current preparation authority.", 409);
     }
     const { context, target, liveProof, request } = resolved;
@@ -3729,13 +3719,15 @@ export class SessionsService {
       this.db.getRunner(root.runnerId)?.protocolVersion !== context.controllerProtocolVersion ||
       this.db.getRunner(child.runnerId)?.protocolVersion !== context.childProtocolVersion ||
       this.db.getRunner(target.runnerId)?.protocolVersion !== target.runnerProtocolVersion ||
-      request.config?.model !== target.modelId || request.role === "orchestrator" || request.launchSurface === "native_tui" ||
+      request.config?.model !== target.modelId || (request.config?.effort ?? null) !== target.effort ||
+      request.role === "orchestrator" || request.launchSurface === "native_tui" ||
       request.images?.length || this.db.getAgentLaunch(request.runnerId, request.agentId)?.driver !== target.driver ||
       (validation ? !this.operatorValidationPermits?.authorizePreparation(validation.permitId, identity, subject, context, target, request) :
         reviewerAdmissionReadiness(context, target, liveProof, Date.now()))) {
       return fail("Current scoped media profile, destination, disclosure or allowance preparation is unsupported.", 409);
     }
-    const item = decision.resourceSnapshot.evidence.find((e) => e.evidenceId === subject.evidenceId);
+    const item = decision.resourceSnapshot.category === "ui_evidence_approval"
+      ? decision.resourceSnapshot.evidence.find((e) => e.evidenceId === subject.evidenceId) : undefined;
     const source = item?.artifactId ? this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact : null;
     if (!item || !source || source.sessionId !== child.id || source.kind !== "video" || source.sha256 !== item.sha256 ||
       source.mimeType !== item.mediaType || !["video/webm", "video/mp4"].includes(source.mimeType ?? "")) {
@@ -3755,6 +3747,45 @@ export class SessionsService {
     // The controller can receive quality observations only within the source audience.
     // Use its already narrower audience for the reviewer; never broaden either audience.
     return ok({ resolved, childAudience: rootAudience });
+  }
+
+  /** The exact original media gate is current: the Full Control boundary, its private evidence
+   * disclosures and the typed owner still hold, and the decision is in one of `statuses`. A pending
+   * gate also needs a live child; an approved one is consumed by that child itself. */
+  private mediaGateCurrent(root: SessionView, child: SessionView, decision: WorkflowDecisionView,
+    owner: "human" | "orchestrator", statuses: readonly WorkflowDecisionView["status"][]): boolean {
+    const control = root.orchestratorPolicy?.control;
+    return control?.mode === "full_control" && Boolean(control.boundary.evidenceAuthority) &&
+      campaignEvidenceDisclosuresCurrent(control.boundary.evidenceAuthority!, this.evidenceAuthorityDisclosures) &&
+      campaignBoundaryCurrent(root) && statuses.includes(decision.status) && decision.authority === owner &&
+      decision.category === "ui_evidence_approval" && decision.resourceSnapshot.category === "ui_evidence_approval" &&
+      decision.controllingSessionId === root.id && decision.sessionId === child.id &&
+      decision.policyRevision === root.parentControlPolicy?.revision &&
+      this.workflowDecisionRelationship(root.id, child.id) &&
+      (decision.status !== "pending" || !this.workflowDecisionChildEnded(child)) &&
+      (owner === "human" ? Boolean(root.parentControlPolicy) && this.workflowDecisionAuthorityCurrent(root, root.parentControlPolicy!, decision) :
+        evaluateCampaignAuthority(root, child, this.db.getRunner(child.runnerId)?.protocolVersion,
+          decision.resourceSnapshot, root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion,
+          this.campaignPeerContracts(root, child.id)).owner === owner);
+  }
+
+  /** Delegated video review (#1321): the Orchestrator-owned original gate for `occurrenceId`, when
+   * it is still current, with its controlling root and child. Never a grant by itself. */
+  delegatedVideoGate(occurrenceId: string, statuses: readonly WorkflowDecisionView["status"][]):
+    { root: SessionView; child: SessionView; decision: WorkflowDecisionView } | null {
+    try {
+      const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+      const root = decision ? this.db.getSession(decision.controllingSessionId) : undefined;
+      const child = decision ? this.db.getSession(decision.sessionId) : undefined;
+      return decision && root && child && this.mediaGateCurrent(root, child, decision, "orchestrator", statuses)
+        ? { root, child, decision } : null;
+    } catch { return null; }
+  }
+
+  /** Both registries agree this Session's selected installation declares the paced contract. */
+  sessionPacedVideoPeer(sessionId: string): boolean {
+    const session = this.db.getSession(sessionId);
+    return Boolean(session && this.sessionPacedVideoCompatible(session));
   }
 
   /** Persist normal policy asks outside the Session/member/command transaction. Ordinary
@@ -6824,6 +6855,35 @@ export class SessionsService {
     if (this.preparedMediaActiveStops?.owns(session.id)) return true; // ACK is not terminal usage/fence proof.
     const state = this.mediaSessionPurposes.lifecycleState(session.id);
     return state !== "active" && state !== "cancelled";
+  }
+
+  /** The single authority for a dispatched dedicated media reviewer (#1321). The dispatcher runs it
+   * outside its runner's Session inventory and reports it only through authenticated media receipts
+   * and readback, so while it is open only that lifecycle may change its status:
+   * - open: a media purpose, not archived, no explicit or dedicated Stop, a dispatched prepared
+   *   record (`dispatching`, `uncertain` or `active`), and the Session live or only provisionally
+   *   stopped (runner disconnect or startup, unconfirmed);
+   * - generic disconnect, absent-inventory and startup sweeps leave an open reviewer alone;
+   * - an authenticated runner report may restore or finish only an open reviewer;
+   * - Archive refuses an open reviewer, so an archived reviewer can never be restored, even after
+   *   unarchive, because Stop and archive fences are never undone. */
+  dedicatedMediaReviewerOpen(sessionId: string): boolean {
+    try {
+      const session = this.db.getSession(sessionId);
+      if (!session || session.archived || !this.mediaSessionPurposes.owns(sessionId) || this.db.hasSessionStopIntent(sessionId) ||
+        this.preparedMediaActiveStops?.owns(sessionId) === true) return false;
+      const row = this.db.raw().prepare("SELECT state FROM prepared_media_sessions WHERE json_extract(payload,'$.sessionId')=?")
+        .get(sessionId) as { state: string } | undefined;
+      if (!row || !["dispatching", "uncertain", "active"].includes(row.state)) return false;
+      if (!isTerminal(session.status)) return true;
+      const stop = session.status === "stopped" ? this.db.sessionStopProvenance(sessionId) : null;
+      return Boolean(stop && sessionStopRestorable(stop));
+    } catch { return false; }
+  }
+
+  /** Generic sweeps skip an unresolved media command and an open dedicated reviewer. */
+  private dedicatedMediaLifecycle(session: SessionView | null): boolean {
+    return this.pendingMediaLifecycle(session) || Boolean(session && this.dedicatedMediaReviewerOpen(session.id));
   }
 
   /** Declining a guardrail card is a Stop, so it is as durable as one: persist the intent before
@@ -12213,6 +12273,12 @@ export class SessionsService {
     if (session.archiveStatus === "stop_failed") {
       return ok(session, 202);
     }
+    // A dispatched media reviewer, even one only provisionally stopped, is still decided by its
+    // runner; archiving it would race that report. Stop it first (#1321).
+    if (this.dedicatedMediaReviewerOpen(sessionId)) {
+      return fail("An active media review Session cannot be archived yet: Stop it and let authenticated reconciliation " +
+        "settle it first; capacity is retained.", 409);
+    }
     if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId)) {
       const media = this.mediaSessionPurposes.owns(session.id);
       // A dedicated media Stop records no archive intent and settles nothing, so archival cannot be
@@ -15239,7 +15305,7 @@ export class SessionsService {
   failRunnerSessions(runnerId: string): void {
     const now = Date.now();
     for (const s of this.db.listSessions({ includeArchived: true })) {
-      if (this.pendingMediaLifecycle(s)) continue;
+      if (this.dedicatedMediaLifecycle(s)) continue;
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
         const campaignBefore = this.campaignAttentionController(s);
         this.automaticQuestions.delete(s.id);
@@ -15270,7 +15336,7 @@ export class SessionsService {
     this.endAbsentWorkflowDecisionWork(runnerId, (sessionId) => !liveSet.has(sessionId));
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId !== runnerId) continue;
-      if (this.pendingMediaLifecycle(s)) continue;
+      if (this.dedicatedMediaLifecycle(s)) continue;
       if (this.db.hasSessionStopIntent(s.id)) {
         if (liveSet.has(s.id)) {
           this.sendStopCommand(runnerId, s.id);
@@ -15633,7 +15699,7 @@ export class SessionsService {
       const s = this.db.getSession(id);
       if (!s || changedSinceInventory(id)) continue;
       if (s.runnerId === runnerId && !byId.has(s.id)) {
-        if (this.pendingMediaLifecycle(s)) continue;
+        if (this.dedicatedMediaLifecycle(s)) continue;
         campaignBefore(s);
         if (this.db.hasSessionStopIntent(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
         if (isTerminal(s.status)) this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");

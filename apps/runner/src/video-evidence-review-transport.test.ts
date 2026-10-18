@@ -10,7 +10,7 @@ const bytes = Buffer.from("synthetic-frame-transport-bytes");
 const grant: PacedVideoTransportGrant = {
   reviewId: "synthetic_review", reviewerSessionId: "worker", childSessionId: "child", occurrenceId: "workflow",
   policyRevision: 4, sourceEvidenceId: "synthetic_evidence", sourceArtifactId: "synthetic_source", sourceSha256: sha("source"),
-  manifestSha256: sha("manifest"), bindingSha256: sha("binding"), criteriaSha256: sha("criteria"), expiresAt: 2_000,
+  manifestSha256: sha("manifest"), bindingSha256: sha("binding"), criteriaSha256: sha("criteria"), deliveryPlanSha256: sha("plan"), expiresAt: 2_000,
   frames: [{ index: 0, ptsUs: 0, durationUs: 33_333, sha256: sha(bytes), sizeBytes: bytes.length }],
 };
 function fixture() {
@@ -21,6 +21,7 @@ function fixture() {
     receipt: { receiptId: "synthetic_receipt", occurrenceId: "workflow", reviewerSessionId: "worker", childSessionId: "child",
       policyRevision: 4, evidenceId: "synthetic_evidence", artifactId: "synthetic_review:frame:0",
       sha256: sha(bytes), deliveredAt: 1_000, deliveryOrder: 1, bindingSha256: sha("binding"), criteriaSha256: sha("criteria"),
+      deliveryPlanSha256: sha("plan"), windowIndex: 0,
       videoFrame: { profile: "paced-silent-complete-frames-v1", sourceArtifactId: "synthetic_source", sourceSha256: sha("source"),
         manifestSha256: sha("manifest"), index: 0, ptsMs: 0, ptsUs: 0, durationUs: 33_333 } },
   };
@@ -46,7 +47,7 @@ test("verified bytes are acknowledged before image handoff and receipts claim no
 });
 test("generated changes in every receipt binding, order, timing and content field withhold images before acknowledgement", async () => {
   const top = ["occurrenceId", "reviewerSessionId", "childSessionId", "policyRevision", "evidenceId", "artifactId",
-    "sha256", "bindingSha256", "criteriaSha256", "deliveryOrder"] as const;
+    "sha256", "bindingSha256", "criteriaSha256", "deliveryPlanSha256", "deliveryOrder"] as const;
   const temporal = ["sourceArtifactId", "sourceSha256", "manifestSha256", "index", "ptsMs", "ptsUs", "durationUs", "profile"] as const;
   await fc.assert(fc.asyncProperty(fc.constantFrom(...top.map((key) => "top:" + key), ...temporal.map((key) => "time:" + key)),
     async (coordinate) => {

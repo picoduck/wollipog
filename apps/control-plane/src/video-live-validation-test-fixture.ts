@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { mediaReviewerAttestationBody, PACED_VIDEO_REVIEW_WINDOW_LIMITS, type ClaudeMediaReviewerAttestation } from "@wollipog/protocol";
 import type { EvidenceReviewerTarget } from "./evidence-review-worker.js";
 import type { InspectedVideoValidationRun } from "./video-live-validation.js";
 
@@ -26,11 +27,23 @@ export function syntheticInspectedVideoRuns(target: EvidenceReviewerTarget, insp
   }));
 }
 
-/** A synthetic reviewer target for one registered installation; its digests attest nothing. */
+/** A synthetic runner attestation shaped like PR B's media-only Claude Code reviewer. It names no
+ * real executable or namespace and attests nothing; tests use it to exercise digest binding. */
+export function syntheticMediaReviewerAttestation(agentId: string, cliVersion = "synthetic"): ClaudeMediaReviewerAttestation {
+  return { profile: "claude-code-media-only-v1", harness: "claude-code", agentId, cliVersion,
+    executableSha256: digest("synthetic executable " + cliVersion), namespacePolicySha256: digest("synthetic narrowed namespace"),
+    tools: ["review_video_evidence_frame", "submit_video_evidence_verdict"], credential: "dedicated_api_key",
+    windowLimitsRevision: PACED_VIDEO_REVIEW_WINDOW_LIMITS.revision };
+}
+
+/** A synthetic reviewer target for one registered installation; its digests attest nothing. With an
+ * attestation, the target names that attestation's digest and namespace as hosting requires. */
 export function syntheticVideoReviewerTarget(installation: { runnerId: string; agentId: string; driver: string; modelId: string;
-  protocolVersion: number; contract: unknown }): EvidenceReviewerTarget {
-  return { agentId: installation.agentId, driver: installation.driver, modelId: installation.modelId,
-    providerId: installation.driver, runnerId: installation.runnerId, runnerProtocolVersion: installation.protocolVersion,
-    pacedVideoReviewContract: installation.contract, capabilitiesSha256: digest("synthetic audited capability"),
-    auditedAllFrameDelivery: true, reviewerNamespaceSha256: digest("synthetic narrowed namespace"), mediaOnlyNamespaceVerified: true };
+  protocolVersion: number; contract: unknown; attestation?: ClaudeMediaReviewerAttestation; providerId?: string }): EvidenceReviewerTarget {
+  return { agentId: installation.agentId, driver: installation.driver, modelId: installation.modelId, effort: "high",
+    providerId: installation.providerId ?? installation.driver, runnerId: installation.runnerId, runnerProtocolVersion: installation.protocolVersion,
+    pacedVideoReviewContract: installation.contract,
+    capabilitiesSha256: installation.attestation ? digest(mediaReviewerAttestationBody(installation.attestation)) : digest("synthetic audited capability"),
+    auditedAllFrameDelivery: true, mediaOnlyNamespaceVerified: true,
+    reviewerNamespaceSha256: installation.attestation?.namespacePolicySha256 ?? digest("synthetic narrowed namespace") };
 }

@@ -22,7 +22,7 @@ const record: VideoReviewRecord = {
   manifest: { schemaVersion: 1, purpose: "trusted_temporal_derivation", profile: "paced-silent-complete-frames-v1",
     sourceSha256: digest, sourceSizeBytes: 1, sourceMediaType: "video/webm", width: 1280, height: 720,
     durationUs: 1, frames: [], segments: [] }, manifestSha256: digest,
-  criteria: [{ criterionId: "criterion", description: "Test criterion" }], criteriaSha256: digest,
+  criteria: [{ criterionId: "criterion", description: "Test criterion" }], criteriaSha256: digest, deliveryPlanSha256: digest,
   createdAt: 1_000, expiresAt: 1_001, status: "pending",
 };
 /** Credential/audit boundary test doubles only. Real derivation/provenance is tested separately
@@ -34,7 +34,7 @@ function fixture() {
   const audit: EvidenceReviewAuditEvent[] = [];
   const pending: ResolvedVideoReviewRequest = {
     binding: record.binding, criteria: record.criteria, target: { agentId: "synthetic", driver: "codex-app-server",
-      modelId: "synthetic-model", providerId: "synthetic-provider", runnerId: "runner", runnerProtocolVersion: PACED_VIDEO_REVIEW_MIN_PROTOCOL,
+      modelId: "synthetic-model", effort: "high", providerId: "synthetic-provider", runnerId: "runner", runnerProtocolVersion: PACED_VIDEO_REVIEW_MIN_PROTOCOL,
       pacedVideoReviewContract: { id: "wollipog-paced-video-review-v1", revision: 1 },
       capabilitiesSha256: digest, auditedAllFrameDelivery: true, reviewerNamespaceSha256: digest, mediaOnlyNamespaceVerified: true },
     mediaType: "video/webm", mode: "full_control", sourceGrantVerified: true,
@@ -111,7 +111,7 @@ test("current peer revocation after synthetic derive prevents retries/recovery o
   for (const outcome of ["success", "busy"] as const) {
     const f = fixture(); const target = f.pending.target;
     // Pure Source proof object, never an actual human-inspected validation record.
-    f.setProof({ proofId: "synthetic-not-live", driver: target.driver, modelId: target.modelId, providerId: target.providerId,
+    f.setProof({ proofId: "synthetic-not-live", driver: target.driver, modelId: target.modelId, effort: target.effort, providerId: target.providerId,
       capabilitiesSha256: digest, reviewerNamespaceSha256: digest, oracleIsolationEvidenceSha256: digest,
       profile: "paced-silent-complete-frames-v1", validatedAt: Date.now() - 1000, expiresAt: Date.now() + 60_000,
       candidateValidationRunId: "synthetic", pacedValidationRunId: "synthetic", maximumProfileValidationRunId: "synthetic",

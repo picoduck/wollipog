@@ -16,7 +16,7 @@ function validGrant(grant: PacedVideoTransportGrant, now: number): boolean {
       typeof grant.operatorValidation.permitId === "string" && grant.operatorValidation.permitId.length > 0 &&
       grant.operatorValidation.permitId.length <= 256 && digest(grant.operatorValidation.scopeSha256)) &&
     grant.frames.length > 0 && grant.frames.length <= 900 &&
-    [grant.sourceSha256, grant.manifestSha256, grant.bindingSha256, grant.criteriaSha256].every(digest) &&
+    [grant.sourceSha256, grant.manifestSha256, grant.bindingSha256, grant.criteriaSha256, grant.deliveryPlanSha256].every(digest) &&
     grant.frames.every((frame, index) => frame.index === index && digest(frame.sha256) &&
       Number.isSafeInteger(frame.sizeBytes) && frame.sizeBytes > 0 && frame.sizeBytes <= 2 * 1024 * 1024 &&
       Number.isSafeInteger(frame.ptsUs) && frame.ptsUs >= 0 && Number.isSafeInteger(frame.durationUs) && frame.durationUs > 0));
@@ -30,6 +30,7 @@ function verifiedDelivery(candidate: unknown, grant: PacedVideoTransportGrant, i
     if (!exact(delivery, ["receipt", "mimeType", "sizeBytes", "data"]) ||
       !exact(receipt, ["receiptId", "occurrenceId", "reviewerSessionId", "childSessionId", "policyRevision",
         "evidenceId", "artifactId", "sha256", "deliveredAt", "deliveryOrder", "videoFrame", "bindingSha256", "criteriaSha256",
+        "deliveryPlanSha256", "windowIndex",
         ...(grant.operatorValidation ? ["operatorValidation"] : [])]) ||
       JSON.stringify(receipt.operatorValidation) !== JSON.stringify(grant.operatorValidation) ||
       !exact(receipt.videoFrame, ["sourceArtifactId", "sourceSha256", "manifestSha256", "profile", "index", "ptsMs", "ptsUs", "durationUs"]) ||
@@ -41,6 +42,7 @@ function verifiedDelivery(candidate: unknown, grant: PacedVideoTransportGrant, i
       receipt.reviewerSessionId !== grant.reviewerSessionId || receipt.childSessionId !== grant.childSessionId ||
       receipt.occurrenceId !== grant.occurrenceId || receipt.policyRevision !== grant.policyRevision ||
       receipt.bindingSha256 !== grant.bindingSha256 || receipt.criteriaSha256 !== grant.criteriaSha256 ||
+      receipt.deliveryPlanSha256 !== grant.deliveryPlanSha256 || !Number.isSafeInteger(receipt.windowIndex) || receipt.windowIndex < 0 ||
       receipt.artifactId !== grant.reviewId + ":frame:" + index ||
       receipt.evidenceId !== grant.sourceEvidenceId ||
       !receipt.receiptId || receipt.receiptId.length > 256 || receipt.sha256 !== frame.sha256 ||

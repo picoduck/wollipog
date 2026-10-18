@@ -46,6 +46,7 @@ import {
 } from "./automation-trigger-ingress.js";
 import {
   PROTOCOL_VERSION,
+  PACED_VIDEO_REVIEW_CONTRACT_ID,
   SPAWN_APPROVAL_ABANDONMENT_MS,
   POLICY_HOOK_POLL_CAPABILITY,
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
@@ -973,8 +974,9 @@ const evidenceAuthorityDisclosures = hostingEvidenceAuthorityDisclosures({
   organizationExists: (organizationId) => db.listOrganizationIds().includes(organizationId),
   listRunners: () => db.listRunners(),
 });
-// Inert until a paced-video peer, a Human-certified live proof and the media-only reviewer exist.
-const videoEvidence = composeHostingVideoEvidence(db);
+// Delegated video review (#1321). Nothing is admitted until a Human records a live proof for an
+// attested media-only reviewer; until then video evidence stays with the Human.
+const videoEvidence = composeHostingVideoEvidence(db, { log: (event, fields) => app.log.info({ event, ...fields }, "video evidence review") });
 const svc = new SessionsService(
   db,
   hub,
@@ -996,12 +998,13 @@ const svc = new SessionsService(
   sessionNamingSettings.revisionForSession,
   VIDEO_FRAME_VALIDATION_SESSION_ID !== undefined,
   VIDEO_FRAME_VALIDATION_SESSION_ID,
-  undefined,
+  videoEvidence.preparedMediaRuntime,
   videoEvidence.workflowVideoApprovals,
   evidenceAuthorityDisclosures,
-  undefined,
+  videoEvidence.operatorValidationPermits,
   videoEvidence.preparedMediaActiveStops,
 );
+videoEvidence.attach(svc, hub);
 const roleConversions = new SessionRoleConversions(db, hub, (event, fields) =>
   app.log.info({ event, ...fields }, "session role conversion"));
 if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
@@ -1404,6 +1407,8 @@ app.register(async (instance) => {
         svc.recoverCampaignReviewJobs(runnerId);
         svc.recoverSessionReviewJobs(runnerId);
         svc.recoverReviewSessions(runnerId);
+        // Media reviewers live outside the Session inventory; read back their durable outcomes.
+        videoEvidence.delegated.readback(runnerId);
         automations.tick(Date.now());
         automations.commandOutbox.flush(Date.now(), runnerId);
         hub.runnerChanged(runnerId);
@@ -1449,7 +1454,13 @@ app.register(async (instance) => {
         if(runnerId) svc.onCampaignReviewJobUpdate(runnerId,msg);
         break;
       case "media_review_never_dispatched":
-        if (runnerId) svc.onMediaReviewNeverDispatched(runnerId, msg.receipt);
+        if (runnerId) void videoEvidence.delegated.onNeverDispatched(runnerId, msg.receipt, msg.reason);
+        break;
+      case "media_review_dispatch_receipt":
+        if (runnerId) void videoEvidence.delegated.onDispatchReceipt(runnerId, msg.receipt);
+        break;
+      case "media_review_finished":
+        if (runnerId) void videoEvidence.delegated.onFinished(runnerId, msg.result);
         break;
       case "media_review_stop_acknowledged":
         if (runnerId) svc.onMediaReviewStopAcknowledged(runnerId, msg.receipt);
@@ -2076,7 +2087,9 @@ app.get("/healthz", async () => ({
 // while its parent's turn is live; create tools quote it instead of a client-side constant.
 app.get("/api/compatibility", async () => ({
   protocolVersion: PROTOCOL_VERSION,
-  // No pacedVideoReviewContract declaration: no audited production media runtime is registered.
+  // The delegated video review contract (#1321). Declaring it admits nothing: each preparation
+  // still needs an attested reviewer, a Human-inspected live proof and the current gate owner.
+  pacedVideoReviewContract: { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 },
   spawnApprovalAbandonmentMs: SPAWN_APPROVAL_ABANDONMENT_MS,
 }));
 

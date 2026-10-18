@@ -1535,6 +1535,19 @@ are spent by resolution and revoked with the decision, so a policy-revision or o
 supersession, or revocation invalidates them. The resolution audit lists evidence identifier and
 digest pairs and the receipt ids spent; each delivery is a `review`-stage audit entry.
 
+Video evidence is reviewed by a separate managed reviewer, never by the Orchestrator itself.
+`prepare_descendant_video_evidence_review` (`sessionId`, `occurrenceId`, `evidenceId`) asks the
+control plane to admit, derive and dispatch a media-only Claude Code reviewer for one video item of a
+pending decision this Orchestrator owns; it returns the review id, frame and window counts, or a
+specific refusal (`custom_fallback`, `mixed_peer`, `live_validation`, `reviewer_unavailable`,
+`allowance`, `preparation`, `reviewer_busy_exhausted`), or `pending` with reason `host_busy` while a
+busy reviewer host is retried. `get_descendant_video_evidence_provenance` (`reviewId`) returns
+`pending` until the reviewer finished and its priced usage settled, then the verdict with its
+observations. An accepted verdict also carries the exact `delegatedVideoEvidence` reference to pass
+to `resolve_descendant_workflow_decision`; a rejection is evidence for denying. Neither tool
+sends anything unless `/api/compatibility` declares the paced video review contract, and both are
+listed only for Orchestrators. See `docs/video-evidence-production.md`.
+
 This boundary governs actions performed through Wollipog's workflow-decision tools. It cannot
 intercept a separate shell, forge client, browser, or other credential that can independently
 perform the action. Orchestrator instructions must therefore require `request_workflow_decision`,

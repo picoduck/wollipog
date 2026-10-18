@@ -9139,7 +9139,9 @@ export interface SessionNamingCustomModelResultMessage {
 
 export type RunnerToControlPlane =
   | { type: "media_review_stop_acknowledged"; receipt: import("./media-active-stop.js").MediaActiveStopAcknowledgement }
-  | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence }
+  | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence;
+      /** Outside the fence digest. `host_busy` alone lets the owner requeue a fresh identity. */
+      reason?: "host_busy" }
   | { type: "media_review_dispatch_receipt"; receipt: import("./paced-video-review-windows.js").MediaReviewDispatchReceipt }
   | { type: "media_review_finished"; result: import("./paced-video-review-windows.js").MediaReviewFinished }
   | import("./campaign-control-launch.js").CampaignLaunchInspectionResult
@@ -11825,7 +11827,7 @@ export type { PacedVideoReviewReceipt, PacedVideoReviewDelivery, PacedVideoRevie
 export { PACED_VIDEO_REVIEW_BATCH_LIMITS, PACED_VIDEO_REVIEW_MIN_PROTOCOL, PACED_VIDEO_REVIEW_CONTRACT_ID,
   validPacedVideoReviewPeerContract, supportsPacedVideoReviewPeer } from "./paced-video-review.js";
 export type { PacedVideoReviewPeerContract } from "./paced-video-review.js";
-export { PACED_VIDEO_REVIEW_WINDOW_LIMITS, pacedVideoReviewWindowPlan, pacedVideoReviewWindowPlanBody,
+export { PACED_VIDEO_REVIEW_WINDOW_LIMITS, pacedVideoReviewWindowPlan, pacedVideoReviewWindowPlanBody, mediaReviewerAttestationBody,
   parsePacedVideoReviewWindowNotes, validPacedVideoReviewWindowNotes } from "./paced-video-review-windows.js";
 export type { PacedVideoReviewWindow, PacedVideoReviewWindowPlan, PacedVideoReviewWindowNotes, PacedVideoReviewWindowLimits,
   ClaudeMediaReviewerAttestation, MediaReviewDispatch, MediaReviewDispatchReceipt, MediaReviewFinished } from "./paced-video-review-windows.js";

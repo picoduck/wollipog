@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { DurableSessionCommand, PacedVideoTransportGrant } from "@wollipog/protocol";
+import { pacedVideoReviewWindowPlan, pacedVideoReviewWindowPlanBody, type DurableSessionCommand,
+  type PacedVideoTransportGrant } from "@wollipog/protocol";
 import { validReviewerBudgetAdmission, type EvidenceReviewerBudgetAdmission } from "./evidence-review-admission.js";
 
 type StartCommand = Extract<DurableSessionCommand, { type: "start_session" }>;
@@ -87,10 +88,16 @@ function validMaterialized(identity: PreparedMediaIdentity, value: MaterializedM
     (a.allocation.toolCalls === undefined || value.command.spec.config?.maxToolCalls !== undefined &&
       value.command.spec.config.maxToolCalls > 0 && value.command.spec.config.maxToolCalls <= a.allocation.toolCalls);
 }
+/** The grant's window plan is recomputed from its own frames, never trusted as supplied. */
+export function pacedGrantPlanDigest(frames: PacedVideoTransportGrant["frames"]): string | null {
+  try { return createHash("sha256").update(pacedVideoReviewWindowPlanBody(pacedVideoReviewWindowPlan(frames))).digest("hex"); }
+  catch { return null; }
+}
 function validBinding(record: PreparedMediaRecord, binding: PreparedMediaBinding, now: number): boolean {
   const g = binding.grant;
   return [binding.namespaceLaunchSha256, binding.namespacePolicySha256, binding.authoritySha256,
-    g.sourceSha256, g.manifestSha256, g.bindingSha256, g.criteriaSha256].every(digest) &&
+    g.sourceSha256, g.manifestSha256, g.bindingSha256, g.criteriaSha256, g.deliveryPlanSha256].every(digest) &&
+    pacedGrantPlanDigest(g.frames) === g.deliveryPlanSha256 &&
     [g.reviewId, g.occurrenceId, g.sourceEvidenceId, g.sourceArtifactId].every(id) &&
     g.reviewerSessionId === record.sessionId && g.childSessionId === record.childSessionId &&
     Number.isSafeInteger(g.policyRevision) && g.policyRevision === record.admission.authorityRevision &&
