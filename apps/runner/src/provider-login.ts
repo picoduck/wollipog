@@ -660,10 +660,9 @@ export class ProviderLoginSupervisor {
     return { ...operation.view };
   }
 
-  /** Forget one configured account. The runner-created credential home is deleted only when no
-   * session or process on this Machine still depends on it; otherwise it is kept so those sessions
-   * continue to authenticate. Operator-configured homes are never deleted, nor is a home whose
-   * provider profile other control planes are still granted (#3239, see `ProviderAccountRemovalOptions`). */
+  /** Forget one configured account and settle its profile grants. Retain its credential HOME and
+   * canonical lease evidence: neither a managed path nor a released lease proves exclusive
+   * physical retirement authority (#3157, see `ProviderAccountRemovalOptions`). */
   async removeAccount(accountId: string, options: ProviderAccountRemovalOptions = {}): Promise<{ credentialsRetained: boolean }> {
     const account = this.options.accounts.find((candidate) => candidate.id === accountId);
     if (!account) throw new Error("Provider account is not configured on this Machine.");
