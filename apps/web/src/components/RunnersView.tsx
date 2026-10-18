@@ -1866,7 +1866,8 @@ export function RunnersView() {
     return {};
   };
   const sections: Array<{ id: ConnectionSection; label: React.ReactNode }> = [
-    { id: "machines", label: <>Machines <span className="count">{total}</span></> },
+    // No count before the first snapshot: an empty list there proves nothing (§12.3).
+    { id: "machines", label: <>Machines{snapshot.loading ? null : <> <span className="count">{total}</span></>}</> },
     ...(instancesTab
       ? [{ id: "instances" as const, label: <>Instances <span className="count">{instances.registry.profiles.length}</span></> }]
       : []),

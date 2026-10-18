@@ -335,8 +335,11 @@ test("before the first snapshot the list shows skeleton rows and the detail its 
     assert.equal(list(view.body).querySelectorAll(".skeleton .row.row-2.machine-row-skeleton").length, 3);
     assert.ok(detail(view.body).querySelector(".detail-skeleton"));
     assert.doesNotMatch(view.body.textContent ?? "", /No Machines/);
+    const tab = () => view.body.querySelector("#connections-machines-tab")?.textContent;
+    assert.equal(tab(), "Machines", "no zero count while loading (§12.3)");
     await view.push(snapshot([alpha]));
     assert.deepEqual(rowNames(view.body), ["Alpha"]);
+    assert.equal(tab(), "Machines 1");
   } finally {
     await view.unmount();
   }
