@@ -1,6 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { ProviderHomeLeaseRegistry, providerHomeLeaseRefusalKind, type ProviderHomeLeaseOptions } from "./provider-home-lease.js";
-import { adoptProviderProfileMarker, revokeProviderProfileMarkerGrant } from "./provider-profile.js";
+import { adoptProviderProfileMarker, createProviderProfileMarker, revokeProviderProfileMarkerGrant } from "./provider-profile.js";
 import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_LIMITS, LEASE_WORKER_REFERENCE_LIMIT, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept, type LeaseWorkerError, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** Only the fixed source/SEA entry starts this worker; there is no public RPC/CLI entry. */
@@ -53,7 +53,7 @@ export function runProviderHomeLeaseWorker(): void {
             const acquisition = registry.acquireHomeWithReceipt(op.home, op.provider, op.profile);
             reply.value = acquisition.first; prepared.cancel = acquisition.cancel;
           }
-        } else if (op.method === "profile_adopt" || op.method === "profile_revoke" || op.method === "profile_retire") {
+        } else if (op.method === "profile_adopt" || op.method === "profile_revoke" || op.method === "profile_retire" || op.method === "profile_create") {
           // Grants name the attested instance this worker was started for, never a frame value.
           const controlPlaneInstanceId = options.controlPlaneInstanceId;
           if (!controlPlaneInstanceId) throw new Error("provider profile changes require an attested control-plane instance");
@@ -62,8 +62,13 @@ export function runProviderHomeLeaseWorker(): void {
             const { marker } = registry.changeProfileMarkerWhileHeld(op.home, op.provider,
               read => adoptProviderProfileMarker(read, { provider: op.provider, grant }));
             reply.value = true; reply.profileId = marker.profileId;
+          } else if (op.method === "profile_create") {
+            const grant = { controlPlaneInstanceId, grantId: op.grantId, grantedAt: new Date().toISOString() };
+            registry.changeProfileMarkerWhileHeld(op.home, op.provider,
+              read => createProviderProfileMarker(read, { provider: op.provider, profileId: op.profileId, grant }));
+            reply.value = true;
           } else if (op.method === "profile_retire") {
-            reply.value = registry.retireProfileHomeWhileHeld(op.home, op.provider, controlPlaneInstanceId);
+            reply.value = registry.retireProfileHomeWhileHeld(op.home, op.provider, controlPlaneInstanceId, op.profileId);
           } else {
             reply.value = registry.changeProfileMarkerWhileHeld(op.home, op.provider, read =>
               revokeProviderProfileMarkerGrant(read, { profileId: op.profileId, controlPlaneInstanceId, grantId: op.grantId })).changed;

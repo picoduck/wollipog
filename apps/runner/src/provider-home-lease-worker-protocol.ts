@@ -27,10 +27,15 @@ export type LeaseWorkerOperation =
    * and drop the reference they took before replying. */
   | { method: "profile_adopt"; home: string; provider: "claude" | "codex"; grantId: string }
   | { method: "profile_revoke"; home: string; provider: "claude" | "codex"; profileId: string; grantId: string }
+  /** #3239: give a new, marker-less managed HOME (Add Account) the identity `profileId` with this
+   * control plane's grant. Refused as `profile_changed` when the HOME already holds a marker. */
+  | { method: "profile_create"; home: string; provider: "claude" | "codex"; profileId: string; grantId: string }
   /** #3239: the retain-or-delete decision for a removed account's HOME, under its lease. Drops every
    * grant of this control plane from the marker; `value` is true only when the lease was released
-   * (no other reference here) and no other control plane is granted, so the caller may delete it. */
-  | { method: "profile_retire"; home: string; provider: "claude" | "codex" };
+   * (no other reference here) and no other control plane is granted, so the caller may delete it.
+   * `profileId`, sent for a managed profile HOME, is the identity its account recorded: a marker
+   * holding any other identity, or none, keeps the HOME and is not changed. */
+  | { method: "profile_retire"; home: string; provider: "claude" | "codex"; profileId?: string };
 export function isLeaseWorkerAcquisition(method: LeaseWorkerOperation["method"]): method is "acquire" | "acquire_reference" {
   return method === "acquire" || method === "acquire_reference";
 }
@@ -92,8 +97,12 @@ export function validLeaseWorkerOperation(value: unknown): value is LeaseWorkerO
   if (v.method === "release") return Object.keys(v).length === 2;
   if (v.method === "cancel") return typeof v.completedId === "string" && /^[a-f0-9-]{36}$/u.test(v.completedId) && Object.keys(v).length === 3;
   if (v.method === "release_reference" || v.method === "retain_reference") return typeof v.referenceId === "string" && /^[a-f0-9-]{36}$/u.test(v.referenceId) && Object.keys(v).length === 3;
-  if (v.method === "profile_retire") return (v.provider === "claude" || v.provider === "codex") && Object.keys(v).length === 3;
-  if (v.method === "profile_adopt" || v.method === "profile_revoke") {
+  if (v.method === "profile_retire") {
+    const expected = Object.hasOwn(v, "profileId");
+    if (expected && (typeof v.profileId !== "string" || !PROFILE_ID.test(v.profileId))) return false;
+    return (v.provider === "claude" || v.provider === "codex") && Object.keys(v).length === (expected ? 4 : 3);
+  }
+  if (v.method === "profile_adopt" || v.method === "profile_revoke" || v.method === "profile_create") {
     if (v.provider !== "claude" && v.provider !== "codex") return false;
     if (typeof v.grantId !== "string" || !GRANT_ID.test(v.grantId)) return false;
     if (v.method === "profile_adopt") return Object.keys(v).length === 4;

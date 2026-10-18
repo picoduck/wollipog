@@ -793,6 +793,8 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const providerLoginCommand = await runnerInbox.take((message) => message.type === "start_provider_login");
   assert.equal(providerLoginCommand.provider, "claude");
   assert.equal(providerLoginCommand.label, "Work");
+  assert.match(String(providerLoginCommand.profileGrantId), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    "a v225 runner creates the new account as a managed profile granted to this control plane (#3239)");
   const providerLogin = {
     operationId: "login_12345678-1234-4123-8123-123456789abc",
     accountId: "work",

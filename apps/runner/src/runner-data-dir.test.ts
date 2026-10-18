@@ -164,6 +164,23 @@ test("same-owner concurrency is rejected while different owners receive determin
   }
 });
 
+test("the managed provider profile root is not legacy state of a default data directory", () => {
+  const root = tempRoot();
+  try {
+    // Another runner on this OS account (with its own --data-dir) created a managed profile (#3239).
+    mkdirSync(join(root, "profiles", "6f1c2d3e-4a5b-4c6d-8e7f-001122334455"), { recursive: true });
+    const lease = acquireRunnerDataDirLease(root, FIRST);
+    assert.equal(lease.dataDir, root);
+    lease.release();
+    mkdirSync(join(root, "runner-instances-unrelated"));
+    rmSync(join(root, ".wollipog-runner-owner-v2.json"), { force: true });
+    rmSync(join(root, ".wollipog-runner-owner-v1.json"), { force: true });
+    assert.throws(() => acquireRunnerDataDirLease(root, FIRST), /--adopt-legacy-data-dir/, "any other entry still is");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("stale same-host leases are reclaimed but foreign-host leases fail closed", () => {
   const root = tempRoot();
   try {

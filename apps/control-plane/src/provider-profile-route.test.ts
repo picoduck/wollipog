@@ -7,12 +7,15 @@ import { ControlPlaneDb } from "./db.js";
 import type { Hub, RunnerRequestResult } from "./hub.js";
 import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import {
+  authorizeCreatedProviderProfileGrant,
   ProviderProfileInventoryRevocations,
   providerProfileGrantsForRunner,
   reconcileProviderProfileGrants,
   registerProviderProfileRoutes,
   revokeProviderProfileAccessForAccountRemoval,
   revokeProviderProfileGrantsForAccountRemoval,
+  revokeUnrecordedCreatedProviderProfileGrants,
+  settleCreatedProviderProfileGrantStart,
 } from "./provider-profile-route.js";
 
 const PROFILE = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
@@ -399,6 +402,75 @@ test("a runner whose marker holds one of the later of 257 grants in its scope is
     assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-replacement", [late!.profileId]),
       [{ grantId: late!.grantId, status: "active", profileId: late!.profileId }],
       "the grant is listed, so the runner neither treats it as stale nor removes it from the marker");
+  } finally {
+    await f.close();
+  }
+});
+
+test("Add Account on a v225 runner records a created grant with the creator's role and completes it from the account report", async () => {
+  const f = await fixture();
+  try {
+    const grantId = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, principal("operator"), "codex", 10);
+    assert.ok(grantId, "any person who can manage the Machine is granted the account they create");
+    const pending = f.db.getProviderProfileGrant(grantId)!;
+    assert.deepEqual([pending.status, pending.origin, pending.grantedBy, pending.grantedRole, pending.provider, pending.profileId],
+      ["pending", "created", "user-1", "operator", "codex", null]);
+    assert.notEqual(pending.providerAccountId, "work-1234", "the account is named only by the runner's start reply");
+    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a", []), [{ grantId, status: "pending" }],
+      "a reconnect during the sign-in still lists the grant to the runner");
+
+    settleCreatedProviderProfileGrantStart(f.db, grantId, { started: true, accountId: "work-1234" }, principal("operator"), 11);
+    assert.equal(f.db.getProviderProfileGrant(grantId)?.providerAccountId, "work-1234");
+    f.register("runner-a", [account("work-1234", { id: PROFILE, access: "granted" })]);
+    assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", f.db.getRunner("runner-a")?.providerAccounts, 12), [grantId]);
+    const active = f.db.getProviderProfileGrant(grantId)!;
+    assert.deepEqual([active.status, active.profileId, active.origin], ["active", PROFILE, "created"]);
+  } finally {
+    await f.close();
+  }
+});
+
+test("Add Account records no grant for an older runner or a non-human caller", async () => {
+  const f = await fixture({ protocolVersion: 224 });
+  try {
+    assert.equal(authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 224 }, principal("owner"), "claude", 1), undefined);
+    const agent = { kind: "agent", actorId: "agent-1" } as unknown as Parameters<typeof authorizeCreatedProviderProfileGrant>[2];
+    assert.equal(authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, agent, "claude", 1), undefined);
+    assert.equal(authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-unknown", protocolVersion: 225 }, principal("owner"), "claude", 1),
+      undefined, "a runner without a recorded scope keeps today's HOME");
+    assert.deepEqual(f.db.liveProviderProfileGrantsForAccount("runner-a", "work"), []);
+  } finally {
+    await f.close();
+  }
+});
+
+test("an Add Account grant is spent when the sign-in does not start, settles without an account, or reports no profile", async () => {
+  const f = await fixture();
+  try {
+    const owner = principal("admin");
+    const refused = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 1)!;
+    settleCreatedProviderProfileGrantStart(f.db, refused, { started: false }, owner, 2);
+    assert.deepEqual([f.db.getProviderProfileGrant(refused)?.status, f.db.getProviderProfileGrant(refused)?.revokedBy],
+      ["revoked", "user-1"]);
+
+    const cancelled = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 3)!;
+    settleCreatedProviderProfileGrantStart(f.db, cancelled, { started: true, accountId: "cancelled-1" }, owner, 4);
+    const adoption = f.db.authorizeProviderProfileGrant({ grantId: randomUUID(), runnerId: "runner-a", providerAccountId: "work",
+      provider: "claude", origin: "adopted", grantedBy: "user-1", grantedRole: "owner", now: 4 })!.grant.grantId;
+    const login = (accountId: string, status: string, sessionId?: string) => ({ accountId, status, ...(sessionId ? { sessionId } : {}) });
+    assert.deepEqual(revokeUnrecordedCreatedProviderProfileGrants(f.db, "runner-a",
+      [login("cancelled-1", "waiting_for_provider"), login("work", "failed"), login("cancelled-1", "failed", "session-1")], 5), [],
+      "a running sign-in, a re-sign-in of an adopted account, and a session's repair keep their grants");
+    assert.deepEqual(revokeUnrecordedCreatedProviderProfileGrants(f.db, "runner-a", [login("cancelled-1", "cancelled")], 6), [cancelled]);
+    assert.equal(f.db.getProviderProfileGrant(cancelled)?.status, "revoked");
+    assert.equal(f.db.getProviderProfileGrant(adoption)?.status, "pending");
+
+    const windows = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 7)!;
+    settleCreatedProviderProfileGrantStart(f.db, windows, { started: true, accountId: "windows-1" }, owner, 8);
+    f.register("runner-a", [account("windows-1"), account("work")]);
+    assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", f.db.getRunner("runner-a")?.providerAccounts, 9), []);
+    assert.equal(f.db.getProviderProfileGrant(windows)?.status, "revoked", "the runner created no profile, so the grant is spent");
+    assert.equal(f.db.getProviderProfileGrant(adoption)?.status, "pending", "an adoption waiting for its runner is untouched");
   } finally {
     await f.close();
   }

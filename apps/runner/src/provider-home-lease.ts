@@ -792,14 +792,16 @@ export class ProviderHomeLeaseRegistry {
    * its lease. Like a marker change it skips the grant check (this control plane's grant may already
    * be revoked), drops every grant of `controlPlaneInstanceId` from the marker, and then drops the
    * reference taken here. True only when that released the lease (no other reference was held here)
-   * and the marker grants no other control plane; an unverifiable marker is kept.
+   * and the marker grants no other control plane; an unverifiable marker is kept. With
+   * `expectedProfileId` a marker that does not hold exactly that identity is kept and left unchanged.
    */
-  retireProfileHomeWhileHeld(requestedHome: string, provider: "claude" | "codex", controlPlaneInstanceId: string): boolean {
+  retireProfileHomeWhileHeld(requestedHome: string, provider: "claude" | "codex", controlPlaneInstanceId: string, expectedProfileId?: string): boolean {
     const receipt = this.acquireReceiptFor(requestedHome, provider, PROFILE_CHANGE);
     const home = this.lastAcquisitionHome!;
     let shared: boolean;
     try {
-      const result = retireProviderProfileMarker(readProviderProfileMarker(home, { provider }), { controlPlaneInstanceId });
+      const result = retireProviderProfileMarker(readProviderProfileMarker(home, { provider }),
+        { controlPlaneInstanceId, ...(expectedProfileId !== undefined ? { expectedProfileId } : {}) });
       if (result.changed && result.marker) this.writeProfileMarkerWhileHeld(home, result.marker);
       shared = result.shared;
     } catch (error) {

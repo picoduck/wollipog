@@ -183,11 +183,14 @@ import {
 } from "./box-lifecycle.js";
 import { registerBoxLegacyAdoptionRoute } from "./box-legacy-adoption-route.js";
 import {
+  authorizeCreatedProviderProfileGrant,
   ProviderProfileInventoryRevocations,
   providerProfileGrantsForRunner,
   reconcileProviderProfileGrants,
   registerProviderProfileRoutes,
   revokeProviderProfileAccessForAccountRemoval,
+  revokeUnrecordedCreatedProviderProfileGrants,
+  settleCreatedProviderProfileGrantStart,
 } from "./provider-profile-route.js";
 import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
@@ -238,6 +241,7 @@ import { validateForgeReviewSync, validateGitHubReviewSync } from "./review-find
 import {
   Hub,
   INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
+  isRunnerRequestNotSentError,
   isRunnerRequestTimeoutError,
   SOMEDAY_REMINDER_CLIENT_UPDATE_REQUIRED,
 } from "./hub.js";
@@ -1593,6 +1597,10 @@ app.register(async (instance) => {
         }
         try {
           db.updateRunnerProviderLogins(msg.runnerId, msg.logins, Date.now());
+          if (runnerSupportsProtocol(db.getRunner(msg.runnerId)?.protocolVersion, "providerProfiles")) {
+            // A new-account sign-in that settled without an account spends its Add Account grant.
+            revokeUnrecordedCreatedProviderProfileGrants(db, msg.runnerId, msg.logins, Date.now());
+          }
           hub.runnerChanged(msg.runnerId);
         } catch (error) {
           app.log.warn(
@@ -2961,6 +2969,15 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     return reply.code(409).send({ error: "The provider account is not available on this Machine." });
   }
   const requestId = `provider_login_${randomUUID()}`;
+  // #3239: the control plane that creates an account on a v225 runner is granted its new managed
+  // provider profile; adoption and revocation stay Owner/Admin only.
+  const profileGrantId = hasAccountId ? undefined
+    : authorizeCreatedProviderProfileGrant(db, runner, principal, body.provider as "claude" | "codex", Date.now());
+  const settleProfileGrant = (outcome: Parameters<typeof settleCreatedProviderProfileGrantStart>[2]) => {
+    if (profileGrantId && principal.kind === "human") {
+      settleCreatedProviderProfileGrantStart(db, profileGrantId, outcome, principal, Date.now());
+    }
+  };
   try {
     const result = await hub.requestFromRunner(id, requestId, {
       type: "start_provider_login",
@@ -2972,16 +2989,22 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
       })),
       ...(hasAccountId
         ? { accountId: body.accountId as string }
-        : { provider: body.provider as "claude" | "codex", label: (body.label as string).trim() }),
+        : { provider: body.provider as "claude" | "codex", label: (body.label as string).trim(),
+          ...(profileGrantId ? { profileGrantId } : {}) }),
     });
     if (result.type !== "provider_login_result" || result.action !== "start") {
+      settleProfileGrant({ started: false });
       return reply.code(502).send({ error: "unexpected runner reply" });
     }
     if (!result.ok || !result.login) {
+      settleProfileGrant({ started: false });
       return reply.code(409).send({ error: result.error ?? "Provider sign-in could not be started" });
     }
+    settleProfileGrant({ started: true, accountId: result.login.accountId });
     return reply.code(201).send({ login: result.login });
   } catch (error) {
+    // A command that never left is spent; a lost reply leaves the grant pending (see the docs).
+    if (isRunnerRequestNotSentError(error)) settleProfileGrant({ started: false });
     return reply.code(504).send({ error: (error as Error).message });
   }
 });
