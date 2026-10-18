@@ -42,6 +42,7 @@ const routes: Array<[View, string]> = [
   [{ name: "skills", pane: "overview" }, "/skills/overview"],
   [{ name: "usage" }, "/usage"],
   [{ name: "projects" }, "/projects"],
+  [{ name: "projects", pane: "overview" }, "/projects/overview"],
   [{ name: "projects", id: "project / unicode ✅" }, `/projects/~${encodeResourceId("project / unicode ✅")}`],
   ...["space / unicode ✅ %?#", ".", "..", "foo.txt", "a/../foo.txt", "~already-marked"].map(
     (id): [View, string] => [{ name: "session", id }, `/sessions/~${encodeResourceId(id)}`],
@@ -75,6 +76,15 @@ test("Agent Skills panes have their own routes, and a skill id wins over a pane"
   assert.equal(viewFromPath("/skills/unknown"), null);
   assert.equal(viewFromPath("/skills/Orphans"), null);
   assert.equal(sameView({ name: "skills", pane: "orphans" }, { name: "skills" }), false, "Back can leave the pane");
+});
+
+test("the Projects Overview has its own route, and a project id wins over it", () => {
+  assert.deepEqual(viewFromPath(`/projects/~${encodeResourceId("overview")}`), { name: "projects", id: "overview" },
+    "a project whose id reads like the pane is still a project");
+  assert.equal(viewPath({ name: "projects", id: "project_abc", pane: "overview" }), `/projects/~${encodeResourceId("project_abc")}`);
+  assert.equal(viewFromPath("/projects/Overview"), null);
+  assert.equal(viewFromPath("/projects/unknown"), null);
+  assert.equal(sameView({ name: "projects", pane: "overview" }, { name: "projects" }), false, "Back can leave the overview");
 });
 
 test("every dashboard view has a canonical round-tripping path", () => {

@@ -15814,26 +15814,28 @@ button.review-finding-location {
 /* Skeleton rows are the row itself, holding a title bar over a meta bar (§12.3). */
 /* The Projects list's are the same (#2957). */
 :is(.skill-row-skeleton, .project-row-skeleton) > .row-body { gap: var(--space-2); }
-/* The phone's first row (#1971): it opens the Library Overview, a step apart from the groups. */
-.skill-list-overview { margin-bottom: var(--space-2); }
+/* The phone's first row (#1971): it opens the Library Overview, a step apart from the groups. The
+   Projects list's opens the Projects Overview (#2958). */
+:is(.skill-list-overview, .project-list-overview) { margin-bottom: var(--space-2); }
 /* The Library Overview (#1971, §6.1): the default detail, top-aligned at the pane's leading edge.
-   A title row, then sections 32px apart, each a Surface of two-line rows. */
-.skills-overview {
+   A title row, then sections 32px apart, each a Surface of two-line rows. The Projects Overview
+   (#2958) is the same recipe. */
+:is(.skills-overview, .projects-overview) {
   display: grid;
   align-content: start;
   gap: var(--space-8);
   min-width: 0;
 }
-.skills-overview-head {
+:is(.skills-overview-head, .projects-overview-head) {
   display: grid;
   gap: var(--space-1);
   min-width: 0;
 }
-.skills-overview-title {
+:is(.skills-overview-title, .projects-overview-title) {
   margin: 0;
   font: var(--type-title);
 }
-.skills-overview-summary {
+:is(.skills-overview-summary, .projects-overview-summary) {
   margin: 0;
   color: var(--text-dim);
   font: var(--type-body);
@@ -15911,14 +15913,14 @@ button.review-finding-location {
 }
 .skill-orphans-reason { color: var(--amber); }
 /* The section's plain count (§11.4): no pill, faint and tabular. */
-.skills-overview-count {
+:is(.skills-overview-count, .projects-overview-count) {
   margin-left: var(--space-2);
   color: var(--text-faint);
   font: var(--type-micro);
   font-variant-numeric: tabular-nums;
 }
 /* Actions trail the row and never shrink; the reason gives way first. */
-.skills-overview-row > .btn,
+:is(.skills-overview-row, .projects-overview-row) > .btn,
 .skills-overview-actions { flex: none; }
 .skills-overview-actions {
   display: flex;
@@ -15926,14 +15928,14 @@ button.review-finding-location {
   gap: var(--space-2);
 }
 /* Nothing to review: one line after a green dot, centred on the first line if it wraps. */
-.skills-overview-ok {
+:is(.skills-overview-ok, .projects-overview-ok) {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
   margin: 0;
   font: var(--type-body);
 }
-.skills-overview-dot {
+:is(.skills-overview-dot, .projects-overview-dot) {
   flex: none;
   width: 8px;
   height: 8px;
@@ -15941,14 +15943,14 @@ button.review-finding-location {
   border-radius: var(--radius-pill);
   background: var(--green);
 }
-.skills-get-started {
+:is(.skills-get-started, .projects-get-started) {
   display: grid;
   gap: var(--space-3);
   margin: 0;
   padding: 0;
   list-style: none;
 }
-.skills-get-started > li {
+:is(.skills-get-started, .projects-get-started) > li {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -16737,7 +16739,7 @@ button.review-finding-location {
 .machine-skills-group h5 { margin: 0; }
 .machine-skills-group ul { display: grid; gap: var(--space-1); margin: 0; padding-left: var(--space-4); }
 .machine-skills-group li { overflow-wrap: anywhere; }
-.skills-hint { color: var(--text-dim); font-size: var(--text-sm); line-height: 1.5; margin: 0; }
+:is(.skills-hint, .projects-overview-hint) { color: var(--text-dim); font-size: var(--text-sm); line-height: 1.5; margin: 0; }
 /* New Skill (NewSkillDialog.tsx). The Upload Folder dropzone is the §8.4 file picker: an icon, a
    sentence and Choose Folder…, never the native "Choose Files" control. */
 .skill-dropzone {

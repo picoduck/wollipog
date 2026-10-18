@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import { PROTOCOL_VERSION, type ProjectView, type RunnerView, type UiSnapshotMessage } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import type { ViewNavigation } from "../navigation.js";
+import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
@@ -96,10 +96,15 @@ function project(index: number, options: Partial<ProjectView> = {}): ProjectView
 /** Every preset New Session was opened with, newest last. */
 const newSessionPresets: (NewSessionPreset | undefined)[] = [];
 
+/** The store's route as of the last render. */
+let currentView: View = { name: "projects" };
+
 /** The route is the view's only selection, so the harness renders the store's current route. */
 function ProjectsRoute() {
   const view = useStoreSelector((state) => state.view);
+  currentView = view;
   return <ProjectsView selectedProjectId={view.name === "projects" ? view.id : undefined}
+    pane={view.name === "projects" ? view.pane : undefined}
     onNewSession={(preset) => { newSessionPresets.push(preset); }} />;
 }
 
@@ -168,7 +173,7 @@ test("the filter counts All 9, Shown 8 and Hidden 1, and Hidden lists only the h
   assert.equal(text(rows(body)[0]!.querySelector(".row-sub")), "Hidden tab · Build Machine");
 });
 
-test("a search with no match is one inline row with Clear Search, and no Select a Project beside it", async () => {
+test("a search with no match is one inline row with Clear Search, and the overview stays beside it", async () => {
   const body = await render({ projects: [project(1), project(2)] });
   const search = body.querySelector<HTMLInputElement>('input[aria-label="Search Projects"]')!;
   await act(async () => {
@@ -183,6 +188,8 @@ test("a search with no match is one inline row with Clear Search, and no Select 
   assert.equal(noMatch.length, 1);
   assert.match(text(noMatch[0]), /No projects match “zzz”\./);
   assert.doesNotMatch(text(body), /Select a Project/);
+  assert.equal(text(body.querySelector(".master-detail-detail .projects-overview-summary")),
+    "2 projects on 1 machine, with 3 sessions.", "a search changes only the list (#2957)");
   const clear = [...noMatch[0]!.querySelectorAll("button")].find((button) => text(button) === "Clear Search");
   assert.ok(clear, "Clear Search");
   await act(async () => { clear!.click(); });
@@ -453,6 +460,176 @@ test("on a phone the detail bar carries New Session and the same ⋯ items, and 
     assert.equal(newSessionPresets.at(-1)?.projectLocationId, "location-1b");
     const menu = await openProjectActions(bar);
     assert.deepEqual(menuItems(menu).map((item) => item.label), ["Copy Project ID", "Archive Sessions…", "Delete Project…"]);
+  } finally {
+    restore();
+  }
+});
+
+
+/* --- The Projects Overview (#2958) --- */
+
+const offlineRunner: RunnerView = {
+  ...runner,
+  runnerId: "runner-2",
+  hostname: "studio-host",
+  displayName: "Studio Mac",
+  status: "offline",
+  workspaces: [{ id: "workspace-docs", name: "Docs", path: "/repos/docs" }],
+};
+
+/** Docs Site only on the offline machine, Edge Proxy with no locations, and two projects named Field App. */
+function attentionProjects(): ProjectView[] {
+  return [
+    project(1, { name: "Alpha" }),
+    project(2, {
+      id: "docs", name: "Docs Site",
+      locations: [{ ...project(2).locations[0]!, id: "location-docs", projectId: "docs", runnerId: "runner-2", workspaceId: "workspace-docs", availability: "runner_offline" }],
+    }),
+    project(3, { id: "edge", name: "Edge Proxy", locations: [] }),
+    project(4, { id: "field-1", name: "Field App" }),
+    project(5, { id: "field-2", name: "Field App" }),
+  ];
+}
+
+const overview = (body: HTMLElement) => body.querySelector(".master-detail-detail > .projects-overview");
+const overviewSection = (body: HTMLElement, title: string) => [...body.querySelectorAll(".projects-overview > section")]
+  .find((section) => text(section.querySelector(".section-title")).startsWith(title)) ?? null;
+const settle = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); }); };
+
+test("at 1440px with no selection the detail is the Projects Overview with its count line, never Select a Project", async () => {
+  const body = await render({
+    projects: [busyProject(), project(2, { activeSessionCount: 1 }), project(3, { locations: [] })],
+    runners: [runner, offlineRunner],
+  });
+  assert.ok(overview(body), "the overview is the default detail");
+  assert.equal(text(body.querySelector(".projects-overview-title")), "Projects Overview");
+  assert.equal(body.querySelector(".projects-overview-title")!.tagName, "H2");
+  assert.equal(text(body.querySelector(".projects-overview-summary")), "3 projects on 1 machine, with 16 sessions. 2 are running now.");
+  assert.doesNotMatch(text(body), /Select a Project/);
+  assertNoDomNode(body.querySelector(".master-detail-detail .project-manager-empty"), "the placeholder is gone");
+  assertNoDomNode(body.querySelector(".project-list-overview"), "only a phone's list leads with an overview row");
+});
+
+test("an offline project, a project with no locations and a shared name are each one Needs Attention row with its action", async () => {
+  const body = await render({ projects: attentionProjects(), runners: [runner, offlineRunner] });
+  const section = overviewSection(body, "Needs Attention")!;
+  assert.equal(text(section.querySelector(".projects-overview-count")), "3", "a plain count");
+  const surface = section.querySelector(":scope > .surface")!;
+  const items = [...surface.querySelectorAll(":scope > .row.row-2")].map((row) => ({
+    title: text(row.querySelector(".row-title")),
+    badge: row.querySelector(".status") ? text(row.querySelector(".status")) : null,
+    reason: text(row.querySelector(".row-sub")),
+    action: [...row.querySelectorAll("button")].map((button) => `${text(button)} (${button.getAttribute("aria-label")})`),
+  }));
+  assert.deepEqual(items, [
+    { title: "Docs Site", badge: "Runner Offline", reason: "Studio Mac is offline, so this project can't start sessions.", action: ["Open (Open Docs Site)"] },
+    { title: "Edge Proxy", badge: null, reason: "No locations yet, so it can't start sessions.", action: ["Add Location… (Add Location to Edge Proxy)"] },
+    { title: "2 Projects Named Field App", badge: null, reason: "Rename one so they're easy to tell apart in lists and pickers.", action: ["Rename… (Rename Field App)"] },
+  ]);
+  assertNoDomNode(section.querySelector(".projects-overview-ok"), "no all-clear beside problems");
+
+  await act(async () => { surface.querySelector<HTMLButtonElement>('button[aria-label="Open Docs Site"]')!.click(); });
+  await settle();
+  assert.deepEqual(currentView, { name: "projects", id: "docs" });
+  assert.equal(text(body.querySelector(".project-detail-title")), "Docs Site");
+});
+
+test("Add Location… opens Add Location for that project, over the overview", async () => {
+  const body = await render({ projects: attentionProjects(), runners: [runner, offlineRunner] });
+  await act(async () => { body.querySelector<HTMLButtonElement>('button[aria-label="Add Location to Edge Proxy"]')!.click(); });
+  await settle();
+  const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement | null;
+  assert.ok(dialog, "Add Location is open");
+  assert.equal(text(dialog!.querySelector(".modal-title, h2")), "Add Location to Edge Proxy");
+  assert.deepEqual(currentView, { name: "projects" }, "the overview stays behind it");
+});
+
+test("Rename… opens the first project of a shared name with its Name field focused", async () => {
+  const body = await render({ projects: attentionProjects(), runners: [runner, offlineRunner] });
+  await act(async () => { body.querySelector<HTMLButtonElement>('button[aria-label="Rename Field App"]')!.click(); });
+  await settle();
+  assert.deepEqual(currentView, { name: "projects", id: "field-1" });
+  const name = body.querySelector<HTMLInputElement>(".project-name-form input");
+  assert.equal(name?.value, "Field App");
+  assert.ok(domWindow.document.activeElement as unknown as Element | null === name, "the Name field has focus");
+});
+
+test("a project the person can't change offers Open, not Add Location… or Rename…", async () => {
+  const body = await render({ projects: [project(1, { name: "Shared", locations: [], canManage: false })] });
+  const row = overviewSection(body, "Needs Attention")!.querySelector(".surface > .row")!;
+  assert.deepEqual([...row.querySelectorAll("button")].map(text), ["Open"]);
+});
+
+test("with nothing needing attention, Needs Attention is the one green-dot line", async () => {
+  const body = await render({ projects: [project(1), project(2), project(3)] });
+  const section = overviewSection(body, "Needs Attention")!;
+  assertNoDomNode(section.querySelector(".surface"), "no empty surface");
+  assertNoDomNode(section.querySelector(".projects-overview-count"), "no count of zero");
+  const ok = section.querySelector(".projects-overview-ok")!;
+  assert.equal(text(ok), "Every project can start sessions.");
+  assert.equal(ok.querySelector(".projects-overview-dot")?.getAttribute("aria-hidden"), "true");
+});
+
+test("Most Active lists at most five projects, most sessions first, each opening its project", async () => {
+  const counts = [4, 0, 9, 2, 7, 1, 12];
+  const projects = counts.map((count, index) => project(index + 1, { unarchivedSessionCount: count, activeSessionCount: index === 6 ? 2 : 0 }));
+  const body = await render({ projects });
+  const section = overviewSection(body, "Most Active")!;
+  const items = [...section.querySelectorAll<HTMLButtonElement>(".surface > button.row.row-2")];
+  assert.deepEqual(items.map((row) => [text(row.querySelector(".row-title")), text(row.querySelector(".row-trail")), text(row.querySelector(".row-sub"))]), [
+    ["Project 7", "12 sessions, 2 running", "Build Machine"],
+    ["Project 3", "9 sessions", "Build Machine"],
+    ["Project 5", "7 sessions", "Build Machine"],
+    ["Project 1", "4 sessions", "Build Machine"],
+    ["Project 4", "2 sessions", "Build Machine"],
+  ]);
+  await act(async () => { items[1]!.click(); });
+  await settle();
+  assert.deepEqual(currentView, { name: "projects", id: "project-3" });
+  assert.equal(text(body.querySelector(".project-detail-title")), "Project 3");
+});
+
+test("with two projects Get Started offers New Project and Connect a Machine as secondary buttons", async () => {
+  const body = await render({ projects: [project(1), project(2)] });
+  const section = overviewSection(body, "Get Started");
+  assert.ok(section, "Get Started");
+  const items = [...section!.querySelectorAll("li")];
+  assert.deepEqual(items.map((item) => text(item.querySelector("button"))), ["New Project", "Connect a Machine"]);
+  assert.ok(items.every((item) => text(item.querySelector(".projects-overview-hint")).length > 0), "one line each");
+  assert.ok(items.every((item) => !item.querySelector("button")!.classList.contains("primary")), "secondary buttons");
+  await act(async () => { items[0]!.querySelector<HTMLButtonElement>("button")!.click(); });
+  assert.ok(domWindow.document.querySelector('[role="dialog"]'), "New Project opens its dialog");
+});
+
+test("with three projects there is no Get Started", async () => {
+  const body = await render({ projects: [project(1), project(2), project(3)] });
+  assert.ok(overview(body));
+  assertNoDomNode(overviewSection(body, "Get Started"), "no Get Started from three projects");
+});
+
+test("on a phone the list's first row opens /projects/overview under a Projects Overview detail bar, and Back returns", async () => {
+  const restore = stubPhone();
+  try {
+    const body = await render({ projects: attentionProjects(), runners: [runner, offlineRunner] });
+    assert.equal(body.querySelector(".master-detail")?.hasAttribute("data-detail-open"), false, "the list is the screen");
+    const first = body.querySelector<HTMLButtonElement>(".master-detail-list-body > .row")!;
+    assert.ok(first.classList.contains("project-list-overview"));
+    assert.equal(text(first.querySelector(".row-title")), "Projects Overview");
+    assert.equal(text(first.querySelector(".count-badge")), "3", "the same count as Needs Attention");
+    assert.equal(text(body.querySelector(`#${first.getAttribute("aria-describedby")}`)), "3 items need attention");
+
+    await act(async () => { first.click(); });
+    await settle();
+    assert.deepEqual(currentView, { name: "projects", pane: "overview" });
+    assert.equal(text(body.querySelector(".detail-bar h1#page-title")), "Projects Overview");
+    assert.ok(body.querySelector(".master-detail[data-detail-open] .master-detail-detail > .projects-overview"));
+    assertNoDomNode(body.querySelector(".projects-overview-title"), "the detail bar already names the route");
+    assertNoDomNode(body.querySelector(".detail-bar .detail-bar-action.primary"), "no New Session on the overview");
+
+    await act(async () => { body.querySelector<HTMLButtonElement>(".detail-bar-back")!.click(); });
+    await settle();
+    assert.deepEqual(currentView, { name: "projects" });
+    assert.equal(body.querySelector(".master-detail")?.hasAttribute("data-detail-open"), false);
   } finally {
     restore();
   }

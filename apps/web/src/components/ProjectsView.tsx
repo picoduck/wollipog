@@ -30,7 +30,7 @@ import { AccessScopeSettings, useAccessScopeIdentity } from "./AccessScopeContro
 import { useFeedback } from "./FeedbackProvider.js";
 import { PlusIcon, ProjectsIcon } from "./Icons.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
-import { backLabel, destination } from "../navigation.js";
+import { backLabel, destination, type ProjectsPane } from "../navigation.js";
 import { useIsMobile } from "./useIsMobile.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
@@ -42,11 +42,13 @@ import { PROJECT_ACTIONS_LABEL, ProjectDetailHeader, projectDetailMenu, projectN
 import { DetailSkeleton, Modal } from "./common.js";
 import { Notice } from "./Notice.js";
 import { ProjectList } from "./ProjectList.js";
+import { ProjectsOverview } from "./ProjectsOverview.js";
+import { projectsOverviewAttention } from "../projects-overview.js";
 import { State } from "./State.js";
 
 type DialogState =
   | { kind: "create" }
-  | { kind: "add-location"; onboarding?: boolean }
+  | { kind: "add-location"; projectId: string; onboarding?: boolean }
   | { kind: "delete" };
 
 /** A failed project action: the sentence the detail's notice leads with, and the raw message behind
@@ -152,9 +154,12 @@ const PROJECTS = destination("projects");
 
 export function ProjectsView({
   selectedProjectId,
+  pane,
   onNewSession,
 }: {
   selectedProjectId?: string;
+  /** `/projects/overview`: the Projects Overview as its own route, which a phone opens from the list. */
+  pane?: ProjectsPane;
   onNewSession: (preset?: NewSessionPreset) => void;
 }) {
   const api = useApi();
@@ -181,6 +186,9 @@ export function ProjectsView({
   const [renameDraft, setRenameDraft] = useState("");
   const { identity: accessIdentity, error: accessIdentityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const createButtonRef = useRef<HTMLButtonElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  /** The project whose Name field takes focus once its detail shows (the overview's Rename…). */
+  const [focusNameOf, setFocusNameOf] = useState<string | null>(null);
 
   const projectMap = useMemo(() => {
     const map = new Map(storedProjects);
@@ -196,6 +204,11 @@ export function ProjectsView({
   const visibleProjects = useMemo(() => filterManagedProjects(projectMap.values(), query, visibility, machineName),
     [machineName, projectMap, query, visibility]);
   const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
+  const dialogProject = dialog?.kind === "add-location" ? projectMap.get(dialog.projectId) ?? null : null;
+  // One list for the overview's Needs Attention and the phone's Projects Overview row, so the two
+  // counts cannot differ.
+  const overviewAttention = useMemo(() => projectsOverviewAttention(allProjects, runners, machineName),
+    [allProjects, machineName, runners]);
   const selectedStopsRuntime = selected ? [...sessions.values()].some((session) =>
     session.projectId === selected.id && !session.archived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)
   ) : false;
@@ -206,21 +219,29 @@ export function ProjectsView({
       navigate(fallback ? { name: "projects", id: fallback.id } : { name: "projects" });
     }
   }, [allProjects, navigate, selected, selectedProjectId, snapshotLoaded, visibleProjects]);
-  // Each pane scrolls on its own (§6). A new selection starts the detail at its top; on a phone, where
+  // Each pane scrolls on its own (§6). A new route starts the detail at its top; on a phone, where
   // the route swaps the whole screen, focus moves to the new page title, which shows no ring (§16.1).
   const listBodyRef = useRef<HTMLDivElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
-  const previousSelection = useRef(selectedProjectId);
+  const routeKey = selectedProjectId ?? pane;
+  const previousRoute = useRef(routeKey);
   useLayoutEffect(() => {
-    if (previousSelection.current === selectedProjectId) return;
-    previousSelection.current = selectedProjectId;
+    if (previousRoute.current === routeKey) return;
+    previousRoute.current = routeKey;
     if (detailRef.current) detailRef.current.scrollTop = 0;
     if (isMobile) document.getElementById("page-title")?.focus({ preventScroll: true });
-  }, [selectedProjectId, isMobile]);
-  // A phone hides the list while a project is open, which loses its scroll position; Back puts the
+  }, [routeKey, isMobile]);
+  // Rename… lands on the Name field once its project's detail is on screen, after the page title
+  // has taken focus above, so the field is what keeps it.
+  useEffect(() => {
+    if (!focusNameOf || selected?.id !== focusNameOf) return;
+    setFocusNameOf(null);
+    nameInputRef.current?.focus();
+  }, [focusNameOf, selected?.id]);
+  // A phone hides the list while a detail is open, which loses its scroll position; Back puts the
   // list back where it was (§6.2). Recorded only while the list is on screen.
   const listScrollTop = useRef(0);
-  const detailOpen = Boolean(selectedProjectId);
+  const detailOpen = Boolean(selectedProjectId || pane);
   useLayoutEffect(() => {
     if (!detailOpen && listBodyRef.current) listBodyRef.current.scrollTop = listScrollTop.current;
   }, [detailOpen]);
@@ -389,6 +410,12 @@ export function ProjectsView({
       : { projectId: project.id };
   };
 
+  const openProject = (projectId: string) => navigate({ name: "projects", id: projectId });
+  const renameProject = (projectId: string) => {
+    setFocusNameOf(projectId);
+    openProject(projectId);
+  };
+
   const header = (primary: boolean) => (
     <PageHeader
       title={PROJECTS.name}
@@ -420,11 +447,10 @@ export function ProjectsView({
   // No projects is one state across both panes (§6.1, §12.1), and that state offers creation, so the
   // header's primary steps aside while it shows.
   const spanningEmpty = snapshotLoaded && allProjects.length === 0;
-  // On a phone the list and the open project are two routes, so the open project takes the detail
-  // bar and its Back (§4.3, §6.2). The bar sits inside the fill page, where it is full-bleed like
+  // On a phone the list and the open project, or the overview, are two routes, so the open detail
+  // takes the detail bar and its Back (§4.3, §6.2). The bar sits inside the fill page, where it is full-bleed like
   // every detail bar and shares the column's height with the panes.
   const phoneDetail = isMobile && detailOpen && !spanningEmpty;
-  const noMatch = snapshotLoaded && allProjects.length > 0 && visibleProjects.length === 0;
   const newSessionBlocker = selected ? projectNewSessionBlocker(selected, runners, machineName) : null;
   // The saved scope, the one the access field below reads, so the two never disagree. A team or a
   // person is named only once the identity directory has loaded; until then the field says it is
@@ -446,7 +472,7 @@ export function ProjectsView({
     <section className="page full fill">
       {phoneDetail && (
         <DetailBar
-          title={selected?.name ?? "Project"}
+          title={selected?.name ?? (selectedProjectId ? "Project" : "Projects Overview")}
           backLabel={backLabel("projects")}
           onBack={() => navigate({ name: "projects" })}
           primary={newSession ? { ...newSession, icon: <PlusIcon />, title: newSessionBlocker ?? undefined } : undefined}
@@ -485,7 +511,9 @@ export function ProjectsView({
           onVisibilityChange={setVisibility}
           machineName={machineName}
           selectedId={selected?.id ?? null}
-          onSelect={(projectId) => navigate({ name: "projects", id: projectId })}
+          onSelect={openProject}
+          // On a phone the overview is a route of its own, opened from the list's first row (§6.2).
+          overview={isMobile ? { count: overviewAttention.length, onOpen: () => navigate({ name: "projects", pane: "overview" }) } : undefined}
           bodyRef={listBodyRef}
           onBodyScroll={(event) => {
             // A hidden list reports 0; that is not where the person left it.
@@ -497,14 +525,19 @@ export function ProjectsView({
             // While the snapshot loads, the list's skeleton is the one announcement.
             <DetailSkeleton />
           ) : !selected ? (
-            // Until the Projects Overview (#2958), a desktop with no selection keeps this placeholder.
-            // A search with no match is answered in the list alone, so it steps aside then (§12.2).
-            noMatch ? null : (
-              <div className="project-manager-empty">
-                <strong>Select a Project</strong>
-                <span>Choose a Project to manage its Locations and sessions.</span>
-              </div>
-            )
+            // The default detail (§6.1): /projects beside the list, and /projects/overview on its own.
+            // A search changes only the list, so the overview always counts every project.
+            <ProjectsOverview
+              projects={allProjects}
+              attention={overviewAttention}
+              machineName={machineName}
+              showTitle={!phoneDetail}
+              onOpenProject={openProject}
+              onAddLocation={(projectId) => openDialog({ kind: "add-location", projectId })}
+              onRename={renameProject}
+              onNewProject={() => openDialog({ kind: "create" })}
+              onConnectMachine={manageConnections}
+            />
           ) : (
             // The header, then the notices, then one section recipe in a fixed order (#2959): the
             // section contents are reworked by #2961 (Locations), #2962 (Settings, Child Session
@@ -537,7 +570,7 @@ export function ProjectsView({
                 title="Locations"
                 note="The folders this project runs in; new sessions use the default first when it's available."
                 actions={(
-                  <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "add-location" })}>
+                  <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "add-location", projectId: selected.id })}>
                     <PlusIcon />
                     <span>Add Location</span>
                   </button>
@@ -548,7 +581,7 @@ export function ProjectsView({
                     <strong>No Project Locations</strong>
                     <span>Add a folder on a connected machine to start sessions here.</span>
                     <div>
-                      <button type="button" className="btn primary" disabled={selected.canManage === false} onClick={() => openDialog({ kind: "add-location" })}>Add Location</button>
+                      <button type="button" className="btn primary" disabled={selected.canManage === false} onClick={() => openDialog({ kind: "add-location", projectId: selected.id })}>Add Location</button>
                       <button type="button" className="btn" onClick={manageConnections}>Manage Connections</button>
                     </div>
                   </div>
@@ -627,7 +660,7 @@ export function ProjectsView({
                 <form className="project-name-form" onSubmit={(event) => void rename(event)}>
                   <label className="field">
                     <span>Project Name</span>
-                    <input value={renameDraft} disabled={selected.canManage === false || busy !== null} maxLength={120} onChange={(event) => setRenameDraft(event.target.value)} />
+                    <input ref={nameInputRef} value={renameDraft} disabled={selected.canManage === false || busy !== null} maxLength={120} onChange={(event) => setRenameDraft(event.target.value)} />
                   </label>
                   <button type="submit" className="btn" disabled={selected.canManage === false || busy !== null || !renameDraft.trim() || renameDraft.trim() === selected.name}>
                     <span>{busy === "rename" ? "Saving…" : "Save Changes"}</span>
@@ -677,13 +710,13 @@ export function ProjectsView({
           onCreated={(project) => {
             applyProject(project);
             navigate({ name: "projects", id: project.id });
-            setDialog({ kind: "add-location", onboarding: true });
+            setDialog({ kind: "add-location", projectId: project.id, onboarding: true });
           }}
         />
       )}
-      {dialog?.kind === "add-location" && selected && (
+      {dialog?.kind === "add-location" && dialogProject && (
         <ProjectLocationDialog
-          project={selected}
+          project={dialogProject}
           projects={allProjects}
           runners={runners}
           boxes={boxes}
@@ -693,7 +726,7 @@ export function ProjectsView({
           onClose={() => setDialog(null)}
           onManageConnections={manageConnections}
           onAdd={async (candidate: ProjectLocationCandidate, generateSetup) => {
-            const { project } = await api.addProjectLocation(selected.id, { runnerId: candidate.runnerId, workspaceId: candidate.workspaceId });
+            const { project } = await api.addProjectLocation(dialogProject.id, { runnerId: candidate.runnerId, workspaceId: candidate.workspaceId });
             applyProject(project);
             if (generateSetup) {
               const added = project.locations.find((location) =>
@@ -708,7 +741,7 @@ export function ProjectsView({
             }
           }}
           onCreate={async (location, generateSetup) => {
-            const { project } = await api.createProjectLocation(selected.id, location);
+            const { project } = await api.createProjectLocation(dialogProject.id, location);
             applyProject(project);
             if (generateSetup) {
               const added = project.locations.find((candidate) =>
