@@ -3006,36 +3006,6 @@ const client = {
     window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(owningProject) }), 0);
     return { project: structuredClone(owningProject) };
   },
-  moveProjectLocation: async (targetProjectId: string, body: { locationId: string }) => {
-    const target = model.projects.find((candidate) => candidate.id === targetProjectId);
-    const source = model.projects.find((candidate) => candidate.locations.some((location) => location.id === body.locationId));
-    const location = source?.locations.find((candidate) => candidate.id === body.locationId);
-    if (!target || !source || !location) throw new Error("project location not found");
-    source.locations = source.locations.filter((candidate) => candidate.id !== location.id);
-    if (location.isDefault && source.locations[0]) source.locations[0].isDefault = true;
-    location.projectId = target.id;
-    location.isDefault = target.locations.length === 0;
-    target.locations.push(location);
-    for (const value of model.sessions.filter((candidate) => candidate.projectLocationId === location.id)) {
-      value.projectId = target.id;
-      value.updatedAt += 1;
-    }
-    for (const value of [source, target]) {
-      value.activeSessionCount = model.sessions.filter((candidate) => candidate.projectId === value.id && !candidate.archived && ["queued", "starting", "running", "input_required"].includes(candidate.status)).length;
-      value.unarchivedSessionCount = model.sessions.filter((candidate) => candidate.projectId === value.id && !candidate.archived).length;
-      value.totalSessionCount = model.sessions.filter((candidate) => candidate.projectId === value.id).length;
-      value.updatedAt += 1;
-    }
-    saveModel();
-    window.setTimeout(() => {
-      socket?.push({ type: "project_upsert", project: structuredClone(source) });
-      socket?.push({ type: "project_upsert", project: structuredClone(target) });
-      for (const value of model.sessions.filter((candidate) => candidate.projectLocationId === location.id)) {
-        socket?.push({ type: "session_upsert", session: structuredClone(value) });
-      }
-    }, 0);
-    return { project: structuredClone(target) };
-  },
   removeProjectLocation: async (projectId: string, locationId: string) => {
     const owningProject = model.projects.find((candidate) => candidate.id === projectId);
     if (!owningProject) throw new Error("project not found");
