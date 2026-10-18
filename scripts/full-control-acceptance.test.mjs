@@ -132,6 +132,41 @@ test("finite allowance, exact private destination, normal video and fixed root a
   assert.ok(inspectLivePlan(null).blockers.length > 0);
 });
 
+test("the root is fixed to native Claude Code at claude-opus-5-5 high, exactly", () => {
+  assert.ok(!inspectLivePlan(proposal()).blockers.includes("fixed_root_profile"));
+  const changes = [
+    (p) => { p.provider.root.driver = "codex-app-server"; },
+    (p) => { p.provider.root.model = "gpt-6.1-sol"; },
+    (p) => { p.provider.root.model = "claude-sonnet-5-5"; },
+    (p) => { p.provider.root.effort = "medium"; },
+    (p) => { p.provider.root.context = "wsl"; },
+    (p) => { delete p.provider.root.context; },
+    (p) => { p.provider.root.accountProfile = " "; },
+  ];
+  for (const [index, change] of changes.entries()) {
+    const plan = proposal(); change(plan);
+    assert.ok(inspectLivePlan(plan).blockers.includes("fixed_root_profile"), String(index));
+  }
+});
+
+test("the root and every implementation child must be able to advertise the paced video contract", () => {
+  // Mirrors reviewerAdmissionPrerequisites (evidence-review-worker.ts): a controller or child without
+  // the paced contract makes delegated video admission refuse `mixed_peer`.
+  assert.ok(!inspectLivePlan(proposal()).blockers.includes("paced_video_peers"));
+  const changes = [
+    (p) => { p.provider.root.driver = "codex-app-server"; },
+    (p) => { p.provider.root.context = "acp"; },
+    (p) => { delete p.provider.children; },
+    (p) => { p.provider.children.driver = "codex-app-server"; },
+    (p) => { p.provider.children.context = "wsl"; },
+    (p) => { delete p.provider.children.accountProfile; },
+  ];
+  for (const [index, change] of changes.entries()) {
+    const plan = proposal(); change(plan);
+    assert.ok(inspectLivePlan(plan).blockers.includes("paced_video_peers"), String(index));
+  }
+});
+
 test("every prepared matrix path exists and browser/provider coverage is explicitly deterministic", () => {
   const files = acceptanceMatrix.flatMap((suite) => suite.files);
   assert.equal(new Set(files).size, files.length);

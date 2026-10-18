@@ -87,8 +87,19 @@ export function inspectLivePlan(plan) {
     integer(plan?.limits?.wallTimeMinutes) && plan?.limits?.followUps === 1 &&
     plan?.limits?.faultAttempts === 6, "finite_aggregate_limits");
   need(plan?.limits?.onExhaustion === "stop_without_override" && plan?.limits?.unknownUsage === "retain_reservation", "no_limit_reset");
-  need(plan?.provider?.root?.driver === "codex-app-server" && plan?.provider?.root?.model === "gpt-6.1-sol" &&
-    plan?.provider?.root?.effort === "high" && text(plan?.provider?.root?.accountProfile), "fixed_root_profile");
+  // The Human fixed this release run's root: native Claude Code, claude-opus-5-5, high effort.
+  need(plan?.provider?.root?.driver === "claude-code" && plan?.provider?.root?.context === "native" &&
+    plan?.provider?.root?.model === "claude-opus-5-5" && plan?.provider?.root?.effort === "high" &&
+    text(plan?.provider?.root?.accountProfile), "fixed_root_profile");
+  // Delegated video admission refuses `mixed_peer` unless the controller, the child and the reviewer
+  // each declare the paced video review contract (reviewerAdmissionPrerequisites in
+  // apps/control-plane/src/evidence-review-worker.ts). Only a native Claude Code agent with a
+  // re-proven media-only reviewer attestation advertises it (withMediaReviewerCapabilities in
+  // apps/runner/src/index.ts), so the root and every implementation child must be one. Children the
+  // plan does not declare could run any harness, so they fail closed too.
+  const pacedPeer = (agent) => agent?.driver === "claude-code" && agent?.context === "native";
+  need(pacedPeer(plan?.provider?.root) && pacedPeer(plan?.provider?.children) &&
+    text(plan?.provider?.children?.accountProfile), "paced_video_peers");
   need(["codex-app-server", "claude-code"].includes(plan?.provider?.media?.driver) && text(plan?.provider?.media?.model) &&
     text(plan?.provider?.media?.provider) && text(plan?.provider?.media?.accountProfile) &&
     digest(plan?.provider?.media?.capabilitiesSha256) && text(plan?.provider?.media?.retentionDisclosure), "exact_media_profile_disclosure");
