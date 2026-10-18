@@ -5,6 +5,7 @@ import {
   PROTOCOL_VERSION,
   buildConversationHandoff,
   removePendingRequest,
+  type AccessScopeChangePreview,
   type AgentCapabilities,
   type AgentSlashCommand,
   type CreateSessionRequest,
@@ -22,6 +23,8 @@ import {
   type ProjectView,
   type ProviderAccountDefinition,
   type ProviderLoginView,
+  type ResourceOwner,
+  type ResourceScope,
   type RunView,
   type RunnerView,
   type SessionConfig,
@@ -49,6 +52,7 @@ import {
   saveDurableQueuedEditRecovery,
   type QueuedPromptEditRecovery,
 } from "../queued-edit-recovery.js";
+import { scopeAudienceContainedForIdentity } from "../access-scopes.js";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider, useFeedback, type ToastOptions } from "../components/FeedbackProvider.js";
@@ -809,6 +813,7 @@ function initialModel(): FixtureModel {
     const healthy = shellProjects(9).filter((candidate) => candidate.locations.some((value) => value.availability === "available"));
     initial.projects = SHELL_PROJECTS_MODE === "two" ? healthy.slice(0, 2) : healthy;
   }
+  if (SHELL_PROJECTS_MODE === "access") initial.projects = accessProjects();
   return initial;
 }
 
@@ -845,6 +850,88 @@ function shellProjects(count: number): ProjectView[] {
       hidden: name === "Secret", locations, unarchivedSessionCount: sessions, totalSessionCount: sessions, activeSessionCount: running,
     });
   });
+}
+
+/**
+ * `?projects=access` (#2960): a control plane that manages access. Alpha and Beta are shared with
+ * Builders (three people). Alpha Checkout is Organization-Wide; Beta's Laptop Checkout is private to
+ * the signed-in owner, so making Beta Organization-Wide is refused until that location is widened.
+ * Gamma is Organization-Wide. Ghosts is a team with no members.
+ * `&accessPreview=hold` leaves every preview pending, for the checking state.
+ */
+const ACCESS_ORG = "fixture-organization";
+const ACCESS_USER = "fixture-user";
+const ACCESS_TEAMS: TeamView[] = [
+  { teamId: "team-builders", organizationId: ACCESS_ORG, name: "Builders", memberUserIds: [ACCESS_USER, "user-ana", "user-kofi"], createdAt: 1 },
+  { teamId: "team-ghosts", organizationId: ACCESS_ORG, name: "Ghosts", memberUserIds: [], createdAt: 1 },
+];
+const ACCESS_PREVIEW_HOLD = FIXTURE_QUERY.get("accessPreview") === "hold";
+const accessScope = (owner: ResourceOwner): ResourceScope => ({ organizationId: ACCESS_ORG, owner });
+const BUILDERS_SCOPE = accessScope({ kind: "team", teamId: "team-builders" });
+const organizationAccess = accessScope({ kind: "organization", organizationId: ACCESS_ORG });
+
+function accessProjects(): ProjectView[] {
+  const location = (projectId: string, name: string, scope: ResourceScope): ProjectLocationView => ({
+    id: `location-${projectId}`, projectId, runnerId: "runner-1", workspaceId: `${projectId}-workspace`, name,
+    path: `/repos/${projectId}`, source: "managed", availability: "available", isDefault: true, createdAt: 1, updatedAt: 1,
+    scope, canManage: true,
+  });
+  return [
+    project("alpha", "Alpha", {
+      scope: BUILDERS_SCOPE, canManage: true,
+      locations: [location("alpha", "Alpha Checkout", organizationAccess)],
+      activeSessionCount: 2, unarchivedSessionCount: 5, totalSessionCount: 5,
+    }),
+    project("beta", "Beta", {
+      scope: BUILDERS_SCOPE, canManage: true,
+      locations: [location("beta", "Laptop Checkout", accessScope({ kind: "user", userId: ACCESS_USER }))],
+      activeSessionCount: 1, unarchivedSessionCount: 3, totalSessionCount: 3,
+    }),
+    project("gamma", "Gamma", {
+      scope: organizationAccess, canManage: true, locations: [location("gamma", "Gamma Checkout", organizationAccess)],
+      activeSessionCount: 1, unarchivedSessionCount: 4, totalSessionCount: 4,
+    }),
+  ];
+}
+
+/** The server's preview (control-plane db.ts), from the fixture's scopes and the project's counts. */
+async function accessPreview(
+  resource: "project" | "workspace",
+  id: { projectId?: string; runnerId?: string; workspaceId?: string },
+  owner: ResourceOwner,
+): Promise<AccessScopeChangePreview> {
+  if (ACCESS_PREVIEW_HOLD) return new Promise(() => undefined);
+  const identity = await client.getIdentity();
+  const target = accessScope(owner);
+  const owning = resource === "project"
+    ? model.projects.filter((candidate) => candidate.id === id.projectId)
+    : model.projects.filter((candidate) => candidate.locations.some((entry) => entry.workspaceId === id.workspaceId));
+  const location = owning[0]?.locations.find((entry) => entry.workspaceId === id.workspaceId);
+  const currentScope = resource === "project" ? owning[0]?.scope : location?.scope;
+  if (!owning[0] || !currentScope) throw new Error("access scope not found");
+  const contained = (narrower: ResourceScope, wider: ResourceScope) =>
+    scopeAudienceContainedForIdentity(identity, narrower, wider);
+  const reason = resource === "project"
+    ? owning[0].locations.some((entry) => entry.scope && !contained(target, entry.scope))
+      ? "The requested Project access would expose a narrower Location. Change that Location first or choose a narrower Project scope."
+      : undefined
+    : owning.some((candidate) => candidate.scope && !contained(candidate.scope, target))
+      ? "The requested Location access is narrower than an attached Project. Narrow those Projects first or choose a broader Location scope."
+      : undefined;
+  const sessions = resource === "project" ? owning[0] : { activeSessionCount: 0, totalSessionCount: 0 };
+  return {
+    resource,
+    resourceId: (resource === "project" ? id.projectId : id.workspaceId)!,
+    ...(id.runnerId ? { runnerId: id.runnerId } : {}),
+    currentScope,
+    targetScope: target,
+    affectedProjects: owning.map((candidate) => ({ projectId: candidate.id, name: candidate.name })),
+    activeSessionCount: sessions.activeSessionCount,
+    totalSessionCount: sessions.totalSessionCount,
+    sessionsToNarrow: contained(currentScope, target) ? 0 : sessions.totalSessionCount,
+    compatible: reason === undefined,
+    ...(reason ? { reason } : { confirmationToken: `token-${resource}-${owner.kind}` }),
+  };
 }
 
 function loadModel(): FixtureModel {
@@ -1414,6 +1501,7 @@ function snapshot(): UiSnapshotMessage {
       ...(SESSION_REMINDERS ? { sessionReminders: true } : {}),
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
       ...(LIST_NOTICES.has("setup") ? { worktreeSetupConfig: true } : {}),
+      ...(SHELL_PROJECTS_MODE === "access" ? { accessScopeManagement: true } : {}),
     },
     runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner]
       : SHELL_SKILLS_MODE === "notices" ? [noticeStudio, noticeLaptop]
@@ -3023,6 +3111,38 @@ const client = {
     window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(value) }), 0);
     return { project: structuredClone(value) };
   },
+  project: async (id: string) => {
+    const value = model.projects.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("project not found");
+    return { project: structuredClone(value) };
+  },
+  previewProjectAccessScope: async (projectId: string, owner: ResourceOwner) =>
+    ({ preview: await accessPreview("project", { projectId }, owner) }),
+  previewWorkspaceAccessScope: async (runnerId: string, workspaceId: string, owner: ResourceOwner) =>
+    ({ preview: await accessPreview("workspace", { runnerId, workspaceId }, owner) }),
+  updateProjectAccessScope: async (projectId: string, owner: ResourceOwner, confirmationToken: string) => {
+    const preview = await accessPreview("project", { projectId }, owner);
+    if (preview.confirmationToken !== confirmationToken) throw new Error("access scope confirmation is stale");
+    const value = model.projects.find((candidate) => candidate.id === projectId)!;
+    Object.assign(value, { scope: preview.targetScope, updatedAt: value.updatedAt + 1 });
+    saveModel();
+    window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(value) }), 0);
+    return { project: structuredClone(value), preview };
+  },
+  updateWorkspaceAccessScope: async (runnerId: string, workspaceId: string, owner: ResourceOwner, confirmationToken: string) => {
+    const preview = await accessPreview("workspace", { runnerId, workspaceId }, owner);
+    if (preview.confirmationToken !== confirmationToken) throw new Error("access scope confirmation is stale");
+    for (const value of model.projects) {
+      const location = value.locations.find((entry) => entry.workspaceId === workspaceId);
+      if (!location) continue;
+      location.scope = preview.targetScope;
+      value.updatedAt += 1;
+      window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(value) }), 0);
+    }
+    saveModel();
+    // The page reads the project again rather than the workspace, so the workspace is a stand-in.
+    return { workspace: { id: workspaceId } as never, preview };
+  },
   addProjectLocation: async (projectId: string, body: { runnerId: string; workspaceId: string }) => {
     const owningProject = model.projects.find((candidate) => candidate.id === projectId);
     const workspace = runner.workspaces.find((candidate) => candidate.id === body.workspaceId);
@@ -3168,7 +3288,7 @@ if (sideChatFixture) {
 }
 
 let workspaceMoveCount = 0;
-let identityTeams: TeamView[] = [];
+let identityTeams: TeamView[] = SHELL_PROJECTS_MODE === "access" ? structuredClone(ACCESS_TEAMS) : [];
 
 let nextProjectUpdateError: string | null = null;
 

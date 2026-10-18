@@ -14,6 +14,7 @@ import {
   Bot as LucideBot,
   Braces as LucideBraces,
   Brain as LucideBrain,
+  Building as LucideBuilding,
   ChartNoAxesColumn as LucideChartNoAxesColumn,
   Check as LucideCheck,
   CircleAlert as LucideCircleAlert,
@@ -518,6 +519,11 @@ export function AccountIcon(props: IconProps) {
 
 export function LockIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideLock} {...props} />;
+}
+
+/** Organization-Wide access: everyone in the organization (#2960). */
+export function BuildingIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideBuilding} {...props} />;
 }
 
 /** A page that needs HTTPS or localhost to check evidence against its digest (#1787, #2197). */

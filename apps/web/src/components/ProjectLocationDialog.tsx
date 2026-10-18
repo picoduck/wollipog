@@ -5,6 +5,7 @@ import {
   type BoxView,
   type ProjectView,
   type ResourceOwner,
+  type ResourceScope,
   type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
@@ -95,6 +96,7 @@ export function ProjectLocationDialog({
   const [scopeCorrection, setScopeCorrection] = useState<{
     resource: { kind: "project"; projectId: string; name: string } |
       { kind: "workspace"; runnerId: string; workspaceId: string; name: string };
+    scope: ResourceScope;
     owner: ResourceOwner;
   } | null>(null);
   const { identity, error: identityError } = useAccessScopeIdentity(accessScopeManagementSupported);
@@ -308,6 +310,7 @@ export function ProjectLocationDialog({
                   onChange={setScopeKey}
                   disabled={busyKey !== null}
                   label="Location Access"
+                  helper="A location must be shared at least as widely as its project."
                 />
               )}
               {accessScopeManagementSupported && !identity && !identityError && (
@@ -418,6 +421,7 @@ export function ProjectLocationDialog({
                           {canNarrowProject && candidate.scope && (
                             <button type="button" className="btn ghost sm" onClick={() => setScopeCorrection({
                               resource: { kind: "project", projectId: project.id, name: project.name },
+                              scope: project.scope!,
                               owner: candidate.scope!.owner,
                             })}>Narrow Project Access</button>
                           )}
@@ -429,6 +433,7 @@ export function ProjectLocationDialog({
                                 workspaceId: candidate.workspaceId,
                                 name: candidate.name,
                               },
+                              scope: candidate.scope!,
                               owner: project.scope!.owner,
                             })}>Broaden Location Access</button>
                           )}
@@ -474,7 +479,8 @@ export function ProjectLocationDialog({
       {scopeCorrection && identity && (
         <AccessScopeChangeDialog
           resource={scopeCorrection.resource}
-          owner={scopeCorrection.owner}
+          scope={scopeCorrection.scope}
+          initialOwner={scopeCorrection.owner}
           identity={identity}
           onClose={() => setScopeCorrection(null)}
           onUpdated={onClose}

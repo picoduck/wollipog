@@ -83,7 +83,8 @@ export function CreateProjectDialog({
           <input autoFocus value={name} maxLength={120} onChange={(event) => setName(event.target.value)} />
         </label>
         {accessScopeManagementSupported && scopeChoices.length > 0 && (
-          <AccessScopeField choices={scopeChoices} value={scopeKey} onChange={setScopeKey} disabled={busy} />
+          <AccessScopeField choices={scopeChoices} value={scopeKey} onChange={setScopeKey} disabled={busy}
+            helper="You can change this later from the project." />
         )}
         {accessScopeManagementSupported && !identity && !identityError && (
           <span className="muted">Loading permitted access scopes…</span>
