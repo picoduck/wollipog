@@ -2048,11 +2048,13 @@ export function Select<T extends string>({
    */
   const navigate = (event: React.KeyboardEvent<HTMLElement>, spaceCommits: boolean) => {
     revealActive.current = true;
-    // Unavailable options are skipped by every move here; the create row and the footer never are.
+    // Up/Down reach unavailable options so their reason is heard, as SearchableCombobox's do (#2953,
+    // the direction of #2474); Home/End still land on the first or last one that can be chosen, and
+    // Enter, Space and a click refuse an unavailable option.
     const unavailable = (row: PickerRow) => typeof row === "number" && Boolean(visible[row]?.disabled);
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      return setActive(stepPickerRow(listRows, activeRow, event.key === "ArrowDown" ? 1 : -1, unavailable));
+      return setActive(stepPickerRow(listRows, activeRow, event.key === "ArrowDown" ? 1 : -1));
     }
     if (event.key === "Home" || event.key === "End") {
       event.preventDefault();

@@ -432,11 +432,21 @@ test("typing in a searchable Select's filter narrows the options and Enter commi
   }
 });
 
-test("a searchable Select's arrows skip unavailable options, as the plain list's do", () => {
-  const { open, options, unmount } = mountSelect();
+// Select's arrows used to skip unavailable options (#1951). They reach them now, as the combobox's
+// do, so an unavailable option's reason is heard (#2953, the direction of #2474); Home and End
+// still land on the first and last options that can be chosen, and Enter refuses an unavailable one.
+test("a searchable Select's arrows reach unavailable options, while Home/End skip them and Enter refuses them", () => {
+  const chosen: string[] = [];
+  const { open, options, unmount } = mountSelect({ onChange: (value) => chosen.push(value) });
   try {
     const filter = open();
     assert.equal(filter.getAttribute("aria-activedescendant"), options()[0]!.id);
+    press(filter, "ArrowDown");
+    assert.equal(filter.getAttribute("aria-activedescendant"), options()[1]!.id);
+    assert.equal(options()[1]!.getAttribute("aria-disabled"), "true");
+    press(filter, "Enter");
+    assert.deepEqual(chosen, [], "Enter does not choose an unavailable option");
+    assert.equal(filter.getAttribute("aria-activedescendant"), options()[1]!.id, "and the list stays open on it");
     press(filter, "ArrowDown");
     assert.equal(filter.getAttribute("aria-activedescendant"), options()[2]!.id);
     press(filter, "Home");

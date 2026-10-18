@@ -5,7 +5,8 @@ import {
   agentDriverLabel,
   agentMeta,
   agentOptions,
-  codexAppServerSetupReason,
+  agentSetupProblem,
+  agentSetupReason,
   currentAgentSelectionIssue,
   firstEnabledAgentId,
   runnableAgentIds,
@@ -61,6 +62,14 @@ test("competing installations remain separate choices and only the Machine selec
   assert.ok(options.some((option) => option.label.includes("/usr/bin/codex")));
   assert.ok(options.some((option) => option.label.includes("/home/u/.local/bin/codex")));
   assert.deepEqual(options.filter((option) => !option.disabled).map((option) => option.agent.id), [local.id]);
+  // New Session shows the folder on its own line (#2953): `name` is the label without it.
+  const localOption = options.find((option) => option.agent.id === local.id)!;
+  assert.equal(localOption.name, "Codex App Server");
+  assert.equal(localOption.installationPath, "/home/u/.local/bin/codex");
+  assert.equal(localOption.label, "Codex App Server · /home/u/.local/bin/codex");
+  const wrapperOption = options.find((option) => option.agent.id === wrapper.id)!;
+  assert.equal(wrapperOption.name, wrapperOption.label);
+  assert.equal(wrapperOption.installationPath, undefined);
 });
 
 test("saved installation follows rediscovered id and stays missing if only a reused id remains", () => {
@@ -170,12 +179,25 @@ test("App Server failing its check leaves no selectable Codex instead of falling
   ]);
   assert.deepEqual(opts.map((option) => [option.agent.id, option.disabled === true]), [["codex", true]]);
   assert.equal(firstEnabledAgentId(opts), "");
-  assert.equal(
-    codexAppServerSetupReason(appServer),
-    "Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
-  );
-  assert.equal(codexAppServerSetupReason({ ...appServer, authStatus: "unauthenticated" }), undefined,
-    "a signed-out row keeps agentMeta's codex login instruction");
+  // New Session names the fix, not the runner's rediscovery wording (#2953).
+  assert.equal(agentSetupProblem(appServer, true), "unchecked");
+  assert.equal(agentSetupReason(appServer, "Studio Mac", true),
+    "Wollipog couldn't check it on Studio Mac. Check it again in Connections.");
+  assert.equal(agentSetupReason({ ...appServer, authStatus: "unauthenticated" }, "Studio Mac", true),
+    "Sign in before the session can start.", "a signed-out App Server asks for a sign-in");
+});
+
+test("a setup reason names another installation, an old Wollipog, a missing install or the agent's update (#2953)", () => {
+  const base = agent({ id: "claude", name: "Claude", driver: "claude-code", available: false });
+  assert.equal(agentSetupReason({ ...base, installation: { id: "i", path: "/a/claude", via: "path", selection: "other" } }, "M", true),
+    "Another installation is selected in Machine Settings.");
+  assert.equal(agentSetupReason(base, "M", false), "Update Wollipog on M to use it.");
+  assert.equal(agentSetupReason(base, "M", true), "Not installed on M.");
+  assert.equal(agentSetupReason({ ...base, claudeCode: {
+    status: "unsupported", effortLevels: [], permissionModes: [], streamJsonInput: false, streamJsonImages: false,
+    controlProtocol: false, forkSession: false, replayUserMessages: false, auth: { status: "authenticated", billingSource: "unknown" },
+    failure: { code: "unsupported_mode", message: "x" },
+  } }, "M", true), "Update Claude Code on M to use it.");
 });
 
 test("a saved retired exec default selects nothing and recommends its App Server sibling", () => {

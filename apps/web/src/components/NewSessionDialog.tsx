@@ -63,10 +63,12 @@ import {
 } from "../session-preset-defaults.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import {
-  agentMeta,
   agentOptions,
-  codexAppServerSetupReason,
+  agentSessionLimits,
+  agentSetupProblem,
+  agentSetupReason,
   currentAgentSelectionIssue,
+  savedAgentName,
   savedAgentSelection,
 } from "./agent-options.js";
 import { AgentIcon } from "./AgentIcon.js";
@@ -81,6 +83,8 @@ import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
 import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { FieldError } from "./FieldError.js";
+import { FieldWarning } from "./FieldWarning.js";
+import { statusMeta } from "../status-meta.js";
 import { Notice } from "./Notice.js";
 import { FullControlLaunchPanel, OrchestratorControlChoice, type FullControlAuthorization } from "./FullControlPreparation.js";
 import { supportsAgentTui } from "../shells-panel.js";
@@ -134,6 +138,14 @@ function startTruncatedPath(path: string): string {
   const separator = path.includes("\\") ? "\\" : "/";
   const segments = path.split(/[\\/]+/u).filter(Boolean);
   return segments.length <= 2 ? path : `…${separator}${segments.slice(-2).join(separator)}`;
+}
+
+/** An account's sign-in in the words Switch Account and Choose Another Account use (§11.2). */
+function providerAccountDescription(authStatus: "authenticated" | "unauthenticated" | "unknown" | undefined): string {
+  const status = authStatus === "authenticated" ? "signed_in"
+    : authStatus === "unauthenticated" ? "sign_in_required" : "status_unknown";
+  const { label } = statusMeta("provider_account", status);
+  return status === "sign_in_required" ? `${label} · Sign in again before using it.` : label;
 }
 
 /** Why a chosen location cannot host the session, and what to do about it (§8.5). */
@@ -515,18 +527,42 @@ export function NewSessionDialog({
     () => agentOptions(runner?.agents ?? []),
     [runner?.agents],
   );
-  const agentComboboxOptions = useMemo<SearchableComboboxOption<string>[]>(() => agentOpts.map((option) => {
-    const metadata = agentMeta(option.agent);
-    return {
-      value: option.agent.id,
-      label: option.label,
-      description: option.disabled ? undefined : metadata,
-      disabled: option.disabled,
-      disabledReason: option.disabled
-        ? `Needs setup. ${codexAppServerSetupReason(option.agent) ?? metadata}`
-        : undefined,
-    };
-  }), [agentOpts]);
+  const savedSelection = savedAgentSelection(agentOpts, agentDefaults[runnerId], runner?.agents);
+  // The saved default this machine can start: the list leads with it and says so.
+  const savedDefaultAgentId = agentDefaults[runnerId] && !savedSelection.issue ? savedSelection.agentId : "";
+  const agentMachine = runner ? machineName(runnerId) : "";
+  const agentAvailabilityVerified = runnerSupportsProtocol(runner?.protocolVersion, "verifiedAgentAvailability");
+  // Ready on the machine first, led by the saved default, then Needs Setup, each in agentOptions'
+  // family order (#2953). A second line only says what changes the choice: the default, which
+  // installation, how the agent limits the session, or, for one that can't start, the fix.
+  const agentComboboxOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
+    const ready = agentOpts.filter((option) => !option.disabled);
+    return [
+      ...ready.filter((option) => option.agent.id === savedDefaultAgentId),
+      ...ready.filter((option) => option.agent.id !== savedDefaultAgentId),
+      ...agentOpts.filter((option) => option.disabled),
+    ].map((option) => {
+      // The installation's path names its executable; the folder holding it tells two apart.
+      const path = option.installationPath;
+      const folder = path ? startTruncatedPath(path.replace(/[\\/]+[^\\/]*$/u, "") || path) : undefined;
+      const description = [
+        !option.disabled && option.agent.id === savedDefaultAgentId ? "Your default on this machine" : undefined,
+        folder,
+        ...(option.disabled ? [] : agentSessionLimits(option.agent)),
+      ].filter(Boolean).join(" · ");
+      return {
+        value: option.agent.id,
+        label: option.name,
+        ...(folder ? { selectedLabel: `${option.name} · ${folder}` } : {}),
+        group: option.disabled ? "Needs Setup" : `Ready on ${agentMachine}`,
+        ...(description ? { description } : {}),
+        disabled: option.disabled,
+        disabledReason: option.disabled
+          ? agentSetupReason(option.agent, agentMachine, agentAvailabilityVerified)
+          : undefined,
+      };
+    });
+  }, [agentOpts, savedDefaultAgentId, agentMachine, agentAvailabilityVerified]);
   const selectedAgentOption = agentOpts.find((option) => option.agent.id === agentId);
   const executionTargets = (runner?.executionTargets ?? []).filter((target) =>
     (!target.compatibleAgentIds || target.compatibleAgentIds.includes(agentId)) &&
@@ -939,9 +975,48 @@ export function NewSessionDialog({
   const directoryGrants = !browsedPath && (agent?.driver ?? "acp") === "acp"
     ? (workspace?.additionalDirectoryGrants ?? [])
     : [];
-  const savedSelection = savedAgentSelection(agentOpts, agentDefaults[runnerId], runner?.agents);
   const selectionIssue = currentAgentSelectionIssue(agentOpts, agentId, agentDefaults[runnerId], runner?.agents);
   const suggestedAgentOption = agentOpts.find((option) => option.agent.id === savedSelection.recommendedId);
+  // Agent lists what the chosen machine can start, so it waits for an online one (#2953).
+  const agentWaitsFor = projectsSupported && projectSelection !== NO_PROJECT_SELECTION
+    ? !selectedProjectLocation ? "Choose a Location First"
+      : !projectLocationLaunchable ? "Choose an Online Location First" : null
+    : !runner ? "Choose a Location First"
+      : runner.status !== "online" ? "Choose an Online Location First" : null;
+  // A saved default this machine can't start is the field's error; one that only needs updating is a
+  // warning whose button applies the fix (§8.5).
+  const savedAgentChoice = agentDefaults[runnerId];
+  const agentDefaultProblem: { tone: "error" | "warning"; message: string; fix?: { label: string; id: string } } | null =
+    agentWaitsFor || !runner ? null
+      : selectionIssue === "unavailable" && selectedAgentOption ? {
+        tone: "error",
+        message: agentSetupProblem(selectedAgentOption.agent, agentAvailabilityVerified) === "not_installed"
+          ? `${selectedAgentOption.name} isn't installed on ${agentMachine}. Choose another agent, or set it up in Connections.`
+          : `${selectedAgentOption.name} can't start on ${agentMachine} until it's set up. Choose another agent, or set it up in Connections.`,
+      }
+      : selectionIssue === "missing" && savedAgentChoice ? {
+        tone: "error",
+        message: `${savedAgentName(savedAgentChoice, runner.agents) ?? "Your saved agent"} isn't installed on ${agentMachine}. Choose another agent, or set it up in Connections.`,
+      }
+      : selectionIssue === "legacy" ? {
+        tone: "warning",
+        message: "Your saved default uses Codex non-interactive mode, which is no longer supported. Codex App Server supports interactive approvals and resumable conversations.",
+        ...(suggestedAgentOption && savedSelection.recommendedId !== savedAgentChoice
+          ? { fix: { label: `Use ${suggestedAgentOption.name}`, id: suggestedAgentOption.agent.id } } : {}),
+      }
+      : selectionIssue === "unbound" ? {
+        tone: "warning",
+        message: `Your saved default doesn't say which installation of ${
+          agentOpts.find((option) => option.agent.id === savedAgentChoice)?.name ?? "this agent"} it means.`,
+        ...(suggestedAgentOption ? {
+          fix: {
+            label: savedSelection.recommendedId === savedAgentChoice ? "Use This Installation" : `Use ${suggestedAgentOption.name}`,
+            id: suggestedAgentOption.agent.id,
+          },
+        } : {}),
+      }
+      : null;
+  const agentDefaultProblemId = `${generatedFormId}-agent-default`;
   // Browse the runner's filesystem in the selected agent's context (native host vs a WSL distro).
   const browseDistro = agent?.context?.kind === "wsl" ? agent.context.distro : undefined;
 
@@ -1155,7 +1230,8 @@ export function NewSessionDialog({
       : projectsSupported && selectedProject &&
           (selectedProjectLocation ? !projectLocationLaunchable : projectLocationsAvailable.length === 0)
         ? "Choose an online location to continue."
-        : runner && (!agentOpts.some((option) => !option.disabled) || selectedAgentOption?.disabled)
+        : runner && (!agentOpts.some((option) => !option.disabled) || selectedAgentOption?.disabled ||
+            agentDefaultProblem?.tone === "error")
           ? "Choose an installed agent to continue."
           : null;
 
@@ -1369,7 +1445,7 @@ export function NewSessionDialog({
       } else if (!workspaceId && !browsedPath) {
         report("folder", "Choose a workspace, or browse for a folder.", "folder", "browse");
       } else if (!agentId || !selectedAgentOption || selectedAgentOption.disabled) {
-        report("agent", "Choose an installed agent.", "agent");
+        report("agent", agentDefaultProblem?.tone === "error" ? null : "Choose an installed agent.", "agent");
       } else if (missingRequiredAccountChoice) {
         // The Account field already says why, and its control is described by it.
         report("form", null, "account");
@@ -1449,6 +1525,8 @@ export function NewSessionDialog({
     onClose();
     navigate({ name: "runners", section: "machines" });
   };
+  // Machines in Connections lists each machine with its agents (#2953).
+  const setUpAgentsAction: PickerFooterAction = { label: "Set Up Agents in Connections", onSelect: openConnections };
 
   // Project takes focus as the dialog opens, with its list closed (#1143, #2951): typing filters
   // at once, Arrow Down opens it, and it never covers the form uninvited.
@@ -1979,55 +2057,53 @@ export function NewSessionDialog({
                 <Select<string>
                   className="new-session-choice-control"
                   label="Agent"
-                  value={agentId || null}
+                  value={agentWaitsFor ? null : agentId || null}
                   onChange={selectAgent}
-                  options={agentComboboxOptions}
-                  placeholder="Choose an Agent…"
+                  options={agentWaitsFor ? [] : agentComboboxOptions}
+                  placeholder={agentWaitsFor ?? "Choose an Agent…"}
                   emptyLabel="No Agents Available"
-                  leadingIcon={agentIcon}
+                  leadingIcon={agentWaitsFor ? undefined : agentIcon}
                   searchable
                   noun="agents"
-                  invalid={controlInvalid("agent")}
-                  describedBy={controlDescribedBy("agent")}
+                  footerAction={setUpAgentsAction}
+                  disabled={!!agentWaitsFor}
+                  invalid={controlInvalid("agent") || agentDefaultProblem?.tone === "error"}
+                  describedBy={controlDescribedBy("agent", agentDefaultProblem ? agentDefaultProblemId : undefined)}
                 />
               ) : (
                 <SearchableCombobox<string>
                   inputId={agentInputId}
                   className="new-session-choice-control"
                   label="Agent"
-                  value={agentId || null}
+                  value={agentWaitsFor ? null : agentId || null}
                   onChange={selectAgent}
-                  options={agentComboboxOptions}
-                  placeholder="Choose an Agent…"
+                  options={agentWaitsFor ? [] : agentComboboxOptions}
+                  placeholder={agentWaitsFor ?? "Choose an Agent…"}
                   emptyLabel="No Agents Available"
-                  leadingIcon={agentIcon}
+                  leadingIcon={agentWaitsFor ? undefined : agentIcon}
                   noun="agents"
-                  invalid={controlInvalid("agent")}
-                  describedBy={controlDescribedBy("agent")}
+                  footerAction={setUpAgentsAction}
+                  disabled={!!agentWaitsFor}
+                  invalid={controlInvalid("agent") || agentDefaultProblem?.tone === "error"}
+                  describedBy={controlDescribedBy("agent", agentDefaultProblem ? agentDefaultProblemId : undefined)}
                 />
               )}
             </div>
             {problemFor("agent")}
-            {agent && <span className="muted agent-meta">{agentMeta(agent)}</span>}
-            {selectionIssue && (
-              <div className="agent-default-warning" role="alert">
-                <span>
-                  {selectionIssue === "legacy"
-                    ? "Your saved default uses Codex non-interactive mode, which is no longer supported. Codex App Server supports interactive approvals and resumable conversations."
-                    : selectionIssue === "unbound"
-                      ? "This older saved agent choice has no installation identity. Select the installation shown here to keep future sessions bound to it."
-                    : selectionIssue === "unavailable"
-                      ? "The selected agent is unavailable on this runner."
-                      : "Your saved installation is no longer available on this Machine. Select an available agent to recover."}
-                </span>
-                {suggestedAgentOption && (selectionIssue === "unbound" ||
-                  savedSelection.recommendedId !== agentDefaults[runnerId]) && (
-                  <button type="button" className="btn ghost sm" onClick={() => selectAgent(savedSelection.recommendedId)}>
-                    Use {suggestedAgentOption.label}
-                  </button>
-                )}
-              </div>
-            )}
+            {agentDefaultProblem && (agentDefaultProblem.tone === "error"
+              ? <FieldError id={agentDefaultProblemId}>{agentDefaultProblem.message}</FieldError>
+              : (
+                <FieldWarning
+                  id={agentDefaultProblemId}
+                  action={agentDefaultProblem.fix && (
+                    <button type="button" className="btn sm" onClick={() => selectAgent(agentDefaultProblem.fix!.id)}>
+                      {agentDefaultProblem.fix.label}
+                    </button>
+                  )}
+                >
+                  {agentDefaultProblem.message}
+                </FieldWarning>
+              ))}
           </div>
 
           {hostExecutionTarget && (providerAccounts.length > 1 || savedProviderAccountMissing) && (
@@ -2051,15 +2127,16 @@ export function NewSessionDialog({
                 options={providerAccounts.map((account, index) => ({
                   value: account.id,
                   label: accountIdentifiersRevealed ? account.label : providerAccountTitles[index]!,
-                  description: account.authStatus === "authenticated" ? "Logged In" :
-                    account.authStatus === "unauthenticated" ? "Login Required" : "Login Unknown",
+                  description: providerAccountDescription(account.authStatus),
                 }))}
                 placeholder="Choose an Account…"
                 invalid={missingRequiredAccountChoice}
                 describedBy={missingRequiredAccountChoice ? accountReasonId : undefined}
               />
               {missingRequiredAccountChoice && (
-                <p className="hint" id={accountReasonId} role="alert">The saved default account is no longer on this Machine. Choose an account or change the default in Machine settings.</p>
+                <FieldError id={accountReasonId}>
+                  The saved default account isn't on this machine anymore. Choose an account, or change the default in Machine Settings.
+                </FieldError>
               )}
             </div>
           )}

@@ -48,7 +48,7 @@ async function open(page: Page, query: string, heading: string) {
  */
 async function sweep(page: Page) {
   return page.locator(".modal").evaluate((modal) => {
-    const classes = ["form-error", "muted", "muted agent-meta", "project-location-reason"];
+    const classes = ["form-error", "muted", "project-location-reason"];
     const read = (element: Element) => {
       const style = getComputedStyle(element);
       return { color: style.color, size: style.fontSize, weight: style.fontWeight };
@@ -105,10 +105,8 @@ for (const theme of ["dark", "light"] as const) {
       await expect(error).toHaveText(/Could not load saved permission defaults/);
       expect(await look(error), "Session Role's field error").toEqual({ color: red, size: "12.5px", weight: "400" });
 
-      // The Agent field's meta line asks for 12.5px; the Mode note keeps the dialog's own size.
-      const meta = field(page, "Agent").locator(":scope > span.muted.agent-meta");
-      await expect(meta).toBeVisible();
-      expect(await look(meta), "Agent meta line").toEqual({ color: faint, size: "12.5px", weight: "400" });
+      // The Agent field has no meta line (#2953); the Mode note keeps the dialog's own size.
+      await expect(field(page, "Agent").locator(":scope > span.muted")).toHaveCount(0);
       const modeNote = field(page, "Mode").locator(":scope > span.muted").first();
       await expect(modeNote).toHaveText(/Runs (directly in the workspace directory|in an isolated git worktree)/);
       expect((await look(modeNote)).color, "Mode note").toBe(faint);

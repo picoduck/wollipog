@@ -69,6 +69,13 @@ const runDialog = fixtureParams.get("dialog") === "run";
 const codexDiscovery = fixtureParams.get("codexDiscovery") === "1";
 const appServerCheckTimedOut = fixtureParams.get("appServerCheck") === "timeout";
 const savedAgent = fixtureParams.get("savedAgent");
+/**
+ * #2953: `?agentSetup=1` adds two agents that need setup (Gemini, not installed; OpenCode, signed
+ * out) beside the three that can start, on a machine named Studio Workstation. `?noPreset=1` opens
+ * New Session with nothing chosen, so Agent waits for a location.
+ */
+const agentSetup = fixtureParams.get("agentSetup") === "1";
+const noPreset = fixtureParams.get("noPreset") === "1";
 if (savedAgent) saveAgentDefault({}, "runner-1", savedAgent);
 
 /** `?theme=light|dark` pins the theme; without it the page keeps the app's own default. */
@@ -78,6 +85,7 @@ if (fixtureTheme === "light" || fixtureTheme === "dark") document.documentElemen
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "fixture-runner",
+  ...(agentSetup ? { displayName: "Studio Workstation" } : {}),
   os: "linux",
   version: "1",
   status: "online",
@@ -149,6 +157,13 @@ const runner: RunnerView = {
         permissionModes: [],
       },
     },
+    ...(agentSetup ? [
+      { id: "gemini", name: "Gemini", command: "gemini", args: [], env: {}, driver: "acp" as const, available: false },
+      {
+        id: "opencode", name: "OpenCode", command: "opencode", args: [], env: {}, driver: "acp" as const,
+        available: false, authStatus: "unauthenticated" as const,
+      },
+    ] : []),
   ],
   providerAccounts: [
     {
@@ -384,7 +399,7 @@ function Harness() {
   return (
     <NewSessionDialog
       onClose={() => undefined}
-      preset={{ projectId: project.id, projectLocationId: project.locations[0]!.id }}
+      preset={noPreset ? undefined : { projectId: project.id, projectLocationId: project.locations[0]!.id }}
     />
   );
 }
