@@ -7308,8 +7308,9 @@ body.shell-dock-dragging * {
    (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." Open
    Pull Request (#2847) says why it can't open the request: offline, a Viewer's refusal, or a partial
    stage ("Commit the staged changes first."). New Session (#2952) says what nothing further down
-   its form can fix: "Choose an online location to continue." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason) {
+   its form can fix: "Choose an online location to continue." Add Location (#2966) says what its one
+   Add Location waits for: "Choose a location or a folder." or "Match the access levels to continue." */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -7320,7 +7321,7 @@ body.shell-dock-dragging * {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > .snooze-blocked-reason { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -10847,13 +10848,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .held-children .facts > div + div > dt { margin-top: var(--space-2); }
 }
 
-.project-location-generate-option {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-}
-
 /* The Sessions notice and Reconnecting line (#2221, §13.2, §6.3): inset at the
    list's edges and 8px from the top as the rows are. Together they take whole stacked-list rows. */
 .inbox-list-head,
@@ -11440,6 +11434,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: var(--space-5);
   overflow-y: auto;
 }
+/* A notice never scrolls inside itself, so it never shrinks in a body that overflows: a compact
+   notice's `min-height` replaced its content height as the floor, and a wrapped sentence spilled
+   out of its box under a long list (#2966). */
+.modal-body > .notice { flex-shrink: 0; }
 .modal-foot {
   display: flex;
   flex: none;
@@ -12157,8 +12155,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font: var(--type-body);
 }
 /* New Session's No Locations notice (#2952) takes Location's place in a half-width column, where its
-   sentence wraps: the icon stays on the sentence's first line, as a full notice's does. */
-.notice.compact.new-session-no-locations {
+   sentence wraps: the icon stays on the sentence's first line, as a full notice's does. Add Location's
+   onboarding and offline notices (#2966) are sentences that wrap on a phone, so they do the same. */
+.notice.compact:is(.new-session-no-locations, .add-location-note) {
   align-items: start;
   padding-block: var(--space-2);
 }
@@ -12621,7 +12620,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font: var(--type-small);
 }
 .access-change-sentence { margin: 0; color: var(--text-dim); font: var(--type-body); }
-.project-location-corrections { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 /* ProjectLocationRow.tsx (#2961): each location a §5.2 two-line row in one surface. Line 1 is the
    name, which badges never squeeze under seven characters, quiet "Default" text and the availability;
    line 2 the machine, the path in 12px mono losing its start first (§11.3), and the setup status. */
@@ -12703,120 +12701,50 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex: 1 1 24ch;
   color: var(--text-dim);
 }
-.project-location-candidate {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg);
+/* Add Location (#2966, §5.1–§5.2, §8.4): the existing locations are one surface of two-line radio
+   rows, at least --row-h-2 tall (56px, 64px on touch), divided by hairlines and with no scroller of
+   their own: the dialog body scrolls. Line 2 is the machine, then the path in mono, cut from its
+   start so the folder's own name stays in view (an RTL box around a <bdi>, §11.3). */
+.add-location-list { gap: 0; }
+.add-location-list > .choice-row { min-height: var(--row-h-2); border-radius: unset; }
+.add-location-list > .choice-row + .choice-row { box-shadow: inset 0 1px 0 var(--border); }
+.add-location-list > .choice-row:first-child {
+  border-top-left-radius: var(--radius-md);
+  border-top-right-radius: var(--radius-md);
 }
-.project-location-candidate-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: var(--space-1); }
-.project-location-candidate-main code { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
-.project-location-candidate-heading { display: flex; min-width: 0; align-items: center; gap: var(--space-2); }
-.project-location-candidate-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-manager-empty {
-  display: flex;
-  min-height: 260px;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 8px;
-  color: var(--text-dim);
-  text-align: center;
+.add-location-list > .choice-row:last-child {
+  border-bottom-left-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
 }
-.project-manager-empty > div { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
-.project-location-picker { display: grid; gap: 14px; }
-.project-location-picker > .muted { margin: 0; }
-.project-location-create-section { display: grid; gap: var(--space-2); }
-/* The collapsed creation trigger stays a full-width, readable target. */
-.project-location-create-section > .disclosure-trigger { width: 100%; }
-.project-location-compatibility,
-.project-location-error {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--yellow) 40%, var(--border));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--yellow) 7%, transparent);
-  color: var(--text);
-  font-size: 12px;
-}
-.project-location-compatibility span { color: var(--text-dim); }
-.project-location-error {
-  border-color: color-mix(in srgb, var(--danger-text) 45%, var(--border));
-  background: color-mix(in srgb, var(--danger-text) 7%, transparent);
-  color: var(--danger-text);
-}
-.project-location-create {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: 9px;
-  background: var(--bg);
-}
-.project-location-create-heading,
-.project-location-existing-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.project-location-create-heading .muted,
-.project-location-existing-heading .muted { font-size: 12px; }
-.project-location-create-fields {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 10px;
-}
-.project-location-folder {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.project-location-folder code {
-  min-width: 0;
-  flex: 1;
+.add-location-line { display: flex; min-width: 0; gap: var(--space-3); }
+.add-location-machine {
+  flex: none;
+  max-width: 50%;
   overflow: hidden;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg-elev-2);
-  color: var(--text);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.project-location-create-actions { display: flex; justify-content: flex-end; }
-.project-location-machine-empty {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+.add-location-path {
+  min-width: 0;
+  overflow: hidden;
+  direction: rtl;
+  font-family: var(--font-mono);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* No match (§12.2): one row in the surface, its sentence free to wrap on a phone. */
+.row.add-location-empty {
+  height: auto;
+  min-height: var(--row-h);
+  padding-block: var(--space-2);
   color: var(--text-dim);
-  font-size: 12px;
 }
-.project-location-existing-heading {
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-.project-location-candidates { display: flex; max-height: min(360px, 38vh); flex-direction: column; gap: 8px; overflow-y: auto; }
-.project-location-candidate .btn { flex: none; }
+.row.add-location-empty > svg { flex: none; }
 .danger-note { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger-text) 45%, var(--border)); border-radius: 8px; color: var(--danger-text); background: color-mix(in srgb, var(--danger-text) 7%, transparent); }
 @media (max-width: 760px) {
   .project-name-form { align-items: stretch; flex-direction: column; }
   .project-name-form .btn { justify-content: center; }
-  .project-location-candidate { align-items: stretch; flex-direction: column; }
-  .project-location-candidate .btn { width: 100%; justify-content: center; }
-  .project-location-create-fields { grid-template-columns: minmax(0, 1fr); }
-  .project-location-folder,
-  .project-location-machine-empty { align-items: stretch; flex-direction: column; }
-  .project-location-folder .btn,
-  .project-location-create-actions .btn,
-  .project-location-machine-empty .btn { width: 100%; justify-content: center; }
 }
 
 /* Command Inbox --------------------------------------------------------- */
