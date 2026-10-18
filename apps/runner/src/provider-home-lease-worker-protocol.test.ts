@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
-import { LEASE_WORKER_ERRORS, LEASE_WORKER_PROFILE_LIMIT, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept } from "./provider-home-lease-worker-protocol.js";
+import { LEASE_WORKER_CLOCK, LEASE_WORKER_ERRORS, LEASE_WORKER_PROFILE_LIMIT, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept } from "./provider-home-lease-worker-protocol.js";
 
 class Port extends EventEmitter {
   readonly sent: Array<LeaseWorkerExecute | LeaseWorkerAccept> = [];
@@ -12,7 +12,7 @@ class Port extends EventEmitter {
   ref(): this { return this; }
   unref(): this { return this; }
   async terminate(): Promise<number> { this.terminated++; return 1; }
-  ready(): void { this.emit("message", { kind: "ready", epoch: this.epoch, pid: process.pid }); }
+  ready(): void { this.emit("message", { kind: "ready", epoch: this.epoch, pid: process.pid, clock: LEASE_WORKER_CLOCK }); }
   reply(kind: "receipt" | "done", request: LeaseWorkerExecute, extra: Record<string, unknown> = {}): void {
     this.emit("message", { kind, epoch: this.epoch, id: request.id, ok: true, value: true, ...extra });
   }

@@ -1,6 +1,8 @@
 /** Control frames contain no canonical snapshots or private acquisition/completion tokens. */
 export const LEASE_WORKER_LIMITS = { pending: 64, requestBytes: 64 * 1024, responseBytes: 4096, deadlineMs: 300_000, heartbeatDelayMs: 500 } as const;
-export const LEASE_WORKER_ASSET = "wollipog/provider-home-lease-worker";
+/** Mixed wall-time/monotonic workers fail before any operation is dispatched. */
+export const LEASE_WORKER_CLOCK = "hrtime-ns-v1";
+export const LEASE_WORKER_ASSET = "wollipog/provider-home-lease-worker-hrtime-ns-v1";
 /** Bound on outstanding `acquire_reference` handles the worker keeps. Every handle is settled by
  * `release_reference` or `retain_reference`, so only in-flight transactions occupy the pool. */
 export const LEASE_WORKER_REFERENCE_LIMIT = 1024;
@@ -63,11 +65,11 @@ export class ProviderHomeLeaseError extends Error {
   constructor(readonly code: LeaseWorkerError) { super(LEASE_WORKER_ERRORS[code]); }
 }
 export interface LeaseWorkerExecute {
-  kind: "execute"; epoch: string; id: string; deadline: number; operation: LeaseWorkerOperation;
+  kind: "execute"; epoch: string; id: string; deadline: string; operation: LeaseWorkerOperation;
 }
 export interface LeaseWorkerAccept { kind: "accept"; epoch: string; id: string; cancel: boolean }
 export type LeaseWorkerReply =
-  | { kind: "ready"; epoch: string; pid: number }
+  | { kind: "ready"; epoch: string; pid: number; clock: typeof LEASE_WORKER_CLOCK }
   | { kind: "receipt" | "done"; epoch: string; id: string; ok: boolean; value: boolean; error?: LeaseWorkerError; profileId?: string }
   | { kind: "diagnostic"; epoch: string; event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished"; leaseId: string; message: string };
 

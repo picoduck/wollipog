@@ -95,7 +95,7 @@ if (process.argv.includes("--bundle-only")) {
 // 2) Node SEA blob.
 const seaConfig = join(buildDir, "sea-config.json");
 const blob = join(buildDir, "runner.blob");
-const assets = { "wollipog/provider-home-lease-worker": leaseWorker };
+const assets = { "wollipog/provider-home-lease-worker-hrtime-ns-v1": leaseWorker };
 if (process.platform === "linux" || process.platform === "darwin") assets["wollipog/provider-home-lease-io"] = leaseIoHelper;
 if (process.platform === "linux") assets["wollipog/claude-provider-pipe"] = claudePipeHelper;
 if (process.platform === "darwin") {
