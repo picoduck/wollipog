@@ -495,6 +495,13 @@ export class DelegatedVideoReviews {
 
   readonly gateAccess: WorkflowVideoEvidenceAccess = {
     available: (controller) => this.ready && this.readyFor(controller),
+    campaignReadiness: (controller) => {
+      if (!this.ready) return { available: false, reason: "Wollipog's video review service is not attached yet." };
+      const target = this.target(controller);
+      if (!target) return { available: false, reason: `this campaign's evidence envelope names no attested ${VIDEO_REVIEWER_MODEL} media-only reviewer on the Orchestrator's machine.` };
+      return validVideoLiveProof(this.liveValidation.current(target), target, this.clock()) ? { available: true }
+        : { available: false, reason: "no current live proof certifies the media-only reviewer on the Orchestrator's machine." };
+    },
     decisionCurrent: (decision, phase) => {
       const gate = this.attached?.sessions.delegatedVideoGate(decision.occurrenceId, [phase === "resolve" ? "pending" : "approved"]);
       return Boolean(gate && gate.decision.status === decision.status && gate.decision.resourceDigest === decision.resourceDigest &&

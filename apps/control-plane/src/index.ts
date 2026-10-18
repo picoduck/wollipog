@@ -1005,6 +1005,7 @@ const svc = new SessionsService(
   videoEvidence.preparedMediaActiveStops,
 );
 videoEvidence.attach(svc, hub);
+db.setCampaignVideoReviewSource((campaignSessionId, uiEvidenceOwner) => svc.campaignVideoReview(campaignSessionId, uiEvidenceOwner));
 const roleConversions = new SessionRoleConversions(db, hub, (event, fields) =>
   app.log.info({ event, ...fields }, "session role conversion"));
 if (VIDEO_FRAME_VALIDATION_SESSION_ID) {

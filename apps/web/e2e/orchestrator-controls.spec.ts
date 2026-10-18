@@ -34,6 +34,30 @@ for (const viewport of [
   { name: "desktop", width: 1440, height: 900 },
   { name: "phone", width: 390, height: 844 },
 ] as const) {
+  for (const theme of ["dark", "light"] as const) {
+    for (const video of ["certified", "uncertified"] as const) {
+      test(`${viewport.name} ${theme}: a ${video} Full Control campaign lists video from the server's fact`, async ({ page }) => {
+        await openFixture(page, viewport.width, viewport.height, `&fullControlFixture=1&video=${video}`);
+        await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+        const dialog = await openControls(page);
+        const humanRequired = dialog.locator("section").filter({ has: page.getByRole("heading", { name: "Human Required", exact: true }) });
+        await expect(humanRequired).toContainText("External Evidence Review: Evidence stored outside private Session artifacts (links only) needs your review.");
+        const helper = dialog.locator(".orchestrator-gate-helper").filter({ hasText: "Video Evidence Review:" });
+        if (video === "certified") {
+          await expect(humanRequired).not.toContainText("Video Evidence Review");
+          await expect(helper).toContainText("The Orchestrator hands video evidence to the certified media-only reviewer");
+        } else {
+          await expect(humanRequired).toContainText("Video Evidence Review: Video evidence comes to you because no current live proof certifies");
+          await expect(helper).toHaveCount(0);
+        }
+        await humanRequired.scrollIntoViewIfNeeded();
+        const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        expect(overflow).toBeLessThanOrEqual(0);
+        await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-video-${video}.png` });
+      });
+    }
+  }
+
   test(`${viewport.name}: the + menu has one Orchestrator Controls row and does not scroll`, async ({ page }) => {
     await openFixture(page, viewport.width, viewport.height);
     await page.getByRole("button", { name: "Attach and Settings" }).click();

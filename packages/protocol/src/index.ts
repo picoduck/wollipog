@@ -2694,6 +2694,11 @@ export interface OrchestratorCampaignProjection {
     costBudgetUsd: number | null;
     maxToolCalls: number | null;
   };
+  /** Delegated video evidence review for this Full Control campaign (#1321): `available` only while
+   * its Orchestrator can hand video to a certified media-only reviewer, otherwise the first reason it
+   * cannot. Absent from servers without video review and from Custom campaigns; each gate still
+   * rechecks its own child, source and audience. */
+  videoEvidenceReview?: { status: "available" | "unavailable"; reason: string };
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;

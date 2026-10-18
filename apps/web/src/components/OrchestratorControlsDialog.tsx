@@ -497,6 +497,12 @@ function FullControlDecisions({ control, campaign, driver, titleId }: {
   driver: string | null; titleId: string;
 }) {
   const standing = fullControlStandingHumanRequired(driver ?? "claude-code");
+  // Video is the one evidence exception a certified media-only reviewer can lift (#1321). Only the
+  // server's campaign fact lifts it; without one (an older server) it stays with the Human.
+  const video = campaign?.videoEvidenceReview;
+  const exceptions = FULL_CONTROL_EVIDENCE_EXCEPTIONS
+    .filter((item) => item.id !== "video_evidence" || video?.status !== "available")
+    .map((item) => item.id === "video_evidence" && video ? { ...item, reason: video.reason } : item);
   const reasonFor = (category: DelegatableWorkflowDecisionCategory) =>
     category === "ui_evidence_approval" && campaign?.uiEvidenceReview.status === "unavailable"
       ? campaign.uiEvidenceReview.reason ?? "This Orchestrator can't inspect the evidence images."
@@ -518,7 +524,7 @@ function FullControlDecisions({ control, campaign, driver, titleId }: {
       </div>
       <p className="section-note">These always come to you under Full Control.</p>
       <ul>
-        {FULL_CONTROL_EVIDENCE_EXCEPTIONS.map((item) => <li key={item.id}><strong>{item.exception}:</strong> {item.reason}</li>)}
+        {exceptions.map((item) => <li key={item.id}><strong>{item.exception}:</strong> {item.reason}</li>)}
         {standing.map((id) => <li key={id}><strong>{FULL_CONTROL_HUMAN_REQUIRED_LABELS[id] ?? id}:</strong> {FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON}</li>)}
       </ul>
     </section>
@@ -562,6 +568,9 @@ function EffectiveOwnerFacts({ campaign, reasonFor }: {
     </dl>
     {campaign?.decisionOwners.ui_evidence_approval === "orchestrator" &&
       <p className="orchestrator-gate-helper">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>}
+    {/* Only the server's campaign fact states video as delegated (#1321). */}
+    {campaign?.videoEvidenceReview?.status === "available" &&
+      <p className="orchestrator-gate-helper"><strong>Video Evidence Review:</strong> {campaign.videoEvidenceReview.reason}</p>}
   </>;
 }
 

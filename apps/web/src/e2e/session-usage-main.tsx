@@ -373,6 +373,18 @@ if (composerFixture) {
         operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [] } };
       session.orchestratorCampaign.control = session.orchestratorPolicy.control;
       session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(session.orchestratorPolicy.control);
+      // `video=certified|uncertified` (#1321): the server's campaign fact for delegated video review,
+      // with UI evidence delegated to an image-capable Orchestrator. Source UI fixture only.
+      const videoFixture = params.get("video");
+      if (fullFixture === "1" && (videoFixture === "certified" || videoFixture === "uncertified")) {
+        session.orchestratorCampaign.decisionOwners = { ...session.orchestratorCampaign.decisionOwners, ui_evidence_approval: "orchestrator" };
+        session.orchestratorCampaign.uiEvidenceReview = { status: "available", effectiveOwner: "orchestrator" };
+        session.orchestratorCampaign.videoEvidenceReview = videoFixture === "certified"
+          ? { status: "available", reason: "The Orchestrator hands video evidence to the certified media-only reviewer and decides " +
+            "from its verdict. A child's video stays with you unless that child also runs on an attested agent." }
+          : { status: "unavailable",
+            reason: "Video evidence comes to you because no current live proof certifies the media-only reviewer on the Orchestrator's machine." };
+      }
       if (fullFixture === "enable") {
         // A live Custom root with a Human-established scope, ready to enable through the server preflight.
         session.orchestratorPolicy.control = { mode: "custom" };

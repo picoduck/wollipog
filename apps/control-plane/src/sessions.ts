@@ -10310,6 +10310,27 @@ export class SessionsService {
     );
   }
 
+  /** Delegated video review for a Full Control campaign as a whole (#1321), for the Orchestrator's
+   * controls: available only when its root can hand video to a certified media-only reviewer, else
+   * the first reason it cannot. Each gate still rechecks its child, source and audience
+   * (`productionVideoReviewAvailable`); this grants nothing. */
+  campaignVideoReview(controllerId: string, uiEvidenceOwner: WorkflowDecisionAuthority):
+    { status: "available" | "unavailable"; reason: string } | null {
+    const controller = this.db.getSession(controllerId);
+    const control = controller?.orchestratorPolicy?.control;
+    if (!controller || control?.mode !== "full_control" || !this.workflowVideoApprovals) return null;
+    const human = (reason: string) => ({ status: "unavailable" as const, reason: `Video evidence comes to you because ${reason}` });
+    if (uiEvidenceOwner !== "orchestrator") return human("UI evidence approval is not delegated to the Orchestrator.");
+    if (!control.boundary.evidenceAuthority) return human("this campaign has no evidence envelope for a media-only reviewer.");
+    if (!campaignEvidenceDisclosuresCurrent(control.boundary.evidenceAuthority, this.evidenceAuthorityDisclosures) ||
+      !campaignBoundaryCurrent(controller)) return human("this campaign's evidence disclosures or boundary changed.");
+    if (!this.sessionPacedVideoCompatible(controller)) return human("the Orchestrator's agent does not declare the paced video review contract.");
+    const readiness = this.workflowVideoApprovals.campaignReadiness(controller);
+    if (!readiness.available) return human(readiness.reason);
+    return { status: "available", reason: "The Orchestrator hands video evidence to the certified media-only reviewer and decides " +
+      "from its verdict. A child's video stays with you unless that child also runs on an attested agent." };
+  }
+
   private productionVideoReviewAvailable(controller: SessionView, child: SessionView,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }>): boolean {
     const control = controller.orchestratorPolicy?.control;

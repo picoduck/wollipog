@@ -5433,6 +5433,15 @@ export class ControlPlaneDb {
   setLiveTurnSource(source: (sessionId: string) => string | undefined): void {
     this.liveTurnSource = source;
   }
+  /** Delegated video review's campaign-level fact (#1321), which only the Session service and the
+   * hosting video composition can derive. Unset, campaign projections omit it. */
+  private campaignVideoReviewSource: ((campaignSessionId: string, uiEvidenceOwner: WorkflowDecisionAuthority) =>
+    OrchestratorCampaignProjection["videoEvidenceReview"] | null) | null = null;
+
+  setCampaignVideoReviewSource(source: (campaignSessionId: string, uiEvidenceOwner: WorkflowDecisionAuthority) =>
+    OrchestratorCampaignProjection["videoEvidenceReview"] | null): void {
+    this.campaignVideoReviewSource = source;
+  }
 
   private derivedSessionRevision = 0;
 
@@ -19154,6 +19163,12 @@ export class ControlPlaneDb {
         ? { budget } : {}),
       ...(recovery ? { recovery } : {}),
       decisionOwners: effectiveOwners,
+      ...(() => {
+        let video: OrchestratorCampaignProjection["videoEvidenceReview"] | null = null;
+        try { video = policy.control?.mode === "full_control" ? this.campaignVideoReviewSource?.(resolvedCampaignId,
+          effectiveOwners.ui_evidence_approval) ?? null : null; } catch { video = null; }
+        return video ? { videoEvidenceReview: video } : {};
+      })(),
       limits: {
         maximumConcurrentChildren: limit,
         occupied,

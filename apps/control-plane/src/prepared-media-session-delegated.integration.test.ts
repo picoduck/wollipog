@@ -832,3 +832,25 @@ test("preparation refuses specifically before reserving anything", async (t) => 
     assert.equal(fixture.db.raw().prepare("SELECT COUNT(*) AS n FROM prepared_media_sessions").get()!.n, 0);
   }
 });
+
+test("the campaign projection reports delegated video review from the same server facts as gate ownership", async (t) => {
+  const h = await harness(t);
+  assert.equal(h.db.campaignProjection("root")!.videoEvidenceReview, undefined, "without the Session service's source there is no fact");
+  h.db.setCampaignVideoReviewSource((id, owner) => h.sessions.campaignVideoReview(id, owner));
+  const video = () => h.db.campaignProjection("root")!.videoEvidenceReview;
+  assert.equal(h.db.campaignProjection("root")!.decisionOwners.ui_evidence_approval, "orchestrator");
+  assert.equal(video()?.status, "available", JSON.stringify(video()));
+  assert.match(video()!.reason, /certified media-only reviewer/u);
+  h.revokeProof();
+  assert.deepEqual(video(), { status: "unavailable",
+    reason: "Video evidence comes to you because no current live proof certifies the media-only reviewer on the Orchestrator's machine." });
+  assert.equal(h.sessions.campaignVideoReview("root", "human")?.reason,
+    "Video evidence comes to you because UI evidence approval is not delegated to the Orchestrator.");
+  assert.equal(h.sessions.campaignVideoReview("child", "orchestrator"), null, "only a Full Control campaign root has the fact");
+});
+
+test("a campaign without a live proof reports video as the Human's with the missing proof named", async (t) => {
+  const h = await harness(t, { proof: false });
+  assert.deepEqual(h.sessions.campaignVideoReview("root", "orchestrator"), { status: "unavailable",
+    reason: "Video evidence comes to you because no current live proof certifies the media-only reviewer on the Orchestrator's machine." });
+});
