@@ -3,9 +3,21 @@ import { attentionRequestRank, pendingRequests, type SessionView } from "@wollip
 
 export type SessionFollowUpGroup = "needs_input" | "ready_for_review" | "working" | "quiet";
 
-export function outstandingSessionResult(session: Pick<SessionView, "attention">) {
+type CampaignFacts = Partial<Pick<SessionView, "parentSessionId" | "orchestratorCampaign" | "orchestratorPolicy">>;
+
+/** A Full Control root whose campaign the server reports Verified Complete (#2940): its normal
+ * completion is informational, never review work. Only the server's projection decides this; any
+ * other campaign state, a Custom campaign or a descendant keeps its ordinary follow-up. */
+export function completedFullControlCampaign(session: CampaignFacts): boolean {
+  const campaign = session.orchestratorCampaign;
+  if (session.parentSessionId || campaign?.status !== "verified_complete") return false;
+  return (campaign.control ?? session.orchestratorPolicy?.control)?.mode === "full_control";
+}
+
+export function outstandingSessionResult(session: Pick<SessionView, "attention"> & CampaignFacts) {
   const facts = session.attention;
-  return facts?.result?.owner === "human" && facts.result.revision !== facts.acknowledgedRevision
+  return facts?.result?.owner === "human" && facts.result.revision !== facts.acknowledgedRevision &&
+    !completedFullControlCampaign(session)
     ? facts.result : null;
 }
 

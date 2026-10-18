@@ -68,6 +68,8 @@ const VOCABULARY = {
     children_working: info("Children Working", { pulse: true }),
     children_pending: neutral("Child Work Pending"),
     ready_for_review: { label: "Ready for Review", tone: "review" },
+    /** A Full Control campaign's verified normal completion: informational, not review work (#2940). */
+    campaign_complete: success("Campaign Complete"),
     stalled: danger("Stalled"),
     failed: danger("Failed"),
     completed: success("Completed"),
@@ -478,7 +480,8 @@ export interface SessionStatusContext {
 
 /** The session fields the ranking reads. */
 export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-  Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners" | "archived" |
+  Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "orchestratorPolicy" | "parentSessionId" | "campaignRequests" |
+    "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
     "queueHold" | "holds" | "backgroundWorkState" | "backgroundDeliveries">>;
 

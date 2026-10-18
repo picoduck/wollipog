@@ -516,6 +516,21 @@ test("a result waits behind active children and becomes reviewable when the comp
 });
 
 
+test("a verified-complete Full Control root reads Campaign Complete in a success badge, and a Custom one stays Ready for Review (#2940)", async () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: NOW,
+    result: { revision: "r1", at: NOW, owner: "human" as const }, acknowledgedRevision: null };
+  const campaign = (control: unknown) => ({ status: "verified_complete", policyRevision: 3, control }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
+  await withRow(baseSession({ attention, orchestratorCampaign: campaign({ mode: "full_control", boundary: {} }) }), (container) => {
+    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Campaign Complete"]);
+    assert.ok(badges(container)[0]!.classList.contains("t-success"));
+    assertNoDomNode(container.querySelector(".status.t-review"));
+  });
+  await withRow(baseSession({ attention, orchestratorCampaign: campaign({ mode: "custom" }) }), (container) => {
+    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Ready for Review"]);
+  });
+});
+
+
 test("a filtered family keeps its active chip without an empty expand control (#3328)", async () => {
   await withRow(baseSession(), (container) => {
     assertNoDomNode(container.querySelector(".inbox-thread-toggle"));
