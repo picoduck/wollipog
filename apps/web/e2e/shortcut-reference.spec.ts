@@ -123,8 +123,16 @@ test.describe("at 1440×900", () => {
 
     const reference = await openWithKey(page, SESSION);
     const reading = reference.locator(".shortcut-group").filter({ has: page.getByRole("heading", { name: /^Session Reading/ }) });
-    await expect(reading.locator(".shortcut-row", { hasText: "Next Session" }).locator("kbd")).toHaveText("Alt+↓");
-    await expect(reading.locator(".shortcut-row", { hasText: "Previous Session" }).locator("kbd")).toHaveText("Alt+↑");
+            await expect(
+              reading
+                .locator(".shortcut-row", { hasText: "Next Session" })
+                .locator("kbd"),
+            ).toHaveText("Alt+↓");
+            await expect(
+              reading
+                .locator(".shortcut-row", { hasText: "Previous Session" })
+                .locator("kbd"),
+            ).toHaveText("Alt+↑");
   });
 
   test("the reference lists Fork Conversation (F) under the session page's group (#2272)", async ({ page }) => {
@@ -140,6 +148,7 @@ test.describe("at 1440×900", () => {
   test("typing filters to the matching rows and their headings", async ({ page }) => {
     const reference = await openWithKey(page, SKILLS);
     const filter = reference.getByRole("searchbox", { name: "Filter Shortcuts" });
+    await expect.poll(async () => (await filter.boundingBox())?.height).toBe(32);
     await expect(filter).toBeFocused();
     await filter.fill("term");
     await expect(headings(reference)).toHaveText(["Session"]);
@@ -177,6 +186,8 @@ test.describe("on a 390px phone", () => {
     // A touch screen opens on the sheet, not the filter: focusing the field would raise the
     // software keyboard over a sheet nobody has read yet.
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const filter = reference.getByRole("searchbox", { name: "Filter Shortcuts" });
+    await expect.poll(async () => (await filter.boundingBox())?.height).toBe(44);
     await expect(reference).toBeFocused();
     await expect(reference.getByRole("searchbox", { name: "Filter Shortcuts" })).not.toBeFocused();
     // The loading modal can hand its phone sheet to the loaded reference in a later frame.
