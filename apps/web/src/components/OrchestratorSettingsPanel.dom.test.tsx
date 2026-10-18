@@ -337,7 +337,8 @@ test("the editor has control preparation and three settings groups, and a change
       ["About Isolation", "About UI Evidence Delegation"]);
     assert.ok(disclosures.every((node) => !(node as HTMLDetailsElement).open), "every disclosure starts closed");
     assert.match(disclosures[1]!.textContent ?? "", /provider may retain images in provider-local transcripts or media logs/);
-    assert.match(disclosures[1]!.textContent ?? "", /Video evidence otherwise requires human review/);
+    assert.match(disclosures[1]!.textContent ?? "", /Video evidence otherwise requires human review, including video attached as a Session artifact, unless a Full Control campaign's certified media-only reviewer is available\./,
+      "account settings name no single campaign, so the video sentence names the certified exception");
     assert.match(container.querySelector(".orchestrator-human-only")?.textContent ?? "",
       /^Secrets, sign-in, permission grants, governance changes, budgets and guardrails always stay with you\.$/);
     assert.ok(container.querySelector(".orchestrator-human-only > svg"), "with its lock icon");
