@@ -4218,3 +4218,27 @@ test("an out-of-range Cloud Budget left behind closed Options is named in the he
     assert.equal(optionsHead(fixture.container).querySelector(".status.t-warning")?.textContent, "Budget Out of Range");
   } finally { await unmountFixture(fixture); }
 });
+
+test("Cloud Budget limits are never rounded into values the field refuses (#2954)", async () => {
+  const boundaries = { filesystem: "snapshot", network: "policy", secrets: "references", billing: "target_metered" } as const;
+  const fixture = await mountFixture({ runners: [{ ...runner, executionTargets: [...hostTargets(), {
+    id: "cloud", runnerId: runner.runnerId, name: "Cloud Sandbox", kind: "cloud", workspaceStrategy: "snapshot", adapter: "cloud",
+    boundaries, available: true,
+    policy: { cost: { currency: "USD", estimatedHourlyRateUsd: 0.125, minimumBudgetUsd: 1.004, maximumBudgetUsd: 20.006 }, admission: { maxConcurrentSessions: 2, queue: "fifo" } },
+  }] }] }, undefined, undefined, undefined, undefined, undefined, { runnerSkills: async () => ({ desired: [], reported: null }) as never });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await act(async () => { optionsHead(fixture.container).click(); });
+    await chooseSelectOption(fixture.container, "Run On", "Cloud Sandbox");
+    const budget = fixture.container.querySelector<HTMLInputElement>('input[step="0.01"]')!;
+    assert.equal(settingRowOf(budget).querySelector(".setting-row-desc")?.textContent,
+      "Stops the session at this amount. Between $1.004 and $20.006, at about $0.125 an hour.");
+    await act(async () => { fireDomEvent.change(budget, { target: { value: "0" } }); });
+    assert.match(ariaReferencedText(budget, "aria-describedby") ?? "", /^Enter an amount from \$1\.004 to \$20\.006\./);
+    // Each endpoint the sentence names is one the field accepts.
+    for (const endpoint of ["1.004", "20.006"]) {
+      await act(async () => { fireDomEvent.change(budget, { target: { value: endpoint } }); });
+      assert.equal(budget.getAttribute("aria-invalid"), null, `${endpoint} is accepted`);
+    }
+  } finally { await unmountFixture(fixture); }
+});

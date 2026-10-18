@@ -135,9 +135,13 @@ function liveLocationAvailability(
   return runner.workspaces.some((workspace) => workspace.id === location.workspaceId) ? "available" : "workspace_missing";
 }
 
-/** A dollar amount as people write it: "$1", "$0.40". */
+/**
+ * A dollar amount as people write it, "$1", "$0.40", without rounding away precision a policy limit
+ * has: a minimum of $1.004 reads "$1.004", because "$1.00" would name a value the field refuses.
+ */
 function usd(amount: number): string {
-  return `$${Number.isInteger(amount) ? amount : amount.toFixed(2)}`;
+  return `$${Number.isInteger(amount) ? amount
+    : amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 20, useGrouping: false })}`;
 }
 
 /** A path cut at its start, so the folder name and its parent stay whole: "…/repos/wollipog". */
