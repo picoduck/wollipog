@@ -1546,10 +1546,10 @@ test("Project-first creation distinguishes same names and explains multi-locatio
   await projectCombobox.click();
   const alphas = dialog.getByRole("listbox", { name: "Project Options" }).getByRole("option", { name: "Alpha", exact: true });
   await expect(alphas).toHaveCount(2);
-  await expect(alphas.nth(0)).toHaveAccessibleDescription("runner-1 · 2 locations");
-  await expect(alphas.nth(1)).toHaveAccessibleDescription("Hidden · runner-1 · 1 location");
+  await expect(alphas.nth(0)).toHaveAccessibleDescription("runner-1 · alpha · 2 locations");
+  await expect(alphas.nth(1)).toHaveAccessibleDescription("Hidden · runner-1 · alpha-copy · 1 location");
   await page.keyboard.press("Escape");
-  await expect(projectCombobox).toHaveValue("Alpha · runner-1", { timeout: 1000 });
+  await expect(projectCombobox).toHaveValue("Alpha · runner-1 · alpha", { timeout: 1000 });
   await location.click();
   await expect(dialog.getByRole("listbox", { name: "Location" }).getByRole("option")).toHaveText([
     /runner-1Available · \/repos\/alpha$/, /runner-1Available · \/repos\/alpha-secondary$/, "Add Location…",
@@ -1568,7 +1568,7 @@ test("Project-first creation distinguishes same names and explains multi-locatio
 
   // A search still finds a project by its folder, though no option shows a path.
   await chooseNewSessionProject(dialog, "/repos/alpha-copy", /Hidden/);
-  await expect(projectCombobox).toHaveValue("Alpha · runner-1");
+  await expect(projectCombobox).toHaveValue("Alpha · runner-1 · alpha-copy");
   await expect(location).toHaveAccessibleName("Location: runner-1");
   await expect(reason).toHaveCount(0);
   await dialog.getByRole("button", { name: "Create Session" }).click();
@@ -1647,6 +1647,8 @@ test.describe("New Session's Where row (#2952)", () => {
   test("Project and Location are one row of equal columns at 1440px and stack at 390px", async ({ page }) => {
     for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(viewport);
+      // The phone app bar replaces the tabs (#2211); wait for the layout before choosing a group.
+      await expect(page.locator(".sessions-app-bar")).toHaveCount(viewport.width < 760 ? 1 : 0);
       await chooseGroup(page, /^Alpha/);
       await page.keyboard.press("c");
       const dialog = page.getByRole("dialog", { name: "New Session" });

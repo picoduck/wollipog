@@ -163,6 +163,9 @@ function createFailureSentence(error: unknown, kept: boolean): string {
  */
 /** The field a submit's validation problem is shown under. `form` is the rare problem no field owns. */
 type ProblemField = "project" | "location" | "machine" | "folder" | "agent" | "role" | "harness" | "mode" | "form";
+/** Inside a field with several controls, the control a problem is about. */
+type ProblemControl =
+  | "role" | "defaults" | "orchestrator" | "live-child-limit" | "harness" | "execution-target" | "cloud-budget";
 
 /** Pre-selection for launches from a project's menu ("Create permanent worktree"). */
 export interface NewSessionPreset {
@@ -225,23 +228,53 @@ export function NewSessionDialog({
   // A project's option is its name; the second line says where it runs (§9.1). Two projects with
   // one name keep that name in the list, and the closed field adds the machine to tell them apart.
   const projectOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
-    const nameCounts = new Map<string, number>();
-    for (const project of projectList) nameCounts.set(project.name, (nameCounts.get(project.name) ?? 0) + 1);
     const nameOf = (id: string) => runnerDisplay(runners.get(id), boxByRunner.get(id), id).name;
+    const primaryOf = (project: ProjectView) => project.locations.find((location) => location.isDefault) ?? project.locations[0];
+    // Where each project runs, said no more precisely than its same-named projects need: the machine,
+    // then the machine and folder, then a longer path, and the project's id when nothing else differs.
+    const qualifiers = new Map<string, string>();
+    const sameName = new Map<string, ProjectView[]>();
+    for (const project of projectList) sameName.set(project.name, [...(sameName.get(project.name) ?? []), project]);
+    for (const group of sameName.values()) {
+      if (group.length < 2) continue;
+      const levels: Array<(project: ProjectView) => string> = [
+        (project) => { const primary = primaryOf(project); return primary ? nameOf(primary.runnerId) : ""; },
+        (project) => {
+          const primary = primaryOf(project);
+          return primary ? `${nameOf(primary.runnerId)} · ${primary.path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? primary.path}` : "";
+        },
+        (project) => { const primary = primaryOf(project); return primary ? `${nameOf(primary.runnerId)} · ${startTruncatedPath(primary.path)}` : ""; },
+        (project) => { const primary = primaryOf(project); return primary ? `${nameOf(primary.runnerId)} · ${primary.path}` : ""; },
+      ];
+      const level = levels.find((qualify) => {
+        const values = group.map(qualify);
+        return values.every(Boolean) && new Set(values).size === group.length;
+      });
+      for (const project of group) {
+        const primary = primaryOf(project);
+        qualifiers.set(project.id, level
+          ? level(project)
+          : `${primary ? `${nameOf(primary.runnerId)} · ` : ""}Project ${project.id.slice(-6)}`);
+      }
+    }
     return [
       ...projectList.map((project) => {
-        const primary = project.locations.find((location) => location.isDefault) ?? project.locations[0];
+        const primary = primaryOf(project);
+        const qualifier = qualifiers.get(project.id);
         const machine = primary ? nameOf(primary.runnerId) : undefined;
+        // The second line leads with what tells this project apart: its machine, or more when that
+        // alone does not.
+        const where = qualifier && qualifier !== machine ? qualifier : machine;
         const count = project.locations.length;
-        const where = !machine ? "No locations yet"
+        const summary = !primary ? (where ? `${where} · No locations yet` : "No locations yet")
           : project.locations.every((location) => liveLocationAvailability(location, runners) === "runner_offline")
-            ? `${machine} · offline`
-            : `${machine} · ${count} location${count === 1 ? "" : "s"}`;
+            ? `${where} · offline`
+            : `${where} · ${count} location${count === 1 ? "" : "s"}`;
         return {
           value: project.id,
           label: project.name,
-          description: project.hidden ? `Hidden · ${where}` : where,
-          ...((nameCounts.get(project.name) ?? 0) > 1 && machine ? { selectedLabel: `${project.name} · ${machine}` } : {}),
+          description: project.hidden ? `Hidden · ${summary}` : summary,
+          ...(qualifier ? { selectedLabel: `${project.name} · ${qualifier}` } : {}),
           keywords: project.locations.flatMap((location) => [nameOf(location.runnerId), location.path]),
         };
       }),
@@ -397,7 +430,9 @@ export function NewSessionDialog({
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   // A submit that finds a problem names it under the field it is about (§8.5) and focuses that field.
-  const [fieldProblem, setFieldProblem] = useState<{ field: ProblemField; message: string } | null>(null);
+  const [fieldProblem, setFieldProblem] = useState<{
+    field: ProblemField; message: string; control?: ProblemControl;
+  } | null>(null);
   const [requestFailure, setRequestFailure] = useState<{ sentence: string; detail: string } | null>(null);
   const [retainedSessionId, setRetainedSessionId] = useState<string | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -457,6 +492,7 @@ export function NewSessionDialog({
   const problemId = (field: ProblemField) => `${generatedFormId}-${field}-error`;
   const locationHelperId = `${generatedFormId}-location-helper`;
   const blockedReasonId = `${generatedFormId}-blocked-reason`;
+  const cloudBudgetInputId = `${generatedFormId}-cloud-budget`;
   const permissionOptionsId = `${generatedFormId}-session-role`;
   const liveChildLimitInputId = `${generatedFormId}-live-child-limit`;
   const liveChildLimitHelpId = `${generatedFormId}-live-child-limit-help`;
@@ -1250,10 +1286,16 @@ export function NewSessionDialog({
       if (message) setFieldProblem({ field, message });
       focusValidationProblem(...selectors);
     };
+    // A field holding several controls also names the one the problem is about, which carries
+    // `aria-invalid` and points `aria-describedby` at the error, so focusing it announces why (§8.5).
+    const flagControl = (field: ProblemField, control: ProblemControl, message: string, selector: string) => {
+      setFieldProblem({ field, control, message });
+      focusValidationProblem(selector);
+    };
     const projectControl = '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]';
     if (fullControlLaunch) {
       if (!fullControlAuthorization?.ready) {
-        flag("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.",
+        flagControl("role", "orchestrator", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.",
           '[data-control-mode="full_control"]');
         return;
       }
@@ -1265,7 +1307,7 @@ export function NewSessionDialog({
     }
     if (!valid) {
       if (orchestrator && controlPreview === "full_control") {
-        flag("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.",
+        flagControl("role", "orchestrator", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.",
           '[data-control-mode="full_control"]');
       } else if (retainedSessionId) {
         // The failure notice above the footer already says a session was kept; Open Session is next.
@@ -1295,38 +1337,40 @@ export function NewSessionDialog({
         // The Account field already says why under its control.
         flag("form", null, 'button[aria-label^="Account:"]');
       } else if (!defaultsReady && !orchestrator) {
-        flag("role", harnessDefaults?.error
+        flagControl("role", harnessDefaults?.error ? "defaults" : "role", harnessDefaults?.error
           ? "Retry loading saved permission defaults before creating a session."
           : "Wait for saved permission defaults to finish loading.",
-        '[data-validation-target="defaults"]');
+        harnessDefaults?.error ? '[data-validation-target="defaults"]' : `[id="${permissionOptionsId}"] input:checked`);
       } else if (orchestrator && !orchestratorSupported) {
-        flag("role", "Choose an available Session Role.", `[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
+        flagControl("role", "role", "Choose an available Session Role.",
+          `[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
       } else if (orchestrator && !orchestratorSettingsReady) {
-        flag("role", orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.",
+        flagControl("role", "orchestrator", orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.",
           '[data-validation-target="orchestrator-defaults"]');
       } else if (orchestrator && !orchestratorCapabilitiesValid) {
-        flag("role", orchestratorCapabilities?.reason ??
+        flagControl("role", "orchestrator", orchestratorCapabilities?.reason ??
           "Choose available Child Model and Child Effort values before creating this campaign.",
         '[data-validation-target="orchestrator-defaults"]');
       } else if (orchestrator && !orchestratorDelegationValid) {
-        flag("role", effectiveParentControl !== "off" && !parentControlSupported
+        flagControl("role", "orchestrator", effectiveParentControl !== "off" && !parentControlSupported
           ? parentControlUnavailable ?? "Choose Human for Descendant Requests on this runner."
           : typedDelegationUnavailable ?? "Choose Human for typed decisions on this runner.",
         '[data-validation-target="orchestrator-defaults"]');
       } else if (orchestrator && !orchestratorExecutionValid) {
-        flag("role", orchestratorExecutionUnavailable, '[data-validation-target="orchestrator-defaults"]');
+        flagControl("role", "orchestrator", orchestratorExecutionUnavailable, '[data-validation-target="orchestrator-defaults"]');
       } else if (!liveChildLimitValid) {
-        flag("role", `Enter a Live Child Limit from ${minimumLiveChildLimit} to ${MAX_LIVE_CHILD_LIMIT}.`,
+        flagControl("role", "live-child-limit", `Enter a Live Child Limit from ${minimumLiveChildLimit} to ${MAX_LIVE_CHILD_LIMIT}.`,
           `[id="${liveChildLimitInputId}"]`);
       } else if (directWslRequiresSafeOrchestrator && !orchestrator) {
-        flag("role", "Choose Orchestrator or another execution context.",
+        flagControl("role", "role", "Choose Orchestrator or another execution context.",
           `[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
       } else if (launchSurface === "native_tui" && !nativeTuiSupported) {
-        flag("harness", "Choose an available Harness.", `[id="${harnessOptionsId}"] input:not([aria-disabled="true"])`);
+        flagControl("harness", "harness", "Choose an available Harness.",
+          `[id="${harnessOptionsId}"] input:not([aria-disabled="true"])`);
       } else if (executionTarget && !executionTarget.available) {
-        flag("mode", "Choose an available Execution Target.", 'button[aria-label^="Execution Target:"]');
+        flagControl("mode", "execution-target", "Choose an available Execution Target.", 'button[aria-label^="Execution Target:"]');
       } else if (!cloudBudgetValid) {
-        flag("mode", "Enter a Cloud Cost Budget within the allowed range.", 'input[type="number"]');
+        flagControl("mode", "cloud-budget", "Enter a Cloud Cost Budget within the allowed range.", `[id="${cloudBudgetInputId}"]`);
       } else {
         flag("form", "Complete the required session settings before creating a session.");
       }
@@ -1362,6 +1406,10 @@ export function NewSessionDialog({
     ? <FieldError id={problemId(field)}>{fieldProblem.message}</FieldError>
     : null;
   const problemDescribedBy = (field: ProblemField) => fieldProblem?.field === field ? problemId(field) : undefined;
+  /** Whether a submit's problem is about `control`, and its description: `own` plus the error. */
+  const controlInvalid = (control: ProblemControl) => fieldProblem?.control === control;
+  const controlDescribedBy = (control: ProblemControl, own?: string) =>
+    [own, fieldProblem?.control === control ? problemId(fieldProblem.field) : undefined].filter(Boolean).join(" ") || undefined;
 
   const openConnections = () => {
     onClose();
@@ -1654,7 +1702,7 @@ export function NewSessionDialog({
                     required
                     value={liveChildLimitDraft}
                     aria-invalid={!liveChildLimitValid}
-                    aria-describedby={liveChildLimitHelpId}
+                    aria-describedby={controlDescribedBy("live-child-limit", liveChildLimitHelpId)}
                     onChange={(event) => {
                       setLiveChildLimitDraft(event.currentTarget.value);
                       const value = Number(event.currentTarget.value);
@@ -1976,6 +2024,8 @@ export function NewSessionDialog({
                 two choices below the fold. Always visible, there is no menu to mis-measure. */}
             <ChoiceRows<"normal" | "orchestrator">
               id={permissionOptionsId}
+              invalid={controlInvalid("role")}
+              describedBy={controlDescribedBy("role")}
               label="Session Role"
               value={orchestrator ? "orchestrator" : "normal"}
               onChange={setRoleOverride}
@@ -2026,6 +2076,7 @@ export function NewSessionDialog({
                 type="button"
                 className="btn ghost sm"
                 data-validation-target="defaults"
+                aria-describedby={controlDescribedBy("defaults")}
                 onClick={() => setDefaultsRetry((value) => value + 1)}
               >
                 Retry Defaults
@@ -2043,10 +2094,19 @@ export function NewSessionDialog({
                 type="button"
                 className="btn ghost sm"
                 data-validation-target="orchestrator-defaults"
+                aria-describedby={controlDescribedBy("orchestrator")}
                 onClick={() => setDefaultsRetry((value) => value + 1)}
               >Retry Orchestrator Defaults</button>}
             </div>}
-            {orchestrator && orchestratorSettingsReady && <div className="new-session-orchestrator-policy" data-validation-target="orchestrator-defaults">
+            {/* Focusable from script, so a policy problem can land here and announce its error. */}
+            {orchestrator && orchestratorSettingsReady && <div
+              className="new-session-orchestrator-policy"
+              data-validation-target="orchestrator-defaults"
+              role="group"
+              aria-label="Orchestrator Policy"
+              aria-describedby={controlDescribedBy("orchestrator")}
+              tabIndex={-1}
+            >
               <OrchestratorControlChoice surface="launch" mode={controlPreview} onChange={setControlPreview} disabled={busy} />
               {controlPreview === "full_control"
                 ? <FullControlLaunchPanel request={buildSessionRequest} selectionValid={launchSelectionValid} disabled={busy}
@@ -2070,6 +2130,8 @@ export function NewSessionDialog({
                 together instead of as siblings a screen reader meets separately. */}
             <ChoiceRows<"direct" | "native_tui">
               id={harnessOptionsId}
+              invalid={controlInvalid("harness")}
+              describedBy={controlDescribedBy("harness")}
               label="Harness"
               value={launchSurface}
               onChange={setLaunchSurface}
@@ -2119,6 +2181,8 @@ export function NewSessionDialog({
                   label="Execution Target"
                   value={executionTarget?.id ?? null}
                   onChange={selectExecutionTarget}
+                  invalid={controlInvalid("execution-target")}
+                  describedBy={controlDescribedBy("execution-target")}
                   options={executionTargets.map((target) => ({
                     value: target.id,
                     label: target.name,
@@ -2149,10 +2213,13 @@ export function NewSessionDialog({
               <label>
                 <span>Cloud Cost Budget (USD)</span>
                 <input
+                  id={cloudBudgetInputId}
                   type="number"
                   min={executionTarget.policy.cost.minimumBudgetUsd}
                   max={executionTarget.policy.cost.maximumBudgetUsd}
                   step="0.01"
+                  aria-invalid={controlInvalid("cloud-budget") || undefined}
+                  aria-describedby={controlDescribedBy("cloud-budget")}
                   value={cloudBudgetUsd}
                   onChange={(event) => setCloudBudgetUsd(event.target.value)}
                 />

@@ -599,6 +599,93 @@ test("two projects with one name keep the name in the list and add the machine t
   }
 });
 
+test("same-named projects on one machine are told apart by folder, then path, then id (#2952)", async () => {
+  const docsAt = (id: string, path: string): ProjectView => ({
+    ...project,
+    id,
+    name: "Docs Site",
+    locations: [{ ...project.locations[0]!, id: `${id}-location`, projectId: id, path }],
+  });
+  const describe = async (projects: ProjectView[]) => {
+    const fixture = await mountFixture({ projects });
+    try {
+      const input = combobox(fixture.container, "Project");
+      await act(async () => { input.click(); });
+      const options = comboboxOptions(fixture.container, "Project").slice(0, -2);
+      const lines = optionNamesAndDescriptions(options);
+      for (const line of lines) assert.equal(line.name, "Docs Site", "the option is the name alone");
+      const values: string[] = [];
+      for (let index = 0; index < options.length; index += 1) {
+        if (index > 0) await act(async () => { input.click(); });
+        await act(async () => { comboboxOptions(fixture.container, "Project")[index]!.click(); });
+        values.push(input.value);
+      }
+      return { descriptions: lines.map((line) => line.description), values };
+    } finally {
+      await unmountFixture(fixture);
+    }
+  };
+
+  const byFolder = await describe([docsAt("p-a", "/home/me/src/docs-site"), docsAt("p-b", "/home/me/src/docs-site-v2")]);
+  assert.deepEqual(byFolder.descriptions, ["runner-1 · docs-site · 1 location", "runner-1 · docs-site-v2 · 1 location"]);
+  assert.deepEqual(byFolder.values, ["Docs Site · runner-1 · docs-site", "Docs Site · runner-1 · docs-site-v2"]);
+
+  const byPath = await describe([docsAt("p-a", "/home/me/a/docs"), docsAt("p-b", "/home/me/b/docs")]);
+  assert.deepEqual(byPath.descriptions, ["runner-1 · …/a/docs · 1 location", "runner-1 · …/b/docs · 1 location"]);
+  assert.equal(new Set(byPath.values).size, 2);
+
+  const byId = await describe([docsAt("project-aaaaaa", "/srv/docs"), docsAt("project-bbbbbb", "/srv/docs")]);
+  assert.deepEqual(byId.descriptions, ["runner-1 · Project aaaaaa · 1 location", "runner-1 · Project bbbbbb · 1 location"]);
+  assert.equal(new Set(byId.values).size, 2, "a unique visible fallback when everything else matches");
+});
+
+test("an invalid Cloud Cost Budget marks the focused input and describes it by its error (#2952)", async () => {
+  const boundaries = { filesystem: "host", network: "inherit", secrets: "runner_local", billing: "agent_account" } as const;
+  const cloudRunner: RunnerView = {
+    ...runner,
+    executionTargets: [
+      { id: "runner-1:in-place", runnerId: "runner-1", name: "Host · In Place", kind: "local", workspaceStrategy: "in_place",
+        adapter: "host", boundaries, available: true },
+      { id: "runner-1:worktree", runnerId: "runner-1", name: "Host · Worktree", kind: "local", workspaceStrategy: "worktree",
+        adapter: "host", boundaries, available: true },
+      { id: "runner-1:cloud", runnerId: "runner-1", name: "Cloud Sandbox", kind: "cloud", workspaceStrategy: "worktree",
+        adapter: "cloud", boundaries: { ...boundaries, filesystem: "isolated" } as never, available: true,
+        policy: {
+          cost: { currency: "USD", estimatedHourlyRateUsd: 2, minimumBudgetUsd: 1, maximumBudgetUsd: 20 },
+          admission: { maxConcurrentSessions: 2, queue: "fifo" },
+        } },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [cloudRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const target = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Execution Target:"]');
+    assert.ok(target);
+    await act(async () => { target.click(); });
+    const cloud = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="listbox"][aria-label="Execution Target"] [role="option"]')]
+      .find((option) => option.textContent?.includes("Cloud Sandbox"));
+    assert.ok(cloud);
+    await act(async () => { cloud.click(); });
+    const budget = fixture.container.querySelector<HTMLInputElement>('input[type="number"][step="0.01"]');
+    assert.ok(budget);
+    assert.equal(budget.getAttribute("aria-invalid"), null);
+    await act(async () => { fireDomEvent.change(budget, { target: { value: "50" } }); });
+
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 0);
+    assert.equal((domWindow.document.activeElement as unknown) === budget, true, "validation lands on the budget");
+    assert.equal(budget.getAttribute("aria-invalid"), "true");
+    assert.equal(ariaReferencedText(budget, "aria-describedby"), "Enter a Cloud Cost Budget within the allowed range.");
+    assert.notEqual(fixture.container.querySelector(".field-error")?.getAttribute("role"), "alert",
+      "a field error is not an alert; focusing its field announces it");
+
+    await act(async () => { fireDomEvent.change(budget, { target: { value: "5" } }); });
+    assert.equal(budget.getAttribute("aria-invalid"), null, "fixing the value clears the error");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("Project describes hidden, empty and offline projects, and ends with No Project and New Project… (#2952)", async () => {
   const hidden: ProjectView = { ...project, id: "project-hidden", name: "Archive", hidden: true };
   const empty: ProjectView = { ...project, id: "project-empty", name: "Blank", locations: [] };
@@ -991,11 +1078,13 @@ test("Maximum Concurrent Children rejects fractional and out-of-range creation v
       assert.equal(limit.getAttribute("aria-invalid"), "true", invalid);
       await assertCreateRefused(fixture, invalid);
       assert.equal(fixture.container.querySelector(
-        `[id="${limit.getAttribute("aria-describedby")}"]`,
+        `[id="${limit.getAttribute("aria-describedby")?.split(" ")[0]}"]`,
       )?.getAttribute("role"), "alert");
       await act(async () => { submitWithEnter(fixture.container); });
       assert.equal(fixture.requests.length, 0, invalid);
       assert.equal((domWindow.document.activeElement as unknown) === limit, true, invalid);
+      // The submit's field error is part of the focused input's description (#2952).
+      assert.match(ariaReferencedText(limit, "aria-describedby") ?? "", /Enter a Live Child Limit from 0 to 64\./, invalid);
     }
 
     await act(async () => { fireDomEvent.change(limit, { target: { value: "0" } }); });
