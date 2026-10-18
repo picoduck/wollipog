@@ -243,7 +243,9 @@ function comboboxOptions(container: HTMLDivElement, label: string): HTMLButtonEl
 
 async function selectProject(container: HTMLDivElement, value: string): Promise<void> {
   const input = combobox(container, "Project");
+  // Project's list stays closed on focus (#2952); a click opens it.
   input.focus();
+  if (input.getAttribute("aria-expanded") !== "true") input.click();
   await Promise.resolve();
   const expected = value === NO_PROJECT_SELECTION ? "No Project" : project.name;
   const option = [...container.querySelectorAll<HTMLButtonElement>('[role="listbox"][aria-label="Project Options"] [role="option"]')]
@@ -270,6 +272,46 @@ function createButton(container: HTMLDivElement): HTMLButtonElement {
     candidate.textContent?.trim() === "Create Session");
   assert.ok(button, "Create Session button is rendered");
   return button;
+}
+
+/**
+ * Create Session refuses this state (#2952): disabled, with the reason in the footer, for what
+ * nothing further down the form can fix; otherwise pressing it sends nothing and names the problem
+ * under its field.
+ */
+async function assertCreateRefused(fixture: Pick<Fixture, "container" | "requests">, message?: string): Promise<void> {
+  const button = createButton(fixture.container);
+  if (button.disabled) {
+    assert.ok(footerReason(fixture.container), message ?? "a disabled Create Session says why in the footer");
+    return;
+  }
+  const before = fixture.requests.length;
+  await act(async () => { button.click(); });
+  await act(async () => { await Promise.resolve(); });
+  assert.equal(fixture.requests.length, before, message ?? "Create Session sends nothing for this state");
+}
+
+/** The footer's reason a disabled Create Session gives (§7.3). */
+function footerReason(container: HTMLDivElement): string | null {
+  return container.querySelector(".modal-foot .new-session-reason")?.textContent ?? null;
+}
+
+/** The request failure's danger notice above the footer (§7.3, §13.2). */
+function failureNotice(container: HTMLDivElement): HTMLElement {
+  const notice = container.querySelector<HTMLElement>(".modal-body .notice.t-danger");
+  assert.ok(notice, "the request failure is a danger notice in the body");
+  return notice;
+}
+
+function buttonNamed(root: ParentNode, name: string, required = true): HTMLButtonElement {
+  const button = [...root.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === name);
+  if (required) assert.ok(button, `${name} is rendered`);
+  return button!;
+}
+
+/** The problem a submit names under a field (§8.5), or null. */
+function fieldErrorText(container: HTMLDivElement): string | null {
+  return container.querySelector(".modal-body .field-error")?.textContent ?? null;
 }
 
 function labelledNumberInput(container: HTMLDivElement, label: string): HTMLInputElement | null {
@@ -407,14 +449,18 @@ test("modified Enter validates and focuses the first actionable problem", async 
   const fixture = await mountFixture();
   try {
     const projectInput = combobox(fixture.container, "Project");
+    assert.equal(createButton(fixture.container).disabled, false,
+      "no project chosen yet is not a hard block: Create Session stays enabled (#2952)");
     await act(async () => { pressFormShortcut(fixture.container); });
     assert.equal(fixture.requests.length, 0);
-    assert.equal(fixture.container.querySelector('.form-error[role="alert"]')?.textContent,
-      "Choose a Project or No Project.");
+    assert.equal(fieldErrorText(fixture.container), "Choose a project, or choose No Project.");
+    assert.equal(projectInput.getAttribute("aria-invalid"), "true");
+    assert.equal(ariaReferencedText(projectInput, "aria-describedby"), "Choose a project, or choose No Project.");
     assert.equal((domWindow.document.activeElement as unknown) === projectInput, true,
       "validation moves focus to the first control that can fix the form");
+    assertNoDomNode(fixture.container.querySelector(".modal-foot .form-error"), "the footer carries no error (#2952)");
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assertNoDomNode(fixture.container.querySelector('.form-error[role="alert"]'),
+    assertNoDomNode(fixture.container.querySelector(".modal-body .field-error"),
       "correcting the reported problem clears its stale validation message");
   } finally {
     await unmountFixture(fixture);
@@ -451,89 +497,370 @@ test("IME, held keys, and concurrent shortcuts cannot create duplicate sessions"
   }
 });
 
-test("Project visibility copy names every audience and the new transcript consequence", async () => {
-  const expectations = [
-    ["user", "Project Visibility: Only the Project Owner"],
-    ["team", "Project Visibility: Everyone on the Owning Team"],
-    ["organization", "Project Visibility: Everyone in Your Organization"],
-  ] as const;
-  for (const [audience, expected] of expectations) {
+test("Project has no helper paragraph and no Create Project button beside it (#2952)", async () => {
+  for (const audience of ["user", "team", "organization", undefined] as const) {
     const fixture = await mountFixture({ projects: [{ ...project, audience }] });
     try {
+      const body = () => fixture.container.querySelector(".modal-body")?.textContent ?? "";
+      assert.doesNotMatch(body(), /Choose a Project to organize/);
       await act(async () => { await selectProject(fixture.container, project.id); });
-      const copy = fixture.container.querySelector(".new-session-project-actions > span")?.textContent ?? "";
-      assert.match(copy, /^A Project keeps related sessions together across Locations\. /);
-      assert.match(copy, new RegExp(expected));
-      assert.match(copy, /New session transcripts use the Project's visibility\./);
-      assert.doesNotMatch(copy, /\bAccess:/);
-      assert.doesNotMatch(copy, RETIRED_PROJECT_TERMS);
+      assert.doesNotMatch(body(), /keeps related sessions together|transcripts use|can't show who can see/);
+      assert.doesNotMatch(body(), RETIRED_PROJECT_TERMS);
+      assertNoDomNode(fixture.container.querySelector(".new-session-project-actions"));
+      assert.equal([...fixture.container.querySelectorAll(".modal-body button")]
+        .some((button) => /Create Project/.test(button.textContent ?? "")), false);
     } finally {
       await unmountFixture(fixture);
     }
   }
 });
 
-test("Project visibility copy stays neutral before selection and fails closed when audience is missing", async () => {
-  const fixture = await mountFixture({ projects: [{ ...project, audience: undefined }] });
+test("Project opens with its list closed, and a project from its own sessions opens selected (#2952)", async () => {
+  const fixture = await mountFixture();
   try {
-    const copy = () => fixture.container.querySelector(".new-session-project-actions > span")?.textContent ?? "";
-    assert.match(copy(), /Choose a Project to organize the new session, or choose No Project./);
-    assert.doesNotMatch(copy(), /transcripts use/);
-    assert.doesNotMatch(copy(), RETIRED_PROJECT_TERMS);
-
-    await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.match(copy(), /^A Project keeps related sessions together across Locations\. Wollipog can't show who can see this Project\.$/);
-    assert.doesNotMatch(copy(), /transcripts use/);
-    assert.doesNotMatch(copy(), RETIRED_PROJECT_TERMS);
+    const input = combobox(fixture.container, "Project");
+    assert.equal((domWindow.document.activeElement as unknown) === input, true, "Project keeps initial focus (#1143)");
+    assert.equal(input.getAttribute("aria-expanded"), "false", "focus leaves the list closed");
+    assert.equal(input.value, "", "All Sessions chooses no project on the person's behalf");
+    await act(async () => { setComboboxQuery(input, "Wol"); });
+    assert.equal(input.getAttribute("aria-expanded"), "true", "typing opens the list at once");
+    assert.deepEqual(comboboxOptions(fixture.container, "Project").slice(0, -1).map((option) => ariaReferencedText(option, "aria-labelledby")),
+      ["Wollipog"]);
   } finally {
     await unmountFixture(fixture);
   }
 
-  const noProject = await mountFixture({ projects: [{ ...project, audience: undefined }] });
+  const preset = await mountFixture({}, { projectId: project.id });
   try {
-    await act(async () => { await selectProject(noProject.container, NO_PROJECT_SELECTION); });
-    const copy = noProject.container.querySelector(".new-session-project-actions > span")?.textContent ?? "";
-    assert.match(copy, /^This session will run in the selected folder without being added to a Project\.$/);
-    assert.doesNotMatch(copy, RETIRED_PROJECT_TERMS);
+    const input = combobox(preset.container, "Project");
+    assert.equal((domWindow.document.activeElement as unknown) === input, true);
+    assert.equal(input.value, "Wollipog");
+    assert.equal(input.getAttribute("aria-expanded"), "false");
+    assert.equal(input.selectionStart, 0, "the prefilled name is selected from its start");
+    assert.equal(input.selectionEnd, "Wollipog".length, "to its end, so typing replaces it");
+    await act(async () => { setComboboxQuery(input, "No"); });
+    assert.deepEqual(comboboxOptions(preset.container, "Project").slice(0, -1).map((option) => ariaReferencedText(option, "aria-labelledby")),
+      ["No Project"], "the search is only what was typed");
   } finally {
-    await unmountFixture(noProject);
+    await unmountFixture(preset);
   }
 });
 
-test("Project search uses visible location context to disambiguate duplicate names", async () => {
-  const fork: ProjectView = {
+test("two projects with one name keep the name in the list and add the machine to the closed field (#2952)", async () => {
+  const docs: ProjectView = {
     ...project,
-    id: "project-2",
+    id: "project-docs-1",
+    name: "Docs Site",
+    locations: [{ ...project.locations[0]!, id: "docs-1", projectId: "project-docs-1", path: "/home/me/src/docs-site" }],
+  };
+  const docsCopy: ProjectView = {
+    ...project,
+    id: "project-docs-2",
+    name: "Docs Site",
     locations: [{
-      ...project.locations[0]!,
-      id: "location-2",
-      projectId: "project-2",
-      workspaceId: "workspace-2",
-      path: "/repos/wollipog-fork",
+      ...project.locations[0]!, id: "docs-2", projectId: "project-docs-2", runnerId: "runner-2",
+      workspaceId: "workspace-9", path: "/srv/build/docs-site",
     }],
   };
-  const duplicateRunner: RunnerView = {
-    ...runner,
-    workspaces: [
-      ...runner.workspaces,
-      { id: "workspace-2", name: "Wollipog Fork", path: "/repos/wollipog-fork" },
-    ],
+  const buildServer: RunnerView = {
+    ...runner, runnerId: "runner-2", hostname: "build", displayName: "Build Server",
+    workspaces: [{ id: "workspace-9", name: "Docs", path: "/srv/build/docs-site" }],
   };
-  const fixture = await mountFixture({ runners: [duplicateRunner], projects: [project, fork] });
+  const fixture = await mountFixture({ runners: [{ ...runner, displayName: "Studio Mac" }, buildServer], projects: [docs, docsCopy] });
   try {
     const input = combobox(fixture.container, "Project");
-    await act(async () => { input.focus(); });
-    assert.equal(comboboxOptions(fixture.container, "Project").length, 3,
-      "both same-named Projects and No Project are inspectable");
+    await act(async () => { input.click(); });
+    const options = comboboxOptions(fixture.container, "Project").slice(0, -1);
+    assert.deepEqual(optionNamesAndDescriptions(options), [
+      { name: "Docs Site", description: "Studio Mac · 1 location" },
+      { name: "Docs Site", description: "Build Server · 1 location" },
+      { name: "No Project", description: "Run in any folder on a machine, outside a project." },
+    ]);
+    for (const option of options) {
+      assert.doesNotMatch(ariaReferencedText(option, "aria-labelledby") ?? "", /\//, "no option label contains a path");
+    }
+    await act(async () => { options[1]!.click(); });
+    assert.equal(input.value, "Docs Site · Build Server", "the closed field adds the machine after the name");
 
-    await act(async () => { setComboboxQuery(input, "fork"); });
-    const matches = comboboxOptions(fixture.container, "Project");
-    assert.equal(matches.length, 1);
-    assert.match(matches[0]?.textContent ?? "", /Wollipog — \/repos\/wollipog-fork · runner-1/);
+    await act(async () => { input.click(); });
+    await act(async () => { setComboboxQuery(input, "srv"); });
+    assert.deepEqual(comboboxOptions(fixture.container, "Project").slice(0, -1).map((option) => ariaReferencedText(option, "aria-describedby")),
+      ["Build Server · 1 location"], "a search still reaches a project by its folder");
+  } finally {
+    await unmountFixture(fixture);
+  }
 
-    await act(async () => { pressComboboxKey(input, "Enter"); });
-    assert.match(input.value, /wollipog-fork/);
-    assert.equal(createButton(fixture.container).disabled, false);
+  const unique = await mountFixture();
+  try {
+    await act(async () => { await selectProject(unique.container, project.id); });
+    assert.equal(combobox(unique.container, "Project").value, "Wollipog", "a unique name stands alone");
+  } finally {
+    await unmountFixture(unique);
+  }
+});
+
+test("same-named projects on one machine are told apart by folder, then path, then id (#2952)", async () => {
+  const docsAt = (id: string, path: string): ProjectView => ({
+    ...project,
+    id,
+    name: "Docs Site",
+    locations: [{ ...project.locations[0]!, id: `${id}-location`, projectId: id, path }],
+  });
+  const describe = async (projects: ProjectView[]) => {
+    const fixture = await mountFixture({ projects });
+    try {
+      const input = combobox(fixture.container, "Project");
+      await act(async () => { input.click(); });
+      const options = comboboxOptions(fixture.container, "Project").slice(0, -2);
+      const lines = optionNamesAndDescriptions(options);
+      for (const line of lines) assert.equal(line.name, "Docs Site", "the option is the name alone");
+      const values: string[] = [];
+      for (let index = 0; index < options.length; index += 1) {
+        if (index > 0) await act(async () => { input.click(); });
+        await act(async () => { comboboxOptions(fixture.container, "Project")[index]!.click(); });
+        values.push(input.value);
+      }
+      return { descriptions: lines.map((line) => line.description), values };
+    } finally {
+      await unmountFixture(fixture);
+    }
+  };
+
+  const byFolder = await describe([docsAt("p-a", "/home/me/src/docs-site"), docsAt("p-b", "/home/me/src/docs-site-v2")]);
+  assert.deepEqual(byFolder.descriptions, ["runner-1 · docs-site · 1 location", "runner-1 · docs-site-v2 · 1 location"]);
+  assert.deepEqual(byFolder.values, ["Docs Site · runner-1 · docs-site", "Docs Site · runner-1 · docs-site-v2"]);
+
+  const byPath = await describe([docsAt("p-a", "/home/me/a/docs"), docsAt("p-b", "/home/me/b/docs")]);
+  assert.deepEqual(byPath.descriptions, ["runner-1 · …/a/docs · 1 location", "runner-1 · …/b/docs · 1 location"]);
+  assert.equal(new Set(byPath.values).size, 2);
+
+  const byId = await describe([docsAt("project-aaaaaa", "/srv/docs"), docsAt("project-bbbbbb", "/srv/docs")]);
+  assert.deepEqual(byId.descriptions, ["runner-1 · Project aaaaaa · 1 location", "runner-1 · Project bbbbbb · 1 location"]);
+  assert.equal(new Set(byId.values).size, 2, "a unique visible fallback when everything else matches");
+});
+
+/**
+ * What a person hears after pressing Create Session (#2952): focus is on a control in the dialog, never
+ * left behind, and that control, or the choice group it is in, is described by `expected`.
+ */
+async function pressCreateAndHear(fixture: Fixture, expected: RegExp, label: string): Promise<HTMLElement> {
+  const before = fixture.requests.length;
+  await act(async () => { createButton(fixture.container).click(); });
+  assert.equal(fixture.requests.length, before, `${label}: nothing is sent`);
+  const focused = domWindow.document.activeElement as unknown as HTMLElement;
+  const dialog = fixture.container.querySelector('[role="dialog"]');
+  assert.ok(dialog?.contains(focused as never), `${label}: focus is in the dialog`);
+  const described = [focused, focused.closest('[role="radiogroup"], [role="group"]')]
+    .filter((element): element is HTMLElement => element !== null)
+    .map((element) => ariaReferencedText(element, "aria-describedby") ?? "")
+    .join(" ");
+  assert.match(described, expected, `${label}: the focused control is described by why`);
+  return focused;
+}
+
+test("every refused submit lands on a control described by its reason (#2952)", async () => {
+  const orchestratorRunner: RunnerView = {
+    ...runner, protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const cases: Array<{ label: string; run: () => Promise<void> }> = [
+    { label: "no project chosen", run: async () => {
+      const fixture = await mountFixture();
+      try {
+        const focused = await pressCreateAndHear(fixture, /Choose a project, or choose No Project\./, "no project");
+        assert.equal(focused, combobox(fixture.container, "Project"));
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "no machines online", run: async () => {
+      const fixture = await mountFixture({ runners: [{ ...runner, status: "offline" }] });
+      try {
+        await act(async () => { submitWithEnter(fixture.container); });
+        const focused = domWindow.document.activeElement as unknown as HTMLElement;
+        assert.equal(focused.textContent, "Open Connections");
+        assert.equal(ariaReferencedText(focused, "aria-describedby"), "Start Wollipog on one of your machines, or connect a new one.");
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "a project with no locations", run: async () => {
+      const fixture = await mountFixture({ projects: [{ ...project, locations: [] }] });
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        await act(async () => { submitWithEnter(fixture.container); });
+        const focused = domWindow.document.activeElement as unknown as HTMLElement;
+        assert.equal(focused.textContent, "Add Location…");
+        assert.match(ariaReferencedText(focused, "aria-describedby") ?? "", /This project has no locations yet/);
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "a project with no locations that you can't manage", run: async () => {
+      const fixture = await mountFixture({ projects: [{ ...project, locations: [], canManage: false }] });
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        await act(async () => { submitWithEnter(fixture.container); });
+        const focused = domWindow.document.activeElement as unknown as HTMLElement;
+        assert.equal(focused, combobox(fixture.container, "Project"));
+        assert.equal(ariaReferencedText(focused, "aria-describedby"),
+          "This project has no locations, and you can't add one. Choose another project.");
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "Orchestrator policy still loading", run: async () => {
+      const fixture = await mountFixture({ runners: [orchestratorRunner] }, undefined, undefined, undefined, undefined,
+        () => new Promise<OrchestratorSettingsView>(() => {}));
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        await choosePermissionPreset(fixture.container, "Orchestrator");
+        const focused = await pressCreateAndHear(fixture, /Wait for Orchestrator defaults to finish loading\./, "policy loading");
+        assert.ok(focused.closest('[role="radiogroup"][aria-label="Session Role"]'), "Session Role answers while nothing else can");
+        assert.equal(focused.closest('[role="radiogroup"]')?.getAttribute("aria-invalid"), "true");
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "Orchestrator policy failed to load", run: async () => {
+      const fixture = await mountFixture({ runners: [orchestratorRunner] }, undefined, undefined, undefined, undefined,
+        async () => { throw new Error("Policy service unavailable."); });
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        await choosePermissionPreset(fixture.container, "Orchestrator");
+        const focused = await pressCreateAndHear(fixture, /Policy service unavailable\./, "policy failed");
+        assert.equal(focused.textContent, "Retry Orchestrator Defaults");
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "saved permission defaults still loading", run: async () => {
+      const fixture = await mountFixture({}, undefined, undefined, () => new Promise<AgentHarnessDefaultsView>(() => {}));
+      try {
+        await act(async () => { await selectProject(fixture.container, project.id); });
+        const focused = await pressCreateAndHear(fixture, /Wait for saved permission defaults to finish loading\./, "defaults loading");
+        assert.ok(focused.closest('[role="radiogroup"][aria-label="Session Role"]'));
+      } finally { await unmountFixture(fixture); }
+    } },
+    { label: "a missing saved account", run: async () => {
+      const accountRunner: RunnerView = {
+        ...runner,
+        protocolVersion: PROTOCOL_VERSION,
+        providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
+        providerAccountDefaults: [{ provider: "claude", accountId: "removed", revision: 1 }],
+      };
+      const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+      try {
+        const focused = await pressCreateAndHear(fixture, /saved default account is no longer on this Machine/, "account");
+        assert.match(focused.getAttribute("aria-label") ?? "", /^Account:/);
+        assert.equal(focused.getAttribute("aria-invalid"), "true");
+      } finally { await unmountFixture(fixture); }
+    } },
+  ];
+  for (const { run } of cases) await run();
+});
+
+test("an invalid Cloud Cost Budget marks the focused input and describes it by its error (#2952)", async () => {
+  const boundaries = { filesystem: "host", network: "inherit", secrets: "runner_local", billing: "agent_account" } as const;
+  const cloudRunner: RunnerView = {
+    ...runner,
+    executionTargets: [
+      { id: "runner-1:in-place", runnerId: "runner-1", name: "Host · In Place", kind: "local", workspaceStrategy: "in_place",
+        adapter: "host", boundaries, available: true },
+      { id: "runner-1:worktree", runnerId: "runner-1", name: "Host · Worktree", kind: "local", workspaceStrategy: "worktree",
+        adapter: "host", boundaries, available: true },
+      { id: "runner-1:cloud", runnerId: "runner-1", name: "Cloud Sandbox", kind: "cloud", workspaceStrategy: "worktree",
+        adapter: "cloud", boundaries: { ...boundaries, filesystem: "isolated" } as never, available: true,
+        policy: {
+          cost: { currency: "USD", estimatedHourlyRateUsd: 2, minimumBudgetUsd: 1, maximumBudgetUsd: 20 },
+          admission: { maxConcurrentSessions: 2, queue: "fifo" },
+        } },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [cloudRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const target = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Execution Target:"]');
+    assert.ok(target);
+    await act(async () => { target.click(); });
+    const cloud = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="listbox"][aria-label="Execution Target"] [role="option"]')]
+      .find((option) => option.textContent?.includes("Cloud Sandbox"));
+    assert.ok(cloud);
+    await act(async () => { cloud.click(); });
+    const budget = fixture.container.querySelector<HTMLInputElement>('input[type="number"][step="0.01"]');
+    assert.ok(budget);
+    assert.equal(budget.getAttribute("aria-invalid"), null);
+    await act(async () => { fireDomEvent.change(budget, { target: { value: "50" } }); });
+
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 0);
+    assert.equal((domWindow.document.activeElement as unknown) === budget, true, "validation lands on the budget");
+    assert.equal(budget.getAttribute("aria-invalid"), "true");
+    assert.equal(ariaReferencedText(budget, "aria-describedby"), "Enter a Cloud Cost Budget within the allowed range.");
+    assert.notEqual(fixture.container.querySelector(".field-error")?.getAttribute("role"), "alert",
+      "a field error is not an alert; focusing its field announces it");
+
+    await act(async () => { fireDomEvent.change(budget, { target: { value: "5" } }); });
+    assert.equal(budget.getAttribute("aria-invalid"), null, "fixing the value clears the error");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Project describes hidden, empty and offline projects, and ends with No Project and New Project… (#2952)", async () => {
+  const hidden: ProjectView = { ...project, id: "project-hidden", name: "Archive", hidden: true };
+  const empty: ProjectView = { ...project, id: "project-empty", name: "Blank", locations: [] };
+  const offline: ProjectView = {
+    ...project,
+    id: "project-offline",
+    name: "Mobile",
+    locations: [{ ...project.locations[0]!, id: "offline-1", projectId: "project-offline", runnerId: "runner-off" }],
+  };
+  const offlineRunner: RunnerView = { ...runner, runnerId: "runner-off", displayName: "Build Server 02", status: "offline" };
+  const fixture = await mountFixture({ runners: [runner, offlineRunner], projects: [hidden, empty, offline] });
+  try {
+    const input = combobox(fixture.container, "Project");
+    await act(async () => { input.click(); });
+    const listbox = fixture.container.querySelector('[role="listbox"][aria-label="Project Options"]');
+    assert.ok(listbox);
+    const options = comboboxOptions(fixture.container, "Project");
+    assert.deepEqual(optionNamesAndDescriptions(options.slice(0, -1)), [
+      { name: "Archive", description: "Hidden · runner-1 · 1 location" },
+      { name: "Blank", description: "No locations yet" },
+      { name: "Mobile", description: "Build Server 02 · offline" },
+      { name: "No Project", description: "Run in any folder on a machine, outside a project." },
+    ]);
+    assert.equal(options.at(-1)?.textContent, "New Project…");
+    const rows = [...listbox.children];
+    const noProject = rows.find((row) => row.textContent?.startsWith("No Project"));
+    assert.ok(noProject?.previousElementSibling?.classList.contains("menu-sep"), "No Project follows a separator");
+    assert.equal(rows.at(-1)?.textContent, "New Project…", "New Project… is the list's footer row");
+    assert.ok(rows.at(-2)?.classList.contains("menu-sep"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("New Project… stacks its dialog over New Session, then selects the new project with focus on Project (#2952)", async () => {
+  const created: ProjectView = { ...project, id: "project-new", name: "Payments", locations: [], createdAt: 5, updatedAt: 5 };
+  const fixture = await mountFixture({}, undefined, undefined, undefined, undefined, undefined, {
+    createProject: async () => ({ project: created }),
+  } as Partial<ApiClient>);
+  try {
+    const input = combobox(fixture.container, "Project");
+    await act(async () => { input.click(); });
+    const footer = comboboxOptions(fixture.container, "Project").at(-1);
+    assert.equal(footer?.textContent, "New Project…");
+    await act(async () => { footer!.click(); });
+
+    const dialogs = [...fixture.container.querySelectorAll<HTMLElement>('[role="dialog"]')];
+    assert.equal(dialogs.length, 2, "New Session stays open under New Project");
+    assert.match(dialogs[1]?.textContent ?? "", /Project Name/);
+    assert.ok(dialogs[1]?.closest(".modal-backdrop.stacked"), "the child stacks over its parent under one dim");
+
+    const name = dialogs[1]!.querySelector<HTMLInputElement>("input")!;
+    await act(async () => { fireDomEvent.change(name, { target: { value: "Payments" } }); });
+    await act(async () => {
+      dialogs[1]!.querySelector("form")!.dispatchEvent(new domWindow.Event("submit", { bubbles: true, cancelable: true }) as never);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+
+    assert.equal(fixture.container.querySelectorAll('[role="dialog"]').length, 1);
+    assert.equal(combobox(fixture.container, "Project").value, "Payments", "the new project is selected");
+    assert.equal((domWindow.document.activeElement as unknown) === combobox(fixture.container, "Project"), true,
+      "focus returns to Project");
+    assert.match(fixture.container.textContent ?? "", /This project has no locations yet/);
   } finally {
     await unmountFixture(fixture);
   }
@@ -564,15 +891,15 @@ test("recommitting the selected Project preserves an explicit Location", async (
     { projectId: project.id, projectLocationId: secondLocation.id },
   );
   try {
-    const selected = () => fixture.container.querySelector(
-      '[role="radiogroup"][aria-label="Project Location"] input[type="radio"]:checked',
-    )?.closest("label");
-    assert.match(selected()?.textContent ?? "", /wollipog-fork/);
+    const selected = () => fixture.container.querySelector('button[aria-label^="Location:"]')?.getAttribute("aria-label");
+    assert.equal(selected(), "Location: runner-1 · wollipog-fork",
+      "two locations on one machine add the folder to the closed field");
 
     const input = combobox(fixture.container, "Project");
-    await act(async () => { input.focus(); pressComboboxKey(input, "Enter"); });
+    await act(async () => { input.click(); });
+    await act(async () => { pressComboboxKey(input, "Enter"); });
 
-    assert.match(selected()?.textContent ?? "", /wollipog-fork/,
+    assert.equal(selected(), "Location: runner-1 · wollipog-fork",
       "committing the same Project is not a dependent-selection reset");
     assert.equal(createButton(fixture.container).disabled, false);
   } finally {
@@ -637,11 +964,11 @@ test("Project and Agent options are named by their label and described by their 
   const fixture = await mountFixture({ runners: [agentRunner] });
   try {
     const projectInput = combobox(fixture.container, "Project");
-    await act(async () => { projectInput.focus(); });
-    const projectOptions = comboboxOptions(fixture.container, "Project");
+    await act(async () => { projectInput.click(); });
+    const projectOptions = comboboxOptions(fixture.container, "Project").slice(0, -1);
     assert.deepEqual(optionNamesAndDescriptions(projectOptions), [
-      { name: "Wollipog", description: "1 Project Location." },
-      { name: "No Project", description: "Run in the selected folder without adding this session to a Project." },
+      { name: "Wollipog", description: "runner-1 · 1 location" },
+      { name: "No Project", description: "Run in any folder on a machine, outside a project." },
     ]);
     for (const option of projectOptions) assert.equal(option.getAttribute("aria-label"), null);
     await act(async () => { projectOptions[0]!.click(); });
@@ -753,7 +1080,7 @@ test("a saved Codex exec default is not offered or started without a choice (#32
     await act(async () => { await selectProject(fixture.container, project.id); });
     const input = combobox(fixture.container, "Agent");
     assert.equal(input.value, "", "the saved exec default is not preselected");
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
     assert.match(fixture.container.querySelector(".agent-default-warning")?.textContent ?? "",
       /non-interactive mode, which is no longer supported/);
 
@@ -810,7 +1137,7 @@ test("Codex App Server that failed its check needs setup with the runner's reaso
       description: "Needs setup. Wollipog couldn't check this Codex installation in time. Rediscover to try again.",
     }]);
     assert.equal(options[0]?.getAttribute("aria-disabled"), "true");
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
   } finally {
     await unmountFixture(fixture);
   }
@@ -861,13 +1188,15 @@ test("Maximum Concurrent Children rejects fractional and out-of-range creation v
     for (const invalid of ["4.5", "-1", "65", ""]) {
       await act(async () => { fireDomEvent.change(limit, { target: { value: invalid } }); });
       assert.equal(limit.getAttribute("aria-invalid"), "true", invalid);
-      assert.equal(createButton(fixture.container).disabled, true, invalid);
+      await assertCreateRefused(fixture, invalid);
       assert.equal(fixture.container.querySelector(
-        `[id="${limit.getAttribute("aria-describedby")}"]`,
+        `[id="${limit.getAttribute("aria-describedby")?.split(" ")[0]}"]`,
       )?.getAttribute("role"), "alert");
       await act(async () => { submitWithEnter(fixture.container); });
       assert.equal(fixture.requests.length, 0, invalid);
       assert.equal((domWindow.document.activeElement as unknown) === limit, true, invalid);
+      // The submit's field error is part of the focused input's description (#2952).
+      assert.match(ariaReferencedText(limit, "aria-describedby") ?? "", /Enter a Live Child Limit from 0 to 64\./, invalid);
     }
 
     await act(async () => { fireDomEvent.change(limit, { target: { value: "0" } }); });
@@ -1377,7 +1706,7 @@ test("a fixed Child Harness on an older runner shows the server's refusal senten
     ), alerts);
     assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
     assert.doesNotMatch(alerts, /saved Child Model or Child Effort is no longer advertised/i);
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
   } finally {
     await unmountFixture(fixture);
   }
@@ -1449,7 +1778,7 @@ test("unsupported control-plane combinations explain the upgrade and block Orche
     assert.equal(unavailable,
       "This version of Wollipog does not support campaign policy. Update or restart Wollipog so it matches this dashboard.");
     assert.doesNotMatch(unavailable, RETIRED_PROJECT_TERMS);
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
   } finally {
@@ -1481,7 +1810,7 @@ test("a session override can repair drifted defaults without rewriting the accou
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
     await chooseSelectOption(fixture.container, "Child Model", "Automatic");
     assert.equal(createButton(fixture.container).disabled, false,
       "a compatible explicit override repairs only this new campaign");
@@ -1599,7 +1928,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     await act(async () => { await selectProject(orchestrator.container, project.id); });
     assert.match(orchestrator.container.textContent ?? "",
       /verified Direct WSL bridge and a bubblewrap-isolated runner/u);
-    assert.equal(createButton(orchestrator.container).disabled, true);
+    await assertCreateRefused(orchestrator);
     await act(async () => { submitWithEnter(orchestrator.container); });
     assert.equal(orchestrator.requests.length, 0);
   } finally {
@@ -1615,7 +1944,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   }] }), undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(protocolOnly.container, project.id); });
-    assert.equal(createButton(protocolOnly.container).disabled, true,
+    await assertCreateRefused(protocolOnly,
       "a v124 runner cannot replace fresh launcher attestation");
   } finally {
     await unmountFixture(protocolOnly);
@@ -1642,7 +1971,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   }] }), undefined, strictOrchestratorDefaults);
   try {
     await act(async () => { await selectProject(providerMode.container, project.id); });
-    assert.equal(createButton(providerMode.container).disabled, true,
+    await assertCreateRefused(providerMode,
       "safe attestation cannot enable Direct WSL under provider isolation");
     assert.equal(providerMode.requests.length, 0);
   } finally { await unmountFixture(providerMode); }
@@ -1713,7 +2042,7 @@ test("default loading fails closed, retries, and allows old control planes witho
   });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
     const retry = [...fixture.container.querySelectorAll<HTMLButtonElement>("button")]
@@ -1736,7 +2065,7 @@ test("late saved-default response completes before enabling creation", async () 
   const fixture = await mountFixture({}, undefined, undefined, () => pending);
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
     assert.match(fixture.container.textContent!, /Loading saved permission defaults/);
     await act(async () => { resolve({ defaults: [] }); });
     assert.equal(createButton(fixture.container).disabled, false);
@@ -1756,7 +2085,7 @@ test("saved Orchestrator cannot launch on an incompatible runner even through Di
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     assert.match(fixture.container.textContent!, /runner is too old to orchestrate child sessions/);
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
   } finally { await unmountFixture(fixture); }
@@ -1766,7 +2095,7 @@ test("Projects mode requires an explicit Project choice and No Project sends exa
   const fixture = await mountFixture();
   try {
     assert.equal(combobox(fixture.container, "Project").value, "", "the only Project is not selected implicitly");
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
 
     await act(async () => { await selectProject(fixture.container, "__no_project__"); });
     assert.equal(createButton(fixture.container).disabled, false);
@@ -1914,13 +2243,10 @@ test("a late saved-default failure replaces stale loading validation", async () 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await act(async () => { submitWithEnter(fixture.container); });
-    assert.equal(
-      fixture.container.querySelector('.form-error[role="alert"]')?.textContent,
-      "Wait for saved permission defaults to finish loading.",
-    );
+    assert.equal(fieldErrorText(fixture.container), "Wait for saved permission defaults to finish loading.");
 
     await act(async () => { reject(new ApiError("Unavailable", 503)); });
-    assertNoDomNode(fixture.container.querySelector('.form-error[role="alert"]'),
+    assertNoDomNode(fixture.container.querySelector(".modal-body .field-error"),
       "feedback for the superseded loading state is removed when loading becomes retryable");
     assert.match(fixture.container.textContent!, /Retry Defaults/);
   } finally {
@@ -2050,7 +2376,7 @@ test("a missing saved default requires an explicit account choice", async () => 
   };
   const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
   try {
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
     assert.match(fixture.container.textContent ?? "", /saved default account is no longer on this Machine/u);
     await chooseSelectOption(fixture.container, "Account", "Work");
     assert.equal(createButton(fixture.container).disabled, false);
@@ -2177,13 +2503,13 @@ test("a delayed Project preset hydrates once its exact Project and Location arri
   );
   try {
     assert.equal(combobox(fixture.container, "Project").value, "");
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
 
     await act(async () => { fixture.socket.push(snapshot()); });
 
     assert.equal(combobox(fixture.container, "Project").value, "Wollipog");
-    const location = fixture.container.querySelector('input[type="radio"]:checked')?.closest("label");
-    assert.equal(location?.textContent?.includes("/repos/wollipog"), true);
+    assert.equal(fixture.container.querySelector('button[aria-label^="Location:"]')?.getAttribute("aria-label"),
+      "Location: runner-1");
     assert.equal(createButton(fixture.container).disabled, false);
   } finally {
     await unmountFixture(fixture);
@@ -2223,33 +2549,30 @@ test("a selected Location becoming unavailable disables submission and fails clo
     };
     await act(async () => { fixture.socket.push(snapshot({ projects: [unavailableProject] })); });
 
-    assert.equal(createButton(fixture.container).disabled, true);
+    const unavailableSentence = "runner-1 no longer has this folder. Choose another location, or add the folder again.";
+    assert.equal(createButton(fixture.container).disabled, true, "an unavailable location is a hard block");
+    assert.equal(footerReason(fixture.container), "Choose an online location to continue.");
+    assert.equal(fieldErrorText(fixture.container), unavailableSentence);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
-    assert.equal(
-      fixture.container.querySelector(".form-error")?.textContent,
-      "Choose an available Project Location.",
-    );
-    const addLocation = fixture.container.querySelector<HTMLElement>('[data-validation-target="add-location"]');
-    assert.equal(
-      (domWindow.document.activeElement as unknown) === addLocation,
-      true,
-      "when no Location is launchable, focus falls back to the control that can add one",
-    );
+    const locationTrigger = fixture.container.querySelector<HTMLElement>('button[aria-label^="Location:"]');
+    assert.equal(locationTrigger?.getAttribute("aria-invalid"), "true");
+    assert.equal(ariaReferencedText(locationTrigger!, "aria-describedby"), unavailableSentence);
+    assert.equal((domWindow.document.activeElement as unknown) === locationTrigger, true,
+      "Enter lands on the Location that needs attention");
 
     const stillUnavailableProject: ProjectView = { ...unavailableProject, updatedAt: 2 };
     await act(async () => {
       fixture.socket.push(snapshot({ projects: [stillUnavailableProject] }));
     });
-    assert.equal(
-      fixture.container.querySelector('.form-error[role="alert"]')?.textContent,
-      "Choose an available Project Location.",
-      "a validity-neutral inventory refresh preserves actionable feedback",
-    );
+    assert.equal(fieldErrorText(fixture.container), unavailableSentence,
+      "a validity-neutral inventory refresh preserves actionable feedback");
 
     await act(async () => { fixture.socket.push(snapshot()); });
-    assert.equal(fixture.container.querySelector('.form-error[role="alert"]') === null, true,
+    assertNoDomNode(fixture.container.querySelector(".modal-body .field-error"),
       "a validation-relevant live-state correction clears the stale diagnosis");
+    assert.equal(footerReason(fixture.container), null);
+    assert.equal(createButton(fixture.container).disabled, false);
   } finally {
     await unmountFixture(fixture);
   }
@@ -2263,13 +2586,11 @@ test("removing the selected Project from the live inventory disables submission 
 
     await act(async () => { fixture.socket.push(snapshot({ projects: [] })); });
 
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
-    assert.equal(
-      fixture.container.querySelector(".form-error")?.textContent,
-      "Choose an available Project Location.",
-    );
+    assert.equal(fieldErrorText(fixture.container), "This project is no longer available. Choose another project.");
+    assert.equal((domWindow.document.activeElement as unknown) === combobox(fixture.container, "Project"), true);
   } finally {
     await unmountFixture(fixture);
   }
@@ -2422,7 +2743,14 @@ test("a failed atomic Native TUI launch leaves Terminal closed and surfaces the 
 
     assert.equal(fixture.requests[0]?.launchSurface, "native_tui");
     assert.equal(fixture.terminalOpens.count, 0);
-    assert.equal(fixture.container.querySelector(".form-error")?.textContent, "provider TUI exited");
+    const notice = failureNotice(fixture.container);
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Start the Session");
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "Wollipog couldn't reach the server. Check your connection and try again.");
+    assert.doesNotMatch(notice.textContent ?? "", /provider TUI exited/, "the raw error waits behind Show Details");
+    await act(async () => { buttonNamed(notice, "Show Details").click(); });
+    assert.match(notice.textContent ?? "", /provider TUI exited/);
+    assert.equal(buttonNamed(notice, "Open Session", false), undefined, "no session was kept");
   } finally {
     await unmountFixture(fixture);
   }
@@ -2454,10 +2782,23 @@ test("an ambiguous Native TUI launch retains one session and prevents duplicate 
 
     assert.equal(fixture.requests.length, 1);
     assert.equal(fixture.terminalOpens.count, 0);
-    assert.equal(createButton(fixture.container).disabled, true);
-    assert.match(fixture.container.querySelector(".form-error")?.textContent ?? "", /was retained/);
-    assert.ok([...fixture.container.querySelectorAll("button")]
-      .some((button) => button.textContent === "Open Retained Session"));
+    // A mocked create failure that kept a session: the notice above the footer, not the footer (#2952).
+    const notice = failureNotice(fixture.container);
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Start the Session");
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "Wollipog kept the session, but its terminal may not have opened.");
+    const openSession = buttonNamed(notice, "Open Session");
+    assert.ok(buttonNamed(notice, "Show Details"));
+    assert.equal(notice.closest(".modal-body") !== null, true, "the notice is in the body");
+    assert.equal(notice.parentElement?.lastElementChild === notice, true, "at the body's end, above the footer");
+    const footerButtons = [...fixture.container.querySelectorAll(".modal-foot button")].map((button) => button.textContent);
+    assert.deepEqual(footerButtons, ["Cancel", "Create Session"], "the footer has only Cancel and Create Session");
+    assertNoDomNode(fixture.container.querySelector(".modal-foot .form-error"));
+
+    await assertCreateRefused(fixture);
+    assert.equal((domWindow.document.activeElement as unknown) === openSession, true,
+      "pressing Create Session again lands on Open Session");
+    assert.ok(failureNotice(fixture.container), "the kept session's notice stays");
   } finally {
     await unmountFixture(fixture);
   }
@@ -2488,9 +2829,8 @@ test("failed Native TUI compensation exposes the retained session and disables r
     await act(async () => { createButton(fixture.container).click(); });
 
     assert.equal(fixture.requests.length, 1);
-    assert.equal(createButton(fixture.container).disabled, true);
-    assert.ok([...fixture.container.querySelectorAll("button")]
-      .some((button) => button.textContent === "Open Retained Session"));
+    await assertCreateRefused(fixture);
+    assert.ok(buttonNamed(failureNotice(fixture.container), "Open Session"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -2604,34 +2944,117 @@ test("an old Codex on unverified WSL reports both independent Orchestrator block
   }
 });
 
-test("an unavailable Project Location is refused with the availability as its reason", async () => {
-  // The bespoke `.loc-pick` button used the DOM `disabled` property, which took the option out of
-  // the tab order — so the availability badge explaining WHY it could not be chosen was reachable
-  // by mouse and by nothing else. On ChoiceRows it is `aria-disabled`, and the reason is a
-  // sentence on the card rather than a badge the user has to interpret.
-  const offlineRunner: RunnerView = { ...runner, status: "offline" };
-  const fixture = await mountFixture({
-    runners: [offlineRunner],
-    projects: [{
-      ...project,
-      locations: [{ ...project.locations[0]!, availability: "runner_offline" }],
-    }],
-  });
+test("Location is a Select of machines with status and folder, and an offline one can be read but not launched (#2952)", async () => {
+  const offlineRunner: RunnerView = {
+    ...runner, runnerId: "runner-2", hostname: "build-02", displayName: "Build Server 02", status: "offline",
+    workspaces: [{ id: "workspace-2", name: "Wollipog", path: "/srv/checkouts/team/wollipog" }],
+  };
+  const twoLocations: ProjectView = {
+    ...project,
+    locations: [
+      { ...project.locations[0]!, path: "/home/me/src/repos/wollipog" },
+      {
+        ...project.locations[0]!, id: "location-2", runnerId: "runner-2", workspaceId: "workspace-2",
+        path: "/srv/checkouts/team/wollipog", availability: "runner_offline", isDefault: false,
+      },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [runner, offlineRunner], projects: [twoLocations] });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const group = fixture.container.querySelector('[role="radiogroup"][aria-label="Project Location"]');
-    assert.ok(group, "Project Location renders as a choice group");
+    const trigger = () => fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Location:"]')!;
+    assert.equal(trigger().getAttribute("aria-label"), "Location: runner-1", "the default location is preselected");
+    assertNoDomNode(fixture.container.querySelector('[role="radiogroup"][aria-label="Project Location"]'));
 
-    const card = radioRows(group)[0];
-    assert.ok(card);
-    assert.equal(card.querySelector("input")?.getAttribute("aria-disabled"), "true");
-    assert.match(card.textContent ?? "", /Runner Offline/);
-    assert.match(card.textContent ?? "", /cannot host a session right now/);
+    await act(async () => { trigger().click(); });
+    const listbox = fixture.container.querySelector('[role="listbox"][aria-label="Location"]');
+    assert.ok(listbox, "Location opens a listbox");
+    const options = [...listbox.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+    assert.deepEqual(optionNamesAndDescriptions(options.slice(0, -1)), [
+      { name: "runner-1", description: "Available · …/repos/wollipog" },
+      { name: "Build Server 02", description: "Runner Offline · …/team/wollipog" },
+    ]);
+    assert.equal(options.at(-1)?.textContent, "Add Location…", "Add Location… is the list's footer row");
+    assert.equal(options[1]?.getAttribute("aria-disabled"), null, "an offline location stays choosable");
 
-    // Refused, not merely styled: clicking must not select it or enable creation.
-    await act(async () => { card.click(); });
-    assert.equal(card.querySelector("input")?.checked.toString(), "false");
+    await act(async () => { options[1]!.click(); });
+    const offlineSentence = "Build Server 02 is offline. Start it, or add a location on another machine.";
+    assert.equal(trigger().getAttribute("aria-label"), "Location: Build Server 02");
+    assert.equal(trigger().getAttribute("aria-invalid"), "true");
+    assert.equal(fieldErrorText(fixture.container), offlineSentence);
+    assert.equal(ariaReferencedText(trigger(), "aria-describedby"), offlineSentence);
+    assert.equal(footerReason(fixture.container), "Choose an online location to continue.");
     assert.equal(createButton(fixture.container).disabled, true);
+    assert.equal(ariaReferencedText(createButton(fixture.container), "aria-describedby"),
+      "Choose an online location to continue.");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a project without locations shows the No Locations notice in Location's place (#2952)", async () => {
+  const empty: ProjectView = { ...project, locations: [] };
+  const fixture = await mountFixture({ projects: [empty] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const notice = fixture.container.querySelector<HTMLElement>(".modal-body .notice.t-neutral.compact");
+    assert.ok(notice, "a compact neutral notice");
+    assert.match(notice.textContent ?? "", /This project has no locations yet\. Add the folder where its sessions run\./);
+    assert.ok(buttonNamed(notice, "Add Location…"));
+    assertNoDomNode(fixture.container.querySelector(".modal-body .project-manager-empty"));
+    assert.equal(footerReason(fixture.container), "Add a location to continue.");
+    assert.equal(createButton(fixture.container).disabled, true);
+  } finally {
+    await unmountFixture(fixture);
+  }
+
+  const viewer = await mountFixture({ projects: [{ ...project, canManage: false }] });
+  try {
+    await act(async () => { await selectProject(viewer.container, project.id); });
+    const trigger = viewer.container.querySelector<HTMLButtonElement>('button[aria-label^="Location:"]')!;
+    assert.equal(ariaReferencedText(trigger, "aria-describedby"), "You can't add locations to this project.");
+    await act(async () => { trigger.click(); });
+    const options = [...viewer.container.querySelectorAll('[role="listbox"][aria-label="Location"] [role="option"]')];
+    assert.equal(options.some((option) => option.textContent === "Add Location…"), false,
+      "no Add Location… without manage permission");
+  } finally {
+    await unmountFixture(viewer);
+  }
+});
+
+test("no machine online shows the No Machines Online notice and the footer's reason (#2952)", async () => {
+  const fixture = await mountFixture({ runners: [{ ...runner, status: "offline" }] });
+  try {
+    const notice = fixture.container.querySelector<HTMLElement>(".modal-body .notice.t-neutral");
+    assert.ok(notice);
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "No Machines Online");
+    assert.match(notice.textContent ?? "", /Start Wollipog on one of your machines, or connect a new one\./);
+    assert.ok(buttonNamed(notice, "Open Connections"));
+    assert.equal(fixture.container.querySelector(".modal-body")?.firstElementChild?.firstElementChild === notice, true,
+      "at the top of the body");
+    assert.equal(footerReason(fixture.container), "Connect a machine to continue.");
+    assert.equal(createButton(fixture.container).disabled, true);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /No runners online/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("New Session's description replaces the closing hint, and retired pieces are gone (#2952)", async () => {
+  const fixture = await mountFixture({}, { projectId: null });
+  try {
+    const dialog = fixture.container.querySelector<HTMLElement>('[role="dialog"]');
+    assert.ok(dialog);
+    assert.equal(ariaReferencedText(dialog, "aria-describedby"), "Choose the model and write your first message once it opens.");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Pick the model, effort/);
+    for (const selector of [".static-pick", ".new-session-project-actions", ".new-session-hint", ".new-session-project-control"]) {
+      assertNoDomNode(fixture.container.querySelector(selector), `${selector} is retired`);
+    }
+    assert.ok(fixture.container.querySelector('button[aria-label^="Machine:"]'),
+      "with one machine online, Machine is still a Select");
+    const row = fixture.container.querySelector(".modal-body .field-row");
+    assert.ok(row?.contains(combobox(fixture.container, "Project")), "Project shares the row");
+    assert.ok(row?.querySelector('button[aria-label^="Machine:"]'), "with Machine under No Project");
   } finally {
     await unmountFixture(fixture);
   }
@@ -2644,7 +3067,7 @@ test("the Location groups and Harness share one control family", async () => {
   const fixture = await mountFixture();
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    for (const label of ["Project Location", "Session Role", "Harness"]) {
+    for (const label of ["Session Role", "Harness"]) {
       const group = fixture.container.querySelector(`[role="radiogroup"][aria-label="${label}"]`);
       assert.ok(group, `${label} is a labelled radiogroup`);
       assert.ok(group.querySelector(".choice-row"), `${label} uses the shared ChoiceRow`);
@@ -2833,7 +3256,7 @@ test("an additive Codex Orchestrator is offered where the audited sandbox is una
     const errors = [...strict.container.querySelectorAll('.form-error[role="alert"]')]
       .map((error) => error.textContent ?? "").join(" ");
     assert.match(errors, /Strict Project Isolation is delivered by the Orchestrator preset/);
-    assert.equal(createButton(strict.container).disabled, true);
+    await assertCreateRefused(strict);
   } finally { await unmountFixture(strict); }
 });
 
@@ -2872,7 +3295,7 @@ test("an installation that offers only the additive role never submits the coupl
     await act(async () => { await selectProject(legacy.container, project.id); });
     await choosePermissionPreset(legacy.container, "Orchestrator");
     assert.match(legacy.container.textContent!, /Update Wollipog to give an Orchestrator ordinary provider permissions\./);
-    assert.equal(createButton(legacy.container).disabled, true,
+    await assertCreateRefused(legacy,
       "the coupled preset this control plane would force is not launchable by this installation");
     assert.equal(legacy.requests.length, 0);
   } finally { await unmountFixture(legacy); }
@@ -2979,7 +3402,7 @@ test("an additive-only Pi Orchestrator refuses Strict Project Isolation with a r
     // Strict Project Isolation is delivered only by the coupled preset, which this installation
     // cannot launch. The dialog must say so and refuse, not submit a shape the server rejects.
     assert.match(strict.container.textContent!, /Strict Project Isolation is delivered by the Orchestrator preset/);
-    assert.equal(createButton(strict.container).disabled, true,
+    await assertCreateRefused(strict,
       "a shape the control plane would refuse is never submittable");
     await act(async () => { createButton(strict.container).click(); });
     assert.equal(strict.requests.length, 0);
@@ -3050,7 +3473,7 @@ test("an older runner blocks Integration Isolation rather than letting it be sub
       "This machine needs a newer runner for integration isolation. Update and restart the runner. To start now, turn off Integration Isolation.",
     ), alerts);
     assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
-    assert.equal(createButton(fixture.container).disabled, true,
+    await assertCreateRefused(fixture,
       "the dialog never advertises a shape the control plane refuses");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 0);
@@ -3076,7 +3499,7 @@ test("an Orchestrator without Strict Project Isolation on an older runner shows 
       "This machine needs a newer runner for an Orchestrator without strict project isolation. Update and restart the runner. To start now, turn on Strict Project Isolation.",
     ), alerts);
     assert.doesNotMatch(fixture.container.textContent!, /protocol-v/);
-    assert.equal(createButton(fixture.container).disabled, true);
+    await assertCreateRefused(fixture);
   } finally { await unmountFixture(fixture); }
 });
 

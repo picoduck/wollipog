@@ -87,6 +87,10 @@ async function expectFullControlOwnersReadOnly(page: Page) {
 }
 
 async function shoot(page: Page, anchor: Locator, path: string) {
+  // The pointer is left wherever the last action put it. Scrolling slides other controls under it,
+  // and their hover transitions start and are cancelled while `settle` waits on them, so the capture
+  // depended on which control happened to land there. A capture shows no hover.
+  await page.mouse.move(0, 0);
   await anchor.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
   await settle(page);
   await page.screenshot({ path });

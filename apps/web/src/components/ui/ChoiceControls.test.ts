@@ -195,6 +195,11 @@ test("a section label is one 28px row and a footer action one single-line option
       selectMenuDesiredHeight({ optionCount: 3, maxOptionLines: 1, footerAction: true, coarsePointer }),
       bare + option + MENU_SEPARATOR_PX,
     );
+    // A separator between options (#2952) is the footer's separator alone.
+    assert.equal(
+      selectMenuDesiredHeight({ optionCount: 3, maxOptionLines: 1, separatorCount: 1, coarsePointer }),
+      bare + MENU_SEPARATOR_PX,
+    );
     // The footer row is its label alone, so taller options do not make it taller.
     assert.equal(
       selectMenuDesiredHeight({ optionCount: 3, maxOptionLines: 3, footerAction: true, coarsePointer: false })

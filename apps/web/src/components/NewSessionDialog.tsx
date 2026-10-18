@@ -17,8 +17,10 @@ import {
   orchestratorChildHarnessRequirement,
   orchestratorExecutionPolicyRequirement,
   orchestratorIntegrationIsolationRequirement,
+  type ProjectLocationAvailability,
   type ProjectLocationView,
   type ProjectView,
+  type RunnerView,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type BoxView,
@@ -44,7 +46,6 @@ import {
   projectFallbacksAwaitingStore,
   projectLocationForSessionPreset,
   projectInventoryWithFallbacks,
-  projectSelectionLabel,
   projectSessionPlacement,
   suggestedProjectLocation,
 } from "../project-session-selection.js";
@@ -77,11 +78,11 @@ import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
-import { projectAvailabilityLabel, projectAvailabilityMeta, type ProjectLocationCandidate } from "../project-management.js";
-import { StatusBadge } from "./StatusBadge.js";
+import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { FieldError } from "./FieldError.js";
+import { Notice } from "./Notice.js";
 import { FullControlLaunchPanel, OrchestratorControlChoice, type FullControlAuthorization } from "./FullControlPreparation.js";
-import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
 import {
@@ -89,8 +90,9 @@ import {
   SearchableCombobox,
   SegmentedControl,
   Select,
-  type PickerCreateOption,
+  type PickerFooterAction,
   type SearchableComboboxOption,
+  type SelectOption,
   useTapOnlyPicker,
 } from "./ui/ChoiceControls.js";
 
@@ -113,10 +115,60 @@ function cloneOrchestratorDefaults(defaults: OrchestratorDefaults): Orchestrator
 }
 
 /**
- * New Session is intentionally minimal — pick where it runs (runner + agent + workspace) and go.
- * Model, reasoning effort, approvals, and the first message are all chosen in the chat itself
- * (the composer bar), like the Codex app, so they can be changed per turn.
+ * A location's availability as the live runner catalog sees it. The stored availability can still
+ * read Available while its machine is offline or no longer advertises the folder, and the Location
+ * field names what is actually in the way.
  */
+function liveLocationAvailability(
+  location: ProjectLocationView,
+  runners: ReadonlyMap<string, RunnerView>,
+): ProjectLocationAvailability {
+  if (location.availability !== "available") return location.availability;
+  const runner = runners.get(location.runnerId);
+  if (runner?.status !== "online") return "runner_offline";
+  return runner.workspaces.some((workspace) => workspace.id === location.workspaceId) ? "available" : "workspace_missing";
+}
+
+/** A path cut at its start, so the folder name and its parent stay whole: "…/repos/wollipog". */
+function startTruncatedPath(path: string): string {
+  const separator = path.includes("\\") ? "\\" : "/";
+  const segments = path.split(/[\\/]+/u).filter(Boolean);
+  return segments.length <= 2 ? path : `…${separator}${segments.slice(-2).join(separator)}`;
+}
+
+/** Why a chosen location cannot host the session, and what to do about it (§8.5). */
+function unavailableLocationSentence(availability: ProjectLocationAvailability, machine: string): string {
+  return availability === "workspace_missing"
+    ? `${machine} no longer has this folder. Choose another location, or add the folder again.`
+    : availability === "runner_removed"
+      ? `${machine} was removed. Choose another location, or add one on another machine.`
+      : `${machine} is offline. Start it, or add a location on another machine.`;
+}
+
+/**
+ * A failed create request in one user sentence (§8.5, §13.2). The raw message stays behind Show
+ * Details, so nothing the server says is lost.
+ */
+function createFailureSentence(error: unknown, kept: boolean): string {
+  if (kept) return "Wollipog kept the session, but its terminal may not have opened.";
+  if (!(error instanceof ApiError)) return "Wollipog couldn't reach the server. Check your connection and try again.";
+  if (error.status === 403) return "You don't have permission to start a session here.";
+  return "The machine didn't start the session. Check the choices above and try again.";
+}
+
+/**
+ * New Session asks where a session runs and with which agent. Model, reasoning effort, approvals,
+ * and the first message are all chosen in the chat itself (the composer bar), like the Codex app,
+ * so they can be changed per turn.
+ */
+/** The field a submit's validation problem is shown under. `form` is the rare problem no field owns. */
+type ProblemField = "project" | "location" | "machine" | "folder" | "agent" | "role" | "harness" | "mode" | "form";
+/** The control a submit problem moved focus to, which is described by the problem's error. */
+type ProblemControl =
+  | "project" | "location" | "add-location" | "machine" | "folder" | "browse" | "agent" | "account"
+  | "retained-session" | "open-connections" | "role" | "defaults" | "orchestrator-retry" | "orchestrator"
+  | "full-control" | "live-child-limit" | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
+
 /** Pre-selection for launches from a project's menu ("Create permanent worktree"). */
 export interface NewSessionPreset {
   runnerId?: string;
@@ -168,28 +220,74 @@ export function NewSessionDialog({
     () => [...projects.values()].sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id)),
     [projects],
   );
-  const projectOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
-    const nameCounts = new Map<string, number>();
-    for (const project of projectList) nameCounts.set(project.name, (nameCounts.get(project.name) ?? 0) + 1);
-    return [
-      ...projectList.map((project) => ({
-        value: project.id,
-        label: `${projectSelectionLabel(project, (nameCounts.get(project.name) ?? 0) > 1)}${project.hidden ? " (Hidden)" : ""}`,
-        description: `${project.locations.length} Project Location${project.locations.length === 1 ? "" : "s"}${project.hidden ? ", hidden from the default Projects view" : ""}.`,
-      })),
-      {
-        value: NO_PROJECT_SELECTION,
-        label: "No Project",
-        description: "Run in the selected folder without adding this session to a Project.",
-      },
-    ];
-  }, [projectList]);
   const online = useMemo(() => [...runners.values()].filter((r) => r.status === "online"), [runners]);
   const boxByRunner = useMemo(() => {
     const m = new Map<string, BoxView>();
     for (const b of boxes.values()) m.set(b.runnerId, b);
     return m;
   }, [boxes]);
+  const machineName = (id: string) => runnerDisplay(runners.get(id), boxByRunner.get(id), id).name;
+  // A project's option is its name; the second line says where it runs (§9.1). Two projects with
+  // one name keep that name in the list, and the closed field adds the machine to tell them apart.
+  const projectOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
+    const nameOf = (id: string) => runnerDisplay(runners.get(id), boxByRunner.get(id), id).name;
+    const primaryOf = (project: ProjectView) => project.locations.find((location) => location.isDefault) ?? project.locations[0];
+    // Where each project runs, said no more precisely than its same-named projects need: the machine,
+    // then the machine and folder, then a longer path, and the project's id when nothing else differs.
+    const qualifiers = new Map<string, string>();
+    const sameName = new Map<string, ProjectView[]>();
+    for (const project of projectList) sameName.set(project.name, [...(sameName.get(project.name) ?? []), project]);
+    for (const group of sameName.values()) {
+      if (group.length < 2) continue;
+      const levels: Array<(project: ProjectView) => string> = [
+        (project) => { const primary = primaryOf(project); return primary ? nameOf(primary.runnerId) : ""; },
+        (project) => {
+          const primary = primaryOf(project);
+          return primary ? `${nameOf(primary.runnerId)} · ${primary.path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? primary.path}` : "";
+        },
+        (project) => { const primary = primaryOf(project); return primary ? `${nameOf(primary.runnerId)} · ${startTruncatedPath(primary.path)}` : ""; },
+        (project) => { const primary = primaryOf(project); return primary ? `${nameOf(primary.runnerId)} · ${primary.path}` : ""; },
+      ];
+      const level = levels.find((qualify) => {
+        const values = group.map(qualify);
+        return values.every(Boolean) && new Set(values).size === group.length;
+      });
+      for (const project of group) {
+        const primary = primaryOf(project);
+        qualifiers.set(project.id, level
+          ? level(project)
+          : `${primary ? `${nameOf(primary.runnerId)} · ` : ""}Project ${project.id.slice(-6)}`);
+      }
+    }
+    return [
+      ...projectList.map((project) => {
+        const primary = primaryOf(project);
+        const qualifier = qualifiers.get(project.id);
+        const machine = primary ? nameOf(primary.runnerId) : undefined;
+        // The second line leads with what tells this project apart: its machine, or more when that
+        // alone does not.
+        const where = qualifier && qualifier !== machine ? qualifier : machine;
+        const count = project.locations.length;
+        const summary = !primary ? (where ? `${where} · No locations yet` : "No locations yet")
+          : project.locations.every((location) => liveLocationAvailability(location, runners) === "runner_offline")
+            ? `${where} · offline`
+            : `${where} · ${count} location${count === 1 ? "" : "s"}`;
+        return {
+          value: project.id,
+          label: project.name,
+          description: project.hidden ? `Hidden · ${summary}` : summary,
+          ...(qualifier ? { selectedLabel: `${project.name} · ${qualifier}` } : {}),
+          keywords: project.locations.flatMap((location) => [nameOf(location.runnerId), location.path]),
+        };
+      }),
+      {
+        value: NO_PROJECT_SELECTION,
+        label: "No Project",
+        description: "Run in any folder on a machine, outside a project.",
+        separator: true,
+      },
+    ];
+  }, [boxByRunner, projectList, runners]);
   const machineLabels = useMemo(
     () => machineOptionLabels(online, (id) => boxByRunner.get(id)),
     [boxByRunner, online],
@@ -222,22 +320,21 @@ export function NewSessionDialog({
   const [projectLocationId, setProjectLocationId] = useState(initialProjectLocation?.id ?? "");
   const projectSelectionChangedRef = useRef(false);
   const [creatingProject, setCreatingProject] = useState(false);
-  // Which control opened Create Project, so closing it returns focus there rather than to the
-  // other one: the button below the picker, or the picker's own no-match row.
-  const [createProjectFromPicker, setCreateProjectFromPicker] = useState(false);
-  // A Project search that finds nothing offers to create one, beside the button that already does.
-  const createProjectOption: PickerCreateOption = {
-    label: "Create Project…",
-    onSelect: () => {
-      setCreateProjectFromPicker(true);
-      setCreatingProject(true);
-    },
-  };
+  // New Project… and Add Location… end their fields' lists (§9.1). New Session stays open under the
+  // dialogs they open (§7.1), and closing one returns focus to the field that opened it.
+  const newProjectAction: PickerFooterAction = { label: "New Project…", onSelect: () => setCreatingProject(true) };
   const [addingLocation, setAddingLocation] = useState(false);
-  // New Session stays open under Create Project and Add Location (§7.1): these return focus to the
-  // button inside it that opened them.
-  const createProjectButtonRef = useRef<HTMLButtonElement>(null);
-  const addLocationButtonRef = useRef<HTMLButtonElement>(null);
+  const addLocationAction: PickerFooterAction = { label: "Add Location…", onSelect: () => setAddingLocation(true) };
+  const locationFieldRef = useRef<HTMLDivElement>(null);
+  // The Location control as it is when Add Location closes: its Select, or the No Locations
+  // notice's Add Location… while the project has none.
+  const locationFocusRef = useMemo(() => ({
+    get current() {
+      return locationFieldRef.current?.querySelector<HTMLElement>(
+        '.ui-select-trigger, [data-validation-target="add-location"]',
+      ) ?? null;
+    },
+  }), []);
 
   const [agentDefaults, setAgentDefaults] = useState(() => loadAgentDefaults(instanceScope));
   const [runnerId, setRunnerId] = useState(
@@ -334,10 +431,12 @@ export function NewSessionDialog({
   const workspacePickerRestoredRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const [validationError, setValidationError] = useState<string | null>(null);
-  const [requestError, setRequestError] = useState<string | null>(null);
+  // A submit that finds a problem names it under the field it is about (§8.5) and focuses that field.
+  const [fieldProblem, setFieldProblem] = useState<{
+    field: ProblemField; message: string; control?: ProblemControl;
+  } | null>(null);
+  const [requestFailure, setRequestFailure] = useState<{ sentence: string; detail: string } | null>(null);
   const [retainedSessionId, setRetainedSessionId] = useState<string | null>(null);
-  const retainedSessionButtonRef = useRef<HTMLButtonElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const projectChoiceRef = useRef<HTMLDivElement>(null);
   // The Project control as it is when the dialog above it closes: the combobox, or on touch the
@@ -363,6 +462,13 @@ export function NewSessionDialog({
     // after the opening commit so a later touch-to-desktop presentation swap cannot steal focus.
     initialProjectAutoFocusRef.current = false;
   }, []);
+  // Opened with a project already chosen (from that project's sessions), Project holds focus with
+  // its name selected and the list closed, so the first character typed replaces the name with a
+  // search instead of extending it.
+  useEffect(() => {
+    const input = projectChoiceRef.current?.querySelector<HTMLInputElement>(".ui-searchable-combobox-input");
+    if (input && document.activeElement === input && input.value) input.select();
+  }, []);
   const previousTouchChoicePickerRef = useRef(touchChoicePicker);
   // Capture ownership DURING render, while the old control is still mounted. By the time a layout
   // effect runs after the media-query change, React has replaced the focused input or listbox and
@@ -385,7 +491,15 @@ export function NewSessionDialog({
       : region?.querySelector<HTMLInputElement>(".ui-searchable-combobox-input");
     replacement?.focus();
   }, [responsiveChoiceFocusBeforeRender, touchChoicePicker]);
-  const projectLocationOptionsId = `${generatedFormId}-project-locations`;
+  const problemId = (field: ProblemField) => `${generatedFormId}-${field}-error`;
+  const locationHelperId = `${generatedFormId}-location-helper`;
+  const blockedReasonId = `${generatedFormId}-blocked-reason`;
+  const cloudBudgetInputId = `${generatedFormId}-cloud-budget`;
+  // Sentences that describe the control a problem with no field error of its own lands on.
+  const noLocationsId = `${generatedFormId}-no-locations`;
+  const noMachinesId = `${generatedFormId}-no-machines`;
+  const failureSentenceId = `${generatedFormId}-failure`;
+  const accountReasonId = `${generatedFormId}-account-reason`;
   const permissionOptionsId = `${generatedFormId}-session-role`;
   const liveChildLimitInputId = `${generatedFormId}-live-child-limit`;
   const liveChildLimitHelpId = `${generatedFormId}-live-child-limit-help`;
@@ -913,7 +1027,7 @@ export function NewSessionDialog({
     // An editable combobox can commit its current value again. Unlike a native select, that is a
     // real event, but it is not a new Project decision and must not erase an explicit Location.
     if (value === projectSelection) return;
-    setValidationError(null);
+    setFieldProblem(null);
     projectSelectionChangedRef.current = true;
     setProjectSelection(value);
     setProjectLocationId("");
@@ -1027,11 +1141,28 @@ export function NewSessionDialog({
   const valid = launchSelectionValid && (!orchestrator || controlPreview !== "full_control");
   // Full Control never falls back to ordinary creation: its one action authorizes the reviewed preflight.
   const fullControlLaunch = orchestrator && orchestratorSettingsReady && controlPreview === "full_control";
+  // The chosen location, as the Location field reports it: why it can't host the session, if it can't.
+  const selectedLocationProblem = selectedProjectLocation && !projectLocationLaunchable
+    ? unavailableLocationSentence(
+      liveLocationAvailability(selectedProjectLocation, runners),
+      machineName(selectedProjectLocation.runnerId),
+    )
+    : null;
+  // Create Session is disabled only for what nothing further down the form can fix (§7.3, §8.5), and
+  // the footer says what that is. Anything else leaves it enabled: pressing it lands on the field.
+  const blockedReason = online.length === 0 ? "Connect a machine to continue."
+    : projectsSupported && selectedProject && selectedProject.locations.length === 0 ? "Add a location to continue."
+      : projectsSupported && selectedProject &&
+          (selectedProjectLocation ? !projectLocationLaunchable : projectLocationsAvailable.length === 0)
+        ? "Choose an online location to continue."
+        : runner && (!agentOpts.some((option) => !option.disabled) || selectedAgentOption?.disabled)
+          ? "Choose an installed agent to continue."
+          : null;
 
   // Validation feedback describes the state that produced it. Once any value participating in
   // validation changes, remove that stale diagnosis; request failures remain until the next submit.
   useEffect(() => {
-    setValidationError(null);
+    setFieldProblem(null);
   }, [
     projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
     runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled, providerAccountId,
@@ -1073,14 +1204,40 @@ export function NewSessionDialog({
     }
   };
 
-  const focusValidationProblem = (...selectors: Array<string | undefined>) => {
-    for (const selector of selectors) {
-      if (!selector) continue;
-      const target = formRef.current?.querySelector<HTMLElement>(selector);
+  /** Where each control a submit problem can land on is found, in the dialog (the form or its footer). */
+  const problemTargets: Record<ProblemControl, string> = {
+    project: '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
+    location: 'button[aria-label^="Location:"]:not([aria-disabled="true"])',
+    "add-location": '[data-validation-target="add-location"]',
+    machine: 'button[aria-label^="Machine:"]',
+    folder: 'button[aria-label^="Workspace:"]',
+    browse: '[data-validation-target="browse"]:not(:disabled)',
+    agent: '[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]',
+    account: 'button[aria-label^="Account:"]',
+    "retained-session": '[data-validation-target="retained-session"]',
+    "open-connections": '[data-validation-target="open-connections"]',
+    role: `[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`,
+    defaults: '[data-validation-target="defaults"]',
+    "orchestrator-retry": 'button[data-validation-target="orchestrator-defaults"]',
+    orchestrator: 'div[data-validation-target="orchestrator-defaults"]',
+    "full-control": '[data-control-mode="full_control"]',
+    "live-child-limit": `[id="${liveChildLimitInputId}"]`,
+    harness: `[id="${harnessOptionsId}"] input:not([aria-disabled="true"])`,
+    mode: '.new-session-mode button[aria-checked="true"]',
+    "execution-target": 'button[aria-label^="Execution Target:"]',
+    "cloud-budget": `[id="${cloudBudgetInputId}"]`,
+    create: '[data-validation-target="create"]',
+  };
+  /** Focus the first of `controls` that renders now, falling back to Create Session, and say which. */
+  const focusValidationProblem = (...controls: ProblemControl[]): ProblemControl => {
+    const dialog = formRef.current?.closest<HTMLElement>('[role="dialog"]') ?? formRef.current;
+    for (const control of [...controls, "create" as const]) {
+      const target = dialog?.querySelector<HTMLElement>(problemTargets[control]);
       if (!target) continue;
       target.focus();
-      return;
+      return control;
     }
+    return "create";
   };
 
   const buildSessionRequest = (): CreateSessionRequest => {
@@ -1154,12 +1311,20 @@ export function NewSessionDialog({
     // Re-entrancy guard: the Enter path bypasses the footer button's disabled attribute, and a
     // second submit while createSession is in flight would spawn a duplicate session.
     if (busyRef.current) return;
-    setValidationError(null);
-    setRequestError(null);
+    setFieldProblem(null);
+    // A kept session's failure stays: its Open Session is the way forward.
+    if (!retainedSessionId) setRequestFailure(null);
+    // Each problem is shown under its field, and focus moves to the first of its controls that renders
+    // now. That control carries `aria-invalid` where it has one, and its `aria-describedby` names the
+    // error, so focusing it announces why (§8.5). A problem with no message is already explained by
+    // what its control is described by (a notice, the account's reason).
+    const report = (field: ProblemField, message: string | null, ...controls: ProblemControl[]) => {
+      const control = focusValidationProblem(...controls);
+      setFieldProblem(message ? { field, message, control } : null);
+    };
     if (fullControlLaunch) {
       if (!fullControlAuthorization?.ready) {
-        setValidationError("Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.");
-        focusValidationProblem('[data-control-mode="full_control"]');
+        report("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.", "full-control");
         return;
       }
       busyRef.current = true;
@@ -1170,76 +1335,79 @@ export function NewSessionDialog({
     }
     if (!valid) {
       if (orchestrator && controlPreview === "full_control") {
-        setValidationError("Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.");
-        focusValidationProblem('[data-control-mode="full_control"]');
+        report("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom.",
+          "full-control", "orchestrator-retry", "role");
       } else if (retainedSessionId) {
-        setValidationError("Open the retained session before creating another one.");
-        retainedSessionButtonRef.current?.focus();
+        // The failure notice above the footer already says a session was kept; Open Session is next.
+        report("form", null, "retained-session");
+      } else if (online.length === 0) {
+        // No Machines Online says why; Open Connections is the way forward.
+        report("form", null, "open-connections");
       } else if (projectsSupported && !projectSelection) {
-        setValidationError("Choose a Project or No Project.");
-        focusValidationProblem('[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]');
+        report("project", "Choose a project, or choose No Project.", "project");
+      } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !selectedProject) {
+        report("project", "This project is no longer available. Choose another project.", "project");
+      } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && selectedProject &&
+          selectedProject.locations.length === 0) {
+        // The No Locations notice explains, and its Add Location… is next, unless only someone who
+        // manages the project can add one.
+        if (cannotAddLocation) {
+          report("project", "This project has no locations, and you can't add one. Choose another project.", "project");
+        } else {
+          report("location", null, "add-location");
+        }
       } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !projectLocationLaunchable) {
-        setValidationError("Choose an available Project Location.");
-        focusValidationProblem(
-          `[id="${projectLocationOptionsId}"] input:not([aria-disabled="true"])`,
-          '[data-validation-target="add-location"]:not(:disabled)',
-          '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
-        );
+        // An unavailable choice already shows its own error under Location; an unchosen one needs one.
+        report("location", selectedProjectLocation
+          ? null
+          : projectLocationsAvailable.length > 0
+            ? "Choose where this session runs."
+            : "No location of this project is online. Start its machine, or add a location on another machine.",
+        "location", "project");
       } else if (!runnerId) {
-        setValidationError("Pick a runner, workspace, and agent.");
-        focusValidationProblem(
-          'button[aria-label^="Machine:"]',
-          '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
-        );
+        report("machine", "Choose a machine.", "machine", "project");
       } else if (!workspaceId && !browsedPath) {
-        setValidationError("Pick a runner, workspace, and agent.");
-        focusValidationProblem('button[aria-label^="Workspace:"]');
+        report("folder", "Choose a workspace, or browse for a folder.", "folder", "browse");
       } else if (!agentId || !selectedAgentOption || selectedAgentOption.disabled) {
-        setValidationError("Pick a runner, workspace, and agent.");
-        focusValidationProblem('[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]');
+        report("agent", "Choose an installed agent.", "agent");
       } else if (missingRequiredAccountChoice) {
-        setValidationError("Choose an account because the saved default is no longer available.");
-        focusValidationProblem('button[aria-label^="Account:"]');
+        // The Account field already says why, and its control is described by it.
+        report("form", null, "account");
       } else if (!defaultsReady && !orchestrator) {
-        setValidationError(harnessDefaults?.error
+        report("role", harnessDefaults?.error
           ? "Retry loading saved permission defaults before creating a session."
-          : "Wait for saved permission defaults to finish loading.");
-        focusValidationProblem('[data-validation-target="defaults"]');
+          : "Wait for saved permission defaults to finish loading.",
+        ...(harnessDefaults?.error ? ["defaults", "role"] as const : ["role"] as const));
       } else if (orchestrator && !orchestratorSupported) {
-        setValidationError("Choose an available Session Role.");
-        focusValidationProblem(`[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
+        report("role", "Choose an available Session Role.", "role");
       } else if (orchestrator && !orchestratorSettingsReady) {
-        setValidationError(orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.");
-        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
+        // While the policy loads there is nothing of it to focus, so the Session Role answers.
+        report("role", orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.",
+          "orchestrator-retry", "role");
       } else if (orchestrator && !orchestratorCapabilitiesValid) {
-        setValidationError(orchestratorCapabilities?.reason ??
-          "Choose available Child Model and Child Effort values before creating this campaign.");
-        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
+        report("role", orchestratorCapabilities?.reason ??
+          "Choose available Child Model and Child Effort values before creating this campaign.",
+        "orchestrator", "role");
       } else if (orchestrator && !orchestratorDelegationValid) {
-        setValidationError(effectiveParentControl !== "off" && !parentControlSupported
+        report("role", effectiveParentControl !== "off" && !parentControlSupported
           ? parentControlUnavailable ?? "Choose Human for Descendant Requests on this runner."
-          : typedDelegationUnavailable ?? "Choose Human for typed decisions on this runner.");
-        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
+          : typedDelegationUnavailable ?? "Choose Human for typed decisions on this runner.",
+        "orchestrator", "role");
       } else if (orchestrator && !orchestratorExecutionValid) {
-        setValidationError(orchestratorExecutionUnavailable);
-        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
+        report("role", orchestratorExecutionUnavailable, "orchestrator", "role");
       } else if (!liveChildLimitValid) {
-        setValidationError(`Enter a Live Child Limit from ${minimumLiveChildLimit} to ${MAX_LIVE_CHILD_LIMIT}.`);
-        focusValidationProblem(`[id="${liveChildLimitInputId}"]`);
+        report("role", `Enter a Live Child Limit from ${minimumLiveChildLimit} to ${MAX_LIVE_CHILD_LIMIT}.`,
+          "live-child-limit", "orchestrator", "role");
       } else if (directWslRequiresSafeOrchestrator && !orchestrator) {
-        setValidationError("Choose Orchestrator or another execution context.");
-        focusValidationProblem(`[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
+        report("role", "Choose Orchestrator or another execution context.", "role");
       } else if (launchSurface === "native_tui" && !nativeTuiSupported) {
-        setValidationError("Choose an available Harness.");
-        focusValidationProblem(`[id="${harnessOptionsId}"] input:not([aria-disabled="true"])`);
+        report("harness", "Choose an available Harness.", "harness");
       } else if (executionTarget && !executionTarget.available) {
-        setValidationError("Choose an available Execution Target.");
-        focusValidationProblem('button[aria-label^="Execution Target:"]');
+        report("mode", "Choose an available Execution Target.", "execution-target", "mode");
       } else if (!cloudBudgetValid) {
-        setValidationError("Enter a Cloud Cost Budget within the allowed range.");
-        focusValidationProblem('input[type="number"]');
+        report("mode", "Enter a Cloud Cost Budget within the allowed range.", "cloud-budget", "execution-target", "mode");
       } else {
-        setValidationError("Complete the required session settings before creating a session.");
+        report("form", "Complete the required session settings before creating a session.", "create");
       }
       return;
     }
@@ -1251,20 +1419,240 @@ export function NewSessionDialog({
       if (launchSurface === "native_tui") onOpenTerminal?.();
       onClose();
     } catch (e) {
-      if (e instanceof ApiError &&
+      const keptSessionId = e instanceof ApiError &&
           (e.code === "NATIVE_TUI_LAUNCH_AMBIGUOUS" ||
             e.code === "NATIVE_TUI_COMPENSATION_FAILED") &&
-          typeof e.details?.sessionId === "string") {
-        setRetainedSessionId(e.details.sessionId);
-      }
-      setRequestError((e as Error).message);
+          typeof e.details?.sessionId === "string"
+        ? e.details.sessionId
+        : null;
+      if (keptSessionId) setRetainedSessionId(keptSessionId);
+      setRequestFailure({
+        sentence: createFailureSentence(e, keptSessionId !== null),
+        detail: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
   };
 
-  const error = requestError ?? validationError;
+  /** The error a submit left under `field`, with the id its control points `aria-describedby` at. */
+  const problemFor = (field: ProblemField) => fieldProblem?.field === field
+    ? <FieldError id={problemId(field)}>{fieldProblem.message}</FieldError>
+    : null;
+  /** Whether a submit's problem is about `control`, and its description: `own` plus the error. */
+  const controlInvalid = (control: ProblemControl) => fieldProblem?.control === control;
+  const controlDescribedBy = (control: ProblemControl, own?: string) =>
+    [own, fieldProblem?.control === control ? problemId(fieldProblem.field) : undefined].filter(Boolean).join(" ") || undefined;
+
+  const openConnections = () => {
+    onClose();
+    navigate({ name: "runners", section: "machines" });
+  };
+
+  // Project takes focus as the dialog opens, with its list closed (#1143, #2951): typing filters
+  // at once, Arrow Down opens it, and it never covers the form uninvited.
+  const projectField = (
+    <div className="field" ref={projectChoiceRef}>
+      <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : projectInputId}>Project</label>
+      {touchChoicePicker ? (
+        <Select<string>
+          className="new-session-choice-control"
+          label="Project"
+          value={projectSelection || null}
+          onChange={pickProject}
+          options={projectOptions}
+          placeholder="Choose a Project…"
+          emptyLabel="No Projects Available"
+          searchable
+          noun="projects"
+          footerAction={newProjectAction}
+          invalid={controlInvalid("project")}
+          describedBy={controlDescribedBy("project")}
+        />
+      ) : (
+        <SearchableCombobox<string>
+          inputId={projectInputId}
+          autoFocus={initialProjectAutoFocusRef.current}
+          openOnFocus={false}
+          className="new-session-choice-control"
+          label="Project"
+          value={projectSelection || null}
+          onChange={pickProject}
+          options={projectOptions}
+          placeholder="Choose a Project…"
+          emptyLabel="No Projects Available"
+          noun="projects"
+          footerAction={newProjectAction}
+          invalid={controlInvalid("project")}
+          describedBy={controlDescribedBy("project")}
+        />
+      )}
+      {problemFor("project")}
+    </div>
+  );
+
+  // Each location is its machine, with its status and folder on the second line. An unavailable one
+  // stays choosable so its reason can be read, and choosing it marks the field invalid (§8.5).
+  const locationMachineCounts = new Map<string, number>();
+  for (const location of selectedProject?.locations ?? []) {
+    locationMachineCounts.set(location.runnerId, (locationMachineCounts.get(location.runnerId) ?? 0) + 1);
+  }
+  const locationOptions: SelectOption<string>[] = (selectedProject?.locations ?? []).map((location) => {
+    const machine = machineName(location.runnerId);
+    const folder = location.path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? location.path;
+    return {
+      value: location.id,
+      label: machine,
+      description: `${projectAvailabilityLabel(liveLocationAvailability(location, runners))} · ${startTruncatedPath(location.path)}`,
+      ...((locationMachineCounts.get(location.runnerId) ?? 0) > 1 ? { selectedLabel: `${machine} · ${folder}` } : {}),
+    };
+  });
+  const locationError = selectedLocationProblem ?? (fieldProblem?.field === "location" ? fieldProblem.message : null);
+  const cannotAddLocation = selectedProject?.canManage === false;
+  const locationField = (
+    <div className="field" ref={locationFieldRef}>
+      <span>Location</span>
+      {selectedProject && selectedProject.locations.length === 0 ? (
+        <Notice
+          tone="neutral"
+          compact
+          className="new-session-no-locations"
+          actions={cannotAddLocation ? undefined : (
+            <button
+              type="button"
+              className="btn sm"
+              data-validation-target="add-location"
+              aria-describedby={noLocationsId}
+              onClick={() => setAddingLocation(true)}
+            >
+              Add Location…
+            </button>
+          )}
+        >
+          <span id={noLocationsId}>This project has no locations yet. Add the folder where its sessions run.</span>
+        </Notice>
+      ) : (
+        <Select<string>
+          className="new-session-choice-control"
+          label="Location"
+          value={selectedProjectLocation ? selectedProjectLocation.id : null}
+          onChange={(id) => {
+            const location = selectedProject?.locations.find((item) => item.id === id);
+            if (location) pickProjectLocation(location);
+          }}
+          options={locationOptions}
+          placeholder={selectedProject ? "Choose a Location…" : "Choose a Project First"}
+          disabled={!selectedProject}
+          footerAction={selectedProject && !cannotAddLocation ? addLocationAction : undefined}
+          invalid={!!locationError}
+          describedBy={locationError ? problemId("location") : cannotAddLocation ? locationHelperId : undefined}
+        />
+      )}
+      {locationError
+        ? <FieldError id={problemId("location")}>{locationError}</FieldError>
+        : cannotAddLocation && <p className="field-helper" id={locationHelperId}>You can't add locations to this project.</p>}
+    </div>
+  );
+
+  // Always a Select, even with one machine online: it says where the session runs either way.
+  const machineField = online.length > 0 ? (
+    <div className="field">
+      <span>Machine</span>
+      <Select<string>
+        label="Machine"
+        value={runnerId || null}
+        onChange={pickRunner}
+        options={online.map((r) => ({
+          value: r.runnerId,
+          label: machineLabels.get(r.runnerId) ?? r.runnerId,
+        }))}
+        placeholder="Choose a Machine…"
+        invalid={controlInvalid("machine")}
+        describedBy={controlDescribedBy("machine")}
+      />
+      {problemFor("machine")}
+    </div>
+  ) : null;
+
+  const folderField = runner ? (
+    <div className="field">
+      {browsedPath
+        ? <label className="new-session-field-label" htmlFor={folderInputId}>Folder</label>
+        : <span>Workspace</span>}
+      {/* Browse… keeps its place in both states, so it is still there to take focus back
+          when Choose Folder closes after filling the Folder field. */}
+      <div className="folder-field-row" ref={workspaceRowRef}>
+        {browsedPath ? (
+          <input
+            id={folderInputId}
+            className="input folder-field-path is-read-only"
+            value={browsedPath}
+            title={browsedPath}
+            readOnly
+          />
+        ) : (
+          <Select<string>
+            label="Workspace"
+            value={workspaceId || null}
+            onChange={(value) => { setWorkspaceId(value); setAdditionalDirectories([]); }}
+            options={(runner?.workspaces ?? []).map((w) => ({ value: w.id, label: w.name }))}
+            invalid={controlInvalid("folder")}
+            describedBy={controlDescribedBy("folder")}
+          />
+        )}
+        <button
+          ref={browseButtonRef}
+          type="button"
+          className="btn"
+          data-validation-target="browse"
+          onClick={() => setChoosingFolder(true)}
+          disabled={!browseSupported}
+          aria-describedby={browseSupported ? undefined : browseReasonId}
+        >
+          Browse…
+        </button>
+      </div>
+      {problemFor("folder") ?? (!browseSupported && <p className="field-helper" id={browseReasonId}>{browseHint}</p>)}
+      {browsedPath && (
+        <button
+          type="button"
+          className="btn ghost sm new-session-use-workspace"
+          onClick={() => {
+            workspacePickerRestoredRef.current = true;
+            setBrowsedPath(null);
+          }}
+        >
+          Use a Workspace
+        </button>
+      )}
+    </div>
+  ) : null;
+
+  // A server without projects keeps its workspace quick-pick, as the same Location Select. Every
+  // option can host a session: `locations` is already filtered to online, advertised workspaces.
+  const legacyLocationField = locations.length > 1 ? (
+    <div className="field">
+      <span>Location</span>
+      <Select<string>
+        label="Location"
+        value={browsedPath ? null : workspaceLocationKey(runnerId, workspaceId)}
+        onChange={(key) => {
+          const picked = locations.find((loc) => workspaceLocationKey(loc.runnerId, loc.workspaceId) === key);
+          if (picked) pickLocation(picked);
+        }}
+        options={locations.map((loc) => {
+          const path = runners.get(loc.runnerId)?.workspaces.find((w) => w.id === loc.workspaceId)?.path;
+          return {
+            value: workspaceLocationKey(loc.runnerId, loc.workspaceId),
+            label: machineName(loc.runnerId),
+            description: path ? startTruncatedPath(path) : loc.workspaceId,
+          };
+        })}
+        placeholder="Choose a Location…"
+      />
+    </div>
+  ) : null;
 
   useLayoutEffect(() => {
     if (!workspacePickerRestoredRef.current || browsedPath) return;
@@ -1349,7 +1737,7 @@ export function NewSessionDialog({
                     required
                     value={liveChildLimitDraft}
                     aria-invalid={!liveChildLimitValid}
-                    aria-describedby={liveChildLimitHelpId}
+                    aria-describedby={controlDescribedBy("live-child-limit", liveChildLimitHelpId)}
                     onChange={(event) => {
                       setLiveChildLimitDraft(event.currentTarget.value);
                       const value = Number(event.currentTarget.value);
@@ -1499,34 +1887,22 @@ export function NewSessionDialog({
     <>
     <Modal
       title="New Session"
+      description="Choose the model and write your first message once it opens."
       onClose={onClose}
       phoneSheet="full"
       onKeyDown={submitOnModifiedEnter}
-      tertiary={retainedSessionId ? (
-        <button
-          ref={retainedSessionButtonRef}
-          type="button"
-          className="btn ghost"
-          onClick={() => {
-            navigate({ name: "session", id: retainedSessionId });
-            onClose();
-          }}
-        >
-          Open Retained Session
-        </button>
-      ) : undefined}
       footer={
         <>
-          {error && <span className="form-error" role="alert">{error}</span>}
+          {blockedReason && !fullControlLaunch && <p className="new-session-reason" id={blockedReasonId}>{blockedReason}</p>}
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
           {fullControlLaunch
             ? <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Starting the campaign…"
               disabled={!fullControlAuthorization?.ready}>Authorize and Start</BusyButton>
-            : <button type="submit" form={formId} className="btn primary" disabled={busy || !valid}>
-              {busy ? "Creating…" : "Create Session"}
-            </button>}
+            : <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Creating the session…"
+              disabled={!!blockedReason} data-validation-target="create"
+              aria-describedby={controlDescribedBy("create", blockedReason ? blockedReasonId : undefined)}>Create Session</BusyButton>}
         </>
       }
     >
@@ -1537,232 +1913,44 @@ export function NewSessionDialog({
         noValidate
         onSubmit={(event) => { event.preventDefault(); void submit(); }}
       >
-        {online.length === 0 && <p className="muted">No runners online. Start a runner first.</p>}
-        {projectsSupported && (
-            <>
-              <div className="field" ref={projectChoiceRef}>
-                <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : projectInputId}>Project</label>
-                {touchChoicePicker ? (
-                  <Select<string>
-                    className="new-session-choice-control"
-                    label="Project"
-                    value={projectSelection || null}
-                    onChange={pickProject}
-                    options={projectOptions}
-                    placeholder="Choose a Project…"
-                    emptyLabel="No Projects Available"
-                    searchable
-                    noun="projects"
-                    createOption={createProjectOption}
-                  />
-                ) : (
-                  <SearchableCombobox<string>
-                    inputId={projectInputId}
-                    autoFocus={initialProjectAutoFocusRef.current}
-                    className="new-session-choice-control"
-                    label="Project"
-                    value={projectSelection || null}
-                    onChange={pickProject}
-                    options={projectOptions}
-                    placeholder="Choose a Project…"
-                    emptyLabel="No Projects Available"
-                    noun="projects"
-                    createOption={createProjectOption}
-                  />
-                )}
-              </div>
-              <div className="new-session-project-actions">
-                <span className="muted">
-                  {projectSelection === NO_PROJECT_SELECTION
-                    ? "This session will run in the selected folder without being added to a Project."
-                    : !selectedProject
-                      ? "Choose a Project to organize the new session, or choose No Project."
-                      : projectAudienceVisibilitySummary(selectedProject.audience)
-                      ? `A Project keeps related sessions together across Locations. ${projectAudienceVisibilitySummary(selectedProject.audience)}. New session transcripts use the Project's visibility.`
-                      : "A Project keeps related sessions together across Locations. Wollipog can't show who can see this Project."}
-                </span>
-                <button ref={createProjectButtonRef} type="button" className="btn ghost new-session-project-control" onClick={() => { setCreateProjectFromPicker(false); setCreatingProject(true); }}>Create Project…</button>
-              </div>
-            </>
-          )}
-
-          {projectsSupported && selectedProject && (
-            <div className="field">
-              <span>Project Location</span>
-              {selectedProject.locations.length > 0 ? (
-                <ChoiceRows<string>
-                  id={projectLocationOptionsId}
-                  label="Project Location"
-                  value={projectLocationId || null}
-                  onChange={(id) => {
-                    const location = selectedProject.locations.find((item) => item.id === id);
-                    if (location) pickProjectLocation(location);
-                  }}
-                  options={selectedProject.locations.map((location) => {
-                    const display = runnerDisplay(
-                      runners.get(location.runnerId),
-                      boxByRunner.get(location.runnerId),
-                      location.runnerId,
-                    );
-                    const launchable = isLaunchableProjectLocation(location, runners);
-                    return {
-                      value: location.id,
-                      title: display.name,
-                      // The kind and the availability are STATUS, not description: they say what
-                      // this Location is and whether it can host a session, which is the whole
-                      // basis for choosing between two of them.
-                      status: (
-                        <>
-                          <StatusBadge tone="neutral" noDot label={display.kind === "ssh" ? "SSH" : "Local"} />
-                          <StatusBadge meta={projectAvailabilityMeta(location.availability)} />
-                        </>
-                      ),
-                      description: <span title={location.path}>{shortenPath(location.path)}</span>,
-                      disabled: !launchable,
-                      // The availability label already names the cause — Runner Offline, Workspace
-                      // Missing, Runner Removed — so the reason restates it as a sentence rather
-                      // than inventing a second vocabulary for the same states.
-                      disabledReason: launchable
-                        ? undefined
-                        : `${projectAvailabilityLabel(location.availability)} — this Location cannot host a session right now.`,
-                    };
-                  })}
-                />
-              ) : (
-                <div className="project-manager-empty compact">
-                  <strong>No Project Locations</strong>
-                  <span>Add a Location to this Project before starting a session.</span>
-                </div>
-              )}
-              {selectedProject.locations.length > 0 && projectLocationsAvailable.length === 0 && (
-                <span className="project-location-reason">No Locations are currently available. Bring a linked machine online or update this Project’s Locations.</span>
-              )}
-              {projectLocationsAvailable.length > 1 && !projectLocationId && <span className="muted">Choose a Location for this session.</span>}
-              {selectedProjectLocation && !projectLocationLaunchable && projectLocationsAvailable.length > 0 && (
-                <span className="project-location-reason">The selected Location is unavailable. Choose another Location.</span>
-              )}
-              <button
-                ref={addLocationButtonRef}
-                type="button"
-                className="btn ghost new-session-project-control"
-                data-validation-target="add-location"
-                disabled={selectedProject.canManage === false}
-                title={selectedProject.canManage === false ? "Project management permission is required" : undefined}
-                onClick={() => setAddingLocation(true)}
-              >
-                Add Location…
-              </button>
-              {selectedProject.canManage === false && <span className="muted">You do not have permission to manage this Project’s Locations.</span>}
-            </div>
-          )}
-
-          {(!projectsSupported || projectSelection === NO_PROJECT_SELECTION) && (
-            <>
-          {locations.length > 1 && (
-            <div className="field">
-              <span>Location</span>
-              {/* The legacy workspace quick-pick, on the same primitive as Project Location so
-                  the two read identically. No option here is ever unavailable: `locations` is
-                  already filtered to runners that are online and still advertise the workspace. */}
-              <ChoiceRows<string>
-                label="Workspace Location"
-                value={browsedPath ? null : workspaceLocationKey(runnerId, workspaceId)}
-                onChange={(key) => {
-                  const picked = locations.find(
-                    (loc) => workspaceLocationKey(loc.runnerId, loc.workspaceId) === key,
-                  );
-                  if (picked) pickLocation(picked);
-                }}
-                options={locations.map((loc) => {
-                  const runnerForLocation = runners.get(loc.runnerId);
-                  const disp = runnerDisplay(runnerForLocation, boxByRunner.get(loc.runnerId), loc.runnerId);
-                  const ws = runnerForLocation?.workspaces.find((w) => w.id === loc.workspaceId);
-                  return {
-                    value: workspaceLocationKey(loc.runnerId, loc.workspaceId),
-                    title: disp.name,
-                    status: (
-                      <StatusBadge tone="neutral" noDot label={disp.kind === "ssh" ? "SSH" : "Local"} />
-                    ),
-                    description: (
-                      <span title={ws?.path}>{ws?.path ? shortenPath(ws.path) : loc.workspaceId}</span>
-                    ),
-                  };
-                })}
-              />
-              <span className="muted">Choose from {locations.length} known workspace Locations.</span>
-            </div>
-          )}
-          {online.length > 0 && <div className="field">
-            <span>Machine</span>
-            {online.length === 1 ? (
-              // With a single online runner there is nothing to choose — show where it runs.
-              <div className="static-pick">
-                <span className="cctx-dot online-dot" />
-                {runnerDisplay(online[0]!, boxByRunner.get(online[0]!.runnerId), online[0]!.runnerId).name}
-              </div>
-            ) : (
-              <Select<string>
-                label="Machine"
-                value={runnerId || null}
-                onChange={pickRunner}
-                options={online.map((r) => ({
-                  value: r.runnerId,
-                  label: machineLabels.get(r.runnerId) ?? r.runnerId,
-                }))}
-              />
-            )}
-          </div>}
-
-          {runner && <div className="field">
-            {browsedPath
-              ? <label className="new-session-field-label" htmlFor={folderInputId}>Folder</label>
-              : <span>Workspace</span>}
-            {/* Browse… keeps its place in both states, so it is still there to take focus back
-                when Choose Folder closes after filling the Folder field. */}
-            <div className="folder-field-row" ref={workspaceRowRef}>
-              {browsedPath ? (
-                <input
-                  id={folderInputId}
-                  className="input folder-field-path is-read-only"
-                  value={browsedPath}
-                  title={browsedPath}
-                  readOnly
-                />
-              ) : (
-                <Select<string>
-                  label="Workspace"
-                  value={workspaceId || null}
-                  onChange={(value) => { setWorkspaceId(value); setAdditionalDirectories([]); }}
-                  options={(runner?.workspaces ?? []).map((w) => ({ value: w.id, label: w.name }))}
-                />
-              )}
-              <button
-                ref={browseButtonRef}
-                type="button"
-                className="btn"
-                onClick={() => setChoosingFolder(true)}
-                disabled={!browseSupported}
-                aria-describedby={browseSupported ? undefined : browseReasonId}
-              >
-                Browse…
-              </button>
-            </div>
-            {!browseSupported && <p className="field-helper" id={browseReasonId}>{browseHint}</p>}
-            {browsedPath && (
+        {online.length === 0 && (
+          <Notice
+            tone="neutral"
+            title="No Machines Online"
+            actions={(
               <button
                 type="button"
-                className="btn ghost sm new-session-use-workspace"
-                onClick={() => {
-                  workspacePickerRestoredRef.current = true;
-                  setBrowsedPath(null);
-                }}
+                className="btn sm"
+                data-validation-target="open-connections"
+                aria-describedby={noMachinesId}
+                onClick={openConnections}
               >
-                Use a Workspace
+                Open Connections
               </button>
             )}
-          </div>}
-            </>
-          )}
+          >
+            <span id={noMachinesId}>Start Wollipog on one of your machines, or connect a new one.</span>
+          </Notice>
+        )}
+        {/* Where (§8.1): Project and Location share one row; with No Project, Project and Machine do,
+            and Folder follows. A server without projects keeps Location, then Machine and Folder. */}
+        {projectsSupported ? (
+          <>
+            <div className="field-row">
+              {projectField}
+              {projectSelection === NO_PROJECT_SELECTION ? machineField : locationField}
+            </div>
+            {projectSelection === NO_PROJECT_SELECTION && folderField}
+          </>
+        ) : (
+          <>
+            {legacyLocationField}
+            <div className="field-row">
+              {machineField}
+              {folderField}
+            </div>
+          </>
+        )}
 
           {directoryGrants.length > 0 && executionTarget?.adapter === "host" && (
             <fieldset className="field">
@@ -1799,6 +1987,8 @@ export function NewSessionDialog({
                   leadingIcon={agentIcon}
                   searchable
                   noun="agents"
+                  invalid={controlInvalid("agent")}
+                  describedBy={controlDescribedBy("agent")}
                 />
               ) : (
                 <SearchableCombobox<string>
@@ -1812,9 +2002,12 @@ export function NewSessionDialog({
                   emptyLabel="No Agents Available"
                   leadingIcon={agentIcon}
                   noun="agents"
+                  invalid={controlInvalid("agent")}
+                  describedBy={controlDescribedBy("agent")}
                 />
               )}
             </div>
+            {problemFor("agent")}
             {agent && <span className="muted agent-meta">{agentMeta(agent)}</span>}
             {selectionIssue && (
               <div className="agent-default-warning" role="alert">
@@ -1862,9 +2055,11 @@ export function NewSessionDialog({
                     account.authStatus === "unauthenticated" ? "Login Required" : "Login Unknown",
                 }))}
                 placeholder="Choose an Account…"
+                invalid={missingRequiredAccountChoice}
+                describedBy={missingRequiredAccountChoice ? accountReasonId : undefined}
               />
               {missingRequiredAccountChoice && (
-                <p className="hint" role="alert">The saved default account is no longer on this Machine. Choose an account or change the default in Machine settings.</p>
+                <p className="hint" id={accountReasonId} role="alert">The saved default account is no longer on this Machine. Choose an account or change the default in Machine settings.</p>
               )}
             </div>
           )}
@@ -1877,6 +2072,8 @@ export function NewSessionDialog({
                 two choices below the fold. Always visible, there is no menu to mis-measure. */}
             <ChoiceRows<"normal" | "orchestrator">
               id={permissionOptionsId}
+              invalid={controlInvalid("role")}
+              describedBy={controlDescribedBy("role")}
               label="Session Role"
               value={orchestrator ? "orchestrator" : "normal"}
               onChange={setRoleOverride}
@@ -1927,6 +2124,7 @@ export function NewSessionDialog({
                 type="button"
                 className="btn ghost sm"
                 data-validation-target="defaults"
+                aria-describedby={controlDescribedBy("defaults")}
                 onClick={() => setDefaultsRetry((value) => value + 1)}
               >
                 Retry Defaults
@@ -1944,22 +2142,32 @@ export function NewSessionDialog({
                 type="button"
                 className="btn ghost sm"
                 data-validation-target="orchestrator-defaults"
+                aria-describedby={controlDescribedBy("orchestrator-retry")}
                 onClick={() => setDefaultsRetry((value) => value + 1)}
               >Retry Orchestrator Defaults</button>}
             </div>}
-            {orchestrator && orchestratorSettingsReady && <div className="new-session-orchestrator-policy" data-validation-target="orchestrator-defaults">
+            {/* Focusable from script, so a policy problem can land here and announce its error. */}
+            {orchestrator && orchestratorSettingsReady && <div
+              className="new-session-orchestrator-policy"
+              data-validation-target="orchestrator-defaults"
+              role="group"
+              aria-label="Orchestrator Policy"
+              aria-describedby={controlDescribedBy("orchestrator") ?? controlDescribedBy("full-control")}
+              tabIndex={-1}
+            >
               <OrchestratorControlChoice surface="launch" mode={controlPreview} onChange={setControlPreview} disabled={busy} />
               {controlPreview === "full_control"
                 ? <FullControlLaunchPanel request={buildSessionRequest} selectionValid={launchSelectionValid} disabled={busy}
                   savedDefaults={orchestratorSettings?.view?.defaults ?? null}
                   onAuthorization={setFullControlAuthorization}
                   onCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
-                  onActivity={() => setValidationError(null)}
+                  onActivity={() => setFieldProblem(null)}
                   advanced={orchestratorPolicyFields} />
                 : orchestratorPolicyFields}
             </div>}
             {directWslRequiresSafeOrchestrator && !orchestrator &&
               <span className="form-error">Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.</span>}
+            {problemFor("role")}
           </div>
 
           <div className="field">
@@ -1970,6 +2178,8 @@ export function NewSessionDialog({
                 together instead of as siblings a screen reader meets separately. */}
             <ChoiceRows<"direct" | "native_tui">
               id={harnessOptionsId}
+              invalid={controlInvalid("harness")}
+              describedBy={controlDescribedBy("harness")}
               label="Harness"
               value={launchSurface}
               onChange={setLaunchSurface}
@@ -1994,6 +2204,7 @@ export function NewSessionDialog({
             {launchSurface === "native_tui" && (
               <span className="muted">Usage Accounting: Unavailable. No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Sessions with cost budgets, cost checkpoints, or tool-call limits must use Direct. {nativeTuiAccountingExplanation && <>{nativeTuiAccountingExplanation} </>}Manager policy hook status appears after launch.</span>
             )}
+            {problemFor("harness")}
           </div>
 
           <div className="field">
@@ -2004,6 +2215,7 @@ export function NewSessionDialog({
             <SegmentedControl
               className="new-session-mode"
               label="Session Mode"
+              describedBy={controlDescribedBy("mode")}
               value={useWorktree ? "worktree" : "in-place"}
               options={[
                 { value: "in-place", label: "In Place" },
@@ -2018,6 +2230,8 @@ export function NewSessionDialog({
                   label="Execution Target"
                   value={executionTarget?.id ?? null}
                   onChange={selectExecutionTarget}
+                  invalid={controlInvalid("execution-target")}
+                  describedBy={controlDescribedBy("execution-target")}
                   options={executionTargets.map((target) => ({
                     value: target.id,
                     label: target.name,
@@ -2048,10 +2262,13 @@ export function NewSessionDialog({
               <label>
                 <span>Cloud Cost Budget (USD)</span>
                 <input
+                  id={cloudBudgetInputId}
                   type="number"
                   min={executionTarget.policy.cost.minimumBudgetUsd}
                   max={executionTarget.policy.cost.maximumBudgetUsd}
                   step="0.01"
+                  aria-invalid={controlInvalid("cloud-budget") || undefined}
+                  aria-describedby={controlDescribedBy("cloud-budget")}
                   value={cloudBudgetUsd}
                   onChange={(event) => setCloudBudgetUsd(event.target.value)}
                 />
@@ -2060,11 +2277,35 @@ export function NewSessionDialog({
                 </span>
               </label>
             )}
+            {problemFor("mode")}
           </div>
 
-          <p className="muted new-session-hint">
-            Pick the model, effort, and your first message once the session opens.
-          </p>
+          {problemFor("form")}
+          {/* A request failure sits at the body's end, directly above the footer (§7.3, §13.2). */}
+          {requestFailure && (
+            <Notice
+              tone="danger"
+              role="alert"
+              title="Couldn't Start the Session"
+              actions={retainedSessionId ? (
+                <button
+                  type="button"
+                  className="btn sm"
+                  data-validation-target="retained-session"
+                  aria-describedby={failureSentenceId}
+                  onClick={() => {
+                    navigate({ name: "session", id: retainedSessionId });
+                    onClose();
+                  }}
+                >
+                  Open Session
+                </button>
+              ) : undefined}
+              details={requestFailure ? <code>{requestFailure.detail}</code> : undefined}
+            >
+              <span id={failureSentenceId}>{requestFailure?.sentence}</span>
+            </Notice>
+          )}
         </form>
     </Modal>
     {choosingFolder && runner && (
@@ -2084,7 +2325,7 @@ export function NewSessionDialog({
     {creatingProject && (
       <CreateProjectDialog
         accessScopeManagementSupported={accessScopeManagementSupported}
-        returnFocusRef={createProjectFromPicker ? projectPickerFocusRef : createProjectButtonRef}
+        returnFocusRef={projectPickerFocusRef}
         onClose={() => setCreatingProject(false)}
         onCreated={(project) => {
           projectSelectionChangedRef.current = true;
@@ -2104,7 +2345,7 @@ export function NewSessionDialog({
         boxes={boxes}
         canCreateLocation={projectLocationCreationSupported}
         accessScopeManagementSupported={accessScopeManagementSupported}
-        returnFocusRef={addLocationButtonRef}
+        returnFocusRef={locationFocusRef}
         onClose={() => setAddingLocation(false)}
         onManageConnections={() => {
           setAddingLocation(false);

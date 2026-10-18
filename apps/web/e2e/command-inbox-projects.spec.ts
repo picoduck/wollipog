@@ -1142,8 +1142,7 @@ test("Project launch actions submit stable Project and Location identity", async
 
   const dialog = page.getByRole("dialog", { name: "New Session" });
   await expect(dialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
-  await expect(dialog.getByRole("radiogroup", { name: "Project Location" }).locator(".choice-row").filter({ hasText: /\/repos\/alpha$/ }).getByRole("radio"))
-    .toBeChecked();
+  await expect(dialog.getByRole("button", { name: /^Location:/ })).toHaveAccessibleName("Location: runner-1");
   await dialog.getByRole("button", { name: "Create Session" }).click();
   await expect(dialog).toBeHidden();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
@@ -1224,9 +1223,17 @@ test("the Sessions header opens both existing workflows with the active Project 
   const sessionDialog = page.getByRole("dialog", { name: "New Session" });
   const project = sessionDialog.getByRole("combobox", { name: "Project" });
   await expect(project).toHaveValue("Alpha");
+  // Project has focus with its list closed and the project's name selected, so typing replaces it (#2952).
+  await expect(project).toBeFocused();
+  await expect(project).toHaveAttribute("aria-expanded", "false");
+  expect(await project.evaluate((input: HTMLInputElement) => [input.selectionStart, input.selectionEnd]))
+    .toEqual([0, "Alpha".length]);
+  await page.keyboard.type("Be");
+  await expect(project).toHaveValue("Be");
   await expect(project).toHaveAttribute("aria-expanded", "true");
   await page.keyboard.press("Escape");
   await expect(project).toHaveAttribute("aria-expanded", "false");
+  await expect(project).toHaveValue("Alpha", { timeout: 1000 });
   await expect(sessionDialog).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(sessionDialog).toBeHidden();
@@ -1270,8 +1277,7 @@ test("C defaults New Session to the active single-Project Inbox tab", async ({ p
   await page.keyboard.press("c");
   const dialog = page.getByRole("dialog", { name: "New Session" });
   await expect(dialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
-  await expect(dialog.getByRole("radiogroup", { name: "Project Location" })
-    .locator(".choice-row").filter({ hasText: /\/repos\/alpha$/ }).getByRole("radio")).toBeChecked();
+  await expect(dialog.getByRole("button", { name: /^Location:/ })).toHaveAccessibleName("Location: runner-1");
 });
 
 test.describe("with a touch pointer", () => {
@@ -1293,16 +1299,17 @@ test.describe("with a touch pointer", () => {
         const dialog = page.getByRole("dialog", { name: "New Session" });
         await expect(dialog).toBeVisible();
         await dialogMotionSettled(page);
+        // Project and Location share one row (#2952); Agent follows.
         const controls = [
-          dialog.getByRole("button", { name: "Create Project…" }),
-          dialog.getByRole("button", { name: "Add Location…" }),
+          dialog.locator('[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]'),
+          dialog.getByRole("button", { name: /^Location:/ }),
           dialog.locator('[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]'),
         ];
         const geometry = await Promise.all(controls.map(controlGeometry));
 
-        for (const [index, control] of geometry.entries()) {
+        for (const control of geometry) {
           expect(control.paddingTop - control.paddingBottom,
-            `${viewport.name} ${theme} controls centre their line box`).toBe(index < 2 ? 2 : 0);
+            `${viewport.name} ${theme} controls centre their line box`).toBe(0);
           expect(control.scrollHeight, `${viewport.name} ${theme} control text is not vertically clipped`)
             .toBeLessThanOrEqual(control.clientHeight);
           expect(control.scrollWidth, `${viewport.name} ${theme} control text is not horizontally clipped`)
@@ -1325,15 +1332,15 @@ test.describe("with a touch pointer", () => {
 
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const controls = [
-      dialog.getByRole("button", { name: "Create Project…" }),
-      dialog.getByRole("button", { name: "Add Location…" }),
+      dialog.getByRole("button", { name: /^Project:/ }),
+      dialog.getByRole("button", { name: /^Location:/ }),
       dialog.locator('[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]'),
     ];
     await expect(dialog.getByRole("button", { name: /^Agent:/ })).toHaveAccessibleName(
       /Áccented Agent With Descenders ģyq — Extended Name/,
     );
     await page.addStyleTag({
-      content: ".new-session-project-control, .ui-select-trigger { font-size: 24px !important; }",
+      content: ".ui-select-trigger { font-size: 24px !important; }",
     });
     const enlargedGeometry = await Promise.all(controls.map(controlGeometry));
     for (const control of enlargedGeometry) {
@@ -1370,14 +1377,21 @@ test("multi-Location Projects without a default require an explicit Location", a
   await page.getByRole("menuitem", { name: "New Session", exact: true }).click();
 
   const dialog = page.getByRole("dialog", { name: "New Session" });
-  const locations = dialog.getByRole("radiogroup", { name: "Project Location" });
-  const first = locations.locator(".choice-row").filter({ hasText: /\/repos\/alpha$/ }).getByRole("radio");
-  const second = locations.locator(".choice-row").filter({ hasText: /\/repos\/alpha-secondary$/ }).getByRole("radio");
-  await expect(first).not.toBeChecked();
-  await expect(second).not.toBeChecked();
-  await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
+  const location = dialog.getByRole("button", { name: /^Location:/ });
+  await expect(location).toHaveAccessibleName("Location: Choose a Location…");
+  // Not a hard block (#2952): pressing Create Session sends nothing and lands on Location.
+  await dialog.getByRole("button", { name: "Create Session" }).click();
+  await expect(dialog.locator(".field-error")).toHaveText("Choose where this session runs.");
+  await expect(location).toBeFocused();
+  await expect(location).toHaveAttribute("aria-invalid", "true");
+  expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest())).toBeFalsy();
 
-  await second.click();
+  await location.click();
+  const options = dialog.getByRole("listbox", { name: "Location" }).getByRole("option");
+  await expect(options.filter({ hasText: "/repos/alpha" })).toHaveCount(2);
+  await options.filter({ hasText: "alpha-secondary" }).click();
+  await expect(location).toHaveAccessibleName("Location: runner-1 · alpha-secondary");
+  await expect(dialog.locator(".field-error")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Create Session" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
     .toMatchObject({
@@ -1393,8 +1407,10 @@ test("New Session creates a durable Project and links its first Location inline"
   await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   const newSession = page.getByRole("dialog", { name: "New Session" });
-  const createProjectButton = newSession.getByRole("button", { name: /Create Project/ });
-  await createProjectButton.click();
+  // New Project… is the Project list's footer row (#2952).
+  const projectField = newSession.getByRole("combobox", { name: "Project" });
+  await projectField.click();
+  await newSession.getByRole("listbox", { name: "Project Options" }).getByRole("option", { name: "New Project…" }).click();
 
   // New Session stays open under its child, under one shared dim (§7.1).
   const createProject = page.getByRole("dialog", { name: "Create Project" });
@@ -1407,17 +1423,20 @@ test("New Session creates a durable Project and links its first Location inline"
   await createProject.getByRole("button", { name: "Create Project" }).click();
 
   await expect(createProject).toHaveCount(0);
-  await expect(createProjectButton).toBeFocused();
-  await expect(newSession.getByRole("combobox", { name: "Project" })).toHaveValue("Inline Project");
-  await expect(newSession.getByText("No Project Locations", { exact: true })).toBeVisible();
-  await newSession.getByRole("button", { name: /Add Location/ }).click();
+  await expect(projectField).toBeFocused();
+  await expect(projectField).toHaveValue("Inline Project");
+  const noLocations = newSession.locator(".notice").filter({ hasText: "This project has no locations yet." });
+  await expect(noLocations).toBeVisible();
+  await expect(newSession.locator(".new-session-reason")).toHaveText("Add a location to continue.");
+  await noLocations.getByRole("button", { name: "Add Location…" }).click();
 
   const addLocation = page.getByRole("dialog", { name: "Add Location to Inline Project" });
   const loose = addLocation.getByRole("listitem").filter({ hasText: "/repos/loose" });
   await loose.getByRole("button", { name: "Add to Project" }).click();
   await expect(newSession).toBeVisible();
-  await expect(newSession.getByRole("radiogroup", { name: "Project Location" }).locator(".choice-row").filter({ hasText: /\/repos\/loose$/ }).getByRole("radio"))
-    .toBeChecked();
+  const location = newSession.getByRole("button", { name: /^Location:/ });
+  await expect(location).toHaveAccessibleName("Location: runner-1");
+  await expect(newSession.locator(".new-session-reason")).toHaveCount(0);
   await newSession.getByRole("button", { name: "Create Session" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
     .toMatchObject({
@@ -1432,7 +1451,8 @@ test("an inline Project fallback cannot revive the Project after a later live de
   await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   const newSession = page.getByRole("dialog", { name: "New Session" });
-  await newSession.getByRole("button", { name: /Create Project/ }).click();
+  await newSession.getByRole("combobox", { name: "Project" }).click();
+  await newSession.getByRole("listbox", { name: "Project Options" }).getByRole("option", { name: "New Project…" }).click();
   const createProject = page.getByRole("dialog", { name: "Create Project" });
   await createProject.getByLabel("Project Name").fill("Temporary Inline Project");
   await createProject.getByRole("button", { name: "Create Project" }).click();
@@ -1519,29 +1539,168 @@ test("Project-first creation distinguishes same names and explains multi-locatio
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   const dialog = page.getByRole("dialog", { name: "New Session" });
   const projectCombobox = dialog.getByRole("combobox", { name: "Project" });
-  const locationChoices = dialog.getByRole("radiogroup", { name: "Project Location" });
+  const location = dialog.getByRole("button", { name: /^Location:/ });
+  const reason = dialog.locator(".modal-foot .new-session-reason");
 
+  // Two projects named Alpha: each option is the name alone, told apart by its second line (#2952).
   await projectCombobox.click();
-  await expect(dialog.getByRole("listbox", { name: "Project Options" })
-    .getByRole("option").filter({ hasText: "Alpha" })).toHaveCount(2);
+  const alphas = dialog.getByRole("listbox", { name: "Project Options" }).getByRole("option", { name: "Alpha", exact: true });
+  await expect(alphas).toHaveCount(2);
+  await expect(alphas.nth(0)).toHaveAccessibleDescription("runner-1 · alpha · 2 locations");
+  await expect(alphas.nth(1)).toHaveAccessibleDescription("Hidden · runner-1 · alpha-copy · 1 location");
   await page.keyboard.press("Escape");
-  await expect(locationChoices.getByRole("radio")).toHaveCount(2);
-  await expect(locationChoices.locator(".choice-row").filter({ hasText: /\/repos\/alpha$/ }).getByRole("radio")).toBeChecked();
+  await expect(projectCombobox).toHaveValue("Alpha · runner-1 · alpha", { timeout: 1000 });
+  await location.click();
+  await expect(dialog.getByRole("listbox", { name: "Location" }).getByRole("option")).toHaveText([
+    /runner-1Available · \/repos\/alpha$/, /runner-1Available · \/repos\/alpha-secondary$/, "Add Location…",
+  ]);
+  await page.keyboard.press("Escape");
+  await expect(location).toHaveAccessibleName("Location: runner-1 · alpha");
 
   await chooseNewSessionProject(dialog, "Gamma");
-  await expect(dialog.getByText("No Project Locations", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("This project has no locations yet. Add the folder where its sessions run.")).toBeVisible();
+  await expect(reason).toHaveText("Add a location to continue.");
   await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
 
   await chooseNewSessionProject(dialog, "Offline Project");
-  await expect(dialog.getByText(/No Locations are currently available/)).toBeVisible();
+  await expect(reason).toHaveText("Choose an online location to continue.");
   await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
 
-  await chooseNewSessionProject(dialog, "/repos/alpha-copy", "/repos/alpha-copy");
-  await expect(dialog.getByRole("radiogroup", { name: "Project Location" }).locator(".choice-row").filter({ hasText: /\/repos\/alpha-copy$/ }).getByRole("radio"))
-    .toBeChecked();
+  // A search still finds a project by its folder, though no option shows a path.
+  await chooseNewSessionProject(dialog, "/repos/alpha-copy", /Hidden/);
+  await expect(projectCombobox).toHaveValue("Alpha · runner-1 · alpha-copy");
+  await expect(location).toHaveAccessibleName("Location: runner-1");
+  await expect(reason).toHaveCount(0);
   await dialog.getByRole("button", { name: "Create Session" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
     .toMatchObject({ projectId: "alpha-copy", projectLocationId: "location-alpha-copy" });
+});
+
+/** A visible project named Payments, so a search for "pay" has something to find. */
+async function addPaymentsProject(page: Page) {
+  await page.evaluate(() => {
+    const model = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model();
+    const alpha = model.projects.find((project) => project.id === "alpha")!;
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.upsertProject({
+      ...structuredClone(alpha),
+      id: "payments",
+      name: "Payments",
+      locations: alpha.locations.map((location) => ({ ...location, id: "location-payments", projectId: "payments" })),
+    });
+  });
+}
+
+test.describe("New Session's Where row (#2952)", () => {
+  test("at 1440px Project has focus with its list closed, and typing filters at once", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await addPaymentsProject(page);
+    await page.getByRole("tab", { name: /^All \d/ }).click();
+    await page.keyboard.press("c");
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    const project = dialog.getByRole("combobox", { name: "Project" });
+    await expect(project).toBeFocused();
+    await expect(project).toHaveAttribute("aria-expanded", "false");
+    await expect(project).toHaveValue("", { timeout: 1000 });
+    await expect(dialog.getByRole("listbox", { name: "Project Options" })).toHaveCount(0);
+
+    await page.keyboard.type("pay");
+    await expect(project).toHaveAttribute("aria-expanded", "true");
+    const options = dialog.getByRole("listbox", { name: "Project Options" }).getByRole("option");
+    await expect(options).toHaveText([/^Payments/, "New Project…"]);
+  });
+
+  test("a pointer resting where the list opens neither chooses a project nor moves Enter's target", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await addPaymentsProject(page);
+    await page.getByRole("tab", { name: /^All \d/ }).click();
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    const project = dialog.getByRole("combobox", { name: "Project" });
+    const options = dialog.getByRole("listbox", { name: "Project Options" }).getByRole("option");
+
+    // Find where the list's third row will be, then leave the pointer there and reopen.
+    await page.keyboard.press("c");
+    await dialogMotionSettled(page);
+    await page.keyboard.type("a");
+    await expect(options.nth(2)).toBeVisible();
+    const box = (await options.nth(2).boundingBox())!;
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+
+    await page.keyboard.press("c");
+    await dialogMotionSettled(page);
+    await expect(project).toBeFocused();
+    await expect(project).toHaveValue("");
+    await page.keyboard.type("a");
+    await expect(options.nth(2)).toBeVisible();
+    expect(await options.nth(2).evaluate((option, point) =>
+      option.contains(document.elementFromPoint(point.x, point.y)), { x: box.x + box.width / 2, y: box.y + box.height / 2 }),
+    "the pointer rests over the third option").toBe(true);
+    const first = await options.nth(0).getAttribute("id");
+    await expect(project).toHaveAttribute("aria-activedescendant", first!);
+    const firstName = (await options.nth(0).locator(".ui-select-option-body > span").first().textContent())!;
+    await page.keyboard.press("Enter");
+    await expect(project).toHaveValue(firstName);
+  });
+
+  test("Project and Location are one row of equal columns at 1440px and stack at 390px", async ({ page }) => {
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      // The phone app bar replaces the tabs (#2211); wait for the layout before choosing a group.
+      await expect(page.locator(".sessions-app-bar")).toHaveCount(viewport.width < 760 ? 1 : 0);
+      await chooseGroup(page, /^Alpha/);
+      await page.keyboard.press("c");
+      const dialog = page.getByRole("dialog", { name: "New Session" });
+      await dialogMotionSettled(page);
+      const fields = dialog.locator(".modal-body > .form > .field-row").first().locator(":scope > .field");
+      await expect(fields).toHaveCount(2);
+      const [projectBox, locationBox] = await Promise.all([fields.nth(0).boundingBox(), fields.nth(1).boundingBox()]);
+      await expect(fields.nth(1).getByRole("button", { name: /^Location:/ })).toBeVisible();
+      if (viewport.width === 1440) {
+        expect(Math.abs(projectBox!.y - locationBox!.y), "one row").toBeLessThanOrEqual(0.5);
+        expect(Math.abs(projectBox!.width - locationBox!.width), "equal columns").toBeLessThanOrEqual(1);
+        expect(locationBox!.x).toBeGreaterThan(projectBox!.x + projectBox!.width);
+      } else {
+        expect(locationBox!.y, "Location stacks under Project").toBeGreaterThan(projectBox!.y + projectBox!.height);
+        expect(Math.abs(projectBox!.x - locationBox!.x)).toBeLessThanOrEqual(0.5);
+      }
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+    }
+  });
+
+  test("at 390px New Session is a full-height sheet and Add Location replaces it with Back", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => {
+      const model = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model();
+      const gamma = model.projects.find((project) => project.name === "Gamma")!;
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.upsertProject({ ...gamma, locations: [] });
+    });
+    await chooseGroup(page, /^Gamma/);
+    await page.keyboard.press("c");
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    await dialogMotionSettled(page);
+    const sheet = await dialog.boundingBox();
+    expect(Math.round(sheet!.height), "a full-height sheet").toBe(844);
+    for (const name of ["Cancel", "Create Session"]) {
+      expect(layoutPx((await dialog.locator(".modal-foot").getByRole("button", { name }).boundingBox())!.height)).toBe(48);
+    }
+    const project = dialog.getByRole("button", { name: /^Project:/ });
+    await expect(project).toHaveAccessibleName("Project: Gamma");
+
+    await dialog.locator(".notice").getByRole("button", { name: "Add Location…" }).click();
+    const addLocation = page.getByRole("dialog", { name: /^Add Location/ });
+    await expect(addLocation).toBeVisible();
+    await expect(dialog).toBeHidden();
+    const back = addLocation.getByRole("button", { name: /^Back/ });
+    await expect(back).toBeVisible();
+    await back.click();
+    await expect(addLocation).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+    await expect(project).toHaveAccessibleName("Project: Gamma");
+    await expect(dialog.locator(".notice").getByRole("button", { name: "Add Location…" })).toBeFocused();
+  });
 });
 
 /** The session bar's project menu button owns Move to Another Project… (#2146). */
