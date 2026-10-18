@@ -1,12 +1,13 @@
 name: Stop Superseded Pull Request CI
 
 # CI keys pull-request concurrency by head commit, so runs of one head never cancel each other
-# (#3283). This cancels runs of a pull request's older heads once its current ready head is in
-# progress. If it cannot, older-head CI simply runs to completion.
+# (#3283). Queue cleanup when current-head CI is requested, before it gets a runner. Reruns do
+# not emit requested, so retain in_progress for later attempts. Cleanup still needs a hosted
+# runner; if it cannot act, older-head CI simply runs to completion.
 on:
   workflow_run:
     workflows: [CI]
-    types: [in_progress]
+    types: [requested, in_progress]
 
 # The workflow_run event executes trusted default-branch code. Never check out
 # the triggering pull request or load its artifacts with this write-capable token.
@@ -21,7 +22,8 @@ concurrency:
 
 jobs:
   supersede:
-    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.repository.full_name == github.repository
+    # Skip first-attempt in_progress at job admission, so it requests no second cleanup runner.
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.repository.full_name == github.repository && (github.event.action == 'requested' || github.event.workflow_run.run_attempt > 1)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
