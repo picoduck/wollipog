@@ -1620,15 +1620,31 @@ async function retiredWorktreeFixture(options: {
   noResume?: boolean;
   /** Awaited inside each provider turn, so a test can hold one open. */
   onPrompt?: (text: string) => Promise<void> | void;
+  /** Work in the legacy worktree beside a runner-created sibling that a real discard can retire:
+   * it sits in the requested-worktree boundary and its head is on the remote default branch. */
+  createdSibling?: boolean;
 } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-retired-worktree-")));
   const home = mkdtempSync(join(tmpdir(), "wollipog-managed-retired-home-"));
   const { repoPath, worktreePath: first } = hostWorktree(root, "s1");
-  const second = join(root, "second");
+  const dataDir = join(root, "state");
+  const second = options.createdSibling
+    ? join(await requestedWorktreeBoundary(repoPath, "s1", { dataDir }, false), "slot")
+    : join(root, "second");
   execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "stacked", second]);
+  if (options.createdSibling) {
+    const origin = join(root, "origin.git");
+    execFileSync("git", ["init", "-q", "--bare", origin]);
+    execFileSync("git", ["-C", repoPath, "remote", "add", "origin", origin]);
+    execFileSync("git", ["-C", repoPath, "push", "-q", "origin", "HEAD:refs/heads/main"]);
+    execFileSync("git", ["-C", repoPath, "fetch", "-q", "origin"]);
+    execFileSync("git", ["-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+  }
+  const [selected, sibling] = options.createdSibling ? [first, second] : [second, first];
   const store = new SessionStore(join(root, "sessions"));
   store.create({
-    ...meta(), repoPath, worktreePath: second, worktreeBranch: "stacked", env: { HOME: home },
+    ...meta(), repoPath, worktreePath: selected, worktreeBranch: options.createdSibling ? "agent/s1" : "stacked",
+    env: { HOME: home },
     worktrees: [
       { id: "legacy", path: first, branch: "agent/s1", source: "legacy" },
       { id: "stacked", path: second, branch: "stacked", source: "created" },
@@ -1668,7 +1684,7 @@ async function retiredWorktreeFixture(options: {
     };
   };
   const manager = new SessionManager(
-    (message) => { sent.push(message); }, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 1,
+    (message) => { sent.push(message); }, () => {}, store, "runner", undefined, factory as never, dataDir, 1,
     undefined, undefined, { agentLimits: {}, agentWeights: {} },
     { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) => {
       observed.push(state);
@@ -1684,10 +1700,14 @@ async function retiredWorktreeFixture(options: {
   internals.verifySelectedWorktreeBeforeLaunch = async () => true;
   assert.equal(await internals.acquireAdmission("s1"), true);
   assert.equal(await internals.launch(store.readMeta("s1")), true);
-  assert.deepEqual(observed.at(-1)?.protectedWorktree?.ownedWorktrees?.map((owned) => owned.path), [first]);
-  assert.deepEqual(internals.active.get("s1").boundOwnedWorktrees, [first]);
+  assert.deepEqual(observed.at(-1)?.protectedWorktree?.ownedWorktrees?.map((owned) => owned.path), [sibling]);
+  assert.deepEqual(internals.active.get("s1").boundOwnedWorktrees, [sibling]);
   return {
-    manager, store, internals, observed, sent, live, drivers, first, second,
+    manager, store, internals, observed, sent, live, drivers, first, second, selected, sibling,
+    /** `discard_worktree` on the bound sibling, without the forge lookup a fixture cannot answer. */
+    discard: (): Promise<{ removed: boolean; retirement?: { status: string; reason?: string } }> =>
+      internals.runWorktreeOperation("s1", () =>
+        internals.discardWorktreeLocked("s1", sibling, { refreshMergedHead: false })),
     /** The deferred retirement completes while the provider lives: the tree is removed and its row
      * forgotten through the same step a completed cleanup takes. */
     retire: async () => {
@@ -1713,9 +1733,9 @@ async function retiredWorktreeFixture(options: {
     /** The relaunch resumes in the selected worktree, with no bind for the retired one. */
     assertRelaunched: () => {
       const relaunched = observed.at(-1);
-      assert.equal(relaunched?.cwd, second, "the relaunch resumes in the selected worktree");
+      assert.equal(relaunched?.cwd, selected, "the relaunch resumes in the selected worktree");
       assert.equal(relaunched?.protectedWorktree?.ownedWorktrees, undefined);
-      assert.equal(JSON.stringify(relaunched?.protectedWorktree ?? {}).includes(first), false,
+      assert.equal(JSON.stringify(relaunched?.protectedWorktree ?? {}).includes(sibling), false,
         "the retired worktree is in no bind list");
       assert.equal(internals.active.get("s1").boundOwnedWorktrees, undefined);
     },
@@ -1893,6 +1913,124 @@ test("a retirement rebind blocked by another runner's lock fails once (#3402)", 
     await f.settle();
     assert.equal(f.drivers.length, 1, "the failed rebind is not requested again");
     assert.equal(lockErrors().length, 1, "the failure is reported exactly once");
+  } finally {
+    f.cleanup();
+  }
+});
+
+for (const ask of [false, true]) {
+  test(`a selection rebind during a provider-initiated turn${ask ? " with a provider-owned ask" : ""} waits for it to settle (#3424)`, async () => {
+    if (process.platform !== "linux") return;
+    const f = await retiredWorktreeFixture();
+    try {
+      f.drivers[0]!.cb.onProviderInitiatedTurn?.("started", "provider-turn-1");
+      if (ask) {
+        f.drivers[0]!.cb.onEvent({
+          kind: "permission_request", requestId: "provider-ask", title: "Run Command",
+          options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+        });
+        assert.ok(f.store.readMeta("s1")?.pendingApproval);
+      }
+      const requested = await f.manager.requestWorktree("s1", { baseRef: "HEAD", branch: "fix/next" });
+      await f.settle();
+      f.manager.prompt("s1", "continue");
+      await f.settle();
+      assert.equal(f.drivers.length, 1, "the provider-initiated turn is never retired mid-turn");
+      assert.equal(f.drivers[0]!.disposed, false);
+
+      // It settles normally: no interruption and no further background update.
+      f.drivers[0]!.cb.onProviderInitiatedTurn?.("settled", "provider-turn-1");
+      await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the queued prompt was stranded");
+      assert.ok(f.drivers[0]!.disposed);
+      assert.deepEqual(f.drivers[0]!.prompts, []);
+      assert.equal(f.observed.at(-1)?.cwd, requested.worktree.path, "the prompt runs in the selected worktree");
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test("a selection rebind during a runner turn still waits for the turn, then rebinds (#3424)", async () => {
+  if (process.platform !== "linux") return;
+  let release!: () => void;
+  const held = new Promise<void>((done) => { release = done; });
+  const f = await retiredWorktreeFixture({ onPrompt: (text) => text === "long turn" ? held : undefined });
+  try {
+    f.manager.prompt("s1", "long turn");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 1, "the first turn did not start");
+    const requested = await f.manager.requestWorktree("s1", { baseRef: "HEAD", branch: "fix/next" });
+    f.manager.prompt("s1", "next turn");
+    await f.settle();
+    assert.equal(f.drivers.length, 1, "nothing is rebound while the runner turn runs");
+
+    release();
+    await f.waitFor(() => f.drivers[1]?.prompts.length === 1, "the next turn did not run in the selected worktree");
+    assert.deepEqual(f.drivers[1]!.prompts, ["next turn"]);
+    assert.equal(f.observed.at(-1)?.cwd, requested.worktree.path);
+  } finally {
+    release();
+    f.cleanup();
+  }
+});
+
+test("discarding a bound sibling during a runner turn defers until the turn ends (#3424)", async () => {
+  if (process.platform !== "linux") return;
+  let release!: () => void;
+  const held = new Promise<void>((done) => { release = done; });
+  const f = await retiredWorktreeFixture({
+    createdSibling: true, onPrompt: (text) => text === "long turn" ? held : undefined,
+  });
+  try {
+    f.manager.prompt("s1", "long turn");
+    await f.waitFor(() => f.drivers[0]!.prompts.length === 1, "the first turn did not start");
+    const result = await f.discard();
+    assert.deepEqual(result.retirement, { status: "deferred", reason: "provider_active" });
+    await f.settle();
+    assert.ok(existsSync(join(f.sibling, ".git")), "the bound sibling stays while the turn runs");
+    assert.equal(f.drivers.length, 1);
+
+    // The turn ends; the retirement completes with no second discard, then the provider rebinds.
+    release();
+    await f.waitFor(() => !existsSync(f.sibling), "the deferred retirement did not complete after the turn");
+    await f.waitFor(() => f.internals.active.get("s1")?.client?.pid === 2, "the provider was not rebound");
+    f.assertRelaunched();
+    f.manager.prompt("s1", "next turn");
+    await f.waitFor(() => f.drivers[1]!.prompts.length === 1, "the next turn did not run");
+  } finally {
+    release();
+    f.cleanup();
+  }
+});
+
+test("discarding a bound sibling during a provider-initiated turn defers until it settles (#3424)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await retiredWorktreeFixture({ createdSibling: true });
+  try {
+    f.drivers[0]!.cb.onProviderInitiatedTurn?.("started", "provider-turn-1");
+    const result = await f.discard();
+    assert.deepEqual(result.retirement, { status: "deferred", reason: "provider_active" });
+    await f.settle();
+    assert.ok(existsSync(join(f.sibling, ".git")), "the bound sibling stays while the turn runs");
+    assert.equal(f.drivers[0]!.disposed, false);
+
+    f.drivers[0]!.cb.onProviderInitiatedTurn?.("settled", "provider-turn-1");
+    await f.waitFor(() => !existsSync(f.sibling), "the deferred retirement did not complete after settlement");
+    await f.waitFor(() => f.internals.active.get("s1")?.client?.pid === 2, "the provider was not rebound");
+    f.assertRelaunched();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("discarding a bound sibling while the provider is idle removes it at once and rebinds (#3424)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await retiredWorktreeFixture({ createdSibling: true });
+  try {
+    const result = await f.discard();
+    assert.equal(result.removed, true);
+    assert.equal(existsSync(f.sibling), false);
+    await f.waitFor(() => f.internals.active.get("s1")?.client?.pid === 2, "the provider was not rebound");
+    f.assertRelaunched();
   } finally {
     f.cleanup();
   }

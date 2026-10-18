@@ -794,8 +794,8 @@ interface ActiveSession {
    * resume probe — so once one of them is retired the provider is rebound into its selected
    * worktree before its next turn instead of failing on a bind source that no longer exists. */
   boundOwnedWorktrees?: readonly string[];
-  /** The selected worktree a retirement rebind targets, while that rebind is the pending one. Unlike
-   * a selection change, it waits for provider-initiated work instead of retiring it (#3402). */
+  /** The selected worktree a retirement rebind targets, while that rebind is the pending one; only
+   * such a rebind fails once when it cannot run (#3402). */
   retiredWorktreeRebind?: string;
   /** A retirement rebind that could not run; this process is never handed to another one. */
   retiredWorktreeRebindFailed?: true;
@@ -3372,11 +3372,24 @@ export class SessionManager {
     return !!meta.worktreePath && sameWorktreePath(meta.context, meta.worktreePath, path);
   }
 
+  /** A provider turn uses its cwd and every sibling its sandbox binds (#3424): the driver renders
+   * the same bind list for any respawn within the turn, so a bound sibling removed mid-turn would
+   * fail that spawn. Its retirement waits for the turn and replays when it ends. */
   private providerTurnUsesPath(sessionId: string, context: AgentContext, path: string): boolean {
     const active = this.active.get(sessionId);
-    if (!active || !sameWorktreePath(context, active.cwd, path)) return false;
+    if (!active || (!sameWorktreePath(context, active.cwd, path) &&
+        !active.boundOwnedWorktrees?.some((bound) => sameWorktreePath(context, bound, path)))) return false;
     return active.running || active.providerInitiatedTurnActive === true || (active.queue?.length ?? 0) > 0 ||
       this.reservedPromotions(active).size > 0;
+  }
+
+  /** Replay a safe retirement that a turn deferred because it held a bound sibling (#3424). */
+  private replayBoundWorktreeRetirements(sessionId: string, entry: ActiveSession): void {
+    const bound = entry.boundOwnedWorktrees;
+    if (!bound?.length || !this.cleanupJournal.list().some((record) =>
+      record.sessionId === sessionId && record.removalMode === "safe" &&
+      bound.some((path) => sameWorktreePath(entry.context, path, record.worktreePath)))) return;
+    this.scheduleDeferredSafeWorktreeReaps(sessionId, "turn end");
   }
 
   private releaseActiveWorktreeLease(entry: ActiveSession): void {
@@ -12126,6 +12139,7 @@ export class SessionManager {
         this.store.releaseLock(sessionId, this.lockOwner);
       }
       this.settleActiveWorkPermit(sessionId, entry);
+      this.replayBoundWorktreeRetirements(sessionId, entry);
       if (
         !entry.historyIntegrityFailure &&
         entry.governanceRearmPending &&
@@ -12165,7 +12179,7 @@ export class SessionManager {
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
       !meta?.orphanedWork?.recoveryAttemptedAt;
     return !entry.running &&
-      !(entry.providerInitiatedTurnActive && this.retirementRebindPending(entry)) &&
+      !entry.providerInitiatedTurnActive &&
       this.active.get(sessionId) === entry &&
       !backgroundWorkBlocksRebind &&
       !this.rewinding.has(sessionId) &&
@@ -19072,12 +19086,13 @@ export class SessionManager {
       if (interrupted &&
           (live.queue.length || live.pendingProviderAccountSwitch || live.pendingWorktreeRebind)) {
         setImmediate(() => this.scheduleDrain(sessionId));
-      } else if (state === "settled" && this.requestRetiredWorktreeRebind(sessionId, live) &&
-          this.retirementRebindPending(live)) {
-        // A retirement rebind waited for this turn (#3402); nothing else wakes it on normal settlement.
+      } else if (state === "settled" && this.requestRetiredWorktreeRebind(sessionId, live)) {
+        // Every worktree rebind waits for this turn (#3402, #3424); nothing else wakes it on normal
+        // settlement.
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
+    if (state === "settled") this.replayBoundWorktreeRetirements(sessionId, live);
   }
 
   /** Persist/relay first, then enforce against the same normalized event stream every dashboard
