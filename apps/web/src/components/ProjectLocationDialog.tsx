@@ -100,6 +100,13 @@ function projectAudience(project: ProjectView, identity: IdentityAdministrationV
   return owner.userId === identity.context.userId ? "you" : "its owner";
 }
 
+/** A machine New Folder can list, and whether it can browse its folders now. */
+interface MachineChoice {
+  runner: RunnerView;
+  display: ReturnType<typeof runnerDisplay>;
+  browsable: boolean;
+}
+
 type ScopeCorrection = {
   resource: { kind: "project"; projectId: string; name: string } |
     { kind: "workspace"; runnerId: string; workspaceId: string; name: string };
@@ -163,6 +170,7 @@ export function ProjectLocationDialog({
   const [scopeKey, setScopeKey] = useState("");
   const [generateSetup, setGenerateSetup] = useState(false);
   const [scopeCorrection, setScopeCorrection] = useState<ScopeCorrection | null>(null);
+  const [submittedMachine, setSubmittedMachine] = useState<MachineChoice | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const { identity, error: identityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const close = () => {
@@ -215,7 +223,7 @@ export function ProjectLocationDialog({
 
   // New Folder: every machine, with the ones that can't browse listed but unavailable (§8.4).
   const machines = useMemo(() => [...runners.values()]
-    .map((runner) => ({
+    .map((runner): MachineChoice => ({
       runner,
       display: runnerDisplay(runner, boxByRunner.get(runner.runnerId), runner.runnerId),
       browsable: runner.status === "online" && runnerSupportsProtocol(runner.protocolVersion, "directoryListing"),
@@ -232,8 +240,14 @@ export function ProjectLocationDialog({
     [boxByRunner, machines],
   );
   const anyOnline = machines.some(({ runner }) => runner.status === "online");
-  const selectedMachine = machines.find(({ runner, browsable }) => browsable && runner.runnerId === runnerId) ??
+  const liveMachine = machines.find(({ runner, browsable }) => browsable && runner.runnerId === runnerId) ??
     machines.find(({ browsable }) => browsable) ?? null;
+  // While a new folder is being added, the machine it was submitted for holds. Live availability
+  // can't unmount or re-key the folder browser under the request, so the folder shown, the folder
+  // selected and the folder submitted stay one; the live machine returns when the request settles,
+  // and a browser that remounts then reports its own folder again.
+  const holding = submittedMachine !== null;
+  const selectedMachine = submittedMachine ?? liveMachine;
   const selectedRunnerId = selectedMachine?.runner.runnerId ?? "";
   const selectedFolder = folderSelection?.runnerId === selectedRunnerId ? folderSelection.path : null;
   const creationScopeChoices = useMemo(() => identity ? accessScopeChoices(identity)
@@ -252,7 +266,7 @@ export function ProjectLocationDialog({
     }
   }, [accessScopeManagementSupported, creationScopeChoices, project.scope, scopeKey]);
   const creationScope = creationScopeChoices.find((choice) => choice.key === scopeKey);
-  const creating = mode === "new" && canCreateLocation && selectedMachine !== null;
+  const creating = mode === "new" && (canCreateLocation || holding) && selectedMachine !== null;
 
   const changeMachine = (nextRunnerId: string) => {
     setRunnerId(nextRunnerId);
@@ -263,8 +277,6 @@ export function ProjectLocationDialog({
 
   // The browser's current folder is the selection; the name follows it until the person edits it.
   const folderChanged = (path: string | null) => {
-    // The picker is frozen while a commit is pending; this keeps the submitted folder regardless.
-    if (busy) return;
     setFolderSelection(path === null ? null : { runnerId: selectedRunnerId, path });
     if (!nameEdited) setLocationName(path === null ? "" : locationNameFromFolder(path));
   };
@@ -302,7 +314,8 @@ export function ProjectLocationDialog({
         nameRef.current?.focus();
         return;
       }
-      if (!selectedFolder) return;
+      if (!selectedFolder || !selectedMachine) return;
+      setSubmittedMachine(selectedMachine);
       setBusy(true);
       setError(null);
       try {
@@ -323,6 +336,7 @@ export function ProjectLocationDialog({
           : { sentence: "Wollipog couldn't add this folder. Try again.", detail: raw || null });
       } finally {
         setBusy(false);
+        setSubmittedMachine(null);
       }
       return;
     }
@@ -454,11 +468,11 @@ export function ProjectLocationDialog({
     </>
   );
 
-  const newFolder = !canCreateLocation ? (
+  const newFolder = !canCreateLocation && !holding ? (
     <Notice tone="warning" title="Adding New Folders Needs an Update">
       This version of Wollipog can't register a new folder as a location. Update or restart Wollipog so it matches this dashboard. You can still add an existing location.
     </Notice>
-  ) : !anyOnline ? (
+  ) : !anyOnline && !holding ? (
     <Notice
       tone="neutral"
       title="No Machines Online"

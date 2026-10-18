@@ -139,6 +139,8 @@ interface Rendered {
   generated: boolean[];
   created: unknown[];
   closed: () => number;
+  /** The live snapshot's machines changing under the open dialog. */
+  setRunners: (runners: readonly RunnerView[]) => Promise<void>;
   unmount: () => Promise<void>;
 }
 
@@ -160,9 +162,7 @@ async function render(options: {
   const created: unknown[] = [];
   let closed = 0;
   const client = { ...api, getIdentity: async () => identity, ...options.client } as ApiClient;
-  const runners = options.runners ?? [runner, offlineRunner];
-  await act(async () => {
-    root.render(
+  const draw = (runners: readonly RunnerView[]) => root.render(
       <ApiProvider client={client}>
         <ProjectLocationDialog
           project={project}
@@ -187,13 +187,17 @@ async function render(options: {
         />
       </ApiProvider>,
     );
-  });
+  await act(async () => { draw(options.runners ?? [runner, offlineRunner]); });
   await settle();
   return {
     added,
     generated,
     created,
     closed: () => closed,
+    setRunners: async (runners) => {
+      await act(async () => { draw(runners); });
+      await settle();
+    },
     unmount: async () => {
       await act(async () => { root.unmount(); });
       mountPoint.remove();
@@ -537,6 +541,99 @@ test("while a new folder is being added, the browser and the form hold still on 
     await act(async () => { settleCreate(); });
     await settle();
     assert.equal(view.closed(), 1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+/** A machine whose home is /repos, holding one folder, `a`. */
+const browsingClient = (listed: string[] = []): Partial<ApiClient> => ({
+  listDirectory: async (_runnerId: string, path: string) => {
+    listed.push(path);
+    const at = path || "/repos";
+    return { path: at, parent: at === "/repos" ? "/" : "/repos", entries: at === "/repos" ? [{ name: "a", path: "/repos/a", isDir: true }] : [] };
+  },
+});
+const currentFolder = () => dialog()!.querySelector(".folder-picker .crumb.is-current")?.getAttribute("title") ?? null;
+const openNewFolder = async () => {
+  const radio = [...dialog()!.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Add From"] [role="radio"]')]
+    .find((element) => text(element) === "New Folder")!;
+  await act(async () => { radio.click(); });
+  await settle();
+  await settle();
+};
+const openFolder = async (name: string) => {
+  const row = [...dialog()!.querySelectorAll<HTMLButtonElement>(".folder-picker-list > .row")].find((element) => text(element) === name)!;
+  await act(async () => { row.click(); });
+  await settle();
+};
+
+test("a machine that drops and returns while a new folder is added leaves the shown, chosen and retried folder one", async () => {
+  let attempts = 0;
+  let rejectFirst: (cause: Error) => void = () => {};
+  const offline = { ...runner, status: "offline" as const };
+  const view = await render({
+    runners: [runner],
+    projects: [project],
+    client: browsingClient(),
+    onCreate: () => {
+      attempts += 1;
+      return attempts === 1 ? new Promise<void>((_resolve, reject) => { rejectFirst = reject; }) : Promise.resolve();
+    },
+  });
+  try {
+    await openNewFolder();
+    await openFolder("a");
+    assert.equal(currentFolder(), "/repos/a");
+    await act(async () => { addButton().click(); });
+    await settle();
+    // The live snapshot loses the machine and gets it back while the request is pending.
+    await view.setRunners([offline]);
+    assert.equal(currentFolder(), "/repos/a", "the submitted machine holds the browser in place");
+    await view.setRunners([runner]);
+    await act(async () => { rejectFirst(new Error("disk full")); });
+    await settle();
+    await settle();
+    assert.match(text(dialog()), /Couldn't Add the Location/u);
+    const shown = currentFolder();
+    assert.equal(shown, "/repos/a");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.deepEqual(view.created.map((value) => (value as { path: string }).path), ["/repos/a", shown],
+      "the retry submits the folder on screen");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a machine that is gone when a new folder's add fails leaves nothing chosen", async () => {
+  let rejectFirst: (cause: Error) => void = () => {};
+  const offline = { ...runner, status: "offline" as const };
+  const view = await render({
+    runners: [runner],
+    projects: [project],
+    client: browsingClient(),
+    onCreate: () => new Promise<void>((_resolve, reject) => { rejectFirst = reject; }),
+  });
+  try {
+    await openNewFolder();
+    await openFolder("a");
+    await act(async () => { addButton().click(); });
+    await settle();
+    await view.setRunners([offline]);
+    assert.equal(currentFolder(), "/repos/a", "held while pending");
+    await act(async () => { rejectFirst(new Error("machine went away")); });
+    await settle();
+    assert.match(text(dialog()), /No Machines Online/u, "the live state returns once the request settles");
+    assert.equal(addButton().disabled, true);
+    assert.equal(text(footer().querySelector(".add-location-reason")), "Choose a location or a folder.");
+    // The machine comes back: the browser starts again from its home, and that is what is chosen.
+    await view.setRunners([runner]);
+    await settle();
+    assert.equal(currentFolder(), "/repos");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.deepEqual(view.created.map((value) => (value as { path: string }).path), ["/repos/a", "/repos"]);
   } finally {
     await view.unmount();
   }
