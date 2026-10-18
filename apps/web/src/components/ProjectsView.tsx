@@ -426,6 +426,12 @@ export function ProjectsView({
   const phoneDetail = isMobile && detailOpen && !spanningEmpty;
   const noMatch = snapshotLoaded && allProjects.length > 0 && visibleProjects.length === 0;
   const newSessionBlocker = selected ? projectNewSessionBlocker(selected, runners, machineName) : null;
+  // The saved scope, the one the access field below reads, so the two never disagree. A team or a
+  // person is named only once the identity directory has loaded; until then the field says it is
+  // loading, and the meta line shows no access rather than "Unknown Team".
+  const accessLabel = accessScopeManagementSupported && selected?.scope &&
+    (accessIdentity !== null || selected.scope.owner.kind === "organization")
+    ? accessScopeLabel(selected.scope, accessIdentity) : null;
   const newSession = selected ? {
     label: "New Session",
     disabled: newSessionBlocker !== null,
@@ -510,7 +516,7 @@ export function ProjectsView({
                 newSession={newSession!}
                 blocker={newSessionBlocker}
                 menu={detailMenu}
-                access={accessScopeManagementSupported && selected.scope ? accessScopeLabel(selected.scope, accessIdentity) : null}
+                access={accessLabel}
               />
               {selected.canManage === false && (
                 <Notice tone="neutral" compact role="note">You can view this project, but you can't change it.</Notice>

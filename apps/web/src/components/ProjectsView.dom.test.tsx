@@ -298,6 +298,35 @@ test("the meta line shows locations and sessions with the running count, and no 
   assert.equal(headings.includes("Danger Zone"), false);
 });
 
+test("the access fact is the saved scope, and names a team only once the identity directory has loaded", async () => {
+  const identity = {
+    context: { userId: "user-1", userName: "Ada", organizationId: "org-1", organizationName: "Org", role: "owner", deviceId: null, localBootstrap: false },
+    organizations: [],
+    memberships: [],
+    teams: [{ teamId: "team-1", organizationId: "org-1", name: "Builders", memberUserIds: ["user-1"] }],
+  };
+  let release: (value: unknown) => void = () => {};
+  const loaded = new Promise((resolve) => { release = resolve; });
+  const client = { ...api, getIdentity: async () => { await loaded; return identity; } } as unknown as ApiClient;
+  const scoped = { ...busyProject(), audience: "organization" as const, scope: { organizationId: "org-1", owner: { kind: "team" as const, teamId: "team-1" } } };
+  const capabilities = { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, accessScopeManagement: true };
+  const body = await renderSelected([scoped], "Project 1", { capabilities } as Partial<UiSnapshotMessage>, client);
+  const facts = () => [...body.querySelectorAll(".project-detail-meta li")].map(text);
+  assert.deepEqual(facts(), ["2 Locations", "11 Sessions, 1 Running"], "no access fact while the team's name is unknown");
+  assert.doesNotMatch(text(body.querySelector(".master-detail-detail")), /Unknown Team|Project Visibility/);
+  await act(async () => { release(undefined); await new Promise((resolve) => setTimeout(resolve, 20)); });
+  assert.deepEqual(facts(), ["2 Locations", "11 Sessions, 1 Running", "Access: Team: Builders"],
+    "the saved team scope, not the audience field (Everyone in Your Organization)");
+});
+
+test("an organization-wide scope shows before the identity directory loads", async () => {
+  const client = { ...api, getIdentity: () => new Promise(() => {}) } as unknown as ApiClient;
+  const scoped = { ...busyProject(), scope: { organizationId: "org-1", owner: { kind: "organization" as const, organizationId: "org-1" } } };
+  const capabilities = { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, accessScopeManagement: true };
+  const body = await renderSelected([scoped], "Project 1", { capabilities } as Partial<UiSnapshotMessage>, client);
+  assert.equal(text([...body.querySelectorAll(".project-detail-meta li")].at(-1)), "Access: Organization-Wide");
+});
+
 test("every section is the one recipe, in order, and no bare heading renders", async () => {
   const body = await renderSelected([{ ...busyProject(), childSessionDefaults: null, memorySharing: "separate" }], "Project 1");
   const detail = body.querySelector(".master-detail-detail")!;
