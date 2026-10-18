@@ -27,6 +27,15 @@ ceiling across changed heads; the head remains an exact observation coordinate, 
 Hard denial and exhaustion stay blocked and ask
 for no override. Existing continuation transport owns its own bounded retries and ambiguous-result
 fence; recovery never acknowledges an unknown parent turn to create another turn.
+A dispatched wake stays in flight until its parent turn finishes. It counts as unanswered only
+when all of these hold: the runner confirmed the turn delivering that exact wake as `completed`;
+the root is idle with nothing pending; no descendant is queued, starting or running; and the
+observation's signal is unchanged. Unanswered for 2, 4, 8 or 16 minutes after its first to fourth
+wake (capped at 30), the same record and occurrence is woken again under a new attempt identity
+through the same single-flight reservation. A failed, missing or acknowledged-unknown turn never
+counts as answered, so an unknown outcome is not a reason to wake again. Once the four-attempt
+ceiling is spent, an unanswered record becomes an `attempts_exhausted` blocked exception: it no
+longer counts as automatic, `unattendedReady` turns false, and no override is requested.
 Denied operations stop being live exceptions when their subject's exact terminal report is
 authoritatively verified; their original decision remains denied. Status, archive and an ended
 attempt alone do not establish completed delivery. Durable retirement binds the exact denied

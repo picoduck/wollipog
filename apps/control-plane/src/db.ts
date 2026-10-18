@@ -5616,6 +5616,19 @@ export class ControlPlaneDb {
     return { state: "available" };
   }
 
+  /** When the parent turn that delivered this exact recovery wake finished, if it did. Only a
+   * runner-confirmed `completed` turn counts: a pending, failed, missing or acknowledged-unknown
+   * turn never proves the Orchestrator saw the wake, so it cannot justify another one (#2938). */
+  campaignRecoveryWakeSettledAt(campaignId: string, eventId: string): number | undefined {
+    const event = this.stmt("SELECT seq FROM orchestrator_campaign_events WHERE campaign_session_id=? AND event_id=?")
+      .get(campaignId, eventId) as { seq: number } | undefined;
+    if (!event) return undefined;
+    const row = this.stmt(`SELECT MIN(updated_at) AS at FROM orchestrator_campaign_continuations
+      WHERE campaign_session_id=? AND state='completed' AND event_from_seq<=? AND event_through_seq>=?`)
+      .get(campaignId, event.seq, event.seq) as { at: number | null } | undefined;
+    return row?.at ?? undefined;
+  }
+
   /** Shared completion boundary for projection, recovery reservation, scheduler and outbox.
    * No SessionView/projection reads: those contain this admission check. A child report cannot
    * finish an original scoped PR. Agent stage prose/retained records alone cannot admit repair. */

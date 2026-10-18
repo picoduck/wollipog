@@ -4,7 +4,7 @@ import { attentionRequestRank, pendingRequests, type SessionView } from "@wollip
 export type SessionFollowUpGroup = "needs_input" | "ready_for_review" | "working" | "quiet";
 
 type CampaignFacts = Partial<Pick<SessionView, "parentSessionId" | "orchestratorCampaign" | "orchestratorPolicy" |
-  "fullControlCampaignStatus">>;
+  "fullControlCampaignStatus" | "status" | "attention" | "campaignRequests">>;
 
 /** The revision of the result a fired reminder stands in for while the ordinary list sorts: it is the
  * person's own follow-up, so a completed campaign never hides it. */
@@ -16,19 +16,35 @@ export const FIRED_REMINDER_RESULT_REVISION = "reminder";
  * plane, its campaign projection. Any other campaign state, a Custom campaign or a descendant keeps
  * its ordinary follow-up. */
 export function completedFullControlCampaign(session: CampaignFacts): boolean {
-  if (session.parentSessionId) return false;
+  return fullControlRootStatus(session) === "verified_complete";
+}
+
+/** The server's campaign status for a Full Control root, or null for a Custom root or a descendant. */
+function fullControlRootStatus(session: CampaignFacts) {
+  if (session.parentSessionId) return null;
   // The row's own stored policy is authoritative for its control mode. A projection the store kept
   // from an earlier detail read may predate a revoke, so its control counts only on a row without one.
   const policy = session.orchestratorPolicy;
   const fullControl = policy ? policy.control?.mode === "full_control"
     : session.fullControlCampaignStatus !== undefined || session.orchestratorCampaign?.control?.mode === "full_control";
-  return fullControl && (session.fullControlCampaignStatus ?? session.orchestratorCampaign?.status) === "verified_complete";
+  return fullControl ? session.fullControlCampaignStatus ?? session.orchestratorCampaign?.status ?? null : null;
+}
+
+/** A Full Control root whose campaign the server reports Active, continuing automatically (#2938):
+ * its intermediate results are informational. A failed or stopped root, and any human action or
+ * human-owned campaign request, keeps the ordinary follow-up; the server reports human-required
+ * and blocked work as Waiting for a Person or Blocked, which also keep it. */
+export function activeFullControlCampaign(session: CampaignFacts): boolean {
+  return fullControlRootStatus(session) === "active" && session.status !== "failed" && session.status !== "stopped" &&
+    (session.attention?.humanActions?.length ?? 0) === 0 &&
+    (sessionCampaignRequests(session)?.human ?? 0) === 0;
 }
 
 export function outstandingSessionResult(session: Pick<SessionView, "attention"> & CampaignFacts) {
   const facts = session.attention;
   return facts?.result?.owner === "human" && facts.result.revision !== facts.acknowledgedRevision &&
-    (facts.result.revision === FIRED_REMINDER_RESULT_REVISION || !completedFullControlCampaign(session))
+    (facts.result.revision === FIRED_REMINDER_RESULT_REVISION ||
+      !completedFullControlCampaign(session) && !activeFullControlCampaign(session))
     ? facts.result : null;
 }
 

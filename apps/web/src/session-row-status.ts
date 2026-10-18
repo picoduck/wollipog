@@ -1,5 +1,5 @@
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { completedFullControlCampaign, sessionFollowUp, sessionWorking } from "./session-follow-up.js";
+import { activeFullControlCampaign, completedFullControlCampaign, sessionFollowUp, sessionWorking } from "./session-follow-up.js";
 import { reminderBadgeDescription, reminderBadgeLabel, snoozedSessionAttentionReason } from "./session-reminders.js";
 import {
   sessionStatusSummary,
@@ -83,7 +83,9 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
  * 3. Else a fired reminder's Returned.
  * 4. Else an outstanding human result's Ready for Review, once the session has stopped working (#3074).
  *    A Full Control root the server reports Verified Complete shows an informational Campaign Complete
- *    instead: its normal completion is not review work (#2940).
+ *    instead: its normal completion is not review work (#2940). One the server reports Active, at rest
+ *    with no human item, shows an informational Campaign Active: the campaign continues on its own,
+ *    so neither its intermediate results nor an Awaiting Prompt state are the person's work (#2938).
  * 5. Else Children Working while an at-rest parent's descendants have unfinished work.
  * 6. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
  *
@@ -125,6 +127,11 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       !sessionWorking(session as SessionView) && completedFullControlCampaign(session)) {
     primary = { kind: "lifecycle", meta: statusMeta("session", "campaign_complete"),
       description: "This Full Control campaign finished and the server verified it. Its result is informational.", needsYou: false };
+  } else if ((!primary || (primary.kind === "lifecycle" && primary.meta.label === statusMeta("session", "completed").label)) &&
+      !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
+      !sessionWorking(session as SessionView) && activeFullControlCampaign(session)) {
+    primary = { kind: "lifecycle", meta: statusMeta("session", "campaign_active"),
+      description: "This Full Control campaign continues automatically. Its intermediate results are informational.", needsYou: false };
   }
   const others = needs.slice(1).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;

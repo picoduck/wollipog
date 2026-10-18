@@ -47,7 +47,7 @@ test("a verified-complete Full Control root shows an informational Campaign Comp
   // Exclusions keep their own status.
   assert.equal(label(sessionRowStatus(session({ status: "idle", attention,
     orchestratorCampaign: campaign("verified_complete", { mode: "custom" }) }))), "Ready for Review", "Custom");
-  for (const pending of ["active", "blocked", "waiting_human"]) {
+  for (const pending of ["blocked", "waiting_human"]) {
     assert.equal(label(sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign(pending) }))), "Ready for Review", pending);
   }
   assert.equal(label(sessionRowStatus({ ...complete, parentSessionId: "parent" })), "Ready for Review", "a descendant");
@@ -61,6 +61,45 @@ test("a verified-complete Full Control root shows an informational Campaign Comp
     attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } })), "Answer Required");
   const fired = reminder({ state: "fired" });
   assert.equal(label(sessionRowStatus(complete, { reminder: fired })), label(sessionRowStatus(session(), { reminder: fired })), "a fired reminder");
+});
+
+test("an at-rest root of an active Full Control campaign shows an informational Campaign Active (#2938)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  const fullControl = { mode: "full_control", boundary: { version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo",
+    objective: "Deliver", authorizedByUserId: "user", authorizedAt: 1, operations: [], delegatablePolicyIds: [] } };
+  const campaign = (status: string, control: unknown = fullControl) =>
+    ({ status, policyRevision: 3, control }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
+  const active = session({ status: "idle", attention, orchestratorCampaign: campaign("active") });
+  const status = sessionRowStatus(active);
+  assert.equal(label(status), "Campaign Active");
+  assert.deepEqual([status.badge?.meta.tone, Boolean(status.badge?.meta.pulse)], ["info", false]);
+  assert.equal(status.badge?.ariaLabel, "Status: Campaign Active");
+  assert.equal(status.badge?.title, "This Full Control campaign continues automatically. Its intermediate results are informational.");
+  assert.equal(label(sessionRowStatus({ ...active, attention: { ...attention, result: null } })), "Campaign Active",
+    "an at-rest active root never reads as awaiting a prompt");
+  assert.equal(label(sessionRowStatus({ ...active, status: "completed" })), "Campaign Active");
+  // The server's status moving changes the badge in both directions.
+  assert.equal(label(sessionRowStatus({ ...active, orchestratorCampaign: campaign("verified_complete") })), "Campaign Complete");
+  assert.equal(label(sessionRowStatus({ ...active, orchestratorCampaign: campaign("waiting_human") })), "Ready for Review");
+  assert.equal(label(sessionRowStatus({ ...active, orchestratorCampaign: campaign("blocked") })), "Ready for Review");
+  // Exclusions keep their own status.
+  assert.equal(label(sessionRowStatus({ ...active, orchestratorCampaign: campaign("active", { mode: "custom" }) })), "Ready for Review", "Custom");
+  assert.equal(label(sessionRowStatus({ ...active, parentSessionId: "parent" })), "Ready for Review", "a descendant");
+  assert.equal(label(sessionRowStatus({ ...active, status: "running" })), "Running", "still working");
+  assert.equal(label(sessionRowStatus({ ...active, status: "failed" })), "Failed");
+  assert.equal(label(sessionRowStatus({ ...active, status: "stopped" })), "Ready for Review",
+    "a stopped root is not continuing, so its result is the person's again");
+  assert.equal(label(sessionRowStatus(active, { runnerOnline: false })), "Disconnected");
+  assert.equal(label(sessionRowStatus(active, { familyWorking: true })), "Children Working");
+  // A child's request routed to the Human surfaces at the root over the informational badge.
+  const family = sessionRowStatus(active, { familyFollowUpLabel: "Needs Your Input" });
+  assert.equal(label(family), "Needs Your Input");
+  const question = { requestId: "q", kind: "question" as const, title: "Choose", options: [] };
+  assert.equal(label(sessionRowStatus({ ...active, pendingApproval: question,
+    attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } })), "Answer Required");
+  const fired = reminder({ state: "fired" });
+  assert.equal(label(sessionRowStatus(active, { reminder: fired })), label(sessionRowStatus(session(), { reminder: fired })), "a fired reminder");
 });
 
 test("a working session shows its working status, never Ready for Review, until its turn ends (#3074)", () => {

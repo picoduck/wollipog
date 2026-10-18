@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
-  type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata } from "@wollipog/protocol";
+  type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata,
+  type SessionSnapshot } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
+import { STALLED_RECOVERY_WAKE_MAX_MS, stalledRecoveryWakeDelayMs } from "./campaign-recovery-store.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -351,6 +353,71 @@ test("human exceptions retain exact resource, owner and smallest input without d
     h.db.updateSessionStatus("child", "idle", 400);
     h.recovery.maintain(400);
     assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0);
+  } finally { h.db.close(); }
+});
+
+/** A child's runner snapshot, as the runner reports it, carrying or clearing a hold. */
+function childSnapshot(extra: Partial<SessionSnapshot>): SessionSnapshot {
+  return { id: "child", workspaceId: "w", agentId: "agent", status: "input_required", title: "child", driver: "codex-app-server",
+    config: { model: "gpt-6.1-sol" }, costUsd: 0, tokensIn: 0, tokensOut: 0, useWorktree: true,
+    worktreePath: "/repos/test/.agent-worktrees/child", preview: null, pendingApproval: null, seq: 0, historyEpoch: 0,
+    createdAt: 1, updatedAt: 3, ...extra };
+}
+
+test("a held child is recovered through the real recovery wake, and clearing the hold resolves it (#2938 AC2)", () => {
+  const h = fixture();
+  try {
+    const detail = "PRIVATE-HOLD-DETAIL the selected worktree could not be verified";
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ worktreeRecovery: { recoveryId: "worktree-recovery:child",
+      detectedAt: 2, selectedPath: "/repos/test/.agent-worktrees/child", expectedBranch: "agent/child", detail } }));
+    assert.ok(h.db.getSession("child")!.holds?.length, "the runner-reported hold is current");
+    h.db.updateSessionStatus("root", "idle", 4);
+    const now = Date.now();
+    h.recovery.maintain(now);
+    const held = h.db.campaignRecovery.projection("root").records.find(record => record.action === "recover_hold")!;
+    assert.deepEqual([held.resource.kind, held.resource.sessionId, held.effectiveOwner, held.reason, held.requiredInput],
+      ["hold", "child", "orchestrator", "transient_failure", "none"]);
+    assert.equal(held.resource.occurrenceId, recoveryCoordinate(h.db.getSession("child")!.holds![0]!.holdId),
+      "the hold is identified by digest, never by its runner text");
+    h.recovery.maintain(now + 1_000); // Transient holds retain their bounded backoff before the wake.
+    const woken = h.db.campaignRecovery.projection("root").records.find(record => record.id === held.id)!;
+    assert.deepEqual([woken.state, woken.attempts], ["dispatched", 1]);
+    h.svc.retryDuePrompts(now + 32_000);
+    const continuation = h.db.latestCampaignContinuation("root")!;
+    assert.ok(continuation, "the wake reaches the parent's single continuation lane");
+    const text = JSON.parse(h.db.getSessionPromptCommand(continuation.commandId)!.payloadJson).text as string;
+    assert.match(text, /Action needed: yes/u);
+    assert.match(text, /"action":"recover_hold"/u);
+    assert.ok(text.includes(held.id));
+    assert.equal(text.includes("PRIVATE-HOLD-DETAIL") || text.includes(".agent-worktrees"), false,
+      "the wake names the hold's record, not the runner's detail or paths");
+    h.svc.retryDuePrompts(now + 33_000);
+    assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, continuation.continuationId, "no duplicate turn");
+    // The runner reports the hold cleared: the recovery is resolved, not left as automatic work.
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ status: "idle", worktreeRecovery: null, updatedAt: 5 }));
+    assert.equal(h.db.getSession("child")!.holds?.length ?? 0, 0);
+    h.recovery.maintain(now + 34_000);
+    assert.equal(h.db.campaignRecovery.activeRecords("root").some(record => record.id === held.id), false);
+    assert.equal((JSON.parse((h.db.raw().prepare("SELECT record_json FROM campaign_recovery WHERE id=?").get(held.id) as
+      { record_json: string }).record_json) as { state: string }).state, "resolved");
+  } finally { h.db.close(); }
+});
+
+test("a provider account switch hold waits for the Human and never wakes the parent (#2938 AC2)", () => {
+  const h = fixture();
+  try {
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ status: "queued", queueHold: { kind: "provider_account_switch",
+      holdId: "account-switch:child", since: 2, target: "Fixture Account", queuedPrompts: 1, unfinishedBackgroundJobs: 1 } }));
+    assert.ok(h.db.getSession("child")!.holds?.some(hold => hold.kind === "provider_account_switch"));
+    h.db.updateSessionStatus("root", "idle", 4);
+    const now = Date.now();
+    for (const at of [now, now + 1_000, now + 31_000]) h.recovery.maintain(at);
+    const record = h.db.campaignRecovery.projection("root").records.find(item => item.action === "recover_hold")!;
+    assert.deepEqual([record.effectiveOwner, record.reason, record.state, record.requiredInput, record.attempts],
+      ["human", "missing_access", "waiting_human", "restore_existing_access", 0]);
+    assert.equal(JSON.stringify(record).includes("Fixture Account"), false);
+    assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE occurrence_id=?").get(record.id)!.n, 0,
+      "a human-owned hold reserves no parent wake");
   } finally { h.db.close(); }
 });
 
@@ -1003,6 +1070,133 @@ test("all four scoped repair reservations deliver; a fifth head cannot reset the
     assert.equal(exhausted.reason, "attempts_exhausted");
     assert.equal(exhausted.attempts, 4);
     assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+  } finally { h.db.close(); }
+});
+
+/** Delivers the latest staged parent continuation and reports its turn finished, as the runner does. */
+function completeLatestContinuation(h: ReturnType<typeof completedPrFixture>, at: number) {
+  h.svc.retryDuePrompts(at);
+  const continuation = h.db.latestCampaignContinuation("root")!;
+  assert.ok(continuation);
+  const text = JSON.parse(h.db.getSessionPromptCommand(continuation.commandId)!.payloadJson).text as string;
+  assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update",
+    commandId: continuation.commandId, sessionId: "root", state: "completed", revision: 1 }));
+  const settled = h.db.latestCampaignContinuation("root")!;
+  assert.equal(settled.state, "completed");
+  h.db.updateSessionStatus("root", "idle", at);
+  return { ...continuation, text, settledAt: settled.updatedAt };
+}
+const recoveryEvents = (h: ReturnType<typeof completedPrFixture>) =>
+  (h.db.raw().prepare("SELECT event_id FROM orchestrator_campaign_events WHERE campaign_session_id='root' ORDER BY seq").all() as
+    Array<{ event_id: string }>).map(row => row.event_id);
+
+test("an unanswered dispatched wake is woken again with backoff, then exhausts instead of staying automatic (#2938 AC8)", () => {
+  const h = completedPrFixture();
+  try {
+    h.recovery.maintain(h.now);
+    const original = h.db.campaignRecovery.projection("root").records[0]!;
+    assert.deepEqual([original.state, original.attempts], ["dispatched", 1]);
+    const first = completeLatestContinuation(h, h.now + 31_000);
+    let settledAt = first.settledAt;
+    const delivered = new Set([first.commandId]);
+    for (let attempts = 1; attempts <= 3; attempts++) {
+      const delay = stalledRecoveryWakeDelayMs(attempts);
+      // Within its delay a finished wake is still owed an answer: no new wake, no new event.
+      const events = recoveryEvents(h).length;
+      h.recovery.maintain(settledAt + delay - 1);
+      h.recovery.maintain(settledAt + delay - 1);
+      assert.deepEqual([h.db.campaignRecovery.projection("root").records[0]!.state, recoveryEvents(h).length],
+        ["dispatched", events], `attempt ${attempts} waits for its delay`);
+      // After it, the same record and occurrence is woken once more under a fresh event identity.
+      h.recovery.maintain(settledAt + delay);
+      h.recovery.maintain(settledAt + delay);
+      const record = h.db.campaignRecovery.projection("root").records[0]!;
+      assert.deepEqual([record.id, record.resource, record.state, record.attempts],
+        [original.id, original.resource, "dispatched", attempts + 1]);
+      assert.deepEqual(recoveryEvents(h).slice(-1), [`${original.id}:${attempts + 1}`], "exactly one new wake event, single-flight");
+      const continuation = completeLatestContinuation(h, settledAt + delay + 31_000);
+      settledAt = continuation.settledAt;
+      assert.equal(delivered.has(continuation.commandId), false, "each re-wake reaches its own parent turn");
+      delivered.add(continuation.commandId);
+      assert.match(continuation.text, /Action needed: yes/u);
+      assert.ok(continuation.text.includes(original.id), "the re-wake names the same recovery record");
+    }
+    // The fourth wake also went unanswered: the ceiling is spent, so the record is blocked as an
+    // exhausted exception and unattended readiness is withdrawn rather than counted as automatic.
+    const before = h.db.latestCampaignContinuation("root")!.continuationId;
+    h.recovery.maintain(settledAt + stalledRecoveryWakeDelayMs(4));
+    h.svc.retryDuePrompts(settledAt + stalledRecoveryWakeDelayMs(4) + 31_000);
+    const exhausted = h.db.campaignRecovery.projection("root");
+    assert.deepEqual([exhausted.records[0]!.reason, exhausted.records[0]!.state, exhausted.records[0]!.attempts,
+      exhausted.records[0]!.requiredInput], ["attempts_exhausted", "blocked", 4, "none"]);
+    assert.deepEqual([exhausted.unattendedReady, exhausted.automatic, exhausted.blocked], [false, 0, 1]);
+    assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, before, "an exhausted record is never woken again");
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(JSON.stringify(exhausted).includes("Component fixture"), false, "the exception carries no transcript content");
+  } finally { h.db.close(); }
+});
+
+test("a wake is not re-sent while the parent is busy, a descendant works, or its turn's outcome is unknown", () => {
+  for (const hold of ["root_running", "descendant_running", "missing_result"] as const) {
+    const h = completedPrFixture();
+    try {
+      h.recovery.maintain(h.now);
+      const original = h.db.campaignRecovery.projection("root").records[0]!;
+      h.svc.retryDuePrompts(h.now + 31_000);
+      const continuation = h.db.latestCampaignContinuation("root")!;
+      assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId: continuation.commandId,
+        sessionId: "root", state: hold === "missing_result" ? "uncertain" : "completed", revision: 1 }));
+      h.db.updateSessionStatus("root", hold === "root_running" ? "running" : "idle", h.now + 31_000);
+      if (hold === "descendant_running") {
+        h.db.setSessionArchived("child", false, h.now + 31_000);
+        h.db.updateSessionStatus("child", "running", h.now + 31_000);
+      }
+      const events = recoveryEvents(h).length;
+      for (const at of [h.now + 31_000 + stalledRecoveryWakeDelayMs(1), h.now + 31_000 + STALLED_RECOVERY_WAKE_MAX_MS * 4]) {
+        h.recovery.maintain(at);
+      }
+      const record = h.db.campaignRecovery.projection("root").records.find(r => r.id === original.id)!;
+      assert.deepEqual([record.state, record.attempts, recoveryEvents(h).length], ["dispatched", 1, events], hold);
+    } finally { h.db.close(); }
+  }
+});
+
+test("restarting a Full Control root cancels its outstanding recovery, so the old wake cannot continue (#2938 AC9)", () => {
+  const h = completedPrFixture();
+  try {
+    h.recovery.maintain(h.now);
+    const original = h.db.campaignRecovery.projection("root").records[0]!;
+    assert.deepEqual([original.state, original.attempts], ["dispatched", 1]);
+    // A current host advertises the independent Orchestrator role the restart relaunches with.
+    h.metadata.agents[0]!.capabilities = { models: [{ id: "gpt-6.1-sol", displayName: "Fixture", default: true }],
+      effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default"],
+      orchestratorAdditive: true };
+    h.db.registerRunner(h.metadata, h.now, PROTOCOL_VERSION);
+    const restarted = h.svc.restart("root");
+    assert.ok(restarted.ok, restarted.error ?? "restart refused");
+    const stored = JSON.parse((h.db.raw().prepare("SELECT record_json FROM campaign_recovery WHERE id=?")
+      .get(original.id) as { record_json: string }).record_json);
+    assert.deepEqual([stored.state, stored.dispatchFenced, stored.attempts], ["cancelled", true, 1],
+      "the restart cancels the reservation rather than rebinding it to the new run");
+    // The restarted root comes back idle and the same failing check is observed again: the old
+    // reservation stays fenced until a fresh occurrence exists, and its ceiling is not reset.
+    h.db.updateSessionStatus("root", "idle", h.now + 1_000);
+    const events = recoveryEvents(h);
+    for (const at of [h.now + 1_000, h.now + 31_000, h.now + 31_000 + STALLED_RECOVERY_WAKE_MAX_MS]) {
+      h.recovery.maintain(at);
+      h.svc.retryDuePrompts(at);
+    }
+    const after = h.db.campaignRecovery.projection("root");
+    assert.deepEqual([after.records[0]!.id, after.records[0]!.state, after.records[0]!.reason, after.records[0]!.attempts],
+      [original.id, "blocked", "authority_changed", 1]);
+    assert.equal(after.unattendedReady, false);
+    assert.deepEqual(recoveryEvents(h), events, "no new wake is reserved for the fenced record");
+    const continuation = h.db.latestCampaignContinuation("root");
+    if (continuation) {
+      const text = JSON.parse(h.db.getSessionPromptCommand(continuation.commandId)!.payloadJson).text as string;
+      assert.match(text, /Action needed: no/u, "the pre-restart wake is delivered only as settled information");
+      assert.match(text, /"pending":false/u);
+    }
   } finally { h.db.close(); }
 });
 

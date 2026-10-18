@@ -70,6 +70,9 @@ const VOCABULARY = {
     ready_for_review: { label: "Ready for Review", tone: "review" },
     /** A Full Control campaign's verified normal completion: informational, not review work (#2940). */
     campaign_complete: success("Campaign Complete"),
+    /** An at-rest Full Control root whose campaign continues automatically: informational, not
+     * review work or a prompt the person owes (#2938). No pulse, so it never reads as Running. */
+    campaign_active: info("Campaign Active"),
     stalled: danger("Stalled"),
     failed: danger("Failed"),
     completed: success("Completed"),

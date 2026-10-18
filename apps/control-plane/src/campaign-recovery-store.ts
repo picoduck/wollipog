@@ -55,6 +55,14 @@ const hard = new Set<CampaignRecoveryReason>(["hard_denial", "attempts_exhausted
 const human = new Set<CampaignRecoveryReason>(["missing_human_information", "missing_access",
   "boundary_enlargement", "human_required_rule", "unsupported_capability"]);
 
+/** How long a delivered, completed wake may stay unanswered (same signal, quiet campaign) before
+ * the same record is woken again: 2, 4, 8 then 16 minutes, capped at 30. The attempt ceiling
+ * still bounds the total; a stalled record past it is exhausted, never silently automatic. */
+export const STALLED_RECOVERY_WAKE_BASE_MS = 120_000;
+export const STALLED_RECOVERY_WAKE_MAX_MS = 1_800_000;
+export const stalledRecoveryWakeDelayMs = (attempts: number) =>
+  Math.min(STALLED_RECOVERY_WAKE_MAX_MS, STALLED_RECOVERY_WAKE_BASE_MS * 2 ** Math.max(0, attempts - 1));
+
 function identity(campaignId: string, resource: CampaignRecoveryResource, action: CampaignRecoveryAction): string {
   const coordinate = resource.kind === "worker" && resource.workItemId
     ? { kind: "worker", workItemId: resource.workItemId }
@@ -126,9 +134,12 @@ export class CampaignRecoveryStore {
   }
 
   /** Complete authoritative scan. Repetition is read-only, including notification/admission ids.
-   * Policy revocation cancels old work rather than rebinding it to fresh authority. */
+   * Policy revocation cancels old work rather than rebinding it to fresh authority.
+   * `settledWakeAt` reports when the turn delivering a dispatched record's current wake completed,
+   * only while the campaign is quiet; a record still unanswered after its delay is woken again. */
   synchronize(campaignId: string, policyRevision: number, authorized: boolean,
-    observations: readonly CampaignRecoveryObservation[], now: number): boolean {
+    observations: readonly CampaignRecoveryObservation[], now: number,
+    settledWakeAt?: (record: CampaignRecoveryRecord) => number | undefined): boolean {
     return this.atomic(() => {
       const previous = new Map(this.rows(campaignId).map((row) => [row.id, row]));
       const observed = new Set<string>();
@@ -146,7 +157,11 @@ export class CampaignRecoveryStore {
         const dispatchFenced = (!authorized || old?.dispatchFenced === true || old?.state === "cancelled" ||
           old !== undefined && old.policyRevision !== policyRevision) && !(authorized && freshOccurrence);
         const currentDispatch = old?.state === "dispatched" && row?.signal === observation.signal && !changedResource;
-        let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved && !currentDispatch
+        // A wake the Orchestrator received and finished without changing anything is no longer in
+        // flight. The same record (same occurrence) is woken again, or exhausted past its ceiling.
+        const settledAt = currentDispatch && authorized && !observation.resolved ? settledWakeAt?.(old!) : undefined;
+        const stalled = settledAt !== undefined && now >= settledAt + stalledRecoveryWakeDelayMs(attempts);
+        let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved && (!currentDispatch || stalled)
           ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved
             ? old.reason : observation.reason;
         const state = observation.resolved ? "resolved" : !authorized && observation.owner !== "human"
@@ -155,7 +170,7 @@ export class CampaignRecoveryStore {
           : dispatchFenced ? "blocked"
           : reason === "transient_failure" ? "backoff" : "ready";
         if (state === "blocked" && dispatchFenced && !hard.has(reason) && reason !== "uncertain_outcome") reason = "authority_changed";
-        if (old && row!.signal === observation.signal && !changedResource && old.policyRevision === policyRevision &&
+        if (old && !stalled && row!.signal === observation.signal && !changedResource && old.policyRevision === policyRevision &&
             old.effectiveOwner === observation.owner && old.reason === reason && Boolean(old.dispatchFenced) === dispatchFenced &&
             (observation.resolved ? old.state === "resolved" : !terminal.has(old.state) || state === old.state)) continue;
         const next: CampaignRecoveryRecord = {

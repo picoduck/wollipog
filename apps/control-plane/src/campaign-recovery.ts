@@ -178,7 +178,12 @@ export class CampaignRecoveryService {
         }
       }
     }
-    const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now);
+    // A dispatched wake is unanswered only while nothing could still be answering it: the root is
+    // idle with nothing pending and no descendant is queued, starting or running.
+    const quiet = root.status === "idle" && !root.pendingApproval && sessions.slice(1).every(session =>
+      session.archived || !["queued", "starting", "running"].includes(session.status));
+    const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now,
+      quiet ? record => this.db.campaignRecoveryWakeSettledAt(root.id, `${record.id}:${record.attempts}`) : undefined);
     const admission = this.db.campaignContinuationAdmission(root.id);
     const admissionKey = `${revision}:${admission.state}`;
     if (this.admissionStates.get(root.id) !== admissionKey) {
