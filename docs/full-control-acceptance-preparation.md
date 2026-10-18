@@ -77,8 +77,14 @@ describes narrower shell/image/MCP/connector switches. Adding dynamic tools, omi
 emptying environments, accepting arbitrary config keys or advertising image modality does not
 establish complete native tool/context/FS/network/resource/API restriction.
 
-Keep installed media preflight **unsupported / `builtin_tool_allowlist_unavailable`** until an
-actual reviewed same-harness path exists. A possible upstream/native-host bridge to the internal
+Codex media preflight therefore stays **unsupported / `builtin_tool_allowlist_unavailable`**, and the
+plan's media boundary no longer accepts it. The boundary now requires the Claude Code media-only
+reviewer from #1321 PR B (`docs/video-evidence-media-reviewer.md`): driver `claude-code`,
+`claude-opus-5-5` at high effort, profile `claude-code-media-only-v1`, pinned CLI `2.1.296`, exactly
+the `review_video_evidence_frame` and `submit_video_evidence_verdict` tools, a dedicated API key, the
+runner's executable and namespace policy digests, a denied-routes probe digest, and an
+`attestationSha256` equal to the media `capabilitiesSha256` that the certification proof names.
+Every other check is unchanged. A possible upstream/native-host bridge to the internal
 startup hooks requires separate owner coordination, authorization, immutable resume enforcement
 and adversarial denied-route evidence; acceptance preparation does not implement or activate it.
 The proposal now records the inspected native inputs and absent enforcement prerequisites.
@@ -134,16 +140,19 @@ The executable matrix lists actual integrated steering recovery and descendant d
 
 ## Concrete Live Proposal, Awaiting Human Limits and Operator Resources
 
-`scripts/fixtures/full-control-live-plan.json` names the proposed **private** isolated repository
-`picoduck/wollipog-full-control-2939-validation`, synthetic issue #1 and one related follow-up. It
-does not claim that repository exists or that anyone approved creating it. A read-only access
-check could not resolve it with the current account; existence and access remain unverified.
-Operator setup must
-create/verify that exact private destination and sanitized seed issue before the observed campaign,
-or explicitly approve a revised exact plan. Do not use `picoduck/wollipog` for validation effects.
-Seed fixtures and bootstrap effects are disclosed separately from the measured positive campaign.
+The Human decided that the live #2939 run targets `picoduck/wollipog` itself, not an isolated
+sandbox repository, under a Human-set **$200** ceiling. `scripts/fixtures/full-control-live-plan.json`
+records that decision as `repositoryTarget` (`kind: "human_authorized_repository"`,
+`authorizedBy: "human"`, the repository and `costCeilingUsd: 200`). The check admits
+`picoduck/wollipog` only through that explicit target, only when the target names the plan's own
+repository and only while `limits.costUsd` stays within the ceiling. The report then asks for
+`human_repository_target_authorization` instead of `isolated_repository_operator_authorization`.
+A plan without a target still rejects `picoduck/wollipog`, so the isolation check is not weakened
+for any other plan. Agent-authored JSON is not evidence of the Human's decision; the Human still
+confirms it through the authenticated ingress. Seed fixtures and bootstrap effects are disclosed
+separately from the measured positive campaign.
 
-Proposed aggregate admission bounds are **$40 model-priced usage, 1,200 distinct tool calls, two
+Proposed aggregate admission bounds are **$200 model-priced usage, 1,200 distinct tool calls, two
 concurrent descendants/jobs, one accepted follow-up, 180 minutes and six fault attempts**. These
 are proposals, not authority or guaranteed invoice caps. The operator must inspect current official
 pricing, context/frame feasibility, native invalid-attempt cost and stricter Session/organization
@@ -153,8 +162,9 @@ report that concrete refusal rather than silently increasing limits, sampling fr
 external unaccounted reviewer. All positive and fault attempts share the original ledger/allowance.
 
 Root/implementation path: fixed Codex App Server / `gpt-6.1-sol` / high, existing runner-default
-OpenAI account. Proposed media path: a separately admitted, narrowed managed Session on that exact
-provider/model only if its actual capability and namespace probes pass. Native code review remains
+OpenAI account. Media path: the separately admitted Claude Code media-only reviewer
+(`claude-opus-5-5`, high, dedicated runner-local API key) only if its runner attestation and actual
+namespace probes pass and a current Human-recorded live proof certifies that exact attestation. Native code review remains
 Claude Opus 5.5 / high / Read-only using the exact #2936 admitted controller, executable hash, CLI
 version and existing runner-default Claude account. Neither account is provisioned, inspected for
 secrets, copied or changed by this preparation. Provider-account retention and permissions are

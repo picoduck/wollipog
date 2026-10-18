@@ -173,7 +173,9 @@ constructs the review store and runtime, `WorkflowVideoEvidenceApprovals`, `Prep
 `DelegatedVideoReviews` adapters (`delegated-video-reviews.ts`), and passes the prepared-media
 resolver, approvals, permits and dedicated Stop coordinator to `SessionsService`. `attach` then
 connects the Session service and runner hub. Construction creates the durable schema and admits
-nothing. The Full Control launch preflight still reports video as `human_required`.
+nothing. The Full Control launch preflight reports video as `verified` only through
+`launchCertification` (a current proof for an installation on the root's runner) and the conditions in
+`docs/full-control-launch-preparation.md`; without a proof it is `human_required` exactly as before.
 
 Readiness refuses in this order, and every review route returns `409` with the matching code:
 
@@ -296,7 +298,12 @@ Still required before delegated video review can run in production:
 
 - The remaining #1321 integration work tracked on the issue.
 - A Human certification: three inspected live runs recorded through the ingress for the exact
-  attested target.
+  attested target. `docs/video-review-certification-runbook.md` is the exact procedure; its permit
+  and run steps need the PR E stacked on #1321 PR D.
+
+`GET /api/video-evidence/review-status` (owners and admins of the personal organization) reports
+readiness and, for each machine, the first reason it cannot host the media-only reviewer or its
+installation's newest proof state (certified, expired, revoked or missing). Settings shows it.
 
 ## Remaining Integration
 

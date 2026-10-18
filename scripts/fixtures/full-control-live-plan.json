@@ -1,8 +1,12 @@
 {
   "version": 1,
   "status": "proposed",
-  "repository": "picoduck/wollipog-full-control-2939-validation",
-  "objective": "Verify one complete Full Control campaign on synthetic UI issues in a disposable private repository, including one justified related follow-up.",
+  "repository": "picoduck/wollipog",
+  "repositoryTarget": {
+    "kind": "human_authorized_repository", "repository": "picoduck/wollipog", "authorizedBy": "human", "costCeilingUsd": 200,
+    "reason": "The Human chose to run the live #2939 campaign against picoduck/wollipog itself, not an isolated sandbox repository, under a Human-set $200 ceiling."
+  },
+  "objective": "Verify one complete Full Control campaign on synthetic UI issues in the Human-authorized picoduck/wollipog target, including one justified related follow-up.",
   "scope": {
     "originalIssues": [1],
     "relatedFollowUps": 1,
@@ -10,7 +14,7 @@
   },
   "integration": { "reviewedMainSha": null, "mergedPrerequisites": [] },
   "limits": {
-    "costUsd": 40,
+    "costUsd": 200,
     "toolCalls": 1200,
     "concurrency": 2,
     "followUps": 1,
@@ -22,15 +26,14 @@
   "provider": {
     "root": { "driver": "codex-app-server", "model": "gpt-6.1-sol", "effort": "high", "accountProfile": "existing runner-default OpenAI account; operator must verify" },
     "media": {
-      "driver": "codex-app-server", "model": "gpt-6.1-sol", "provider": "OpenAI", "accountProfile": "existing runner-default OpenAI account; operator must verify",
+      "driver": "claude-code", "model": "claude-opus-5-5", "provider": "Anthropic", "accountProfile": "dedicated runner-local media reviewer API key; operator must verify",
       "capabilitiesSha256": null,
       "nativeBoundary": {
-        "driver": "codex-app-server", "effort": "high", "installedVersion": "0.162.1",
-        "executableSha256": "628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1",
-        "schemaSha256": "80a40a7fac15b4bf70efb7f893fb353acc0a0d30c68f54aee4f01923deca85de",
-        "supported": false, "reason": "builtin_tool_allowlist_unavailable",
-        "enforcedProfileRef": null, "deniedRoutesProofSha256": null,
-        "completeToolAllowlist": false, "isolatedContext": false, "immutableResumePolicy": false
+        "profile": "claude-code-media-only-v1", "driver": "claude-code", "effort": "high", "cliVersion": "2.1.296",
+        "executableSha256": null, "namespacePolicySha256": null,
+        "tools": ["review_video_evidence_frame", "submit_video_evidence_verdict"], "credential": "dedicated_api_key",
+        "supported": null, "attestationSha256": null, "deniedRoutesProofSha256": null,
+        "completeToolAllowlist": null, "isolatedContext": null, "immutableResumePolicy": null
       },
       "retentionDisclosure": "Provider-local transcripts/media may retain disclosed synthetic evidence outside Wollipog audit guarantees; actual account retention must be confirmed by the operator."
     },

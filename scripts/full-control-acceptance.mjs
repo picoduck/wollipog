@@ -26,7 +26,7 @@ export const acceptanceMatrix = Object.freeze([
 
 export const liveSteps = Object.freeze([
   "Freeze reviewed integrated main and prerequisite merge commits; verify actual current runtime capabilities.",
-  "Operator establishes disposable services/state and the exact private test repository; never reuse hosting ports or databases.",
+  "Operator establishes disposable services/state and the exact Human-authorized target repository; never reuse hosting ports or databases.",
   "Operator verifies existing account/profile, official prices and stricter limits; authenticate outside the campaign if needed.",
   "Probe the actual media-only reviewer namespace and tools; generate fresh private oracle afterward, outside that namespace.",
   "Complete normal-video candidate/paced/maximum certification under a separately human-authorized metered operator reservation; finish required human inspection/registration before the measured campaign authorization.",
@@ -64,8 +64,16 @@ export function inspectLivePlan(plan) {
   const blockers = [];
   const need = (condition, code) => { if (!condition) blockers.push(code); };
   need(plan?.version === 1 && plan?.status === "proposed", "plan_format");
+  // The hosting repository is never an implicit sandbox. It is admissible only as the explicit
+  // Human-authorized target that names it, with the Human's ceiling covering the plan's allowance.
+  const target = plan?.repositoryTarget;
+  const hostingRepository = text(plan?.repository) && plan.repository.toLowerCase() === "picoduck/wollipog";
+  const authorizedTarget = target?.kind === "human_authorized_repository" && target?.authorizedBy === "human" &&
+    text(target?.repository) && text(plan?.repository) && target.repository.toLowerCase() === plan.repository.toLowerCase() &&
+    positive(target?.costCeilingUsd) && positive(plan?.limits?.costUsd) && plan.limits.costUsd <= target.costCeilingUsd &&
+    text(target?.reason);
   need(text(plan?.repository) && /^[\w.-]+\/[\w.-]+$/u.test(plan.repository) &&
-    plan.repository.toLowerCase() !== "picoduck/wollipog", "isolated_repository");
+    (target === undefined ? !hostingRepository : authorizedTarget), "isolated_repository");
   need(text(plan?.objective), "objective");
   need(Array.isArray(plan?.scope?.originalIssues) && plan.scope.originalIssues.length > 0 &&
     plan.scope.originalIssues.every(integer) && new Set(plan.scope.originalIssues).size === plan.scope.originalIssues.length,
@@ -84,12 +92,18 @@ export function inspectLivePlan(plan) {
   need(["codex-app-server", "claude-code"].includes(plan?.provider?.media?.driver) && text(plan?.provider?.media?.model) &&
     text(plan?.provider?.media?.provider) && text(plan?.provider?.media?.accountProfile) &&
     digest(plan?.provider?.media?.capabilitiesSha256) && text(plan?.provider?.media?.retentionDisclosure), "exact_media_profile_disclosure");
+  // The installed Claude Code media-only reviewer (#1321 PR B): the pinned CLI, exactly the two
+  // scoped media tools and a dedicated key, attested by the runner. Codex cannot prove a media-only
+  // tool allowlist, so it is refused here exactly as the runner refuses it.
   const nativeBoundary = plan?.provider?.media?.nativeBoundary;
-  need(nativeBoundary?.driver === "codex-app-server" && plan?.provider?.media?.driver === "codex-app-server" &&
-    plan?.provider?.media?.model === "gpt-6.1-sol" && nativeBoundary?.effort === "high" &&
-    text(nativeBoundary?.installedVersion) && digest(nativeBoundary?.executableSha256) &&
-    digest(nativeBoundary?.schemaSha256) && nativeBoundary?.supported === true &&
-    text(nativeBoundary?.enforcedProfileRef) && digest(nativeBoundary?.deniedRoutesProofSha256) &&
+  need(nativeBoundary?.profile === "claude-code-media-only-v1" && nativeBoundary?.driver === "claude-code" &&
+    plan?.provider?.media?.driver === "claude-code" && plan?.provider?.media?.model === "claude-opus-5-5" &&
+    nativeBoundary?.effort === "high" && nativeBoundary?.cliVersion === "2.1.296" &&
+    digest(nativeBoundary?.executableSha256) && digest(nativeBoundary?.namespacePolicySha256) &&
+    JSON.stringify(nativeBoundary?.tools) === JSON.stringify(["review_video_evidence_frame", "submit_video_evidence_verdict"]) &&
+    nativeBoundary?.credential === "dedicated_api_key" && nativeBoundary?.supported === true &&
+    digest(nativeBoundary?.attestationSha256) && nativeBoundary.attestationSha256 === plan?.provider?.media?.capabilitiesSha256 &&
+    digest(nativeBoundary?.deniedRoutesProofSha256) &&
     nativeBoundary?.completeToolAllowlist === true && nativeBoundary?.isolatedContext === true &&
     nativeBoundary?.immutableResumePolicy === true, "native_media_boundary");
   need(plan?.provider?.codeReview?.profile === "native_opus_5_5_high_read_only" &&
@@ -115,7 +129,8 @@ export function inspectLivePlan(plan) {
   // A prepared plan cannot activate missing runtime adapters or certify its own approval.
   return { status: "blocked", planComplete: blockers.length === 0, blockers,
     requiredIndependentChecks: ["authenticated_human_envelope", "registered_integrated_adapters", "actual_namespace_enforcement",
-      "actual_media_and_cost_proof", "current_server_capabilities", "isolated_repository_operator_authorization"],
+      "actual_media_and_cost_proof", "current_server_capabilities",
+      target === undefined ? "isolated_repository_operator_authorization" : "human_repository_target_authorization"],
     liveExecutionAvailable: false, releaseAcceptanceProven: false };
 }
 

@@ -704,6 +704,7 @@ export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
+export * from "./video-review-settings.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
@@ -2693,6 +2694,11 @@ export interface OrchestratorCampaignProjection {
     costBudgetUsd: number | null;
     maxToolCalls: number | null;
   };
+  /** Delegated video evidence review for this Full Control campaign (#1321): `available` only while
+   * its Orchestrator can hand video to a certified media-only reviewer, otherwise the first reason it
+   * cannot. Absent from servers without video review and from Custom campaigns; each gate still
+   * rechecks its own child, source and audience. */
+  videoEvidenceReview?: { status: "available" | "unavailable"; reason: string };
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;

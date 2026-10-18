@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { isTerminal, mediaActiveStopIdentityBody, mediaReviewerAttestationBody, pacedVideoReviewWindowPlan, PACED_VIDEO_REVIEW_WINDOW_LIMITS,
+import { isTerminal, mediaActiveStopIdentityBody, mediaReviewerAttestationBody, pacedVideoReviewWindowPlan, PACED_VIDEO_REVIEW_MIN_PROTOCOL, PACED_VIDEO_REVIEW_WINDOW_LIMITS,
   supportsPacedVideoReviewPeer, type ClaudeMediaReviewerAttestation, type CreateSessionRequest, type MediaActiveStopIdentity,
   type MediaActiveStopRequest, type MediaNeverDispatchedFence, type MediaReviewDispatchReceipt, type MediaReviewFinished,
-  type SessionView, type WorkflowDecisionView } from "@wollipog/protocol";
+  type SessionView, type VideoReviewerInstallationGap, type WorkflowDecisionView } from "@wollipog/protocol";
 import { RUNNER_REPORTED_STOP, sessionStopRestorable, type ControlPlaneDb } from "./db.js";
 import { EvidenceReviewBudgetProvenance } from "./evidence-review-budget-provenance.js";
 import type { EvidenceReviewService, EvidenceReviewServiceAdapter, ResolvedVideoReviewRequest } from "./evidence-review-service.js";
@@ -157,6 +157,35 @@ export function mediaReviewerInstallations(db: ControlPlaneDb, runnerId?: string
         contract: agent.capabilities!.pacedVideoReviewContract, attestation: agent.capabilities!.mediaReviewerAttestation! })));
 }
 
+const GAP_REASONS: Record<VideoReviewerInstallationGap, string> = {
+  no_claude_code_agent: "This machine has no native Claude Code agent, the only harness that can host the media-only reviewer.",
+  runner_protocol: "This machine's Wollipog is too old to advertise the paced video review contract; update it.",
+  no_attestation: "Its Claude Code agent has no media-only reviewer attestation. Install the pinned Claude Code CLI, provision the dedicated reviewer API key and restart the runner.",
+  reviewer_model: `Its Claude Code agent does not offer ${VIDEO_REVIEWER_MODEL} at ${VIDEO_REVIEWER_EFFORT} effort.`,
+};
+
+/** Every native Claude Code agent on every registered runner, with the first reason it cannot
+ * host the media-only reviewer, in the same order `mediaReviewerInstallations` checks. */
+export function mediaReviewerInstallationGaps(db: ControlPlaneDb) {
+  return db.listRunners().flatMap((runner) => {
+    const agents = runner.agents.filter((agent) => agent.driver === "claude-code" && (agent.context?.kind ?? "native") === "native");
+    const row = (agentId: string | null, code: VideoReviewerInstallationGap | null) => ({ runnerId: runner.runnerId,
+      machineName: runner.displayName ?? runner.hostname, agentId, gap: code ? { code, reason: GAP_REASONS[code] } : null });
+    if (!agents.length) return [row(null, "no_claude_code_agent")];
+    return agents.map((agent) => {
+      const capabilities = agent.capabilities;
+      if (!runner.protocolVersion || runner.protocolVersion < PACED_VIDEO_REVIEW_MIN_PROTOCOL) return row(agent.id, "runner_protocol");
+      if (!supportsPacedVideoReviewPeer(runner.protocolVersion, capabilities?.pacedVideoReviewContract) ||
+        !validAttestation(capabilities?.mediaReviewerAttestation) || capabilities.mediaReviewerAttestation.agentId !== agent.id) {
+        return row(agent.id, "no_attestation");
+      }
+      if (!(capabilities.models ?? []).some((model) => model.id === VIDEO_REVIEWER_MODEL) ||
+        !(capabilities.effortLevels ?? []).includes(VIDEO_REVIEWER_EFFORT)) return row(agent.id, "reviewer_model");
+      return row(agent.id, null);
+    });
+  });
+}
+
 /** The reviewer target for a campaign root: an attested installation on the root's own runner (a
  * managed worker must share it), under a provider the Human evidence authority disclosed. A proof
  * certifies one exact installation, so one with a current proof is preferred; otherwise the first
@@ -168,12 +197,17 @@ export function rootReviewerTarget(db: ControlPlaneDb, root: SessionView,
   const provider = authority?.providers.find((p) => p.reviewers.some((r) => r.driver === "claude-code" && r.modelId === VIDEO_REVIEWER_MODEL));
   if (!provider) return null;
   const targets = mediaReviewerInstallations(db, root.runnerId).filter((installation) => agentId === undefined ||
-    installation.agentId === agentId).map((installation): EvidenceReviewerTarget => ({
-    agentId: installation.agentId, driver: "claude-code", modelId: VIDEO_REVIEWER_MODEL, effort: VIDEO_REVIEWER_EFFORT,
-    providerId: provider.providerId, runnerId: installation.runnerId, runnerProtocolVersion: installation.protocolVersion,
-    pacedVideoReviewContract: installation.contract, capabilitiesSha256: mediaReviewerAttestationSha256(installation.attestation),
-    auditedAllFrameDelivery: true, reviewerNamespaceSha256: installation.attestation.namespacePolicySha256, mediaOnlyNamespaceVerified: true }));
+    installation.agentId === agentId).map((installation) => installationReviewerTarget(installation, provider.providerId));
   return targets.find(proven) ?? targets[0] ?? null;
+}
+
+/** The exact reviewer target an attested installation presents under one disclosed provider. */
+export function installationReviewerTarget(installation: ReturnType<typeof mediaReviewerInstallations>[number],
+  providerId: string): EvidenceReviewerTarget {
+  return { agentId: installation.agentId, driver: "claude-code", modelId: VIDEO_REVIEWER_MODEL, effort: VIDEO_REVIEWER_EFFORT,
+    providerId, runnerId: installation.runnerId, runnerProtocolVersion: installation.protocolVersion,
+    pacedVideoReviewContract: installation.contract, capabilitiesSha256: mediaReviewerAttestationSha256(installation.attestation),
+    auditedAllFrameDelivery: true, reviewerNamespaceSha256: installation.attestation.namespacePolicySha256, mediaOnlyNamespaceVerified: true };
 }
 
 const reviewerPrompt = (criteria: readonly VideoReviewCriterion[]) => [
@@ -461,6 +495,13 @@ export class DelegatedVideoReviews {
 
   readonly gateAccess: WorkflowVideoEvidenceAccess = {
     available: (controller) => this.ready && this.readyFor(controller),
+    campaignReadiness: (controller) => {
+      if (!this.ready) return { available: false, reason: "Wollipog's video review service is not attached yet." };
+      const target = this.target(controller);
+      if (!target) return { available: false, reason: `this campaign's evidence envelope names no attested ${VIDEO_REVIEWER_MODEL} media-only reviewer on the Orchestrator's machine.` };
+      return validVideoLiveProof(this.liveValidation.current(target), target, this.clock()) ? { available: true }
+        : { available: false, reason: "no current live proof certifies the media-only reviewer on the Orchestrator's machine." };
+    },
     decisionCurrent: (decision, phase) => {
       const gate = this.attached?.sessions.delegatedVideoGate(decision.occurrenceId, [phase === "resolve" ? "pending" : "approved"]);
       return Boolean(gate && gate.decision.status === decision.status && gate.decision.resourceDigest === decision.resourceDigest &&

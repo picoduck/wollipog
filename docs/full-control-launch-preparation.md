@@ -70,7 +70,12 @@ Each capability is `verified`, `unsupported` (blocks launch, with an actionable 
 `human_required` (a disclosed exception routing that decision class to the Human). Repository
 scope, the authority contract, accounting/budget, controlled review and the runner's enforced
 execution isolation are mandatory. Screenshot review is delegated when the Orchestrator can review
-images; video and external evidence are Human Required until #1321.
+images. External evidence is always Human Required. Video is Human Required exactly as before
+unless a current Human-recorded live proof certifies an attested media-only reviewer on the root's
+runner (#1321). With one, video is `verified` only when the launch also mints the evidence envelope
+for that exact reviewer: UI Evidence Approval is delegated, the root is an attested Claude Code agent
+that declares the paced video contract, at the certified model, with provider disclosures and the
+video review adapters attached and no blocker. Otherwise the row names the first missing condition.
 
 Admission requires request identity and the exact reviewed digest. The preflight is computed
 from facts re-read after the runner inspection, and admission creates the root synchronously from
