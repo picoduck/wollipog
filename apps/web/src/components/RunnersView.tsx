@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { State, useSnapshotState } from "./State.js";
 import { TabList } from "./Tabs.js";
 import {
@@ -46,7 +46,9 @@ import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
 import { agentDisplayName, agentDriverDescription, agentDriverLabel } from "../agent-presentation.js";
 import {
   ChevronRightIcon,
+  CommandLineIcon,
   InfoIcon,
+  NetworkIcon,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
@@ -64,7 +66,8 @@ import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettin
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { formatHarnessLaunchCommand } from "../harness-command.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
-import { PageHeader, type PageAction } from "./PageHeader.js";
+import { PageHeader, type PageHeaderActions } from "./PageHeader.js";
+import { useIsMobile } from "./useIsMobile.js";
 import { useInstances } from "../instances-context.js";
 import { destination, type ConnectionSection } from "../navigation.js";
 import {
@@ -1574,6 +1577,107 @@ export function NativeRunnerCard({
   );
 }
 
+/** One way to connect a machine: an item of the Add Machine menu and a row of the empty Machines tab. */
+export interface AddMachineMethod {
+  id: "local" | "ssh" | "manual";
+  /** The menu item, with the ellipsis of a command that opens a dialog (§17). */
+  label: string;
+  /** The empty tab's row title and its button. */
+  title: string;
+  action: string;
+  /** One line under the label or the title (§9.1). */
+  description: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+}
+
+/**
+ * The ways to connect a machine, in the order offered: This Machine only where local setup is
+ * offered today (`offerLocalSetup`), then SSH, then a manual install. The first is the empty tab's
+ * primary, so the desktop app with a bundled runner leads with This Machine and the web app with SSH.
+ */
+export function addMachineMethods({ offerLocalSetup, localRunnerEnabled, onLocal, onSsh, onManual }: {
+  offerLocalSetup: boolean;
+  /** The local runner is enabled but offline: This Machine reconnects it rather than setting it up. */
+  localRunnerEnabled: boolean;
+  onLocal: () => void;
+  onSsh: () => void;
+  onManual: () => void;
+}): AddMachineMethod[] {
+  const local = localRunnerEnabled ? "Reconnect This Machine" : "Set Up This Machine";
+  return [
+    ...(offerLocalSetup ? [{
+      id: "local" as const,
+      label: `${local}…`,
+      title: "This Machine",
+      action: local,
+      description: "Use the runner built into the Wollipog desktop app.",
+      icon: <ComputerIcon />,
+      onClick: onLocal,
+    }] : []),
+    {
+      id: "ssh",
+      label: "Connect via SSH…",
+      title: "Over SSH",
+      action: "Connect via SSH",
+      description: "Wollipog installs and starts the runner for you over SSH.",
+      icon: <NetworkIcon />,
+      onClick: onSsh,
+    },
+    {
+      id: "manual",
+      label: "Install Manually…",
+      title: "Manual Install",
+      action: "Install Manually",
+      description: "Run the runner yourself on any machine with Node.js.",
+      icon: <CommandLineIcon />,
+      onClick: onManual,
+    },
+  ];
+}
+
+/**
+ * The Machines tab before its first machine (§12.1): one top-left state that owns the create
+ * actions, so the header hides Add Machine, and under it one row per method with the first as the
+ * primary. A viewer gets the sentence and no rows.
+ */
+function EmptyMachines({ methods, sentence }: { methods: AddMachineMethod[]; sentence: string }) {
+  return (
+    <State
+      className="connections-empty"
+      icon={<ComputerIcon />}
+      title="No Machines Yet"
+      actions={methods.length > 0 ? (
+        <div className="surface">
+          {methods.map((method, index) => (
+            <div className="row row-2 add-machine-method" key={method.id}>
+              <span className="row-icon" aria-hidden="true">{method.icon}</span>
+              <span className="row-body">
+                <span className="row-title">{method.title}</span>
+                <span className="row-sub">{method.description}</span>
+              </span>
+              <button type="button" className={index === 0 ? "btn primary" : "btn"} onClick={method.onClick}>
+                {method.action}
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : undefined}
+    >
+      {sentence}
+    </State>
+  );
+}
+
+/**
+ * Each tab's page container (§4.5). Every tab is a `.page` for now; the Machines master-detail
+ * (#2985) takes `.page.full.fill`. The header sits inside the container either way, so the title
+ * and the tabs keep the content's left edge on every tab.
+ */
+function connectionsPageClass(_section: ConnectionSection): string {
+  return "page";
+}
+
 export function RunnersView() {
   const api = useApi();
   const { runners, boxes, view, navigate } = useStore();
@@ -1589,8 +1693,12 @@ export function RunnersView() {
   const [removeError, setRemoveError] = useState<Record<string, string>>({});
   const [identity, setIdentity] = useState<IdentityAdministrationView | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
+  // Instances is a desktop-app feature with nothing to do on a phone, so a narrowed window drops the
+  // tab as the one-instance app does, and its route lands on Machines in place.
+  const isMobile = useIsMobile();
+  const instancesTab = instances.desktopMultiInstance && !isMobile;
   const requestedSection = view.name === "runners" ? view.section ?? "machines" : "machines";
-  const section: ConnectionSection = !instances.desktopMultiInstance && requestedSection === "instances"
+  const section: ConnectionSection = !instancesTab && requestedSection === "instances"
     ? "machines"
     : requestedSection;
   const identityRole = identity?.context.role ?? null;
@@ -1598,17 +1706,21 @@ export function RunnersView() {
   const canManageProfiles = canManageProviderProfiles(identity?.context);
   const selectSection = (next: ConnectionSection) => navigate({ name: "runners", section: next });
   useEffect(() => {
-    if (!instances.desktopMultiInstance && requestedSection === "instances") {
-      navigate({ name: "runners", section: "machines" });
+    if (!instancesTab && requestedSection === "instances") {
+      navigate({ name: "runners", section: "machines" }, { replace: true });
     }
-  }, [instances.desktopMultiInstance, navigate, requestedSection]);
+  }, [instancesTab, navigate, requestedSection]);
 
+  // Only the latest load answers: an earlier one that fails after a Retry has succeeded must not
+  // bring the failure notice back.
+  const accessLoad = useRef(0);
   const loadMachineAccess = () => {
+    const load = ++accessLoad.current;
     setIdentityError(null);
     void api.getIdentity().then((nextIdentity) => {
-      setIdentity(nextIdentity);
+      if (load === accessLoad.current) setIdentity(nextIdentity);
     }).catch((error) => {
-      setIdentityError(error instanceof Error ? error.message : String(error));
+      if (load === accessLoad.current) setIdentityError(error instanceof Error ? error.message : String(error));
     });
   };
   useEffect(loadMachineAccess, [api]);
@@ -1687,42 +1799,51 @@ export function RunnersView() {
     }
     setRepairRunnerId(runnerId);
   };
+  // "local" onboarding drives the desktop bridge, whose runner credential and socket work is
+  // hard-coded to the loopback control plane, so on a remote instance it would set up a machine the
+  // page in front of you does not show, and could overwrite the local runner while doing it.
   const offerLocalSetup = Boolean(
     localInstanceActive && localRunnerStatus?.available && (!localRunnerStatus.enabled || !localRunnerOnline),
   );
-  // The Machines tab's create actions are the page header's (§3.3): This Machine is the primary when
-  // it can be set up here, otherwise SSH is.
-  const connectSsh: PageAction = { label: "Connect via SSH", onClick: () => setAddingBox(true) };
-  const addRunner: PageAction = {
-    label: localInstanceActive && bundledLocalRunner
-      ? localRunnerStatus?.enabled ? "Add Another Runner" : "Advanced Runner Setup"
-      : "Add Native Runner",
-    onClick: () => setOnboarding("manual"),
-  };
-  const machineActions = canManageMachines && section === "machines" ? offerLocalSetup ? {
-    primary: {
-      label: localRunnerStatus?.enabled ? "Reconnect This Machine" : "Set Up This Machine",
-      onClick: () => setOnboarding("local"),
-    },
-    secondary: [addRunner, connectSsh],
-  } : { primary: connectSsh, secondary: [addRunner] } : {};
+  const methods = addMachineMethods({
+    offerLocalSetup,
+    localRunnerEnabled: Boolean(localRunnerStatus?.enabled),
+    onLocal: () => setOnboarding("local"),
+    onSsh: () => setAddingBox(true),
+    onManual: () => setOnboarding("manual"),
+  });
 
   const total = runnerList.length + boxList.length;
+  // An empty machine list proves nothing before the first snapshot or while disconnected.
+  const machinesEmpty = total === 0 && !snapshot.offline && !snapshot.loading;
+  // Each tab supplies the header's actions (§3.3). Only owners and admins add machines, and while the
+  // tab is empty its state offers the same methods, so the header does not repeat them (§12.1).
+  const tabActions = (tab: ConnectionSection): PageHeaderActions => {
+    if (tab === "machines" && canManageMachines && !machinesEmpty) {
+      return {
+        primary: {
+          label: "Add Machine",
+          items: methods.map(({ label, description, onClick }) => ({ label, description, onClick })),
+        },
+      };
+    }
+    return {};
+  };
   const sections: Array<{ id: ConnectionSection; label: React.ReactNode }> = [
-    ...(instances.desktopMultiInstance
+    { id: "machines", label: <>Machines <span className="count">{total}</span></> },
+    ...(instancesTab
       ? [{ id: "instances" as const, label: <>Instances <span className="count">{instances.registry.profiles.length}</span></> }]
       : []),
-    { id: "machines", label: <>Machines <span className="count">{total}</span></> },
-    { id: "people", label: <>People &amp; Devices</> },
+    { id: "people", label: <>People and Devices</> },
   ];
   return (
-    <div className="page">
+    <div className={connectionsPageClass(section)}>
       {/* The tabs sit in the page header's tab slot (§4.2, §10.1), under its title and actions. */}
       <PageHeader
         title={destination("runners").name}
-        {...machineActions}
+        {...tabActions(section)}
         tabs={(
-          <TabList label="Connection Settings" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
+          <TabList label="Connections" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
             {sections.map((item) => (
               <button
                 key={item.id}
@@ -1775,48 +1896,33 @@ export function RunnersView() {
         aria-labelledby="connections-machines-tab"
         className="connections-panel"
       >
-        <div className="toolbar">
-          <span className="muted">
-            {total} Machine{total === 1 ? "" : "s"}
-          </span>
-        </div>
         {identityError && (
-          <div className="connection-access-error" role="alert">
-            Machine management permissions could not be loaded: {identityError}
-            <button type="button" className="btn ghost sm" onClick={loadMachineAccess}>Retry</button>
-          </div>
+          <Notice
+            compact
+            tone="danger"
+            role="alert"
+            title="Couldn't Load Machine Permissions"
+            actions={<button type="button" className="btn sm" onClick={loadMachineAccess}>Retry</button>}
+            details={identityError}
+          />
         )}
-        {total === 0 && (snapshot.offline || snapshot.loading) ? (
-          // An empty machine list proves nothing before the first snapshot or while disconnected.
+        {total === 0 && !machinesEmpty ? (
           <State variant={snapshot.offline ? "offline" : "loading"}>
             {snapshot.offline ? "Reconnecting…" : "Loading machines…"}
           </State>
-        ) : total === 0 ? (
-          <State
-            icon={<ComputerIcon />}
-            title="No Machines Connected"
-            // Only where the user CAN act. A viewer without machine-management rights is told to
-            // ask an admin, and offering them a button that fails is worse than offering none —
-            // §11.3's rule about disabled controls carrying a reason, applied to an empty state.
-            // And only the action the toolbar would offer HERE. "local" onboarding drives the
-            // desktop bridge, whose runner credential and socket work is hard-coded to the loopback
-            // control plane — so on a remote instance it set up a machine the empty screen in front
-            // of you does not show, and could overwrite the local runner while doing it. The gate is
-            // `offerLocalSetup`, the same one the toolbar uses.
-            actions={!canManageMachines ? undefined : offerLocalSetup
-              ? <button type="button" className="btn primary" onClick={() => setOnboarding("local")}>
-                  {localRunnerStatus?.enabled ? "Reconnect This Machine" : "Set Up This Machine"}
-                </button>
-              : <button type="button" className="btn primary" onClick={() => setAddingBox(true)}>Connect via SSH</button>}
-          >
-            {canManageMachines ? (
-              <>Connect via SSH or add a native runner to start working on this dashboard.</>
-            ) : identityRole ? (
-              <>Ask an organization owner or admin to connect a machine.</>
-            ) : (
-              <>Loading machine access…</>
-            )}
-          </State>
+        ) : machinesEmpty ? (
+          <EmptyMachines
+            // Only where the person can act: a viewer is told whom to ask, since a button that fails
+            // is worse than none (§11.3, applied to an empty state).
+            methods={canManageMachines ? methods : []}
+            sentence={canManageMachines
+              ? "Wollipog runs agents on machines you connect. Choose how to connect the first one."
+              : identityRole
+              ? "Ask an organization owner or admin to connect a machine."
+              : identityError
+              ? "Wollipog runs agents on machines you connect."
+              : "Loading machine access…"}
+          />
         ) : <div className="runner-grid">
         {boxList.map((box) => (
           <BoxCard

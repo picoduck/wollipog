@@ -581,9 +581,19 @@ export interface NavigationWindow {
   removeEventListener(type: "popstate", listener: () => void): void;
 }
 
+export interface NavigateOptions {
+  /**
+   * Replace the current history entry instead of adding one: for a route that cannot be shown here
+   * and lands somewhere else (Connections › Instances on a phone), so Back does not return to it.
+   */
+  replace?: boolean;
+}
+
 export interface ViewNavigation {
   current(): View;
   push(view: View): void;
+  /** Absent in a harness that only records pushes; the store pushes instead. */
+  replace?(view: View): void;
   /** Browser Back and Forward. A move that can be held comes with its traversal (#3218). */
   listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void;
   activate?(view: View): void;
@@ -616,6 +626,11 @@ export class BrowserNavigation implements ViewNavigation {
     const path = viewPath(view);
     if (`${this.target.location.pathname}${this.target.location.search}` === path && !this.target.location.hash) return;
     this.positions.push(path);
+  }
+
+  replace(view: View): void {
+    // The entry keeps its state, and with it its history position.
+    this.target.history.replaceState(this.target.history.state, "", viewPath(view));
   }
 
   listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void {

@@ -326,9 +326,11 @@ test("a remote instance with no machines is not offered local setup", async () =
   await act(async () => { socket.push(snapshot({ runners: [], boxes: [] })); });
   await act(async () => { await Promise.resolve(); });
 
-  const action = container.querySelector(".state .actions button") as unknown as HTMLButtonElement | null;
-  assert.ok(action, "an owner looking at an empty remote instance is still offered a way to add a machine");
-  assert.equal((action!.textContent ?? "").trim(), "Connect via SSH");
+  const buttons = [...container.querySelectorAll(".add-machine-method .btn")] as unknown as HTMLButtonElement[];
+  assert.deepEqual(buttons.map((button) => (button.textContent ?? "").trim()), ["Connect via SSH", "Install Manually"],
+    "an owner looking at an empty remote instance is offered SSH first, and never This Machine");
+  const action = buttons[0]!;
+  assert.ok(action.classList.contains("primary"), "SSH is the primary where local setup is not offered");
 
   await act(async () => { fireDomEvent.click(action as never); });
   // The local-onboarding dialog names This Machine; the SSH dialog does not.

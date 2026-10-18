@@ -11,14 +11,14 @@ const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
 test("Connections separates machines from people and exposes durable machine recovery", () => {
   // The shared tab row (§10.1) owns role="tablist"; it sits in the page header's tab slot.
-  assert.match(view, /tabs=\{\(\s*<TabList label="Connection Settings"/);
+  assert.match(view, /tabs=\{\(\s*<TabList label="Connections"/);
   assert.match(view, /aria-controls=\{`connections-\$\{item\.id\}-panel`\}/);
   assert.match(view, /handleRovingChoiceKeyDown\(event, "tab"\)/);
   assert.match(view, /id: "instances" as const/);
   assert.match(view, /<InstancesPanel \/>/);
   assert.match(view, /id: "machines", label: <>Machines/);
-  assert.match(view, /id: "people", label: <>People &amp; Devices/);
-  assert.match(view, /instances\.desktopMultiInstance/);
+  assert.match(view, /id: "people", label: <>People and Devices/);
+  assert.match(view, /const instancesTab = instances\.desktopMultiInstance && !isMobile/);
   assert.match(view, /<PeopleDevicesPanel identity=\{identity\}/);
   assert.match(view, /Repair Credentials/);
   assert.match(view, /canRepair=\{canManage\}/);

@@ -47,7 +47,7 @@ import {
   recordSessionActivity,
   type SessionActivity,
 } from "./activity.js";
-import { BrowserNavigation, sameView, viewFromNotificationMessage, type View, type ViewNavigation } from "./navigation.js";
+import { BrowserNavigation, sameView, viewFromNotificationMessage, type NavigateOptions, type View, type ViewNavigation } from "./navigation.js";
 import { defaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
 import { interceptLeave, interceptTraversal } from "./leave-guard.js";
 import type { HistoryTraversal } from "./history-position.js";
@@ -1756,7 +1756,7 @@ function initialState(
 
 interface StoreValue extends State {
   dispatch: Dispatch<Action>;
-  navigate: (view: View) => void;
+  navigate: (view: View, options?: NavigateOptions) => void;
   setInboxPersistenceEnabled: (enabled: boolean) => void;
   setInboxSelection: (sessionId: string | null, splitKey?: string | null, persist?: boolean, repair?: boolean) => void;
   setInboxSplit: (splitKey: string | null, persist?: boolean) => void;
@@ -1888,7 +1888,7 @@ export class Store {
 
   constructor(
     initialView: View = { name: "inbox" },
-    private readonly onNavigate?: (view: View) => void,
+    private readonly onNavigate?: (view: View, options?: NavigateOptions) => void,
     private readonly instanceScope = LOCAL_INSTANCE_SCOPE,
     private readonly inboxStorage?: KeyValueStorage,
   ) {
@@ -2255,17 +2255,17 @@ export class Store {
     }
     return { view, activation: false };
   }
-  navigate = (view: View): void => {
+  navigate = (view: View, options?: NavigateOptions): void => {
     const { view: activated, activation } = this.activate(view);
     if (sameView(this.state.view, activated)) {
       if (activation) this.dispatch({ type: "navigate", view: activated });
       return;
     }
     // An editor with unsaved changes asks first (leave-guard.ts), and navigates here itself if the
-    // person chooses to leave.
-    if (interceptLeave(() => this.navigate(view))) return;
+    // person chooses to leave. A replace corrects a route that cannot be shown, so nothing is left.
+    if (!options?.replace && interceptLeave(() => this.navigate(view))) return;
     this.dispatch({ type: "navigate", view: activated });
-    this.onNavigate?.(activated);
+    this.onNavigate?.(activated, options);
   };
   navigateFromHistory = (view: View, traversal?: HistoryTraversal): void => {
     const { view: activated, activation } = this.activate(view);
@@ -2860,7 +2860,9 @@ export function StoreProvider({
     const navigation = navigationRef.current;
     storeRef.current = new Store(
       navigation?.current(),
-      navigation ? (view) => navigation.push(view) : undefined,
+      navigation
+        ? (view, options) => options?.replace && navigation.replace ? navigation.replace(view) : navigation.push(view)
+        : undefined,
       connection.instanceId,
     );
   }

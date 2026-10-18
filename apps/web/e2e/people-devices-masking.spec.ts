@@ -126,17 +126,17 @@ async function identityRequests(page: Page): Promise<number> {
   return page.evaluate(() => window.__WOLLIPOG_PEOPLE_DEVICES_E2E__.identityRequests());
 }
 
-/** Open the fixture on the People & Devices tab and wait for the panel's own refresh to settle. */
+/** Open the fixture on the People and Devices tab and wait for the panel's own refresh to settle. */
 async function openPeopleDevices(page: Page): Promise<void> {
   await page.goto(FIXTURE);
-  await expect(page.getByRole("tab", { name: "People & Devices" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "People and Devices" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("region", { name: "Paired Devices" }).getByText("Pat's Phone")).toBeVisible();
 }
 
-/** Leave People & Devices for Machines through the production tabs, then come back. */
+/** Leave People and Devices for Machines through the production tabs, then come back. */
 async function leaveAndReturn(page: Page, via: "pointer" | "keyboard", whileAway?: () => Promise<void>) {
   const machinesTab = page.getByRole("tab", { name: "Machines" });
-  const peopleTab = page.getByRole("tab", { name: "People & Devices" });
+  const peopleTab = page.getByRole("tab", { name: "People and Devices" });
   if (via === "keyboard") {
     await peopleTab.focus();
     await page.keyboard.press("ArrowLeft");

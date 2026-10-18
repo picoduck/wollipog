@@ -103,7 +103,7 @@ export function PairingBanner({
     >
       {nativePairingFailure
         ? "This app couldn't pair itself with Wollipog. Retry pairing, or paste a pairing link or token here."
-        : "Pair this device to use Wollipog: open a pairing link on it, or paste the link or token here. An owner or admin can create one in Connections › People & Devices."}
+        : "Pair this device to use Wollipog: open a pairing link on it, or paste the link or token here. An owner or admin can create one in Connections › People and Devices."}
       {/* The banner is the live region; a nested alert would announce the error twice. */}
       {error && <p className="notice-error">{error}</p>}
       {submitted && !error && !connecting && (

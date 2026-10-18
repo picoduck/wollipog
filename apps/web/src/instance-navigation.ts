@@ -133,6 +133,11 @@ export class DesktopInstanceNavigation implements ViewNavigation {
     this.positions.push(path);
   }
 
+  replace(view: View): void {
+    saveLastInstanceView(this.instanceId, view);
+    this.replaceAlias(view);
+  }
+
   listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void {
     const onPopState = () => {
       const scoped = instanceRouteFromPath(this.target.location.pathname, this.target.location.search);

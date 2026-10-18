@@ -26,7 +26,7 @@ const dialogs: Array<{ name: string; open: (page: Page) => Promise<Locator> }> =
       } }));
       await page.goto("/machine-management-e2e.html");
       await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
-      await choosePageAction(page, "Add Native Runner");
+      await choosePageAction(page, "Install Manually…", "Add Machine");
       return page.getByRole("dialog", { name: "Add a Runner" });
     },
   },
