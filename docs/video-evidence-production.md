@@ -298,7 +298,12 @@ Still required before delegated video review can run in production:
 
 - The remaining #1321 integration work tracked on the issue.
 - A Human certification: three inspected live runs recorded through the ingress for the exact
-  attested target.
+  attested target. `docs/video-review-certification-runbook.md` is the exact procedure; its permit
+  and run steps need the PR E stacked on #1321 PR D.
+
+`GET /api/video-evidence/review-status` (owners and admins of the personal organization) reports
+readiness and, for each machine, the first reason it cannot host the media-only reviewer or its
+installation's newest proof state (certified, expired, revoked or missing). Settings shows it.
 
 ## Remaining Integration
 
