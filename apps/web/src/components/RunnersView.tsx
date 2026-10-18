@@ -1791,8 +1791,15 @@ export function RunnersView() {
   const reconnectBox = async (boxId: string, force: boolean) => {
     await api.reconnectBox(boxId, force);
   };
+  // A deleted machine's route is gone too: the tab returns to the list in its place, so Back never
+  // lands on it, and the first row or the empty state follows (§6.1).
+  const leaveDeletedMachine = (runnerId: string) => {
+    if (machineId === runnerId) navigate({ name: "runners", section: "machines" }, { replace: true });
+  };
   const removeBox = async (boxId: string) => {
     await api.removeBox(boxId);
+    const runnerId = [...boxes.values()].find((box) => box.boxId === boxId)?.runnerId;
+    if (runnerId) leaveDeletedMachine(runnerId);
   };
   const dialogs = (
     <>
@@ -1817,7 +1824,10 @@ export function RunnersView() {
         <MachineSettingsDialog
           runner={runners.get(settingsRunnerId)}
           onClose={() => setSettingsRunnerId(null)}
-          onDelete={() => api.removeRunner(settingsRunnerId)}
+          onDelete={async () => {
+            await api.removeRunner(settingsRunnerId);
+            leaveDeletedMachine(settingsRunnerId);
+          }}
           capacityOnly={!canManageMachines}
         />
       )}
@@ -1850,8 +1860,10 @@ export function RunnersView() {
   });
 
   const total = machines.length;
-  // An empty machine list proves nothing before the first snapshot or while disconnected.
-  const machinesEmpty = total === 0 && !snapshot.offline && !snapshot.loading;
+  // An empty machine list proves nothing before the first snapshot or while disconnected. A route
+  // that names a machine keeps its detail: the first machine is arriving after Connect via SSH, or
+  // the link is to one that no longer exists (§6.1).
+  const machinesEmpty = total === 0 && !snapshot.offline && !snapshot.loading && machineId === null;
   // Each tab supplies the header's actions (§3.3). Only owners and admins add machines, and while the
   // tab is empty its state offers the same methods, so the header does not repeat them (§12.1).
   const tabActions = (tab: ConnectionSection): PageHeaderActions => {

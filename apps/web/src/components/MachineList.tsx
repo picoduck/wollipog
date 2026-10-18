@@ -83,7 +83,7 @@ export function MachineList({ entries, selectedId, onSelect, stale, bodyRef, onB
           </div>
         ) : (
           <StaleContent stale={stale}>
-            {shown.length === 0 ? (
+            {entries.length === 0 ? null : shown.length === 0 ? (
               <State
                 variant="no-results"
                 compact

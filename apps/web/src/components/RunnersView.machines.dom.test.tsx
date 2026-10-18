@@ -439,6 +439,49 @@ test("on a phone, a row opens the detail route under Back and the machine's name
   }
 });
 
+test("connecting the first machine leaves the empty state for its waiting detail, and an unknown id there is Not Found", async () => {
+  const arriving: BoxView = { boxId: "box-first", runnerId: "box-first-runner", displayName: "First Box", sshTarget: "me@first", status: "bootstrapping", lastError: null, createdAt: 2 };
+  const view = await mount({ runners: [], client: { addBox: async () => ({ box: arriving }) } as Partial<ApiClient> });
+  try {
+    const empty = view.body.querySelector(".connections-empty")!;
+    assert.ok(empty, "no machines: the empty state spans both panes");
+    await act(async () => [...empty.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Connect via SSH")!.click());
+    const dialog = view.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    const label = [...dialog.querySelectorAll("label")].find((candidate) => candidate.textContent === "SSH Target")!;
+    const target = domWindow.document.getElementById(label.htmlFor) as unknown as HTMLInputElement;
+    await act(async () => fireDomEvent.change(target, { target: { value: "me@first" } }));
+    await act(async () => [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Connect Machine")!.click());
+    await settle();
+    assert.deepEqual(view.history.pushed.at(-1), { name: "runners", section: "machines", machineId: "box-first-runner" });
+    // The box has not streamed in yet.
+    assertNoDomNode(view.body.querySelector(".connections-empty"), "No Machines Yet steps aside for the selection");
+    assert.ok(detail(view.body).querySelector(".detail-skeleton"), "the detail waits for the new machine");
+    assert.doesNotMatch(detail(view.body).textContent ?? "", /Machine Not Found/);
+    assert.equal(rows(view.body).length, 0);
+    assertNoDomNode(list(view.body).querySelector(".machine-list-no-results"), "an empty list is not a filter with no match");
+
+    await view.push({ type: "box_upsert", box: arriving });
+    assert.equal(detailName(view.body), "First Box");
+    assert.ok(row(view.body, "First Box").classList.contains("is-selected"));
+  } finally {
+    await view.unmount();
+  }
+
+  const unknown = await mount({ runners: [], view: { name: "runners", section: "machines", machineId: "gone" } });
+  try {
+    assertNoDomNode(unknown.body.querySelector(".connections-empty"));
+    assert.match(detail(unknown.body).textContent ?? "", /Machine Not Found/);
+    await act(async () => [...detail(unknown.body).querySelectorAll("button")]
+      .find((button) => button.textContent === "Show All Machines")!.click());
+    await settle();
+    assert.ok(unknown.body.querySelector(".connections-empty"), "Show All Machines returns to the empty state");
+  } finally {
+    await unknown.unmount();
+  }
+});
+
 test("connecting a machine over SSH selects it, and its detail waits for it rather than saying Not Found (#2987)", async () => {
   const arriving: BoxView = { boxId: "box-new", runnerId: "box-new-runner", displayName: "Golf Sim", sshTarget: "me@golf", status: "bootstrapping", lastError: null, createdAt: 2 };
   const view = await mount({ client: { addBox: async () => ({ box: arriving }) } as Partial<ApiClient> });
