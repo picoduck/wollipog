@@ -204,6 +204,7 @@ export function updateHelp(): string {
   return [
     "Usage: wollipog update [--user | --system] [--release <vX.Y.Z>] [--force] [--yes] [--json]",
     "Alias for `wollipog service upgrade` with identical verification, confirmation, health checks, rollback, output, and exit codes.",
+    "When an interrupted earlier attempt blocks staging, `wollipog service staging inspect` explains it and `wollipog service staging recover` preserves it with explicit authorization.",
   ].join("\n");
 }
 

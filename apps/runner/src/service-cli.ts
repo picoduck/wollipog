@@ -29,7 +29,11 @@ import {
   type JsonFetch,
 } from "./release-assets.js";
 import { VERSION } from "./version.js";
-import { ReleaseStaging, type StagingFilesystem } from "./release-staging.js";
+import { ReleaseStaging, StagingOccupiedError, stagingFilesystem, type StagingFilesystem } from "./release-staging.js";
+import { StagingJournal } from "./release-staging-journal.js";
+import {
+  RecoveryRefusedError, inspectStaging, procProcesses, recoverStaging, type StagingInspection, type StagingProcesses,
+} from "./release-staging-recovery.js";
 import {
   CONTROL_PLANE_UNIT,
   DEFAULT_PORT,
@@ -53,7 +57,7 @@ import {
 
 const VALUE_OPTIONS = new Set([
   "--control-plane-bin", "--runner-bin", "--web-dist", "--host", "--port", "--public-origin", "--runner-id",
-  "--workspace", "--account", "--lines", "--release",
+  "--workspace", "--account", "--lines", "--release", "--attempt",
 ]);
 const LOOPBACK_HOST_RE = /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|\[::1\])$/u;
 const RUNNER_ID_REJECT_RE = /[\u0000-\u0020\u007f/\\?#]/u;
@@ -78,6 +82,8 @@ export interface ServiceHost {
   download: Downloader;
   /** Complete filesystem identity adapter for deterministic staging tests. */
   stagingFilesystem?: StagingFilesystem;
+  /** Process table used to prove a blocked staging attempt is inactive; defaults to `/proc`. */
+  stagingProcesses?: StagingProcesses;
   arch: string;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -178,7 +184,8 @@ export function defaultServiceHost(fetchImpl: McpFetch = globalThis.fetch): Serv
 }
 
 class CliError extends Error {
-  constructor(message: string, readonly exitCode: 1 | 2 = 1) {
+  /** Extra machine-readable fields merged into the JSON error object. */
+  constructor(message: string, readonly exitCode: 1 | 2 = 1, readonly details: Record<string, unknown> = {}) {
     super(message);
   }
 }
@@ -226,6 +233,10 @@ export function serviceUsage(): string {
     "  service logs <control-plane | runner> [--user | --system] [--follow] [--lines <n>]",
     "  service uninstall [--user | --system] [--purge] [--yes] [--yes-purge] [--json]",
     "  service upgrade [--user | --system] [--release <vX.Y.Z>] [--force] [--yes] [--json]",
+    "  service staging inspect [--user | --system] [--json]",
+    "  service staging recover --attempt <token> [--user | --system] [--accept-uninspectable-processes] [--yes] [--json]",
+    "staging inspect explains a blocked upgrade slot without changing anything; staging recover moves the exact inspected,",
+    "inactive attempt into <data-dir>/upgrade-recovery/ (nothing is deleted) so the next upgrade can run.",
     "Linux systemd only. Without --control-plane/--runner, install sets up both (a colocated runner over loopback).",
     "Mode defaults to --system when run as root and --user otherwise; user services need lingering to survive logout.",
   ].join("\n");
@@ -793,6 +804,73 @@ interface UpgradeTarget {
   assetName: string;
 }
 
+function installedComponents(layout: ServiceLayout, host: ServiceHost): Array<{ component: ServiceComponent; unit: string; path: string }> {
+  const installed: Array<{ component: ServiceComponent; unit: string; path: string }> = [];
+  for (const component of ["control-plane", "runner"] as const) {
+    const unitPath = join(layout.unitDir, unitFor(component));
+    if (!host.exists(unitPath)) continue;
+    const executable = executableFromUnit(host.readFile(unitPath));
+    if (!executable) throw new CliError(`${unitFor(component)} has no ExecStart; reinstall with \`wollipog service install\``);
+    installed.push({ component, unit: unitFor(component), path: executable });
+  }
+  return installed;
+}
+
+async function installedVersions(host: ServiceHost, installed: Array<{ component: ServiceComponent; path: string }>): Promise<Map<string, string | null>> {
+  const versions = new Map<string, string | null>();
+  for (const target of installed) {
+    const probe = await host.exec(target.path, ["--version"], { timeoutMs: 30_000 });
+    versions.set(target.component, probe.code === 0 ? probe.stdout.trim().split(/\s+/u)[0] ?? null : null);
+  }
+  return versions;
+}
+
+const modeFlag = (mode: ServiceMode) => (mode === "system" ? "--system" : "--user");
+const stagingFs = (host: ServiceHost) => host.stagingFilesystem ?? stagingFilesystem;
+const stagingProcs = (host: ServiceHost) => host.stagingProcesses ?? procProcesses();
+const isoNow = (host: ServiceHost) => () => new Date(host.now()).toISOString();
+
+function occupiedStaging(error: unknown): StagingOccupiedError | null {
+  for (let cause: unknown = error; cause instanceof Error; cause = cause.cause) {
+    if (cause instanceof StagingOccupiedError) return cause;
+  }
+  return null;
+}
+
+function describeAttempt(inspection: StagingInspection): string {
+  const owner = inspection.owner;
+  const attempt = owner.state === "valid" ? `${owner.tag} (owner record valid)`
+    : owner.state === "absent" ? "unknown (no owner record)"
+    : `${owner.tag ?? "unknown release"} (owner record ${owner.state})`;
+  return `${attempt}; ${inspection.journal.conclusion}`;
+}
+
+/**
+ * Admission refused because the slot is occupied: explain what blocked it from a read-only
+ * inspection, keep the installed state separate from the old attempt's state, and name next steps.
+ */
+function stagingRefusal(error: Error, blocked: StagingOccupiedError, mode: ServiceMode, inspection: StagingInspection, installed: Map<string, string | null>): CliError {
+  const inspect = `wollipog service staging inspect ${modeFlag(mode)}`;
+  const versions = [...installed].map(([component, version]) => `${component} ${version ?? "unknown"}`).join(", ") || "none";
+  const lines = [
+    error.message,
+    `Blocked:   ${blocked.path} (the ${mode} layout's single upgrade slot; nothing was downloaded or installed by this run)`,
+    `Previous:  ${describeAttempt(inspection)}`,
+    `Installed: ${versions} (the installed versions are not evidence of how the previous attempt ended)`,
+    `Next:      ${inspect}  (read-only), then follow its recovery guidance.`,
+    "Retrying, choosing a different release, or --force does not clear the slot.",
+  ];
+  return new CliError(lines.join("\n"), 1, {
+    staging: {
+      blockedPath: blocked.path, slot: inspection.slot, mode, state: inspection.state,
+      previousAttempt: { tag: inspection.owner.tag, owner: inspection.owner.state, outcome: inspection.journal.outcome, uncertain: inspection.journal.uncertain, conclusion: inspection.journal.conclusion },
+      installed: Object.fromEntries(installed),
+      recoverable: inspection.recovery.eligible,
+      next: { inspect, recover: `wollipog service staging recover ${modeFlag(mode)} --attempt <token from inspect>` },
+    },
+  });
+}
+
 /**
  * `service upgrade`: download the release's executables and web bundle, prove their digests and
  * versions, swap them in while keeping the previous generation, restart, confirm health, and roll
@@ -805,14 +883,9 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   const layout = layoutFor(args, mode, host);
   const triple = hostTargetTriple(host.platform, host.arch);
   if (!triple) throw new CliError(`no release assets exist for ${host.platform}/${host.arch}`, 2);
-  const targets: UpgradeTarget[] = [];
-  for (const component of ["control-plane", "runner"] as const) {
-    const unitPath = join(layout.unitDir, unitFor(component));
-    if (!host.exists(unitPath)) continue;
-    const executable = executableFromUnit(host.readFile(unitPath));
-    if (!executable) throw new CliError(`${unitFor(component)} has no ExecStart; reinstall with \`wollipog service install\``);
-    targets.push({ component, unit: unitFor(component), path: executable, assetName: component === "control-plane" ? controlPlaneAssetName(triple) : runnerAssetName(triple) });
-  }
+  const targets: UpgradeTarget[] = installedComponents(layout, host).map((installed) => ({
+    ...installed, assetName: installed.component === "control-plane" ? controlPlaneAssetName(triple) : runnerAssetName(triple),
+  }));
   if (targets.length === 0) throw new CliError(`no Wollipog units are installed in ${layout.unitDir}; run \`wollipog service install\` first`, 2);
   const serviceUid = await accountUid(host, layout);
   const effective = effectiveFromEnv(host, layout, DEFAULT_PORT, serviceUid);
@@ -821,11 +894,7 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   const token = host.env.GH_TOKEN ?? host.env.GITHUB_TOKEN ?? null;
 
   const release = await resolveRelease(host.fetchJson, { tag: option(args, "--release") ?? null, token });
-  const currentVersions = new Map<string, string | null>();
-  for (const target of targets) {
-    const probe = await host.exec(target.path, ["--version"], { timeoutMs: 30_000 });
-    currentVersions.set(target.component, probe.code === 0 ? probe.stdout.trim().split(/\s+/u)[0] ?? null : null);
-  }
+  const currentVersions = await installedVersions(host, targets);
   const alreadyCurrent = targets.every((target) => currentVersions.get(target.component) === release.version);
   if (alreadyCurrent && !flag(args, "--force")) {
     emit({ upgraded: false, release: release.tag, current: Object.fromEntries(currentVersions) }, `already at ${release.tag}; pass --force to reinstall the same release`);
@@ -865,8 +934,30 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     selected.push(webAsset);
   }
   if (selected.some((asset) => release.assets.filter((candidate) => candidate.name === asset.name).length !== 1)) throw new CliError("release metadata has duplicate selected asset names");
-  const attempt = ReleaseStaging.create(layout.dataDir, { mode, serviceUid }, release.tag, selected, host.stagingFilesystem);
+  const procs = stagingProcs(host);
+  let processIdentity = null;
+  try { processIdentity = procs.identity(procs.self); } catch { /* recorded as unknown; recovery then needs more proof */ }
+  let attempt: ReleaseStaging;
+  try {
+    attempt = ReleaseStaging.create(layout.dataDir, { mode, serviceUid }, release.tag, selected, host.stagingFilesystem, processIdentity);
+  } catch (error) {
+    const blocked = occupiedStaging(error);
+    if (!blocked) throw error;
+    const inspection = inspectStaging(layout.dataDir, { mode, serviceUid }, stagingFs(host), procs);
+    throw stagingRefusal(error as Error, blocked, mode, inspection, currentVersions);
+  }
   const staging = attempt.path;
+  const journal = StagingJournal.open(layout.dataDir, { nonce: attempt.nonce, tag: release.tag, mode, process: processIdentity }, stagingFs(host), isoNow(host));
+  journal.note("reserved");
+  let installing = false;
+  let finished = false;
+  const finishStaging = (): string | null => {
+    if (finished) return null;
+    finished = true;
+    const cleanup = attempt.finish();
+    journal.note(cleanup ? "cleanup-failed" : "cleaned", cleanup ?? undefined);
+    return cleanup;
+  };
   try {
     const manifestPath = join(staging, CHECKSUM_MANIFEST_NAME);
     await downloadVerifiedAsset(host.download, manifestAsset, manifestPath, { staging: attempt, token });
@@ -939,9 +1030,13 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
       }
       const healthy = controlPlane ? await waitFor(host, 60_000, async () => (await probeHealth(host, effective.port)).ok) : true;
       if (!healthy) problems.push("the control plane is still not healthy: inspect with `wollipog service logs control-plane`");
+      journal.note("rolled-back", `${reason}${problems.length ? `; rollback problems: ${problems.join("; ")}` : ""}`);
       return new CliError(`${reason}; rolled back to the previous executables${problems.length ? `, with problems: ${problems.join("; ")}` : controlPlane ? " (control plane healthy again)" : ""}`);
     };
 
+    journal.note("staged");
+    installing = true;
+    journal.note("installing");
     try {
       for (const target of targets) replace(target.path, staged.get(target.component)!, false);
       for (const alias of aliases) {
@@ -957,6 +1052,7 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     } catch (error) {
       throw await rollBack(`installing the new executables failed (${(error as Error).message})`);
     }
+    journal.note("installed");
 
     if (controlPlane) {
       const restart = await systemctl(host, mode, ["restart", controlPlane.unit]);
@@ -985,8 +1081,13 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
         if (!active) throw await rollBack(`${runner.unit} did not become active within 30s after the upgrade`);
       }
     }
-    const cleanup = attempt.finish();
-    if (cleanup) throw new CliError(`upgrade to ${release.tag} completed and is healthy, but ${cleanup}`);
+    journal.note("verified");
+    const cleanup = finishStaging();
+    if (cleanup) {
+      throw new CliError(`upgrade to ${release.tag} completed and is healthy, but ${cleanup}\nNext: wollipog service staging inspect ${modeFlag(mode)}  (read-only); the retained staging blocks the next upgrade until it is recovered.`, 1, {
+        staging: { slot: staging, mode, outcome: "healthy-installation-cleanup-failed", next: { inspect: `wollipog service staging inspect ${modeFlag(mode)}` } },
+      });
+    }
     const report = {
       upgraded: true,
       release: release.tag,
@@ -994,18 +1095,125 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
       components: targets.map((target) => ({ component: target.component, path: target.path, previousKept: host.exists(previous(target.path)) ? previous(target.path) : null })),
       aliases,
       webDist: stagedWeb ? webDist : null,
+      diagnostics: { journal: journal.path, problem: journal.problem },
     };
     emit(report, [
       `Upgraded to ${release.tag}: ${targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ")}${aliases.length ? `, ${aliases.map((alias) => basename(alias)).join(" and ")} refreshed` : ""}${stagedWeb ? ", web bundle refreshed" : ""}.`,
       `Previous executables kept as ${targets.map((target) => previous(target.path)).join(" and ")}; the next upgrade replaces them.`,
       controlPlane ? `Control plane healthy${runner ? " and runner online." : "."}` : "Runner active.",
+      ...(journal.problem ? [`Warning: ${journal.problem}`] : []),
     ].join("\n"));
     return 0;
   } catch (error) {
-    const cleanup = attempt.finish();
-    if (cleanup) throw new CliError(`${(error as Error).message}; ${cleanup}`);
+    if (!installing && !finished) journal.note("failed", (error as Error).message);
+    const cleanup = finishStaging();
+    if (cleanup) throw new CliError(`${(error as Error).message}; ${cleanup}\nNext: wollipog service staging inspect ${modeFlag(mode)}  (read-only).`);
     throw error;
   }
+}
+
+/** `service staging inspect | recover`: explain and, with explicit authorization, unblock upgrades. */
+async function staging(args: string[], words: string[], host: ServiceHost, io: ServiceIo, emit: (data: unknown, text: string) => void): Promise<number> {
+  const action = words[2];
+  if (action !== "inspect" && action !== "recover") throw new CliError("service staging requires <inspect | recover>", 2);
+  const token = action === "recover" ? option(args, "--attempt") : undefined;
+  if (action === "recover" && !token) throw new CliError("service staging recover requires --attempt <token> from `wollipog service staging inspect`", 2);
+  const mode = resolveMode(args, host);
+  await requireSystemd(host, mode);
+  const layout = layoutFor(args, mode, host);
+  const context = { mode, serviceUid: await accountUid(host, layout) };
+  const fs = stagingFs(host);
+  const procs = stagingProcs(host);
+  const inspect = `wollipog service staging inspect ${modeFlag(mode)}`;
+  if (action === "inspect") return inspectStagingCommand(host, mode, layout, inspectStaging(layout.dataDir, context, fs, procs), emit);
+
+  const options = { acceptUninspectable: flag(args, "--accept-uninspectable-processes") };
+  const before = inspectStaging(layout.dataDir, context, fs, procs, options);
+  if (!flag(args, "--yes")) {
+    if (!io.stdinIsTTY) throw new CliError("refusing to recover staging without confirmation; pass --yes in non-interactive use", 2);
+    if (!(await io.confirm(`Move attempt ${token} from ${before.slot} into ${before.recovery.destination}/ (nothing is deleted)?`))) {
+      emit({ recovered: false }, "nothing was changed");
+      return 1;
+    }
+  }
+  let result;
+  try {
+    result = recoverStaging(layout.dataDir, context, token!, fs, procs, isoNow(host), options);
+  } catch (error) {
+    if (!(error instanceof RecoveryRefusedError)) throw error;
+    throw new CliError(`${error.message}\nNothing was deleted. Next: ${inspect}  (read-only) to review the current evidence.`, 1, {
+      recovery: { refused: true, state: error.inspection?.state ?? null, reasons: error.inspection?.recovery.reasons ?? [], next: { inspect } },
+    });
+  }
+  const next = result.admissible ? `wollipog update ${modeFlag(mode)}` : inspect;
+  emit({ recovered: true, ...result, next }, [
+    `Recovered the ${result.tag} attempt: moved ${before.slot} to ${result.preservedPath}. Nothing was deleted.`,
+    `Preserved: ${result.container} keeps the attempt and its recovery.json until you remove it; Wollipog never deletes it.`,
+    result.admissible ? `Staging is clear. Next: ${next}` : `The staging parent is still not empty. Next: ${next}`,
+    ...result.warnings.map((warning) => `Warning: ${warning}`),
+  ].join("\n"));
+  return 0;
+}
+
+async function inspectStagingCommand(host: ServiceHost, mode: ServiceMode, layout: ServiceLayout, inspection: StagingInspection, emit: (data: unknown, text: string) => void): Promise<number> {
+  const installed = installedComponents(layout, host);
+  const versions = await installedVersions(host, installed);
+  const port = readInstalledControlPlaneEnv({ home: host.home, env: host.env, platform: host.platform, uid: host.uid, mode })?.port ?? DEFAULT_PORT;
+  const units = await Promise.all(installed.map((component) => unitState(host, mode, component.unit)));
+  const health = installed.some((component) => component.component === "control-plane") ? await probeHealth(host, port) : null;
+  const token = inspection.recovery.token;
+  const acknowledge = inspection.recovery.acknowledgement ? " --accept-uninspectable-processes" : "";
+  const recover = token ? `wollipog service staging recover ${modeFlag(mode)} --attempt ${token}${acknowledge}` : null;
+  const data = {
+    ...inspection,
+    installed: { versions: Object.fromEntries(versions), units: units.map((unit) => ({ unit: unit.unit, activeState: unit.activeState, subState: unit.subState })), health },
+    next: inspection.state === "clear" ? { update: `wollipog update ${modeFlag(mode)}` } : { recover },
+  };
+  const size = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+  const lines = [
+    `Staging:    ${inspection.state}${inspection.state === "clear" ? "" : ` (${inspection.slot})`}`,
+    `Layout:     ${mode}, data directory ${inspection.dataDir}`,
+    ...(inspection.problem ? [`Problem:    ${inspection.problem}`] : []),
+  ];
+  if (inspection.state !== "clear") {
+    if (inspection.parentEntries.some((entry) => entry.name !== "download-attempt-v1")) {
+      lines.push(`Parent:     ${inspection.parentEntries.map((entry) => `${entry.name} (${entry.kind})`).join(", ")}`);
+    }
+    if (inspection.slotEntries) {
+      lines.push(`Contents:   ${inspection.slotEntries.map((entry) => `${entry.name} (${entry.kind}${entry.kind === "file" ? ` ${size(entry.size)}` : ""}, ${entry.mode})`).join(", ") || "empty"}`);
+    }
+    lines.push(
+      `Attempt:    ${describeAttempt(inspection)}`,
+      ...(inspection.journal.events.length ? [`Phases:     ${inspection.journal.events.map((event) => `${event.phase} ${event.at}`).join(" → ")}`] : []),
+      `In use:     ${inspection.holders.reason ?? "no process holds the staging directory open"}`,
+    );
+  }
+  lines.push(
+    `Installed:  ${[...versions].map(([component, version]) => `${component} ${version ?? "unknown"}`).join(", ") || "no Wollipog units installed"}`,
+    `Services:   ${units.map((unit) => `${unit.unit} ${unit.activeState}/${unit.subState}`).join(", ") || "none"}${health ? `; health ${health.ok ? "ok" : `NOT ok (${health.detail})`}` : ""}`,
+  );
+  if (inspection.preserved.length) {
+    lines.push(`Preserved:  ${inspection.preserved.map((entry) => `${entry.path} (${entry.state}: ${entry.detail})`).join("; ")}`);
+  }
+  if (inspection.state === "clear") lines.push(`Next:       staging is clear; \`wollipog update ${modeFlag(mode)}\` can be admitted.`);
+  else if (recover) {
+    lines.push(
+      `Recovery:   ${inspection.recovery.acknowledgement ? "possible with your attestation" : "eligible"}. This moves the exact attempt above into ${inspection.recovery.destination}/ without deleting anything:`,
+      ...(inspection.recovery.acknowledgement ? [
+        `            ${inspection.recovery.acknowledgement}.`,
+        "            Pass --accept-uninspectable-processes only after confirming no Wollipog update is running for this layout.",
+      ] : []),
+      `            ${recover}`,
+      "            The token is bound to the evidence shown; any change to the attempt invalidates it.",
+    );
+  } else {
+    lines.push(
+      `Recovery:   refused: ${inspection.recovery.reasons.join("; ")}.`,
+      "            Leave the evidence in place. Wait for an active attempt to finish, or have an operator review protected objects manually, then inspect again.",
+    );
+  }
+  emit(data, lines.join("\n"));
+  return inspection.state === "clear" ? 0 : 1;
 }
 
 export function defaultServiceIo(): ServiceIo {
@@ -1042,11 +1250,12 @@ export async function runServiceCli(
       case "logs": return await logs(args, words, host);
       case "uninstall": return await uninstall(args, host, io, emit);
       case "upgrade": return await upgrade(args, host, io, emit);
+      case "staging": return await staging(args, words, host, io, emit);
       default: throw new CliError(serviceUsage(), 2);
     }
   } catch (error) {
     const cli = error instanceof CliError ? error : new CliError((error as Error).message ?? String(error));
-    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: cli.message })}\n` : `${cli.message}\n`);
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: cli.message, ...cli.details })}\n` : `${cli.message}\n`);
     return cli.exitCode;
   }
 }

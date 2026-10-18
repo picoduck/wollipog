@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import {
   constants, closeSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync,
-  opendirSync, readSync, realpathSync, rmdirSync, statfsSync, unlinkSync, writeSync,
+  opendirSync, readSync, realpathSync, renameSync, rmdirSync, statfsSync, unlinkSync, writeSync,
   type BigIntStats,
 } from "node:fs";
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
@@ -23,7 +23,7 @@ export const stagingFilesystem = {
   type: (path: string): bigint => statfsSync(path, { bigint: true }).type,
   open: openSync, close: closeSync, sync: fsyncSync, mkdir: mkdirSync,
   directory: opendirSync, link: linkSync, unlink: unlinkSync, rmdir: rmdirSync,
-  write: writeSync, read: readSync,
+  write: writeSync, read: readSync, rename: renameSync,
 };
 export type StagingFilesystem = typeof stagingFilesystem;
 /** A token owns one open generation, never a number after a Linux close attempt. */
@@ -47,6 +47,61 @@ type Receipt = { path: string; handle: OwnedDescriptor; stat: BigIntStats; names
 const LOCAL_TYPES = new Set([0xef53n, 0x58465342n, 0x9123683en, 0x01021994n, 0x794c7630n]);
 const OWNER = "owner.json";
 const SLOT = "download-attempt-v1";
+export const STAGING_OWNER = OWNER;
+export const STAGING_SLOT = SLOT;
+export const STAGING_PARENT = "upgrades";
+
+/** Admission found the slot or its parent occupied; `path` names the entry that blocked it. */
+export class StagingOccupiedError extends Error {
+  constructor(readonly path: string) {
+    super(`release staging is occupied or has unknown entries: ${path}; inspect staging and obtain operator-authorized remediation before retrying`);
+  }
+}
+
+export type StagingContext = { mode: "user" | "system"; serviceUid: number | null };
+
+/** The updater's effective UID under the supported Linux identity profile. */
+export function stagingUid(fs: StagingFilesystem): bigint {
+  const uid = fs.euid();
+  if (fs.platform !== "linux" || !Number.isSafeInteger(uid) || uid! < 0 || !constants.O_NOFOLLOW || !constants.O_DIRECTORY) {
+    throw new Error("release staging requires the supported Linux filesystem identity profile");
+  }
+  return BigInt(uid!);
+}
+
+/**
+ * Check the data directory and every ancestor against the staging profile and return the checked
+ * chain. Admission and recovery share it so both refuse the same unsafe layouts.
+ */
+export function stagingChain(dataDir: string, context: StagingContext, uid: bigint, fs: StagingFilesystem): Array<{ path: string; stat: BigIntStats }> {
+  if (!isAbsolute(dataDir) || fs.realpath(dataDir) !== resolve(dataDir)) throw new Error("release staging requires an existing canonical absolute data directory without symlinks");
+  if (context.mode === "system" && (uid !== 0n || !Number.isSafeInteger(context.serviceUid) || context.serviceUid! < 0)) throw new Error("system release staging requires root and the installed service UID");
+  const trusted = new Set([0n, uid, ...(context.mode === "system" ? [BigInt(context.serviceUid!)] : [])]);
+  const paths: string[] = [];
+  for (let path = resolve(dataDir);; path = dirname(path)) {
+    paths.unshift(path);
+    if (path === parse(path).root) break;
+  }
+  const chain: Array<{ path: string; stat: BigIntStats }> = [];
+  for (const [index, path] of paths.entries()) {
+    const stat = fs.lstat(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.ino <= 0n || stat.dev < 0n) throw new Error(`release staging refuses a symlink or unavailable directory identity: ${path}`);
+    if (index === paths.length - 1) {
+      const owners = context.mode === "system" ? new Set([0n, BigInt(context.serviceUid!)]) : new Set([uid]);
+      if (!owners.has(stat.uid) || (stat.mode & 0o7777n) !== 0o700n) throw new Error("release staging data directory must have its expected owner and private 0700 permissions");
+    } else if (!trusted.has(stat.uid) || (stat.mode & 0o6000n) !== 0n ||
+        ((stat.mode & 0o022n) !== 0n && ((stat.mode & 0o1000n) === 0n || !trusted.has(fs.lstat(paths[index + 1]!).uid)))) {
+      throw new Error(`release staging refuses unsafe ancestor ownership or writable permissions: ${path}`);
+    }
+    chain.push({ path, stat });
+  }
+  if (!LOCAL_TYPES.has(fs.type(dataDir))) throw new Error("release staging refuses an unsupported filesystem");
+  return chain;
+}
+
+export function isLocalStagingFilesystem(fs: StagingFilesystem, path: string): boolean {
+  return LOCAL_TYPES.has(fs.type(path));
+}
 
 export function validateSelectedAssets(assets: ReleaseAsset[]): void {
   if (assets.length === 0 || assets.length > 4) throw new Error("release staging needs one to four selected assets");
@@ -70,7 +125,8 @@ function same(a: BigIntStats, b: BigIntStats): boolean {
 
 export class ReleaseStaging {
   readonly path: string;
-  private readonly nonce = randomUUID();
+  /** Correlates this attempt's owner record with its phase journal; never cleanup authority. */
+  readonly nonce = randomUUID();
   private readonly chain: Array<{ path: string; stat: BigIntStats }> = [];
   private readonly directories: Receipt[] = [];
   private readonly files: Receipt[] = [];
@@ -89,24 +145,25 @@ export class ReleaseStaging {
 
   private constructor(
     private readonly dataDir: string,
-    private readonly context: { mode: "user" | "system"; serviceUid: number | null },
+    private readonly context: StagingContext,
     assets: ReleaseAsset[],
     private readonly fs: StagingFilesystem,
   ) {
-    const uid = fs.euid();
-    if (fs.platform !== "linux" || !Number.isSafeInteger(uid) || uid! < 0 || !constants.O_NOFOLLOW || !constants.O_DIRECTORY) {
-      throw new Error("release staging requires the supported Linux filesystem identity profile");
-    }
-    this.uid = BigInt(uid!);
+    this.uid = stagingUid(fs);
     validateSelectedAssets(assets);
     this.selected = new Map(assets.map((asset) => [asset.name, { size: asset.size, digest: asset.digest }]));
-    this.path = join(dataDir, "upgrades", SLOT);
+    this.path = join(dataDir, STAGING_PARENT, SLOT);
   }
 
-  static create(dataDir: string, context: { mode: "user" | "system"; serviceUid: number | null }, tag: string, assets: ReleaseAsset[], fs: StagingFilesystem = stagingFilesystem): ReleaseStaging {
+  /**
+   * `holder` (this process's PID, start time and boot ID) is recorded in the immutable owner
+   * record so a later recovery can prove the recording process is gone. It is evidence only.
+   */
+  static create(dataDir: string, context: StagingContext, tag: string, assets: ReleaseAsset[], fs: StagingFilesystem = stagingFilesystem,
+    holder: { pid: number; startTime: string; bootId: string } | null = null): ReleaseStaging {
     const attempt = new ReleaseStaging(dataDir, context, assets, fs);
     try {
-      attempt.initialize(tag, assets);
+      attempt.initialize(tag, assets, holder);
       return attempt;
     } catch (error) {
       const cleanup = attempt.finish();
@@ -142,28 +199,8 @@ export class ReleaseStaging {
     }
   }
 
-  private initialize(tag: string, assets: ReleaseAsset[]): void {
-    if (!isAbsolute(this.dataDir) || this.fs.realpath(this.dataDir) !== resolve(this.dataDir)) throw new Error("release staging requires an existing canonical absolute data directory without symlinks");
-    if (this.context.mode === "system" && (this.uid !== 0n || !Number.isSafeInteger(this.context.serviceUid) || this.context.serviceUid! < 0)) throw new Error("system release staging requires root and the installed service UID");
-    const trusted = new Set([0n, this.uid, ...(this.context.mode === "system" ? [BigInt(this.context.serviceUid!)] : [])]);
-    const paths: string[] = [];
-    for (let path = resolve(this.dataDir);; path = dirname(path)) {
-      paths.unshift(path);
-      if (path === parse(path).root) break;
-    }
-    for (const [index, path] of paths.entries()) {
-      const stat = this.fs.lstat(path);
-      if (!stat.isDirectory() || stat.isSymbolicLink() || stat.ino <= 0n || stat.dev < 0n) throw new Error(`release staging refuses a symlink or unavailable directory identity: ${path}`);
-      if (index === paths.length - 1) {
-        const owners = this.context.mode === "system" ? new Set([0n, BigInt(this.context.serviceUid!)]) : new Set([this.uid]);
-        if (!owners.has(stat.uid) || (stat.mode & 0o7777n) !== 0o700n) throw new Error("release staging data directory must have its expected owner and private 0700 permissions");
-      } else if (!trusted.has(stat.uid) || (stat.mode & 0o6000n) !== 0n ||
-          ((stat.mode & 0o022n) !== 0n && ((stat.mode & 0o1000n) === 0n || !trusted.has(this.fs.lstat(paths[index + 1]!).uid)))) {
-        throw new Error(`release staging refuses unsafe ancestor ownership or writable permissions: ${path}`);
-      }
-      this.chain.push({ path, stat });
-    }
-    if (!LOCAL_TYPES.has(this.fs.type(this.dataDir))) throw new Error("release staging refuses an unsupported filesystem");
+  private initialize(tag: string, assets: ReleaseAsset[], holder: { pid: number; startTime: string; bootId: string } | null): void {
+    this.chain.push(...stagingChain(this.dataDir, this.context, this.uid, this.fs));
     // The dataDir may belong to the system service account; pin it without pretending root owns it.
     const dataHandle = this.open(this.dataDir, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
     let dataStat: BigIntStats;
@@ -189,6 +226,7 @@ export class ReleaseStaging {
     const record = Buffer.from(JSON.stringify({ schema: 1, nonce: this.nonce, tag,
       root: this.identity(dataStat), parent: this.identity(this.parent.stat), attempt: this.identity(this.reservation.stat),
       assets: assets.map(({ name, size, digest }) => ({ name, size, digest })),
+      ...(holder ? { process: { pid: holder.pid, startTime: holder.startTime, bootId: holder.bootId } } : {}),
     }) + "\n");
     let offset = 0;
     while (offset < record.length) {
@@ -217,7 +255,7 @@ export class ReleaseStaging {
           if (seen.size !== allowed.size) throw new Error("release staging inventory is incomplete");
           return;
         }
-        if (!allowed.has(entry.name) || seen.has(entry.name)) throw new Error("release staging is occupied or has unknown entries; inspect staging and obtain operator-authorized remediation before retrying");
+        if (!allowed.has(entry.name) || seen.has(entry.name)) throw new StagingOccupiedError(join(path, entry.name));
         seen.add(entry.name);
       }
       throw new Error("release staging inventory exceeded its known entry bound");
