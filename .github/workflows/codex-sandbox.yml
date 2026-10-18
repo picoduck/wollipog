@@ -44,7 +44,7 @@ jobs:
           CODEX_BIN: ${{ runner.temp }}/codex/node_modules/.bin/codex
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           "$CODEX_BIN" --version
           node --version
           uname -sm
@@ -54,7 +54,7 @@ jobs:
             local parent="$1" expected="$2" probe_root observed
             probe_root=$(mktemp -d "$parent/wollipog-placement-XXXXXX")
             mkdir "$probe_root/workspace"
-            observed=$(env HOME="$control_home" CODEX_HOME="$control_home" "$CODEX_BIN" sandbox -P :workspace -C "$probe_root/workspace" -- node -e 'try { require("fs").writeFileSync(process.argv[1], "probe"); console.log("written"); } catch (error) { console.log(error.code); }' "$probe_root/outside-workspace")
+            observed=$(env HOME="$control_home" CODEX_HOME="$control_home" TMPDIR=/tmp "$CODEX_BIN" sandbox -P :workspace -C "$probe_root/workspace" -- node -e 'try { require("fs").writeFileSync(process.argv[1], "probe"); console.log("written"); } catch (error) { console.log(error.code); }' "$probe_root/outside-workspace")
             printf 'Workspace profile outside its workspace, parent=%s: %s\n' "$parent" "$observed"
             test "$observed" = "$expected"
           }
