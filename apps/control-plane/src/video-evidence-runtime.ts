@@ -100,6 +100,10 @@ export interface VideoReviewRuntimeAccess {
   /** Re-resolves exact pending occurrence, authority, scope, capabilities, managed reviewer
    * identity and reservation on every operation. Returns null for stale/unavailable bindings. */
   currentBinding(review: VideoReviewBinding, phase: "derive" | "media" | "attest" | "resolve"): VideoReviewBinding | null;
+  /** True only while the exact reviewer is still open but stopped provisionally (an unconfirmed
+   * restart or disconnect stop) and every other fact of its binding is still current. Media and
+   * verdicts then wait for the owning runner's readback without revoking; nothing is granted. */
+  resuming?(review: VideoReviewBinding): boolean;
   /** Active preflight for derive/media/attest; resolve verifies the durable historical snapshot
    * plus current denial/exhaustion/action constraints. Normal completion grants no fresh access. */
   /** True only after durable final usage/normal completion settlement, never revocation. */
@@ -251,6 +255,11 @@ export class VideoEvidenceRuntime {
       // quality proof remains subject to every current owner/authority/integrity check below.
       throw new VideoReviewRefused("stale");
     }
+    // A provisionally stopped reviewer is refused until its runner confirms it is running. The
+    // review stays pending, so an early call after a restart cannot irreversibly revoke it.
+    let resuming = false;
+    try { resuming = phase !== "resolve" && this.access.resuming?.(review.binding) === true; } catch { resuming = false; }
+    if (resuming) throw new VideoReviewRefused("stale");
     if (!fresh(review.binding, this.access, phase) ||
       (review.manifest.captureProfile === "candidate" && !review.binding.operatorValidation) ||
       (review.binding.operatorValidation && (!this.access.validationProfile?.(review.binding) ||

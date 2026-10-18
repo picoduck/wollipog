@@ -22,6 +22,8 @@ import type { VideoEvidenceRuntime } from "./video-evidence-runtime.js";
 import { VIDEO_VALIDATION_CRITERIA, VideoValidationDerivations, videoValidationIdentity, videoValidationLaunchSha256,
   videoValidationPrompt } from "./video-validation-runs.js";
 import type { WorkflowVideoEvidenceAccess } from "./workflow-video-evidence-approvals.js";
+import { countsTowardRepairLimit, exhaustedVideoEvidenceLineage, VIDEO_EVIDENCE_REPAIR_LIMIT, videoEvidenceRepairException,
+  type VideoEvidenceRepairException } from "./video-evidence-repair.js";
 
 const sha = (value: unknown) => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
 
@@ -58,6 +60,8 @@ interface ReviewRow {
   finished: MediaReviewFinished | null; updatedAt: number;
   /** A Human validation run (#1321): one-shot under its permit, never requeued, never production. */
   validation?: { permitId: string; profile: OperatorVideoValidationProfile };
+  /** Why preparation refused this exact source and the repair it needs (#2938). */
+  recovery?: VideoEvidenceRepairException;
 }
 
 /** The SessionsService surface this composition uses. Each method re-reads current records. */
@@ -119,6 +123,13 @@ class ReviewLedger {
     const row = this.db.raw().prepare("SELECT d.record FROM delegated_video_reviews d, json_each(json_extract(d.record,'$.reviewIds')) r " +
       "WHERE r.value=?").get(reviewId) as { record: string } | undefined;
     return row ? JSON.parse(row.record) as ReviewRow : null;
+  }
+  /** Earlier occurrences of one evidence lineage: the same root, child and decision resource key. */
+  lineage(rootSessionId: string, childSessionId: string, resourceKey: string, exceptOccurrenceId: string): ReviewRow[] {
+    return (this.db.raw().prepare("SELECT d.record FROM delegated_video_reviews d JOIN workflow_decisions w ON w.occurrence_id=d.occurrence_id " +
+      "WHERE w.controlling_session_id=? AND w.session_id=? AND w.resource_key=? AND w.category='ui_evidence_approval' AND d.occurrence_id<>? " +
+      "ORDER BY w.created_at, d.occurrence_id").all(rootSessionId, childSessionId, resourceKey, exceptOccurrenceId) as Array<{ record: string }>)
+      .map((row) => JSON.parse(row.record) as ReviewRow).filter((row) => !row.validation);
   }
   unfinished(): ReviewRow[] {
     return (this.db.raw().prepare("SELECT record FROM delegated_video_reviews WHERE json_extract(record,'$.state')='dispatched'").all() as
@@ -510,10 +521,27 @@ export class DelegatedVideoReviews {
         ? this.currentBinding(row, phase === "resolve" ? ["pending", "approved"] : ["pending"],
           phase === "resolve" ? "historical" : phase === "derive" ? "unsent" : "live") : null;
     },
+    resuming: (binding) => this.resuming(binding),
     normalCompletion: (binding) => this.budgetProvenance.normalCompletion(binding),
     workerAdmission: (binding, phase) => phase === "active" ? this.budgetProvenance.active(binding) : this.budgetProvenance.historical(binding),
     readSource: (artifactId) => { try { return this.db.readWorkflowArtifactBytes(artifactId); } catch { return null; } },
   };
+
+  /** An open reviewer left provisionally stopped (by an older control plane's startup, for example)
+   * whose binding is otherwise exactly current. Its media call waits for the owning runner's
+   * readback, which alone restores `running`, instead of revoking a review that may still finish.
+   * Any other change (owner, policy, proof, audience, source, Stop or archive) still revokes. */
+  private resuming(binding: VideoReviewBinding): boolean {
+    const session = this.db.getSession(binding.reviewerSessionId);
+    const stop = session?.status === "stopped" ? this.db.sessionStopProvenance(session.id) : null;
+    if (!this.attached || !stop || !sessionStopRestorable(stop) || !this.attached.sessions.dedicatedMediaReviewerOpen(binding.reviewerSessionId)) return false;
+    const row = this.ledger.byReviewer(binding.reviewerSessionId);
+    if (!row || row.occurrenceId !== binding.occurrenceId || row.state !== "dispatched") return false;
+    const current = this.currentBinding(row, ["pending"]);
+    if (!current || videoReviewBindingDigest(current) !== videoReviewBindingDigest(binding)) return false;
+    this.readbackIfStale(row);
+    return true;
+  }
 
   readonly serviceAdapter: EvidenceReviewServiceAdapter = {
     resolvePending: (rootSessionId, request) => {
@@ -735,14 +763,38 @@ export class DelegatedVideoReviews {
     const existing = this.recoverStale(this.ledger.get(request.occurrenceId, request.evidenceId));
     if (existing && existing.state !== "refused") return this.status(existing);
     if (existing?.reason === "reviewer_busy_exhausted") return this.status(existing); // The cap is never reset.
+    // An occurrence's source is immutable, so an inadequate capture fails identically every time.
+    // The same refusal is returned without reserving a reviewer; repair needs a fresh occurrence.
+    if (existing?.recovery && !existing.recovery.reprepare) return this.status(existing);
     const blocked = this.admissionRefusal(gate.root, gate.child);
     if (blocked) return blocked;
+    const inadequate = this.priorInadequate(request.occurrenceId, rootId, request.childSessionId);
+    if (inadequate.length > VIDEO_EVIDENCE_REPAIR_LIMIT) {
+      const exhausted: ReviewRow = { occurrenceId: request.occurrenceId, evidenceId: request.evidenceId, rootSessionId: rootId,
+        childSessionId: request.childSessionId, attempt: 0, state: "refused", reason: "preparation", reviewId: null, reviewIds: [],
+        reviewerSessionId: null, firstBusyAt: null, nextAttemptAt: null, busyRequeues: 0, finished: null, updatedAt: this.clock(),
+        recovery: exhaustedVideoEvidenceLineage(request, inadequate.at(-1)!) };
+      this.ledger.save(exhausted);
+      return this.status(exhausted);
+    }
     const row: ReviewRow = { occurrenceId: request.occurrenceId, evidenceId: request.evidenceId, rootSessionId: rootId,
       childSessionId: request.childSessionId, attempt: existing ? existing.attempt + 1 : 0, state: "preparing", reason: null,
       reviewId: null, reviewIds: existing?.reviewIds ?? [], reviewerSessionId: null, firstBusyAt: existing?.firstBusyAt ?? null,
       nextAttemptAt: null, busyRequeues: existing?.busyRequeues ?? 0, finished: null, updatedAt: this.clock() };
     this.ledger.save(row);
     return this.attempt(row);
+  }
+
+  /** One repair exception per earlier occurrence of this lineage that held an inadequate capture.
+   * An occurrence is one capture attempt, however many split clips it carried. */
+  private priorInadequate(occurrenceId: string, rootSessionId: string, childSessionId: string): VideoEvidenceRepairException[] {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision) return [];
+    const byOccurrence = new Map<string, VideoEvidenceRepairException>();
+    for (const row of this.ledger.lineage(rootSessionId, childSessionId, decision.resourceKey, occurrenceId)) {
+      if (countsTowardRepairLimit(row.recovery)) byOccurrence.set(row.occurrenceId, row.recovery!);
+    }
+    return [...byOccurrence.values()];
   }
 
   private admissionRefusal(root: SessionView, child: SessionView) {
@@ -817,8 +869,14 @@ export class DelegatedVideoReviews {
       this.cancelUnsent(identity);
       const code = derived.code === "live_validation" || derived.code === "mixed_peer" || derived.code === "custom_fallback" ||
         derived.code === "not_authorized" ? derived.code : "preparation";
-      return this.settleRefusal(row, { ...this.refuse(code, "Video review preparation was refused."),
-        ...(derived.recovery ? { recovery: derived.recovery } : {}) });
+      if (code === "preparation" && derived.recovery && derived.preparationCode && !row.validation) {
+        row.recovery = videoEvidenceRepairException(row, derived.preparationCode, derived.recovery,
+          this.priorInadequate(row.occurrenceId, row.rootSessionId, row.childSessionId).length);
+        this.log("video_evidence_repair_required", { occurrenceId: row.occurrenceId, action: row.recovery.action,
+          preparationCode: row.recovery.preparationCode, repairAttempt: row.recovery.repairAttempt });
+        return this.settleRefusal(row, { ...this.refuse(code, row.recovery.summary), recovery: row.recovery });
+      }
+      return this.settleRefusal(row, this.refuse(code, "Video review preparation was refused."));
     }
     const review = derived.review;
     row.reviewId = review.reviewId; row.reviewIds = [...row.reviewIds, review.reviewId]; this.ledger.save(row);
@@ -892,6 +950,8 @@ export class DelegatedVideoReviews {
 
   /** Owner-facing state, never media bytes or the reviewer's credential. */
   private status(row: ReviewRow) {
+    if (row.state === "refused" && row.recovery) return { ...this.refuse((row.reason ?? "preparation") as VideoReviewRefusalCode,
+      row.recovery.summary), recovery: structuredClone(row.recovery) };
     if (row.state === "refused") return this.refuse((row.reason ?? "preparation") as VideoReviewRefusalCode,
       row.reason === "reviewer_busy_exhausted" ? "The reviewer host stayed busy through every bounded retry; video evidence stays with the Human."
         : "Video review preparation was refused.");

@@ -75,3 +75,20 @@ test("unsupported readiness and absent grants return bounded no-store errors wit
   }
   assert.equal(f.calls(), 6);
 });
+test("an owner refusal carries its reason as the error agent tools show, with its structured recovery intact", async (t) => {
+  const app = Fastify();
+  t.after(async () => { await app.close(); });
+  const recovery = { action: "split", summary: "Video review preparation was refused (split_capture): Capture shorter clips. Next: decline." };
+  const owner = {
+    prepare: async () => ({ ok: false, code: "preparation", reason: recovery.summary, recovery }),
+    provenance: () => ({ ok: false, code: "preparation", reason: recovery.summary, recovery }),
+  };
+  registerVideoEvidenceReviewRoutes(app, { service: {} as unknown as EvidenceReviewService,
+    owner: owner as never, requestPrincipal: () => ({ ...agent("worker"), orchestrator: true } as AuthPrincipal) });
+  for (const [action, payload] of [["prepare", { childSessionId: "child", occurrenceId: "workflow", evidenceId: "video" }],
+    ["provenance", { reviewId: "review" }]] as const) {
+    const result = await app.inject({ method: "POST", url: prefix + "/" + action, payload });
+    assert.equal(result.statusCode, 409);
+    assert.deepEqual(result.json(), { ok: false, code: "preparation", reason: recovery.summary, recovery, error: recovery.summary });
+  }
+});

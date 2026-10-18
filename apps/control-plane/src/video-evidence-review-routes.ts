@@ -27,6 +27,10 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
   unavailable?(sessionId: string, route: "owner" | "reviewer"): { code: string; reason: string } | null;
 }): void {
   const prefix = "/api/sessions/:id/video-evidence-review";
+  // A refusal carries its reason in `error`, which agent tools show verbatim, so a repair
+  // exception's next step reaches the Orchestrator intact and not as a truncated raw body.
+  const ownerResult = <T extends { ok: boolean }>(result: T) => !result.ok && "reason" in result && typeof result.reason === "string"
+    ? { ...result, error: result.reason } : result;
   const refused = (reply: FastifyReply, principal: AuthPrincipal, route: "owner" | "reviewer" = "reviewer") => {
     const refusal = deps.unavailable?.(principal.kind === "agent" ? principal.credentialSessionId ?? "" : "", route);
     return refusal ? reply.code(409).send({ error: refusal.reason, code: refusal.code }) : null;
@@ -49,7 +53,7 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
     try {
       const request = { childSessionId: req.body.childSessionId, occurrenceId: req.body.occurrenceId, evidenceId: req.body.evidenceId };
       const result = deps.owner ? await deps.owner.prepare(principal, request) : await deps.service.prepare(principal, request);
-      return reply.code(result.ok ? 200 : result.code === "not_authorized" ? 403 : 409).send(result);
+      return reply.code(result.ok ? 200 : result.code === "not_authorized" ? 403 : 409).send(ownerResult(result));
     } catch (error) {
       return reply.code(error instanceof VideoReviewRefused ? 409 : 503).send({
         error: "Video review preparation is unavailable.", code: error instanceof VideoReviewRefused ? error.reason : "unavailable",
@@ -159,7 +163,7 @@ export function registerVideoEvidenceReviewRoutes(app: FastifyInstance, deps: {
     try {
       if (!deps.owner) return deps.service.ownerProvenance(principal, req.body.reviewId);
       const result = deps.owner.provenance(principal, req.body.reviewId);
-      return reply.code(result.ok ? 200 : result.code === "not_authorized" ? 403 : 409).send(result);
+      return reply.code(result.ok ? 200 : result.code === "not_authorized" ? 403 : 409).send(ownerResult(result));
     }
     catch { return reply.code(409).send({ error: "Current owner authority and complete verified provenance are required." }); }
   });

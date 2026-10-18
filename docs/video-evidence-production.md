@@ -537,6 +537,36 @@ unbound or unknown transients refuse. Actual capture/allowance/provenance/typed-
 ports remain unregistered; disclosed synthetic SQLite fixtures prove code control flow only, not real
 capture, native model inspection, Human allowance, genuine usage or production readiness.
 
+### Repair Through the Typed Gate (#2938)
+
+Hosting does not register that coordinator. It has no trusted capture trace, owner quality
+disposition, capture allowance or server-created replacement occurrence. Inadequate video evidence
+is repaired through the existing typed gate instead. When the isolated decoder needs a split or a
+recapture, `prepare` persists a content-safe repair exception on the refused subject: the blocked
+action, the exact occurrence, a digest of the child-authored evidence id, the decoder code, the
+planner's fixed reason, the owner and the smallest next input. Preparing the same occurrence again
+returns the same exception, as does the refusal's HTTP `error` that the Orchestrator's tool shows.
+A refusal before any review has no review id, so `provenance` cannot look it up; `prepare` is the
+lookup. Decoder-busy retries of one source never count as replacement captures. Under Full Control the
+Orchestrator owns `ui_evidence_approval`, so it denies that occurrence with the reason as
+`childMessage`. The child records adjacent shorter clips or a simpler recapture and requests a
+fresh occurrence under the same resource key. Nothing reaches the Human, and the inadequate
+original is never approved.
+
+An occurrence's source is immutable, so preparing a refused one again returns the same exception
+and reserves no reviewer. A lineage (root, child and resource key) gets one initial capture and two
+replacement captures. A third inadequate capture is exhausted (`reject`), and any later occurrence
+is refused before a reviewer is reserved. A busy decoder (`wait`) leaves the occurrence preparable
+and does not count. An unverifiable source (`human`) keeps today's Human route. Custom control
+keeps video with the Human throughout.
+
+A reviewer left provisionally stopped (an unconfirmed restart or disconnect stop, for example
+written by an older control plane's startup) is refused at HTTP authentication until its runner's
+readback restores it. If an in-process caller reaches the runtime first, the media or verdict call
+is refused without revoking, provided the binding is otherwise exactly current, and a throttled
+readback is requested. Any changed owner, policy, proof, audience or source, a confirmed stop, an
+explicit Stop or archive still revokes, as before.
+
 Current private destination and provider disclosure revisions, retention text and exact offered
 reviewer identities are re-read at preparation, resolution and consumption. A privacy or retention
 change invalidates admission/provenance even if the Human previously approved the old disclosure.
