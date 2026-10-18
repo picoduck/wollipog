@@ -82,3 +82,25 @@ test("after a save, only fields still in the draft keep their errors shown", () 
   assert.deepEqual([...revealedAfterSave(new Set(["name"] as const), { cost: "-2" })], [],
     "a field typed into but never left keeps waiting for its leave");
 });
+
+test("Memory Sharing is part of the draft: it follows the saved choice, is dirty once changed, and saves with the rest", () => {
+  const separate = project({ memorySharing: "separate" });
+  assert.deepEqual(projectSettingsValues(separate, {}), { name: "Alpha", cost: "5", tools: "100", memorySharing: "separate" });
+  assert.equal(projectSettingsDirty(separate, { memorySharing: "separate" }), false, "chosen back to the saved choice");
+  assert.equal(projectSettingsDirty(separate, { memorySharing: "shared" }), true);
+  const values = projectSettingsValues(separate, { name: "Beta", memorySharing: "shared" });
+  assert.deepEqual(projectSettingsChanges(separate, values), { name: "Beta", memorySharing: "shared" },
+    "one request with the other changed fields");
+  assert.deepEqual(projectSettingsChanges(separate, projectSettingsValues(separate, { memorySharing: "separate" })), {});
+  assert.deepEqual(draftAfterSave({ memorySharing: "shared" }, values), {}, "saved, so it leaves the draft");
+  assert.deepEqual(draftAfterSave({ memorySharing: "separate" }, values), { memorySharing: "separate" },
+    "chosen again while the save ran");
+});
+
+test("a server with no memory policy is never sent one, and a choice left in the draft is not a change", () => {
+  const older = project({ memorySharing: undefined });
+  assert.deepEqual(projectSettingsValues(older, {}), { name: "Alpha", cost: "5", tools: "100" });
+  assert.equal(projectSettingsDirty(older, { memorySharing: "shared" }), false);
+  assert.deepEqual(projectSettingsChanges(older, projectSettingsValues(older, { name: "Beta", memorySharing: "shared" })),
+    { name: "Beta" });
+});

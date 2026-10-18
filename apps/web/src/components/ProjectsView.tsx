@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { BoxView, ProjectLocationView, ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { archiveProjectWithFeedback, projectArchiveMessage } from "../project-actions.js";
-import { ProjectMemorySharingSettings } from "./ProjectMemorySharing.js";
 import { ProjectSettings } from "./ProjectSettings.js";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
@@ -469,9 +468,8 @@ export function ProjectsView({
             />
           ) : (
             // The header, then the notices, then one section recipe in a fixed order (#2959). Each
-            // location is a ProjectLocationRow (#2961); Settings and Child Session Defaults are setting
-            // rows saved by one save bar at the end (ProjectSettings, #2962), which Memory Sharing
-            // joins in #2963.
+            // location is a ProjectLocationRow (#2961); Settings, Memory Sharing and Child Session
+            // Defaults are setting rows saved by one save bar at the end (ProjectSettings, #2962, #2963).
             <div className="project-detail">
               <ProjectDetailHeader
                 project={selected}
@@ -559,16 +557,8 @@ export function ProjectsView({
                     onUpdated={() => void refreshSelectedProject()}
                   />
                 )}
-                memorySharing={(
-                  <ProjectMemorySharingSettings key={`memory:${selected.id}`} project={selected} runners={runners}
-                    disabled={selected.canManage === false || busy !== null}
-                    onSave={async (memorySharing) => {
-                      const result = await runProjectMutation("memory-sharing",
-                        // This form owns its error alert; do not announce the rejection twice.
-                        async () => (await api.updateProject(selected.id, { memorySharing })).project, null);
-                      if (!result) throw new Error("Could not save the memory policy.");
-                    }} />
-                )}
+                runners={runners}
+                machine={(runnerId) => runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId)}
                 onSave={(changes) => updateSettings("settings", changes)}
                 onSetSessionsTab={(shown) => updateSettings("visibility", { hidden: !shown })}
               />

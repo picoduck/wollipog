@@ -1,17 +1,25 @@
-import type { ChildSessionDefaults, ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
+import type { ChildSessionDefaults, ProjectMemorySharing, ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
 
 /**
- * A project's typed settings as one draft (#2962): its name and its two child-session limits, saved
- * together by the detail's save bar (docs/design-system.md §8.6, Editor). The switches beside them
- * apply at once and are not part of it.
+ * A project's settings as one draft, saved together by the detail's save bar (docs/design-system.md
+ * §8.6, Editor): its name and its two child-session limits (#2962), and its Memory Sharing choice
+ * (#2963). The switches beside them apply at once and are not part of it.
+ *
+ * The typed fields validate; Memory Sharing is a choice of two and cannot be invalid.
  */
 export type ProjectSettingsField = "name" | "cost" | "tools";
 
-/** The fields in the order they read, which is the order Save moves focus to the first invalid one. */
+/** The typed fields in the order they read, which is the order Save moves focus to the first invalid one. */
 export const PROJECT_SETTINGS_FIELDS: readonly ProjectSettingsField[] = ["name", "cost", "tools"];
 
-/** What each field shows. The limits are text, so a field can be emptied while typing. */
-export type ProjectSettingsValues = Record<ProjectSettingsField, string>;
+/**
+ * What each field shows. The limits are text, so a field can be emptied while typing. Memory Sharing
+ * is absent where the server has no memory policy (an older server), which leaves it out of the save.
+ */
+export type ProjectSettingsValues = Record<ProjectSettingsField, string> & { memorySharing?: ProjectMemorySharing };
+
+/** Every part of the draft, in the order the detail shows them. */
+const PROJECT_SETTINGS_KEYS = ["name", "memorySharing", "cost", "tools"] as const satisfies readonly (keyof ProjectSettingsValues)[];
 
 /**
  * Only the fields the person has edited. A field that is not here follows the saved project, so a
@@ -28,6 +36,7 @@ export function savedProjectSettings(project: ProjectView): ProjectSettingsValue
     name: project.name,
     cost: defaults ? String(defaults.costBudgetUsd) : "",
     tools: defaults ? String(defaults.maxToolCalls) : "",
+    ...(project.memorySharing !== undefined ? { memorySharing: project.memorySharing } : {}),
   };
 }
 
@@ -35,10 +44,14 @@ export function projectSettingsValues(project: ProjectView, draft: ProjectSettin
   return { ...savedProjectSettings(project), ...draft };
 }
 
-/** Whether any field shows something other than what is saved. */
+/**
+ * Whether any field shows something other than what is saved. A Memory Sharing choice left in the
+ * draft after the server stopped reporting the policy is not: it has nothing to be saved to.
+ */
 export function projectSettingsDirty(project: ProjectView, draft: ProjectSettingsDraft): boolean {
   const saved = savedProjectSettings(project);
-  return PROJECT_SETTINGS_FIELDS.some((field) => draft[field] !== undefined && draft[field] !== saved[field]);
+  return PROJECT_SETTINGS_KEYS.some((key) => draft[key] !== undefined && draft[key] !== saved[key] &&
+    (key !== "memorySharing" || project.memorySharing !== undefined));
 }
 
 function parseCost(text: string): number | null {
@@ -78,8 +91,9 @@ export function childSessionDefaultsFrom(values: ProjectSettingsValues): ChildSe
 
 /**
  * The one update request for valid `values`, carrying only what differs from the saved project: a name
- * that differs once trimmed, and the limits when either changed (null clears them). Empty when nothing
- * would change, such as a name that differs only by a trailing space.
+ * that differs once trimmed, the limits when either changed (null clears them), and the Memory Sharing
+ * choice when it changed. Empty when nothing would change, such as a name that differs only by a
+ * trailing space.
  */
 export function projectSettingsChanges(project: ProjectView, values: ProjectSettingsValues): UpdateProjectRequest {
   const changes: UpdateProjectRequest = {};
@@ -92,6 +106,11 @@ export function projectSettingsChanges(project: ProjectView, values: ProjectSett
     if (saved?.costBudgetUsd !== next?.costBudgetUsd || saved?.maxToolCalls !== next?.maxToolCalls) {
       changes.childSessionDefaults = next;
     }
+  }
+  // Likewise a server with no memory policy, which reports none.
+  if (project.memorySharing !== undefined && values.memorySharing !== undefined &&
+      values.memorySharing !== project.memorySharing) {
+    changes.memorySharing = values.memorySharing;
   }
   return changes;
 }
@@ -106,6 +125,7 @@ export function draftAfterSave(draft: ProjectSettingsDraft, sent: ProjectSetting
     const value = draft[field];
     if (value !== undefined && value !== sent[field]) next[field] = value;
   }
+  if (draft.memorySharing !== undefined && draft.memorySharing !== sent.memorySharing) next.memorySharing = draft.memorySharing;
   return next;
 }
 

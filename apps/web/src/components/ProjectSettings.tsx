@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
-import type { ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
+import type { ProjectView, RunnerView, UpdateProjectRequest } from "@wollipog/protocol";
 import { useLeaveGuard } from "../leave-guard.js";
+import type { RunnerDisplay } from "../runners.js";
 import {
   draftAfterSave,
   PROJECT_SETTINGS_FIELDS,
@@ -14,25 +15,24 @@ import {
 } from "../project-settings-draft.js";
 import { DetailSection } from "./DetailSection.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { ProjectMemorySharingSection } from "./ProjectMemorySharing.js";
 import { SaveBar } from "./SaveBar.js";
 import { NumberRow, SAVED_MS, SettingRow, SettingsGroup, SwitchRow, type RowFailure } from "./ui/SettingsRows.js";
 
 const READ_ONLY_REASON = "You can't change this project.";
 
 /**
- * A project's Settings and Child Session Defaults (#2962), as setting rows (docs/design-system.md
- * §8.2) on one draft. Name and the two child limits are typed values saved together by one
- * `SaveBar` (§8.6, Editor), in one update request carrying only what changed; Show as a Sessions Tab
- * applies at once (§8.6, Instant). Keyed by project identity by the caller, so another project
- * starts with no draft.
- *
- * `memorySharing` is drawn between the two sections, where Memory Sharing sits until it joins this
- * draft (#2963).
+ * A project's Settings, Memory Sharing and Child Session Defaults, as setting rows
+ * (docs/design-system.md §8.2) on one draft. Name, the Memory Sharing choice (#2963) and the two
+ * child limits are saved together by one `SaveBar` (§8.6, Editor), in one update request carrying
+ * only what changed; Show as a Sessions Tab applies at once (§8.6, Instant). Keyed by project
+ * identity by the caller, so another project starts with no draft.
  */
 export function ProjectSettings({
   project,
   access,
-  memorySharing,
+  runners,
+  machine,
   busy,
   nameInputRef,
   onSave,
@@ -41,7 +41,9 @@ export function ProjectSettings({
   project: ProjectView;
   /** The Access row (#2960's readout with Change…), where access is managed. */
   access?: ReactNode;
-  memorySharing?: ReactNode;
+  /** For Memory Sharing's machine rows. */
+  runners: ReadonlyMap<string, RunnerView>;
+  machine: (runnerId: string) => RunnerDisplay;
   /** The key of the project request in flight, from this editor or any other part of the page. */
   busy: string | null;
   nameInputRef?: Ref<HTMLInputElement>;
@@ -261,7 +263,14 @@ export function ProjectSettings({
           </SettingsGroup>
         </form>
       </DetailSection>
-      {memorySharing}
+      <ProjectMemorySharingSection
+        project={project}
+        runners={runners}
+        machine={machine}
+        value={values.memorySharing ?? "separate"}
+        readOnly={readOnly}
+        onChange={(memorySharing) => setDraft((current) => ({ ...current, memorySharing }))}
+      />
       {limitsSupported && (
         <DetailSection
           title="Child Session Defaults"
