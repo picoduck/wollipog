@@ -336,7 +336,8 @@ and unavailable identity stop cleanup and preserve uncertain evidence. Extracted
 that has not been moved into the installation is retained; the updater does not recursively
 delete that tree. Abrupt process death may leave the exclusive reservation occupied. Safety
 across attempts comes from refusing another reservation, not from assuming normal-exit cleanup
-ran or reclaiming an apparently old slot.
+ran or reclaiming an apparently old slot. The supported way out is the explicitly authorized
+recovery described below, which preserves the slot rather than deleting it.
 
 The original download writer is closed before final staged publication and executable probing,
 with the same inode pinned through a checked read-only handoff. Numeric descriptor authority
@@ -353,27 +354,99 @@ Inspect service status and the reported version rather than treating this as pro
 old version is still installed. Retained staging can block the next upgrade even while the new
 services are healthy.
 
-### Operator Inspection and Separately Authorized Recovery
+### Phase Diagnostics
 
-1. Record the exact refusal and use the existing read-only `service status` and service-log
-   commands to establish the installed version and health. Confirm the selected user/system
-   layout and data directory; protect credentials and private paths when sharing diagnostics.
-2. Inspect directory metadata and a bounded inventory without following symlinks, executing
-   staged files, or extracting archives. Check the canonical path, owners, modes, filesystem
-   types, slot contents, and any owner record. Do not mistake an interrupted or complete marker
-   for proof that cleanup is safe. If inspection is partial or identities cannot be established,
-   leave the evidence intact.
-3. Independently establish whether an updater still owns or uses the slot. An old timestamp,
-   a missing PID, or service health alone does not establish that no upgrade is in flight.
-   Coordinate with the operator responsible for the host; preserve live attempts.
-4. If recovery is needed, obtain separate operator authorization for the exact inspected
-   objects and proposed intervention. Any manual retirement or filesystem/layout correction is
-   outside automatic updater authority and must follow the operator's reviewed recovery plan.
-   Preserve installed and previous generations, configuration, credentials, databases, artifacts,
-   and uncertain evidence. This guide supplies no deletion, takeover, or permission repair recipe.
-5. Retry only after the operator confirms the staging prerequisites and empty parent inventory
-   are restored safely. An agent hosted by the target stack must not upgrade or restart that
-   stack; an independent operator must perform and verify such work.
+Each admitted attempt also keeps a small phase record at
+`<data-dir>/upgrade-journal/<nonce>.json` (directory 0700, file 0600), outside the staging slot
+so it survives cleanup and recovery. The nonce matches the attempt's `owner.json`. The record
+lists bounded, timestamped phases: `reserved`, `staged` (every asset verified), `installing`,
+`installed` (executables swapped; restart and health verification pending), `verified`,
+`rolled-back`, `failed` (before installation), `cleanup-failed` or `cleaned`, and `recovered`
+when recovery later preserved the attempt. Details are truncated and stripped of anything
+that looks like a credential. Admission keeps the newest eight records and prunes older ones.
+
+Inspection turns the record into one of these conclusions:
+
+- pre-installation failure: installed executables were not replaced by the attempt;
+- installation awaiting verification: executables were swapped (or partly swapped), but
+  restart and health verification did not finish;
+- rollback: verification failed and a rollback ran;
+- healthy installation with cleanup failure;
+- completed cleanup.
+
+A record that ends before `cleaned` or `cleanup-failed` is marked uncertain: the process stopped
+or could not record later phases. A missing record (any attempt from an updater older than this
+journal, or one whose journal could not be written) is reported as unknown. Journal problems
+never fail an upgrade; a successful upgrade reports them as a warning. The record is evidence
+only and never grants cleanup authority.
+
+The owner record of new attempts also stores the updater's PID, kernel start time, and boot ID,
+so a later recovery can prove that the exact process is gone. A reused PID with a different
+start time or boot ID is not the same process.
+
+### Inspecting and Recovering a Blocked Slot
+
+An occupied slot refusal names the blocked path, summarizes what is known about the previous
+attempt, and lists the installed versions separately: they describe the current installation,
+not how the previous attempt ended. The JSON error carries the same facts under `staging`.
+Retrying, choosing another release, and `--force` never clear the slot.
+
+```bash
+wollipog service staging inspect [--user | --system] [--json]
+wollipog service staging recover --attempt <token> [--user | --system] [--accept-uninspectable-processes] [--yes] [--json]
+```
+
+`staging inspect` is read-only. It downloads nothing and changes nothing. It reports the slot
+path and inventory (names, kinds, sizes, modes; no symlink is followed and no archive is
+opened), owner-record metadata, phase evidence, processes found holding the staging
+directories, installed versions, unit states and control-plane health, and any earlier
+preserved recoveries. It exits 0 when staging is clear and 1 when it is blocked or cannot be
+inspected. When recovery is possible it prints a token such as `sa1-…` bound to the exact
+slot identity, owner-record bytes, and every entry's identity, size, mode, and link count.
+
+`staging recover` requires that token plus confirmation (`--yes` in non-interactive use). It
+pins the staging directories, inspects again, and refuses unless all of the following hold:
+
+- the token matches the current evidence (any change to the attempt invalidates it);
+- the data directory and staging directories pass the staging profile above, and the staging
+  parent holds only the attempt slot;
+- `owner.json` is complete and valid, and its pinned data-directory, parent, and slot
+  identities still match;
+- every slot entry is a recognized object of that attempt: `owner.json`, a declared asset or
+  its `.<nonce>.partial` download, each a private single-link regular file no larger than its
+  declared size, or the extracted `web/` directory (preserved without traversal);
+- the updater process recorded for the attempt is not running, and no inspectable process
+  has its working directory, root, or a descriptor inside the staging parent (a live updater
+  holds both open for its whole attempt; this also catches a concurrent recovery);
+- `<data-dir>/upgrade-recovery/` is absent or a private directory on the same filesystem.
+
+Same-user processes whose descriptors cannot be read, such as non-dumpable agents or processes
+in another namespace, are tolerated when the attempt's recorded updater identity proves that
+updater gone. Older attempts do not record that identity. For those, inspection names the
+processes it could not inspect, and recovery needs `--accept-uninspectable-processes`: your
+statement that none of them is updating this layout. Pass it only after checking. A readable
+holder still refuses recovery even with the flag.
+
+Recovery then creates `<data-dir>/upgrade-recovery/<time>-<nonce>-<random>/`, writes its
+`recovery.json` intent record, verifies the evidence once more, and atomically renames the slot
+into that directory. Nothing is deleted. The staging parent is left empty, so the next
+`wollipog update` is admitted without manual filesystem edits. If recovery is interrupted
+before the rename, the slot stays in place and a later run can use the same token. If it is
+interrupted after the rename, the attempt is already preserved and only its record is marked
+incomplete. Inspection lists both cases.
+
+Recovery refuses, and changes nothing, for incomplete, legacy, or unverifiable owner records;
+unknown, substituted, hard-linked, or symlinked objects; foreign entries such as legacy
+release-tag directories; an active or possibly active attempt; and an unavailable process
+table. Those cases still need an operator's manual review. Preserve installed and previous
+generations, configuration, credentials, databases, artifacts, and uncertain evidence; this
+guide supplies no deletion recipe.
+
+Preserved attempts are retained indefinitely: Wollipog never deletes them. After reviewing
+one (its `recovery.json` names the source, tag, inventory, and phase evidence), remove it with
+ordinary tools. Recovery covers only the generic updater slot; native helper caches and
+standalone installer staging are outside its scope. An agent hosted by the target stack must
+not upgrade or restart that stack; an independent operator must perform and verify that work.
 
 ## Uninstall
 

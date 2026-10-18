@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, constants, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -8,7 +8,7 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
 import { executableFromUnit, runServiceCli, type ServiceHost, type ServiceIo } from "./service-cli.js";
 import { CONTROL_PLANE_UNIT, RUNNER_UNIT, serviceLayout } from "./systemd-service.js";
-import { stagingFilesystem } from "./release-staging.js";
+import { ReleaseStaging, stagingFilesystem } from "./release-staging.js";
 
 const LOCAL_TOKEN = "L".repeat(43);
 const RUNNER_TOKEN = `wollipogr_${"r".repeat(43)}`;
@@ -154,6 +154,13 @@ function fake(t: { after(fn: () => void): void }, options: {
     fetchJson: async () => ({ ok: false, status: 500, text: async () => "" }),
     download: async () => { throw new Error("no downloads in this fake"); },
     stagingFilesystem: stagingFs,
+    // No other processes. Every CLI invocation is a new process, so each identity read of this
+    // PID sees a new start time: an updater recorded by an earlier command is gone.
+    stagingProcesses: (() => {
+      let starts = 0;
+      return { self: 5000, list: () => [5000], uids: () => [MY_UID], links: () => [], name: () => "wollipog",
+        identity: (pid: number) => (pid === 5000 ? { pid, startTime: String(++starts), bootId: "fixture-boot" } : null) };
+    })(),
     arch: "x64",
     sleep: async () => { clock += 1_000; },
     now: () => clock,
@@ -965,6 +972,142 @@ test("cleanup failure after a healthy upgrade reports retained staging without r
   assert.equal(existsSync(join(f.layout.dataDir, "upgrades", "download-attempt-v1", "owner.json")), true);
 });
 
+function journalPhases(path: string): string[] {
+  return (JSON.parse(readFileSync(path, "utf8")) as { events: Array<{ phase: string }> }).events.map((event) => event.phase);
+}
+
+test("a blocked upgrade names the slot, inspection explains it read-only, and authorized recovery lets the next upgrade run", { skip: process.platform !== "linux" }, async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  const fixture = releaseFixture(f, { webBundle: false });
+  const slot = join(f.layout.dataDir, "upgrades", "download-attempt-v1");
+  const working: ServiceHost = {
+    ...fixture.host,
+    exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options),
+    fetch: async (url, init) => {
+      const response = await fixture.host.fetch(url, init);
+      if (!url.endsWith("/api/admin/status")) return response;
+      const body = JSON.parse(await response.text());
+      return { ...response, text: async () => JSON.stringify({ ...body, appVersion: fixture.version }) };
+    },
+  };
+  const failingCleanup: ServiceHost = { ...working, stagingFilesystem: { ...f.host.stagingFilesystem!, unlink: (path) => { if (String(path).endsWith("/owner.json")) throw new Error("fixture retirement failure"); stagingFilesystem.unlink(path); } } };
+  const first = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], failingCleanup, first.io), 1);
+  const healthyButRetained = JSON.parse(first.stdout());
+  assert.match(healthyButRetained.error, /completed and is healthy, but .*fixture retirement failure/u);
+  assert.equal(healthyButRetained.staging.next.inspect, "wollipog service staging inspect --user");
+
+  // Retries, another release and --force all refuse before any download, naming the slot.
+  for (const extra of [[], ["--force"], ["--release", "v8.8.8"]]) {
+    const before = fixture.downloads.length;
+    const io = makeIo();
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json", ...extra], working, io.io), 1);
+    const refusal = JSON.parse(io.stdout());
+    assert.match(refusal.error, /occupied or has unknown entries: .*download-attempt-v1/u);
+    assert.equal(refusal.staging.blockedPath, slot);
+    assert.equal(refusal.staging.previousAttempt.outcome, "healthy-installation-cleanup-failed");
+    assert.equal(refusal.staging.previousAttempt.uncertain, false);
+    assert.deepEqual(refusal.staging.installed, { "control-plane": "0.22.0", runner: "0.22.0" });
+    assert.equal(refusal.staging.recoverable, true);
+    assert.equal(refusal.staging.next.inspect, "wollipog service staging inspect --user");
+    assert.equal(fixture.downloads.length, before, "admission refusal downloads nothing");
+  }
+  const text = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes"], working, text.io), 1);
+  assert.match(text.stderr(), /Blocked: {3}.*download-attempt-v1 \(the user layout's single upgrade slot/u);
+  assert.match(text.stderr(), /Previous: {2}v9\.9\.9 \(owner record valid\); the installation was verified healthy, but staging cleanup failed/u);
+  assert.match(text.stderr(), /Next: {6}wollipog service staging inspect --user/u);
+  assert.match(text.stderr(), /--force does not clear the slot/u);
+
+  // Inspection is read-only and reports the attempt, installed versions and health separately.
+  const list = (dir: string): string[] => readdirSync(dir, { recursive: true }).map(String).sort();
+  const before = list(f.layout.dataDir);
+  const downloads = fixture.downloads.length;
+  const inspected = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "inspect", "--json"], working, inspected.io), 1);
+  const report = JSON.parse(inspected.stdout());
+  assert.deepEqual(list(f.layout.dataDir), before);
+  assert.equal(fixture.downloads.length, downloads);
+  assert.equal(report.state, "blocked");
+  assert.equal(report.slot, slot);
+  assert.equal(report.owner.tag, "v9.9.9");
+  assert.equal(report.journal.outcome, "healthy-installation-cleanup-failed");
+  assert.deepEqual(report.journal.events.map((event: { phase: string }) => event.phase), ["reserved", "staged", "installing", "installed", "verified", "cleanup-failed"]);
+  assert.deepEqual(report.installed.versions, { "control-plane": "0.22.0", runner: "0.22.0" });
+  assert.equal(report.installed.health.ok, true);
+  assert.match(report.next.recover, /^wollipog service staging recover --user --attempt sa1-[0-9a-f]{32}$/u);
+  const inspectedText = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "inspect"], working, inspectedText.io), 1);
+  assert.match(inspectedText.stdout(), /Recovery: {3}eligible\. This moves the exact attempt above into .*upgrade-recovery\/ without deleting anything/u);
+  assert.match(inspectedText.stdout(), /Installed: {2}control-plane 0\.22\.0, runner 0\.22\.0/u);
+
+  // Recovery needs the exact token and explicit confirmation; ordinary errors change nothing.
+  const usage = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--yes"], working, usage.io), 2);
+  assert.match(usage.stderr(), /requires --attempt/u);
+  const unconfirmed = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", report.recovery.token], working, unconfirmed.io), 2);
+  assert.match(unconfirmed.stderr(), /pass --yes in non-interactive use/u);
+  const declined = makeIo({ stdinIsTTY: true, confirm: async () => false });
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", report.recovery.token], working, declined.io), 1);
+  const wrong = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", `sa1-${"0".repeat(32)}`, "--yes", "--json"], working, wrong.io), 1);
+  assert.match(JSON.parse(wrong.stdout()).error, /token does not match.*Nothing was deleted/su);
+  assert.equal(JSON.parse(wrong.stdout()).recovery.refused, true);
+  assert.deepEqual(list(f.layout.dataDir), before);
+
+  const recovered = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", report.recovery.token, "--yes", "--json"], working, recovered.io), 0, recovered.stdout());
+  const result = JSON.parse(recovered.stdout());
+  assert.equal(result.recovered, true);
+  assert.equal(result.admissible, true);
+  assert.equal(result.next, "wollipog update --user");
+  assert.equal(existsSync(slot), false);
+  assert.ok(existsSync(join(result.preservedPath, "owner.json")), "the attempt is preserved, not deleted");
+
+  // The next update proceeds without manual filesystem edits and retires its staging normally.
+  const next = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], working, next.io), 0, next.stdout());
+  const upgraded = JSON.parse(next.stdout());
+  assert.equal(upgraded.upgraded, true);
+  assert.equal(existsSync(slot), false);
+  assert.equal(upgraded.diagnostics.problem, null);
+  assert.deepEqual(journalPhases(upgraded.diagnostics.journal), ["reserved", "staged", "installing", "installed", "verified", "cleaned"]);
+  const clear = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "inspect", "--json"], working, clear.io), 0);
+  assert.equal(JSON.parse(clear.stdout()).state, "clear");
+  assert.equal(JSON.parse(clear.stdout()).preserved[0].state, "preserved");
+});
+
+test("upgrade journals distinguish pre-installation failure and rollback, and a live updater blocks recovery", { skip: process.platform !== "linux" }, async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  const fixture = releaseFixture(f, { webBundle: false });
+  const journalDir = join(f.layout.dataDir, "upgrade-journal");
+  const newest = () => readdirSync(journalDir).map((name) => join(journalDir, name)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]!;
+  const wrongVersion: ServiceHost = { ...fixture.host, exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? "1.0.0" : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options) };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], wrongVersion, makeIo().io), 1);
+  assert.deepEqual(journalPhases(newest()), ["reserved", "failed", "cleaned"]);
+  const unhealthy: ServiceHost = { ...fixture.host, exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options) };
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], unhealthy, makeIo().io), 1);
+  assert.deepEqual(journalPhases(newest()), ["reserved", "staged", "installing", "installed", "rolled-back", "cleaned"]);
+
+  // An updater still running with its recorded identity keeps its slot even with a token.
+  const live = { pid: 5001, startTime: "9", bootId: "fixture-boot" };
+  const manifest = { name: "SHA256SUMS", size: 1, digest: `sha256:${"a".repeat(64)}`, url: "" };
+  const attempt = ReleaseStaging.create(f.layout.dataDir, { mode: "user", serviceUid: MY_UID }, "v9.9.9", [manifest], f.host.stagingFilesystem, live);
+  t.after(() => attempt.finish());
+  const io = makeIo();
+  const procs = { ...f.host.stagingProcesses!, self: 1, identity: (pid: number) => (pid === 5001 ? live : null) };
+  assert.equal(await runServiceCli(["service", "staging", "inspect", "--json"], { ...fixture.host, stagingProcesses: procs }, io.io), 1);
+  const inspection = JSON.parse(io.stdout());
+  assert.equal(inspection.recovery.token, null);
+  assert.match(inspection.recovery.reasons.join(" "), /5001 .*still running/u);
+  assert.equal(attempt.finish(), null, "the live attempt still completes normally");
+});
+
 test("upgrade close errors preserve pre-swap bytes or healthy installed generations without stale retries", { skip: process.platform !== "linux" }, async (t) => {
   for (const phase of ["writer", "final-owner"]) await t.test(phase, async (t) => {
     const f = fake(t);
@@ -982,6 +1125,9 @@ test("upgrade close errors preserve pre-swap bytes or healthy installed generati
         ...base,
         open: (...args) => {
           const fd = base.open(...args);
+          // A later open (for example the phase journal) may legitimately receive the released
+          // number; that is a new generation, not a retry of the retired one.
+          foreign.delete(fd);
           handles.set(fd, { path: String(args[0]), flags: args[1] as number });
           return fd;
         },
