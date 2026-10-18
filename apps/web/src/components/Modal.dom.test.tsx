@@ -479,6 +479,22 @@ test("a focused tertiary action keeps focus when the breakpoint moves it between
   await view.unmount();
 });
 
+test("on a phone the tertiary stays at the body's end when the body's content changes under it (#2993)", async () => {
+  matchingMedia = new Set([PHONE]);
+  const tertiary = <button type="button" className="btn ghost">Install Manually Instead</button>;
+  const sheet = (loaded: boolean) => (
+    <Modal title="Set Up This Machine" onClose={() => undefined} tertiary={tertiary}>
+      {loaded ? <p>Loaded</p> : <span>Loading</span>}
+    </Modal>
+  );
+  const view = await mount(sheet(false));
+  await act(async () => { view.root.render(sheet(true)); await tick(); });
+  const body = document.querySelector(".modal-body")!;
+  assert.equal(body.lastElementChild?.className, "modal-tertiary", "the loaded content comes before the tertiary");
+  assert.equal(body.querySelector("p")?.textContent, "Loaded");
+  await view.unmount();
+});
+
 test("closing the dialog that owns a phone sheet keeps focus in the dialog that takes it over", async () => {
   matchingMedia = new Set([PHONE]);
   let closeParent: (() => void) | undefined;
