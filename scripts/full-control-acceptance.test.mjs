@@ -7,6 +7,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { acceptanceMatrix, inspectLivePlan, liveSteps, isolateTestEnvironment, readPlan } from "./full-control-acceptance.mjs";
 
+const enforcedBoundary = (attestationSha256) => ({ executableSha256: "d".repeat(64), namespacePolicySha256: "e".repeat(64),
+  supported: true, attestationSha256, deniedRoutesProofSha256: "f".repeat(64), completeToolAllowlist: true, isolatedContext: true,
+  immutableResumePolicy: true });
 const proposal = () => JSON.parse(readFileSync(new URL("./fixtures/full-control-live-plan.json", import.meta.url), "utf8"));
 
 test("the concrete live proposal identifies missing empirical/authoritative inputs and never grants execution", () => {
@@ -22,8 +25,7 @@ test("filling JSON with fixture proof digests is still incapable of authorizing 
   plan.integration = { reviewedMainSha: "a".repeat(40), mergedPrerequisites:
     [2934, 2935, 2936, 2937, 2938, 2940, 1321, 1448, 1469].map((issue) => ({ issue, mergeCommitSha: "b".repeat(40) })) };
   plan.provider.media.capabilitiesSha256 = "c".repeat(64);
-  Object.assign(plan.provider.media.nativeBoundary, { supported: true, enforcedProfileRef: "fixture-only",
-    deniedRoutesProofSha256: "a".repeat(64), completeToolAllowlist: true, isolatedContext: true, immutableResumePolicy: true });
+  Object.assign(plan.provider.media.nativeBoundary, enforcedBoundary(plan.provider.media.capabilitiesSha256));
   Object.assign(plan.provider.codeReview, { controllerSha256: "d".repeat(64), executableSha256: "e".repeat(64), cliVersion: "fixture" });
   plan.oracle.namespaceProbeSha256 = "f".repeat(64);
   plan.evidence.normalVideoCertification = { proofId: "fixture-proof", proofSha256: "a".repeat(64),
@@ -46,9 +48,70 @@ test("native schema, image modality and added dynamic tools cannot replace an en
   assert.ok(inspectLivePlan(plan).blockers.includes("native_media_boundary"), "a claimed flag cannot fill absent enforcement metadata");
 });
 
+test("the media boundary accepts only the attested Claude Code media-only reviewer", () => {
+  const complete = () => {
+    const plan = proposal();
+    plan.provider.media.capabilitiesSha256 = "a".repeat(64);
+    Object.assign(plan.provider.media.nativeBoundary, enforcedBoundary("a".repeat(64)));
+    return plan;
+  };
+  assert.ok(!inspectLivePlan(complete()).blockers.includes("native_media_boundary"));
+  const changes = [
+    (p) => { p.provider.media.driver = "codex-app-server"; p.provider.media.nativeBoundary.driver = "codex-app-server"; },
+    (p) => { p.provider.media.model = "claude-sonnet-5-5"; },
+    (p) => { p.provider.media.nativeBoundary.effort = "low"; },
+    (p) => { p.provider.media.nativeBoundary.cliVersion = "2.1.297"; },
+    (p) => { p.provider.media.nativeBoundary.profile = "claude-code-default"; },
+    (p) => { p.provider.media.nativeBoundary.tools.push("Read"); },
+    (p) => { p.provider.media.nativeBoundary.tools.reverse(); },
+    (p) => { p.provider.media.nativeBoundary.credential = "operator_login"; },
+    (p) => { p.provider.media.nativeBoundary.executableSha256 = null; },
+    (p) => { p.provider.media.nativeBoundary.namespacePolicySha256 = "short"; },
+    (p) => { p.provider.media.nativeBoundary.attestationSha256 = "b".repeat(64); },
+    (p) => { p.provider.media.nativeBoundary.deniedRoutesProofSha256 = null; },
+    (p) => { p.provider.media.nativeBoundary.isolatedContext = false; },
+  ];
+  for (const [index, change] of changes.entries()) {
+    const plan = complete(); change(plan);
+    assert.ok(inspectLivePlan(plan).blockers.includes("native_media_boundary"), String(index));
+  }
+});
+
+test("picoduck/wollipog is admissible only as the explicit Human-authorized target under its ceiling", () => {
+  const report = inspectLivePlan(proposal());
+  assert.ok(!report.blockers.includes("isolated_repository"));
+  assert.ok(report.requiredIndependentChecks.includes("human_repository_target_authorization"));
+  assert.ok(!report.requiredIndependentChecks.includes("isolated_repository_operator_authorization"));
+  const changes = [
+    (p) => { delete p.repositoryTarget; },
+    (p) => { p.repositoryTarget.authorizedBy = "orchestrator"; },
+    (p) => { p.repositoryTarget.kind = "isolated"; },
+    (p) => { p.repositoryTarget.repository = "picoduck/other"; },
+    (p) => { p.repositoryTarget.costCeilingUsd = 199; },
+    (p) => { p.repositoryTarget.costCeilingUsd = 0; },
+    (p) => { p.repositoryTarget.reason = " "; },
+    (p) => { p.repository = "picoduck/other"; },
+  ];
+  for (const [index, change] of changes.entries()) {
+    const plan = proposal(); change(plan);
+    assert.ok(inspectLivePlan(plan).blockers.includes("isolated_repository"), String(index));
+  }
+  const isolated = proposal();
+  isolated.repository = "picoduck/wollipog-full-control-2939-validation";
+  delete isolated.repositoryTarget;
+  const isolatedReport = inspectLivePlan(isolated);
+  assert.ok(!isolatedReport.blockers.includes("isolated_repository"));
+  assert.ok(isolatedReport.requiredIndependentChecks.includes("isolated_repository_operator_authorization"));
+  const mixedCase = proposal();
+  mixedCase.repository = "PICODUCK/WOLLIPOG";
+  assert.ok(!inspectLivePlan(mixedCase).blockers.includes("isolated_repository"), "the target names the same repository");
+  delete mixedCase.repositoryTarget;
+  assert.ok(inspectLivePlan(mixedCase).blockers.includes("isolated_repository"));
+});
+
 test("finite allowance, exact private destination, normal video and fixed root are independent required inputs", () => {
   const changes = [
-    [(p) => { p.repository = "PICODUCK/WOLLIPOG"; }, "isolated_repository"],
+    [(p) => { delete p.repositoryTarget; }, "isolated_repository"],
     [(p) => { p.limits.costUsd = Infinity; }, "finite_aggregate_limits"],
     [(p) => { p.limits.toolCalls = 0; }, "finite_aggregate_limits"],
     [(p) => { p.limits.faultAttempts = 7; }, "finite_aggregate_limits"],
