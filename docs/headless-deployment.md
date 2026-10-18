@@ -381,8 +381,9 @@ effort: journal problems never fail an upgrade, and a successful upgrade reports
 warning. Inspection therefore reads records conservatively. Only a recorded `failed`, which is
 written before replacement starts, proves on its own that executables were not replaced. A
 record that simply stops before `installing` is reported as unknown, unless the retained slot
-itself proves the installation was untouched: a download still in progress, or every selected
-executable still staged. The journal directory is pinned by descriptor for every write, and a
+itself proves the installation was untouched: a partial download remains, and replacement
+never starts before every download is published. Staged executables left in the slot prove
+nothing, because replacement moves the live executable aside first. The journal directory is pinned by descriptor for every write, and a
 path that fails validation is never written. The record is evidence only and never grants
 cleanup authority.
 

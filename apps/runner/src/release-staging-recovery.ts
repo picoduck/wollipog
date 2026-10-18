@@ -369,12 +369,12 @@ function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesyst
     if (reason) { recognized = false; refuse(`${reason}; unrecognized objects are protected`); }
   }
   if (recognized) {
-    // Replacement starts only after every download is published, then moves each executable out.
-    const names = new Set(slotList.observed.map(({ entry }) => entry.name));
-    const executables = [...owner.declared.keys()].filter((name) => /^wollipog-(?:runner|control-plane)-/u.test(name));
-    const untouched = [...names].some((name) => owner.partials.has(name)) ? "a download was still in progress"
-      : executables.length > 0 && executables.every((name) => names.has(name)) ? "every selected executable is still staged" : null;
-    inspection.journal = withSlotEvidence(inspection.journal, untouched);
+    // Replacement starts only after every download is published, and publication removes the
+    // partial, so a remaining partial proves nothing was replaced. Retained staged executables
+    // prove nothing: the swap moves the live executable aside first, and a cross-filesystem move
+    // replaces the live path before removing its staged source.
+    const downloading = slotList.observed.some(({ entry }) => owner.partials.has(entry.name));
+    inspection.journal = withSlotEvidence(inspection.journal, downloading ? "a download was still in progress" : null);
   }
   const recorded = owner.process ?? inspection.journal.process;
   let updaterGone = false;

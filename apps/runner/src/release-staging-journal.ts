@@ -318,10 +318,7 @@ export function describeJournal(read: JournalRead): JournalSummary {
   return { evidence: "recorded", uncertain: !terminal, lastPhase: last, outcome, cleanup, conclusion: `${conclusion}${stopped}`, events, process: read.record.process };
 }
 
-/**
- * Strengthen an unknown conclusion with proof from the retained slot itself: replacement starts
- * only after every download is published, and it moves each executable out of the slot.
- */
+/** Strengthen an unknown conclusion with proof from the retained slot itself. */
 export function withSlotEvidence(summary: JournalSummary, untouched: string | null): JournalSummary {
   const replacing = summary.events.some((event) => ["installing", "installed", "verified", "rolled-back"].includes(event.phase));
   if (!untouched || summary.outcome !== "unknown" || replacing) return summary;

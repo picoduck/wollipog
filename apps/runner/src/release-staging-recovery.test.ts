@@ -295,8 +295,8 @@ test("active attempts and concurrent recoveries are protected; unavailable proof
     const f = fixture(t);
     await f.abandoned({ publish: ["SHA256SUMS", "wollipog-runner-x86_64-unknown-linux-gnu"], journal: true });
     const inspection = f.inspect();
-    assert.equal(inspection.journal.outcome, "pre-installation-failure", "every selected executable is still staged");
-    assert.match(inspection.journal.conclusion, /every selected executable is still staged/u);
+    // Staged executables can remain while a swap has already moved a live executable aside.
+    assert.equal(inspection.journal.outcome, "unknown", "retained staged executables do not prove the installation is untouched");
     const displaced = join(f.data, "displaced");
     const racing: StagingFilesystem = { ...stagingFilesystem, rename: (from, to) => {
       stagingFilesystem.rename(from, to);
