@@ -1,5 +1,5 @@
 /**
- * Context-window variants of one base model (protocol v120 `AgentModel.baseModelId`). Pure and
+ * Context-window variants of one base model (protocol v122 `AgentModel.baseModelId`). Pure and
  * framework-free: the composer's model menu, the context meter, and their tests share this file.
  *
  * A "real choice" exists only when the provider's own catalog lists two or more launchable ids for

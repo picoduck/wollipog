@@ -989,7 +989,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   workflowDecisionChildMessage: 166,
   /** Read exact descendant decisions and enumerate pending/approved decisions. */
   descendantWorkflowDecisionInspection: 214,
-  orchestratorCampaignManagement: 140,
   campaignContinuations: 149,
   orchestratorExecutionPolicy: 144,
   orchestratorChildHarnessPolicy: 157,
@@ -1046,9 +1045,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   nativeMacosMachineSkillSnapshots: 120,
   /** v121 runners publish a content-free, live-discovered Native TUI accounting boundary. */
   nativeTuiAccountingDiagnostics: 121,
-  /** Runner separates base model identity from context-window variants and publishes the
-   * effective post-launch window for native drivers. */
-  contextWindowVariants: 122,
   wslMachineSkills: 125,
   /** Per-model Codex service-tier catalogs and the selected session tier travel end to end. */
   codexServiceTiers: 126,
@@ -1083,10 +1079,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   wslSafeLauncher: 124,
   /** Correlated runner-owned policy-hook decision events replace timestamp-based UI synthesis. */
   nativePolicyHookEvents: 130,
-  /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
-  usageTokenBuckets: 103,
-  /** v104 runners stamp the producing model on token_usage. */
-  usageEventModel: 104,
   /** v105 runners honour `rearm_governance.holdFor: "control_plane"` as a queue-only hold. */
   controlPlaneQueueHold: 105,
   /** v106 runners enforce the control-plane-priced cumulative cost during the active turn. */
