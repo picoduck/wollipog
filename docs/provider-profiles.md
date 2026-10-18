@@ -125,11 +125,11 @@ profile.
 
 A sign-in that does not record the account spends the grant on both sides:
 
-| Outcome | Runner | Control plane |
+| Outcome | Runner | Control Plane |
 | --- | --- | --- |
-| The start is refused (no agent, the profile cannot be created, the lease is unavailable) | Removes the new HOME | Revokes the grant from the start reply |
-| Cancelled, failed or timed out | Forgets the grant and removes the HOME unless the provider wrote credentials into it; a kept HOME has the grant removed from its marker under the lease | Revokes the grant when the sign-in inventory reports the settled sign-in |
-| A duplicate of an account already on the Machine | Deletes the new HOME, credentials included | Same as failed |
+| The start is refused (no agent, the profile cannot be created, the lease is unavailable) | Retains any created HOME and ownership evidence; settles any created grant | Revokes the grant from the start reply |
+| Cancelled, failed or timed out | Forgets the grant and retains the HOME, including scratch files and credentials; drops the grant from the marker under the lease when possible | Revokes the grant when the sign-in inventory reports the settled sign-in |
+| A duplicate of an account already on the Machine | Retains the new HOME and credentials; drops the grant from its marker when possible | Same as failed |
 
 A lost start reply leaves the grant pending and unbound. The runner still uses it, and the account
 reports `pending` access; adopting the account replaces the grant in the marker.
@@ -279,36 +279,28 @@ plane's grant and drops it from the marker before it attempts the removal, so th
 even when the runner refuses the removal (an agent default names the account, a sign-in is running,
 or the configuration cannot be written).
 
-Whether the HOME is kept is decided at deletion time, under the HOME's lease: the runner takes the
-lease without the grant check, drops every grant of this control plane from the marker, and keeps
-the HOME when the marker still grants another control plane (or cannot be read), so a grant another
-runner recorded while the removal waited is never deleted with the directory. The runner re-reads
-the marker once more immediately before deleting, after the lease is released, because the lease
-journal lives inside the HOME. When no other control plane is granted, the existing deletion rules
-apply unchanged: a runner-created HOME is deleted only when nothing on the Machine still uses it.
+Physical HOME cleanup is disabled pending proved retirement authority (#3157). Removal forgets the
+configured account and reports `credentialsRetained: true`, including for unshared managed HOMEs and
+legacy `<dataDir>/provider-accounts/<accountId>` directories. It preserves credentials, scratch state
+and canonical lease evidence. A matching managed path/profile, an unshared marker or a released
+lease does not prove that a successor or dormant consumer cannot still depend on the HOME.
 
-A runner-created HOME is one of two shapes, and nothing else is ever deleted:
+Grant retirement still takes the HOME's lease without the grant check and drops this control plane's
+grants when the existing path, marker and local-use checks permit it. Its legacy boolean is not
+deletion authority. A replacement runner can forget an account its predecessor created and settle
+this control plane's grants, but it retains the HOME. Operator-configured and linked HOMEs remain
+protected.
 
-- `<dataDir>/provider-accounts/<accountId>`, under this runner's own data directory, as before.
-- A managed profile HOME, exactly `~/.agent-manager/profiles/<profileId>` for an account that records
-  that `profileId`. `.agent-manager` and `profiles` must be private real directories, the HOME
-  must be a real directory that resolves to itself, and this is checked again immediately before
-  deletion. An operator-configured account pointing into the root under another name, a linked
-  HOME or a linked root is kept. Any runner of the SSH account may retire a managed HOME, so a
-  replacement runner can remove an account its predecessor created.
-
-A managed profile HOME must also still hold the identity its account recorded. If
+A managed profile HOME must still hold the identity its account recorded before grant retirement. If
 `profiles/<profileId>` was replaced by another profile's HOME (or holds no readable marker), it is
 not this account's HOME: the removal reports `credentialsRetained`, keeps the directory and leaves
 its marker alone, so neither this control plane's grant in it nor any other control plane's is
-dropped. The identity is checked three times: when the removal handler reads the marker (only a
+dropped. The identity is checked when the removal handler reads the marker (only a
 marker holding the recorded id loses this control plane's grant), under the HOME's lease during
-retirement (`profile_retire` is sent the recorded id and keeps any other identity unchanged), and
-when the marker is read again immediately before deletion. The account itself is still forgotten.
-Accounts at other paths, including existing HOMEs that adopted a profile, are removed as before.
-
-Deletion still follows the lease release, as it did before profiles: #3157 tracks serializing
-managed-directory removal with a competing acquisition, and this part does not change that window.
+retirement (`profile_retire` is sent the recorded id and keeps any other identity unchanged).
+The account itself is still forgotten. Accounts at other paths are also forgotten without physical
+HOME cleanup. See [Provider HOME Cleanup Status](provider-home-cleanup.md) for the current safety
+boundary and the remaining retirement requirements.
 
 ## Mixed Versions
 
