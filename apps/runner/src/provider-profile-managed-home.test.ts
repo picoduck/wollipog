@@ -87,7 +87,7 @@ test("a managed profile HOME's first marker is created under the lease and never
   assert.throws(() => createManagedProviderProfileHome(ssh.profiles, IDS[0]!), /already exists/u);
 });
 
-test("removing a managed profile account deletes its HOME only when no other control plane is granted, from any runner", posixOnly, async (t) => {
+test("removing managed profile accounts retains their HOMEs and revokes this control plane's grants from any runner", posixOnly, async (t) => {
   const ssh = sshAccount(t);
   const accounts: RunnerProviderAccount[] = [];
   const creator = runnerOn(t, ssh, { ownerHash: "a".repeat(64), instance: INSTANCE, accounts, dataDir: join(ssh.root, "data") });
@@ -109,13 +109,15 @@ test("removing a managed profile account deletes its HOME only when no other con
   replacement.grants.synchronize(PROTOCOL_VERSION, [
     { grantId: GRANT, status: "active", profileId: IDS[0]! }, { grantId: SECOND_GRANT, status: "active", profileId: IDS[1]! },
   ]);
-  assert.deepEqual(await removeProviderAccountWithProfile(replacement.deps, "solo"), { credentialsRetained: false });
-  assert.equal(existsSync(solo), false, "the HOME is outside the data directory, so the replacement may retire it");
+  assert.deepEqual(await removeProviderAccountWithProfile(replacement.deps, "solo"), { credentialsRetained: true });
+  assert.equal(existsSync(solo), true, "a matching managed path and profile do not prove physical retirement authority");
+  const unshared = readProviderProfileMarker(solo);
+  assert.deepEqual(unshared.state === "present" && unshared.marker.grants, []);
   assert.deepEqual(await removeProviderAccountWithProfile(replacement.deps, "shared"), { credentialsRetained: true });
   const kept = readProviderProfileMarker(shared);
   assert.deepEqual(kept.state === "present" && kept.marker.grants.map((grant) => grant.controlPlaneInstanceId), [OTHER_INSTANCE],
     "the other control plane keeps its HOME and grant; this control plane's grant is gone");
-  assert.deepEqual(readdirSync(ssh.profiles), [IDS[1]]);
+  assert.deepEqual(readdirSync(ssh.profiles).sort(), [IDS[0], IDS[1]].sort());
 });
 
 test("removal keeps a managed profile HOME that no longer holds the account's recorded identity", posixOnly, async (t) => {
@@ -173,7 +175,7 @@ test("removal keeps a managed profile HOME that no longer holds the account's re
   assert.deepEqual(await removeProviderAccountWithProfile(runner.deps, "bare"), { credentialsRetained: true });
   assert.equal(existsSync(join(bare, ".credentials.json")), true);
 
-  // Substituted after the retirement decision: the identity is read again just before deletion.
+  // Substitution after the legacy retirement verdict must never authorize physical removal.
   const e = await managedHome(ssh, runner.leases, IDS[5]!);
   const f = await managedHome(ssh, runner.leases, IDS[6]!, SECOND_GRANT);
   add("e", e, IDS[5]!);
@@ -188,11 +190,11 @@ test("removal keeps a managed profile HOME that no longer holds the account's re
   assert.equal(existsSync(late.credentials) && existsSync(late.conversation), true, "F's HOME is not deleted");
   assert.deepEqual(markerOf(e), late.marker);
 
-  // A HOME that still holds the recorded identity is deleted exactly as before.
+  // A matching identity is still insufficient to prove every consumer is retired.
   const g = await managedHome(ssh, runner.leases, IDS[7]!);
   add("g", g, IDS[7]!);
-  assert.deepEqual(await removeProviderAccountWithProfile(runner.deps, "g"), { credentialsRetained: false });
-  assert.equal(existsSync(g), false);
+  assert.deepEqual(await removeProviderAccountWithProfile(runner.deps, "g"), { credentialsRetained: true });
+  assert.equal(existsSync(g), true);
 });
 
 test("nothing outside the exact managed profile HOME is ever deleted", posixOnly, async (t) => {

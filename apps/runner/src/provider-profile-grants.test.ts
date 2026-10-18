@@ -75,10 +75,9 @@ function fixture(t: TestContext) {
       removals.push({ accountId, ...(options.retainCredentialHome ? { retainCredentialHome: true } : {}),
         ...(options.retireCredentialHome ? { retired: true } : {}) });
       accounts.splice(accounts.indexOf(account), 1);
-      // The HOME is left in place; only the supervisor's verdict is modelled here.
-      const deletable = options.retainCredentialHome !== true && (await options.retireCredentialHome?.(account) ?? true) &&
-        options.retainCredentialHomeIf?.(account) !== true;
-      return { credentialsRetained: !deletable };
+      // Model the supervisor: keep grant retirement, but its boolean cannot authorize deletion.
+      if (options.retainCredentialHome !== true) await options.retireCredentialHome?.(account);
+      return { credentialsRetained: true };
     },
     publish: () => { published.push(Date.now()); },
     log: () => {},
@@ -259,12 +258,12 @@ test("removing a shared profile's account keeps the HOME and drops only this gra
   assert.deepEqual(read.state === "present" && read.marker.grants.map((grant) => grant.controlPlaneInstanceId), [OTHER_INSTANCE]);
   assert.deepEqual(f.grants.access().activeProfileIds, []);
 
-  // A profile only this control plane holds keeps today's deletion decision.
+  // A profile only this control plane holds is retained too, after grant retirement.
   const g = fixture(t);
   const [solo] = g.accounts as [RunnerProviderAccount];
   writeProviderProfileMarker(solo.directory, marker([[INSTANCE, GRANT]]));
   g.grants.synchronize(225, [{ grantId: GRANT, profileId: PROFILE, status: "active" }]);
-  assert.deepEqual(await removeProviderAccountWithProfile(g.deps, "work"), { credentialsRetained: false });
+  assert.deepEqual(await removeProviderAccountWithProfile(g.deps, "work"), { credentialsRetained: true });
   assert.deepEqual(g.removals, [{ accountId: "work", retired: true }], "the verdict is taken under the HOME's lease");
   assert.equal(g.registry.releaseAll(), true, "the decision released the lease it took");
 });
@@ -359,7 +358,7 @@ test("a refused account removal still revokes this control plane's grant on the 
     (error: unknown) => error instanceof Error && /not granted to this control plane/u.test(error.message));
 });
 
-test("a grant another control plane records while removal waits keeps the HOME, decided under the real lease", posixOnly, async (t) => {
+test("account removal retains unshared HOMEs and a grant recorded by another control plane while settlement waits", posixOnly, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-profile-retire-"));
   const managed = join(root, "provider-accounts");
   mkdirSync(managed);
@@ -407,9 +406,9 @@ test("a grant another control plane records while removal waits keeps the HOME, 
     publish: () => {}, log: () => {},
   };
 
-  // A HOME only this control plane was granted is still deleted.
-  assert.deepEqual(await removeProviderAccountWithProfile(deps, "solo"), { credentialsRetained: false });
-  assert.equal(existsSync(join(managed, "solo")), false);
+  // Even an unshared marker cannot prove physical retirement authority.
+  assert.deepEqual(await removeProviderAccountWithProfile(deps, "solo"), { credentialsRetained: true });
+  assert.equal(existsSync(join(managed, "solo")), true);
 
   // Removal reads the marker (only this grant), then waits; meanwhile another control plane adopts.
   hold = true;

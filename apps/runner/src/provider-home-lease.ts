@@ -788,11 +788,12 @@ export class ProviderHomeLeaseRegistry {
   }
 
   /**
-   * Worker-internal (#3239): decide whether a removed account's HOME may be deleted while holding
+   * Worker-internal (#3239): retire a removed account's profile grants while holding
    * its lease. Like a marker change it skips the grant check (this control plane's grant may already
    * be revoked), drops every grant of `controlPlaneInstanceId` from the marker, and then drops the
    * reference taken here. True only when that released the lease (no other reference was held here)
-   * and the marker grants no other control plane; an unverifiable marker is kept. With
+   * and the marker grants no other control plane; an unverifiable marker is kept. This boolean
+   * proves no authority to delete after release: a successor may already own the HOME (#3157). With
    * `expectedProfileId` a marker that does not hold exactly that identity is kept and left unchanged.
    */
   retireProfileHomeWhileHeld(requestedHome: string, provider: "claude" | "codex", controlPlaneInstanceId: string, expectedProfileId?: string): boolean {
