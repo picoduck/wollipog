@@ -19123,7 +19123,12 @@ export class ControlPlaneDb {
       } else if (!reportVerified && !childHasHumanRequest) active += 1;
     }
     const total = rows.length;
-    let childStatus: OrchestratorCampaignProjection["status"] = waitingHuman > 0 || (policy.control?.mode === "full_control" && (pendingHuman.length > 0 || pendingGenericHuman > 0)) ? "waiting_human" as const
+    // A human-owned recovery exception (an uncertain consumed closure, a missing access hold, ...)
+    // waits for a person even when no request is pending, so it is Waiting for a Person as well (#2938).
+    const humanRecovery = policy.control?.mode === "full_control" && this.campaignRecovery.activeRecords(resolvedCampaignId)
+      .some((record) => record.effectiveOwner === "human" && record.state === "waiting_human");
+    let childStatus: OrchestratorCampaignProjection["status"] = waitingHuman > 0 || (policy.control?.mode === "full_control" &&
+      (pendingHuman.length > 0 || pendingGenericHuman > 0 || humanRecovery)) ? "waiting_human" as const
       : active > 0 || pendingOrchestrator.length > 0 || cleanupPending > 0 || total === 0 ? "active" as const
       : blocked > 0 ? "blocked" as const
       : fullyVerified === total ? "verified_complete" as const

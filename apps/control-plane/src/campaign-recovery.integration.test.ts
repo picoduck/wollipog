@@ -1137,7 +1137,7 @@ test("an unanswered dispatched wake is woken again with backoff, then exhausts i
 });
 
 test("a wake is not re-sent while the parent is busy, a descendant works, or its turn's outcome is unknown", () => {
-  for (const hold of ["root_running", "descendant_running", "missing_result"] as const) {
+  for (const hold of ["root_running", "descendant_running", "root_background", "descendant_background", "missing_result"] as const) {
     const h = completedPrFixture();
     try {
       h.recovery.maintain(h.now);
@@ -1147,9 +1147,14 @@ test("a wake is not re-sent while the parent is busy, a descendant works, or its
       assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId: continuation.commandId,
         sessionId: "root", state: hold === "missing_result" ? "uncertain" : "completed", revision: 1 }));
       h.db.updateSessionStatus("root", hold === "root_running" ? "running" : "idle", h.now + 31_000);
-      if (hold === "descendant_running") {
+      if (hold === "descendant_running" || hold === "descendant_background") {
         h.db.setSessionArchived("child", false, h.now + 31_000);
-        h.db.updateSessionStatus("child", "running", h.now + 31_000);
+        h.db.updateSessionStatus("child", hold === "descendant_running" ? "running" : "idle", h.now + 31_000);
+      }
+      // At rest in the foreground while detached work still returns, as the runner's snapshot records it.
+      if (hold === "root_background") h.db.raw().prepare("UPDATE sessions SET background_work_state='running' WHERE id='root'").run();
+      if (hold === "descendant_background") {
+        h.db.raw().prepare("UPDATE sessions SET background_work_state='continuation_pending' WHERE id='child'").run();
       }
       const events = recoveryEvents(h).length;
       for (const at of [h.now + 31_000 + stalledRecoveryWakeDelayMs(1), h.now + 31_000 + STALLED_RECOVERY_WAKE_MAX_MS * 4]) {

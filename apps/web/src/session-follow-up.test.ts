@@ -57,6 +57,9 @@ test("a summary row, which carries no campaign projection, reads the server's Fu
   assert.equal(sessionFollowUp(summary("verified_complete")).group, "quiet");
   for (const status of ["blocked", "waiting_human"] as const) {
     assert.equal(completedFullControlCampaign(summary(status)), false, status);
+    // The server reports a human-owned recovery exception as waiting_human (#2938), never Campaign Active.
+    assert.equal(activeFullControlCampaign(summary(status)), false, status);
+    assert.notEqual(outstandingSessionResult(summary(status)), null, status);
     assert.equal(sessionFollowUp(summary(status)).group, "ready_for_review", status);
   }
   assert.equal(completedFullControlCampaign(summary("active")), false, "active is informational, not complete");
