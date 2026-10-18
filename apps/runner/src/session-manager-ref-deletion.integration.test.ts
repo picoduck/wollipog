@@ -156,11 +156,11 @@ test("runner shutdown during a paused deletion leaves no HEAD or index lock behi
   assert.equal(locks().length, admins.length * 2);
 
   manager.shutdownAll();
-  await manager.drainWorktreeRefDeletions(50);
-  assert.deepEqual(locks(), [], "no lock outlives the drain");
   await assert.rejects(manager.deleteWorktreeRefs("s_owner", undefined, [{ ref: "refs/heads/fix/owner-first", oldOid: head }]),
     /shutting down/u, "a deletion after shutdown begins is refused");
-  resume();
-  await running;
-  assert.deepEqual(locks(), []);
+  setTimeout(resume, 30);
+  assert.equal(await manager.drainWorktreeRefDeletions(5_000), true, "the running deletion is cancelled and joined");
+  assert.deepEqual(locks(), [], "no lock outlives the drain");
+  assert.equal(await running, "refused");
+  assert.equal(git(["rev-parse", "fix/owner-first"], repo), head, "cancelled before its transaction");
 });

@@ -735,8 +735,10 @@ branch anyway, by a writer that ignores Git's locks, every ref the call deleted 
 call is refused. Each lock file the runner creates holds a marker naming the runner and the
 operation, and is listed in a journal under the runner's data directory before it is created:
 
-- runner shutdown stops admitting deletions, waits up to five seconds for running ones and then
-  removes their remaining locks itself before it exits;
+- runner shutdown stops admitting deletions and cancels running ones: a cancelled deletion creates
+  no further lock and starts no further Git step before its transaction (one already committed
+  still finishes its check). Shutdown waits up to five seconds for them to stop and release their
+  own locks. One that does not stop in time keeps its journal entry, and the runner exits;
 - at startup the runner removes only the marked locks that a journaled, no-longer-running operation
   of its own left behind. A lock Git created, or one marked for another runner or operation, is never
   touched.

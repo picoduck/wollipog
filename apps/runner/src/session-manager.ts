@@ -17329,10 +17329,11 @@ export class SessionManager {
     return clean;
   }
 
-  /** Wait, bounded, for running ref deletions, then remove any lock they still hold (#3316), so the
-   * runner never exits holding a worktree's HEAD.lock or index.lock. */
-  async drainWorktreeRefDeletions(timeoutMs: number): Promise<void> {
-    await this.refDeletionLocks.drain(timeoutMs);
+  /** Cancel running ref deletions and wait, bounded, for them to stop and release their worktree
+   * locks (#3316). False when one did not stop in time: its journal entry stays, and the next
+   * runner process removes its marked locks before deleting anything. */
+  drainWorktreeRefDeletions(timeoutMs: number): Promise<boolean> {
+    return this.refDeletionLocks.drain(timeoutMs);
   }
 
   /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree

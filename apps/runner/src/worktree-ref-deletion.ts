@@ -262,6 +262,13 @@ export interface WorktreeLockKeeper {
   readonly marker: string;
   record(paths: readonly string[]): Promise<void>;
   release(): Promise<void>;
+  /** Throws once runner shutdown has cancelled this operation. Checked synchronously right before
+   * every lock is created and every Git step up to the deletion, so none of them starts after it. */
+  assertActive(): void;
+}
+
+function shuttingDown(): WorktreeRefDeletionRefusal {
+  return new WorktreeRefDeletionRefusal("the runner is shutting down; try again once it is back");
 }
 
 /** The temporary file a lock is linked from, so the lock appears with its marker already inside. */
@@ -292,6 +299,7 @@ export function ephemeralLockKeeper(label = "ephemeral"): WorktreeLockKeeper {
     marker,
     record: async (recorded) => { paths = [...recorded]; },
     release: async () => { await removeMarkedLocks(paths, marker); paths = []; },
+    assertActive: () => undefined,
   };
 }
 
@@ -312,19 +320,24 @@ async function lockWorktrees(commonGitDir: string, keeper: WorktreeLockKeeper): 
     // No linked worktrees.
   }
   const locks = adminDirs.flatMap((admin) => [join(admin, "HEAD.lock"), join(admin, "index.lock")]);
+  keeper.assertActive();
   await keeper.record(locks);
   try {
     for (const lock of locks) {
       const source = lockSource(lock, keeper.marker);
+      keeper.assertActive();
       await writeFile(source, keeper.marker, { flag: "wx", mode: 0o644 });
       try {
+        // Checked in the same turn the link is issued: a cancelled operation creates no new lock.
+        keeper.assertActive();
         await link(source, lock);
       } finally {
         await rm(source, { force: true });
       }
     }
-  } catch {
+  } catch (error) {
     await keeper.release();
+    if (error instanceof WorktreeRefDeletionRefusal) throw error;
     throw new WorktreeRefDeletionRefusal(
       "a worktree's HEAD or index is locked, so a checkout or another Git operation is in progress; try again",
     );
@@ -338,13 +351,16 @@ async function lockWorktrees(commonGitDir: string, keeper: WorktreeLockKeeper): 
  * - each operation's lock paths are written here before any lock is created and removed after;
  * - `recover` (run before the first deletion of a runner process) removes the marked locks of
  *   journaled operations that no longer exist, which is every one a previous process left;
- * - `drain` stops new deletions at shutdown, waits a bounded time for running ones, then removes
- *   whatever marked locks remain, so the runner never exits holding one.
+ * - `drain` stops new deletions at shutdown and cancels running ones, which then create no further
+ *   lock and start no further Git step before their transaction, and joins them: each releases its
+ *   own locks and journal entry as it stops. One that cannot stop within the bound keeps its journal
+ *   entry, so the next runner's `recover` removes what it held; the journal is never removed while
+ *   an acquisition may still run.
  */
 export class RefDeletionLockJournal {
   private closed = false;
   private recovery: Promise<void> | undefined;
-  private readonly active = new Map<string, { paths: readonly string[]; done: Promise<void> }>();
+  private readonly active = new Map<string, { controller: AbortController; done: Promise<void> }>();
 
   constructor(private readonly directory: string, private readonly runnerId: string) {}
 
@@ -382,27 +398,33 @@ export class RefDeletionLockJournal {
 
   /** Runs one deletion with a journaled keeper, or refuses once shutdown has begun. */
   async run<T>(operation: (keeper: WorktreeLockKeeper) => Promise<T>): Promise<T> {
-    if (this.closed) throw new WorktreeRefDeletionRefusal("the runner is shutting down; try again once it is back");
+    if (this.closed) throw shuttingDown();
     await this.recover();
-    if (this.closed) throw new WorktreeRefDeletionRefusal("the runner is shutting down; try again once it is back");
+    if (this.closed) throw shuttingDown();
     const operationId = randomUUID();
     const marker = this.marker(operationId);
     let finish!: () => void;
-    const entry = { paths: [] as readonly string[], done: new Promise<void>((resolve) => { finish = resolve; }) };
+    const controller = new AbortController();
+    const entry = { controller, done: new Promise<void>((resolve) => { finish = resolve; }) };
     this.active.set(operationId, entry);
+    let paths: readonly string[] = [];
     const keeper: WorktreeLockKeeper = {
       marker,
-      record: async (paths) => {
-        entry.paths = [...paths];
+      record: async (recorded) => {
+        paths = [...recorded];
         await mkdir(this.directory, { recursive: true, mode: 0o700 });
         const journal = this.journalPath(operationId);
-        await writeFile(`${journal}.tmp`, JSON.stringify({ runnerId: this.runnerId, paths: entry.paths }), { mode: 0o600 });
+        await writeFile(`${journal}.tmp`, JSON.stringify({ runnerId: this.runnerId, paths }), { mode: 0o600 });
         await rename(`${journal}.tmp`, journal);
       },
+      // Runs only from this operation, so never while its own acquisition is still going on.
       release: async () => {
-        await removeMarkedLocks(entry.paths, marker);
-        entry.paths = [];
+        await removeMarkedLocks(paths, marker);
+        paths = [];
         await rm(this.journalPath(operationId), { force: true });
+      },
+      assertActive: () => {
+        if (controller.signal.aborted) throw shuttingDown();
       },
     };
     try {
@@ -414,23 +436,23 @@ export class RefDeletionLockJournal {
     }
   }
 
-  /** Stop admitting deletions; nothing is held after this resolves, within `timeoutMs` plus cleanup. */
-  async drain(timeoutMs: number): Promise<void> {
+  /**
+   * Stop admitting deletions, cancel the running ones and wait up to `timeoutMs` for them to stop.
+   * True when every one stopped, having released its own locks and journal entry. False leaves the
+   * rest journaled, never removed from under an acquisition that may still run, for `recover`.
+   */
+  async drain(timeoutMs: number): Promise<boolean> {
     this.closed = true;
-    const running = [...this.active.values()].map((entry) => entry.done);
-    if (running.length) {
-      let timer: NodeJS.Timeout | undefined;
-      await Promise.race([
-        Promise.all(running),
-        new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
-      ]);
-      clearTimeout(timer);
-    }
-    // Whatever is still running loses its locks now; its confined Git dies with the runner.
-    for (const [operationId, entry] of this.active) {
-      await removeMarkedLocks(entry.paths, this.marker(operationId));
-      await rm(this.journalPath(operationId), { force: true });
-    }
+    const running = [...this.active.values()];
+    for (const entry of running) entry.controller.abort();
+    if (!running.length) return true;
+    let timer: NodeJS.Timeout | undefined;
+    const joined = await Promise.race([
+      Promise.all(running.map((entry) => entry.done)).then(() => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+    clearTimeout(timer);
+    return joined;
   }
 
   close(): void {
@@ -518,9 +540,13 @@ export async function deleteOwnedWorktreeRefs(
     throw new WorktreeRefDeletionRefusal("the worktree's Git registration could not be verified");
   }
   const env = gitEnvironment(scope);
+  const guarded: GitRunner = (args, options) => {
+    locks.assertActive();
+    return git(args, options);
+  };
   const owned = new Set(scope.ownedBranches.filter((branch) => branch.length > 0));
   const needsRemotes = requests.some((request) => request.ref.startsWith("refs/remotes/"));
-  const remotes = needsRemotes ? await configuredRemotes(git, env) : new Set<string>();
+  const remotes = needsRemotes ? await configuredRemotes(guarded, env) : new Set<string>();
   const classified = requests.map((request) => classify(request, owned, remotes));
 
   if (classified.some((entry) => entry.kind === "sequencer")) {
@@ -562,7 +588,7 @@ export async function deleteOwnedWorktreeRefs(
     const deleted: Classified[] = [];
     const absent: string[] = [];
     for (const entry of classified) {
-      const current = await currentValue(git, env, scope, entry);
+      const current = await currentValue(guarded, env, scope, entry);
       if (current === undefined) {
         absent.push(entry.ref);
         continue;
@@ -573,7 +599,8 @@ export async function deleteOwnedWorktreeRefs(
       deleted.push(entry);
     }
     if (deleted.length) {
-      const result = await git([...SAFE_CONFIG, "update-ref", "--no-deref", "--stdin"], {
+      // The last cancellable step. Once Git commits the deletion, the check below always runs.
+      const result = await guarded([...SAFE_CONFIG, "update-ref", "--no-deref", "--stdin"], {
         env, input: deleted.map((entry) => `delete ${entry.ref} ${entry.oldOid}\n`).join(""),
       });
       if (result.code !== 0) {

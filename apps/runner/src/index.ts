@@ -4245,7 +4245,9 @@ function shutdown(exitCode = 0): void {
     .finally(async () => {
       // A ref deletion holds worktrees' HEAD and index locks; none may outlive the runner (#3316).
       try {
-        await sessions.drainWorktreeRefDeletions(REF_DELETION_DRAIN_MS);
+        if (!await sessions.drainWorktreeRefDeletions(REF_DELETION_DRAIN_MS)) {
+          log("a ref deletion did not stop in time; its worktree locks are journaled and removed at the next start");
+        }
       } catch (error) {
         log(`ref deletion drain failed: ${errText(error)}`);
       }

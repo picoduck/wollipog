@@ -379,30 +379,71 @@ test("startup recovery removes this runner's marked stale locks and never an unm
   assert.equal(existsSync(join(journalDir, `${operation}.json`)), false);
 });
 
-test("shutdown drains a paused deletion without leaving a lock, and admits no new one (CR-2.2)", async () => {
+function pausedAt(): { reached: () => boolean; wait: () => Promise<void>; resume: () => void } {
+  let reached = false;
+  let resume!: () => void;
+  const paused = new Promise<void>((resolve) => { resume = resolve; });
+  return { reached: () => reached, wait: async () => { reached = true; await paused; }, resume };
+}
+
+function wollipogFiles(...admins: string[]): string[] {
+  return admins.flatMap((admin) => readdirSync(admin).filter((name) => name.endsWith(".wollipog") ||
+    ((name === "HEAD.lock" || name === "index.lock") && readFileSync(join(admin, name), "utf8").startsWith("wollipog-ref-deletion"))));
+}
+
+test("a drain cancels a paused deletion before its transaction and joins it, leaving no lock (CR-2.2)", async () => {
   const { root, repoPath, otherAdmin, scope } = fixture();
   const head = git(["rev-parse", "main"], repoPath);
   git(["branch", "agent/s_owner-old", "main"], repoPath);
   const journal = new RefDeletionLockJournal(join(root, "journal"), "runner-a");
-  let resume!: () => void;
-  const paused = new Promise<void>((resolve) => { resume = resolve; });
-  let reached = false;
+  const pause = pausedAt();
+  let paused = false;
   const pausing: GitRunner = async (args, options) => {
-    if (args.includes("for-each-ref") && !reached) {
-      reached = true;
-      await paused;
+    if (args.includes("for-each-ref") && !paused) {
+      paused = true;
+      await pause.wait();
     }
     return unconfinedGitRunnerForTests(args, options);
   };
   const running = journal.run((locks) => deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }], pausing, locks));
-  const settled = running.then(() => "done", () => "refused");
-  await until(() => reached, "the deletion to pause with its locks held");
+  const settled = running.then(() => "done", (error: Error) => error.message);
+  await until(pause.reached, "the deletion to pause with its locks held");
   assert.equal(heldLocks(scope.commonGitDir, scope.worktreeGitDir, otherAdmin).length, 6);
-  await journal.drain(50);
+  setTimeout(pause.resume, 30);
+  assert.equal(await journal.drain(5_000), true, "the drain joins the cancelled deletion");
+  assert.match(await settled, /shutting down/u, "cancelled before its transaction");
+  assert.equal(git(["rev-parse", "agent/s_owner-old"], repoPath), head, "so the branch was not deleted");
   assert.deepEqual(heldLocks(scope.commonGitDir, scope.worktreeGitDir, otherAdmin), [], "no lock outlives the drain");
   assert.deepEqual(readdirSync(join(root, "journal")), [], "and nothing is left to recover");
   await assert.rejects(journal.run(async () => "never"), /shutting down/u);
-  resume();
-  await settled;
-  assert.deepEqual(heldLocks(scope.commonGitDir, scope.worktreeGitDir, otherAdmin), []);
+});
+
+test("a deletion paused between journaling and locking creates no lock after an expired drain (CR-3.2)", async () => {
+  const { root, repoPath, otherAdmin, scope } = fixture();
+  const head = git(["rev-parse", "main"], repoPath);
+  git(["branch", "agent/s_owner-old", "main"], repoPath);
+  const journalDir = join(root, "journal");
+  const journal = new RefDeletionLockJournal(journalDir, "runner-a");
+  const pause = pausedAt();
+  const running = journal.run((locks) => deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }],
+    unconfinedGitRunnerForTests, {
+      marker: locks.marker,
+      record: async (paths) => {
+        await locks.record(paths);
+        await pause.wait();
+      },
+      release: () => locks.release(),
+      assertActive: () => locks.assertActive(),
+    }));
+  const settled = running.then(() => "done", (error: Error) => error.message);
+  await until(pause.reached, "the deletion to journal its locks and pause before creating them");
+  assert.equal(await journal.drain(0), false, "an expired drain cannot join it");
+  assert.equal(readdirSync(journalDir).length, 1, "its recovery metadata stays while acquisition may still run");
+  assert.deepEqual(wollipogFiles(scope.commonGitDir, scope.worktreeGitDir, otherAdmin), []);
+  pause.resume();
+  assert.match(await settled, /shutting down/u);
+  assert.deepEqual(wollipogFiles(scope.commonGitDir, scope.worktreeGitDir, otherAdmin), [],
+    "the resumed acquisition created no lock and no temporary file");
+  assert.deepEqual(readdirSync(journalDir), [], "and removed its journal entry only once it had stopped");
+  assert.equal(git(["rev-parse", "agent/s_owner-old"], repoPath), head);
 });
