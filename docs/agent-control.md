@@ -720,7 +720,11 @@ Every ref names the object id the caller expects, and one `git update-ref --no-d
 transaction deletes all of them or none; a ref already gone is reported as absent, so a repeated
 call succeeds. A call names at most 16 refs. Host Git runs as plumbing with explicit `GIT_DIR` and
 `GIT_COMMON_DIR`, no hooks, no fsmonitor, no global or system config and a minimal environment, and
-a ref path the sandbox redirected through a symlink is refused before Git runs. Each call, refused
+a ref path the sandbox redirected through a symlink is refused before Git runs. Because the session
+could still swap a directory after that check, Linux runs this Git in its own bubblewrap mount view:
+only the shared Git directory's `refs`, `logs`, `packed-refs` and lock files and the worktree's own
+admin directory are writable, so a redirected path reaches nothing the session could not already
+write. Each call, refused
 or not, records a `worktree_refs_deleted` session event; its refusal reasons are fixed runner
 strings that never echo repository content.
 

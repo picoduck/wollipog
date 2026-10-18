@@ -49,6 +49,9 @@ test("the runner deletes only the calling session's refs and audits every call (
   const manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
     undefined as never, dataDir);
   t.after(() => manager.shutdownAll());
+  // The real-bwrap confinement of the runner's Git is covered in managed-worktree-sandbox's
+  // integration test; this host may not allow the user namespace it needs.
+  (manager as unknown as { worktreeRefDeletionGit: () => Promise<undefined> }).worktreeRefDeletionGit = async () => undefined;
 
   const first = await manager.requestWorktree("s_owner", { baseRef: "HEAD", branch: "fix/owner-first" });
   const second = await manager.requestWorktree("s_owner", { baseRef: "HEAD", branch: "fix/owner-second" });

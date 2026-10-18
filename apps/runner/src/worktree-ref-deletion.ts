@@ -18,10 +18,16 @@
  * deletes all of them or none. Host Git runs as plumbing with explicit Git directories, no hooks,
  * no fsmonitor, no global or system config and a minimal environment. Refusals are fixed strings
  * that never echo repository content.
+ *
+ * The session can still change its writable `refs` and `logs` trees while the runner works, for
+ * example by swapping a directory for a symlink after the runner checked it. On Linux the runner's
+ * Git therefore runs in its own bubblewrap mount view (`confinedGitRunner`), in which only the shared
+ * Git directory's `refs`, `logs`, `packed-refs` and lock files and this worktree's admin directory
+ * are writable. A path redirected anywhere else then fails instead of deleting a file there.
  */
 
 import { execFile } from "node:child_process";
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { lstat, readFile, readdir, stat } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { MAX_SESSION_WORKTREE_REF_DELETIONS } from "@wollipog/protocol";
 
@@ -75,21 +81,70 @@ type Classified =
 export type GitRunner = (args: readonly string[], options: { env: NodeJS.ProcessEnv; input?: string }) =>
   Promise<{ code: number; stdout: string }>;
 
-const runGit: GitRunner = (args, options) => new Promise((resolve) => {
-  const child = execFile("git", [...args], {
+function runProcess(command: string, args: readonly string[], options: { env: NodeJS.ProcessEnv; input?: string }):
+  Promise<{ code: number; stdout: string }> {
+  return new Promise((resolve) => {
+    const child = execFile(command, [...args], {
     env: options.env,
     cwd: "/",
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 1024 * 1024,
     encoding: "utf8",
-  }, (error, stdout) => {
-    const exitCode = (error as { code?: unknown } | null)?.code;
-    resolve({ code: error ? (typeof exitCode === "number" ? exitCode : 1) : 0, stdout: String(stdout ?? "") });
+    }, (error, stdout) => {
+      const exitCode = (error as { code?: unknown } | null)?.code;
+      resolve({ code: error ? (typeof exitCode === "number" ? exitCode : 1) : 0, stdout: String(stdout ?? "") });
+    });
+    // A child that exits before reading its input reports through its exit code, not EPIPE.
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end(options.input);
   });
-  // A child that exits before reading its input reports through its exit code, not EPIPE.
-  child.stdin?.on("error", () => undefined);
-  child.stdin?.end(options.input);
-});
+}
+
+const runGit: GitRunner = (args, options) => runProcess("git", args, options);
+
+/**
+ * Git inside a bubblewrap mount view where the whole filesystem is read-only except the shared Git
+ * directory's root (for `packed-refs.lock` and the `packed-refs` it renames into place), its `refs`
+ * and `logs` trees, and this worktree's admin directory. Every other root entry of the shared Git
+ * directory (`config`, `hooks`, `objects`, `HEAD`, ...), every other worktree's admin directory and
+ * this one's registration files are bound read-only over it, so they can be neither written nor
+ * unlinked. The session can already write `refs` and `logs` itself, so a symlink it plants there can
+ * reach nothing through this Git that it could not already change.
+ */
+export async function confinedGitRunner(scope: WorktreeRefDeletionScope, bwrap: string): Promise<GitRunner> {
+  const common = scope.commonGitDir;
+  const args = [
+    "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
+    "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+    "--bind", common, common,
+  ];
+  for (const entry of await readdir(common)) {
+    if (entry === "refs" || entry === "logs" || entry === "packed-refs") continue;
+    args.push("--ro-bind", join(common, entry), join(common, entry));
+  }
+  args.push("--bind", scope.worktreeGitDir, scope.worktreeGitDir);
+  for (const name of ["gitdir", "commondir", "config.worktree"]) {
+    const path = join(scope.worktreeGitDir, name);
+    if (await exists(path)) args.push("--ro-bind", path, path);
+  }
+  args.push("--chdir", "/", "--", "git");
+  return (gitArgs, options) => runProcess(bwrap, [...args, ...gitArgs], options);
+}
+
+/** The first executable `bwrap` on PATH, or undefined. */
+export async function findBubblewrap(path = process.env.PATH ?? ""): Promise<string | undefined> {
+  for (const directory of path.split(":")) {
+    if (!posix.isAbsolute(directory)) continue;
+    const candidate = join(directory, "bwrap");
+    try {
+      const entry = await stat(candidate);
+      if (entry.isFile() && (entry.mode & 0o111) !== 0) return candidate;
+    } catch {
+      // Not here.
+    }
+  }
+  return undefined;
+}
 
 /** Only the names of the refs the session asked for leave this module, and only once validated. */
 export function validateWorktreeRefDeletionRequests(value: unknown): WorktreeRefDeletionRequest[] {

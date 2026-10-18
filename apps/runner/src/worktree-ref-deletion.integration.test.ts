@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import {
   deleteOwnedWorktreeRefs,
+  findBubblewrap,
   MAX_WORKTREE_REF_DELETIONS,
   validateWorktreeRefDeletionRequests,
   WorktreeRefDeletionRefusal,
@@ -204,4 +205,16 @@ test("requests are bounded and need a full expected object id", () => {
   ]), WorktreeRefDeletionRefusal);
   assert.deepEqual(validateWorktreeRefDeletionRequests([{ ref: "AUTO_MERGE", oldOid: oid, extra: 1 }]),
     [{ ref: "AUTO_MERGE", oldOid: oid }]);
+});
+
+test("bubblewrap is found only as an executable file on an absolute PATH entry", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-ref-deletion-path-")));
+  roots.push(root);
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  assert.equal(await findBubblewrap(`relative:${bin}`), undefined);
+  writeFileSync(join(bin, "bwrap"), "#!/bin/sh\n", { mode: 0o644 });
+  assert.equal(await findBubblewrap(bin), undefined, "not executable");
+  chmodSync(join(bin, "bwrap"), 0o755);
+  assert.equal(await findBubblewrap(`relative:${bin}`), join(bin, "bwrap"));
 });

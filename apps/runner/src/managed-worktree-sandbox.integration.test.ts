@@ -7,7 +7,7 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
 import { buildBwrapArgs } from "./spawn.js";
-import { deleteOwnedWorktreeRefs, SEQUENCER_LEFTOVER_REFS } from "./worktree-ref-deletion.js";
+import { confinedGitRunner, deleteOwnedWorktreeRefs, findBubblewrap, SEQUENCER_LEFTOVER_REFS } from "./worktree-ref-deletion.js";
 
 /** Never inherit this process's stdin: a sandboxed child that reads it blocks the whole suite
  * instead of failing, and the timeout below only helps once the child is actually running. */
@@ -772,6 +772,10 @@ test("refs an isolated session cannot delete itself are deleted by the runner, a
     worktreePath, worktreeGitDir: admin, commonGitDir: common,
     ownedBranches: ["agent/s_managed", "agent/s_managed-old"],
   };
+  // Exactly as the runner deletes them on Linux: its own Git in its own confined mount view.
+  const confined = await confinedGitRunner(scope, (await findBubblewrap())!);
+  const runnerDeletes = (requests: Parameters<typeof deleteOwnedWorktreeRefs>[1]) =>
+    deleteOwnedWorktreeRefs(scope, requests, confined);
 
   // The reason the runner has to do it: inside the sandbox every ref deletion needs the lock.
   const ownDeletion = sandboxed(`git update-ref -d refs/heads/agent/s_managed-old ${base}`);
@@ -783,12 +787,12 @@ test("refs an isolated session cannot delete itself are deleted by the runner, a
   assert.equal(rebase.status, 0, rebase.output);
   assert.match(rebase.output, /packed-refs\.lock/u, "the documented deviation: Git prints the lock error first");
   assert.equal(host(["log", "--format=%s", "-3"], worktreePath), "own\nupstream\nbase");
-  await deleteOwnedWorktreeRefs(scope, sequencerLeftovers(admin));
+  await runnerDeletes(sequencerLeftovers(admin));
   assert.deepEqual(sequencerLeftovers(admin), []);
   assert.doesNotMatch(host(["status"], worktreePath), /cherry-pick|rebase/iu);
 
   // The session's own loose branch and its packed remote-tracking ref.
-  const deleted = await deleteOwnedWorktreeRefs(scope, [
+  const deleted = await runnerDeletes([
     { ref: "refs/heads/agent/s_managed-old", oldOid: base },
     { ref: "refs/remotes/origin/agent/s_managed", oldOid: base },
   ]);
@@ -801,7 +805,7 @@ test("refs an isolated session cannot delete itself are deleted by the runner, a
   const leftovers = sequencerLeftovers(admin);
   assert.ok(leftovers.some((entry) => entry.ref === "CHERRY_PICK_HEAD"), JSON.stringify(leftovers));
   assert.equal(existsSync(join(admin, "sequencer")), false);
-  assert.deepEqual((await deleteOwnedWorktreeRefs(scope, leftovers)).deleted, leftovers.map((entry) => entry.ref));
+  assert.deepEqual((await runnerDeletes(leftovers)).deleted, leftovers.map((entry) => entry.ref));
   assert.deepEqual(sequencerLeftovers(admin), []);
   assert.doesNotMatch(host(["status"], worktreePath), /cherry-pick/iu);
   const reset = sandboxed("git reset --quiet --hard HEAD");
@@ -811,4 +815,41 @@ test("refs an isolated session cannot delete itself are deleted by the runner, a
   assert.equal(host(["rev-parse", "main"]), upstream);
   assert.equal(fingerprint(), before);
   host(["fsck", "--no-progress", "--strict"]);
+});
+
+test("a ref directory swapped for a symlink cannot make the runner's confined Git delete elsewhere (#3316)", {
+  skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
+}, async () => {
+  const { root, repoPath, worktreePath } = managedWorktreeFixture(UNMASKED_FIXTURE_BASE);
+  const other = join(root, "worktrees", "s_other");
+  assert.equal(run("git", ["worktree", "add", "--quiet", "-b", "agent/s_other", other, "main"], repoPath).status, 0);
+  const common = realpathSync(join(repoPath, ".git"));
+  const admin = gitAdminDirectory(worktreePath);
+  const otherAdmin = gitAdminDirectory(other);
+  const oid = run("git", ["rev-parse", "main"], repoPath).output.trim();
+  // Ref-shaped victims: another checkout's branch outside this repository, and another session's
+  // admin file. Each holds exactly the object id the request expects, as Git's own check needs.
+  const outside = join(root, "elsewhere", "refs", "heads");
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "victim"), `${oid}\n`);
+  writeFileSync(join(otherAdmin, "ORIG_HEAD"), `${oid}\n`);
+  // The state a session reaches by swapping the directory after the runner's own path checks.
+  symlinkSync(outside, join(common, "refs", "heads", "swapped"));
+  symlinkSync(otherAdmin, join(common, "refs", "heads", "foreign"));
+  const confined = await confinedGitRunner(
+    { worktreePath, worktreeGitDir: admin, commonGitDir: common, ownedBranches: [] }, (await findBubblewrap())!);
+  const env = {
+    PATH: process.env.PATH, GIT_DIR: admin, GIT_COMMON_DIR: common,
+    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
+  };
+  for (const ref of ["refs/heads/swapped/victim", "refs/heads/foreign/ORIG_HEAD"]) {
+    const result = await confined(["-c", "core.hooksPath=/dev/null", "update-ref", "--no-deref", "-d", ref, oid], { env });
+    assert.notEqual(result.code, 0, ref);
+  }
+  assert.equal(readFileSync(join(outside, "victim"), "utf8"), `${oid}\n`);
+  assert.equal(readFileSync(join(otherAdmin, "ORIG_HEAD"), "utf8"), `${oid}\n`);
+  // The same deletion by unconfined host Git follows the symlink: this is what confinement stops.
+  const unconfined = run("git", ["--git-dir", admin, "update-ref", "--no-deref", "-d", "refs/heads/swapped/victim", oid], worktreePath);
+  assert.equal(unconfined.status, 0, unconfined.output);
+  assert.equal(existsSync(join(outside, "victim")), false);
 });
