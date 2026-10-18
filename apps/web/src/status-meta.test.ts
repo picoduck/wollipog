@@ -29,6 +29,7 @@ const TABLE: readonly Row[] = [
   ["session", "stopping", "Stopping", "info"],
   ["session", "idle", "Awaiting Prompt", "neutral"],
   ["session", "ready_for_review", "Ready for Review", "review"],
+  ["session", "campaign_complete", "Campaign Complete", "success"],
   ["session", "stalled", "Stalled", "danger"],
   ["session", "failed", "Failed", "danger"],
   ["session", "stop_failed", "Stop Failed", "danger"],

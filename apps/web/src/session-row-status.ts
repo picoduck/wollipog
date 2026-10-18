@@ -1,5 +1,5 @@
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { sessionFollowUp, sessionWorking } from "./session-follow-up.js";
+import { completedFullControlCampaign, sessionFollowUp, sessionWorking } from "./session-follow-up.js";
 import { reminderBadgeDescription, reminderBadgeLabel, snoozedSessionAttentionReason } from "./session-reminders.js";
 import {
   sessionStatusSummary,
@@ -82,6 +82,8 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
  * 2. Else Background Work Lost, Disconnected, then Waiting on External Job (`sessionStatusSummary()`).
  * 3. Else a fired reminder's Returned.
  * 4. Else an outstanding human result's Ready for Review, once the session has stopped working (#3074).
+ *    A Full Control root the server reports Verified Complete shows an informational Campaign Complete
+ *    instead: its normal completion is not review work (#2940).
  * 5. Else Children Working while an at-rest parent's descendants have unfinished work.
  * 6. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
  *
@@ -118,6 +120,11 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       session.attention && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking }).group === "ready_for_review") {
     primary = { kind: "lifecycle", meta: statusMeta("session", "ready_for_review"),
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
+  } else if ((!primary || (primary.kind === "lifecycle" && primary.meta.label === statusMeta("session", "completed").label)) &&
+      !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
+      !sessionWorking(session as SessionView) && completedFullControlCampaign(session)) {
+    primary = { kind: "lifecycle", meta: statusMeta("session", "campaign_complete"),
+      description: "This Full Control campaign finished and the server verified it. Its result is informational.", needsYou: false };
   }
   const others = needs.slice(1).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;

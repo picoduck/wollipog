@@ -3163,6 +3163,8 @@ interface SessionSummaryContext {
   childObservations: Map<string,Array<{ payload: string }>>;
   heldResumes: Map<string,HeldSessionResumeView[]>;
   campaignRequests: Map<string,NonNullable<SessionView["campaignRequests"]>>;
+  /** Full Control campaign roots' status, derived as the projection does (#2940). */
+  fullControlCampaignStatuses: Map<string,NonNullable<SessionView["fullControlCampaignStatus"]>>;
 }
 
 interface CampaignRequestSummaryRow {
@@ -11622,6 +11624,7 @@ export class ControlPlaneDb {
       childObservations: new Map(),
       heldResumes: new Map(),
       campaignRequests: new Map(),
+      fullControlCampaignStatuses: new Map(),
     };
     // Resolve the same outermost campaign boundary from the preloaded ancestry, with its existing
     // 64-row/cycle/missing-parent refusal. No per-session ancestry SQL is needed.
@@ -11645,6 +11648,13 @@ export class ControlPlaneDb {
     };
     for (const row of rows) {
       if (row.orchestrator_policy && campaignRoot(row.id) === row.id) context.campaignRequests.set(row.id,{ human: 0,orchestrator: 0,humanRequestTokens: [] });
+      // A summary carries no campaign projection; a Full Control root carries its status so a
+      // verified completion reads as informational after a reload too (#2940). Bounded to roots.
+      if (!row.parent_session_id && row.orchestrator_policy && campaignRoot(row.id) === row.id &&
+          orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control?.mode === "full_control") {
+        const status = this.campaignStatusOnly(row.id);
+        if (status) context.fullControlCampaignStatuses.set(row.id, status);
+      }
     }
     if (context.campaignRequests.size) {
       const requests=this.stmt(`SELECT 'generic' AS type,session.id AS session_id,session.runner_id,session.driver,session.workspace_id,
@@ -19011,11 +19021,10 @@ export class ControlPlaneDb {
     return this.campaignWorktreeCleanup(sessionId).length === 0;
   }
 
-  campaignProjection(campaignSessionId: string): OrchestratorCampaignProjection | null {
-    const campaign = this.resolvedCampaignSession(campaignSessionId);
-    if (!campaign) return null;
-    const policy = orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy);
-    if (!policy) return null;
+  /** The campaign's status and the counts behind it, derived once for both the full projection and
+   * the session summary's status-only fact (#2940), so the two can never disagree. Reads no session
+   * view, so it cannot re-enter a projection. */
+  private campaignStatusState(campaign: SessionRow, policy: OrchestratorCampaignPolicy, campaignSessionId: string) {
     const resolvedCampaignId = campaign.id;
     const childIds = this.campaignDescendantIds(resolvedCampaignId);
     const rows = childIds.length ? (this.stmt(
@@ -19100,30 +19109,6 @@ export class ControlPlaneDb {
         if (heldChildren.length < CAMPAIGN_HELD_CHILDREN_LIMIT) heldChildren.push({ sessionId: child.id, holds });
       } else if (!reportVerified && !childHasHumanRequest) active += 1;
     }
-    const followUps = this.stmt(
-      `SELECT SUM(CASE WHEN duplicate_of IS NULL THEN 1 ELSE 0 END) AS unique_count,
-              SUM(CASE WHEN duplicate_of IS NOT NULL THEN 1 ELSE 0 END) AS duplicate_count
-       FROM orchestrator_campaign_follow_ups WHERE campaign_session_id=?`,
-    ).get(resolvedCampaignId) as { unique_count: number | null; duplicate_count: number | null };
-    const effectiveOwners = { ...policy.delegation.decisions };
-    if (policy.control?.mode === "full_control") {
-      const supported = campaignAuthorityPreflight(policy.control, campaign.driver,
-        this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPeerContract(campaign.id)).supported && campaignBoundaryCurrent({ orchestratorPolicy: policy,
-        parentControlPolicy: { revision: campaign.parent_control_policy_revision, decisions: policy.delegation.decisions } });
-      for (const category of WORKFLOW_DECISION_CATEGORIES) effectiveOwners[category] = campaignWorkflowOwner(policy.control, policy.delegation.decisions, category, supported);
-    }
-    // Preserve the saved choice while routing the effective gate to the human whenever this
-    // Orchestrator's runner, harness, or model cannot inspect evidence bytes. A supported client
-    // can still see one decision fall back when that decision's own evidence is unreviewable.
-    // Read the row directly: a full SessionView embeds this projection and would recurse.
-    const uiEvidenceReview = evaluateUiEvidenceReviewClient(this.uiEvidenceReviewClient({
-      runnerId: campaign.runner_id,
-      agentId: campaign.agent_id,
-      driver: campaign.driver,
-      model: campaign.model,
-      agentCapabilities: parseJson<SessionCapabilities>(campaign.agent_capabilities) ?? undefined,
-    }, effectiveOwners.ui_evidence_approval));
-    effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
     const total = rows.length;
     let childStatus: OrchestratorCampaignProjection["status"] = waitingHuman > 0 || (policy.control?.mode === "full_control" && (pendingHuman.length > 0 || pendingGenericHuman > 0)) ? "waiting_human" as const
       : active > 0 || pendingOrchestrator.length > 0 || cleanupPending > 0 || total === 0 ? "active" as const
@@ -19148,6 +19133,49 @@ export class ControlPlaneDb {
       : continuation.continuation?.state === "missing_result" ? "continuation_missing_result" as const
       : undefined;
     const status = stalled && childStatus === "active" ? "blocked" as const : childStatus;
+    return { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation, stalled, status };
+  }
+
+  /** The campaign status alone, for a session summary: identical to `campaignProjection().status`
+   * without the projection's owners, evidence, budget, video review or ledger work. */
+  campaignStatusOnly(campaignSessionId: string): OrchestratorCampaignProjection["status"] | null {
+    const campaign = this.resolvedCampaignSession(campaignSessionId);
+    const policy = campaign ? orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy) : null;
+    return campaign && policy ? this.campaignStatusState(campaign, policy, campaignSessionId).status : null;
+  }
+
+  campaignProjection(campaignSessionId: string): OrchestratorCampaignProjection | null {
+    const campaign = this.resolvedCampaignSession(campaignSessionId);
+    if (!campaign) return null;
+    const policy = orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy);
+    if (!policy) return null;
+    const resolvedCampaignId = campaign.id;
+    const { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation, stalled, status } =
+      this.campaignStatusState(campaign, policy, campaignSessionId);
+    const followUps = this.stmt(
+      `SELECT SUM(CASE WHEN duplicate_of IS NULL THEN 1 ELSE 0 END) AS unique_count,
+              SUM(CASE WHEN duplicate_of IS NOT NULL THEN 1 ELSE 0 END) AS duplicate_count
+       FROM orchestrator_campaign_follow_ups WHERE campaign_session_id=?`,
+    ).get(resolvedCampaignId) as { unique_count: number | null; duplicate_count: number | null };
+    const effectiveOwners = { ...policy.delegation.decisions };
+    if (policy.control?.mode === "full_control") {
+      const supported = campaignAuthorityPreflight(policy.control, campaign.driver,
+        this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPeerContract(campaign.id)).supported && campaignBoundaryCurrent({ orchestratorPolicy: policy,
+        parentControlPolicy: { revision: campaign.parent_control_policy_revision, decisions: policy.delegation.decisions } });
+      for (const category of WORKFLOW_DECISION_CATEGORIES) effectiveOwners[category] = campaignWorkflowOwner(policy.control, policy.delegation.decisions, category, supported);
+    }
+    // Preserve the saved choice while routing the effective gate to the human whenever this
+    // Orchestrator's runner, harness, or model cannot inspect evidence bytes. A supported client
+    // can still see one decision fall back when that decision's own evidence is unreviewable.
+    // Read the row directly: a full SessionView embeds this projection and would recurse.
+    const uiEvidenceReview = evaluateUiEvidenceReviewClient(this.uiEvidenceReviewClient({
+      runnerId: campaign.runner_id,
+      agentId: campaign.agent_id,
+      driver: campaign.driver,
+      model: campaign.model,
+      agentCapabilities: parseJson<SessionCapabilities>(campaign.agent_capabilities) ?? undefined,
+    }, effectiveOwners.ui_evidence_approval));
+    effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
     // Campaign Elapsed ends when the campaign first reaches verified completion and resumes if it
     // reopens. Completion is derived, never written, so the projection records what it observes.
     this.campaignWorkLedger.accounting.observeCompletion(resolvedCampaignId, status === "verified_complete", Date.now(),
@@ -23792,6 +23820,7 @@ export class ControlPlaneDb {
       ...this.reviewSessionProjection(row.id),
       orchestratorPolicy: row.orchestrator_policy ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined : undefined,
       campaignRequests: context.campaignRequests.get(row.id),
+      fullControlCampaignStatus: context.fullControlCampaignStatuses.get(row.id),
       useWorktree: row.use_worktree === 1, worktreePath: row.worktree_path,
       worktrees: row.summary_worktree ? [JSON.parse(row.summary_worktree) as SessionWorktreeView] : undefined,
       archived: row.archived === 1, ...sessionHistoryRetentionView(row),
@@ -24001,7 +24030,10 @@ export class ControlPlaneDb {
         const campaign = includeCampaignProjection && orchestratorCampaignPolicyFromJson(row.orchestrator_policy)
           ? this.campaignProjection(row.id)
           : null;
-        return campaign ? { orchestratorCampaign: campaign } : {};
+        // The same status a summary carries, so a live upsert updates it in both directions (#2940).
+        const fullControl = campaign && !row.parent_session_id &&
+          orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control?.mode === "full_control";
+        return campaign ? { orchestratorCampaign: campaign, ...(fullControl ? { fullControlCampaignStatus: campaign.status } : {}) } : {};
       })(),
       ...(() => {
         const membership = this.campaignMembership(row.id, row.parent_session_id ?? null);
