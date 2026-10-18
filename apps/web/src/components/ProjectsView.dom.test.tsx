@@ -67,9 +67,13 @@ class FakeSocket implements UiSocket {
 }
 
 const navigation: ViewNavigation = { current: () => ({ name: "projects" }), push() {}, listen: () => () => {} };
+/** Every toast shown, newest last, and every confirmation asked, by title, with the answer each one gets. */
+const toasts: string[] = [];
+const confirmations: string[] = [];
+let confirmAnswer = true;
 const feedback = {
-  confirm: async () => true,
-  showToast: () => -1,
+  confirm: async ({ title }: { title: string }) => { confirmations.push(title); return confirmAnswer; },
+  showToast: (message: string) => { toasts.push(message); return -1; },
   showUndo: () => -1,
   dismissToast: () => undefined,
 };
@@ -349,10 +353,275 @@ test("every section is the one recipe, in order, and no bare heading renders", a
   assert.equal(headings.length, 4);
   assert.ok(headings.every((heading) => heading.classList.contains("section-title")), "every h3 is a section title");
   assert.deepEqual([...detail.querySelectorAll("h2")].map((heading) => heading.className), ["project-detail-title"]);
-  // Settings holds the rename form, Hide Project and access unchanged until #2962.
-  const settings = sections[1]!;
-  assert.ok(settings.querySelector("input[maxlength='120']"));
-  assert.ok([...settings.querySelectorAll("button")].some((button) => text(button) === "Hide Project"));
+  // Settings and Child Session Defaults are each one surface of setting rows (#2962).
+  const [, settings, , limits] = sections;
+  assert.equal(settings!.querySelectorAll(".surface").length, 1);
+  assert.deepEqual(rowTitles(settings!), ["Name", "Show as a Sessions Tab"]);
+  assert.deepEqual(rowTitles(limits!), ["Cost Limit per Child", "Tool Calls per Child"]);
+  assert.equal(text(limits!.querySelector(":scope > .section-note")),
+    "Limits for child sessions that don't set their own. A parent's remaining budget always caps them.");
+  assert.ok([settings!, limits!].every((section) => section.querySelector("form")?.noValidate), "no browser validation bubbles");
+  assert.deepEqual([...detail.querySelectorAll("button")].map(text).filter((label) =>
+    /Hide Project|Show Project|Save Changes|Save Child Defaults|Remove Child Defaults|Clear Limits/u.test(label)), [],
+  "no per-form Save, no Hide Project, and no Clear Limits while no limits are set");
+  assertNoDomNode(detail.querySelector(".project-name-form, .save-bar"), "no rename form, and no save bar while clean");
+});
+
+/** The setting rows' titles in `scope`, in order. */
+const rowTitles = (scope: Element) => [...scope.querySelectorAll(".setting-row-title")].map(text);
+/** The setting row titled `title`: the row itself, or its frame while it carries a Saved check or a failure. */
+const settingRow = (body: HTMLElement, title: string) => {
+  const titleNode = [...body.querySelectorAll(".project-detail .setting-row-title")].find((node) => text(node) === title);
+  assert.ok(titleNode, title);
+  return (titleNode!.closest(".setting-row-frame") ?? titleNode!.closest(".setting-row")) as HTMLElement;
+};
+const fieldOf = (body: HTMLElement, title: string) => settingRow(body, title).querySelector<HTMLInputElement>("input")!;
+const saveBar = (body: HTMLElement) => body.querySelector<HTMLElement>(".project-detail > .save-bar");
+const saveBarButton = (body: HTMLElement, label: string) =>
+  [...(saveBar(body)?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((button) => text(button) === label);
+const describedByText = (element: Element) => (element.getAttribute("aria-describedby") ?? "").split(/\s+/u).filter(Boolean)
+  .map((id) => text(domWindow.document.getElementById(id) as unknown as Element));
+
+async function type(input: HTMLInputElement, value: string) {
+  await act(async () => {
+    input.focus();
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+    // react-dom decided at import, before these globals existed, that input events are
+    // unsupported, so it reads value changes on keyup.
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+  });
+}
+const leave = (input: HTMLInputElement) => act(async () => { input.blur(); });
+
+/** A client whose project updates are recorded and answered with the project they describe. */
+function recordingClient(base: ProjectView, fail: () => Error | null = () => null) {
+  const updates: unknown[] = [];
+  let current = base;
+  const client = {
+    ...api,
+    updateProject: async (_id: string, body: Record<string, unknown>) => {
+      updates.push(body);
+      const failure = fail();
+      if (failure) throw failure;
+      current = { ...current, ...body, updatedAt: current.updatedAt + 1 } as ProjectView;
+      return { project: current };
+    },
+  } as unknown as ApiClient;
+  return { client, updates };
+}
+
+test("turning Show as a Sessions Tab off saves at once, shows Saved and the toast, and the filter counts it Hidden", async () => {
+  toasts.length = 0;
+  const alpha = project(1, { name: "Alpha" });
+  const { client, updates } = recordingClient(alpha);
+  const body = await renderSelected([alpha, project(2)], "Alpha", {}, client);
+  const control = () => settingRow(body, "Show as a Sessions Tab").querySelector<HTMLButtonElement>('[role="switch"]')!;
+  assert.equal(control().getAttribute("aria-checked"), "true", "on while the project is not hidden");
+  assert.deepEqual(describedByText(control()), ["Adds a tab for this project above the Sessions list. Its sessions stay in All either way."]);
+  await act(async () => { control().click(); });
+  await settle();
+  assert.deepEqual(updates, [{ hidden: true }], "one instant request, and the Sessions tabs leave out hidden projects (inbox.ts)");
+  assert.equal(control().getAttribute("aria-checked"), "false");
+  assert.equal(text(settingRow(body, "Show as a Sessions Tab").querySelector(".setting-row-saved")), "Saved");
+  assert.deepEqual(toasts, ["Sessions tab hidden."]);
+  assertNoDomNode(saveBar(body), "an instant setting never shows the save bar");
+  const filter = body.querySelector('[role="radiogroup"][aria-label="Sessions Tabs"]');
+  assert.deepEqual([...filter!.querySelectorAll('[role="radio"]')].map(text), ["All 2", "Shown 1", "Hidden 1"]);
+  assert.equal([...body.querySelectorAll("button")].some((button) => /Hide Project|Show Project/u.test(text(button))), false);
+  await act(async () => { control().click(); });
+  await settle();
+  assert.deepEqual(updates, [{ hidden: true }, { hidden: false }]);
+  assert.deepEqual(toasts, ["Sessions tab hidden.", "Sessions tab shown."]);
+});
+
+test("a Sessions tab change that fails says so in the row with Try Again, and the switch keeps the saved value", async () => {
+  let failing = true;
+  const alpha = project(1, { name: "Alpha" });
+  const { client, updates } = recordingClient(alpha, () => failing ? new Error("HTTP 500: database is locked") : null);
+  const body = await renderSelected([alpha], "Alpha", {}, client);
+  const row = () => settingRow(body, "Show as a Sessions Tab");
+  await act(async () => { row().querySelector<HTMLButtonElement>('[role="switch"]')!.click(); });
+  await settle();
+  assert.match(text(row().querySelector(".setting-row-failure")), /^Couldn't hide the Sessions tab\. Try Again$/u);
+  assert.equal(row().querySelector('[role="switch"]')!.getAttribute("aria-checked"), "true");
+  assertNoDomNode(body.querySelector(".master-detail-detail .notice.t-danger"), "the row says it; no page notice");
+  failing = false;
+  const retry = [...row().querySelectorAll<HTMLButtonElement>("button")].find((button) => text(button) === "Try Again")!;
+  await act(async () => { retry.click(); });
+  await settle();
+  assert.deepEqual(updates, [{ hidden: true }, { hidden: true }]);
+  assert.equal(row().querySelector('[role="switch"]')!.getAttribute("aria-checked"), "false");
+  assertNoDomNode(row().querySelector(".setting-row-failure"));
+});
+
+test("a typed name shows the save bar; Discard restores it; Save sends only the name and hides the bar", async () => {
+  const alpha = { ...project(1, { name: "Alpha" }), childSessionDefaults: { costBudgetUsd: 5, maxToolCalls: 100 } };
+  const { client, updates } = recordingClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", {}, client);
+  assertNoDomNode(saveBar(body), "no bar while clean");
+  await type(fieldOf(body, "Name"), "Alpha Renamed");
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Unsaved changes");
+  await act(async () => { saveBarButton(body, "Discard")!.click(); });
+  assert.equal(fieldOf(body, "Name").value, "Alpha");
+  assertNoDomNode(saveBar(body), "Discard hides the bar");
+  await type(fieldOf(body, "Name"), "  Alpha Renamed ");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settle();
+  assert.deepEqual(updates, [{ name: "Alpha Renamed" }], "one request with only the changed field, trimmed");
+  assert.equal(fieldOf(body, "Name").value, "Alpha Renamed");
+  assertNoDomNode(saveBar(body), "the bar goes once it saved");
+});
+
+test("an empty name shows its error in the description's place on leaving it, and Save is blocked until it is fixed", async () => {
+  const alpha = project(1, { name: "Alpha" });
+  const { client, updates } = recordingClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", {}, client);
+  const name = () => fieldOf(body, "Name");
+  await type(name(), " ");
+  assertNoDomNode(settingRow(body, "Name").querySelector(".field-error"), "not while typing");
+  await leave(name());
+  const error = settingRow(body, "Name").querySelector(".setting-row-desc-slot.is-failed .field-error");
+  assert.equal(text(error), "Enter a name for the project.");
+  assert.equal(name().getAttribute("aria-invalid"), "true");
+  assert.deepEqual(describedByText(name()), ["Enter a name for the project."]);
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Fix 1 field to save");
+  assert.equal(saveBarButton(body, "Save")!.getAttribute("aria-disabled"), "true");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await type(name(), "x".repeat(121));
+  assert.equal(text(settingRow(body, "Name").querySelector(".field-error")), "Use 120 characters or fewer.");
+  await type(name(), "Beta");
+  assertNoDomNode(settingRow(body, "Name").querySelector(".field-error"), "the error clears as a valid name is typed");
+  assert.equal(saveBarButton(body, "Save")!.getAttribute("aria-disabled"), null);
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settle();
+  assert.deepEqual(updates, [{ name: "Beta" }]);
+});
+
+test("the limit fields are 96px fields, the cost with USD inside, and -2 shows its error in the helper's place", async () => {
+  const alpha = { ...project(1, { name: "Alpha" }), childSessionDefaults: null };
+  const { client, updates } = recordingClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", {}, client);
+  const cost = () => fieldOf(body, "Cost Limit per Child");
+  const tools = () => fieldOf(body, "Tool Calls per Child");
+  for (const field of [cost(), tools()]) {
+    assert.ok(field.closest(".input-affix")!.classList.contains("w-xs"), "a 96px .w-xs field");
+    assert.equal(field.placeholder, "No limit");
+    assert.equal(field.type, "text", "text the field cannot read is an error, never an empty value");
+  }
+  assert.equal(text(settingRow(body, "Cost Limit per Child").querySelector(".input-affix-text")), "USD");
+  assertNoDomNode(settingRow(body, "Tool Calls per Child").querySelector(".input-affix-text"), "no unit");
+  assert.equal(text(settingRow(body, "Cost Limit per Child").querySelector(".setting-row-desc")), "Leave both empty for no limits.");
+  assert.equal(text(settingRow(body, "Tool Calls per Child").querySelector(".setting-row-desc")), "A whole number.");
+  await type(cost(), "-2");
+  await leave(cost());
+  const row = settingRow(body, "Cost Limit per Child");
+  assert.equal(text(row.querySelector(".setting-row-desc-slot.is-failed .field-error")), "Enter an amount above 0.");
+  assertNoDomNode(row.querySelector(".setting-row-control .field-error"), "in the helper's place, not under the field");
+  assert.equal(cost().getAttribute("aria-invalid"), "true");
+  assert.equal(saveBarButton(body, "Save")!.getAttribute("aria-disabled"), "true");
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Fix 1 field to save");
+  await type(cost(), "2.5");
+  assert.equal(saveBarButton(body, "Save")!.getAttribute("aria-disabled"), null, "fixed, Save is back");
+  // The tool-call limit is still empty: Save shows its error and moves focus there.
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settle();
+  assert.deepEqual(updates, [], "nothing is sent while a field is invalid");
+  assert.equal(text(settingRow(body, "Tool Calls per Child").querySelector(".field-error")),
+    "Enter a tool-call limit too, or clear both for no limits.");
+  assert.ok(domWindow.document.activeElement as unknown as Element === tools(), "focus moves to the first invalid field");
+  await type(tools(), "1.5");
+  assert.equal(text(settingRow(body, "Tool Calls per Child").querySelector(".field-error")), "Enter a whole number above 0.");
+  await type(tools(), "30");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settle();
+  assert.deepEqual(updates, [{ childSessionDefaults: { costBudgetUsd: 2.5, maxToolCalls: 30 } }], "both limits in one request");
+  assertNoDomNode(saveBar(body));
+});
+
+test("Clear Limits shows only while limits are set, empties both fields, and saving sends childSessionDefaults: null", async () => {
+  const alpha = { ...project(1, { name: "Alpha" }), childSessionDefaults: { costBudgetUsd: 5, maxToolCalls: 100 } };
+  const { client, updates } = recordingClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", {}, client);
+  const limits = () => [...body.querySelectorAll(".project-detail > section")].find((section) =>
+    text(section.querySelector(".section-title")) === "Child Session Defaults")!;
+  const clear = () => [...limits().querySelectorAll<HTMLButtonElement>(".section-head button")].find((button) => text(button) === "Clear Limits");
+  assert.ok(clear()?.classList.contains("ghost") && clear()!.classList.contains("sm"), "a .btn.sm.ghost in the section head");
+  assert.equal(fieldOf(body, "Cost Limit per Child").value, "5");
+  await act(async () => { clear()!.click(); });
+  assert.equal(fieldOf(body, "Cost Limit per Child").value, "");
+  assert.equal(fieldOf(body, "Tool Calls per Child").value, "");
+  assert.equal(clear(), undefined, "no limits are set in the draft");
+  assert.ok(domWindow.document.activeElement as unknown as Element === fieldOf(body, "Cost Limit per Child"),
+    "focus goes to the first field it emptied");
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Unsaved changes");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settle();
+  assert.deepEqual(updates, [{ childSessionDefaults: null }]);
+  assertNoDomNode(saveBar(body));
+  assert.equal(clear(), undefined);
+});
+
+test("a failed save keeps the typed values and turns the bar into its error with Try Again", async () => {
+  let failing = true;
+  const alpha = { ...project(1, { name: "Alpha" }), childSessionDefaults: null };
+  const { client, updates } = recordingClient(alpha, () => failing ? new Error("HTTP 500: database is locked") : null);
+  const body = await renderSelected([alpha], "Alpha", {}, client);
+  await type(fieldOf(body, "Name"), "Alpha Two");
+  await type(fieldOf(body, "Cost Limit per Child"), "3");
+  await type(fieldOf(body, "Tool Calls per Child"), "40");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settle();
+  assert.deepEqual(updates, [{ name: "Alpha Two", childSessionDefaults: { costBudgetUsd: 3, maxToolCalls: 40 } }],
+    "one request for every changed field");
+  const bar = saveBar(body)!;
+  assert.ok(bar.classList.contains("is-error"));
+  assert.equal(bar.getAttribute("role"), "alert");
+  assert.equal(text(bar.querySelector(".save-bar-message")), "Couldn't save the changes. Nothing was changed.");
+  assert.deepEqual([fieldOf(body, "Name").value, fieldOf(body, "Cost Limit per Child").value, fieldOf(body, "Tool Calls per Child").value],
+    ["Alpha Two", "3", "40"]);
+  assertNoDomNode(body.querySelector(".master-detail-detail .notice.t-danger"), "the bar says it; no page notice");
+  failing = false;
+  await act(async () => { saveBarButton(body, "Try Again")!.click(); });
+  await settle();
+  assert.equal(updates.length, 2);
+  assertNoDomNode(saveBar(body));
+});
+
+test("leaving a project with unsaved settings asks first, and Keep Editing stays with the draft", async () => {
+  confirmations.length = 0;
+  const alpha = project(1, { name: "Alpha" });
+  const body = await renderSelected([alpha, project(2)], "Alpha");
+  await type(fieldOf(body, "Name"), "Alpha Draft");
+  confirmAnswer = false;
+  try {
+    await act(async () => { rows(body).find((row) => text(row.querySelector(".row-title")) === "Project 2")!.click(); });
+    await settle();
+  } finally {
+    confirmAnswer = true;
+  }
+  assert.deepEqual(confirmations, ["Discard Changes"]);
+  assert.deepEqual(currentView, { name: "projects", id: "project-1" });
+  assert.equal(fieldOf(body, "Name").value, "Alpha Draft");
+  await act(async () => { rows(body).find((row) => text(row.querySelector(".row-title")) === "Project 2")!.click(); });
+  await settle();
+  assert.deepEqual(currentView, { name: "projects", id: "project-2" });
+  assert.equal(fieldOf(body, "Name").value, "Project 2", "another project starts with no draft");
+});
+
+test("a viewer sees the rows read-only: no Clear Limits, and the switch disabled with its reason", async () => {
+  const shared = { ...project(6, { name: "Shared", canManage: false }), childSessionDefaults: { costBudgetUsd: 5, maxToolCalls: 100 } };
+  const body = await renderSelected([shared], "Shared");
+  for (const title of ["Name", "Cost Limit per Child", "Tool Calls per Child"]) {
+    const field = fieldOf(body, title);
+    assert.equal(field.readOnly, true, title);
+    assert.equal(field.disabled, false, `${title} stays in the tab order`);
+    assert.ok(field.classList.contains("is-read-only"), `${title} has the read-only treatment`);
+  }
+  const control = settingRow(body, "Show as a Sessions Tab").querySelector<HTMLButtonElement>('[role="switch"]')!;
+  assert.equal(control.disabled, true);
+  assert.equal(text(settingRow(body, "Show as a Sessions Tab").querySelector(".setting-row-reason")), "You can't change this project.");
+  assert.equal([...body.querySelectorAll("button")].some((button) => text(button) === "Clear Limits"), false);
 });
 
 test("⋯ lists Copy Project ID, the archive item, a separator and Delete Project… last in danger text", async () => {
@@ -428,17 +697,18 @@ test("a viewer sees the neutral notice, New Session and only Copy Project ID", a
 });
 
 test("a failed project action is a danger notice: the sentence first, the raw message behind Show Details", async () => {
-  const client = { ...api, updateProject: async () => { throw new Error("HTTP 500: database is locked"); } } as ApiClient;
+  const client = { ...api, setDefaultProjectLocation: async () => { throw new Error("HTTP 500: database is locked"); } } as ApiClient;
   const body = await renderSelected([busyProject()], "Project 1", {}, client);
-  const settings = [...body.querySelectorAll(".project-detail > section")][1]!;
-  const hide = [...settings.querySelectorAll<HTMLButtonElement>("button")].find((button) => text(button) === "Hide Project")!;
-  await act(async () => { hide.click(); });
+  await act(async () => { body.querySelector<HTMLButtonElement>('button[aria-label="Location 1 Actions"]')!.click(); });
+  const makeDefault = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((item) => text(item.querySelector(".menu-text")) === "Make Default")!;
+  await act(async () => { makeDefault.click(); });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   assertNoDomNode(body.querySelector(".project-manager-error"), "no bare form error");
   const notice = body.querySelector(".master-detail-detail .notice.t-danger");
   assert.ok(notice, "a danger notice");
   assert.equal(notice!.getAttribute("role"), "alert");
-  assert.match(text(notice), /^Couldn't hide the project from Sessions\./);
+  assert.match(text(notice), /^Couldn't make that location the default\./);
   assert.doesNotMatch(text(notice), /database is locked/, "the raw message waits behind Show Details");
   const toggle = [...notice!.querySelectorAll<HTMLButtonElement>("button")].find((button) => text(button) === "Show Details")!;
   await act(async () => { toggle.click(); });
@@ -549,7 +819,7 @@ test("Rename… opens the first project of a shared name with its Name field foc
   await act(async () => { body.querySelector<HTMLButtonElement>('button[aria-label="Rename Field App"]')!.click(); });
   await settle();
   assert.deepEqual(currentView, { name: "projects", id: "field-1" });
-  const name = body.querySelector<HTMLInputElement>(".project-name-form input");
+  const name = fieldOf(body, "Name");
   assert.equal(name?.value, "Field App");
   assert.ok(domWindow.document.activeElement as unknown as Element | null === name, "the Name field has focus");
 });

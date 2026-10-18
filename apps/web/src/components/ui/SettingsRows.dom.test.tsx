@@ -1806,6 +1806,99 @@ test("an invalid number is aria-invalid with a field error under the field, whic
   }
 });
 
+test("a number row whose description is its helper shows the error in the description's place, never beside it", async () => {
+  const { container, cleanup } = await render(
+    <NumberRow
+      title="Cost Limit per Child"
+      description="Leave both empty for no limits."
+      unit="USD"
+      placeholder="No limit"
+      textEntry
+      value="-2"
+      onChange={() => undefined}
+      error="Enter an amount above 0."
+      errorPlacement="description"
+    />,
+  );
+  try {
+    const input = container.querySelector<HTMLInputElement>(".setting-row-number input")!;
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.equal(input.placeholder, "No limit");
+    assertNoDomNode(container.querySelector(".setting-row-control .field-error"), "nothing under the field");
+    const slot = container.querySelector(".setting-row-text .setting-row-desc-slot.is-failed")!;
+    assert.ok(slot, "the description's slot holds the error");
+    assert.equal(slot.querySelector(".field-error")?.textContent, "Enter an amount above 0.");
+    const description = slot.querySelector(":scope > .setting-row-desc")!;
+    assert.equal(description.getAttribute("aria-hidden"), "true", "the helper stays underneath, hidden, so the row keeps its height");
+    assert.deepEqual(describedBy(input), ["Enter an amount above 0."], "the error alone describes the field");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a read-only number row keeps its value in the tab order with the read-only treatment", async () => {
+  const { container, cleanup } = await render(
+    <NumberRow title="Tool Calls per Child" value="30" onChange={() => undefined} readOnly />,
+  );
+  try {
+    const input = container.querySelector<HTMLInputElement>(".setting-row-number input")!;
+    assert.equal(input.readOnly, true);
+    assert.equal(input.disabled, false);
+    assert.ok(input.classList.contains("is-read-only"));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a setting row's error takes the description's place, and the caller's field points at it", async () => {
+  const { container, cleanup } = await render(
+    <SettingRow
+      title="Name"
+      description="Renaming doesn't rename its folders or locations."
+      error="Enter a name for the project."
+      errorId="name-error"
+      control={<span className="field"><input aria-invalid="true" aria-describedby="name-error" /></span>}
+    />,
+  );
+  try {
+    const error = container.querySelector(".setting-row-desc-slot.is-failed .field-error")!;
+    assert.equal(error.id, "name-error");
+    assert.equal(error.textContent, "Enter a name for the project.");
+    assert.equal(container.querySelector(".setting-row-desc-slot > .setting-row-desc")?.getAttribute("aria-hidden"), "true");
+    assert.deepEqual(describedBy(container.querySelector("input")!), ["Enter a name for the project."]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a disabled switch row says why under its description, and the switch is described by both", async () => {
+  const { container, cleanup } = await render(
+    <SwitchRow
+      title="Show as a Sessions Tab"
+      description="Adds a tab for this project above the Sessions list."
+      checked
+      disabled
+      disabledReason="You can't change this project."
+    />,
+  );
+  try {
+    const control = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    assert.equal(control.disabled, true);
+    assert.equal(container.querySelector(".setting-row-reason")?.textContent, "You can't change this project.");
+    assert.deepEqual(describedBy(control), ["Adds a tab for this project above the Sessions list.", "You can't change this project."]);
+  } finally {
+    await cleanup();
+  }
+  const enabled = await render(
+    <SwitchRow title="Show as a Sessions Tab" checked disabledReason="You can't change this project." />,
+  );
+  try {
+    assertNoDomNode(enabled.container.querySelector(".setting-row-reason"), "an enabled switch has no reason to give");
+  } finally {
+    await enabled.cleanup();
+  }
+});
+
 test("a value row shows its value in the control column, mono when asked, with a named Copy", async () => {
   const writes: string[] = [];
   const priorClipboard = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");

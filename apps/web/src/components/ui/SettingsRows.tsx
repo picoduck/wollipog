@@ -81,6 +81,9 @@ interface RowTextProps {
   busyLabel?: ReactNode;
   /** The Saved check at the end of the text cell, for a control that fills its column. */
   saved?: boolean;
+  /** Why the row cannot be operated, a line of its own under the description (§11.3). */
+  reason?: ReactNode;
+  reasonId?: string;
 }
 
 /**
@@ -89,7 +92,7 @@ interface RowTextProps {
  * height and nothing below it moves.
  */
 function RowText({
-  title, titleId, icon, badge, description, descriptionId, descriptionHidden, failure, busy, busyLabel, saved,
+  title, titleId, icon, badge, description, descriptionId, descriptionHidden, failure, busy, busyLabel, saved, reason, reasonId,
 }: RowTextProps) {
   // With no sentence of its own the busy row still says what is happening.
   const busyText = busy ? busyLabel ?? (description ? undefined : "Saving…") : undefined;
@@ -122,10 +125,19 @@ function RowText({
             )}
           </span>
         ) : descriptionNode}
+        {reason && <span className="setting-row-reason" id={reasonId}>{reason}</span>}
       </span>
       {saved && <SavedCheck />}
     </span>
   );
+}
+
+/**
+ * An invalid value's `FieldError` in the description's place (§8.5): where the row's sentence is the
+ * field's helper, the error replaces it rather than showing beside it, and the row keeps its height.
+ */
+function descriptionError(id: string, error: string | null | undefined): ReactNode {
+  return error ? <FieldError as="span" id={id}>{error}</FieldError> : null;
 }
 
 /** A failed change in place of the description (§8.5): the sentence, then Try Again. */
@@ -147,6 +159,9 @@ function FailureSentence({ id, failure }: { id: string; failure: RowFailure }) {
  *
  * `failure` shows a failed read or change in place of the description with Try Again (§8.5), as
  * `SwitchRow` does, for a row that has no value to show until it succeeds. The caller announces it.
+ *
+ * `error` is an invalid value in an editor that saves several rows at once (§8.5): a `FieldError` in
+ * the description's place, with `errorId` so the caller's field can be `aria-invalid` and point at it.
  */
 export function SettingRow({
   title,
@@ -162,15 +177,20 @@ export function SettingRow({
   busyLabel,
   saved,
   failure,
+  error,
+  errorId,
   className,
-}: Omit<RowTextProps, "failure" | "descriptionHidden"> & {
+}: Omit<RowTextProps, "failure" | "descriptionHidden" | "reason" | "reasonId"> & {
   control?: ReactNode;
   trailing?: boolean;
   disabled?: boolean;
   failure?: RowFailure | null;
+  error?: string | null;
+  errorId?: string;
   className?: string;
 }) {
   const id = useId();
+  const fieldError = descriptionError(errorId ?? `${id}-error`, error);
   return (
     <div className={rowClass(trailing ? "setting-row setting-row-trailing" : "setting-row", { disabled, extra: className })} aria-busy={busy || undefined}>
       <RowText
@@ -183,7 +203,7 @@ export function SettingRow({
         busy={busy && !failure}
         busyLabel={busyLabel}
         saved={saved}
-        failure={failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />}
+        failure={fieldError ?? (failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />)}
       />
       {control && <span className="setting-row-control">{control}</span>}
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
@@ -367,8 +387,12 @@ export function SelectRow({
  * in the title or the description, which is why the field stays 96px.
  *
  * Named by the title and its unit. An invalid value is `aria-invalid` with a `FieldError` under the
- * field (§8.5), which the field points at while it shows. `value` is the field's text, so a person can
- * clear it while typing; the caller parses it.
+ * field (§8.5), which the field points at while it shows. `errorPlacement="description"` puts it in
+ * the description's place instead, for a row whose description is the field's helper ("A whole
+ * number."), so the two never show at once. `value` is the field's text, so a person can clear it
+ * while typing; the caller parses it.
+ *
+ * `readOnly` is a value the person can never change here, with the read-only treatment (§8.1).
  */
 export function NumberRow({
   title,
@@ -381,7 +405,10 @@ export function NumberRow({
   max,
   step,
   disabled,
+  readOnly,
+  placeholder,
   error,
+  errorPlacement = "field",
   inputId,
   textEntry = false,
   busy,
@@ -399,8 +426,13 @@ export function NumberRow({
   max?: number;
   step?: number;
   disabled?: boolean;
+  readOnly?: boolean;
+  /** What an empty field means ("No limit"), never a label substitute (§8.1). */
+  placeholder?: string;
   /** One sentence that says what is wrong and how to fix it. */
   error?: string | null;
+  /** Under the field, or in the description's place where the description is the field's helper. */
+  errorPlacement?: "field" | "description";
   /** The field's id, for a link or a label elsewhere that has to reach it. */
   inputId?: string;
   /** A text field with a numeric keyboard instead of `type="number"`. A number input reports text it
@@ -413,7 +445,11 @@ export function NumberRow({
   const unitId = `${id}-unit`;
   const descriptionId = `${id}-desc`;
   const errorId = `${id}-error`;
-  const describedBy = [error ? errorId : null, description ? descriptionId : null].filter(Boolean).join(" ") || undefined;
+  // An error in the description's place hides the description, so it alone describes the field.
+  const describedBy = [
+    error ? errorId : null,
+    description && !(error && errorPlacement === "description") ? descriptionId : null,
+  ].filter(Boolean).join(" ") || undefined;
   return (
     <div className={rowClass("setting-row setting-row-number", { disabled })} aria-busy={busy || undefined}>
       <RowText
@@ -424,12 +460,16 @@ export function NumberRow({
         busy={busy}
         busyLabel={busyLabel}
         saved={saved}
+        failure={errorPlacement === "description" ? descriptionError(errorId, error) : undefined}
       />
       <span className="setting-row-control">
         <span className="field">
           <span className="input-affix w-xs">
             <input
               id={inputId ?? `${id}-input`}
+              className={readOnly ? "is-read-only" : undefined}
+              readOnly={readOnly}
+              placeholder={placeholder}
               type={textEntry ? "text" : "number"}
               inputMode={textEntry && step !== undefined && !Number.isInteger(step) ? "decimal" : "numeric"}
               autoComplete={textEntry ? "off" : undefined}
@@ -446,7 +486,7 @@ export function NumberRow({
             />
             {unit && <span className="input-affix-text" id={unitId} ref={affixSuffixRef}>{unit}</span>}
           </span>
-          {error && <FieldError id={errorId}>{error}</FieldError>}
+          {error && errorPlacement === "field" && <FieldError id={errorId}>{error}</FieldError>}
         </span>
       </span>
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
@@ -726,6 +766,9 @@ export interface RowFailure {
  *
  * A row with either is wrapped in `.setting-row-frame` with its status region, so a group's surface
  * sees one child per setting.
+ *
+ * `disabledReason` says why a disabled switch cannot be changed: a line of its own under the
+ * description, which the switch is described by as well (§11.3).
  */
 export function SwitchRow({
   title,
@@ -734,6 +777,7 @@ export function SwitchRow({
   description,
   checked,
   disabled,
+  disabledReason,
   busy,
   busyLabel,
   saved,
@@ -745,6 +789,7 @@ export function SwitchRow({
   description?: ReactNode;
   icon?: ReactNode;
   disabled?: boolean;
+  disabledReason?: string;
   onClick?: () => void;
   checked: boolean;
   /** A short flag after the title, such as "Custom". */
@@ -759,6 +804,7 @@ export function SwitchRow({
   /** Whether focus was last inside this row. A removed element takes focus with it silently. */
   const focusInside = useRef(false);
   const failed = Boolean(failure);
+  const reason = disabled && disabledReason ? disabledReason : undefined;
   useLayoutEffect(() => {
     if (!focusInside.current) return;
     const active = document.activeElement;
@@ -775,15 +821,18 @@ export function SwitchRow({
       busy={busy && !failed}
       busyLabel={busyLabel}
       failure={failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />}
+      reason={reason}
+      reasonId={`${id}-reason`}
     />
   );
+  // While busy the visible sentence is the busy line, and that is what the switch is described by.
+  const sentenceId = failed ? `${id}-failure`
+    : busy && (busyLabel !== undefined || !description) ? `${id}-desc-busy`
+    : description ? `${id}-desc` : undefined;
   const control = {
     switchRef,
     labelledBy: `${id}-title`,
-    // While busy the visible sentence is the busy line, and that is what the switch is described by.
-    describedBy: failed ? `${id}-failure`
-      : busy && (busyLabel !== undefined || !description) ? `${id}-desc-busy`
-      : description ? `${id}-desc` : undefined,
+    describedBy: [sentenceId, reason ? `${id}-reason` : null].filter(Boolean).join(" ") || undefined,
     checked,
     disabled,
     busy,

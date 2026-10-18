@@ -249,7 +249,7 @@ test("at 1440px a location is one two-line row: name, Default, status; machine, 
 test("no location row holds a Select, Review Access Change, Native Runner or Setup Status:", async () => {
   const { body } = await render([project(threeLocations())], { setup: { "location-1": { status: "absent" } } });
   for (const row of body.querySelectorAll(".project-location")) {
-    assertNoDomNode(row.querySelector("select, [aria-haspopup=listbox], .access-scope-readout"), "no access field in a row");
+    assertNoDomNode(row.querySelector("select, [aria-haspopup=listbox], .setting-row"), "no access field in a row");
     assert.doesNotMatch(text(row), /Review Access Change|Native Runner|Setup Status:/);
   }
 });

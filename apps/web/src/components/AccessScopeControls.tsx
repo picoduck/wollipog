@@ -322,19 +322,22 @@ export function AccessScopeChangeDialog({
 /**
  * The saved access as a readout (§8.2): its icon, its label and who it reaches, with Change… in the
  * control column. The new access is chosen inside Change Access, beside its impact, so nothing here
- * ever shows an access that is not saved. A Viewer sees the readout alone.
+ * ever shows an access that is not saved. A Viewer, or anyone who can't change the resource
+ * (`readOnly`), sees the readout alone. It is one row of the caller's settings surface (#2962).
  */
 export function AccessScopeSettings({
   resource,
   scope,
   identity,
   disabled,
+  readOnly: resourceReadOnly,
   onUpdated,
 }: {
   resource: ScopeResource;
   scope: ResourceScope;
   identity: IdentityAdministrationView | null;
   disabled?: boolean;
+  readOnly?: boolean;
   onUpdated: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -343,12 +346,11 @@ export function AccessScopeSettings({
   const descriptionId = `${ids}-desc`;
   const buttonId = `${ids}-change`;
   const canChange = useMemo(() => identity ? hasOtherAccessChoice(identity, scope) : false, [identity, scope]);
-  if (!identity) return <span className="muted">Loading access…</span>;
-  const readOnly = identity.context.role === "viewer";
+  if (!identity) return <SettingRow title="Access" busy busyLabel="Loading access…" />;
+  const readOnly = resourceReadOnly || identity.context.role === "viewer";
   return (
     <>
       <SettingRow
-        className="access-scope-readout"
         trailing
         title={accessScopeLabel(scope, identity)}
         titleId={titleId}

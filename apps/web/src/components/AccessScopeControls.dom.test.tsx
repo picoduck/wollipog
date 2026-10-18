@@ -92,6 +92,8 @@ const buttonNamed = (name: string) => [...body().querySelectorAll<HTMLButtonElem
 const dialog = () => body().querySelector<HTMLElement>("[role=dialog]");
 const radio = (title: string) => [...(dialog()?.querySelectorAll<HTMLInputElement>("input[type=radio]") ?? [])]
   .find((input) => text(input.closest("label")?.querySelector(".choice-row-title")).startsWith(title));
+/** The access readouts: the setting rows that lead with the access's icon. */
+const accessReadouts = () => [...body().querySelectorAll(".setting-row-icon")].map((icon) => icon.closest(".setting-row")!);
 const readoutParts = (readout: Element | null) => [".setting-row-title", ".setting-row-desc", ".setting-row-control button"]
   .map((selector) => readout?.querySelector(selector)).filter(Boolean).map((part) => text(part));
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
@@ -175,7 +177,7 @@ const changeAccess = () => [...(body().querySelectorAll<HTMLButtonElement>(".mod
 
 test("the readout shows the saved access as text with Change…, and the dialog opens on it marked Current", async () => {
   await renderReadout();
-  const readout = body().querySelector(".access-scope-readout");
+  const readout = accessReadouts()[0];
   assert.ok(readout);
   assert.deepEqual(readoutParts(readout), ["Organization-Wide", "Everyone in your organization can see and use it.", "Change…"]);
   assert.equal(readout.querySelectorAll("[aria-haspopup=listbox]").length, 0, "no Select stands for the saved access");
@@ -326,7 +328,7 @@ test("a failed preview is a danger notice with the raw message behind Show Detai
 
 test("a Viewer sees the readout without Change…", async () => {
   await renderReadout({ who: identity("viewer"), scope: buildersScope });
-  assert.deepEqual(readoutParts(body().querySelector(".access-scope-readout")),
+  assert.deepEqual(readoutParts(accessReadouts()[0] ?? null),
     ["Team: Builders", "Everyone on Builders (3 people) can see and use it."]);
   assert.equal(buttonNamed("Change…"), undefined);
 });
@@ -410,7 +412,7 @@ async function locationMenuItems(): Promise<string[]> {
 
 test("on the Projects page the project shows its saved access as a readout, and its location's is changed from ⋯", async () => {
   await renderProjectsPage(identity());
-  const readouts = [...body().querySelectorAll(".access-scope-readout")];
+  const readouts = accessReadouts();
   assert.equal(readouts.length, 1, "the project's readout; the location row carries no access field (#2961)");
   assert.deepEqual(readoutParts(readouts[0]!), ["Organization-Wide", "Everyone in your organization can see and use it.", "Change…"]);
   const options = [...body().querySelectorAll("[aria-haspopup=listbox]")].map((trigger) => text(trigger));
@@ -429,7 +431,7 @@ test("on the Projects page the project shows its saved access as a readout, and 
 
 test("a Viewer on the Projects page sees the access readout without Change…, and no Change Location Access…", async () => {
   await renderProjectsPage(identity("viewer"));
-  assert.equal(body().querySelectorAll(".access-scope-readout").length, 1);
+  assert.equal(accessReadouts().length, 1);
   assert.equal(buttonNamed("Change…"), undefined);
   assert.ok(!(await locationMenuItems()).includes("Change Location Access…"));
 });

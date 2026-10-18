@@ -18,7 +18,7 @@ async function open(page: Page, id: string, extra = "") {
 }
 
 // The project's readout; a location's access is changed from its row's ⋯ (#2961).
-const projectReadout = (page: Page) => page.locator(".access-scope-readout");
+const projectReadout = (page: Page) => page.locator(".setting-row:has(.setting-row-icon)");
 const dialogNamed = (page: Page, name: string) => page.getByRole("dialog", { name });
 
 test.describe("at desktop widths", () => {
@@ -79,7 +79,7 @@ test.describe("at desktop widths", () => {
   test("a location's access is changed from its row's ⋯, never a field in the row", async ({ page }) => {
     await open(page, "beta");
     const row = page.locator(".project-location").filter({ hasText: "Laptop Checkout" });
-    await expect(row.locator(".access-scope-readout")).toHaveCount(0);
+    await expect(row.locator(".setting-row")).toHaveCount(0);
     await row.getByRole("button", { name: "Laptop Checkout Actions" }).click();
     await page.getByRole("menuitem", { name: "Change Location Access…" }).click();
     const location = dialogNamed(page, "Change Location Access");
