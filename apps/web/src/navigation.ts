@@ -12,7 +12,7 @@ export type AttentionTarget = { eventEpoch: number; requestId?: string; activati
 export type View =
   | { name: "inbox"; split?: SessionsTab }
   | { name: "board"; split?: SessionsTab }
-  | { name: "runners"; section?: ConnectionSection }
+  | { name: "runners"; section?: ConnectionSection; machineId?: string }
   | { name: "runs" }
   | { name: "pods" }
   | { name: "automations" }
@@ -393,7 +393,10 @@ export function viewPath(view: View): string {
   switch (view.name) {
     case "inbox": return `/${sessionsTabSearch(view.split)}`;
     case "board": return `/board${sessionsTabSearch(view.split)}`;
-    case "runners": return `/connections/${view.section ?? "machines"}`;
+    // A machine is selected on the Machines tab alone (#2985), so a machine id names that tab.
+    case "runners": return view.machineId !== undefined
+      ? `/connections/machines/~${encodeResourceId(view.machineId)}`
+      : `/connections/${view.section ?? "machines"}`;
     case "runs": return "/runs";
     case "pods": return "/pods";
     case "automations": return "/automations";
@@ -457,6 +460,11 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   const connectionsMatch = /^\/connections\/(instances|machines|people)$/.exec(path);
   if (connectionsMatch) {
     return { name: "runners", section: connectionsMatch[1] as ConnectionSection };
+  }
+  const machineMatch = /^\/connections\/machines\/~([^/]+)$/.exec(path);
+  if (machineMatch) {
+    const machineId = decodeResourceId(machineMatch[1]!);
+    return machineId === null ? null : { name: "runners", section: "machines", machineId };
   }
   if (path === "/runs") return { name: "runs" };
   if (path === "/pods") return { name: "pods" };

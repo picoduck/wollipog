@@ -32,9 +32,15 @@ const recoveryGeometry = (notice: HTMLElement) => {
 const setOffline = (page: import("@playwright/test").Page) =>
   page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setRunnerStatus("offline"));
 
+/** A machine's row in the Machines list (#2985). */
+const machineRow = (page: import("@playwright/test").Page, name = "Design Workstation") =>
+  page.getByRole("complementary", { name: "Machines" }).locator("button.row").filter({ has: page.locator(".row-title", { hasText: name }) });
+
 test.beforeEach(async ({ page }) => {
   await page.goto("/machine-management-e2e.html");
-  await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+  // Wider than a phone, the first machine opens beside the list; a phone shows the list alone (#2985).
+  const phone = (page.viewportSize()?.width ?? 1280) <= 760;
+  await expect(phone ? machineRow(page) : page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
 });
 
 test("Connections distinguish verified, unavailable, and unverified agents", async ({ page }) => {
@@ -403,9 +409,9 @@ test("Connections show installation guidance for protocol v154 verified-unavaila
 test("offline recovery stays stacked and usable in a narrow card on a desktop viewport", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await setOffline(page);
-  await page.locator(".runner-grid").evaluate((grid) => { (grid as HTMLElement).style.width = "260px"; });
-
   const card = page.locator(".runner-card");
+  await card.evaluate((element) => { (element as HTMLElement).style.width = "260px"; });
+
   await expect.poll(() => card.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThan(280);
   expect(await page.evaluate(() => window.innerWidth)).toBe(1280);
 
@@ -437,6 +443,7 @@ test.describe("on a touch phone", () => {
 
   test("offline recovery stays stacked and usable on a narrow mobile viewport", async ({ page }) => {
     await setOffline(page);
+    await machineRow(page).click();
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
 
     const repair = page.getByRole("button", { name: "Repair Connection…", exact: true });
@@ -465,7 +472,8 @@ test.describe("on a touch phone", () => {
 test("non-admin recovery guidance wraps inside a narrow mobile card", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 720 });
   await page.goto("/machine-management-e2e.html?role=viewer");
-  await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+  await machineRow(page).click();
+  await expect(page.locator(".runner-card").getByRole("heading", { name: "Design Workstation" })).toBeVisible();
   await setOffline(page);
 
   await expect(page.getByRole("button", { name: "Repair Connection…", exact: true })).toHaveCount(0);
@@ -729,5 +737,110 @@ test.describe("the empty Machines tab on a touch phone", () => {
       expect(button.height).toBeGreaterThanOrEqual(44);
       expect(row.right).toBeLessThanOrEqual(width);
     }
+  });
+});
+
+/** Where each pane sits and how it scrolls (#2985). */
+const paneGeometry = (page: import("@playwright/test").Page) => page.evaluate(() => {
+  const list = document.querySelector<HTMLElement>(".master-detail-list")!;
+  const listBody = list.querySelector<HTMLElement>(".master-detail-list-body")!;
+  const detail = document.querySelector<HTMLElement>(".master-detail-detail")!;
+  return {
+    list: list.getBoundingClientRect().toJSON() as DOMRect,
+    detail: detail.getBoundingClientRect().toJSON() as DOMRect,
+    listScrolls: listBody.scrollHeight > listBody.clientHeight && getComputedStyle(listBody).overflowY === "auto",
+    detailScrolls: detail.scrollHeight > detail.clientHeight && getComputedStyle(detail).overflowY === "auto",
+    documentScrolls: document.scrollingElement!.scrollHeight > document.scrollingElement!.clientHeight,
+  };
+});
+
+test("at 1440px the Machines list is 320px beside the detail and each scrolls on its own (#2985)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/machine-management-e2e.html?machines=20");
+  await expect(page.getByRole("heading", { name: "Build Server" })).toBeVisible();
+  await expect(page.locator(".runner-grid")).toHaveCount(0);
+  const geometry = await paneGeometry(page);
+  expect(geometry.list.width).toBe(320);
+  expect(geometry.detail.left).toBeGreaterThanOrEqual(geometry.list.right - 0.5);
+  expect(geometry.detail.top).toBeCloseTo(geometry.list.top, 0);
+  expect(geometry.listScrolls, "the list scrolls inside its pane").toBe(true);
+  expect(geometry.documentScrolls, "the page itself does not scroll").toBe(false);
+  // Scrolling the list leaves the detail where it is.
+  const listBody = page.locator(".master-detail-list-body");
+  await listBody.evaluate((element) => { element.scrollTop = 200; });
+  expect(await page.locator(".master-detail-detail").evaluate((element) => element.scrollTop)).toBe(0);
+  // The first row shown is selected; another row moves the selection and resets the detail.
+  await expect(machineRow(page, "Build Server")).toHaveClass(/is-selected/);
+  await machineRow(page, "Studio Mac").click();
+  await expect(page.getByRole("heading", { name: "Studio Mac" })).toBeVisible();
+  await expect(page.locator(".row.is-selected")).toHaveCount(1);
+});
+
+test("in the compact tier the Machines list is 280px (#2985)", async ({ page }) => {
+  await page.setViewportSize({ width: 834, height: 900 });
+  await page.goto("/machine-management-e2e.html?machines=3");
+  await expect(page.getByRole("heading", { name: "Build Server" })).toBeVisible();
+  const geometry = await paneGeometry(page);
+  expect(geometry.list.width).toBe(280);
+  expect(geometry.detail.left).toBeGreaterThanOrEqual(geometry.list.right - 0.5);
+});
+
+test("past eight machines the list groups under three labels and filters by name (#2985)", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?machines=9");
+  const list = page.getByRole("complementary", { name: "Machines" });
+  await expect(list.locator(".group-label")).toHaveText(["Needs Attention5", "Online3", "Offline1"]);
+  await list.getByRole("searchbox", { name: "Filter Machines" }).fill("studio");
+  await expect(list.locator("button.row .row-title")).toHaveText(["Studio Mac"]);
+  for (const row of await list.locator("button.row").all()) await expect(row.locator(".status")).toHaveCount(1);
+});
+
+test("a machine's route opens it directly, and an unknown one says Machine Not Found (#2985)", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?machines=3&machine=gpu-box");
+  await expect(page.getByRole("heading", { name: "GPU Box" })).toBeVisible();
+  await expect(machineRow(page, "GPU Box")).toHaveClass(/is-selected/);
+  await page.goto("/machine-management-e2e.html?machine=gone");
+  await expect(page.getByText("Machine Not Found")).toBeVisible();
+  await page.getByRole("button", { name: "Show All Machines" }).click();
+  await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+});
+
+test("disconnected, the last-known rows stay dimmed under Reconnecting… (#2985)", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.disconnect());
+  const list = page.getByRole("complementary", { name: "Machines" });
+  await expect(list.getByRole("status").filter({ hasText: "Reconnecting…" })).toBeVisible();
+  await expect(list.locator(".is-stale").locator("button.row")).toHaveCount(1);
+});
+
+test("before the first snapshot the list shows skeleton rows and no empty state (#2985)", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?snapshot=hold");
+  await expect(page.locator(".master-detail-list .machine-row-skeleton")).toHaveCount(3);
+  await expect(page.locator(".master-detail-detail .detail-skeleton")).toBeVisible();
+  await expect(page.getByText("No Machines Yet")).toHaveCount(0);
+});
+
+test.describe("the Machines list and detail on a touch phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("a row opens the detail route under Back and the machine's name; Back returns to the list where it was (#2985)", async ({ page }) => {
+    await page.goto("/machine-management-e2e.html?machines=20");
+    const list = page.getByRole("complementary", { name: "Machines" });
+    await expect(page.locator(".page-header").getByRole("tablist", { name: "Connections" })).toBeVisible();
+    await expect(page.locator(".row.is-selected")).toHaveCount(0);
+    const listBody = page.locator(".master-detail-list-body");
+    await listBody.evaluate((element) => { element.scrollTop = 300; });
+    await expect.poll(() => listBody.evaluate((element) => element.scrollTop)).toBe(300);
+    await machineRow(page, "CI Runner 9").click();
+
+    const bar = page.locator(".detail-bar");
+    await expect(bar.getByRole("button", { name: "Back to Connections" })).toBeVisible();
+    await expect(bar).toContainText("CI Runner 9");
+    await expect(page.getByRole("tablist")).toHaveCount(0);
+    await expect(list).toBeHidden();
+
+    await bar.getByRole("button", { name: "Back to Connections" }).click();
+    await expect(list).toBeVisible();
+    await expect(page.locator(".page-header").getByRole("tablist", { name: "Connections" })).toBeVisible();
+    expect(await listBody.evaluate((element) => element.scrollTop)).toBe(300);
+    await expect(page.locator(".row.is-selected")).toHaveCount(0);
   });
 });

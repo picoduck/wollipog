@@ -31,6 +31,7 @@ import {
   CircleDot as LucideCircleDot,
   Database as LucideDatabase,
   CircleGauge as LucideCircleGauge,
+  Cpu as LucideCpu,
   CirclePause as LucideCirclePause,
   ClipboardList as LucideClipboardList,
   Clock as LucideClock,
@@ -910,6 +911,11 @@ export function HandOffIcon(props: IconProps) {
 
 export function DialIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCircleGauge} {...props} />;
+}
+
+/** Runner Capacity: the session units a machine runs at once. Both gauges have meanings already. */
+export function CapacityIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCpu} {...props} />;
 }
 
 export function PullRequestIcon(props: IconProps) {

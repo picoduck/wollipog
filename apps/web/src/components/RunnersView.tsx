@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { State, useSnapshotState } from "./State.js";
 import { TabList } from "./Tabs.js";
 import {
@@ -25,6 +25,8 @@ import {
   codexUpgradeGuidance,
   harnessUpdateGuidance,
   formatAdmissionPolicy,
+  machineListEntries,
+  machineListOrder,
   formatExecutionIsolation,
   machineSettingsMutationError,
   nativeRunnerUpdateHint,
@@ -36,7 +38,8 @@ import {
   unknownRunnerTitle,
 } from "../runners.js";
 
-import { CopyButton, Modal, Spinner } from "./common.js";
+import { CopyButton, DetailSkeleton, Modal, Spinner } from "./common.js";
+import { MachineList } from "./MachineList.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
@@ -68,10 +71,10 @@ import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettin
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { formatHarnessLaunchCommand } from "../harness-command.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
-import { PageHeader, type PageHeaderActions } from "./PageHeader.js";
+import { DetailBar, PageHeader, type PageHeaderActions } from "./PageHeader.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useInstances } from "../instances-context.js";
-import { destination, type ConnectionSection } from "../navigation.js";
+import { backLabel, destination, type ConnectionSection } from "../navigation.js";
 import {
   hasBundledLocalRunner,
   isManagedLocalRunnerRepair,
@@ -1672,12 +1675,12 @@ function EmptyMachines({ methods, sentence }: { methods: AddMachineMethod[]; sen
 }
 
 /**
- * Each tab's page container (§4.5). Every tab is a `.page` for now; the Machines master-detail
- * (#2985) takes `.page.full.fill`. The header sits inside the container either way, so the title
- * and the tabs keep the content's left edge on every tab.
+ * Each tab's page container (§4.5): the Machines master-detail (#2985) fills the column as
+ * `.page.full.fill`, and the other tabs are a `.page`. The header sits inside the container either
+ * way, so the title and the tabs keep the content's left edge on every tab.
  */
-function connectionsPageClass(_section: ConnectionSection): string {
-  return "page";
+function connectionsPageClass(section: ConnectionSection): string {
+  return section === "machines" ? "page full fill" : "page";
 }
 
 export function RunnersView() {
@@ -1703,6 +1706,10 @@ export function RunnersView() {
   const section: ConnectionSection = !instancesTab && requestedSection === "instances"
     ? "machines"
     : requestedSection;
+  // The route is the only source of selection (§6): `/connections/machines/~<runnerId>` a machine.
+  const machineId = section === "machines" && view.name === "runners" ? view.machineId ?? null : null;
+  /** An SSH machine just connected and selected, whose box has not streamed in yet. */
+  const [arrivingMachineId, setArrivingMachineId] = useState<string | null>(null);
   const identityRole = identity?.context.role ?? null;
   const canManageMachines = identityRole === "owner" || identityRole === "admin";
   const canManageProfiles = canManageProviderProfiles(identity?.context);
@@ -1731,19 +1738,40 @@ export function RunnersView() {
     void readLocalRunnerStatus().then(setLocalRunnerStatus).catch(() => setLocalRunnerStatus(null));
   }, [bundledLocalRunner]);
 
-  const boxList = useMemo(
-    () => [...boxes.values()].sort((a, b) => a.sshTarget.localeCompare(b.sshTarget)),
-    [boxes],
-  );
-  // Runners that belong to a box are shown inside the box card, not in the plain list.
-  const boxRunnerIds = useMemo(() => new Set(boxList.map((b) => b.runnerId)), [boxList]);
-  const runnerList = useMemo(
-    () =>
-      [...runners.values()]
-        .filter((r) => !boxRunnerIds.has(r.runnerId))
-        .sort((a, b) => a.runnerId.localeCompare(b.runnerId)),
-    [runners, boxRunnerIds],
-  );
+  // A box's runner is that machine's, not a machine of its own; sorted by what needs the person.
+  const machines = useMemo(() => machineListEntries(runners, boxes.values()), [runners, boxes]);
+  const selectedMachine = machineId ? machines.find((machine) => machine.runnerId === machineId) ?? null : null;
+  const selectMachine = (runnerId: string | null) => navigate(runnerId
+    ? { name: "runners", section: "machines", machineId: runnerId }
+    : { name: "runners", section: "machines" });
+  useEffect(() => {
+    if (selectedMachine && selectedMachine.runnerId === arrivingMachineId) setArrivingMachineId(null);
+  }, [arrivingMachineId, selectedMachine]);
+  // Until the All Machines overview (#2986), the default detail is the first row (§6.1 rule 2):
+  // selected in place on desktop and compact widths, while a phone shows the list.
+  const firstMachineId = useMemo(() => machineListOrder(machines)[0]?.runnerId ?? null, [machines]);
+  useEffect(() => {
+    if (isMobile || section !== "machines" || machineId !== null || !firstMachineId) return;
+    navigate({ name: "runners", section: "machines", machineId: firstMachineId }, { replace: true });
+  }, [firstMachineId, isMobile, machineId, navigate, section]);
+
+  // Each pane scrolls on its own (§6). A new selection starts the detail at its top; on a phone, where
+  // the route swaps the whole screen, focus moves to the new page title, which shows no ring (§16.1).
+  const listBodyRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const previousMachineId = useRef(machineId);
+  useLayoutEffect(() => {
+    if (previousMachineId.current === machineId) return;
+    previousMachineId.current = machineId;
+    if (detailRef.current) detailRef.current.scrollTop = 0;
+    if (isMobile) document.getElementById("page-title")?.focus({ preventScroll: true });
+  }, [machineId, isMobile]);
+  // A phone hides the list while a machine is open, which loses its scroll position; Back puts the
+  // list back where it was (§6.2). Recorded only while the list is on screen.
+  const listScrollTop = useRef(0);
+  useLayoutEffect(() => {
+    if (!machineId && listBodyRef.current) listBodyRef.current.scrollTop = listScrollTop.current;
+  }, [machineId]);
 
   const rediscover = async (runnerId: string) => {
     setBusy((b) => ({ ...b, [runnerId]: true }));
@@ -1775,7 +1803,16 @@ export function RunnersView() {
       {repairRunnerId && (
         <RepairConnectionDialog runnerId={repairRunnerId} onClose={() => setRepairRunnerId(null)} />
       )}
-      {addingBox && <AddBoxDialog onClose={() => setAddingBox(false)} />}
+      {addingBox && (
+        <AddBoxDialog
+          onClose={() => setAddingBox(false)}
+          // The new machine opens in the detail, so its Connecting notice is in view (#2987).
+          onConnected={(box) => {
+            setArrivingMachineId(box.runnerId);
+            selectMachine(box.runnerId);
+          }}
+        />
+      )}
       {settingsRunnerId && runners.get(settingsRunnerId) && (
         <MachineSettingsDialog
           runner={runners.get(settingsRunnerId)}
@@ -1812,7 +1849,7 @@ export function RunnersView() {
     onManual: () => setOnboarding("manual"),
   });
 
-  const total = runnerList.length + boxList.length;
+  const total = machines.length;
   // An empty machine list proves nothing before the first snapshot or while disconnected.
   const machinesEmpty = total === 0 && !snapshot.offline && !snapshot.loading;
   // Each tab supplies the header's actions (§3.3). Only owners and admins add machines, and while the
@@ -1835,10 +1872,58 @@ export function RunnersView() {
       : []),
     { id: "people", label: <>People and Devices</> },
   ];
+  // On a phone the list and the open machine are two routes (§6.2): the machine takes the detail
+  // bar and its Back, and the header with its tabs steps aside.
+  const phoneDetail = isMobile && machineId !== null;
+  const stale = snapshot.offline;
+  const detail = snapshot.loading ? (
+    // While the first snapshot loads, the list's skeleton is the one announcement.
+    <DetailSkeleton />
+  ) : selectedMachine?.box ? (
+    <BoxCard
+      key={selectedMachine.runnerId}
+      box={selectedMachine.box}
+      runner={selectedMachine.runner}
+      canManage={canManageMachines}
+      canManageProfiles={canManageProfiles}
+      onReconnect={reconnectBox}
+      onRemove={removeBox}
+    />
+  ) : selectedMachine?.runner ? (
+    <NativeRunnerCard
+      key={selectedMachine.runnerId}
+      runner={selectedMachine.runner}
+      canManage={canManageMachines}
+      canManageProfiles={canManageProfiles}
+      busy={Boolean(busy[selectedMachine.runnerId])}
+      removeError={removeError[selectedMachine.runnerId]}
+      onRediscover={rediscover}
+      onManage={setSettingsRunnerId}
+      onRepair={repairRunner}
+    />
+  ) : machineId && !stale && machineId !== arrivingMachineId ? (
+    <State
+      compact
+      title="Machine Not Found"
+      actions={<button type="button" className="btn sm" onClick={() => selectMachine(null)}>Show All Machines</button>}
+    >
+      It may have been deleted.
+    </State>
+  ) : (
+    // A machine that is arriving, or one the last-known list lacks while disconnected.
+    <DetailSkeleton />
+  );
   return (
     <div className={connectionsPageClass(section)}>
+      {phoneDetail && (
+        <DetailBar
+          title={selectedMachine?.name ?? "Machine"}
+          backLabel={backLabel("runners")}
+          onBack={() => selectMachine(null)}
+        />
+      )}
       {/* The tabs sit in the page header's tab slot (§4.2, §10.1), under its title and actions. */}
-      <PageHeader
+      {!phoneDetail && <PageHeader
         title={destination("runners").name}
         {...tabActions(section)}
         tabs={(
@@ -1860,7 +1945,7 @@ export function RunnersView() {
             ))}
           </TabList>
         )}
-      />
+      />}
       {section === "instances" ? (
         <div
           id="connections-instances-panel"
@@ -1892,8 +1977,10 @@ export function RunnersView() {
       <div
         id="connections-machines-panel"
         role="tabpanel"
-        aria-labelledby="connections-machines-tab"
-        className="connections-panel"
+        // A phone's machine route has no tabs, so the detail bar's title names the panel.
+        aria-labelledby={phoneDetail ? undefined : "connections-machines-tab"}
+        aria-label={phoneDetail ? selectedMachine?.name ?? "Machine" : undefined}
+        className="connections-panel machines-panel"
       >
         {identityError && (
           <Notice
@@ -1905,49 +1992,45 @@ export function RunnersView() {
             details={identityError}
           />
         )}
-        {total === 0 && !machinesEmpty ? (
-          <State variant={snapshot.offline ? "offline" : "loading"}>
-            {snapshot.offline ? "Reconnecting…" : "Loading machines…"}
-          </State>
+        {total === 0 && snapshot.offline ? (
+          <div className="master-detail-state">
+            <State variant="offline">Reconnecting…</State>
+          </div>
         ) : machinesEmpty ? (
-          <EmptyMachines
-            // Only where the person can act: a viewer is told whom to ask, since a button that fails
-            // is worse than none (§11.3, applied to an empty state).
-            methods={canManageMachines ? methods : []}
-            sentence={canManageMachines
-              ? "Wollipog runs agents on machines you connect. Choose how to connect the first one."
-              : identityRole
-              ? "Ask an organization owner or admin to connect a machine."
-              : identityError
-              ? "Wollipog runs agents on machines you connect."
-              : "Loading machine access…"}
-          />
-        ) : <div className="runner-grid">
-        {boxList.map((box) => (
-          <BoxCard
-            key={box.boxId}
-            box={box}
-            runner={runners.get(box.runnerId)}
-            canManage={canManageMachines}
-            canManageProfiles={canManageProfiles}
-            onReconnect={reconnectBox}
-            onRemove={removeBox}
-          />
-        ))}
-        {runnerList.map((runner) => (
-          <NativeRunnerCard
-            key={runner.runnerId}
-            runner={runner}
-            canManage={canManageMachines}
-            canManageProfiles={canManageProfiles}
-            busy={Boolean(busy[runner.runnerId])}
-            removeError={removeError[runner.runnerId]}
-            onRediscover={rediscover}
-            onManage={setSettingsRunnerId}
-            onRepair={repairRunner}
-          />
-        ))}
-        </div>}
+          // No machines is one state across both panes (§6.1, §12.1).
+          <div className="master-detail-state">
+            <EmptyMachines
+              // Only where the person can act: a viewer is told whom to ask, since a button that fails
+              // is worse than none (§11.3, applied to an empty state).
+              methods={canManageMachines ? methods : []}
+              sentence={canManageMachines
+                ? "Wollipog runs agents on machines you connect. Choose how to connect the first one."
+                : identityRole
+                ? "Ask an organization owner or admin to connect a machine."
+                : identityError
+                ? "Wollipog runs agents on machines you connect."
+                : "Loading machine access…"}
+            />
+          </div>
+        ) : (
+          <div className="master-detail" data-detail-open={machineId ? "" : undefined}>
+            <MachineList
+              entries={snapshot.loading ? null : machines}
+              // Phone lists never show a selected row (§5.2).
+              selectedId={isMobile ? null : machineId}
+              onSelect={selectMachine}
+              stale={stale}
+              bodyRef={listBodyRef}
+              onBodyScroll={(event) => {
+                // A hidden list reports 0; that is not where the person left it.
+                if (event.currentTarget.clientHeight > 0) listScrollTop.current = event.currentTarget.scrollTop;
+              }}
+            />
+            <div ref={detailRef} className="master-detail-detail" data-focus-zone="main" tabIndex={-1}>
+              {detail}
+            </div>
+          </div>
+        )}
       </div>
       )}
       {dialogs}

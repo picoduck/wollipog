@@ -210,7 +210,8 @@ test("Connections has one header named for the page, its tabs in order, and no c
     assert.deepEqual(tabLabels(body), ["Machines 1", "People and Devices"]);
     assertNoDomNode(body.querySelector(".connections-panel > .toolbar"), "the tab's count is not said twice");
     assert.doesNotMatch(body.textContent ?? "", /\b1 Machine\b|dashboard/);
-    assert.equal(body.querySelector(".page")?.className, "page");
+    // The Machines tab is a master-detail that fills the column (#2985).
+    assert.equal(body.querySelector(".page")?.className, "page full fill");
   } finally {
     await view.unmount();
   }
@@ -345,7 +346,8 @@ test("the empty Machines tab owns the create actions: three method rows for an o
   // Add Machine.
   const loading = await mount({ runners: null });
   try {
-    assert.match(loading.body.querySelector(".connections-panel .state.loading")?.textContent ?? "", /Loading machines…/);
+    // Skeleton rows say so (#2985).
+    assert.equal(loading.body.querySelector(".master-detail-list .skeleton .sr-only")?.textContent, "Loading machines");
     assertNoDomNode(loading.body.querySelector(".connections-empty"));
     assert.ok(addMachine(loading.body));
   } finally {

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import type { SshConfigHost } from "@wollipog/protocol";
+import type { BoxView, SshConfigHost } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { describeSshFailure } from "../format.js";
@@ -36,7 +36,11 @@ export function sshPortError(value: string): string | null {
  * fine pointer, which Modal decides). A refused request is one sentence above the footer with the
  * raw text behind Show Details (#2987).
  */
-export function AddBoxDialog({ onClose }: { onClose: () => void }) {
+export function AddBoxDialog({ onClose, onConnected }: {
+  onClose: () => void;
+  /** The control plane accepted the machine, before it closes: the page selects it (#2987). */
+  onConnected?: (box: BoxView) => void;
+}) {
   const api = useApi();
   const ids = useId();
   const fieldId = (name: string) => `${ids}-${name}`;
@@ -101,13 +105,14 @@ export function AddBoxDialog({ onClose }: { onClose: () => void }) {
     setFailure(null);
     const target = sshTarget.trim();
     try {
-      await api.addBox({
+      const { box } = await api.addBox({
         displayName: displayName.trim() || undefined,
         sshTarget: target,
         workspacePath: workspacePath.trim() || undefined,
         sshPort: sshPort.trim() ? Number(sshPort.trim()) : DEFAULT_PORT,
       });
       submittingRef.current = false;
+      onConnected?.(box);
       onClose(); // it now streams into the list via box_upsert
     } catch (e) {
       const raw = (e as Error).message;

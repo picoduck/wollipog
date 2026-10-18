@@ -164,6 +164,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `RewindFilesIcon` | Lucide | `FileClock` | Rewind files to a turn's checkpoint. |
 | `HandOffIcon` | Lucide | `ArrowRightLeft` | Hand a conversation off to another provider. |
 | `DialIcon` | Lucide | `CircleGauge` | Model or effort setting. |
+| `CapacityIcon` | Lucide | `Cpu` | Runner Capacity, the session units a machine runs at once: the Machines list's meta (#2985). `Gauge` and `CircleGauge` already mean the Fast service tier and a model or effort setting. |
 | `PullRequestIcon` | Lucide | `GitPullRequest` | Pull request. |
 | `DiffIcon` | Lucide | `FileDiff` | Changed files in the Review panel; a patch artifact's kind tile in the Browser (#2854). |
 | `TranscriptHitIcon` | Lucide | `FileText` | A transcript search hit in the command palette. |

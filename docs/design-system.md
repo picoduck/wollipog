@@ -1432,6 +1432,20 @@ variant by default and offers side by side as a user preference (§6.3).
   detail's `scrollTop` on each route, and on a phone it restores the list's position on Back. The
   side-by-side resize handle is built for Sessions' Preview Right (#2219, §6.3), and its stacked
   divider (#2217); Agent Skills' list pane does not resize yet.
+- **Connections › Machines (#2985).** The Machines tab is the same grid in a `.page.full.fill`
+  page under the Connections header and its tabs. `MachineList` is one `button.row.row-2` per
+  machine: the name (its tooltip the full name) and the one `machineStatus()` badge on line 1, and as
+  §11.3 meta its kind ("Native Runner" or "SSH") and, when its runner reports Runner Capacity, "29
+  of 40 Units". Rows sort by `machineSortKey`, `[attentionRank, online ? 0 : 1, displayName]`:
+  whatever is not Online or Connecting first. Past eight machines the head adds "Filter Machines"
+  and the rows sit under Needs Attention, Online and Offline with plain counts. The selection is
+  `/connections/machines/~<runnerId>` (an SSH machine by its box's runner id); `/connections/machines`
+  selects the first row shown in place on desktop and compact widths until the All Machines
+  overview (#2986). An unknown id is a compact "Machine Not Found" with Show All Machines;
+  before the first snapshot the list shows three skeleton rows beside `DetailSkeleton`; while
+  disconnected the last-known rows stay in `StaleContent` under a compact "Reconnecting…" notice
+  in the list head. A phone's machine route replaces the header and its tabs with a `DetailBar`,
+  "Back to Connections" and the machine's name. Connecting a machine over SSH selects it.
 - **Settings (#3018).** Each section is a route, and the list takes the width's shape. Desktop: a
   sticky 192px `nav.settings-nav` of `.row.settings-nav-item` links at `--control-h`, each a 16px
   icon and the section name; the current one is `aria-current="page"` with the §5.2 selected state
@@ -2240,6 +2254,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Machine / instance | Connecting | info |
 | Machine / instance | Offline | neutral (hollow dot) |
 | Machine / instance / device | Update Required, Sign-In Required, Pairing Required | warning |
+| Machine | Approval Required (a Registry agent waits for its exact launch to be approved) | warning |
 | Machine / instance | Unreachable, Error | danger |
 | Skill deployment | Linked | success |
 | Skill deployment | Pending | neutral |
