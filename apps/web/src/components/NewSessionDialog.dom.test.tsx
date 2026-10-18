@@ -4201,14 +4201,18 @@ test("an out-of-range Cloud Budget left behind closed Options is named in the he
   const fixture = await mountFixture({ runners: [{ ...runner, executionTargets: [...hostTargets(), {
     id: "cloud", runnerId: runner.runnerId, name: "Cloud Sandbox", kind: "cloud", workspaceStrategy: "snapshot", adapter: "cloud",
     boundaries, available: true,
-    policy: { cost: { currency: "USD", estimatedHourlyRateUsd: 2, minimumBudgetUsd: 1, maximumBudgetUsd: 20 }, admission: { maxConcurrentSessions: 2, queue: "fifo" } },
+    policy: { cost: { currency: "USD", estimatedHourlyRateUsd: 0.4, minimumBudgetUsd: 1, maximumBudgetUsd: 20.5 }, admission: { maxConcurrentSessions: 2, queue: "fifo" } },
   }] }] }, undefined, undefined, undefined, undefined, undefined, { runnerSkills: async () => ({ desired: [], reported: null }) as never });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await act(async () => { optionsHead(fixture.container).click(); });
     await chooseSelectOption(fixture.container, "Run On", "Cloud Sandbox");
     const budget = fixture.container.querySelector<HTMLInputElement>('input[step="0.01"]')!;
+    // Amounts read as people write them: whole dollars bare, cents with two digits.
+    assert.equal(settingRowOf(budget).querySelector(".setting-row-desc")?.textContent,
+      "Stops the session at this amount. Between $1 and $20.50, at about $0.40 an hour.");
     await act(async () => { fireDomEvent.change(budget, { target: { value: "0" } }); });
+    assert.match(ariaReferencedText(budget, "aria-describedby") ?? "", /^Enter an amount from \$1 to \$20\.50\./);
     await act(async () => { optionsHead(fixture.container).click(); });
     assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false");
     assert.equal(optionsHead(fixture.container).querySelector(".status.t-warning")?.textContent, "Budget Out of Range");

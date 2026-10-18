@@ -135,6 +135,11 @@ function liveLocationAvailability(
   return runner.workspaces.some((workspace) => workspace.id === location.workspaceId) ? "available" : "workspace_missing";
 }
 
+/** A dollar amount as people write it: "$1", "$0.40". */
+function usd(amount: number): string {
+  return `$${Number.isInteger(amount) ? amount : amount.toFixed(2)}`;
+}
+
 /** A path cut at its start, so the folder name and its parent stay whole: "…/repos/wollipog". */
 function startTruncatedPath(path: string): string {
   const separator = path.includes("\\") ? "\\" : "/";
@@ -2325,7 +2330,7 @@ export function NewSessionDialog({
               {executionTarget?.adapter === "cloud" && executionTarget.policy && (
                 <NumberRow
                   title="Cloud Budget"
-                  description={`Stops the session at this amount. Between $${executionTarget.policy.cost.minimumBudgetUsd} and $${executionTarget.policy.cost.maximumBudgetUsd}, at about $${executionTarget.policy.cost.estimatedHourlyRateUsd} an hour.`}
+                  description={`Stops the session at this amount. Between ${usd(executionTarget.policy.cost.minimumBudgetUsd)} and ${usd(executionTarget.policy.cost.maximumBudgetUsd)}, at about ${usd(executionTarget.policy.cost.estimatedHourlyRateUsd)} an hour.`}
                   value={cloudBudgetUsd}
                   onChange={setCloudBudgetUsd}
                   unit="USD"
@@ -2334,7 +2339,7 @@ export function NewSessionDialog({
                   step={0.01}
                   inputId={cloudBudgetInputId}
                   error={cloudBudgetValid ? null
-                    : `Enter an amount from $${executionTarget.policy.cost.minimumBudgetUsd} to $${executionTarget.policy.cost.maximumBudgetUsd}.`}
+                    : `Enter an amount from ${usd(executionTarget.policy.cost.minimumBudgetUsd)} to ${usd(executionTarget.policy.cost.maximumBudgetUsd)}.`}
                 />
               )}
               {directoryGrants.length > 0 && executionTarget?.adapter === "host" && (
