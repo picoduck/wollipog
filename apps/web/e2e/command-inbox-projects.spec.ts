@@ -1853,8 +1853,10 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await expect(page.getByText("Group related sessions and choose the folders where they run.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Durable Empty" })).toBeVisible();
   await expect(page.getByText("No Project Locations", { exact: true })).toBeVisible();
+  // The Settings section's button says the state; the retired pill no longer repeats it (#2959).
   await page.getByRole("button", { name: "Hide Project" }).click();
-  await expect(page.getByText("Hidden from Sessions", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show Project" })).toBeVisible();
+  await expect(page.getByText("Hidden from Sessions", { exact: true })).toHaveCount(0);
 
   await page.reload();
   await openProjectManager(page);
@@ -1865,7 +1867,7 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await expect(page.getByRole("button", { name: /Durable Empty/ })).toBeVisible();
   await page.getByRole("button", { name: /Durable Empty/ }).click();
   await page.getByRole("button", { name: "Show Project" }).click();
-  await expect(page.getByText("Shown in Sessions", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Hide Project" })).toBeVisible();
 });
 
 test.describe("with a touch pointer", () => {
@@ -1876,10 +1878,18 @@ test.describe("with a touch pointer", () => {
     await openProjectManager(page);
     await page.setViewportSize({ width: 390, height: 844 });
     // On a phone the open Project takes the detail bar (#1801): its name is the page's h1 and Back
-    // is the bar's ChevronLeft icon button, not a "← Back to Projects" text link.
-    const detail = page.getByRole("heading", { level: 2, name: "Alpha" });
+    // is the bar's ChevronLeft icon button, not a "← Back to Projects" text link. The detail's own
+    // title row is not repeated under it (#2959); its meta line leads the body.
+    const detail = page.getByRole("list", { name: "Project Details" });
     await expect(detail).toBeVisible();
     await expect(page.getByRole("heading", { level: 1, name: "Alpha" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 2, name: "Alpha" })).toHaveCount(0);
+    const bar = page.locator(".detail-bar");
+    await expect(bar.getByRole("button", { name: "New Session" })).toBeVisible();
+    await bar.getByRole("button", { name: "Project Actions" }).click();
+    await expect(page.getByRole("menu", { name: "Project Actions" }).getByRole("menuitem"))
+      .toHaveText(["Copy Project ID", /^Archive (and Stop )?Sessions…/, "Delete Project…"]);
+    await page.keyboard.press("Escape");
     const back = page.getByRole("button", { name: "Back to Projects", exact: true });
     await expect(back).toBeVisible();
     await expect(back).toHaveText("");
@@ -1992,7 +2002,9 @@ test("one exact Location can be launched from two Projects and unlinked independ
 test("deleting a Project explicitly retains sessions and moves them to No Project", async ({ page }) => {
   await openProjectManager(page);
   await page.getByRole("button", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Delete Project" }).click();
+  // Delete Project… is destructive, so it lives last in the detail's ⋯ (§3.3, #2959).
+  await page.locator(".project-detail-title-row").getByRole("button", { name: "Project Actions" }).click();
+  await page.getByRole("menuitem", { name: "Delete Project…" }).click();
   const dialog = page.getByRole("dialog", { name: "Delete Project" });
   await expect(dialog).toContainText("its sessions move to No Project");
   await expect(dialog).toContainText("Sessions and files are not deleted");

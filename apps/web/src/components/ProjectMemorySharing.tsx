@@ -1,5 +1,6 @@
 import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { DetailSection } from "./DetailSection.js";
 import { useEffect, useState } from "react";
 import { PROJECT_MEMORY_MIN_PROTOCOL, supportsClaudeProjectMemory,
   type ProjectMemorySharing, type ProjectView, type RunnerView } from "@wollipog/protocol";
@@ -15,9 +16,9 @@ export function ProjectMemorySharingSettings({ project, runners, disabled, onSav
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { setChoice(project.memorySharing ?? "separate"); setError(null); }, [project.memorySharing]);
   const machines = [...new Set(project.locations.map((location) => location.runnerId))];
-  return <section className="project-detail-section" aria-labelledby="memory-sharing-heading">
-    <h3 id="memory-sharing-heading">Memory Sharing</h3>
-    <p>Choose whether accounts share this Project’s additional saved memory. Conversation history follows the session when you switch accounts and may already contain memories. This choice cannot remove that information or prevent a provider from learning from the conversation under its own settings.</p>
+  // The section recipe (#2959); #2963 turns its contents into one setting row.
+  return <DetailSection title="Memory Sharing" note="Choose whether accounts share this Project’s additional saved memory.">
+    <p>Conversation history follows the session when you switch accounts and may already contain memories. This choice cannot remove that information or prevent a provider from learning from the conversation under its own settings.</p>
     {project.memorySharing === undefined ? <p role="status">Memory policy is unavailable. Update Wollipog to configure it.</p> : <>
       <p><strong>Saved Choice: </strong>{project.memorySharing === "shared" ? "Share Project Memory" : "Keep Account Memories Separate"}</p>
       <form onSubmit={(event) => {
@@ -53,5 +54,5 @@ export function ProjectMemorySharingSettings({ project, runners, disabled, onSav
         : "Supported Claude installations use the saved choice. Unsupported default cases retain native memory; explicit sharing requires support."}</p>;
     })}
     <p>Changes apply after the current turn and its background work finish, before the next ordinary turn. Existing account memories and previously shared storage remain in their original locations. New managed directories start empty; existing memories are not automatically imported. Turning sharing off retains shared files and returns each account to its own saved memory. Re-enabling sharing reuses the retained shared files.</p>
-  </section>;
+  </DetailSection>;
 }

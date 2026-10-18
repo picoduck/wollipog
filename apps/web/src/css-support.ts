@@ -273,7 +273,7 @@ export const CSS_SURFACE = {
   ],
   /** Pseudo-classes and pseudo-elements, without their leading colons. */
   pseudos: [
-  "active", "after", "before", "checked", "disabled", "empty", "first-child", "first-of-type", "focus",
+  "active", "after", "before", "checked", "disabled", "empty", "first-child", "focus",
   "focus-visible", "focus-within", "has", "hover", "is", "last-child", "not", "nth-child",
   "placeholder", "root", "where",
   ],

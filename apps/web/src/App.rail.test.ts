@@ -357,10 +357,8 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   // The intro paragraph became the page header's one-line description (#1801, §4.2: 80 characters).
   // The registry holds it now, beside the destination name (#1945).
   assert.match(projectsView, /const PROJECTS = destination\("projects"\);/);
-  assert.match(projectsView, /className="muted project-detail-meta">Project ID:/);
-  assert.match(projectsView, /className="muted project-detail-meta">\{projectAudienceVisibilitySummary/);
-  assert.match(css, /\.project-detail-meta\s*\{\s*display:\s*block;/,
-    "Project identity and audience metadata render on distinct lines");
+  // The project's id is copied from ⋯, never printed in the detail (#2959); its DOM test reads the meta line.
+  assert.doesNotMatch(projectsView, /Project ID:/);
   // The list's filter says whether a project has a Sessions tab (#2957), not who can see it.
   assert.match(projectList, /label="Sessions Tabs"/,
     "the Sessions show-or-hide filter does not reuse the Project audience label");
