@@ -337,7 +337,9 @@ It deletes only this session's refs: a worktree's `CHERRY_PICK_HEAD`, `REVERT_HE
 sequence, run `git cherry-pick --quit` first), and `refs/heads/<branch>` or
 `refs/remotes/<remote>/<branch>` for a branch Wollipog recorded for this session's worktrees, once
 no worktree has it checked out. A changed value deletes nothing; refs already gone are reported as
-absent. `--path` names another of this session's worktrees; the default is the selected one.
+absent. `--path` names another of this session's worktrees; the default is the selected one. Only
+Linux runners with bubblewrap support it; other runners refuse, and then the leftovers stay until a
+person removes them.
 
 ## Retiring a Worktree
 

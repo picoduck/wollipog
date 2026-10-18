@@ -20,14 +20,15 @@
  * that never echo repository content.
  *
  * The session can still change its writable `refs` and `logs` trees while the runner works, for
- * example by swapping a directory for a symlink after the runner checked it. On Linux the runner's
- * Git therefore runs in its own bubblewrap mount view (`confinedGitRunner`), in which only the shared
+ * example by swapping a directory for a symlink after the runner checked it. The runner's Git
+ * therefore runs in its own bubblewrap mount view (`confinedGitRunner`), in which only the shared
  * Git directory's `refs`, `logs`, `packed-refs` and lock files and this worktree's admin directory
- * are writable. A path redirected anywhere else then fails instead of deleting a file there.
+ * are writable. A path redirected anywhere else then fails instead of deleting a file there. A
+ * runner that cannot confine its Git that way, every non-Linux one included, refuses the operation.
  */
 
 import { execFile } from "node:child_process";
-import { lstat, readFile, readdir, stat } from "node:fs/promises";
+import { lstat, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { MAX_SESSION_WORKTREE_REF_DELETIONS } from "@wollipog/protocol";
 
@@ -243,6 +244,36 @@ async function branchInUse(commonGitDir: string, branch: string): Promise<boolea
   return false;
 }
 
+/** Every worktree's HEAD.lock, the main worktree's included, or a refusal holding none. Each lock
+ * is created exclusively, so an existing lock or anything planted in its place refuses the call. */
+async function lockWorktreeHeads(commonGitDir: string): Promise<string[]> {
+  const adminDirs = [commonGitDir];
+  try {
+    for (const entry of await readdir(join(commonGitDir, "worktrees"), { withFileTypes: true })) {
+      if (entry.isDirectory()) adminDirs.push(join(commonGitDir, "worktrees", entry.name));
+    }
+  } catch {
+    // No linked worktrees.
+  }
+  const held: string[] = [];
+  try {
+    for (const admin of adminDirs) {
+      const lock = join(admin, "HEAD.lock");
+      const handle = await open(lock, "wx", 0o644);
+      held.push(lock);
+      await handle.close();
+    }
+  } catch {
+    await releaseLocks(held);
+    throw new WorktreeRefDeletionRefusal("a worktree's HEAD is locked by another Git operation; try again");
+  }
+  return held;
+}
+
+async function releaseLocks(locks: readonly string[]): Promise<void> {
+  for (const lock of locks) await rm(lock, { force: true }).catch(() => undefined);
+}
+
 /** Host Git follows a directory symlink inside the session-writable `refs` and `logs` trees, so a
  * path the sandbox redirected must be refused before Git runs, not after. */
 async function assertPlainRefPath(root: string, relative: string): Promise<void> {
@@ -292,10 +323,30 @@ async function currentValue(
   return undefined;
 }
 
+/** The only Git a runner deletes refs with: confined on Linux, refused everywhere else (#3316). An
+ * unconfined host Git would follow a directory the session swapped for a symlink after the path
+ * checks, so a platform without an equivalent confinement gets no deletion at all. */
+export async function refDeletionGitRunner(
+  scope: WorktreeRefDeletionScope,
+  options: { platform?: NodeJS.Platform; findBwrap?: () => Promise<string | undefined> } = {},
+): Promise<GitRunner> {
+  if ((options.platform ?? process.platform) !== "linux") {
+    throw new WorktreeRefDeletionRefusal(
+      "runner-managed ref deletion needs the runner's bubblewrap confinement, which only Linux runners provide",
+    );
+  }
+  const bwrap = await (options.findBwrap ?? findBubblewrap)();
+  if (!bwrap) throw new WorktreeRefDeletionRefusal("bubblewrap is required to delete refs on this runner");
+  return confinedGitRunner(scope, bwrap);
+}
+
+/** Host Git with no confinement. Only tests use it, on fixtures no session can change. */
+export const unconfinedGitRunnerForTests: GitRunner = runGit;
+
 export async function deleteOwnedWorktreeRefs(
   scope: WorktreeRefDeletionScope,
   requests: readonly WorktreeRefDeletionRequest[],
-  git: GitRunner = runGit,
+  git: GitRunner,
 ): Promise<WorktreeRefDeletionResult> {
   if (!posix.isAbsolute(scope.worktreeGitDir) || !posix.isAbsolute(scope.commonGitDir) ||
       posix.dirname(scope.worktreeGitDir) !== posix.join(scope.commonGitDir, "worktrees")) {
@@ -323,11 +374,6 @@ export async function deleteOwnedWorktreeRefs(
     }
   }
   for (const entry of classified) {
-    if (entry.kind === "branch" && await branchInUse(scope.commonGitDir, entry.branch)) {
-      throw new WorktreeRefDeletionRefusal(`${entry.ref} is checked out or being rebased in a worktree`);
-    }
-  }
-  for (const entry of classified) {
     if (entry.kind === "sequencer") {
       await assertPlainRefPath(scope.worktreeGitDir, entry.ref);
       await assertPlainRefPath(join(scope.worktreeGitDir, "logs"), entry.ref);
@@ -337,26 +383,51 @@ export async function deleteOwnedWorktreeRefs(
     }
   }
 
-  const deleted: string[] = [];
-  const absent: string[] = [];
-  const lines: string[] = [];
-  for (const entry of classified) {
-    const current = await currentValue(git, env, scope, entry);
-    if (current === undefined) {
-      absent.push(entry.ref);
-      continue;
+  const branches = classified.filter((entry): entry is Extract<Classified, { kind: "branch" }> => entry.kind === "branch");
+  // A worktree that checks a branch out between the scan and the deletion would be left on a branch
+  // that no longer exists. Git updates HEAD only through HEAD.lock, so holding every worktree's lock
+  // across the scan and the transaction makes such a checkout fail instead.
+  const locks = branches.length ? await lockWorktreeHeads(scope.commonGitDir) : [];
+  try {
+    for (const entry of branches) {
+      if (await branchInUse(scope.commonGitDir, entry.branch)) {
+        throw new WorktreeRefDeletionRefusal(`${entry.ref} is checked out or being rebased in a worktree`);
+      }
     }
-    if (current !== entry.oldOid) {
-      throw new WorktreeRefDeletionRefusal(`${entry.ref} no longer has the expected value; nothing was deleted`);
+    const deleted: Classified[] = [];
+    const absent: string[] = [];
+    for (const entry of classified) {
+      const current = await currentValue(git, env, scope, entry);
+      if (current === undefined) {
+        absent.push(entry.ref);
+        continue;
+      }
+      if (current !== entry.oldOid) {
+        throw new WorktreeRefDeletionRefusal(`${entry.ref} no longer has the expected value; nothing was deleted`);
+      }
+      deleted.push(entry);
     }
-    lines.push(`delete ${entry.ref} ${entry.oldOid}\n`);
-    deleted.push(entry.ref);
+    if (deleted.length) {
+      const result = await git([...SAFE_CONFIG, "update-ref", "--no-deref", "--stdin"], {
+        env, input: deleted.map((entry) => `delete ${entry.ref} ${entry.oldOid}\n`).join(""),
+      });
+      if (result.code !== 0) {
+        throw new WorktreeRefDeletionRefusal("Git refused the deletion, for example because a ref changed; nothing was deleted");
+      }
+      // A writer that bypasses Git's lock can still point a HEAD at the branch meanwhile. Put every
+      // deleted ref back rather than leave that worktree on a branch that is gone.
+      for (const entry of branches) {
+        if (!deleted.includes(entry) || !await branchInUse(scope.commonGitDir, entry.branch)) continue;
+        const restored = await git([...SAFE_CONFIG, "update-ref", "--no-deref", "--stdin"], {
+          env, input: deleted.map((item) => `create ${item.ref} ${item.oldOid}\n`).join(""),
+        });
+        throw new WorktreeRefDeletionRefusal(restored.code === 0
+          ? `${entry.ref} was checked out while it was being deleted; every ref was restored`
+          : `${entry.ref} was checked out while it was being deleted, and the deleted refs could not be restored`);
+      }
+    }
+    return { deleted: deleted.map((entry) => entry.ref), absent };
+  } finally {
+    await releaseLocks(locks);
   }
-  if (lines.length) {
-    const result = await git([...SAFE_CONFIG, "update-ref", "--no-deref", "--stdin"], { env, input: lines.join("") });
-    if (result.code !== 0) {
-      throw new WorktreeRefDeletionRefusal("Git refused the deletion, for example because a ref changed; nothing was deleted");
-    }
-  }
-  return { deleted, absent };
 }

@@ -8,10 +8,20 @@ import {
   deleteOwnedWorktreeRefs,
   findBubblewrap,
   MAX_WORKTREE_REF_DELETIONS,
+  refDeletionGitRunner,
+  unconfinedGitRunnerForTests,
+  type GitRunner,
   validateWorktreeRefDeletionRequests,
   WorktreeRefDeletionRefusal,
+  type WorktreeRefDeletionRequest,
   type WorktreeRefDeletionScope,
 } from "./worktree-ref-deletion.js";
+
+/** These fixtures are changed by nobody but the test, so the unconfined host Git is safe here. */
+function deleteRefs(scope: WorktreeRefDeletionScope, requests: WorktreeRefDeletionRequest[],
+  git: GitRunner = unconfinedGitRunnerForTests) {
+  return deleteOwnedWorktreeRefs(scope, requests, git);
+}
 
 const roots: string[] = [];
 after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5 }); });
@@ -76,7 +86,7 @@ test("the runner clears a worktree's sequencer leftovers and the session's own l
   git(["update-ref", "refs/remotes/origin/agent/s_other", head], repoPath);
   const configBefore = readFileSync(join(commonGitDir, "config"), "utf8");
 
-  const result = await deleteOwnedWorktreeRefs(scope, [
+  const result = await deleteRefs(scope, [
     { ref: "CHERRY_PICK_HEAD", oldOid: pick },
     { ref: "AUTO_MERGE", oldOid: tree },
     { ref: "refs/heads/agent/s_owner-old", oldOid: head },
@@ -94,7 +104,7 @@ test("the runner clears a worktree's sequencer leftovers and the session's own l
   git(["fsck", "--no-progress", "--strict"], repoPath);
 
   // Repeating the same call is not an error: the refs are reported absent.
-  const repeated = await deleteOwnedWorktreeRefs(scope, [
+  const repeated = await deleteRefs(scope, [
     { ref: "CHERRY_PICK_HEAD", oldOid: pick },
     { ref: "refs/remotes/origin/agent/s_owner", oldOid: head },
   ]);
@@ -117,7 +127,7 @@ test("another session's refs and unrecorded branches are refused", async () => {
     "ORIG_HEAD",
     "refs/tags/v1",
   ]) {
-    await refused(deleteOwnedWorktreeRefs(scope, [{ ref, oldOid: head }]), /only this worktree's/u);
+    await refused(deleteRefs(scope, [{ ref, oldOid: head }]), /only this worktree's/u);
   }
   assert.equal(git(["rev-parse", "agent/s_other"], repoPath), head);
   assert.equal(git(["rev-parse", "scratch"], repoPath), head);
@@ -128,14 +138,14 @@ test("a branch checked out or being rebased in any worktree is refused", async (
   const { repoPath, scope, otherAdmin } = fixture();
   const head = git(["rev-parse", "main"], repoPath);
   // The session's own selected branch is checked out in its worktree.
-  await refused(deleteOwnedWorktreeRefs(scope, [{ ref: "refs/heads/agent/s_owner", oldOid: head }]), /checked out/u);
+  await refused(deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner", oldOid: head }]), /checked out/u);
   // A recorded branch another worktree has checked out, or is rebasing, is refused too.
   git(["branch", "agent/s_owner-old", "main"], repoPath);
   mkdirSync(join(otherAdmin, "rebase-merge"));
   writeFileSync(join(otherAdmin, "rebase-merge", "head-name"), "refs/heads/agent/s_owner-old\n");
-  await refused(deleteOwnedWorktreeRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }]), /checked out or being rebased/u);
+  await refused(deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }]), /checked out or being rebased/u);
   rmSync(join(otherAdmin, "rebase-merge"), { recursive: true });
-  assert.deepEqual(await deleteOwnedWorktreeRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }]),
+  assert.deepEqual(await deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }]),
     { deleted: ["refs/heads/agent/s_owner-old"], absent: [] });
 });
 
@@ -146,7 +156,7 @@ test("sequencer leftovers stay while a rebase, merge or cherry-pick sequence is 
     const path = join(scope.worktreeGitDir, marker);
     if (marker === "MERGE_HEAD") writeFileSync(path, `${pick}\n`);
     else mkdirSync(path);
-    await refused(deleteOwnedWorktreeRefs(scope, [{ ref: "CHERRY_PICK_HEAD", oldOid: pick }]),
+    await refused(deleteRefs(scope, [{ ref: "CHERRY_PICK_HEAD", oldOid: pick }]),
       marker === "sequencer" ? /cherry-pick --quit/u : /rebase or merge is in progress/u);
     rmSync(path, { recursive: true });
   }
@@ -157,7 +167,7 @@ test("a stale expected value deletes nothing at all", async () => {
   const { repoPath, worktreePath, scope } = fixture();
   const { pick, tree } = plantSequencerLeftovers(worktreePath, scope.worktreeGitDir);
   git(["branch", "agent/s_owner-old", "main"], repoPath);
-  await refused(deleteOwnedWorktreeRefs(scope, [
+  await refused(deleteRefs(scope, [
     { ref: "CHERRY_PICK_HEAD", oldOid: pick },
     { ref: "refs/heads/agent/s_owner-old", oldOid: tree },
   ]), /no longer has the expected value; nothing was deleted/u);
@@ -173,7 +183,7 @@ test("a ref path redirected through a symlink is refused before Git runs", async
   writeFileSync(join(victim, "s_owner-old"), "keep\n");
   mkdirSync(join(commonGitDir, "refs", "remotes", "origin"), { recursive: true });
   symlinkSync(victim, join(commonGitDir, "refs", "remotes", "origin", "agent"));
-  await refused(deleteOwnedWorktreeRefs(scope, [{ ref: "refs/remotes/origin/agent/s_owner-old", oldOid: head }]),
+  await refused(deleteRefs(scope, [{ ref: "refs/remotes/origin/agent/s_owner-old", oldOid: head }]),
     /not a plain file or directory/u);
   assert.equal(readFileSync(join(victim, "s_owner-old"), "utf8"), "keep\n");
 });
@@ -184,13 +194,13 @@ test("a ref is read by its exact name, never resolved like a revision", async ()
   // `git rev-parse AUTO_MERGE` would fall back to this branch once the pseudo-ref is gone.
   git(["branch", "AUTO_MERGE", "main"], repoPath);
   git(["update-ref", "refs/heads/refs/heads/agent/s_owner-old", head], repoPath);
-  assert.deepEqual(await deleteOwnedWorktreeRefs(scope, [
+  assert.deepEqual(await deleteRefs(scope, [
     { ref: "AUTO_MERGE", oldOid: head },
     { ref: "refs/heads/agent/s_owner-old", oldOid: head },
   ]), { deleted: [], absent: ["AUTO_MERGE", "refs/heads/agent/s_owner-old"] });
   assert.equal(git(["rev-parse", "refs/heads/AUTO_MERGE"], repoPath), head);
   writeFileSync(join(scope.worktreeGitDir, "AUTO_MERGE"), "ref: refs/heads/main\n");
-  await refused(deleteOwnedWorktreeRefs(scope, [{ ref: "AUTO_MERGE", oldOid: head }]), /does not hold an object id/u);
+  await refused(deleteRefs(scope, [{ ref: "AUTO_MERGE", oldOid: head }]), /does not hold an object id/u);
 });
 
 test("requests are bounded and need a full expected object id", () => {
@@ -217,4 +227,73 @@ test("bubblewrap is found only as an executable file on an absolute PATH entry",
   assert.equal(await findBubblewrap(bin), undefined, "not executable");
   chmodSync(join(bin, "bwrap"), 0o755);
   assert.equal(await findBubblewrap(`relative:${bin}`), join(bin, "bwrap"));
+});
+
+test("a runner that cannot confine its Git refuses before any Git runs (#3316)", async () => {
+  const { scope } = fixture();
+  for (const platform of ["darwin", "win32", "freebsd"] as const) {
+    await assert.rejects(refDeletionGitRunner(scope, { platform, findBwrap: async () => "/usr/bin/bwrap" }),
+      /only Linux runners provide/u, platform);
+  }
+  await assert.rejects(refDeletionGitRunner(scope, { platform: "linux", findBwrap: async () => undefined }),
+    /bubblewrap is required/u);
+  assert.equal(typeof await refDeletionGitRunner(scope, { platform: "linux", findBwrap: async () => "/usr/bin/bwrap" }), "function");
+});
+
+/** Runs `between` once, the first time the deletion reads a shared ref's value. */
+function interleaved(between: () => void): GitRunner {
+  let done = false;
+  return async (args, options) => {
+    if (!done && args.includes("for-each-ref")) {
+      done = true;
+      between();
+    }
+    return unconfinedGitRunnerForTests(args, options);
+  };
+}
+
+test("a checkout racing the deletion is refused by Git while the runner holds every HEAD.lock", async () => {
+  const { repoPath, otherPath, otherAdmin, scope } = fixture();
+  const head = git(["rev-parse", "main"], repoPath);
+  git(["branch", "agent/s_owner-old", "main"], repoPath);
+  let raced: ReturnType<typeof spawnSync> | undefined;
+  const result = await deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }], interleaved(() => {
+    raced = spawnSync("git", ["switch", "-q", "agent/s_owner-old"], { cwd: otherPath, encoding: "utf8", timeout: 60_000 });
+  }));
+  assert.notEqual(raced?.status, 0, "the racing checkout fails on HEAD.lock");
+  assert.match(String(raced?.stderr), /HEAD\.lock/u);
+  assert.deepEqual(result, { deleted: ["refs/heads/agent/s_owner-old"], absent: [] });
+  assert.equal(readFileSync(join(otherAdmin, "HEAD"), "utf8"), "ref: refs/heads/agent/s_other\n");
+  assert.equal(git(["rev-parse", "HEAD"], otherPath), head, "the other checkout stays valid");
+  for (const admin of [scope.commonGitDir, scope.worktreeGitDir, otherAdmin]) {
+    assert.equal(existsSync(join(admin, "HEAD.lock")), false, "every lock is released");
+  }
+});
+
+test("a HEAD pointed at the branch without Git's lock during the deletion gets the branch back", async () => {
+  const { repoPath, otherPath, otherAdmin, worktreePath, scope } = fixture();
+  const { pick } = plantSequencerLeftovers(worktreePath, scope.worktreeGitDir);
+  const head = git(["rev-parse", "main"], repoPath);
+  git(["branch", "agent/s_owner-old", "main"], repoPath);
+  await refused(deleteRefs(scope, [
+    { ref: "CHERRY_PICK_HEAD", oldOid: pick },
+    { ref: "refs/heads/agent/s_owner-old", oldOid: head },
+  ], interleaved(() => writeFileSync(join(otherAdmin, "HEAD"), "ref: refs/heads/agent/s_owner-old\n"))),
+  /was checked out while it was being deleted; every ref was restored/u);
+  assert.equal(git(["rev-parse", "refs/heads/agent/s_owner-old"], repoPath), head, "the branch is back");
+  assert.equal(git(["rev-parse", "HEAD"], otherPath), head, "and the checkout on it is valid");
+  assert.equal(readFileSync(join(scope.worktreeGitDir, "CHERRY_PICK_HEAD"), "utf8").trim(), pick,
+    "the refusal leaves the call's other refs in place too");
+  git(["fsck", "--no-progress", "--strict"], repoPath);
+});
+
+test("a worktree whose HEAD is already locked refuses the branch deletion and leaves its lock alone", async () => {
+  const { repoPath, otherAdmin, scope } = fixture();
+  const head = git(["rev-parse", "main"], repoPath);
+  git(["branch", "agent/s_owner-old", "main"], repoPath);
+  writeFileSync(join(otherAdmin, "HEAD.lock"), "busy\n");
+  await refused(deleteRefs(scope, [{ ref: "refs/heads/agent/s_owner-old", oldOid: head }]), /HEAD is locked/u);
+  assert.equal(readFileSync(join(otherAdmin, "HEAD.lock"), "utf8"), "busy\n");
+  for (const admin of [scope.commonGitDir, scope.worktreeGitDir]) assert.equal(existsSync(join(admin, "HEAD.lock")), false);
+  assert.equal(git(["rev-parse", "agent/s_owner-old"], repoPath), head);
 });

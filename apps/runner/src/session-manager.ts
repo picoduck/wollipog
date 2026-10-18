@@ -127,9 +127,8 @@ import {
   managedWorktreeAdminMatches, managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths,
 } from "./managed-worktree-sandbox.js";
 import {
-  confinedGitRunner,
   deleteOwnedWorktreeRefs,
-  findBubblewrap,
+  refDeletionGitRunner,
   validateWorktreeRefDeletionRequests,
   WorktreeRefDeletionRefusal,
   type GitRunner,
@@ -1596,14 +1595,10 @@ export class SessionManager {
   private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
-  /** Linux confines the runner's ref-deleting Git to its own mount view (#3316): a managed worktree
-   * there always launches under bwrap, and its session can race the runner's path checks. */
-  private worktreeRefDeletionGit = async (scope: WorktreeRefDeletionScope): Promise<GitRunner | undefined> => {
-    if (process.platform !== "linux") return undefined;
-    const bwrap = await findBubblewrap();
-    if (!bwrap) throw new WorktreeRefDeletionRefusal("bubblewrap is required to delete refs on this runner");
-    return confinedGitRunner(scope, bwrap);
-  };
+  /** The runner's ref-deleting Git runs only in its own confined mount view (#3316), because the
+   * session can race the runner's path checks; a runner that cannot confine it refuses. */
+  private worktreeRefDeletionGit: (scope: WorktreeRefDeletionScope) => Promise<GitRunner> =
+    (scope) => refDeletionGitRunner(scope);
   /** Test seam keeps provider-home discovery deterministic without writing into a real Claude home. */
   private discoverClaudeTasks: typeof discoverIncompleteClaudeTasks = discoverIncompleteClaudeTasks;
   /** Disk scan for a Claude Code init list's new plugin roots (#1224); a test seam. */

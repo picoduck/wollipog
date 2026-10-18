@@ -8,6 +8,12 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
+import {
+  refDeletionGitRunner,
+  unconfinedGitRunnerForTests,
+  type GitRunner,
+  type WorktreeRefDeletionScope,
+} from "./worktree-ref-deletion.js";
 
 function git(args: string[], cwd: string): string {
   const result = spawnSync("git", ["-c", "user.email=test@example.invalid", "-c", "user.name=Wollipog Test", ...args], {
@@ -51,7 +57,8 @@ test("the runner deletes only the calling session's refs and audits every call (
   t.after(() => manager.shutdownAll());
   // The real-bwrap confinement of the runner's Git is covered in managed-worktree-sandbox's
   // integration test; this host may not allow the user namespace it needs.
-  (manager as unknown as { worktreeRefDeletionGit: () => Promise<undefined> }).worktreeRefDeletionGit = async () => undefined;
+  const seam = manager as unknown as { worktreeRefDeletionGit: (scope: WorktreeRefDeletionScope) => Promise<GitRunner> };
+  seam.worktreeRefDeletionGit = async () => unconfinedGitRunnerForTests;
 
   const first = await manager.requestWorktree("s_owner", { baseRef: "HEAD", branch: "fix/owner-first" });
   const second = await manager.requestWorktree("s_owner", { baseRef: "HEAD", branch: "fix/owner-second" });
@@ -86,8 +93,17 @@ test("the runner deletes only the calling session's refs and audits every call (
   assert.equal(git(["rev-parse", "fix/other"], repo), head);
   assert.equal(git(["rev-parse", "fix/owner-second"], repo), head);
 
+  // A runner without an equivalent confinement, such as macOS, refuses before any Git runs, so a
+  // swapped ref directory can never steer an unconfined host Git there.
+  seam.worktreeRefDeletionGit = (scope) => refDeletionGitRunner(scope, { platform: "darwin" });
+  await assert.rejects(manager.deleteWorktreeRefs("s_owner", undefined, [{ ref: "CHERRY_PICK_HEAD", oldOid: head }]),
+    /only Linux runners provide/u);
+  await assert.rejects(manager.deleteWorktreeRefs("s_owner", undefined, [{ ref: "refs/heads/fix/owner-second", oldOid: head }]),
+    /only Linux runners provide/u);
+  assert.equal(git(["rev-parse", "fix/owner-second"], repo), head);
+
   const recorded = audits();
-  assert.equal(recorded.length, 2 + refusals.length + 1, "every call leaves one audit event");
+  assert.equal(recorded.length, 2 + refusals.length + 1 + 2, "every call leaves one audit event");
   assert.ok(recorded.every((entry) => entry.sessionId === "s_owner"));
   assert.deepEqual(recorded.slice(0, 2).map((entry) => entry.payload.outcome), ["deleted", "deleted"]);
   for (const entry of recorded.slice(2)) {
