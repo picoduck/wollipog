@@ -30,7 +30,7 @@ export interface ProviderProfileCommandDeps {
   /** Drop one exact grant of this control plane from the HOME's marker under the HOME's lease. */
   revoke(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<boolean>;
   /** Under a removed account HOME's lease: drop this control plane's grants and report whether the
-   * HOME may be deleted (no other reference here, no other control plane granted). With
+   * reference was last and the marker unshared. This is not physical deletion authority. With
    * `expectedProfileId` a marker holding another identity, or none, is kept unchanged (false). */
   retire(home: string, provider: "claude" | "codex", expectedProfileId?: string): Promise<boolean>;
   /** The managed profile root (`~/.agent-manager/profiles`); accounts at `<root>/<profileId>` are
@@ -142,13 +142,13 @@ export async function revokeProviderProfileGrantCommand(
 
 /** `remove_provider_account` against a v225 control plane. This control plane's grant stops at
  * once and leaves the marker before removal is attempted, so it holds even when the removal is
- * refused (an agent default, a running sign-in, a configuration write). Whether the HOME is kept for
- * other control planes is decided under its lease at deletion time; reading the marker here only
- * skips deletion early. A HOME only this control plane was granted keeps today's deletion.
+ * refused (an agent default, a running sign-in, a configuration write). Physical cleanup retains
+ * every HOME until exact retirement authority is proved (#3157); grant retirement still runs under
+ * the lease for an unshared marker, but its legacy boolean never authorizes deletion.
  *
  * A managed profile HOME (`<root>/<profileId>`) must still hold the identity its account recorded.
  * When the directory holds another profile (or no readable marker) it is no longer this account's
- * HOME: its grants are left alone and it is kept, and retirement and deletion re-check the identity. */
+ * HOME: its grants are left alone and it is kept, and grant retirement re-checks the identity. */
 export async function removeProviderAccountWithProfile(
   deps: ProviderProfileCommandDeps,
   accountId: string,

@@ -889,8 +889,10 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
     },
     settle: async ({ home, provider, profileId, grantId, recorded, homeRemoved }) => {
       providerProfileGrants.settleCreated(profileId, grantId, recorded);
-      if (recorded || homeRemoved) return;
-      // The provider wrote credentials, so the HOME is kept for inspection, without this grant.
+      // Absence is not proof that cleanup removed the HOME. Keep the old missing-path guard
+      // separately so grant settlement does not recreate a HOME that moved or disappeared.
+      if (recorded || homeRemoved || !existsSync(home)) return;
+      // Physical cleanup has no proved retirement authority yet; retain the HOME without this grant.
       await sessions.revokeProviderProfileGrant(home, provider, profileId, grantId)
         .catch((error) => log(`a discarded provider profile's grant could not be removed from its marker: ${errText(error)}`));
     },

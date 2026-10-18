@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -90,6 +90,7 @@ function fixture(options: {
   ceremonyTimeoutMs?: number;
   codexVersion?: string;
   writeFails?: boolean;
+  spawnFails?: boolean;
   kill?: (child: AgentProcess) => Promise<boolean>;
   probe?: ((login: ResolvedProviderLogin) => Promise<boolean>) | null;
   identify?: (login: ResolvedProviderLogin) => Promise<string | undefined>;
@@ -136,6 +137,7 @@ function fixture(options: {
     ceremonyTimeoutMs: options.ceremonyTimeoutMs,
     spawn: ((spawnOptions: SpawnAgentOptions) => {
       spawns.push(spawnOptions);
+      if (options.spawnFails) throw new Error("synthetic spawn failure");
       const child = new FakeLoginChild();
       children.push(child);
       return child as unknown as AgentProcess;
@@ -578,7 +580,7 @@ test("cancel reaps the supervised process, releases its lease, and records no ac
   }
 });
 
-test("a failed new-account sign-in removes provider scratch state but keeps any credentials", async () => {
+test("a failed new-account sign-in retains scratch state, ownership evidence and credentials", async () => {
   const fx = fixture();
   try {
     await fx.supervisor.startAccount({ provider: "claude", label: "Scratch Only" });
@@ -587,7 +589,8 @@ test("a failed new-account sign-in removes provider scratch state but keeps any 
     mkdirSync(join(scratch, "tmp"), { recursive: true });
     fx.supervisor.cancel(fx.supervisor.views()[0]!.operationId);
     await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(existsSync(scratch), false);
+    assert.equal(existsSync(join(scratch, "log")), true);
+    assert.equal(existsSync(join(scratch, "tmp")), true);
 
     await fx.supervisor.startAccount({ provider: "claude", label: "Has Credentials" });
     const credentialed = fx.spawns[1]!.cwd as string;
@@ -598,6 +601,86 @@ test("a failed new-account sign-in removes provider scratch state but keeps any 
     assert.equal(existsSync(join(credentialed, ".credentials.json")), true);
   } finally {
     fx.cleanup();
+  }
+});
+
+test("login settlement preserves a synthetic successor and journal at the release boundary", async (t) => {
+  for (const outcome of ["success", "failure", "duplicate", "spawn failure", "cancel", "config failure"] as const) {
+    await t.test(outcome, async () => {
+      let releaseStarted!: () => void;
+      const atRelease = new Promise<void>((resolve) => { releaseStarted = resolve; });
+      let finishRelease!: () => void;
+      const releaseGate = new Promise<void>((resolve) => { finishRelease = resolve; });
+      const fx = fixture({
+        spawnFails: outcome === "spawn failure",
+        writeFails: outcome === "config failure",
+        probe: async () => outcome !== "failure",
+        identify: async () => outcome === "duplicate" ? "synthetic-identity" : undefined,
+        releaseLease: async (directory) => {
+          releaseStarted();
+          await releaseGate;
+          // Model a successor at the exact release boundary, without asserting an observed incident.
+          writeFileSync(join(directory, "successor-state.json"), "synthetic successor\n");
+          return true;
+        },
+      });
+      const home = join(fx.root, "provider-accounts", "pending");
+      const journal = join(home, ".agent-manager", "provider-home-leases-v1", "mutable-home.recovery.json");
+      mkdirSync(dirname(journal), { recursive: true });
+      writeFileSync(journal, "synthetic ownership evidence\n");
+      if (outcome === "duplicate") {
+        fx.accounts.push({ id: "existing", label: "Existing", provider: "claude", directory: join(fx.root, "existing") });
+      }
+      const login: ResolvedProviderLogin = { accountId: "pending", label: "Pending", provider: "claude",
+        directory: home, command: "claude", args: [], context: { kind: "native" }, env: {}, persistAccount: true };
+      try {
+        let completion: Promise<unknown>;
+        if (outcome === "spawn failure") {
+          completion = assert.rejects(fx.supervisor.startResolved(login), /could not be started/u);
+        } else {
+          const operation = await fx.supervisor.startResolved(login);
+          completion = operation.completion;
+          if (outcome === "duplicate") writeFileSync(join(home, ".credentials.json"), "synthetic credentials\n");
+          if (outcome === "cancel") fx.supervisor.cancel(operation.view.operationId);
+          else fx.children[0]!.close(outcome === "failure" ? 1 : 0);
+        }
+        await atRelease;
+        await assert.rejects(fx.supervisor.startResolved(login), /already running/u,
+          "the account remains reserved while release is unsettled");
+        finishRelease();
+        await completion;
+        assert.equal(readFileSync(join(home, "successor-state.json"), "utf8"), "synthetic successor\n");
+        assert.equal(readFileSync(journal, "utf8"), "synthetic ownership evidence\n");
+        if (outcome === "duplicate") assert.equal(readFileSync(join(home, ".credentials.json"), "utf8"), "synthetic credentials\n");
+        assert.equal(fx.releases.length, 1);
+        assert.equal(fx.accounts.some((account) => account.id === "pending"), outcome === "success");
+      } finally {
+        finishRelease();
+        fx.cleanup();
+      }
+    });
+  }
+});
+
+test("ambiguous or refused login release preserves every credential and ownership artifact", async (t) => {
+  for (const release of ["refused", "throws"] as const) {
+    await t.test(release, async () => {
+      const fx = fixture({ probe: async () => false, releaseLease: () => {
+        if (release === "throws") throw new Error("synthetic ambiguous release");
+        return false;
+      } });
+      const home = join(fx.root, "provider-accounts", "uncertain");
+      mkdirSync(home, { recursive: true });
+      writeFileSync(join(home, "foreign-artifact"), "unproved evidence");
+      try {
+        const operation = await fx.supervisor.startResolved({ accountId: "uncertain", label: "Uncertain", provider: "claude",
+          directory: home, command: "claude", args: [], context: { kind: "native" }, env: {}, persistAccount: true });
+        fx.children[0]!.close(1);
+        assert.equal(await operation.completion, "failed");
+        assert.equal(readFileSync(join(home, "foreign-artifact"), "utf8"), "unproved evidence");
+        assert.deepEqual(fx.accounts, []);
+      } finally { fx.cleanup(); }
+    });
   }
 });
 
@@ -919,7 +1002,7 @@ test("a new sign-in to an account already on the Machine is discarded instead of
     assert.doesNotMatch(view.error ?? "", /Personal|dev@example\.com/u, "the card never names the account");
     assert.deepEqual(fx.accounts.map((account) => account.id), ["existing", "other"]);
     assert.equal(fx.added.length, 0);
-    assert.equal(existsSync(directory), false, "the duplicate's fresh credentials are deleted");
+    assert.equal(readFileSync(join(directory, ".credentials.json"), "utf8"), "{}", "the unproved HOME is retained");
     const saved = JSON.parse(readFileSync(fx.configPath, "utf8")) as Record<string, unknown>;
     assert.equal(saved.providerAccounts, undefined);
   } finally {
@@ -942,7 +1025,7 @@ test("a new sign-in to a different account is recorded when the existing identit
   }
 });
 
-test("removing an account forgets it and deletes the credential home Wollipog created", async () => {
+test("removing an account forgets it while truthfully reporting its credential HOME retained", async () => {
   const fx = fixture();
   try {
     const directory = join(fx.root, "provider-accounts", "work-1234");
@@ -950,10 +1033,10 @@ test("removing an account forgets it and deletes the credential home Wollipog cr
     writeFileSync(join(directory, "auth.json"), "{}");
     const keep = { id: "keep", label: "Keep", provider: "claude" as const, directory: join(fx.root, "provider-accounts", "keep") };
     fx.accounts.push({ id: "work-1234", label: "Work", provider: "codex", directory }, keep);
-    assert.deepEqual(await fx.supervisor.removeAccount("work-1234"), { credentialsRetained: false });
+    assert.deepEqual(await fx.supervisor.removeAccount("work-1234"), { credentialsRetained: true });
     assert.deepEqual(fx.accounts, [keep]);
     assert.deepEqual(fx.removed, ["work-1234"]);
-    assert.equal(existsSync(directory), false);
+    assert.equal(readFileSync(join(directory, "auth.json"), "utf8"), "{}");
     const saved = JSON.parse(readFileSync(fx.configPath, "utf8")) as { providerAccounts: Array<{ id: string }>; untouched: boolean };
     assert.deepEqual(saved.providerAccounts.map((account) => account.id), ["keep"]);
     assert.equal(saved.untouched, true);
@@ -963,7 +1046,7 @@ test("removing an account forgets it and deletes the credential home Wollipog cr
   }
 });
 
-test("removed-account credential deletion waits for the running skill transaction", async () => {
+test("removed-account settlement still waits for the running skill transaction without deleting its HOME", async () => {
   let openQueue!: () => void;
   const skillTransaction = new Promise<void>((resolve) => { openQueue = resolve; });
   const acquired: string[] = [];
@@ -980,12 +1063,35 @@ test("removed-account credential deletion waits for the running skill transactio
     assert.deepEqual(acquired, [], "no ownership proof is attempted inside a skill transaction");
     assert.equal(existsSync(home), true);
     openQueue();
-    assert.deepEqual(await removing, { credentialsRetained: false });
-    assert.deepEqual(acquired, [home]);
-    assert.equal(existsSync(home), false);
+    assert.deepEqual(await removing, { credentialsRetained: true });
+    assert.deepEqual(acquired, [], "retention needs no new HOME lease");
+    assert.equal(existsSync(home), true);
   } finally {
     fx.cleanup();
   }
+});
+
+test("a legacy grant-retirement verdict cannot delete a successor or consume another local reference", async () => {
+  const fx = fixture({ acquireLease: () => { throw new Error("retention must not acquire another reference"); } });
+  const home = join(fx.root, "provider-accounts", "account");
+  const original = `${home}-original`;
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "ownership-evidence"), "original synthetic journal");
+  fx.accounts.push({ id: "account", label: "Account", provider: "claude", directory: home });
+  let retired = false;
+  try {
+    assert.deepEqual(await fx.supervisor.removeAccount("account", { retireCredentialHome: async () => {
+      retired = true;
+      renameSync(home, original);
+      mkdirSync(home);
+      writeFileSync(join(home, "auth.json"), "synthetic successor credentials");
+      return true;
+    } }), { credentialsRetained: true });
+    assert.equal(retired, true, "grant retirement still settles under the existing callback contract");
+    assert.equal(readFileSync(join(home, "auth.json"), "utf8"), "synthetic successor credentials");
+    assert.equal(readFileSync(join(original, "ownership-evidence"), "utf8"), "original synthetic journal");
+    assert.deepEqual(fx.releases, [], "account retention does not consume any login/session reference");
+  } finally { fx.cleanup(); }
 });
 
 test("removing an account keeps credentials that a session, another process, or the operator owns", async () => {
@@ -1074,7 +1180,7 @@ function profileFixture(t: TestContext, options: Parameters<typeof fixture>[0] &
       }),
       settle: async (input) => {
         state.grants!.settleCreated(input.profileId, input.grantId, input.recorded);
-        if (!input.recorded && !input.homeRemoved) {
+        if (!input.recorded && !input.homeRemoved && existsSync(input.home)) {
           await state.registry!.revokeProfileGrant(input.home, input.provider, input.profileId, input.grantId);
         }
         settled.push(input);
@@ -1120,6 +1226,29 @@ test("Add Account with this control plane's grant creates a managed profile HOME
   assert.equal(existsSync(join(p.fx.root, "provider-accounts")), false, "nothing is created under the data directory");
 });
 
+test("profile settlement does not claim an externally moved HOME was removed", posixOnly, async () => {
+  let moved!: string;
+  const settled: Array<Parameters<ProviderLoginProfileOptions["settle"]>[0]> = [];
+  const fx = fixture({
+    probe: async () => false,
+    releaseLease: (home) => { moved = `${home}-moved`; renameSync(home, moved); return true; },
+    profiles: (root) => ({ root: join(root, "home", ".agent-manager", "profiles"),
+      create: async () => {}, settle: async (input) => { settled.push(input); } }),
+  });
+  mkdirSync(join(fx.root, "home"));
+  try {
+    await fx.supervisor.startAccount({ provider: "claude", label: "Moved", profileGrantId: GRANT });
+    const home = fx.spawns[0]!.cwd as string;
+    writeFileSync(join(home, ".credentials.json"), "synthetic credentials");
+    fx.children[0]!.close(1);
+    await eventually(() => settled.length === 1, "the moved profile settles");
+    assert.equal(existsSync(home), false);
+    assert.equal(readFileSync(join(moved, ".credentials.json"), "utf8"), "synthetic credentials");
+    assert.equal(settled[0]?.homeRemoved, false, "only proved removal may claim homeRemoved");
+    assert.equal(settled[0]?.recorded, false);
+  } finally { fx.cleanup(); }
+});
+
 test("without a grant, or on Windows, Add Account keeps today's HOME and writes no marker", posixOnly, async (t) => {
   const p = profileFixture(t);
   await p.fx.supervisor.startAccount({ provider: "claude", label: "Legacy" });
@@ -1143,16 +1272,18 @@ test("without a grant, or on Windows, Add Account keeps today's HOME and writes 
   await assert.rejects(p.fx.supervisor.startAccount({ provider: "claude", label: "Bad", profileGrantId: "not-a-grant" }), /grant is invalid/u);
 });
 
-test("a cancelled or failed managed-profile sign-in leaves no profile HOME and never uses its grant again", posixOnly, async (t) => {
+test("a cancelled or failed managed-profile sign-in retains its HOME and stops using its grant", posixOnly, async (t) => {
   const p = profileFixture(t, { probe: async () => false });
   await p.fx.supervisor.startAccount({ provider: "claude", label: "Cancelled", profileGrantId: GRANT });
   const cancelled = p.fx.spawns[0]!.cwd as string;
   mkdirSync(join(cancelled, "log"));
   p.fx.supervisor.cancel(p.fx.supervisor.views()[0]!.operationId);
   await eventually(() => p.settled.length === 1, "the cancelled sign-in settles");
-  assert.equal(existsSync(cancelled), false, "provider scratch state and the marker go with the HOME");
+  assert.equal(existsSync(join(cancelled, "log")), true, "scratch and ownership evidence survive");
   assert.deepEqual(p.settled[0], { home: cancelled, provider: "claude", profileId: basename(cancelled), grantId: GRANT,
-    recorded: false, homeRemoved: true });
+    recorded: false, homeRemoved: false });
+  const cancelledMarker = readProviderProfileMarker(cancelled);
+  assert.deepEqual(cancelledMarker.state === "present" && cancelledMarker.marker.grants, []);
   assert.deepEqual(p.grants.access().activeProfileIds, []);
   assert.deepEqual(p.fx.accounts, []);
 
@@ -1160,7 +1291,8 @@ test("a cancelled or failed managed-profile sign-in leaves no profile HOME and n
   const failed = p.fx.spawns[1]!.cwd as string;
   p.fx.children[1]!.close(1);
   await eventually(() => p.settled.length === 2, "the failed sign-in settles");
-  assert.equal(existsSync(failed), false);
+  assert.equal(existsSync(failed), true);
+  assert.equal(p.settled[1]?.homeRemoved, false);
   assert.equal(p.settled[1]?.recorded, false);
 
   // A provider that already wrote credentials keeps them for inspection, but the marker no longer grants anyone.
@@ -1176,7 +1308,7 @@ test("a cancelled or failed managed-profile sign-in leaves no profile HOME and n
   assert.deepEqual(p.grants.access().activeProfileIds, []);
 });
 
-test("a duplicate sign-in's managed profile HOME is deleted with its credentials", posixOnly, async (t) => {
+test("a duplicate sign-in's managed profile HOME is retained while its grant is dropped", posixOnly, async (t) => {
   const p = profileFixture(t, { identify: async () => "same-person" });
   const existing = join(p.fx.root, "existing");
   mkdirSync(existing);
@@ -1187,17 +1319,20 @@ test("a duplicate sign-in's managed profile HOME is deleted with its credentials
   p.fx.children[0]!.close(0);
   await eventually(() => p.settled.length === 1, "the duplicate sign-in settles");
   assert.match(p.fx.supervisor.views()[0]?.error ?? "", /already on this Machine/u);
-  assert.equal(existsSync(home), false);
+  assert.equal(readFileSync(join(home, ".credentials.json"), "utf8"), "{}");
+  assert.equal(p.settled[0]?.homeRemoved, false);
+  const read = readProviderProfileMarker(home);
+  assert.deepEqual(read.state === "present" && read.marker.grants, []);
   assert.equal(p.settled[0]?.recorded, false);
   assert.deepEqual(p.fx.accounts.map((account) => account.id), ["existing"]);
 });
 
-test("a managed profile that cannot be created starts no sign-in and leaves nothing behind", posixOnly, async (t) => {
+test("a managed profile that cannot be created starts no sign-in and preserves its unproved HOME", posixOnly, async (t) => {
   const refused = profileFixture(t, { create: async () => { throw new Error("marker refused"); } });
   await assert.rejects(refused.fx.supervisor.startAccount({ provider: "claude", label: "Refused", profileGrantId: GRANT }),
     /provider profile could not be created: marker refused/u);
   assert.equal(refused.fx.spawns.length, 0);
-  assert.deepEqual(entries(refused.root), [], "the new HOME is removed");
+  assert.equal(entries(refused.root).length, 1, "failed creation does not prove the HOME can be removed");
   assert.equal(refused.settled[0]?.recorded, false);
 
   // A linked `.agent-manager` is not a private directory, so nothing is created through it.
@@ -1211,7 +1346,7 @@ test("a managed profile that cannot be created starts no sign-in and leaves noth
   assert.deepEqual(entries(elsewhere), []);
 });
 
-test("a managed Add Account refused before it takes its lease removes the HOME it created", posixOnly, async (t) => {
+test("a managed Add Account refused before it takes its lease retains the HOME it created", posixOnly, async (t) => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const p = profileFixture(t, {
@@ -1227,7 +1362,7 @@ test("a managed Add Account refused before it takes its lease removes the HOME i
   p.fx.supervisor.shutdown();
   release();
   await assert.rejects(starting, /supervisor has stopped/u);
-  assert.equal(entries(p.root).length, 0, "the refused start leaves no managed HOME behind");
+  assert.equal(entries(p.root).length, 1, "the refused start retains its HOME and ownership evidence");
   assert.equal(p.fx.spawns.length, 0, "and starts no process");
   await eventually(() => p.settled.length === 1, "the created profile is settled as unrecorded");
 });

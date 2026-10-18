@@ -119,13 +119,15 @@ for the grant model:
 - `profile_revoke { home, provider, profileId, grantId }` removes exactly that grant of this
   instance. The reply's `value` is true when the marker changed; a HOME without a marker has nothing
   to revoke, and a marker holding another profile is refused as `profile_changed`.
-- `profile_retire { home, provider, profileId? }` is the retain-or-delete decision for a removed
+- `profile_retire { home, provider, profileId? }` settles grants for a removed
   account's HOME. It removes every grant of this instance and replies `value: true` only when
   dropping its reference released the lease (nothing else on this runner held the HOME) and the
   marker grants no other instance. A marker-less HOME is not shared; an unreadable marker is kept
   (`value: false`), never replaced. For a managed profile HOME the caller sends the account's
   recorded `profileId`: a marker holding another identity, or none, is kept unchanged
-  (`value: false`). The caller deletes the HOME only on `true`, after a last marker read.
+  (`value: false`). Neither result authorizes physical deletion: a successor or unproved consumer
+  may still depend on the released HOME. Current cleanup retains every HOME and its canonical
+  evidence; see [Provider HOME Cleanup Status](provider-home-cleanup.md).
 
 All four take the HOME's lease the same way an acquisition does, but skip the grant check, since
 they are how grants change. A HOME another live owner holds is refused with the acquisition's code
@@ -148,7 +150,8 @@ adoption or restore) sends `retain_reference`, which frees only the handle. Only
 open session, TUI and fork handles occupy the pool, however many launches a runner performs. Releasing by path would re-resolve the HOME, so a symlink retargeted in
 between could drop another HOME's reference. The handle cannot be redirected: it drops only the
 entry it joined, at most once. Path-based `release` remains only for the provider sign-in supervisor
-(sign-in and removed-account cleanup), which is unchanged here.
+(sign-in settlement). Account removal retains the HOME; grant retirement still uses the worker's
+exact internal receipt.
 
 Short-lived provider processes release their reference once their process tree is proven gone (#3238). This covers:
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { agentContextKey, type AgentContext, type AgentDefinition, type ProviderLoginView } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
@@ -110,8 +110,8 @@ export interface ResolvedProviderLogin {
 
 /** #3239: how Add Account creates managed provider profile HOMEs. */
 export interface ProviderLoginProfileOptions {
-  /** `~/.agent-manager/profiles`: new managed HOMEs are created here, and only exact
-   * `<root>/<profileId>` HOMEs of accounts recording that id may be deleted from it. */
+  /** `~/.agent-manager/profiles`: new managed HOMEs are created here. Their location and profile
+   * identity do not prove exclusive retirement authority, so cleanup retains them. */
   root: string;
   /** Write the new HOME's first marker, identity `profileId` with this control plane's grant, under
    * the HOME's lease, and make the grant usable for this sign-in. */
@@ -147,10 +147,10 @@ interface ActiveLogin {
 export interface ProviderAccountRemovalOptions {
   /** Keep the HOME without attempting deletion (an early decision that can only keep it). */
   retainCredentialHome?: boolean;
-  /** Replaces the plain acquire/release exclusivity check: decides under the HOME's lease, from the
-   * profile marker, whether the HOME may be deleted, and drops this control plane's grant. */
+  /** Drop this control plane's grants under the HOME's lease. The legacy boolean is not deletion
+   * authority: neither a released lease nor an unshared marker proves retirement is safe. */
   retireCredentialHome?: (account: RunnerProviderAccount) => Promise<boolean>;
-  /** Re-checked immediately before the HOME is deleted; true keeps it. */
+  /** Legacy retention hint. Cleanup now retains every HOME regardless of this hint. */
   retainCredentialHomeIf?: (account: RunnerProviderAccount) => boolean;
 }
 
@@ -169,9 +169,8 @@ export interface ProviderLoginSupervisorOptions {
   removalBlocker?: (account: RunnerProviderAccount) => string | undefined;
   /** Whether any session on this Machine is bound to the account's credential home. */
   credentialHomeInUse?: (account: RunnerProviderAccount) => boolean;
-  /** Runs credential-home deletion outside any skill transaction. Skill transactions release
-   * their provider-HOME references when they finish, so without this a pass that captured the
-   * account before removal could re-acquire the HOME between deletion's release and its removal. */
+  /** Settle a removed HOME's profile grants outside any skill transaction. Keep this ordering
+   * even while physical cleanup is disabled pending an ownership-preserving retirement protocol. */
   serializeHomeRetirement?: <T>(work: () => Promise<T>) => Promise<T>;
   /** #3239: managed provider profiles for accounts created with a control-plane grant. Without it a
    * grant is ignored and every new account HOME is created under `dataDir` as before. */
@@ -456,11 +455,8 @@ export class ProviderLoginSupervisor {
       try {
         return (await this.startResolved(resolved)).view;
       } catch (error) {
-        // startResolved removed the unused HOME wherever its lease was released; a lease that was
-        // never taken leaves the fresh HOME this sign-in created and nobody else knows.
-        if (error instanceof ProviderLoginLeaseUnavailable || error instanceof ProviderLoginNotStarted) {
-          this.cleanupUnusedDirectory(resolved);
-        }
+        // Even a fresh HOME may have a successor or an unproved consumer. Retain its payload and
+        // canonical lease evidence; failed acquisition or successful release is not retirement.
         await this.settleProfile(resolved, false);
         throw error;
       }
@@ -478,8 +474,7 @@ export class ProviderLoginSupervisor {
     try {
       await profiles.create(resolved.directory, resolved.provider, profile.id, profile.grantId);
     } catch (error) {
-      // The HOME is this sign-in's own and holds no credentials; nothing may keep it.
-      this.cleanupUnusedDirectory(resolved);
+      // A failed creation may have published ownership evidence. Preserve it with the payload.
       await this.settleProfile(resolved, false);
       throw new Error(`The provider profile could not be created: ${error instanceof Error ? error.message : "unknown error"}`);
     }
@@ -490,7 +485,7 @@ export class ProviderLoginSupervisor {
     if (!resolved.profile || !this.options.profiles) return;
     try {
       await this.options.profiles.settle({ home: resolved.directory, provider: resolved.provider, profileId: resolved.profile.id,
-        grantId: resolved.profile.grantId, recorded, homeRemoved: !existsSync(resolved.directory) });
+        grantId: resolved.profile.grantId, recorded, homeRemoved: false });
     } catch {
       // The control plane's row is authoritative; the next registration removes a grant it no longer lists.
     }
@@ -517,8 +512,7 @@ export class ProviderLoginSupervisor {
     }
     if (this.stopped || pending.controller.signal.aborted) {
       // Covers cancellation in the caller's continuation after an already accepted lease.
-      const released = await this.release(resolved.directory);
-      if (released && resolved.profile) this.cleanupUnusedDirectory(resolved);
+      await this.release(resolved.directory);
       this.pending.delete(resolved.accountId);
       throw new Error("The provider sign-in was canceled before launch.");
     }
@@ -551,8 +545,7 @@ export class ProviderLoginSupervisor {
         windowsShell: false,
       });
     } catch (error) {
-      const released = await this.release(resolved.directory);
-      if (released && resolved.persistAccount) this.cleanupUnusedDirectory(resolved);
+      await this.release(resolved.directory);
       this.pending.delete(resolved.accountId);
       if (error instanceof Error && /^(?:Claude|Codex) plugin inheritance could not /u.test(error.message)) throw error;
       throw new Error("The provider sign-in command could not be started.");
@@ -667,10 +660,9 @@ export class ProviderLoginSupervisor {
     return { ...operation.view };
   }
 
-  /** Forget one configured account. The runner-created credential home is deleted only when no
-   * session or process on this Machine still depends on it; otherwise it is kept so those sessions
-   * continue to authenticate. Operator-configured homes are never deleted, nor is a home whose
-   * provider profile other control planes are still granted (#3239, see `ProviderAccountRemovalOptions`). */
+  /** Forget one configured account and settle its profile grants. Retain its credential HOME and
+   * canonical lease evidence: neither a managed path nor a released lease proves exclusive
+   * physical retirement authority (#3157, see `ProviderAccountRemovalOptions`). */
   async removeAccount(accountId: string, options: ProviderAccountRemovalOptions = {}): Promise<{ credentialsRetained: boolean }> {
     const account = this.options.accounts.find((candidate) => candidate.id === accountId);
     if (!account) throw new Error("Provider account is not configured on this Machine.");
@@ -685,11 +677,14 @@ export class ProviderLoginSupervisor {
       throw new Error("The runner configuration could not be updated.");
     }
     this.options.accounts.splice(this.options.accounts.indexOf(account), 1);
-    const retire = () => this.deleteRemovedCredentialHome(account, options);
-    const credentialsRetained = options.retainCredentialHome === true ||
-      !await (this.options.serializeHomeRetirement?.(retire) ?? retire());
+    if (options.retainCredentialHome !== true) {
+      const retire = () => this.retireRemovedCredentialHomeGrant(account, options);
+      await (this.options.serializeHomeRetirement?.(retire) ?? retire());
+    }
     await this.options.onAccountRemoved?.(account);
-    return { credentialsRetained };
+    // No implemented protocol yet proves exact management provenance, excludes paused old cleanup
+    // and dormant bindings, and serializes physical retirement with successor admission (#3157).
+    return { credentialsRetained: true };
   }
 
   cancelAccount(accountId: string): boolean {
@@ -964,16 +959,11 @@ export class ProviderLoginSupervisor {
         });
       }
     }
-    const released = reaped && await this.release(operation.resolved.directory);
-    if (released && result !== "completed" && operation.resolved.persistAccount) {
-      // A duplicate's fresh credentials belong to no configured account, so nothing may keep them.
-      if (duplicate) this.removeDirectory(operation.resolved.directory);
-      else this.cleanupUnusedDirectory(operation.resolved);
-    }
+    if (reaped) await this.release(operation.resolved.directory);
     // A managed profile whose account was not recorded never uses its grant again (#3239).
     if (!profileSettled) await this.settleProfile(operation.resolved, false);
-    // The async release is part of settlement. Keep the account reserved until cleanup finishes,
-    // otherwise a replacement login can write into the same HOME while this one removes it.
+    // The async release and profile settlement are part of settlement. Keep the account reserved
+    // until both finish, including when the HOME is retained.
     this.active.delete(operation.view.operationId);
     this.pruneRecent();
     operation.resolve(result);
@@ -1083,15 +1073,14 @@ export class ProviderLoginSupervisor {
     }
   }
 
-  /** Delete a removed account's credential home only when Wollipog created it and nothing on this
-   * Machine still depends on it. Returns whether the home is gone. */
-  private async deleteRemovedCredentialHome(account: RunnerProviderAccount, options: ProviderAccountRemovalOptions): Promise<boolean> {
+  /** Preserve the existing grant-retirement ordering, without treating its verdict as permission
+   * to delete credentials or lease evidence. Every HOME is retained until #3157's proofs exist. */
+  private async retireRemovedCredentialHomeGrant(account: RunnerProviderAccount, options: ProviderAccountRemovalOptions): Promise<void> {
+    if (!options.retireCredentialHome) return;
     const managedRoot = resolve(this.options.dataDir, "provider-accounts");
-    // #3239: a managed profile HOME lives at the SSH-account-level root, outside this runner's
-    // owner-namespaced data directory, so a replacement runner may retire it too. Only the exact
-    // `<root>/<profileId>` of an account recording that id qualifies, re-verified before deletion,
-    // and only while its marker still holds that identity: a directory substituted by another
-    // profile's HOME (or left without a readable marker) is never this account's to delete.
+    // Keep the existing marker-mutation boundary: a replacement runner may retire this instance's
+    // grants only while the exact managed HOME still holds the account's recorded profile. This
+    // path/marker check does not establish authority to delete its payload or canonical journal.
     const profileRoot = this.options.profiles?.root;
     const profileHome = managedProviderProfileIdFor(profileRoot, account) !== undefined;
     const verifiedProfileHome = () => {
@@ -1103,60 +1092,21 @@ export class ProviderLoginSupervisor {
         return false;
       }
     };
-    if (!profileHome && dirname(resolve(account.directory)) !== managedRoot) return false;
-    if (!existsSync(account.directory)) return true;
-    if (profileHome && !verifiedProfileHome()) return false;
-    if (this.options.credentialHomeInUse?.(account)) return false;
-    let exclusive: boolean;
+    if (!profileHome && dirname(resolve(account.directory)) !== managedRoot) return;
+    if (!existsSync(account.directory)) return;
+    if (profileHome && !verifiedProfileHome()) return;
+    if (this.options.credentialHomeInUse?.(account)) return;
     try {
-      if (options.retireCredentialHome) {
-        // #3239: the same exclusivity proof, plus the profile marker's verdict, under one lease.
-        exclusive = await options.retireCredentialHome(account);
-      } else {
-        // The lease is reference-counted per runner and exclusive across runners. Releasing the
-        // reference taken here reports true only when no session or probe was holding the home.
-        await this.options.acquireLease(account.directory, account.provider);
-        exclusive = await this.options.releaseLease(account.directory);
-      }
+      await options.retireCredentialHome(account);
     } catch {
-      return false;
+      // The profile command retries revocation when a removed HOME is retained. Unproved marker
+      // retirement must not prevent the configured-account removal or erase any evidence.
     }
-    if (!exclusive || this.options.credentialHomeInUse?.(account)) return false;
-    // The lease journal lives inside the HOME, so deletion follows the release; re-read the verdict
-    // last so a grant another runner recorded after the release still keeps the HOME.
-    try {
-      if (options.retainCredentialHomeIf?.(account)) return false;
-    } catch {
-      return false;
-    }
-    if (profileHome && !verifiedProfileHome()) return false;
-    return this.removeDirectory(account.directory);
   }
 
   private async release(directory: string): Promise<boolean> {
     try { return await this.options.releaseLease(directory); }
     catch { return false; }
-  }
-
-  private removeDirectory(directory: string): boolean {
-    try {
-      rmSync(directory, { recursive: true, force: true });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /** Remove a new account's directory after a failed sign-in unless the provider wrote credentials
-   * into it. Providers create logs and scratch space before authenticating (Codex writes `log` and
-   * `tmp`), and that state alone must not leave an orphaned account directory behind. */
-  private cleanupUnusedDirectory(login: Pick<ResolvedProviderLogin, "directory" | "provider">): void {
-    try {
-      const marker = login.provider === "claude" ? ".credentials.json" : "auth.json";
-      if (!readdirSync(login.directory).includes(marker)) rmSync(login.directory, { recursive: true, force: true });
-    } catch {
-      // Cleanup is best-effort; provider credentials are retained for operator inspection.
-    }
   }
 
   private publish(): void {

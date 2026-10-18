@@ -30,9 +30,10 @@ export type LeaseWorkerOperation =
   /** #3239: give a new, marker-less managed HOME (Add Account) the identity `profileId` with this
    * control plane's grant. Refused as `profile_changed` when the HOME already holds a marker. */
   | { method: "profile_create"; home: string; provider: "claude" | "codex"; profileId: string; grantId: string }
-  /** #3239: the retain-or-delete decision for a removed account's HOME, under its lease. Drops every
+  /** #3239: grant retirement for a removed account's HOME, under its lease. Drops every
    * grant of this control plane from the marker; `value` is true only when the lease was released
-   * (no other reference here) and no other control plane is granted, so the caller may delete it.
+   * (no other reference here) and no other control plane is granted. This is not deletion authority;
+   * a successor or unproved consumer may still depend on the HOME after release (#3157).
    * `profileId`, sent for a managed profile HOME, is the identity its account recorded: a marker
    * holding any other identity, or none, keeps the HOME and is not changed. */
   | { method: "profile_retire"; home: string; provider: "claude" | "codex"; profileId?: string };
