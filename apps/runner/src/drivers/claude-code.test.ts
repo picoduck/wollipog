@@ -3164,6 +3164,73 @@ test("one-shot fixed-rule mode delivers multiline prompts through stdin, never a
   driver.dispose();
 });
 
+for (const persistent of [false, true]) {
+  test(`missing required manager hook refuses a ${persistent ? "persistent" : "one-shot"} spawn`, async () => {
+    let spawns = 0;
+    const events: SessionEventPayload[] = [];
+    const driver = new ClaudeCodeDriver({
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: persistent ? "1" : "0" },
+      config: { permissionMode: "acceptEdits" },
+      prepareClaudeHooks: () => ({ args: [], managerRequired: true }),
+    }, { ...noopCb, onEvent: (event) => events.push(event) }, {
+      spawn: () => { spawns++; return fakeProcess(); },
+    });
+    try {
+      assert.equal(await driver.prompt("must refuse"), "refusal");
+      assert.equal(spawns, 0);
+      assert.ok(events.some((event) => event.kind === "error" &&
+        event.message.includes("required manager policy hook is unavailable")));
+      assert.match(driver.lastTurnError()!, /required manager policy hook is unavailable/u);
+    } finally {
+      driver.dispose();
+    }
+  });
+}
+
+for (const persistent of [false, true]) {
+  test(`refreshed hook arguments remain observable at ${persistent ? "persistent" : "one-shot"} completion`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-claude-hook-observe-"));
+    const children: any[] = [];
+    const events: SessionEventPayload[] = [];
+    let preparations = 0;
+    const settings = join(root, "sess.settings.json");
+    writeClaudeSettingsSet(settings, {
+      sessionId: "sess", launch: { command: "runner", args: ["--policy-hook"] },
+      cpHttpUrl: "http://127.0.0.1:4317", tokenFile: claudeHookTokenPath(settings),
+    }, null);
+    const driver = new ClaudeCodeDriver({
+      ...baseOpts, args: [],
+      env: { [CLAUDE_PERSISTENT_FLAG]: persistent ? "1" : "0" },
+      config: { permissionMode: "acceptEdits" },
+      prepareClaudeHooks: () => {
+        preparations++;
+        return { args: ["--settings", settings], managerRequired: true };
+      },
+    }, { ...noopCb, onEvent: (event) => events.push(event) }, {
+      spawn: () => { const child = fakeProcess(); children.push(child); return child; },
+      kill: () => {},
+    } as any);
+    try {
+      const turn = driver.prompt("observe refreshed hooks");
+      await nextTask();
+      const openedAt = Date.now();
+      writeHookCircuitState(claudeHookCircuitPath(settings), { consecutiveFailures: 3, open: true, openedAt });
+      children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+      if (!persistent) children[0].emit("close", 0);
+      assert.equal(await turn, "end_turn");
+      assert.equal(preparations, 1, "completion observes without re-provisioning");
+      assert.deepEqual(events.filter((event) => event.kind === "policy_transport"), [
+        { kind: "policy_transport", state: "open", openedAt },
+      ]);
+    } finally {
+      driver.dispose({ forceImmediate: true });
+      for (const child of children) child.emit("close", 0);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("one-shot first/resume turns heal managed hook settings and circuit-open persistent turns restart hook-less", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-hook-driver-"));
   try {
@@ -3452,6 +3519,7 @@ test("Claude fork mints a deterministic target session with a zero-cost local bo
     {
       ...baseOpts,
       resumeId: source,
+      prepareClaudeHooks: () => { throw new Error("model turn must wait for registration"); },
       capabilities: {
         models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
         supportsConversationFork: true, permissionModes: ["acceptEdits"],

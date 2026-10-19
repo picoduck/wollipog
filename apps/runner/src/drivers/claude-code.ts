@@ -680,6 +680,8 @@ export class ClaudeCodeDriver implements Driver {
   /** Also from the last `preparedBaseArgs()`: what the spawn's environment carries for the runner's
    * own hooks (the relayed manager hook's key, #1472). Never part of the persisted launch env. */
   private preparedHookEnv: Record<string, string> = {};
+  /** Latest provisioning result, also used to observe the completed turn's hook circuit. */
+  private preparedHookArgs: string[];
   /** The permission mode the RUNNING child emulates on the worktree veto's behalf, or null when it
    * was launched unmediated. Bound at spawn for the same reason as
    * `launchedRoutineControlChannelMode`: the worktree inventory now changes mid-turn by design
@@ -702,6 +704,7 @@ export class ClaudeCodeDriver implements Driver {
     this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint, opts.claudeLiveUsage);
     this.cwd = opts.cwd;
     this.config = opts.config;
+    this.preparedHookArgs = [...opts.args];
     // Phase 2 resume: reuse the persisted claude session id (→ `--resume` from the first turn);
     // otherwise mint a fresh id (→ `--session-id` on turn 1, `--resume` after).
     this.sessionId = opts.resumeId ?? randomUUID();
@@ -949,7 +952,8 @@ export class ClaudeCodeDriver implements Driver {
     // /context is a local zero-cost command. It makes Claude persist the fork immediately so the
     // target app session can safely store a real resumable id without running a hidden model turn.
     const args = [
-      ...this.preparedBaseArgs(),
+      // This local, tool-less probe must not refresh a future model turn's hook configuration.
+      ...this.preparedBaseArgs(false),
       "-p",
       "--resume",
       this.sessionId,
@@ -1258,6 +1262,12 @@ export class ClaudeCodeDriver implements Driver {
       }
     }
     if (this.disposed || cancelGeneration !== this.oneShotCancelGeneration) return "cancelled";
+    let preparedArgs: string[];
+    try {
+      preparedArgs = this.preparedBaseArgs();
+    } catch (error) {
+      return this.refuseHookLaunch(error);
+    }
     this.beginUsageProcess();
     return new Promise<StopReason>((resolve) => {
       this.cancelled = false;
@@ -1267,7 +1277,7 @@ export class ClaudeCodeDriver implements Driver {
       const imgs = images ?? [];
 
       const args = [
-        ...this.preparedBaseArgs(),
+        ...preparedArgs,
         "-p",
         "--output-format",
         "stream-json",
@@ -1351,7 +1361,7 @@ export class ClaudeCodeDriver implements Driver {
         if (settled) return;
         settled = true;
         if (this.activeOneShotTurnId === turnId) this.activeOneShotTurnId = null;
-        if (r !== "cancelled") this.preparedBaseArgs();
+        if (r !== "cancelled") this.preparedBaseArgs(false);
         // A clean terminal result is fallback establishment evidence for abbreviated streams
         // that omit system/init. Refused/cancelled turns rely on init alone.
         if (r !== "refusal" && r !== "cancelled") this.markSessionEstablished();
@@ -1549,7 +1559,15 @@ export class ClaudeCodeDriver implements Driver {
     const cfg = this.config;
     // The prepared argv establishes whether the managed-worktree guard is active for this spawn,
     // so it must be resolved BEFORE the permission mode that depends on it.
-    const preparedArgs = this.preparedBaseArgs();
+    let preparedArgs: string[];
+    try {
+      // Background work owns the existing child until it becomes quiescent. Do not rewrite its
+      // shared hook settings or publish a future launch's capabilities while replacement is deferred.
+      preparedArgs = this.preparedBaseArgs(!(this.child && this.pendingBackgroundTasks.size > 0));
+    } catch (error) {
+      this.settlePersistentTurn(turn, this.refuseHookLaunch(error));
+      return;
+    }
     const configuredPermissionMode = this.effectivePermissionMode();
     const mediatesManagedPermissions = this.mediatesManagedPermissions(this.managedProtections());
     this.reportManagedPermissionMediation(configuredPermissionMode, mediatesManagedPermissions);
@@ -1785,7 +1803,7 @@ export class ClaudeCodeDriver implements Driver {
       "Claude provider turn closed before steering acknowledgement",
     );
     this.pendingApprovals.clear();
-    if (reason !== "cancelled") this.preparedBaseArgs();
+    if (reason !== "cancelled") this.preparedBaseArgs(false);
     if (reason !== "refusal" && reason !== "cancelled") this.markSessionEstablished();
     if (reason !== "refusal" && reason !== "cancelled") this.settleUnverifiedBackgroundTasks();
     if (turn.origin === "runner") {
@@ -2661,10 +2679,25 @@ export class ClaudeCodeDriver implements Driver {
     return env;
   }
 
+  private refuseHookLaunch(error: unknown): StopReason {
+    this.settledRunnerTurnErrorText = this.turnErrorText = (error as Error).message;
+    this.settledRunnerTurnFailureCategory = this.turnFailureCategory = null;
+    this.cb.onEvent({ kind: "error", message: this.turnErrorText });
+    return "refusal";
+  }
+
   /** Heal the exact managed settings path before every process and remove it after the session's
    * transport circuit opens. The persisted base args remain intact for restart diagnostics. */
-  private preparedBaseArgs(): string[] {
-    const prepared = prepareClaudeHookArgs(this.opts.args);
+  private preparedBaseArgs(forSpawn = true): string[] {
+    const launch = forSpawn ? this.opts.prepareClaudeHooks?.(this.config) : undefined;
+    // Callers without a provisioning callback may still update their shared base argv.
+    // Callback-backed launches instead retain the most recent refresh for observation.
+    const baseArgs = launch?.args ?? (this.opts.prepareClaudeHooks ? this.preparedHookArgs : this.opts.args);
+    const prepared = prepareClaudeHookArgs(baseArgs);
+    if (launch?.managerRequired && !prepared.managerActive && !prepared.circuitOpen) {
+      throw new Error("Claude launch refused: the required manager policy hook is unavailable. Use Default or Auto, or restore manager hook support before retrying.");
+    }
+    this.preparedHookArgs = [...baseArgs];
     this.preparedHookEnv = prepared.env ?? {};
     this.managedWorktreeGuardActive = prepared.guardActive;
     this.managerHooksActive = prepared.managerActive;

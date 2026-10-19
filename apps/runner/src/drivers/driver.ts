@@ -233,6 +233,8 @@ export interface DriverOptions {
   /** An agent-native session/thread id to resume (Claude UUID, Codex thread id, or ACP session id). */
   resumeId?: string;
   agentVersion?: string;
+  /** Refresh runner-owned hooks against the current mode and registration before each spawn. */
+  prepareClaudeHooks?: (config: SessionConfig) => { args: string[]; managerRequired: boolean };
   claudeUsageCheckpoint?: import("./claude-usage-accounting.js").ClaudeUsageCheckpoint;
   /** Live request usage already published after `claudeUsageCheckpoint`, awaiting settlement. */
   claudeLiveUsage?: import("./claude-usage-accounting.js").ClaudeLiveUsage;

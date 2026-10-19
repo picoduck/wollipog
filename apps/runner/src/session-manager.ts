@@ -141,6 +141,7 @@ import type {
   DriverBackgroundTerminalJob,
   DriverBackgroundWorkUpdate,
   DriverCallbacks,
+  DriverOptions,
   DriverSteerResult,
   DriverSubscriptionUsageUpdate,
   StopReason,
@@ -428,6 +429,7 @@ export function preserveAcpOrchestratorSessionState(
 }
 
 export interface SessionLaunchPreparation {
+  prepareClaudeHooks?: DriverOptions["prepareClaudeHooks"];
   /** Plugin defaults are launch-local, so subsequent launches re-read the default Codex home. */
   codexLaunchArgs?: string[];
   /** True only when this launch performed a fresh, authoritative provider catalog read. */
@@ -8655,6 +8657,7 @@ export class SessionManager {
         meta.driver,
         {
           command: meta.command,
+          prepareClaudeHooks: launchPreparation?.prepareClaudeHooks,
           args: preparedProjectMemoryArgs ?? launchPreparation?.codexLaunchArgs ?? meta.args,
           cwd,
           env: meta.env,

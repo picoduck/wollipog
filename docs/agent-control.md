@@ -1020,10 +1020,16 @@ host launch the runner does not sandbox, **the sidecar holds nothing and the run
 | --- | --- | --- |
 | Runner `provider`, Claude, native Linux | **Runner memory, relayed over the abstract socket.** Nothing in the hook state directory is a credential, and a circuit written there is ignored | `policy-hook-relay.test.ts` (real provisioning, real socket, real sidecar entry point), and a real claude 2.1.278 run |
 | Runner `seatbelt`, native macOS | Files, granted back through the mask's `managerTransport` rules (#1447), unchanged | **macOS CI only** (`managed-worktree-guard-seatbelt.integration.test.ts`) |
-| Runner `bwrap`, native Linux | Manager hooks are omitted with a session launch notice; the separate managed-worktree guard remains available through its verdict socket. Switch to `provider` isolation for the manager policy relay | `hook-settings.test.ts` |
+| Runner `bwrap`, native Linux | Manager hooks are unavailable; with manager hooks enabled, fixed-rule Claude turns fail closed. Switch to `provider` isolation for the manager policy relay, or use Default or Auto. The separate managed-worktree guard remains available through its verdict socket | `hook-settings.test.ts` |
 | Runner `provider`, Claude, macOS and Windows | Files, unchanged: readable and writable by the provider | Existing `policy-hook.test.ts` and `hook-settings.test.ts` |
 | A launch whose abstract socket could not be created or proven | Files, as before, and the runner log says the guard reads its file | `policy-hook-relay.test.ts` |
 | WSL, container, and cloud launches | No manager hooks (not provisioned there) | Unchanged |
+
+With manager hooks enabled, native host Claude turns in Accept Edits, Plan, or Bypass Permissions
+also fail closed when the registered control plane is too old or the agent does not support that
+mode's hook transport. Restore hook support or use Default or Auto. An unknown control-plane
+protocol waits for registration during launch preparation; a disconnected live turn is refused
+until registration completes.
 
 Measured with the runner's own provisioning, the real socket and sidecar, a stand-in control plane,
 and claude 2.1.278 in `bypassPermissions`: all three events arrived with the runner-held bearer, a
