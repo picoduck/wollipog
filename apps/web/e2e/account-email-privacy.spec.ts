@@ -246,7 +246,8 @@ test("default account settings follow privacy and changing their selection reset
   await page.goto("/settings-rows-e2e.html?section=behavior");
   const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
   const management = await context.newPage();
-  await management.goto("/machine-management-e2e.html?emailLabels=1");
+  // The machine's own route: with nothing selected the detail is the All Machines overview (#2986).
+  await management.goto("/machine-management-e2e.html?emailLabels=1&machine=native-t14s");
   await management.getByRole("button", { name: "Manage", exact: true }).click();
   const dialog = management.getByRole("dialog", { name: "Manage Design Workstation" });
   const defaults = dialog.locator("section.machine-settings-section").filter({ hasText: "Default Provider Accounts" });
