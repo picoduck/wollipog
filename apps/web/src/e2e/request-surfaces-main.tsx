@@ -473,6 +473,7 @@ function continuationSession(): SessionView {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "human",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
       limits: { maximumConcurrentChildren: 4, occupied: 2, remaining: 2, costBudgetUsd: null, maxToolCalls: null },
       uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },

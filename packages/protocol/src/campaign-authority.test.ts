@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  campaignAuthorityPreflight, campaignCodeOperationTargets, resolveCampaignAuthority, validCampaignControl,
+  campaignAuthorityPreflight, campaignCodeOperationTargets, campaignWorkflowOwner, completeParentControlDecisions,
+  resolveCampaignAuthority, validCampaignControl,
   fullControlStandingHumanRequired, humanRequiredRulesExist, FULL_CONTROL_DECLINED_CLASSES, type GovernancePolicy,
-  HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type PendingApproval,
+  HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type PendingApproval, type WorkflowDecisionResourceSnapshot,
 } from "./index.js";
 
 const control: CampaignControl = { mode: "full_control", boundary: {
@@ -297,4 +298,38 @@ test("bounded issue authority requires v217 while the foundation stays compatibl
       "live usage v216 does not prove bounded issue-write support");
     assert.equal(campaignAuthorityPreflight(bounded, driver, 217).supported, true);
   }
+});
+
+test("a policy stored before a later category reads it as human-owned; anything else malformed fails closed", () => {
+  const { review_round_extension: _later, ...older } = { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator" as const };
+  assert.deepEqual(completeParentControlDecisions(older), { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator" });
+  assert.deepEqual(completeParentControlDecisions({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY, review_round_extension: "orchestrator" }),
+    { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, review_round_extension: "orchestrator" });
+  const { pr_merge: _missing, ...incomplete } = HUMAN_ONLY_PARENT_CONTROL_POLICY;
+  for (const malformed of [incomplete, { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, unknown: "human" },
+    { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, review_round_extension: "anyone" }, [], null, "human"]) {
+    assert.equal(completeParentControlDecisions(malformed), null, JSON.stringify(malformed));
+  }
+});
+
+test("extra review rounds follow only an explicit Parent Control grant, never Full Control's own boundary", () => {
+  const granted = { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, review_round_extension: "orchestrator" as const };
+  const everything: CampaignControl = { ...control, boundary: { ...control.boundary, operations: [
+    "implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval",
+    "question", "tool_approval", "policy_ask"] } };
+  assert.equal(campaignWorkflowOwner(everything, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", true), "human");
+  assert.equal(campaignWorkflowOwner(everything, granted, "review_round_extension", true), "orchestrator");
+  assert.equal(campaignWorkflowOwner(undefined, granted, "review_round_extension", true), "orchestrator");
+  assert.equal(campaignWorkflowOwner(everything, granted, "review_round_extension", false), "human", "an unsupported provider stays human");
+  const snapshot: WorkflowDecisionResourceSnapshot = {
+    category: "review_round_extension", repository: "picoduck/wollipog", pullRequest: 7, epoch: 1, headSha: "a".repeat(40),
+    roundsUsed: 4, blockingFindings: 2, extraRounds: 2, reason: "Two blockers left, both small.",
+  };
+  const resolve = (decisions: typeof granted, root = false) => resolveCampaignAuthority({
+    control: everything, parentControl: "questions_and_approvals", decisions, root, supported: true, snapshot,
+    trustedSource: "workflow_route",
+  }).owner;
+  assert.equal(resolve(HUMAN_ONLY_PARENT_CONTROL_POLICY), "human", "Full Control does not take it on its own");
+  assert.equal(resolve(granted), "orchestrator", "an explicit grant delegates it");
+  assert.equal(resolve(granted, true), "human", "a root's own request stays with a person");
 });

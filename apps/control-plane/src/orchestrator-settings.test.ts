@@ -82,6 +82,7 @@ function defaults(overrides: Partial<OrchestratorDefaults["behavior"]> = {}): Or
         merged_branch_deletion: "human",
         follow_up_issue_publication: "human",
         ui_evidence_approval: "orchestrator",
+        review_round_extension: "orchestrator",
       },
     },
     execution: { strictProjectIsolation: false, integrationIsolation: false },

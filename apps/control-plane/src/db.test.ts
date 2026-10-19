@@ -6353,6 +6353,7 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "human",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     }, "legacy rows gain no implicit granular delegation");
     initial.updateSessionParentControl("sess-1", "questions_and_approvals", 2_000);
@@ -6362,6 +6363,7 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 2_000, 0), {
       revision: 1,
       decisions: {
@@ -6370,11 +6372,12 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "human",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     });
     assert.equal(initial.updateSessionParentControlPolicy("sess-1", {
       implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
     }, 2_001, 0), null, "stale policy revisions cannot overwrite a newer human choice");
     assert.equal(initial.getSession("sess-1")?.parentControl, "questions_and_approvals");
     initial.close();
@@ -6399,11 +6402,12 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "human",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     }, "malformed or future granular policies fail closed after a rolling restart");
     assert.equal(conservative.updateSessionParentControlPolicy("sess-1", {
       implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
     }, 3_000, 99)?.revision, 100, "the surfaced durable revision lets the conservative UI repair the row");
     conservative.close();
   } finally {
@@ -6438,7 +6442,7 @@ test("legacy Orchestrator sessions gain an inspectable fail-closed campaign snap
     assert.equal(policy.delegation.parentControl, "questions");
     assert.equal(policy.execution.strictProjectIsolation, true,
       "legacy Orchestrators retain their original strict boundary");
-    assert.deepEqual(Object.values(policy.delegation.decisions), ["human", "human", "human", "human", "human"]);
+    assert.deepEqual(Object.values(policy.delegation.decisions), ["human", "human", "human", "human", "human", "human"]);
     assert.deepEqual(new Set(Object.values(policy.sources.behavior)), new Set(["legacy_session"]));
     assert.deepEqual(new Set(Object.values(policy.sources.delegation.decisions)), new Set(["legacy_session"]));
     assert.equal(policy.sources.execution.strictProjectIsolation, "legacy_session");
@@ -6469,7 +6473,7 @@ test("stored campaign harness identities discard presentation and credential-adj
         parentControl: "off",
         decisions: {
           implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-          follow_up_issue_publication: "human", ui_evidence_approval: "human",
+          follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
         },
       },
       execution: { strictProjectIsolation: false },
@@ -6484,6 +6488,7 @@ test("stored campaign harness identities discard presentation and credential-adj
             implementation_question: "system_default", pr_merge: "system_default",
             merged_branch_deletion: "system_default", follow_up_issue_publication: "system_default",
             ui_evidence_approval: "system_default",
+            review_round_extension: "system_default",
           },
         },
         execution: { strictProjectIsolation: "system_default" },
@@ -6530,7 +6535,7 @@ test("established human Orchestrator provenance survives the creation-actor migr
       pr_merge: "human" as const,
       merged_branch_deletion: "human" as const,
       follow_up_issue_publication: "human" as const,
-      ui_evidence_approval: "human" as const,
+      ui_evidence_approval: "human", review_round_extension: "human" as const,
     };
     initial.createSession({
       ...newSession(),
@@ -6563,6 +6568,7 @@ test("established human Orchestrator provenance survives the creation-actor migr
               merged_branch_deletion: "system_default",
               follow_up_issue_publication: "system_default",
               ui_evidence_approval: "system_default",
+              review_round_extension: "system_default",
             },
           },
         },
@@ -6611,6 +6617,7 @@ test("creation-actor migration does not promote a detached agent-created Orchest
             merged_branch_deletion: "human",
             follow_up_issue_publication: "human",
             ui_evidence_approval: "human",
+            review_round_extension: "human",
           },
         },
         sources: {
@@ -6629,6 +6636,7 @@ test("creation-actor migration does not promote a detached agent-created Orchest
               merged_branch_deletion: "system_default",
               follow_up_issue_publication: "system_default",
               ui_evidence_approval: "system_default",
+              review_round_extension: "system_default",
             },
           },
         },

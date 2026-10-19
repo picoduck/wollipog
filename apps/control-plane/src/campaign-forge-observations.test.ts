@@ -84,7 +84,7 @@ function forgeFixture(protocolVersion = PROTOCOL_VERSION, refs: CampaignPullRequ
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   const decisions = {
     implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-    follow_up_issue_publication: "human", ui_evidence_approval: "human",
+    follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
   } as const;
   const created = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator", title: "Campaign Root",

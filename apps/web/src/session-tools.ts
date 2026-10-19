@@ -237,6 +237,7 @@ export function requestKindPhrase(request: Pick<PendingApproval, "kind" | "workf
       case "campaign_issue_scope": return "a campaign scope change";
       case "follow_up_issue_publication": return "an issue publication";
       case "implementation_question": return "an implementation decision";
+      case "review_round_extension": return "more review rounds";
       default: return "a workflow decision";
     }
   }

@@ -47,6 +47,9 @@ import {
   EVENT_PAYLOAD_CHUNK_BYTES,
   EVENT_PAYLOAD_PREVIEW_BYTES,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
+  completeParentControlDecisions,
+  completeWorkflowDecisionRecord,
+  type DelegatableWorkflowDecisionCategory,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   DEFAULT_LIVE_CHILD_LIMIT,
@@ -30621,13 +30624,9 @@ function parseJson<T>(raw: string | null): T | null {
   }
 }
 
+/** A stored decision policy; one stored before a later category existed reads it as human-owned. */
 function parentControlDecisionPolicyFromJson(raw: string | null): ParentControlDecisionPolicy | null {
-  const candidate = parseJson<Record<string, unknown>>(raw);
-  if (!candidate || Array.isArray(candidate) ||
-      Object.keys(candidate).length !== WORKFLOW_DECISION_CATEGORIES.length ||
-      !WORKFLOW_DECISION_CATEGORIES.every((category) =>
-        candidate[category] === "human" || candidate[category] === "orchestrator")) return null;
-  return candidate as ParentControlDecisionPolicy;
+  return completeParentControlDecisions(parseJson<unknown>(raw));
 }
 
 function canonicalChildHarness(value: unknown): AgentHarnessIdentity | null {
@@ -30684,8 +30683,10 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       (behavior.completion !== "retain" && behavior.completion !== "stop_and_archive") ||
       !["off", "questions", "questions_and_approvals"].includes(value.delegation.parentControl) ||
       typeof value.execution?.strictProjectIsolation !== "boolean" ||
-      typeof value.execution?.integrationIsolation !== "boolean" ||
-      !parentControlDecisionPolicyFromJson(JSON.stringify(value.delegation.decisions))) return null;
+      typeof value.execution?.integrationIsolation !== "boolean") return null;
+  const decisions = completeParentControlDecisions(value.delegation.decisions);
+  if (!decisions) return null;
+  value.delegation.decisions = decisions;
   behavior.childHarness = childHarness;
   if (value.issueScopeProposalEpic !== undefined && (!Number.isSafeInteger(value.issueScopeProposalEpic) || value.issueScopeProposalEpic < 1)) return null;
   if (value.issueScope && (typeof value.issueScope.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(value.issueScope.repository) ||
@@ -30706,12 +30707,15 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       !value.sources.execution ||
       Object.keys(value.sources.behavior).length !== behaviorSourceKeys.length ||
       !behaviorSourceKeys.every((key) => validSources.has(value.sources.behavior[key])) ||
-      Object.keys(value.sources.delegation.decisions).length !== WORKFLOW_DECISION_CATEGORIES.length ||
       !validSources.has(value.sources.delegation.parentControl) ||
       !validSources.has(value.sources.execution.strictProjectIsolation) ||
-      !validSources.has(value.sources.execution.integrationIsolation) ||
-      !WORKFLOW_DECISION_CATEGORIES.every((category) =>
-        validSources.has(value.sources.delegation.decisions[category]))) return null;
+      !validSources.has(value.sources.execution.integrationIsolation)) return null;
+  // A policy stored before a later category existed took that category's built-in default.
+  const decisionSources = completeWorkflowDecisionRecord(value.sources.delegation.decisions, "system_default" as const,
+    (entry): entry is typeof value.sources.delegation.decisions[DelegatableWorkflowDecisionCategory] =>
+      typeof entry === "string" && validSources.has(entry));
+  if (!decisionSources) return null;
+  value.sources.delegation.decisions = decisionSources;
   return value;
 }
 

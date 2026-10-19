@@ -74,6 +74,9 @@ export function campaignWorkflowOwner(control: CampaignControl | undefined, deci
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
+  // More review rounds than the policy allows are never part of Full Control's own authority: only
+  // an explicit Parent Control grant delegates them (#3369).
+  if (category === "review_round_extension") return decisions[category];
   return validCampaignControl(control) && control.boundary.operations.includes(category) ? "orchestrator" : "human";
 }
 
@@ -320,7 +323,9 @@ export function resolveCampaignAuthority(input: {
   if ((category === "issue_closure" || category === "campaign_issue_scope") &&
       !(input.control?.mode === "full_control" && validCampaignControl(input.control) && input.control.boundary.issueAuthority &&
         input.snapshot && "issueAdmission" in input.snapshot && input.snapshot.issueAdmission)) return result("human", "human_required", "protected_request");
-  if (!input.control || input.control.mode === "custom") {
+  if (!input.control || input.control.mode === "custom" || category === "review_round_extension") {
+    // Extra review rounds follow the explicit Parent Control grant under Full Control too: they are
+    // never part of a boundary's own operations (#3369).
     const eligible = !input.root && (category ? campaignWorkflowOwner(input.control, input.decisions, category, true) === "orchestrator" : Boolean(request && parentControlRequestEligible(input.parentControl, request)));
     return result(eligible ? "orchestrator" : "human", "custom_policy", "custom_owner");
   }

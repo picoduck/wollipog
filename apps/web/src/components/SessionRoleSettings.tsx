@@ -8,7 +8,7 @@ import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-discl
 const DECISION_LABELS = {
   implementation_question: "Implementation Questions", pr_merge: "PR Merge",
   merged_branch_deletion: "Merged Branch Deletion", follow_up_issue_publication: "Follow-Up Publication",
-  ui_evidence_approval: "UI Evidence Approval",
+  ui_evidence_approval: "UI Evidence Approval", review_round_extension: "Review Round Extensions",
 };
 
 export function roleSettingsError(draft: OrchestratorDefaults, capabilities?: OrchestratorSettingsCapabilities): string | null {

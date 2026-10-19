@@ -81,6 +81,7 @@ function settings(drifted = false): OrchestratorSettingsView {
           merged_branch_deletion: "human",
           follow_up_issue_publication: "human",
           ui_evidence_approval: "human",
+          review_round_extension: "human",
         },
       },
       execution: { strictProjectIsolation: false, integrationIsolation: false },
@@ -355,7 +356,7 @@ test("the editor has control preparation and three settings groups, and a change
     await settle();
     assert.equal(writes.length, 1);
     assert.equal(writes[0]!.defaults.behavior.maximumConcurrentChildren, 8);
-    assert.equal(Object.keys(writes[0]!.defaults.delegation.decisions).length, 5);
+    assert.equal(Object.keys(writes[0]!.defaults.delegation.decisions).length, 6);
     assert.equal(writes[0]!.defaults.execution.strictProjectIsolation, false);
     assertNoDomNode(container.querySelector(".save-bar"), "a saved draft is clean again");
   } finally {

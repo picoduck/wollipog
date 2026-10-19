@@ -2516,6 +2516,10 @@ export const WORKFLOW_DECISION_CATEGORIES = [
   "merged_branch_deletion",
   "follow_up_issue_publication",
   "ui_evidence_approval",
+  /** #3369: more cross-model review rounds for a pull request whose epoch used its round budget
+   * without an upvote. Human-owned unless a Parent Control grant delegates it; Full Control never
+   * takes it on its own. */
+  "review_round_extension",
 ] as const;
 export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
 /** Issue closure is permanently human-owned and never appears in delegation settings. */
@@ -2530,12 +2534,47 @@ export interface ParentControlPolicy {
   decisions: ParentControlDecisionPolicy;
 }
 
+/** Categories added after policies were already stored and sent: a policy that predates one has no
+ * key for it, and it reads as human-owned there. Any other missing or unknown key fails closed. */
+export const LATER_WORKFLOW_DECISION_CATEGORIES: readonly DelegatableWorkflowDecisionCategory[] = ["review_round_extension"];
+
+/** A complete per-category policy from `value`, or null when it is malformed (see
+ * LATER_WORKFLOW_DECISION_CATEGORIES). `fill` is the value an older policy's missing category takes;
+ * `valid` checks each present value. */
+export function completeWorkflowDecisionRecord<T>(
+  value: unknown, fill: T, valid: (entry: unknown) => entry is T,
+): Record<DelegatableWorkflowDecisionCategory, T> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const known = WORKFLOW_DECISION_CATEGORIES as readonly string[];
+  if (Object.keys(record).some((key) => !known.includes(key))) return null;
+  const complete = {} as Record<DelegatableWorkflowDecisionCategory, T>;
+  for (const category of WORKFLOW_DECISION_CATEGORIES) {
+    const entry = record[category];
+    if (entry === undefined && LATER_WORKFLOW_DECISION_CATEGORIES.includes(category)) {
+      complete[category] = fill;
+    } else if (valid(entry)) {
+      complete[category] = entry;
+    } else {
+      return null;
+    }
+  }
+  return complete;
+}
+
+/** A complete decision policy, an older one's later categories human-owned; null when malformed. */
+export function completeParentControlDecisions(value: unknown): ParentControlDecisionPolicy | null {
+  return completeWorkflowDecisionRecord<WorkflowDecisionAuthority>(value, "human",
+    (entry): entry is WorkflowDecisionAuthority => entry === "human" || entry === "orchestrator");
+}
+
 export const HUMAN_ONLY_PARENT_CONTROL_POLICY: ParentControlDecisionPolicy = {
   implementation_question: "human",
   pr_merge: "human",
   merged_branch_deletion: "human",
   follow_up_issue_publication: "human",
   ui_evidence_approval: "human",
+  review_round_extension: "human",
 };
 
 /** User-owned defaults for how a newly created Orchestrator campaign manages children. `null`
@@ -4654,6 +4693,24 @@ export type WorkflowDecisionResourceSnapshot =
         checkedAt: number;
         checks: Array<{ name: string; state: "passed"; url?: string }>;
       };
+    }
+  | {
+      /** #3369: more review rounds for one epoch of the requester's review run on this pull
+       * request. Bound to the run's exact state when requested; the control plane checks it. */
+      category: "review_round_extension";
+      repository: string;
+      pullRequest: number;
+      epoch: number;
+      /** The pull request head the next round would review. */
+      headSha: string;
+      /** Valid rounds the epoch has used, which is its current budget. */
+      roundsUsed: number;
+      /** Blocking findings of the epoch's last valid round, still open. */
+      blockingFindings: number;
+      /** Rounds asked for, 1 to 4. */
+      extraRounds: number;
+      /** Why more rounds are worth it (at most 1000 characters). */
+      reason: string;
     }
   | {
       category: "merged_branch_deletion";
