@@ -13,14 +13,16 @@ import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
+import { helperAssociationName, helperDigest, helperReleaseAssetName, parseHelperAssociation, publishSourceHelperTuple } from "../../../scripts/lease-helper-distribution.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const source = process.argv.includes("--source"), maximal = process.argv.includes("--maximal");
+const source = process.argv.includes("--source"), sourceBundle = process.argv.includes("--source-bundle"), maximal = process.argv.includes("--maximal");
+assert.ok(!(source && sourceBundle), "select exactly one source invocation contract");
 const packaged = process.argv.includes("--packaged");
 const packageDir = join(repo, "apps/runner/dist-bin");
-const packagedNames = packaged ? readdirSync(packageDir).filter(name => /^wollipog-runner-/u.test(name)) : [];
+const packagedNames = packaged ? readdirSync(packageDir).filter(name => /^wollipog-runner-(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin|pc-windows-msvc)(?:\.exe)?$/u.test(name)) : [];
 if (packaged) assert.equal(packagedNames.length, 1, "fixture expects exactly one native packaged runner");
-const binary = source ? process.execPath : packaged ? join(packageDir, packagedNames[0]) : resolve(process.argv[2]);
+const binary = source || sourceBundle ? process.execPath : packaged ? join(packageDir, packagedNames[0]) : resolve(process.argv[2]);
 const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
 const protocol = Number(readFileSync(join(repo, "packages/protocol/src/index.ts"), "utf8").match(/export const PROTOCOL_VERSION = (\d+);/u)[1]);
 const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-worker-daemon-")));
@@ -37,8 +39,13 @@ const inherited = process.platform === "win32"
   ? Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key.toUpperCase(), value])) : process.env;
 const systemPath = process.platform === "win32" ? `${inherited.SYSTEMROOT}\\System32;${inherited.SYSTEMROOT}\\System32\\WindowsPowerShell\\v1.0` : "/usr/bin:/bin";
 const fixtureEnvironment = { ...inherited, HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, "local"), APPDATA: join(home, "roaming"),
-  TMPDIR: temp, TMP: temp, TEMP: temp, PATH: source || process.platform === "win32" ? systemPath : emptyBin };
-let output = "", lastHeartbeat = 0, delays = [], measuring = false;
+  TMPDIR: temp, TMP: temp, TEMP: temp, PATH: source || sourceBundle || process.platform === "win32" ? systemPath : emptyBin };
+if (!source) {
+  // Exercise the shipped association/installer, not a pre-existing source helper pool.
+  const helperRoot = join(root, "installed-helper"); mkdirSync(helperRoot, { mode: 0o700 });
+  fixtureEnvironment.WOLLIPOG_LEASE_HELPER_ROOT = helperRoot;
+}
+let output = "", outputBytes = 0, outputExceeded = false, lastHeartbeat = 0, delays = [], measuring = false;
 const wss = new WebSocketServer({ noServer: true });
 const server = createServer((request, response) => {
   if (request.url?.includes("/runner/attestation/")) {
@@ -66,6 +73,7 @@ server.on("upgrade", (request, socket, head) => wss.handleUpgrade(request, socke
 async function until(predicate, description, ms = 30_000) {
   const end = performance.now() + ms;
   while (!predicate()) {
+    assert.equal(outputExceeded, false, "owned daemon diagnostic budget exceeded");
     assert.ok(performance.now() < end, `${description}\n${output}`);
     await pause(10);
   }
@@ -128,20 +136,53 @@ async function verifyEmbeddedWorker() {
     "the tested SEA worker is byte-identical to this build's fixed worker asset");
   return report;
 }
+async function admitFixtureHelper() {
+  if (source) return;
+  const names = readdirSync(packageDir).filter(name => /^wollipog-runner-lease-contract-.*\.json$/u.test(name));
+  assert.equal(names.length, 1, "one native association");
+  const bytes = readFileSync(join(packageDir, names[0]));
+  const association = parseHelperAssociation(bytes), tuple = association.helper;
+  assert.equal(names[0], helperAssociationName(tuple.target));
+  assert.equal(helperDigest(readFileSync(join(packageDir, association.canonical))), association.runnerSha256);
+  const installer = join(packageDir, association.canonical);
+  const args = ["--lease-helper-install", "--association", bytes.toString("base64"), "--association-sha256", helperDigest(bytes)];
+  if (association.storage === "external") {
+    const image = join(packageDir, helperReleaseAssetName(tuple.target));
+    assert.equal(helperDigest(readFileSync(image)), tuple.imageSha256);
+    args.push("--parent", fixtureEnvironment.WOLLIPOG_LEASE_HELPER_ROOT, "--image", image);
+  }
+  const result = await promisify(execFile)(installer, args, { cwd: root, env: fixtureEnvironment,
+    windowsHide: true, timeout: 30_000, maxBuffer: 65536 });
+  assert.equal(JSON.parse(result.stdout).runtimeCacheEntries, 0);
+  // Trusted fixture preparation for its separate source holder; never runtime adoption.
+  if (association.storage === "external") publishSourceHelperTuple(fixtureEnvironment.WOLLIPOG_LEASE_HELPER_ROOT, tuple);
+}
+function verifyBuiltSourceWorker() {
+  const filename = join(repo, "apps/runner/.bin-build/provider-home-lease-worker.cjs");
+  const { verifyWorkerDeadlines } = createRequire(import.meta.url)("./provider-home-worker-deadline-fixture.cjs");
+  const report = verifyWorkerDeadlines(readFileSync(filename, "utf8"), filename);
+  assert.ok(report.cases >= 25);
+  return report;
+}
 async function start(dataDir) {
   mkdirSync(dataDir, { mode: 0o700 });
   const config = `${dataDir}.config.json`;
   writeFileSync(config, JSON.stringify({ runnerId, controlPlaneUrl: `ws://127.0.0.1:${server.address().port}/runner`,
     token: "isolated-smoke-token", dataDir, agents: [], workspaces: [], features: { acpRegistry: false } }));
-  const child = launchDaemon(binary, [...(source ? ["--import", loader, join(repo, "apps/runner/src/cli.ts")] : []), "--config", config], {
+  const child = launchDaemon(binary, [...(source ? ["--import", loader, join(repo, "apps/runner/src/cli.ts")] : sourceBundle ? [join(repo, "apps/runner/.bin-build/runner-source.cjs")] : []), "--config", config], {
     cwd: dataDir, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
     env: { ...fixtureEnvironment,
       RUNNER_ID: runnerId, RUNNER_DATA_DIR: dataDir, RUNNER_TOKEN: "isolated-smoke-token",
       CONTROL_PLANE_URL: `ws://127.0.0.1:${server.address().port}/runner` },
   });
-  children.push(child); child.stdout.on("data", b => { output = (output + b).slice(-65536); });
-  child.stderr.on("data", b => { output = (output + b).slice(-65536); });
-  child.on("error", error => { output += error.message; });
+  children.push(child);
+  const capture = b => {
+    outputBytes += Buffer.byteLength(b);
+    if (outputBytes > 65536) { outputExceeded = true; child.kill("SIGKILL"); return; }
+    output += b;
+  };
+  child.stdout.on("data", capture); child.stderr.on("data", capture);
+  child.on("error", error => capture(error.message));
   await until(() => {
     assert.equal(child.exitCode, null, output); assert.equal(child.signalCode, null, output);
     return peers.length >= children.length && peers[children.length - 1].registered;
@@ -168,14 +209,15 @@ async function sync(runner, id) {
 async function hold(ownerHash) {
   const helperDataDir = join(root, "holder-data"); mkdirSync(helperDataDir, { recursive: true, mode: 0o700 });
   const script = join(root, "holder.mjs");
+  const sourceRoot = process.platform === "win32" ? join(repo, "apps/runner/.bin-build/lease-test-source") : repo;
   writeFileSync(script, [
-    `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(pathToFileURL(join(repo, "apps/runner/src/provider-home-lease.ts")).href)};`,
+    `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(pathToFileURL(join(sourceRoot, "apps/runner/src/provider-home-lease.ts")).href)};`,
     `const registry = new ProviderHomeLeaseRegistry(${JSON.stringify(ownerHash)}, { helperDataDir: ${JSON.stringify(helperDataDir)} });`,
     `registry.acquireHome(${JSON.stringify(home)}, "skills");`,
     `process.stdout.write("held\\n");`,
     `setInterval(() => {}, 1 << 30);`,
   ].join("\n"));
-  const child = spawn(process.execPath, ["--import", loader, script], { cwd: root, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const child = spawn(process.execPath, ["--import", loader, script], { cwd: root, env: fixtureEnvironment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   holders.push(child);
   let held = false;
   child.stdout.on("data", b => { output = (output + b).slice(-65536); if (String(b).includes("held")) held = true; });
@@ -220,7 +262,16 @@ async function stop(child, signal) {
 }
 
 try {
-  const embeddedDeadlines = source ? undefined : await verifyEmbeddedWorker();
+  await admitFixtureHelper();
+  // The delivery harness uses the same locator as the daemons and its real native engine.
+  const previousRoot = process.env.WOLLIPOG_LEASE_HELPER_ROOT;
+  if (fixtureEnvironment.WOLLIPOG_LEASE_HELPER_ROOT) process.env.WOLLIPOG_LEASE_HELPER_ROOT = fixtureEnvironment.WOLLIPOG_LEASE_HELPER_ROOT;
+  let embeddedDeadlines;
+  try { embeddedDeadlines = source ? undefined : sourceBundle ? verifyBuiltSourceWorker() : await verifyEmbeddedWorker(); }
+  finally {
+    if (previousRoot === undefined) delete process.env.WOLLIPOG_LEASE_HELPER_ROOT;
+    else process.env.WOLLIPOG_LEASE_HELPER_ROOT = previousRoot;
+  }
   await new Promise(resolveListen => server.listen(0, "127.0.0.1", resolveListen));
   const first = await start(join(root, "runner-a"));
   const ownerHash = JSON.parse(readFileSync(join(first.dataDir, ".wollipog-runner-owner-v2.json"), "utf8")).ownerHash;
@@ -255,10 +306,14 @@ try {
   assert.ok(evidence().some(item => item.record.state === "active" && item.record.pid === second.child.pid), "actual runner death enables proved recovery");
   const stopped = await stop(second.child, "SIGTERM"); assert.equal(stopped.code, 0, output);
   assert.ok(evidence().some(item => item.record.state === "released" && item.record.pid === second.child.pid), "graceful shutdown awaited exact release");
-  console.log(JSON.stringify({ mode: source ? "source-daemon" : "SEA-daemon", platform: process.platform, maximal,
+  console.log(JSON.stringify({ mode: source ? "source-daemon" : sourceBundle ? "built-source-daemon" : "SEA-daemon", platform: process.platform, maximal,
     ...(embeddedDeadlines ? { embeddedDeadlines } : {}),
     operationDurationMs, heartbeatIntervalMs: interval, heartbeatDispatches: delays.length, maxHeartbeatDelayMs: Math.max(...delays),
-    liveOwnerRefused: true, killedRunnerRecovered: true, gracefulReleaseProved: true }));
+    liveOwnerRefused: true, killedRunnerRecovered: true, gracefulReleaseProved: true,
+    diagnosticBytes: outputBytes, runtimeHelperCacheEntries: readdirSync(temp).filter(name => name.startsWith("wollipog-provider-home-lease-io-")).length }));
+  assert.equal(outputExceeded, false, "all safe daemon diagnostics must fit the fixed budget");
+  assert.deepEqual(readdirSync(temp).filter(name => name.startsWith("wollipog-provider-home-lease-io-")), []);
+  for (const dir of [first.dataDir, second.dataDir]) assert.deepEqual(readdirSync(dir).filter(name => name.startsWith("wollipog-provider-home-lease-io-")), []);
 } finally {
   for (const child of holders) await stop(child, "SIGKILL");
   for (const child of children) await stop(child, "SIGKILL");

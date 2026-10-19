@@ -4,6 +4,7 @@ export type RunnerEntryMode =
   | "--agent-control-mcp"
   | "--wollipog-cli"
   | "--managed-worktree-guard"
+  | "--lease-helper-install"
   | "daemon";
 
 const INTERNAL_MODES = new Set<RunnerEntryMode>([
@@ -12,6 +13,7 @@ const INTERNAL_MODES = new Set<RunnerEntryMode>([
   "--agent-control-mcp",
   "--wollipog-cli",
   "--managed-worktree-guard",
+  "--lease-helper-install",
 ]);
 
 /** Node reserves argv[1] for the script path, including in a SEA binary, where it repeats the

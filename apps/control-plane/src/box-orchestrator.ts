@@ -30,13 +30,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomInt, randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { get as httpsGet } from "node:https";
 import type { BoxStatus, RunnerCredentialSecret } from "@wollipog/protocol";
 import type { BoxConfig, ControlPlaneDb } from "./db.js";
 import { readCompatibleEnv, type Environment } from "./env-compat.js";
 import type { Hub } from "./hub.js";
+import { collectHelperBytes, helperAssociationBytes, helperAssociationName, helperDigest, helperReleaseAssetName, installLeaseHelper, LEASE_HELPER_LIMITS, parseHelperAssociation, pinHelperParent, readHelperFile, type HelperAssociation } from "../../../scripts/lease-helper-distribution.mjs";
 
 /** Home-relative path the runner binary is deployed to on the box (cwd is $HOME over SSH). */
 const REMOTE_RUNNER_PATH = ".agent-manager/agent-manager-runner";
@@ -85,7 +87,7 @@ export function buildRemoteCommand(o: {
   workspaces: { id: string; path: string }[];
 }): string {
   const parts = [
-    posixQuote(o.runnerPath),
+    'WOLLIPOG_LEASE_HELPER_ROOT="$HOME/.agent-manager"', posixQuote(o.runnerPath),
     "--runner-id", posixQuote(o.runnerId),
     "--control-plane-url", posixQuote(o.controlPlaneUrl),
     "--token-file", posixQuote(o.tokenFile),
@@ -309,6 +311,119 @@ export interface ResolvedRunnerBinary {
   /** Full verified digest; deployment persists the first 16 hex chars as its content identity. */
   sha256: string;
   source: "staged" | "release-cache";
+  /** Independent association and bounded immutable companion, never an unpaired runner path. */
+  leaseHelper?: ResolvedBoxLeaseHelper;
+}
+
+export interface ResolvedBoxLeaseHelper {
+  association: HelperAssociation;
+  associationSha256: string;
+  image: Buffer;
+}
+
+export function validateBoxLeaseHelper(value: ResolvedBoxLeaseHelper, triple: string, runnerSha256: string): ResolvedBoxLeaseHelper {
+  const bytes = helperAssociationBytes(value.association), association = parseHelperAssociation(bytes), tuple = association.helper;
+  if (helperDigest(bytes) !== value.associationSha256 || association.runnerSha256 !== runnerSha256 || tuple.target !== triple ||
+      tuple.abi !== "posix64" || tuple.sourceSha256 !== "28492e116000c648cd5ddc19f8db5ebe6d775c66f1fa57103235051e837af3d7" ||
+      !(value.image instanceof Uint8Array) || value.image.length !== tuple.imageBytes || helperDigest(value.image) !== tuple.imageSha256) {
+    throw new Error("matching bounded box runner/helper association unavailable; no unpaired fallback");
+  }
+  return { association, associationSha256: value.associationSha256, image: Buffer.from(value.image) };
+}
+
+export function buildBoxHelperInstallCommand(runnerPath: string, value: ResolvedBoxLeaseHelper): string {
+  const bytes = helperAssociationBytes(value.association);
+  return `${posixQuote(runnerPath)} --lease-helper-install --association ${posixQuote(bytes.toString("base64"))} ` +
+    `--association-sha256 ${posixQuote(value.associationSha256)} --parent "$HOME/.agent-manager"`;
+}
+
+function stagedBoxLeaseHelper(directory: string, triple: string, runnerSha256: string): ResolvedBoxLeaseHelper {
+  const parent = pinHelperParent(directory);
+  const bytes = readHelperFile(join(directory, helperAssociationName(triple)), LEASE_HELPER_LIMITS.contractBytes, parent.check, false).bytes;
+  const association = parseHelperAssociation(bytes);
+  const image = readHelperFile(join(directory, helperReleaseAssetName(triple)), association.helper.imageBytes, parent.check).bytes;
+  return validateBoxLeaseHelper({ association, associationSha256: helperDigest(bytes), image }, triple, runnerSha256);
+}
+
+async function boxHelperTransport(
+  request: ReleaseArtifactRequest, asset: GithubReleaseAsset, maximum: number, deadline: number, gh: boolean,
+): Promise<Buffer> {
+  const left = deadline - performance.now(); if (left <= 3000) throw new Error("helper acquisition deadline exceeded; no fallback");
+  if (!gh) {
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), left);
+    let input: Readable | undefined;
+    try {
+      const headers: Record<string, string> = { accept: "application/octet-stream", "user-agent": "wollipog-box-lease-helper" };
+      if (request.token) headers.authorization = `Bearer ${request.token}`;
+      const response = await fetch(githubAssetDownloadUrl(asset, request), { headers, signal: controller.signal });
+      if (!response.ok || !response.body) throw new Error("helper asset transport failed; no fallback");
+      input = Readable.fromWeb(response.body as import("node:stream/web").ReadableStream);
+      return await collectHelperBytes(input, maximum, deadline);
+    } finally { input?.destroy(); clearTimeout(timer); controller.abort(); }
+  }
+  // Existing authenticated gh access only. stdout goes directly to a counted memory receiver,
+  // never a randomized helper download pathname. There is no transport fallback or retry.
+  const child = spawn("gh", githubCliDownloadArgs(request, "-"), { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  let diagnosticBytes = 0, transportError: Error | undefined;
+  const closed = new Promise<number | null>(resolveClose => child.once("close", resolveClose));
+  child.once("error", () => { transportError = new Error("owned helper acquisition could not start"); });
+  child.stderr.on("data", chunk => {
+    diagnosticBytes += chunk.length;
+    if (diagnosticBytes > LEASE_HELPER_LIMITS.diagnosticBytes) { transportError = new Error("helper acquisition diagnostic limit"); child.kill("SIGKILL"); }
+  });
+  const timer = setTimeout(() => { transportError = new Error("helper acquisition deadline exceeded"); child.kill("SIGKILL"); }, left - 3000);
+  let reaper: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const bytes = await collectHelperBytes(child.stdout, maximum, deadline - 3000);
+    const code = await Promise.race([closed, new Promise<never>((_, reject) => {
+      reaper = setTimeout(() => reject(new Error("owned helper acquisition closure unavailable; retain evidence")), Math.max(1, deadline - performance.now()));
+    })]);
+    if (transportError || code !== 0) throw transportError ?? new Error("helper acquisition failed; no fallback");
+    return bytes;
+  } finally {
+    clearTimeout(timer); clearTimeout(reaper);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await Promise.race([closed, new Promise<never>((_, reject) => {
+        reaper = setTimeout(() => reject(new Error("owned helper acquisition closure unavailable; retain evidence")), Math.max(1, deadline - performance.now()));
+      })]).finally(() => clearTimeout(reaper));
+    }
+  }
+}
+
+async function resolveBoxReleaseHelper(
+  options: { repo: string; releaseTag: string; cacheDir: string; token?: string }, triple: string, runnerSha256: string,
+): Promise<ResolvedBoxLeaseHelper> {
+  const deadline = performance.now() + LEASE_HELPER_LIMITS.producerMs;
+  const headers: Record<string, string> = { accept: "application/vnd.github+json", "user-agent": "wollipog-box-lease-helper" };
+  if (options.token) headers.authorization = `Bearer ${options.token}`;
+  let metadata: unknown, gh = false;
+  try { metadata = await readJson(`https://api.github.com/repos/${options.repo}/releases/tags/${encodeURIComponent(options.releaseTag)}`, headers, Math.max(1, deadline - performance.now() - 3000)); }
+  catch (error) {
+    if (options.token) throw error;
+    const left = deadline - performance.now(); if (left <= 3000) throw error;
+    metadata = await readReleaseMetadataWithGh(options, left - 3000); gh = true;
+  }
+  const assets = metadata && typeof metadata === "object" && Array.isArray((metadata as GithubRelease).assets)
+    ? (metadata as GithubRelease).assets as GithubReleaseAsset[] : [];
+  const select = (name: string, maximum: number): GithubReleaseAsset => {
+    const matching = assets.filter(asset => asset.name === name);
+    if (matching.length !== 1 || typeof matching[0]!.digest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(matching[0]!.digest as string) ||
+        !Number.isSafeInteger(matching[0]!.size) || Number(matching[0]!.size) < 1 || Number(matching[0]!.size) > maximum) throw new Error("helper publisher/size proof unavailable");
+    return matching[0]!;
+  };
+  const name = helperAssociationName(triple), metadataAsset = select(name, LEASE_HELPER_LIMITS.contractBytes);
+  const bytes = await boxHelperTransport({ ...options, assetName: name }, metadataAsset, LEASE_HELPER_LIMITS.contractBytes, deadline, gh);
+  if (bytes.length !== metadataAsset.size || helperDigest(bytes) !== String(metadataAsset.digest).slice(7)) throw new Error("helper association publisher mismatch");
+  const association = parseHelperAssociation(bytes), tuple = association.helper;
+  const imageName = helperReleaseAssetName(triple), imageAsset = select(imageName, LEASE_HELPER_LIMITS.imageBytes);
+  if (tuple.imageBytes !== imageAsset.size || tuple.imageSha256 !== String(imageAsset.digest).slice(7)) throw new Error("helper image publisher/association mismatch");
+  const image = await boxHelperTransport({ ...options, assetName: imageName }, imageAsset, tuple.imageBytes, deadline, gh);
+  const result = validateBoxLeaseHelper({ association, associationSha256: helperDigest(bytes), image }, triple, runnerSha256);
+  if (performance.now() >= deadline) throw new Error("helper acquisition deadline exceeded before admission");
+  const chunks = function* () { for (let offset = 0; offset < image.length; offset += 65536) yield image.subarray(offset, offset + 65536); };
+  const installed = await installLeaseHelper(options.cacheDir, tuple, chunks(), { deadline });
+  result.image = installed.verify(); return result;
 }
 
 export type BinaryResolver = (triple: string, o?: { refresh?: boolean }) => Promise<ResolvedRunnerBinary>;
@@ -518,6 +633,8 @@ export function makeBinaryResolver(opts: {
   release?: (request: ReleaseArtifactSelectionRequest) => Promise<ReleaseArtifactSelection>;
   /** Injectable for deterministic hash-count coverage. */
   digest?: (path: string) => Promise<string>;
+  /** Injectable complete helper resolution; tests cannot silently omit the pairing contract. */
+  helper?: (triple: string, sha256: string, stagedDirectory?: string) => Promise<ResolvedBoxLeaseHelper>;
 }): BinaryResolver {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(opts.repo)) {
     throw new Error(`invalid GitHub repository: ${opts.repo}`);
@@ -559,6 +676,12 @@ export function makeBinaryResolver(opts: {
   // One in-flight download per release/triple: concurrent resolutions (two boxes on the same
   // platform, or update-spam on one box) share it instead of interleaving writes to one path.
   const inflight = new Map<string, Promise<ResolvedRunnerBinary>>();
+  const pair = async (binary: ResolvedRunnerBinary, triple: string, stagedDirectory?: string): Promise<ResolvedRunnerBinary> => {
+    const helper = opts.helper ? await opts.helper(triple, binary.sha256, stagedDirectory)
+      : stagedDirectory ? stagedBoxLeaseHelper(stagedDirectory, triple, binary.sha256)
+      : await resolveBoxReleaseHelper({ repo: opts.repo, releaseTag: opts.releaseTag, cacheDir: opts.cacheDir, token }, triple, binary.sha256);
+    return { ...binary, leaseHelper: validateBoxLeaseHelper(helper, triple, binary.sha256) };
+  };
   return async (triple, o = {}) => {
     const names = runnerAssetNames(triple);
     const dirs = [runnerBinDir, opts.distBinDir].filter(Boolean) as string[];
@@ -579,7 +702,7 @@ export function makeBinaryResolver(opts: {
             : await digest(p);
         validated.set(p, { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, sha256 });
         if (name === names[1]) warnLegacyAssetOnce("staged");
-        return { path: p, sha256, source: "staged" };
+        return pair({ path: p, sha256, source: "staged" }, triple, dir);
       }
     }
 
@@ -600,7 +723,7 @@ export function makeBinaryResolver(opts: {
         if (cached.current) {
           pruneReleaseCache(opts.cacheDir, opts.releaseTag, opts.warn);
           if (name === names[1]) warnLegacyAssetOnce("release");
-          return { path: dest, sha256: cached.sha256!, source: "release-cache" };
+          return pair({ path: dest, sha256: cached.sha256!, source: "release-cache" }, triple);
         }
         if (cached.reason) {
           opts.warn?.(`ignoring ${name} cache for ${opts.releaseTag}: ${cached.reason}; downloading again`);
@@ -692,7 +815,7 @@ export function makeBinaryResolver(opts: {
               }
             }
             if (name === names[1]) warnLegacyAssetOnce("release");
-            return { path: dest, sha256: persisted.sha256, source: "release-cache" as const };
+            return pair({ path: dest, sha256: persisted.sha256, source: "release-cache" as const }, triple);
           } catch (err) {
             rmSync(tmp, { force: true });
             rmSync(manifestTmp, { force: true });
@@ -713,6 +836,7 @@ export interface GithubReleaseAsset {
   url?: unknown;
   browser_download_url?: unknown;
   digest?: unknown;
+  size?: unknown;
 }
 
 export interface GithubRelease {
@@ -767,9 +891,9 @@ export function githubMetadataRequestError(statusCode: number, headers: GithubRe
   return `GitHub release metadata request was rate limited (${statusCode})${resetContext}${retryContext}`;
 }
 
-function readJson(url: string, headers: Record<string, string>): Promise<unknown> {
+function readJson(url: string, headers: Record<string, string>, absoluteMs?: number): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const req = httpsGet(url, { headers }, (res) => {
+    const req = httpsGet(url, { headers, ...(absoluteMs !== undefined ? { signal: AbortSignal.timeout(absoluteMs) } : {}) }, (res) => {
       const { statusCode = 0 } = res;
       const chunks: Buffer[] = [];
       let size = 0;
@@ -946,12 +1070,13 @@ export function githubCliReleaseMetadataArgs(
 
 function readReleaseMetadataWithGh(
   request: Pick<ReleaseArtifactRequest, "repo" | "releaseTag">,
+  timeoutMs = 30_000,
 ): Promise<unknown> {
   return new Promise((resolveMetadata, rejectMetadata) => {
     execFile(
       "gh",
       githubCliReleaseMetadataArgs(request),
-      { windowsHide: true, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+      { windowsHide: true, timeout: timeoutMs, maxBuffer: 5 * 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
           rejectMetadata(new Error((stderr.trim() || error.message).slice(0, 2_000)));
@@ -1747,18 +1872,17 @@ export class BoxOrchestrator {
     try {
       local = await this.deps.resolveBinary(triple);
     } catch (err) {
-      // No local binary to deploy — fall back to whatever is already on the box (best effort; we
-      // can't verify its launch-contract compatibility, but it beats failing the box outright).
-      const existing = await this.probeRemoteRunner(cfg);
-      if (existing) {
-        this.log(`${cfg.boxId} no local runner binary; using the one already on the box (${existing})`);
-        return { kind: "fallback", runnerPath: REMOTE_RUNNER_PATH, sha256: null };
-      }
+      // A historical remote executable may compile/stage helpers at runtime. Artifact failure
+      // cannot confer a new launch contract on it or bypass bounded companion admission.
       throw err;
     }
+    if (!local.leaseHelper) throw new Error("matching box runner/helper association unavailable; no unpaired remote fallback");
+    const helper = validateBoxLeaseHelper(local.leaseHelper, triple, local.sha256);
     const deployIdentity = binaryDeployIdentity(local);
     const runnerPath = contentAddressedRunnerPath(local.sha256);
     if (await this.remoteRunnerMatches(cfg, local.sha256)) {
+      if (!this.live(rt, epoch)) return { kind: "verified", runnerPath, sha256: local.sha256 };
+      await this.admitRemoteHelper(cfg, runnerPath, helper);
       if (!binaryIsCurrent(cfg.deployedVersion, deployIdentity)) {
         this.deps.db.setBoxDeployedVersion(cfg.boxId, deployIdentity, Date.now());
       }
@@ -1779,8 +1903,33 @@ export class BoxOrchestrator {
     if (!await this.remoteRunnerMatches(cfg, local.sha256)) {
       throw new Error("the promoted managed runner failed remote SHA-256 attestation");
     }
+    if (!this.live(rt, epoch)) return { kind: "verified", runnerPath, sha256: local.sha256 };
+    await this.admitRemoteHelper(cfg, runnerPath, helper);
     this.deps.db.setBoxDeployedVersion(cfg.boxId, deployIdentity, Date.now());
     return { kind: "verified", runnerPath, sha256: local.sha256 };
+  }
+
+  private admitRemoteHelper(cfg: BoxConfig, runnerPath: string, helper: ResolvedBoxLeaseHelper): Promise<void> {
+    return new Promise((resolveAdmission, rejectAdmission) => {
+      const child = spawn("ssh", this.sshArgs(cfg, buildBoxHelperInstallCommand(runnerPath, helper)), { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+      let failure: Error | undefined, diagnosticBytes = 0;
+      // Owned SSH only; no PID/name discovery, no unbounded exception or remote source logging.
+      const timer = setTimeout(() => { failure = new Error("owned helper admission deadline exceeded; retain partial positions"); child.kill("SIGKILL"); }, 27_000);
+      const cleanup = setTimeout(() => { clearTimeout(timer); rejectAdmission(new Error("owned helper admission closure unavailable; retain evidence")); }, 30_000);
+      child.on("error", () => { failure = new Error("owned helper admission could not start"); });
+      const capture = (chunk: Buffer) => {
+        diagnosticBytes += chunk.length;
+        if (diagnosticBytes > 65536) { failure = new Error("helper admission diagnostic limit"); child.kill("SIGKILL"); }
+      };
+      child.stdout.on("data", capture); child.stderr.on("data", capture);
+      child.stdin.on("error", () => { failure = new Error("owned helper input closed before admission; preserve evidence"); });
+      child.on("close", code => {
+        clearTimeout(timer); clearTimeout(cleanup);
+        failure || code !== 0 ? rejectAdmission(failure ?? new Error("remote bounded helper admission refused; preserve occupied positions; no fallback")) : resolveAdmission();
+      });
+      // The independently admitted <=2MiB immutable input is bounded before the pipe write.
+      child.stdin.end(helper.image);
+    });
   }
 
   private async remoteRunnerMatches(cfg: BoxConfig, sha256: string): Promise<boolean> {

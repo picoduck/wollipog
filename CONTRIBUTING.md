@@ -15,10 +15,20 @@ Wollipog requires Node.js 22.13+ within 22.x, or 23.4+ (24 recommended; 23.0–2
 
 ```bash
 pnpm install --frozen-lockfile
+node apps/runner/scripts/prepare-lease-helper-assets.mjs
 pnpm typecheck
 pnpm test
 pnpm build
 ```
+
+Prepare the POSIX lease companion explicitly before running source workers or tests; runner startup
+never compiles or extracts it. Windows lease operations require the offline built-source runner:
+run `pnpm --filter @wollipog/runner build:binary`, then launch
+`node apps/runner/.bin-build/runner-source.cjs` with the usual runner arguments. Raw Windows `tsx`
+source execution refuses lease operations before loading mutable helper assets. The build embeds
+fixed managed bytes and the actual private worker. See
+[helper distribution and lifetime limits](docs/provider-home-lease-helper-cache.md) for preparation,
+installation exhaustion, compatibility, and preservation boundaries.
 
 Run `pnpm check:rust` when changing the Tauri application. Run the relevant Playwright coverage for user-interface changes.
 

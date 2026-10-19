@@ -2799,12 +2799,23 @@ fn spawn_local_runner(
         .map_err(|error| format!("could not create the local runner data directory: {error}"))?;
     let cwd = app_data_dir(app)?;
     let args = local_runner_args(runner_id, &token_file, &data_dir, intent)?;
-    let (mut rx, child) = app
+    let command = app
         .shell()
         .sidecar("runner")
         .map_err(|error| format!("bundled local runner not found: {error}"))?
         .current_dir(cwd)
-        .args(args)
+        .args(args);
+    #[cfg(not(target_os = "windows"))]
+    let command = command.env(
+        "WOLLIPOG_LEASE_HELPER_ROOT",
+        app.path()
+            .resource_dir()
+            .map_err(|error| format!("bundled lease helper resources unavailable: {error}"))?
+            .join("lease-helper")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let (mut rx, child) = command
         .spawn()
         .map_err(|error| format!("failed to start the bundled local runner: {error}"))?;
     let terminated = Arc::new(AtomicBool::new(false));

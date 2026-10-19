@@ -12,10 +12,13 @@ test("runner entry resolves only the first SEA or Node application argument", ()
   assert.deepEqual(resolveRunnerEntry(["node", "cli.ts", "--wollipog-cli", "session", "list"]), {
     mode: "--wollipog-cli", modeIndex: 2,
   });
+  assert.deepEqual(resolveRunnerEntry(["runner", "runner", "--lease-helper-install", "--describe"]), {
+    mode: "--lease-helper-install", modeIndex: 2,
+  });
 });
 
 test("later internal-looking values remain CLI data and never select another mode", () => {
-  for (const later of ["--agent-control-mcp", "--policy-hook", "--state-doctor"]) {
+  for (const later of ["--agent-control-mcp", "--policy-hook", "--state-doctor", "--lease-helper-install"]) {
     assert.deepEqual(resolveRunnerEntry(["runner.exe", "runner.exe", "--wollipog-cli", "session", "create", later]), {
       mode: "--wollipog-cli", modeIndex: 2,
     });
@@ -31,5 +34,8 @@ test("wollipog invocation name remains CLI unless its first argument is an inter
   });
   assert.deepEqual(resolveRunnerEntry(["/usr/local/bin/wollipog", "/usr/local/bin/wollipog", "--agent-control-mcp"]), {
     mode: "--agent-control-mcp", modeIndex: 2,
+  });
+  assert.deepEqual(resolveRunnerEntry(["/usr/local/bin/wollipog", "/usr/local/bin/wollipog", "--lease-helper-install", "--describe"]), {
+    mode: "--lease-helper-install", modeIndex: 2,
   });
 });

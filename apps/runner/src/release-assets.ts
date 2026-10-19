@@ -12,6 +12,8 @@ import { open } from "node:fs/promises";
 import { Readable, Writable } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import type { ReleaseStaging } from "./release-staging.js";
+import { collectHelperBytes, helperAssociationName, helperDigest, helperReleaseAssetName, LEASE_HELPER_LIMITS, parseHelperAssociation, type HelperAssociation } from "../../../scripts/lease-helper-distribution.mjs";
+import { LEASE_HELPER_SOURCE_SHA256 } from "./provider-home-lease-assets.js";
 
 export const RELEASE_REPOSITORY = "picoduck/wollipog";
 export const WEB_BUNDLE_ASSET_NAME = "wollipog-web.tar.gz";
@@ -132,6 +134,48 @@ export function findAsset(release: ResolvedRelease, name: string): ReleaseAsset 
   const asset = release.assets.find((candidate) => candidate.name === name);
   if (!asset) throw new Error(`release ${release.tag} has no asset named ${name}`);
   return asset;
+}
+
+function helperPublisher(release: ResolvedRelease, name: string, maximum: number, manifest?: ReadonlyMap<string, string>): ReleaseAsset {
+  const assets = release.assets.filter(asset => asset.name === name);
+  if (assets.length !== 1) throw new Error(`one exact helper release asset required: ${name}`);
+  const asset = assets[0]!;
+  if (!asset.digest || !/^sha256:[a-f0-9]{64}$/u.test(asset.digest) || !Number.isSafeInteger(asset.size) || asset.size < 1 || asset.size > maximum ||
+      (manifest && manifest.get(name) !== asset.digest.slice(7))) throw new Error(`helper publisher/manifest/size proof unavailable: ${name}`);
+  const url = new URL(asset.url);
+  if (url.protocol !== "https:" || url.username || url.password || asset.url.length > 4096) throw new Error("invalid helper publisher locator");
+  return asset;
+}
+
+/** Inspect the bounded, independently publisher-verified association BEFORE executing any new
+ * internal mode. An older executable must never interpret that flag as a daemon invocation. */
+export async function leaseHelperPreflightArguments(
+  fetchBytes: typeof fetch, release: ResolvedRelease, triple: string, runnerSha256: string, parent: string,
+  options: { manifest?: ReadonlyMap<string, string>; token?: string | null } = {},
+): Promise<{ association: HelperAssociation; args: string[] }> {
+  const asset = helperPublisher(release, helperAssociationName(triple), LEASE_HELPER_LIMITS.contractBytes, options.manifest);
+  const controller = new AbortController(), deadline = performance.now() + LEASE_HELPER_LIMITS.producerMs;
+  const timer = setTimeout(() => controller.abort(), LEASE_HELPER_LIMITS.producerMs);
+  let input: Readable | undefined;
+  try {
+    const headers: Record<string, string> = { accept: "application/octet-stream", "user-agent": "wollipog-lease-helper-preflight" };
+    if (options.token && ["github.com", "api.github.com"].includes(new URL(asset.url).hostname)) headers.authorization = `Bearer ${options.token}`;
+    const response = await fetchBytes(asset.url, { headers, signal: controller.signal });
+    if (!response.ok || !response.body) throw new Error("helper association transport failed; no fallback");
+    input = Readable.fromWeb(response.body as import("node:stream/web").ReadableStream);
+    const bytes = await collectHelperBytes(input, LEASE_HELPER_LIMITS.contractBytes, deadline);
+    if (bytes.length !== asset.size || helperDigest(bytes) !== asset.digest!.slice(7)) throw new Error("helper association publisher mismatch");
+    const association = parseHelperAssociation(bytes), tuple = association.helper;
+    const source = tuple.abi === "posix64" ? LEASE_HELPER_SOURCE_SHA256.posix : LEASE_HELPER_SOURCE_SHA256.windows;
+    if (tuple.target !== triple || tuple.sourceSha256 !== source || association.runnerSha256 !== runnerSha256) throw new Error("helper association runner/target/source mismatch");
+    const args = ["--lease-helper-install", "--association", bytes.toString("base64"), "--association-sha256", asset.digest!.slice(7)];
+    if (association.storage === "external") {
+      const image = helperPublisher(release, helperReleaseAssetName(triple), LEASE_HELPER_LIMITS.imageBytes, options.manifest);
+      if (image.size !== tuple.imageBytes || image.digest!.slice(7) !== tuple.imageSha256) throw new Error("helper companion differs from the runner association");
+      args.push("--parent", parent, "--image-url", image.url, "--image-sha256", tuple.imageSha256);
+    }
+    return { association, args };
+  } finally { clearTimeout(timer); input?.destroy(); controller.abort(); }
 }
 
 /** Parse `SHA256SUMS` (`<hex>  <name>` lines). Duplicate or malformed lines fail closed. */

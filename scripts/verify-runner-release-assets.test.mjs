@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { controlPlaneArtifactName, headlessArtifactNames, runnerArtifactNames, RUNNER_TARGET_TRIPLES, WEB_BUNDLE_ASSET_NAME } from "../apps/runner/scripts/runner-artifacts.mjs";
+import { helperAssociationBytes, helperAssociationName, helperDigest, helperReleaseAssetName } from "./lease-helper-distribution.mjs";
 import { desktopUpdaterArtifacts, updaterReleaseAssetNames } from "./desktop-update-manifest.mjs";
 import {
   checksumManifest,
@@ -26,6 +27,9 @@ async function fixture() {
     const { canonical, legacy } = runnerArtifactNames(triple);
     writeFileSync(join(root, canonical), bytes);
     writeFileSync(join(root, legacy), bytes);
+    const windows = triple.endsWith("-pc-windows-msvc"), image = Buffer.from(`fixed helper for ${triple}`);
+    if (!windows) { const path = join(root, helperReleaseAssetName(triple)); writeFileSync(path, image); chmodSync(path, 0o555); }
+    writeFileSync(join(root, helperAssociationName(triple)), helperAssociationBytes({ schema: "WPLR1", helper: { schema: "WPLI1", target: triple, protocol: "WPLL4", sourceSha256: helperDigest(readFileSync(new URL(windows ? "../apps/runner/native/provider-home-lease-io.cs" : "../apps/runner/native/provider-home-lease-io.c", import.meta.url))), imageSha256: helperDigest(image), imageBytes: image.length, abi: windows ? "framework4-il64" : "posix64" }, canonical, legacy, runnerSha256: helperDigest(bytes), storage: windows ? "embedded" : "external", installerMode: "--lease-helper-install" }));
     writeFileSync(join(root, controlPlaneArtifactName(triple)), Buffer.from(`native control plane for ${triple}`));
   }
   writeFileSync(join(root, WEB_BUNDLE_ASSET_NAME), Buffer.from("web bundle"));
@@ -37,7 +41,7 @@ test("local runner verification emits a complete deterministic SHA256SUMS manife
   try {
     const digests = await verifyLocalRunnerAssets(root);
     const manifest = checksumManifest(digests);
-    assert.equal(manifest.trimEnd().split("\n").length, 19);
+    assert.equal(manifest.trimEnd().split("\n").length, 29);
     assert.deepEqual(manifest.trimEnd().split("\n").map((line) => line.slice(66)), expectedManifestAssetNames());
     assert.deepEqual(headlessArtifactNames(), [...RUNNER_TARGET_TRIPLES.map((triple) => controlPlaneArtifactName(triple)), WEB_BUNDLE_ASSET_NAME].sort());
     assert.equal(controlPlaneArtifactName("x86_64-pc-windows-msvc"), "wollipog-control-plane-x86_64-pc-windows-msvc.exe");
@@ -97,14 +101,14 @@ test("hosted verification enforces the exact release count, manifest, and six re
       })),
     ];
     const assetPages = [assets.slice(0, 13), assets.slice(13)];
-    assert.equal(EXPECTED_RELEASE_ASSET_COUNT, 14 + RUNNER_TARGET_TRIPLES.length * 2 + RUNNER_TARGET_TRIPLES.length + 1 + 1);
-    assert.equal(EXPECTED_RELEASE_ASSET_COUNT, 34);
+    assert.equal(EXPECTED_RELEASE_ASSET_COUNT, 14 + RUNNER_TARGET_TRIPLES.length * 2 + RUNNER_TARGET_TRIPLES.length + 10 + 1 + 1);
+    assert.equal(EXPECTED_RELEASE_ASSET_COUNT, 44);
     assert.equal(assets.length, EXPECTED_RELEASE_ASSET_COUNT);
     assert.doesNotThrow(() => verifyHostedRelease(assetPages, manifest));
 
     assert.throws(
       () => verifyHostedRelease([assets.slice(0, -1)], manifest),
-      /expected exactly 34/,
+      /expected exactly 44/,
     );
     const badManifestDigest = structuredClone(assetPages);
     badManifestDigest.flat().find((asset) => asset.name === "SHA256SUMS").digest = `sha256:${"f".repeat(64)}`;
@@ -148,7 +152,7 @@ test("hosted verification enforces the exact release count, manifest, and six re
       manifestPath,
     ], { encoding: "utf8" });
     assert.equal(cliResult.status, 0, cliResult.stderr);
-    assert.match(cliResult.stdout, /verified exact 34-asset release inventory/u);
+    assert.match(cliResult.stdout, /verified exact 44-asset release inventory/u);
     const missingControlPlane = structuredClone(assetPages);
     const cpAsset = missingControlPlane.flat().find((asset) => asset.name === controlPlaneArtifactName("x86_64-unknown-linux-gnu"));
     cpAsset.digest = `sha256:${"e".repeat(64)}`;
@@ -184,7 +188,7 @@ test("a release signed for updates must carry every package, signature, and the 
       hosted("latest.json", updateManifest),
     ];
     assert.equal(EXPECTED_UPDATER_ASSET_COUNT, 13);
-    assert.equal(EXPECTED_SIGNED_RELEASE_ASSET_COUNT, 47);
+    assert.equal(EXPECTED_SIGNED_RELEASE_ASSET_COUNT, 57);
     assert.equal(assets.length, EXPECTED_SIGNED_RELEASE_ASSET_COUNT);
     const updater = { manifestText: updateManifest, version };
     const pages = [assets.slice(0, 20), assets.slice(20)];
@@ -214,7 +218,7 @@ test("a release signed for updates must carry every package, signature, and the 
       /release is missing/u,
     );
     // A signed release checked as an unsigned one fails on its count, never silently passes.
-    assert.throws(() => verifyHostedRelease(pages, manifest), /expected exactly 34/u);
+    assert.throws(() => verifyHostedRelease(pages, manifest), /expected exactly 44/u);
 
     const assetsPath = join(root, "hosted-assets.json");
     const manifestPath = join(root, "SHA256SUMS");
@@ -228,7 +232,7 @@ test("a release signed for updates must carry every package, signature, and the 
       "--update-manifest", updatePath, "--desktop-version", version,
     ], { encoding: "utf8" });
     assert.equal(cliResult.status, 0, cliResult.stderr);
-    assert.match(cliResult.stdout, /verified exact 47-asset release inventory.*and the 13 update assets/u);
+    assert.match(cliResult.stdout, /verified exact 57-asset release inventory.*and the 13 update assets/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

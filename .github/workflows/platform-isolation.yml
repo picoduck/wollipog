@@ -58,6 +58,22 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Select Private POSIX Source Helper Parent
+        if: ${{ !startsWith(matrix.os, 'windows-') }}
+        shell: bash
+        run: |
+          mkdir -m 700 apps/runner/dist-bin
+          echo "WOLLIPOG_LEASE_HELPER_ROOT=$PWD/apps/runner/dist-bin" >> "$GITHUB_ENV"
+
+      - name: Build Offline Lease Helper and Native Runner
+        run: pnpm --filter @wollipog/runner build:binary
+
+      - name: Verify Raw Source Helper Refusal
+        run: node --import tsx --test apps/runner/src/provider-home-lease-assets.test.ts
+
+      - name: Verify Immutable Helper Publication
+        run: node --test scripts/lease-helper-distribution.test.mjs
+
       - name: Verify Retained Process Disposal Ten Times
         if: github.event_name == 'workflow_dispatch' && inputs.retained_disposal_validation && matrix.os == 'macos-latest'
         shell: bash
@@ -86,7 +102,7 @@ jobs:
         run: node --import tsx --test apps/runner/src/execution-isolation.test.ts apps/runner/src/runner-data-dir.test.ts apps/runner/src/spawn.test.ts
 
       - name: Verify Native Provider-HOME Lease Protocol
-        run: node --import tsx --test apps/runner/src/provider-home-lease.test.ts apps/runner/src/provider-home-lease-portable.test.ts apps/runner/src/provider-home-lease-io.test.ts apps/runner/src/provider-home-lease-async.test.ts apps/runner/src/provider-home-lease-worker-protocol.test.ts apps/runner/src/provider-home-lease-heartbeat.test.ts apps/runner/src/provider-home-lease-clock.test.ts apps/runner/src/provider-home-lease-deadline.test.ts apps/runner/src/provider-home-lease-worker-deadline.test.ts
+        run: node apps/runner/scripts/verify-lease-helper-platform.mjs
 
       - name: Verify Successor Readiness Regression Detects Barrier Removal
         timeout-minutes: 2
@@ -110,13 +126,14 @@ jobs:
         run: node apps/runner/scripts/verify-successor-election-load.mjs
 
       - name: Verify Source Provider-HOME Worker
+        if: ${{ !startsWith(matrix.os, 'windows-') }}
         run: node apps/runner/scripts/verify-provider-home-worker-binary.mjs --source
 
+      - name: Verify Built Source Provider-HOME Worker
+        run: node apps/runner/scripts/verify-provider-home-worker-binary.mjs --source-bundle
+
       - name: Verify Packaged Provider-HOME Worker
-        shell: bash
-        run: |
-          pnpm --filter @wollipog/runner build:binary
-          node apps/runner/scripts/verify-provider-home-worker-binary.mjs --packaged
+        run: node apps/runner/scripts/verify-provider-home-worker-binary.mjs --packaged
 
       # The managed-worktree read-only rule and the hook-state mask (#1336) are only meaningful
       # against a real kernel mount, so this job installs bubblewrap and runs the enforcement tests
@@ -227,9 +244,6 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          $env:TARGET_TRIPLE = 'x86_64-pc-windows-msvc'
-          pnpm --filter @wollipog/runner build:binary
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node apps/runner/scripts/verify-cli-binary.mjs apps/runner/dist-bin/wollipog-runner-x86_64-pc-windows-msvc.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

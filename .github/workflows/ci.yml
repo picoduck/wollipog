@@ -231,6 +231,12 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Prepare Offline Lease Helper Fixture
+        run: |
+          mkdir -m 700 apps/runner/dist-bin
+          echo "WOLLIPOG_LEASE_HELPER_ROOT=$PWD/apps/runner/dist-bin" >> "$GITHUB_ENV"
+          node apps/runner/scripts/prepare-lease-helper-assets.mjs
+
       - name: Unit Tests
         run: pnpm test
 
@@ -258,8 +264,10 @@ jobs:
     # including other setup, suite, shard-1 production checks and cleanup; queue wait excluded.
     # Cache-hit OR cache-miss path: two six-minute attempts, not both exclusive paths.
     # 720s attempts + 2020s rounded remainder + 105s enforcement + 480s failure diagnostics
-    # + 180s reserve = 3505s. A finite 59m (3540s) leaves 215s modeled residual reserve.
-    # Same five concurrent browser jobs; successful execution is unchanged. Hung jobs can
+    # + 180s reserve = 3505s before #2316's offline helper preparation. Its configured
+    # 15s deadline + 5s kill grace + 15s enforcement assumption add 35s, totaling 3540s.
+    # This retains the modeled 180s reserve without increasing 59m; fresh phases remain unmeasured.
+    # Same five concurrent browser jobs. Hung jobs can
     # hold runners 10m longer than the prior 49m limit in the shared 20-job pool.
     # scripts/workflow-browser-budget.test.mjs derives this from actual step deadlines and
     # identified phases. Remeasure after workload/setup changes; do not grow blindly.
@@ -298,6 +306,13 @@ jobs:
 
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Prepare Offline Lease Helper for Live Runners
+        timeout-minutes: 1
+        run: |
+          mkdir -m 700 apps/runner/dist-bin
+          echo "WOLLIPOG_LEASE_HELPER_ROOT=$PWD/apps/runner/dist-bin" >> "$GITHUB_ENV"
+          timeout --kill-after=5s 15s node apps/runner/scripts/prepare-lease-helper-assets.mjs
 
       - name: Resolve Playwright Version
         id: playwright-version

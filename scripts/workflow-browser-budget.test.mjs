@@ -78,11 +78,18 @@ function budgetAccounting(source, rows = evidence.samples) {
   const enforcement = (Math.max(...attemptPaths.map((attempts) => attempts.length)) + diagnosticSteps.length)
     * enforcementSecondsPerAttempt;
   const diagnostics = diagnosticSteps.reduce((seconds, name) => seconds + stepSeconds(namedStep(job, name)), 0);
-  const required = install + remainder + enforcement + reserveSeconds + diagnostics;
+  // #2316 adds explicit offline preparation, absent from the historical phase samples.
+  // Charge its configured 15s deadline + 5s kill grace + the same 15s enforcement assumption.
+  // The one-minute step watchdog is secondary. Neither deadline is measured completion proof.
+  const preparation = namedStep(job, "Prepare Offline Lease Helper for Live Runners");
+  assert.match(preparation, /timeout --kill-after=5s 15s node apps\/runner\/scripts\/prepare-lease-helper-assets\.mjs/u);
+  assert.equal(stepSeconds(preparation), 60);
+  const helperPreparation = 20 + enforcementSecondsPerAttempt;
+  const required = install + remainder + enforcement + reserveSeconds + diagnostics + helperPreparation;
   assert.ok(budget >= required,
     `browser: ${budget}s must cover ${install}s attempts + ${remainder}s measured remainder + ` +
-    `${enforcement}s timeout enforcement + ${diagnostics}s diagnostics + ${reserveSeconds}s reserve (needs ${required}s)`);
-  return { budget, install, remainder, enforcement, diagnostics, required };
+    `${enforcement}s timeout enforcement + ${diagnostics}s diagnostics + ${helperPreparation}s helper preparation + ${reserveSeconds}s reserve (needs ${required}s)`);
+  return { budget, install, remainder, enforcement, diagnostics, helperPreparation, required };
 }
 
 function withBudget(minutes) {
@@ -147,13 +154,13 @@ test("recent sizing evidence covers five natural full runs and rejects incomplet
 
 test("browser budget covers either bounded install path, measured remainder, enforcement and three minutes spare", () => {
   const result = budgetAccounting(workflow);
-  assert.deepEqual(result, { budget: 3540, install: 720, remainder: 2020, enforcement: 105, diagnostics: 480, required: 3505 });
+  assert.deepEqual(result, { budget: 3540, install: 720, remainder: 2020, enforcement: 105, diagnostics: 480, helperPreparation: 35, required: 3540 });
   const timedOut = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(timedOut);
   assert.ok(timedOut.firstInstallSeconds - 360 <= enforcementSecondsPerAttempt,
     "the sizing assumption must cover the observed enforcement overrun");
   for (const row of evidence.samples) {
-    assert.ok(result.budget - result.install - result.enforcement - result.diagnostics - row.nonInstallSeconds >= reserveSeconds,
+    assert.ok(result.budget - result.install - result.enforcement - result.diagnostics - result.helperPreparation - row.nonInstallSeconds >= reserveSeconds,
       `run ${row.runId} shard ${row.shard}: near-bound recovered setup must leave the full remaining workload its reserve`);
   }
 });

@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { readCompatibleEnv } from "../../../scripts/env-compat.mjs";
 import { assertRunnerTargetHost, controlPlaneArtifactName, publishLegacyRunnerAlias } from "../../runner/scripts/runner-artifacts.mjs";
 import { removeWindowsSignature, signWindowsBinary } from "../../runner/scripts/windows-authenticode.mjs";
+import { helperAssociationName, helperReleaseAssetName, installLeaseHelper, LEASE_HELPER_LIMITS, parseHelperAssociation, readHelperFile } from "../../../scripts/lease-helper-distribution.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..", "..", ".."); // repo root
@@ -127,6 +128,17 @@ if (builtRunner === legacyRunner) {
 const bundledRunner = join(binDir, `runner-${triple}${exe}`);
 copyFileSync(builtRunner, bundledRunner);
 console.log("local runner sidecar built ->", bundledRunner);
+
+// Offline resource publication only. Runtime selects this already-installed immutable input;
+// it never copies/extracts a companion into the desktop's mutable application-data directory.
+const leaseResourceRoot = join(buildDir, "lease-helper");
+mkdirSync(leaseResourceRoot, { recursive: true, mode: 0o700 });
+if (process.platform !== "win32") {
+  const association = parseHelperAssociation(readHelperFile(join(runnerBuildDir, helperAssociationName(triple)), LEASE_HELPER_LIMITS.contractBytes, undefined, false).bytes);
+  const image = readHelperFile(join(runnerBuildDir, helperReleaseAssetName(triple)), association.helper.imageBytes).bytes;
+  const chunks = function* () { for (let offset = 0; offset < image.length; offset += 65536) yield image.subarray(offset, offset + 65536); };
+  await installLeaseHelper(leaseResourceRoot, association.helper, chunks());
+}
 
 /** The Rust host target triple (e.g. aarch64-pc-windows-msvc). */
 function hostTriple() {

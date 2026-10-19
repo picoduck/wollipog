@@ -1,6 +1,6 @@
 /**
- * Runner entry dispatcher. ONE executable, several modes — the box deployment is a single
- * Node-SEA binary, so its sidecars must live inside it, not beside it:
+ * Runner entry dispatcher. One Node-SEA executable contains the private worker and internal
+ * modes; POSIX lease I/O uses a separately installed immutable companion:
  *  - internal modes (`--state-doctor`, `--policy-hook`, `--agent-control-mcp`,
  *    `--wollipog-cli`, `--managed-worktree-guard`; see runner-entry.ts) skip the daemon entirely.
  *  - default: the runner daemon (index.ts, unchanged as a module).
@@ -12,7 +12,11 @@ import { resolveRunnerEntry } from "./runner-entry.js";
 
 const entry = resolveRunnerEntry(process.argv);
 
-if (entry.mode === "--state-doctor") {
+if (entry.mode === "--lease-helper-install") {
+  void import("./lease-helper-install.js").then(async (m) => {
+    process.exitCode = await m.runLeaseHelperInstall(process.argv);
+  }).catch(() => { console.error("Lease helper installer unavailable; preserve all evidence."); process.exitCode = 2; });
+} else if (entry.mode === "--state-doctor") {
   void import("./state-doctor.js").then((m) => m.runStateDoctor(process.argv)).catch((error) => {
     console.error(`[state-doctor] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;

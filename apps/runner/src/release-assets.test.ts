@@ -20,11 +20,40 @@ import {
   downloadToFile,
   findAsset,
   hostTargetTriple,
+  leaseHelperPreflightArguments,
   parseChecksumManifest,
   resolveRelease,
   runnerAssetName,
   type Downloader,
 } from "./release-assets.js";
+import { helperAssociationBytes, helperAssociationName, helperDigest, helperReleaseAssetName } from "../../../scripts/lease-helper-distribution.mjs";
+import { LEASE_HELPER_SOURCE_SHA256 } from "./provider-home-lease-assets.js";
+
+test("new internal mode is selected only after complete bounded publisher/runner/source proof", async () => {
+  const triple = "x86_64-unknown-linux-gnu", runnerSha256 = "b".repeat(64), image = Buffer.from("native image");
+  const bytes = helperAssociationBytes({ schema: "WPLR1", helper: {
+    schema: "WPLI1", target: triple, protocol: "WPLL4", sourceSha256: LEASE_HELPER_SOURCE_SHA256.posix,
+    imageSha256: helperDigest(image), imageBytes: image.length, abi: "posix64" },
+    canonical: `wollipog-runner-${triple}`, legacy: `agent-manager-runner-${triple}`, runnerSha256,
+    storage: "external", installerMode: "--lease-helper-install" });
+  const metadata = { name: helperAssociationName(triple), digest: `sha256:${helperDigest(bytes)}`, url: "https://github.com/association", size: bytes.length };
+  const companion = { name: helperReleaseAssetName(triple), digest: `sha256:${helperDigest(image)}`, url: "https://github.com/image", size: image.length };
+  const release = { tag: "v1.2.3", version: "1.2.3", assets: [metadata, companion] };
+  let calls = 0;
+  const fetchBytes: typeof fetch = async () => { calls++; return new Response(bytes); };
+  const verified = await leaseHelperPreflightArguments(fetchBytes, release, triple, runnerSha256, "/protected/bin");
+  assert.deepEqual(verified.args, ["--lease-helper-install", "--association", bytes.toString("base64"), "--association-sha256", helperDigest(bytes), "--parent", "/protected/bin", "--image-url", companion.url, "--image-sha256", helperDigest(image)]);
+  assert.equal(calls, 1, "companion is not downloaded/staged by the consumer");
+  await assert.rejects(leaseHelperPreflightArguments(fetchBytes, release, triple, "c".repeat(64), "/protected/bin"), /runner\/target\/source/u);
+  for (const assets of [[metadata, metadata, companion], [{ ...metadata, size: 16385 }, companion], [{ ...metadata, digest: null }, companion]]) {
+    const previous = calls;
+    await assert.rejects(leaseHelperPreflightArguments(fetchBytes, { ...release, assets }, triple, runnerSha256, "/protected/bin"));
+    assert.equal(calls, previous, "invalid publisher shape refuses before body acquisition");
+  }
+  await assert.rejects(leaseHelperPreflightArguments(async () => new Response(Buffer.alloc(16385)), release, triple, runnerSha256, "/protected/bin"), /before-write byte\/work/u);
+  await assert.rejects(leaseHelperPreflightArguments(fetchBytes, release, triple, runnerSha256, "/protected/bin", { manifest: new Map() }), /publisher\/manifest/u);
+  await assert.rejects(leaseHelperPreflightArguments(fetchBytes, { ...release, assets: [metadata, { ...companion, digest: `sha256:${"d".repeat(64)}` }] }, triple, runnerSha256, "/protected/bin"), /companion differs/u);
+});
 
 test("release asset names stay in sync with the release producer", () => {
   assert.equal(WEB_BUNDLE_ASSET_NAME, PRODUCER_WEB_BUNDLE);

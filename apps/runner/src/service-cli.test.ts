@@ -6,13 +6,29 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
-import { executableFromUnit, runServiceCli, type ServiceHost, type ServiceIo } from "./service-cli.js";
+import { captureLeaseHelperAdmission, executableFromUnit, runServiceCli, type ServiceHost, type ServiceIo } from "./service-cli.js";
 import { CONTROL_PLANE_UNIT, RUNNER_UNIT, serviceLayout } from "./systemd-service.js";
 import { ReleaseStaging, stagingFilesystem } from "./release-staging.js";
 import { describeJournal } from "./release-staging-journal.js";
+import { helperAssociationBytes, helperAssociationName, helperReleaseAssetName } from "../../../scripts/lease-helper-distribution.mjs";
+import { LEASE_HELPER_SOURCE_SHA256 } from "./provider-home-lease-assets.js";
 
 const LOCAL_TOKEN = "L".repeat(43);
 const RUNNER_TOKEN = `wollipogr_${"r".repeat(43)}`;
+
+test("helper admission counts both streams before retention and bounds owned process closure", async () => {
+  const success = await captureLeaseHelperAdmission(process.execPath, ["-e", "process.stdout.write('ok');process.stderr.write('note')"]);
+  assert.deepEqual(success, { code: 0, stdout: "ok", stderr: "note" });
+  const excess = await captureLeaseHelperAdmission(process.execPath, ["-e", "process.stdout.write(Buffer.alloc(40000));process.stderr.write(Buffer.alloc(40000));setInterval(()=>{},1000)"]);
+  assert.equal(excess.code, null); assert.equal(excess.stdout, "");
+  assert.match(excess.stderr, /diagnostic budget exceeded; preserve occupied positions/u);
+  assert.doesNotMatch(excess.stderr, /closure unproved/u);
+  const started = performance.now();
+  const stalled = await captureLeaseHelperAdmission(process.execPath, ["-e", "setInterval(()=>{},1000)"], 500);
+  assert.equal(stalled.code, null); assert.match(stalled.stderr, /deadline exceeded/u);
+  assert.doesNotMatch(stalled.stderr, /closure unproved/u);
+  assert.ok(performance.now() - started < 1500, "exact child closure must not turn into an unbounded wait");
+});
 
 interface Fake {
   enabled: Set<string>;
@@ -152,6 +168,8 @@ function fake(t: { after(fn: () => void): void }, options: {
     },
     spawnInherit: async (command, args) => { execs.push(`${command} ${args.join(" ")} (inherit)`); return 0; },
     fetch,
+    fetchHelper: async () => { throw new Error("no helper transport in this fake"); },
+    verifyLeaseHelper: async path => { execs.push(`read-only helper preflight ${path}`); },
     fetchJson: async () => ({ ok: false, status: 500, text: async () => "" }),
     download: async () => { throw new Error("no downloads in this fake"); },
     stagingFilesystem: stagingFs,
@@ -204,6 +222,16 @@ function bins(f: Fake): string[] {
   writeFileSync(runner, "#!/bin/sh\n", { mode: 0o755 });
   return ["--control-plane-bin", cp, "--runner-bin", runner];
 }
+
+test("missing service companion refuses before account/configuration/credential/start effects", async (t) => {
+  const f = fake(t, { system: true, uid: 0 }), arguments_ = bins(f);
+  const host = { ...f.host, verifyLeaseHelper: async () => { throw new Error("matching installed lease helper unavailable"); } };
+  assert.equal(await runServiceCli(["service", "install", ...arguments_, "--system", "--json"], host, f.io), 1);
+  assert.match(f.stdout(), /matching installed lease helper unavailable/u);
+  assert.ok(f.execs.every(line => !/useradd|chown|enable|restart| start /u.test(line)));
+  assert.equal(existsSync(f.layout.runnerConfigFile), false);
+  assert.equal(existsSync(f.layout.runnerTokenFile), false);
+});
 
 test("service install (user mode) writes units, env, config, mints the runner credential once, and verifies health", async (t) => {
   const f = fake(t);
@@ -638,6 +666,13 @@ function releaseFixture(f: Fake, options: { version?: string; webBundle?: boolea
   const triple = "x86_64-unknown-linux-gnu";
   const files = new Map<string, Buffer>();
   files.set(`wollipog-runner-${triple}`, Buffer.from(`runner ${version}`));
+  const image = Buffer.from("fixed native helper"), imageHash = createHash("sha256").update(image).digest("hex");
+  files.set(helperReleaseAssetName(triple), image);
+  files.set(helperAssociationName(triple), helperAssociationBytes({ schema: "WPLR1", helper: {
+    schema: "WPLI1", protocol: "WPLL4", target: triple, sourceSha256: LEASE_HELPER_SOURCE_SHA256.posix,
+    imageBytes: image.length, imageSha256: imageHash, abi: "posix64" },
+    canonical: `wollipog-runner-${triple}`, legacy: `agent-manager-runner-${triple}`,
+    runnerSha256: createHash("sha256").update(files.get(`wollipog-runner-${triple}`)!).digest("hex"), storage: "external", installerMode: "--lease-helper-install" }));
   files.set(`wollipog-control-plane-${triple}`, Buffer.from(`control plane ${version}`));
   if (options.webBundle !== false) files.set("wollipog-web.tar.gz", Buffer.from(`web ${version}`));
   const digest = (name: string) => createHash("sha256").update(files.get(name)!).digest("hex");
@@ -648,6 +683,7 @@ function releaseFixture(f: Fake, options: { version?: string; webBundle?: boolea
   const host: ServiceHost = {
     ...f.host,
     arch: "x64",
+    fetchHelper: async url => new Response(files.get(String(url).replace("https://dl/", ""))!),
     fetchJson: async (url) => ({ ok: true, status: 200, text: async () => JSON.stringify({ tag_name: `v${version}`, assets, url }) }),
     download: async (url, sink) => {
       downloads.push(url);

@@ -92,10 +92,17 @@ Production checks and cleanup remain included.
 | Timeout Enforcement | 105 | 15 per install attempt and diagnostic step, above the observed 12-second overrun. |
 | Failure Diagnostics | 480 | Sanitization/upload: one minute each; linux baseline regeneration: four minutes; upload/summary: one minute each. All five skip on success. |
 | Required Reserve | 180 | Three minutes beyond the full modeled path. |
-| Total | 3505 | 58m25s; rounded up to 59m (3540s). |
+| Historical Total Before #2316 Preparation | 3505 | 58m25s, from the recorded workload above. |
+| Offline Helper Preparation | 35 | Configured 15-second command deadline, five-second kill grace and the same 15-second enforcement assumption; not a new measurement. |
+| Current Modeled Total | 3540 | The inherited 59-minute job limit remains unchanged. |
 
 `720 + 2020 + 105 + 480 + 180 = 3505 <= 3540`. Residual modeled reserve is
-**215 seconds** after installs, rounded remainder, enforcement and diagnostics.
+**215 seconds** after installs, rounded remainder, enforcement and diagnostics before
+#2316's explicit helper preparation. Its separately charged 35 seconds leave the required
+**180 seconds** modeled reserve. The one-minute step watchdog is secondary to the command
+deadline. Neither timeout enforcement nor compiler completion has been independently measured
+for this new workload; initial-head CI must supply actual outcomes and phase evidence. No old
+sample is relabeled as a measurement of helper preparation.
 At 49 minutes that residual would be **-385 seconds**. Even the success-only path
 needs `720 + 2020 + 30 + 180 = 2950` seconds, above 49 minutes.
 
@@ -110,7 +117,7 @@ snapshot; use natural-run phases and margins to assess workload/setup changes
 and trigger remeasurement, rather than treating the snapshot as a runtime guarantee.
 
 The limit remains below the general 60-minute workflow ceiling. The same five
-concurrent browser jobs perform unchanged normal execution work. A hang can hold
+concurrent browser jobs now include the bounded offline helper preparation. A hang can hold
 each runner ten minutes longer than at 49 minutes. Adding shards competes for
 more of the shared 20-job pool; rebalancing five needs per-file/test durations
 and a fresh all-shard baseline before justifying a smaller budget. Assertions,

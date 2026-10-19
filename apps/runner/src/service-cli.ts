@@ -9,8 +9,8 @@ import {
   chmodSync, constants, closeSync, cpSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { hostname as osHostname, homedir, userInfo } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { execCapture } from "./exec-capture.js";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { execCapture, type ExecResult } from "./exec-capture.js";
 import type { McpFetch } from "./session-management-mcp.js";
 import { runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import {
@@ -21,6 +21,7 @@ import {
   downloadVerifiedAsset,
   findAsset,
   hostTargetTriple,
+  leaseHelperPreflightArguments,
   parseChecksumManifest,
   resolveRelease,
   runnerAssetName,
@@ -28,6 +29,9 @@ import {
   type Downloader,
   type JsonFetch,
 } from "./release-assets.js";
+import { expectedLeaseHelper } from "./provider-home-lease-assets.js";
+import { findInstalledHelper } from "../../../scripts/lease-helper-distribution.mjs";
+import { runnerAssociationDigest } from "./lease-helper-install.js";
 import { VERSION } from "./version.js";
 import { ReleaseStaging, StagingOccupiedError, stagingFilesystem, type StagingFilesystem } from "./release-staging.js";
 import { StagingJournal } from "./release-staging-journal.js";
@@ -62,6 +66,41 @@ const VALUE_OPTIONS = new Set([
 const LOOPBACK_HOST_RE = /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|\[::1\])$/u;
 const RUNNER_ID_REJECT_RE = /[\u0000-\u0020\u007f/\\?#]/u;
 
+/** Count helper diagnostics before retaining them, with closure time inside the producer budget.
+ * Only the exact spawned process is signaled. Unproved descendants/closure never authorize
+ * deleting or reusing a partially occupied helper position. */
+export function captureLeaseHelperAdmission(command: string, args: string[], timeoutMs = 30_000): Promise<ExecResult> {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 30_000) throw new Error("invalid helper admission deadline");
+  return new Promise(resolveResult => {
+    let child: ReturnType<typeof spawn>;
+    try { child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }); }
+    catch { resolveResult({ code: null, stdout: "", stderr: "helper admission could not start; preserve occupied positions" }); return; }
+    let bytes = 0, stdout = "", stderr = "", failure = "", settled = false, closed = false;
+    const finish = (code: number | null, uncertainty = false) => {
+      if (settled) return; settled = true; clearTimeout(workTimer); clearTimeout(closeTimer);
+      resolveResult({ code: failure || uncertainty ? null : code, stdout: failure ? "" : stdout,
+        stderr: failure ? `${failure}; preserve occupied positions${uncertainty ? "; process closure unproved" : ""}` : stderr });
+    };
+    const terminate = (reason: string) => {
+      if (failure || closed) return; failure = reason;
+      stdout = ""; stderr = "";
+      try { child.kill("SIGKILL"); } catch { /* final closure deadline retains uncertainty */ }
+    };
+    const reserve = Math.min(3000, Math.max(1, Math.floor(timeoutMs / 10)));
+    const workTimer = setTimeout(() => terminate("helper admission deadline exceeded"), timeoutMs - reserve);
+    const closeTimer = setTimeout(() => { terminate("helper admission deadline exceeded"); finish(null, !closed); }, timeoutMs);
+    const capture = (chunk: Buffer, channel: "stdout" | "stderr") => {
+      if (failure || settled) return;
+      if (bytes + chunk.length > 65536) { terminate("helper admission diagnostic budget exceeded"); return; }
+      bytes += chunk.length;
+      if (channel === "stdout") stdout += chunk.toString(); else stderr += chunk.toString();
+    };
+    child.stdout!.on("data", chunk => capture(chunk, "stdout")); child.stderr!.on("data", chunk => capture(chunk, "stderr"));
+    child.once("error", () => { failure = "helper admission spawn failed"; });
+    child.once("close", code => { closed = true; finish(code); });
+  });
+}
+
 export interface ServiceHost {
   platform: NodeJS.Platform;
   uid: number | null;
@@ -78,6 +117,10 @@ export interface ServiceHost {
   fetch: McpFetch;
   /** GitHub REST metadata requests (JSON). */
   fetchJson: JsonFetch;
+  /** Counted association input, separate from ordinary release JSON/download transport. */
+  fetchHelper: typeof fetch;
+  /** Read-only companion proof before service account/configuration/start effects. */
+  verifyLeaseHelper(path: string): Promise<void>;
   /** Stream a release asset to a file. */
   download: Downloader;
   /** Complete filesystem identity adapter for deterministic staging tests. */
@@ -122,13 +165,27 @@ export function defaultServiceHost(fetchImpl: McpFetch = globalThis.fetch): Serv
     isSea: detectSea(),
     env: process.env,
     cwd: () => process.cwd(),
-    exec: (command, args, options) => execCapture(command, args, options),
+    exec: (command, args, options) => args[0] === "--lease-helper-install"
+      ? captureLeaseHelperAdmission(command, args, options?.timeoutMs ?? 30_000)
+      : execCapture(command, args, options),
     spawnInherit: (command, args) => new Promise((resolvePromise) => {
       const child = spawn(command, args, { stdio: "inherit" });
       child.on("error", () => resolvePromise(1));
       child.on("close", (code) => resolvePromise(code ?? 1));
     }),
     fetch: fetchImpl,
+    fetchHelper: globalThis.fetch,
+    verifyLeaseHelper: async path => {
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 30_000);
+      try {
+        // The CLI and runner must be the same independently built code before using this
+        // process's expected tuple. A different executable needs its matching installed CLI.
+        if (await runnerAssociationDigest(path, controller.signal) !== await runnerAssociationDigest(process.execPath, controller.signal)) {
+          throw new Error("use the matching verified runner's Wollipog CLI for service installation");
+        }
+        findInstalledHelper(dirname(path), expectedLeaseHelper()).verify();
+      } finally { clearTimeout(timer); controller.abort(); }
+    },
     fetchJson: async (url, headers) => {
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
       return { ok: response.ok, status: response.status, text: () => response.text() };
@@ -463,6 +520,17 @@ interface InstallReport {
   warnings: string[];
 }
 
+function requireStableHelperParent(parent: string, layout: ServiceLayout): void {
+  // These existing trees are recursively chowned or removed by service lifecycle operations.
+  // A helper must not acquire that unrelated mutation policy through its location.
+  for (const unsafe of [layout.dataDir, layout.configDir, layout.unitDir, layout.workspaceDir]) {
+    const path = relative(resolve(unsafe), resolve(parent));
+    if (!path || (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`))) {
+      throw new CliError("runner helper parent overlaps service-managed mutable storage; install the executable and companion in a stable protected binary directory", 2);
+    }
+  }
+}
+
 async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (data: unknown, text: string) => void): Promise<number> {
   const mode = resolveMode(args, host);
   await requireSystemd(host, mode);
@@ -528,6 +596,10 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
         "Install both with `wollipog service install`, or for a remote control plane issue a credential there with `wollipog admin runner-credential issue --output`, place it at that token path, and set controlPlaneUrl in runner.config.json.",
       2,
     );
+  }
+  if (runnerBin) {
+    requireStableHelperParent(dirname(runnerBin), layout);
+    await host.verifyLeaseHelper(runnerBin);
   }
   if (mode === "system") {
     const exists = await host.exec("id", ["-u", layout.account], { timeoutMs: 10_000 });
@@ -897,6 +969,9 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   const currentVersions = await installedVersions(host, targets);
   const alreadyCurrent = targets.every((target) => currentVersions.get(target.component) === release.version);
   if (alreadyCurrent && !flag(args, "--force")) {
+    for (const target of targets.filter(target => target.component === "runner")) {
+      requireStableHelperParent(dirname(target.path), layout); await host.verifyLeaseHelper(target.path);
+    }
     emit({ upgraded: false, release: release.tag, current: Object.fromEntries(currentVersions) }, `already at ${release.tag}; pass --force to reinstall the same release`);
     return 0;
   }
@@ -974,6 +1049,13 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
         throw new CliError(`downloaded ${target.assetName} reports version "${reported}" (exit ${probe.code}) instead of ${release.version}; nothing was installed`);
       }
       staged.set(target.component, destination);
+    }
+    if (runnerTarget) {
+      const parent = dirname(runnerTarget.path); requireStableHelperParent(parent, layout);
+      const runnerAsset = findAsset(release, runnerTarget.assetName);
+      const preflight = await leaseHelperPreflightArguments(host.fetchHelper, release, triple, runnerAsset.digest!.slice(7), parent, { manifest, token });
+      const installed = await host.exec(staged.get("runner")!, preflight.args, { timeoutMs: 30_000 });
+      if (installed.code !== 0) throw new CliError("runner helper admission refused before service swaps; preserve occupied positions and inspect the matching companion; no fallback");
     }
     let stagedWeb: string | null = null;
     if (webDist) {
