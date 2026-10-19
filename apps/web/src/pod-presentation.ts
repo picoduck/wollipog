@@ -28,25 +28,60 @@ export function podMemberChoiceLabel(member: PodMemberView, session: SessionView
   return task ? `${podMemberName(member, session)}: ${task}` : podMemberName(member, session);
 }
 
+/** Where a member's name starts: its role, its role and agent, or those and its task. */
+export type PodMemberNameStart = "role" | "agent" | "task";
+
+/** Two names a person could not tell apart: the same words, whatever their case and spacing. */
+const nameKey = (name: string) => name.toLocaleLowerCase("en-US").replace(/\s+/gu, " ").trim();
+
 /**
- * A member by the shortest name no other member shares: its role ("Worker"), else role and agent
- * ("Worker · Codex"), else those and its task ("Worker · Codex: migrate call sites"), so two
- * workers on one agent never read alike. `withAgent` starts at role and agent, for a choice that
- * names members by both. A session no longer in the pod is named by its title, or "A former member".
+ * Names for `sessionIds` that no two of them share (#2980). Each starts at `start` and grows only
+ * while it reads like another's: role ("Worker"), then role and agent ("Worker · Codex"), then
+ * those and the task ("Worker · Codex: migrate call sites"), and last the session's id, which
+ * nothing else shares, so even two workers on one agent with one title stay apart. A session that
+ * left the pod is named by its title, or "A former member", then the same with its id.
  */
+export function podMemberNames(
+  pod: PodView,
+  sessions: ReadonlyMap<string, SessionView>,
+  sessionIds: readonly string[],
+  start: PodMemberNameStart = "role",
+): Map<string, string> {
+  const ids = [...new Set(sessionIds)];
+  const ladders = new Map(ids.map((sessionId) => {
+    const member = pod.members.find((candidate) => candidate.sessionId === sessionId);
+    const session = sessions.get(sessionId);
+    if (!member) {
+      const title = session?.title.trim() || "A former member";
+      return [sessionId, [title, `${title} (${sessionId})`]];
+    }
+    const levels = [podRoleLabel(member.role), podMemberName(member, session), podMemberChoiceLabel(member, session)]
+      .slice(start === "role" ? 0 : start === "agent" ? 1 : 2);
+    return [sessionId, [...levels, `${levels.at(-1)!} (${sessionId})`]];
+  }));
+  const level = new Map(ids.map((sessionId) => [sessionId, 0]));
+  const name = (sessionId: string) => ladders.get(sessionId)![level.get(sessionId)!]!;
+  // Every name in a group that reads alike takes its next step, until none do; the last step
+  // carries the session id, so this always ends.
+  for (;;) {
+    const groups = new Map<string, string[]>();
+    for (const sessionId of ids) groups.set(nameKey(name(sessionId)), [...groups.get(nameKey(name(sessionId))) ?? [], sessionId]);
+    const colliding = [...groups.values()].filter((group) => group.length > 1).flat()
+      .filter((sessionId) => level.get(sessionId)! < ladders.get(sessionId)!.length - 1);
+    if (colliding.length === 0) break;
+    for (const sessionId of colliding) level.set(sessionId, level.get(sessionId)! + 1);
+  }
+  return new Map(ids.map((sessionId) => [sessionId, name(sessionId)]));
+}
+
+/** One member's name among the pod's members (see `podMemberNames`). */
 export function podMemberShortName(
   pod: PodView,
   sessions: ReadonlyMap<string, SessionView>,
   sessionId: string,
-  { withAgent = false }: { withAgent?: boolean } = {},
+  start: PodMemberNameStart = "role",
 ): string {
-  const member = pod.members.find((candidate) => candidate.sessionId === sessionId);
-  if (!member) return sessions.get(sessionId)?.title || "A former member";
-  const others = pod.members.filter((other) => other.sessionId !== sessionId);
-  if (!withAgent && !others.some((other) => other.role === member.role)) return podRoleLabel(member.role);
-  const name = podMemberName(member, sessions.get(sessionId));
-  const sharesName = others.some((other) => podMemberName(other, sessions.get(other.sessionId)) === name);
-  return sharesName ? podMemberChoiceLabel(member, sessions.get(sessionId)) : name;
+  return podMemberNames(pod, sessions, [...pod.members.map((member) => member.sessionId), sessionId], start).get(sessionId)!;
 }
 
 /** Stop reasons a person caused or already sees elsewhere, which need no banner. */

@@ -1,7 +1,7 @@
 import { useId, useRef, useState } from "react";
 import type { PodArbitrationMode, PodOrchestrationPolicy, PodView, SessionView, UpdatePodOrchestrationRequest } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { podMemberChoiceLabel } from "../pod-presentation.js";
+import { podMemberNames } from "../pod-presentation.js";
 import { useStoreActions } from "../store.js";
 import { FieldError } from "./FieldError.js";
 import { Modal } from "./Modal.js";
@@ -211,6 +211,8 @@ export function PodAutomaticTurnsDialog({ pod, sessions, onClose }: {
   const modeLabelId = `${ids}-mode`;
   const startLabelId = `${ids}-start`;
   const startLabel = draft.mode === "event_triggered" ? "Starting Member" : "First Member";
+  // By agent and task, and by id too where two members share all three (#2980).
+  const startingNames = podMemberNames(pod, sessions, candidates.map((member) => member.sessionId), "task");
   const disabled = Boolean(blockedReason);
   const saveWithoutStarting = (
     <BusyButton className="btn" busy={busy === "save"} progress="Saving automatic turns…"
@@ -278,7 +280,7 @@ export function PodAutomaticTurnsDialog({ pod, sessions, onClose }: {
               value={startingId || null}
               options={candidates.map((member) => ({
                 value: member.sessionId,
-                label: podMemberChoiceLabel(member, sessions.get(member.sessionId)),
+                label: startingNames.get(member.sessionId)!,
               }))}
               onChange={(firstSessionId) => update({ firstSessionId })}
             />

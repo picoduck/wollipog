@@ -128,11 +128,11 @@ async function mount(pods: PodView[], members: SessionView[], overrides: Partial
   await settle();
   return {
     container,
-    push: async (next: PodView) => {
+    push: async (next: PodView, nextMembers: SessionView[] = members) => {
       await act(async () => socket.push({
         type: "snapshot",
         capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-        runners: [runner], boxes: [], projects: [], runs: [], pods: [next], sessions: members,
+        runners: [runner], boxes: [], projects: [], runs: [], pods: [next], sessions: nextMembers,
       }));
       await settle();
     },
@@ -527,5 +527,130 @@ test("on a phone the Automatic Turns footer holds Cancel and Save and Start; Sav
   } finally {
     await view.unmount();
     await act(async () => domWindow.happyDOM.setWindowSize({ width: 1440, height: 900 }));
+  }
+});
+
+/** A status read the test answers when it chooses, in the order it chooses. */
+function statusReads() {
+  const waiting: { sessionId: string; answer: (hasChanges: boolean) => void }[] = [];
+  return {
+    git: (sessionId: string) => new Promise((resolve) => {
+      waiting.push({ sessionId, answer: (hasChanges) => resolve({ status: { hasChanges } }) });
+    }),
+    /** Answers the oldest unanswered read of `sessionId`. */
+    answer: async (sessionId: string, hasChanges: boolean) => {
+      const index = waiting.findIndex((read) => read.sessionId === sessionId);
+      assert.ok(index >= 0, `a read of ${sessionId} is waiting`);
+      const [read] = waiting.splice(index, 1);
+      read!.answer(hasChanges);
+      await settle();
+    },
+    waitingFor: (sessionId: string) => waiting.filter((read) => read.sessionId === sessionId).length,
+  };
+}
+
+const mergeReason = (dialog: HTMLElement) => {
+  const merge = buttonNamed(dialog, "Merge")!;
+  return merge.disabled ? domWindow.document.getElementById(merge.getAttribute("aria-describedby")!)?.textContent ?? "(no reason)" : null;
+};
+
+test("a clean read taken before a member's turn never enables Merge after it, even while the new read is pending (CR-2.1)", async () => {
+  const reads = statusReads();
+  const members = sessions();
+  const view = await mount([pod()], members, { git: reads.git } as unknown as Partial<ApiClient>);
+  try {
+    const dialog = await openDialog("Merge Work…", "Merge Work");
+    assert.equal(mergeReason(dialog), "Checking for uncommitted changes…");
+    await reads.answer("lead", false);
+    await reads.answer("worker", false);
+    assert.equal(mergeReason(dialog), null, "both clean: Merge is enabled");
+
+    // The worker runs a turn that leaves changes, and settles.
+    const running = members.map((entry) => entry.id === "worker" ? { ...entry, status: "running" as const, lastEventAt: 10 } : entry);
+    await view.push(pod(), running);
+    assert.equal(mergeReason(dialog), "Worker is running. Merge when it's idle.");
+    const settled = members.map((entry) => entry.id === "worker" ? { ...entry, status: "idle" as const, lastEventAt: 20 } : entry);
+    await view.push(pod(), settled);
+    assert.equal(reads.waitingFor("worker"), 1, "the settled worker is read again");
+    assert.equal(mergeReason(dialog), "Checking for uncommitted changes…", "the earlier clean read no longer counts");
+    await reads.answer("worker", true);
+    assert.equal(mergeReason(dialog), "Worker has uncommitted changes. Commit them first.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a late answer for a state the member has left never decides Merge (CR-2.1)", async () => {
+  const reads = statusReads();
+  const members = sessions();
+  const view = await mount([pod()], members, { git: reads.git } as unknown as Partial<ApiClient>);
+  try {
+    const dialog = await openDialog("Merge Work…", "Merge Work");
+    await reads.answer("lead", false);
+    // The worker's first read is still out when it runs a turn and settles again.
+    await view.push(pod(), members.map((entry) => entry.id === "worker" ? { ...entry, status: "running" as const, lastEventAt: 10 } : entry));
+    await view.push(pod(), members.map((entry) => entry.id === "worker" ? { ...entry, status: "idle" as const, lastEventAt: 20 } : entry));
+    assert.equal(reads.waitingFor("worker"), 2);
+    await reads.answer("worker", false);
+    assert.equal(mergeReason(dialog), "Checking for uncommitted changes…", "the first, stale answer is not the current one");
+    await reads.answer("worker", true);
+    assert.equal(mergeReason(dialog), "Worker has uncommitted changes. Commit them first.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("returning to the window or finishing a merge re-reads, and an earlier clean read does not stand in meanwhile (CR-2.1)", async () => {
+  const reads = statusReads();
+  const view = await mount([pod()], sessions(), {
+    git: reads.git,
+    reconcilePod: async () => ({ pod: pod(), reconciliation: {} }),
+  } as unknown as Partial<ApiClient>);
+  try {
+    const dialog = await openDialog("Merge Work…", "Merge Work");
+    await reads.answer("lead", false);
+    await reads.answer("worker", false);
+    assert.equal(mergeReason(dialog), null);
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus") as never); });
+    await settle();
+    assert.equal(mergeReason(dialog), "Checking for uncommitted changes…");
+    await reads.answer("lead", false);
+    await reads.answer("worker", false);
+    await act(async () => buttonNamed(dialog, "Merge")!.click());
+    await settle();
+    assert.equal(mergeReason(dialog), "Checking for uncommitted changes…", "the merge may have moved Into's worktree");
+    assert.equal(reads.waitingFor("lead"), 1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("two workers with one agent and one title stay distinguishable in From, Into and Recent Merges (CR-2.2)", async () => {
+  const base = pod({}, [{
+    reconciliationId: "r-same", podId: "pod-1", sourceSessionId: "worker", targetSessionId: "worker-2", actorId: "local",
+    status: "conflicted", createdAt: Date.now() - 60_000, completedAt: Date.now() - 60_000,
+  }]);
+  const shared: PodView = {
+    ...base,
+    members: [...base.members, { sessionId: "worker-2", joinedAt: 1, role: "worker", contextTokenBudget: null, lastContextSeq: 0 }],
+  };
+  const view = await mount([shared], [...sessions(), session("worker-2", "migrate call sites")]);
+  try {
+    const dialog = await openDialog("Merge Work…", "Merge Work");
+    const labels = await optionLabels(dialog, "From");
+    assert.equal(new Set(labels).size, labels.length, `options read alike: ${JSON.stringify(labels)}`);
+    assert.deepEqual(labels, [
+      "Lead · Codex App Server",
+      "Worker · Codex App Server: migrate call sites (worker)",
+      "Worker · Codex App Server: migrate call sites (worker-2)",
+    ]);
+    await chooseOption(dialog, "From", "Worker · Codex App Server: migrate call sites (worker)");
+    await chooseOption(dialog, "Into", "Worker · Codex App Server: migrate call sites (worker-2)");
+    const closed = (label: string) => dialog.querySelector<HTMLButtonElement>(`[aria-label^="${label}:"]`)!.getAttribute("aria-label");
+    assert.notEqual(closed("From")!.slice("From: ".length), closed("Into")!.slice("Into: ".length));
+    const row = dialog.querySelector(".pod-merge-row .row-title")?.textContent ?? "";
+    assert.equal(row, "Worker · Codex App Server: migrate call sites (worker) into Worker · Codex App Server: migrate call sites (worker-2)");
+  } finally {
+    await view.unmount();
   }
 });

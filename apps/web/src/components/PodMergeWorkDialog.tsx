@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -9,7 +9,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { relativeTime } from "../format.js";
-import { podMemberName, podMemberShortName, podMemberTask } from "../pod-presentation.js";
+import { podMemberName, podMemberNames, podMemberTask } from "../pod-presentation.js";
 import { statusMeta } from "../status-meta.js";
 import { ChevronRightIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
@@ -23,6 +23,27 @@ export const MERGE_RULE = "Both members must be idle with committed work on the 
 
 /** Whether a member's worktree has uncommitted changes, as its last status read said. */
 type WorktreeState = "checking" | "clean" | "changed" | "unknown";
+/** What one status read answered: a read that failed is "unknown", which leaves it to the server. */
+type WorktreeRead = Exclude<WorktreeState, "checking">;
+
+/**
+ * What a status read of `session` is valid for: the member's status and activity, and the dialog's
+ * read generation (bumped when the window comes back and after a merge). Anything that can change
+ * the worktree changes one of them, so a read taken against another key never decides Merge.
+ */
+export function worktreeReadKey(session: SessionView, generation: number): string {
+  return `${session.id}|${session.status}|${session.eventEpoch ?? 0}|${session.lastEventAt ?? 0}|${session.updatedAt}|${generation}`;
+}
+
+/**
+ * A chosen member's worktree as Merge may rely on it: the read taken for its current key, else
+ * "checking", because an earlier "clean" may no longer hold. An earlier "changed" keeps blocking
+ * with its reason until the new read answers, since a merge it allowed would fail anyway.
+ */
+export function currentWorktreeState(reads: ReadonlyMap<string, WorktreeRead>, lastRead: ReadonlyMap<string, WorktreeRead>,
+  session: SessionView, generation: number): WorktreeState {
+  return reads.get(worktreeReadKey(session, generation)) ?? (lastRead.get(session.id) === "changed" ? "changed" : "checking");
+}
 
 function shortHead(head: string | undefined): string | null {
   return head ? head.slice(0, 10) : null;
@@ -65,13 +86,12 @@ export function podMergeBlockedReason({ pod, source, target, runner, worktrees, 
   return null;
 }
 
-function MergeRow({ pod, receipt, sessions }: {
-  pod: PodView;
+function MergeRow({ receipt, names }: {
   receipt: PodReconciliation;
-  sessions: ReadonlyMap<string, SessionView>;
+  names: ReadonlyMap<string, string>;
 }) {
-  const from = podMemberShortName(pod, sessions, receipt.sourceSessionId);
-  const into = podMemberShortName(pod, sessions, receipt.targetSessionId);
+  const from = names.get(receipt.sourceSessionId)!;
+  const into = names.get(receipt.targetSessionId)!;
   const heads = [
     ["From", shortHead(receipt.sourceHead)],
     ["Into", shortHead(receipt.targetHead)],
@@ -125,15 +145,18 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
   const [intoId, setIntoId] = useState(() =>
     pod.members.find((member) => member.role === "lead")?.sessionId ?? pod.members[0]?.sessionId ?? "");
   const [fromId, setFromId] = useState(() => pod.members.find((member) => member.sessionId !== intoId)?.sessionId ?? "");
-  const [worktrees, setWorktrees] = useState<ReadonlyMap<string, WorktreeState>>(new Map());
+  // Status reads by the key they were taken for, and each member's latest answer.
+  const [reads, setReads] = useState<ReadonlyMap<string, WorktreeRead>>(new Map());
+  const [lastRead, setLastRead] = useState<ReadonlyMap<string, WorktreeRead>>(new Map());
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  // Bumped when the window regains focus or becomes visible: a commit made outside Wollipog (a
-  // terminal, an editor) changes no session activity, so it is the cue to read the worktrees again.
-  const [recheck, setRecheck] = useState(0);
+  // The read generation, bumped when the window regains focus or becomes visible and after a
+  // merge settles: a commit made outside Wollipog (a terminal, an editor) or by the merge itself
+  // changes no session activity, so these are the cues to read the worktrees again.
+  const [generation, setGeneration] = useState(0);
   useEffect(() => {
-    const again = () => { if (document.visibilityState !== "hidden") setRecheck((count) => count + 1); };
+    const again = () => { if (document.visibilityState !== "hidden") setGeneration((count) => count + 1); };
     window.addEventListener("focus", again);
     document.addEventListener("visibilitychange", again);
     return () => {
@@ -145,35 +168,43 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
   const source = pod.members.some((member) => member.sessionId === fromId) ? sessions.get(fromId) : undefined;
   const target = pod.members.some((member) => member.sessionId === intoId) ? sessions.get(intoId) : undefined;
   const runner = target ? runners.get(target.runnerId) : undefined;
-  const name = (sessionId: string) => podMemberShortName(pod, sessions, sessionId);
-  // By role and agent, and by task too where two members share both, so From and Into never read alike.
-  const choiceName = (sessionId: string) => podMemberShortName(pod, sessions, sessionId, { withAgent: true });
+  const memberIds = pod.members.map((member) => member.sessionId);
+  const receiptIds = (pod.reconciliations ?? []).flatMap((receipt) => [receipt.sourceSessionId, receipt.targetSessionId]);
+  // Names no two members share, in sentences and rows; choices start at role and agent (#2980).
+  const names = podMemberNames(pod, sessions, [...memberIds, ...receiptIds]);
+  const choiceNames = podMemberNames(pod, sessions, memberIds, "agent");
+  const name = (sessionId: string) => names.get(sessionId) ?? sessionId;
 
-  // Read each chosen idle member's worktree, again whenever it settles from a turn or the window
-  // comes back, so Merge can say which member still has uncommitted changes. A failed read leaves
-  // the decision to the server. A re-read keeps the last answer until the new one arrives.
-  const checks = [source, target]
-    .filter((session): session is SessionView => Boolean(session?.worktreePath) && session?.status === "idle")
-    .map((session) => `${session.id}@${session.lastEventAt ?? 0}`);
-  const checkKey = [...new Set(checks)].join(" ");
+  // Read each chosen idle member's worktree for its current key, so Merge can say which member
+  // still has uncommitted changes. Reads are kept by key, so an answer that arrives late, for a
+  // state the member has since left, can never stand for the current one.
+  const chosen = [source, target]
+    .filter((session): session is SessionView => Boolean(session?.worktreePath) && session?.status === "idle");
+  const pending = [...new Map(chosen.map((session) => [worktreeReadKey(session, generation), session.id])).entries()]
+    .filter(([key]) => !reads.has(key));
+  const pendingKey = pending.map(([key]) => key).join(" ");
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  const inFlight = useRef(new Set<string>());
   useEffect(() => {
-    if (!checkKey) return;
-    let current = true;
-    const sessionIds = checkKey.split(" ").map((entry) => entry.slice(0, entry.lastIndexOf("@")));
-    setWorktrees((known) => new Map([...known, ...sessionIds
-      .filter((id) => !known.has(id) || known.get(id) === "unknown")
-      .map((id) => [id, "checking"] as const)]));
-    for (const sessionId of sessionIds) {
+    for (const [key, sessionId] of pending) {
+      if (inFlight.current.has(key)) continue;
+      inFlight.current.add(key);
       api.git(sessionId, { action: "status" })
-        .then((data) => data.status ? (data.status.hasChanges ? "changed" : "clean") : "unknown")
-        .catch(() => "unknown" as const)
+        .then((data): WorktreeRead => data.status ? (data.status.hasChanges ? "changed" : "clean") : "unknown")
+        .catch((): WorktreeRead => "unknown")
         .then((state) => {
-          if (current) setWorktrees((known) => new Map(known).set(sessionId, state as WorktreeState));
+          inFlight.current.delete(key);
+          if (!mounted.current) return;
+          setReads((known) => new Map(known).set(key, state));
+          setLastRead((known) => new Map(known).set(sessionId, state));
         });
     }
-    return () => { current = false; };
-  }, [api, checkKey, recheck]);
+    // Keyed by the reads still missing; each starts once and lands under its own key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, pendingKey]);
 
+  const worktrees = new Map(chosen.map((session) => [session.id, currentWorktreeState(reads, lastRead, session, generation)]));
   const blockedReason = podMergeBlockedReason({ pod, source, target, runner, worktrees, name });
 
   const merge = async () => {
@@ -187,12 +218,14 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
       setFailure((cause as Error).message);
     } finally {
       setMerging(false);
+      // The merge may have moved Into's worktree; nothing read before it decides the next one.
+      setGeneration((count) => count + 1);
     }
   };
 
   const options = pod.members.map((member) => {
     const session = sessions.get(member.sessionId);
-    const label = choiceName(member.sessionId);
+    const label = choiceNames.get(member.sessionId)!;
     const task = podMemberTask(member, session);
     return { value: member.sessionId, label, ...(task && label === podMemberName(member, session) ? { description: task } : {}) };
   });
@@ -234,7 +267,7 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
           <section className="pod-merges" aria-labelledby={`${ids}-recent`}>
             <h3 className="section-title" id={`${ids}-recent`}>Recent Merges</h3>
             <ul className="surface pod-merge-list">
-              {receipts.map((receipt) => <MergeRow key={receipt.reconciliationId} pod={pod} receipt={receipt} sessions={sessions} />)}
+              {receipts.map((receipt) => <MergeRow key={receipt.reconciliationId} receipt={receipt} names={names} />)}
             </ul>
           </section>
         )}
