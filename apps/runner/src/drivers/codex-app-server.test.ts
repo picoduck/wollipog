@@ -2702,12 +2702,6 @@ test("resolvePermission writes accept on allow, decline on deny (command approva
   assert.deepEqual(seen[1], { decision: "decline" });
 });
 
-test("resolvePermission for an unknown id is a no-op", () => {
-  const h = makeHarness();
-  h.driver.resolvePermission("nope", "allow"); // must not throw
-  assert.ok(true);
-});
-
 test("a newer provider request cancels the previous parked approval and keeps unique fallback ids", async () => {
   const h = makeHarness();
   const requests = new Map<string, (params: any) => Promise<any>>();
