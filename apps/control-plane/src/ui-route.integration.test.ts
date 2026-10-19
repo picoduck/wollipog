@@ -29,7 +29,7 @@ interface UpgradeRefusal {
 }
 const PAGED_READER_REFUSAL = "This machine needs a newer runner for paged session event reads. Update and restart the runner. " +
   "To read now, request an explicit limit and eventEpoch.";
-import { ControlPlaneDb } from "./db.js";
+import { CONTROL_PLANE_DB_BUSY_TIMEOUT_MS, ControlPlaneDb } from "./db.js";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "./local-device-credential.js";
 import { MAX_UI_CLIENT_MESSAGE_BYTES } from "./ui-channel.js";
 
@@ -793,7 +793,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     },
   );
   const providerLoginCommand = await runnerInbox.take((message) => message.type === "start_provider_login");
-  const publications = new DatabaseSync(databasePath);
+  const publications = new DatabaseSync(databasePath, { timeout: CONTROL_PLANE_DB_BUSY_TIMEOUT_MS });
   t.after(() => publications.close());
   const publicationIntent = publications.prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?")
     .get(`request:${providerLoginCommand.requestId}`) as { record: string } | undefined;
