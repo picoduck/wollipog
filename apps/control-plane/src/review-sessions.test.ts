@@ -589,7 +589,7 @@ test("a standalone session asks a person for more review rounds, bound to its ru
     const card = h.db.getSession("s1")!.pendingApproval;
     assert.ok(card && JSON.stringify(card).includes(created.data.occurrenceId), "the card waits on the session itself");
     const approved = h.svc.approve("s1", created.data.occurrenceId, "approve");
-    assert.ok(approved.ok, approved.error);
+    assert.ok(approved.ok, approved.error ?? "approval refused");
     // The approved rounds extend this epoch's budget, and the next request consumes the grant so a
     // restart cannot revoke it.
     assert.equal(h.db.reviewSessions.history("s1", pr).roundBudget, 6);

@@ -229,7 +229,7 @@ test("each review shows its reviewer, round, state and staleness, and a valid re
     assert.ok(section, "the section is rendered");
     const head = section.querySelector(".review-findings-head")!;
     assert.match(head.textContent ?? "", /Cross-Model Reviews\s*2/u);
-    assert.match(head.textContent ?? "", /Downvote/u, "the newest review's verdict summarizes the section");
+    assert.match(head.textContent ?? "", /Fixing/u, "a delivered downvote leaves the run with its requester, fixing");
     const runRows = [...section.querySelectorAll<HTMLElement>("article[aria-label]")];
     assert.deepEqual(runRows.map((row) => row.getAttribute("aria-label")), [
       "Codex Review, Round 2 · Epoch 1 · Changes Since Last Round",
@@ -266,7 +266,7 @@ test("a change to the session's review summary reads its reviews again; an uncha
     assert.equal(h.reads.length, 1, "an unrelated session change reads nothing");
     await h.rerender({ ...session, reviewRuns: { count: 1, active: 0, updatedAt: 20 } }, [{ ...latest, reviewSessionId: "s_review_3" }]);
     assert.equal(h.reads.length, 2);
-    assert.match(reviews(h.container)!.querySelector(".review-findings-head")!.textContent ?? "", /Downvote/u);
+    assert.match(reviews(h.container)!.querySelector(".review-findings-head")!.textContent ?? "", /Fixing/u);
   } finally { await h.unmount(); }
 });
 
@@ -285,7 +285,7 @@ test("a read that fails says so and keeps what was shown, and Refresh reads the 
     h.fail(false);
     await h.refresh();
     assert.equal(h.reads.length, 3);
-    assert.match(reviews(h.container)!.querySelector(".review-findings-head")!.textContent ?? "", /Downvote/u);
+    assert.match(reviews(h.container)!.querySelector(".review-findings-head")!.textContent ?? "", /Fixing/u);
     assert.doesNotMatch(reviews(h.container)!.textContent ?? "", /could not be reached/u);
   } finally { await h.unmount(); }
 });

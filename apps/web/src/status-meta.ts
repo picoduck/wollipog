@@ -271,6 +271,16 @@ const VOCABULARY = {
     failed: danger("Failed"),
     canceled: neutral("Canceled"),
   },
+  /** Where a pull request's cross-model review run stands, from its newest review (#3369): the
+   * Cross-Model Reviews section's summary. An attempt that did not vote keeps its reviewRun state. */
+  reviewPhase: {
+    requested: neutral("Review Requested"),
+    reviewing: info("Reviewing", { pulse: true }),
+    re_reviewing: info("Re-Reviewing", { pulse: true }),
+    delivering: info("Delivering Findings"),
+    fixing: warning("Fixing"),
+    settled: success("Settled"),
+  },
   /** A background result's push notification receipt. */
   notification: {
     pending: neutral("Push Pending"),

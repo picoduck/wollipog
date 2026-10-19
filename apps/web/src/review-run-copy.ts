@@ -29,6 +29,26 @@ export function reviewRunState(run: Pick<ReviewSessionView, "state" | "verdict">
   }
 }
 
+/**
+ * Where the run stands, from its newest review (#3369): requested, reviewing (re-reviewing past
+ * its first round), delivering a downvote's findings to the requester, the requester fixing them,
+ * or settled by a valid upvote. A newest attempt that did not vote shows its own state instead.
+ */
+export function reviewRunPhase(latest: Pick<ReviewSessionView, "state" | "verdict" | "round" | "continuation">):
+  { domain: "reviewPhase"; value: StatusValue<"reviewPhase"> } | { domain: "reviewRun"; value: StatusValue<"reviewRun"> } {
+  if (latest.state === "requested") return { domain: "reviewPhase", value: "requested" };
+  if (latest.state === "running") {
+    const again = latest.round !== null && (latest.round.round > 1 || latest.round.epoch > 1);
+    return { domain: "reviewPhase", value: again ? "re_reviewing" : "reviewing" };
+  }
+  const state = reviewRunState(latest);
+  if (state === "upvote") return { domain: "reviewPhase", value: "settled" };
+  if (state === "downvote") {
+    return { domain: "reviewPhase", value: latest.continuation === "pending" ? "delivering" : "fixing" };
+  }
+  return { domain: "reviewRun", value: state };
+}
+
 const MODE: Readonly<Record<NonNullable<ReviewSessionView["round"]>["mode"], string>> = {
   full: "Full Review",
   delta: "Changes Since Last Round",
