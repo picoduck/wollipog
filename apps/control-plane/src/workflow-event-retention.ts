@@ -131,7 +131,7 @@ export class WorkflowEventRetention {
           else if (elapsed < 2.4) this.eventBudget = Math.min(WORKFLOW_EVENT_RETENTION_MAX_BATCH_EVENTS, Math.ceil(this.eventBudget * 1.25));
           await this.sleep(Math.max(1, Math.ceil(elapsed * 3)));
         }
-        if (armed) this.store.recordRun(organizationId, this.now(), counts);
+        if (armed && !this.stopped) this.store.recordRun(organizationId, this.now(), counts);
       } catch (error) {
         this.options.log.warn({ event: "workflow_event_retention_deferred", passId, organizationId,
           error: error instanceof Error ? error.message : String(error) }, "workflow event retention pass deferred");

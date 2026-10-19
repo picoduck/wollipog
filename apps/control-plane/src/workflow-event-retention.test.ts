@@ -231,3 +231,25 @@ test("WAL batches restore FULL mode and roll back events if the atomic prune mar
     assert.equal((f.db.raw().prepare("PRAGMA synchronous").get() as { synchronous: number }).synchronous, 2);
   } finally { f.db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("malformed persisted environment arming fails closed and re-arms the host default", () => {
+  const f = fixture();
+  try {
+    for (const value of ["{", "null", "[]", '{"retentionDays":"90","prunesFrom":0}',
+      '{"retentionDays":90,"prunesFrom":-1}', '{"retentionDays":1,"prunesFrom":0}']) {
+      f.db.raw().prepare("INSERT OR REPLACE INTO control_plane_metadata(key,value) VALUES('workflow_event_environment_policy',?)").run(value);
+      const r = f.worker({ CONTROL_PLANE_WORKFLOW_EVENT_RETENTION_DAYS: "90" });
+      assert.deepEqual(r.policy(ORG), { retentionDays: 90, prunesFrom: T0 + 101 * DAY, source: "environment" });
+    }
+  } finally { f.db.close(); }
+});
+
+test("a sleeping pass stopped during shutdown never touches the closed database", async () => {
+  const f = fixture(); const r = f.worker();
+  f.instance("shutdown", "failed", T0, 1200);
+  r.update(ORG, 90, "owner"); f.setNow(T0 + 101 * DAY);
+  f.onSleep(() => { r.stop(); f.db.close(); });
+  const result = await r.runPass();
+  assert.equal(result.events, 100);
+  assert.equal(f.logs.some((entry) => (entry as { event?: string }).event === "workflow_event_retention_deferred"), false);
+});

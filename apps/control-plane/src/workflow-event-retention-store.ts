@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { WorkflowEventRetentionCounts, WorkflowEventRetentionView } from "@wollipog/protocol";
+import { WORKFLOW_EVENT_RETENTION_LIMITS } from "@wollipog/protocol";
 
 export const WORKFLOW_EVENT_RETENTION_SCHEMA = /* sql */ `
 CREATE TABLE IF NOT EXISTS workflow_event_retention_policy (
@@ -45,7 +46,17 @@ export class WorkflowEventRetentionStore {
   environment(): Policy | null {
     const row = this.db.prepare("SELECT value FROM control_plane_metadata WHERE key='workflow_event_environment_policy'")
       .get() as { value: string } | undefined;
-    return row ? JSON.parse(row.value) as Policy : null;
+    if (!row) return null;
+    try {
+      const parsed: unknown = JSON.parse(row.value);
+      if (!parsed || typeof parsed !== "object") return null;
+      const { retentionDays, prunesFrom } = parsed as Partial<Policy>;
+      if (retentionDays === null && prunesFrom === null) return { retentionDays: null, prunesFrom: null };
+      return typeof retentionDays === "number" && Number.isSafeInteger(retentionDays) &&
+        retentionDays >= WORKFLOW_EVENT_RETENTION_LIMITS.minDays && retentionDays <= WORKFLOW_EVENT_RETENTION_LIMITS.maxDays &&
+        typeof prunesFrom === "number" && Number.isSafeInteger(prunesFrom) && prunesFrom >= 0
+        ? { retentionDays, prunesFrom } : null;
+    } catch { return null; }
   }
   saveEnvironment(policy: Policy): void {
     this.db.prepare("INSERT OR REPLACE INTO control_plane_metadata(key,value) VALUES('workflow_event_environment_policy',?)")
