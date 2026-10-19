@@ -294,6 +294,14 @@ const VOCABULARY = {
     failed: danger("Failed"),
     stopped: neutral("Stopped"),
   },
+  /** A Multi-Agent Run's one row badge (`runStatus()`, #2974). A run whose members are all idle has
+   * none. */
+  run: {
+    awaiting_decision: warning("Awaiting Decision"),
+    approval_required: warning("Approval Required"),
+    running: info("Running", { pulse: true }),
+    failed: danger("Failed"),
+  },
   pod: {
     active: info("Active"),
     paused: neutral("Paused"),

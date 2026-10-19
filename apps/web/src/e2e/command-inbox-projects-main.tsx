@@ -2486,6 +2486,7 @@ const client = {
     return { summary: structuredClone(fixture.summary) };
   },
   workflowInstances: async () => [],
+  workflowDefinitions: async () => [],
   projectLocationWorktreeSetup: async (_projectId: string, locationId: string) => ({
     locationId,
     status: { status: "valid" as const, hash: "a".repeat(64) },

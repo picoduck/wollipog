@@ -10952,8 +10952,68 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 
 /* -------------------------------- Runs ---------------------------------- */
-/* Runs and pods are lists of two-line rows in one Surface (§5.3), not a card grid. */
-.runs-list { overflow: hidden; }
+/* Multi-Agent Runs (#2974): two-line rows in one Surface (§5.2). Line 1 is the title and at most one
+   badge, line 2 the meta, 12px apart with no middle dots (§11.3); the created time trails. */
+.run-list-reconnecting { margin-bottom: var(--space-3); }
+.run-row-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: center;
+  align-items: center;
+}
+.run-row-body > .row-title { grid-area: 1 / 1; }
+.run-row-status {
+  grid-area: 1 / 2;
+  margin-left: var(--space-2);
+}
+/* Line 2 is one clipped line that wraps: an item that does not fit drops whole onto the hidden next
+   line, so the items left in view sit 12px apart with no dead space and none shows a lone initial.
+   The type comes first and only truncates when it alone is wider than the line; the project shows
+   whole or not at all; the agents keep at least a readable name before they fold. */
+.run-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  grid-area: 2 / 1 / 3 / 3;
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: 0;
+  height: 16px;
+  overflow: hidden;
+}
+.run-row-meta > span {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+}
+.run-row-meta > span > svg { flex: none; }
+:is(.run-row-meta > .run-row-type, .run-row-meta > span > span) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-row-meta > .run-row-type {
+  display: block;
+  flex: 0 1 auto;
+}
+.run-row-meta > .run-row-agents {
+  flex: 1 1 0;
+  min-width: 6em;
+  max-width: max-content;
+}
+/* Phones: the badge leads line 2, so a long title keeps the whole first line (§15.1). */
+@media (max-width: 760px) {
+  .run-row-body { grid-template-columns: auto minmax(0, 1fr); }
+  .run-row-body > .row-title { grid-area: 1 / 1 / 2 / 3; }
+  .run-row-status {
+    grid-area: 2 / 1;
+    margin-right: var(--space-2);
+    margin-left: 0;
+  }
+  .run-row-meta { grid-area: 2 / 2; }
+}
 /* The run's artifacts (#2855): an unboxed section (§4.5) of full-width rows in one surface. */
 .run-artifacts {
   flex: 0 0 auto;

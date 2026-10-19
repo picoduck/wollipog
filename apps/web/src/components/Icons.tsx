@@ -38,6 +38,7 @@ import {
   CloudOff as LucideCloudOff,
   Code as LucideCode,
   CodeXml as LucideCodeXml,
+  Columns2 as LucideColumns2,
   Columns3 as LucideColumns3,
   Copy as LucideCopy,
   DollarSign as LucideDollarSign,
@@ -272,6 +273,11 @@ export function ConnectionsIcon(props: IconProps) {
 
 export function RunsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideWorkflow} {...props} />;
+}
+
+/** A comparison run: several agents side by side on one task (#2974). */
+export function CompareIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideColumns2} {...props} />;
 }
 
 export function PodsIcon(props: IconProps) {
