@@ -429,7 +429,7 @@ export function registerProviderProfileRoutes(
     return { status: "active", profileId: result.profileId, grantId };
   });
 
-  /** The online v228+ runner and configured account a lease route acts on, or the reply already sent. */
+  /** The online v229+ runner and configured account a lease route acts on, or the reply already sent. */
   function leaseTarget(id: string, accountId: string, runner: NonNullable<ReturnType<ControlPlaneDb["getRunner"]>>,
     reply: { code(status: number): { send(body: unknown): unknown } }) {
     if (!runnerSupportsProtocol(runner.protocolVersion, "providerHomeLeaseRecovery")) {

@@ -485,8 +485,8 @@ const leaseRunner = (recover: (message: { requestId: string; authorizationId: st
     ? { type: "inspect_provider_home_lease_result", requestId: message.requestId, ok: true, inspection: STALE }
     : recover(message as unknown as { requestId: string; authorizationId: string });
 
-test("lease routes need an Owner or Admin, a v228 online runner, the account, and an explicit exact recovery", async () => {
-  const f = await fixture({ protocolVersion: 228, handler: leaseRunner((m) => ({ type: "recover_provider_home_lease_result", requestId: m.requestId, ok: true })) });
+test("lease routes need an Owner or Admin, a v229 online runner, the account, and an explicit exact recovery", async () => {
+  const f = await fixture({ protocolVersion: 229, handler: leaseRunner((m) => ({ type: "recover_provider_home_lease_result", requestId: m.requestId, ok: true })) });
   try {
     f.as(principal("operator"));
     assert.equal((await f.app.inject({ method: "GET", url: LEASE })).statusCode, 403);
@@ -504,13 +504,13 @@ test("lease routes need an Owner or Admin, a v228 online runner, the account, an
   } finally {
     await f.close();
   }
-  const older = await fixture({ protocolVersion: 227 });
+  const older = await fixture({ protocolVersion: 228 });
   try {
     const refused = await older.app.inject({ method: "GET", url: LEASE });
     assert.equal(refused.statusCode, 409);
     assert.deepEqual(refused.json(), {
       error: "This machine needs a newer runner for provider HOME lease recovery. Update and restart the runner.",
-      requiredRunnerProtocolVersion: 228, runnerProtocolVersion: 227,
+      requiredRunnerProtocolVersion: 229, runnerProtocolVersion: 228,
     });
     assert.deepEqual(older.sent, []);
   } finally {
@@ -520,7 +520,7 @@ test("lease routes need an Owner or Admin, a v228 online runner, the account, an
 
 test("a recovery records who authorized which exact record, once, and how the runner answered", async () => {
   let answer: (requestId: string) => RunnerRequestResult = (requestId) => ({ type: "recover_provider_home_lease_result", requestId, ok: true });
-  const f = await fixture({ protocolVersion: 228, handler: leaseRunner((m) => answer(m.requestId)) });
+  const f = await fixture({ protocolVersion: 229, handler: leaseRunner((m) => answer(m.requestId)) });
   try {
     const recovered = await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } });
     assert.equal(recovered.statusCode, 200);

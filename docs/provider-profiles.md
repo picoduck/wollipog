@@ -161,7 +161,7 @@ explicit journal record; the old lease is kept, never released on its behalf.
 
 A lease without evidence (from an older runner, or on macOS), or any lease on a HOME without a
 profile grant for this control plane, needs an Owner or Admin's one-time authorization. The Accounts
-list on a v228 Machine shows **Stale Lease** for such an account. **Recover Lease** is offered only
+list on a v229 Machine shows **Stale Lease** for such an account. **Recover Lease** is offered only
 when the runner reports that a recovery would proceed: the record has evidence that proves it
 abandoned, or the Machine has restarted since the record was written. Otherwise the badge's tooltip
 says why. The authorization names the exact record that was inspected and is used once; see

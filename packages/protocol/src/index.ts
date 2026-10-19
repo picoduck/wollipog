@@ -10163,7 +10163,7 @@ export interface RevokeProviderProfileGrantResultMessage {
 }
 
 /**
- * Protocol v228 (#3241): why recovering a stale provider-HOME lease is refused.
+ * Protocol v229 (#3241): why recovering a stale provider-HOME lease is refused.
  * - `TIP_CHANGED`: the lease is no longer the record the authorization named (released, replaced, or none).
  * - `NO_REBOOT_PROOF`: the record carries no process evidence and was written during the current boot.
  * - `HOME_IN_USE`: the recorded runner, or a process it launched, is still running.
@@ -10175,7 +10175,7 @@ export interface RevokeProviderProfileGrantResultMessage {
 export type ProviderHomeLeaseRecoveryCode =
   | "TIP_CHANGED" | "NO_REBOOT_PROOF" | "HOME_IN_USE" | "FOREIGN_HOST" | "PROFILE_REFUSED" | "UNSUPPORTED_HOME" | "UNVERIFIABLE";
 
-/** Protocol v228 (#3241): one account HOME's lease state, as an Owner or Admin sees it. */
+/** Protocol v229 (#3241): one account HOME's lease state, as an Owner or Admin sees it. */
 export interface ProviderHomeLeaseInspection {
   /** `none`: no lease journal; `released`: free; `held`: held by this runner; `stale`: an unreleased
    * lease of another runner process; `unverifiable`: the journal cannot be verified. */
@@ -10191,7 +10191,7 @@ export interface ProviderHomeLeaseInspection {
   refusal?: ProviderHomeLeaseRecoveryCode | null;
 }
 
-/** Protocol v228 (#3241): read one account HOME's lease state. Creates nothing. */
+/** Protocol v229 (#3241): read one account HOME's lease state. Creates nothing. */
 export interface InspectProviderHomeLeaseMessage {
   type: "inspect_provider_home_lease";
   requestId: string;
@@ -10207,7 +10207,7 @@ export interface InspectProviderHomeLeaseResultMessage {
   error?: string;
 }
 
-/** Protocol v228 (#3241): succeed exactly the stale lease record `staleTipHash` of one account HOME
+/** Protocol v229 (#3241): succeed exactly the stale lease record `staleTipHash` of one account HOME
  * and release the HOME again. Sent only after an Owner or Admin authorized it; the authorization id
  * is the control plane's audited authorization row and is recorded in the lease journal. */
 export interface RecoverProviderHomeLeaseMessage {

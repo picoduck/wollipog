@@ -1423,7 +1423,7 @@ export function createApiClient(transport: ApiTransport) {
       { method: "POST", body: JSON.stringify({ force }) },
     ),
 
-  /** Owner/Admin (#3241): the account HOME's lease state, read on a v228+ runner. */
+  /** Owner/Admin (#3241): the account HOME's lease state, read on a v229+ runner. */
   inspectProviderHomeLease: (runnerId: string, accountId: string) =>
     req<ProviderHomeLeaseInspection>(
       `/api/runners/${encodeURIComponent(runnerId)}/provider-accounts/${encodeURIComponent(accountId)}/home-lease`,

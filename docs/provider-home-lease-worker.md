@@ -149,7 +149,7 @@ cannot be told apart, and the second blocks recovery. A reboot always proves aba
 
 A lease the rules above cannot recover automatically (one without evidence, from an older runner or
 macOS, or one on a HOME without a profile grant for this control plane) can be recovered on an Owner
-or Admin's one-time authorization (#3241 part 2, protocol v228):
+or Admin's one-time authorization (#3241 part 2, protocol v229):
 
 1. `lease_inspect` reads the journal without creating anything and reports the state (`none`,
    `released`, `held`, `stale` or `unverifiable`). For a stale record it reports the exact hash a
