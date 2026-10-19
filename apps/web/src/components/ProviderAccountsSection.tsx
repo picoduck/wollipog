@@ -422,7 +422,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         <p className="section-note">Only this machine's owner or an organization admin can add or remove its accounts.</p>
       )}
       {notice && (
-        <Notice compact tone="danger" role="alert" title={notice.title} details={notice.details} onDismiss={() => setNotice(null)}>
+        <Notice compact tone="danger" role="alert" title={notice.title} details={notice.details}
+          actions={<button type="button" className="btn sm" onClick={() => setNotice(null)}>Dismiss</button>}>
           {notice.body}
         </Notice>
       )}

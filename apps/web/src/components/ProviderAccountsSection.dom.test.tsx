@@ -455,7 +455,7 @@ test("an agent-default refusal is a notice naming the agent's display name, not 
     // Between the title and the rows.
     const order = [...ui.container.querySelectorAll(".section-head, .notice, .surface")].map((node) => node.className.split(" ")[0]);
     assert.deepEqual(order, ["section-head", "notice", "surface"]);
-    await act(async () => { notice.querySelector<HTMLButtonElement>(".notice-dismiss")!.click(); });
+    await act(async () => { ui.button(notice, "Dismiss").click(); });
     await ui.settle();
     assertNoDomNode(ui.notice());
   } finally {
