@@ -1,4 +1,5 @@
-/** Human-owned envelope. Session budgets remain separate, tighter ceilings. */
+/** Human-owned envelope. Session budgets remain separate, tighter ceilings. An omitted `costUsd` or
+ * `toolCalls` has no ceiling: usage is still metered and shown, and each set amount is enforced. */
 export interface CampaignBudgetAuthority {
   version: 1;
   costUsd?: number;
@@ -65,7 +66,9 @@ export function validCampaignBudgetAuthority(value: unknown): value is CampaignB
   if (b.controlledReview!==undefined) {
     const p = b.controlledReview;
     if(!p || typeof p!=="object" || Array.isArray(p)) return false;
-    if (b.costUsd === undefined || b.toolCalls === undefined || b.concurrency === undefined ||
+    // Each review job reserves its own bounded cost and tool calls, so a campaign with no ceiling
+    // still meters and charges controlled review.
+    if (b.concurrency === undefined ||
         Object.keys(p).some((k) => !["profile","controllerSha256","executableSha256","cliVersion","accounting","account","agentId"].includes(k)) ||
         p.profile !== "native_opus_5_5_high_read_only" || p.cliVersion !== "2.1.296" || p.accounting !== "provider_list_estimate" ||
         p.account !== "runner_default_claude" || typeof p.agentId!=="string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(p.agentId) ||

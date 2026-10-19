@@ -354,7 +354,9 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
 }
 
 export function CampaignBudgetFacts({ budget }: { budget: import("@wollipog/protocol").CampaignBudgetView }) {
-  const limits = [budget.authority.costUsd === undefined ? null : `$${budget.authority.costUsd.toFixed(2)}`,
+  // A campaign authorized without a ceiling says so: it runs unbounded while usage is still metered.
+  const limits = [budget.authority.costUsd === undefined && budget.authority.toolCalls === undefined ? "No limit" : null,
+    budget.authority.costUsd === undefined ? null : `$${budget.authority.costUsd.toFixed(2)}`,
     budget.authority.toolCalls === undefined ? null : `${budget.authority.toolCalls} tool calls`,
     budget.authority.concurrency === undefined ? null : `${budget.authority.concurrency} concurrent workers`,
     budget.authority.acceptedFollowUps === undefined ? null : `${budget.authority.acceptedFollowUps} accepted follow-ups`].filter(Boolean).join(", ");

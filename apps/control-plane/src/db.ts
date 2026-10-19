@@ -15455,7 +15455,6 @@ export class ControlPlaneDb {
         !boundary.issueAuthority || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
         scope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(scope.issueNumbers).size !== scope.issueNumbers.length ||
         JSON.stringify(policy?.issueNumbers) !== JSON.stringify(scope.issueNumbers) ||
-        boundary.budgetAuthority.costUsd === undefined || boundary.budgetAuthority.toolCalls === undefined ||
         boundary.budgetAuthority.concurrency === undefined || boundary.budgetAuthority.acceptedFollowUps === undefined ||
         !input.parentControlPolicy || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) || !/^[a-f0-9]{64}$/.test(digest)) {
       throw new Error("Human campaign launch admission is invalid");
@@ -19305,6 +19304,7 @@ export class ControlPlaneDb {
         scope?.owner.kind==="user" && this.getUsageDailyBudget(scope.organizationId).perUserUsd===null;
       budget.requiredNativeReview={supported,reason:supported?
         "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
+        !profile?"Controlled review is not part of this campaign; it uses the regular cross-model review workflow.":
         "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
     }
     const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;

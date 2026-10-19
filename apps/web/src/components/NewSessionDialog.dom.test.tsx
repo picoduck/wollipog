@@ -1707,13 +1707,14 @@ function launchPreflight(ready: boolean, request: import("@wollipog/protocol").F
         strictProjectIsolation: false, integrationIsolation: false, completion: "retain" },
       budget: { costUsd: budget?.costUsd ?? null, toolCalls: budget?.toolCalls ?? null, concurrency: 4, acceptedFollowUps: 0,
         source: budget?.costUsd ? "override" : "unset", reviewIncluded: true },
+      review: { controlled: true, statement: "Controlled cross-model review, charged to this campaign." },
       followUps: { policy: "recommend_only", relatedFollowUps: false, maxIssues: 1, closureReasons: ["completed"] },
       evidence: { statement: "The Orchestrator reviews screenshots. Video and external evidence need your review.",
         destination: { kind: "private_session_artifacts", configurationId: "session_artifacts:org", disclosureRevision: 1 }, provider: null, envelope: false },
       humanRequired: [{ exception: "Secrets and Sign-In", reason: "Always decided by the Human under Full Control." }],
-      blockers: ready ? [] : [{ capability: "Campaign Accounting and Budget", reason: "No campaign budget yet: enter a cost limit and a tool-call limit." }] },
-    capabilities: [verified("repository_scope", "Repository and Issue Scope"), ready ? verified("accounting_budget", "Campaign Accounting and Budget")
-      : { id: "accounting_budget", capability: "Campaign Accounting and Budget", state: "unsupported", mandatory: true, reason: "No campaign budget yet: enter a cost limit and a tool-call limit." }],
+      blockers: ready ? [] : [{ capability: "Full Control Authority", reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." }] },
+    capabilities: [verified("repository_scope", "Repository and Issue Scope"), ready ? verified("authority_contract", "Full Control Authority")
+      : { id: "authority_contract", capability: "Full Control Authority", state: "unsupported", mandatory: true, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." }],
     advanced: { proposal: null, plan: {} as never, humanRequiredRequests: [] } };
 }
 const settlePreflight = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
@@ -1780,18 +1781,17 @@ test("a saved Full Control preference opens the launch summary without granting 
   } finally { await unmountFixture(fixture); }
 });
 
-test("choosing Full Control checks readiness at once, asks only for the budget, and starts through one authorization", async () => {
+test("choosing Full Control checks readiness at once and starts with no limit through one authorization", async () => {
   const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
   const admissions: Array<Record<string, unknown>> = [];
   const saved: unknown[] = [];
-  const order: string[] = [];
   const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
     fullControlLaunchPreflight: async (input) => {
       preflights.push(structuredClone(input));
-      return { preflight: launchPreflight(Boolean(input.overrides?.budget?.costUsd && input.overrides.budget.toolCalls && input.task !== "Full Control readiness check"), input) };
+      return { preflight: launchPreflight(true, input) };
     },
-    createFullControlCampaign: async (input) => { order.push("admit"); admissions.push(structuredClone(input) as unknown as Record<string, unknown>); return { id: "campaign-1" } as SessionView; },
-    updateOrchestratorSettings: async (input) => { order.push("save"); saved.push(structuredClone(input)); return { defaults: input.defaults, source: "user_default", controlModeSupported: true,
+    createFullControlCampaign: async (input) => { admissions.push(structuredClone(input) as unknown as Record<string, unknown>); return { id: "campaign-1" } as SessionView; },
+    updateOrchestratorSettings: async (input) => { saved.push(structuredClone(input)); return { defaults: input.defaults, source: "user_default", controlModeSupported: true,
       capabilities: { models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" } }; },
   });
   try {
@@ -1803,33 +1803,80 @@ test("choosing Full Control checks readiness at once, asks only for the budget, 
     assert.equal(preflights[0]!.overrides!.session!.config!.permissionMode, "orchestrator");
     assert.equal(preflights[0]!.projectId, project.id);
     assert.equal(Object.hasOwn(preflights[0]!, "repository"), false, "the server derives the repository");
-    assert.match(fixture.container.textContent ?? "", /Can't Start Yet/);
-    assert.match(fixture.container.textContent ?? "", /No campaign budget yet/);
-    assert.equal(authorizeButton(fixture.container).disabled, true);
+    assert.equal(preflights[0]!.overrides!.budget, undefined, "no budget is asked for");
+    // Nothing outside Advanced asks for a limit, and no notice nags about one.
+    const outside = [...fixture.container.querySelectorAll<HTMLLabelElement>("section[aria-label='Full Control Launch'] label")]
+      .filter((node) => !node.closest("details")).map((node) => node.querySelector("span")?.textContent);
+    assert.deepEqual(outside, ["Task", "Issue Numbers"]);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Campaign Budget|budget yet/);
+    assert.match(fixture.container.textContent ?? "", /Describe the task or enter issue numbers to start\./, "only the work itself is still needed");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Ready to Authorize and Start/, "Ready is never shown beside a disabled action");
     const field = (label: string) => [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
       .find((node) => node.querySelector("span")?.textContent === label && !node.closest("details"))!.querySelector("input, textarea") as HTMLInputElement;
     await act(async () => fireDomEvent.change(field("Task"), { target: { value: "Deliver #12" } }));
     await act(async () => fireDomEvent.change(field("Issue Numbers"), { target: { value: "#12" } }));
-    await act(async () => fireDomEvent.change(field("Cost Limit (USD)"), { target: { value: "20" } }));
-    await act(async () => fireDomEvent.change(field("Tool Call Limit"), { target: { value: "200" } }));
     await settlePreflight();
     const latest = preflights.at(-1)!;
     assert.equal(latest.task, "Deliver #12");
     assert.deepEqual(latest.issueNumbers, [12]);
-    assert.deepEqual(latest.overrides!.budget, { costUsd: 20, toolCalls: 200 });
     assert.match(fixture.container.textContent ?? "", /Ready to Authorize and Start/);
     assert.match(fixture.container.textContent ?? "", /owner\/repo · #12/);
+    assert.match(fixture.container.textContent ?? "", /BudgetNo Limit · 4 at a time/, "no ceiling is stated as No Limit");
+    assert.match(fixture.container.textContent ?? "", /ReviewControlled cross-model review, charged to this campaign\./);
     assert.equal(authorizeButton(fixture.container).disabled, false);
     assert.equal(admissions.length, 0);
-    assert.equal(saved.length, 0, "nothing is saved while the person is still reviewing");
     await act(async () => authorizeButton(fixture.container).click());
     assert.equal(admissions.length, 1);
-    assert.deepEqual(order, ["admit", "save"], "the first budget is saved only after the reviewed launch is admitted");
     assert.equal(admissions[0]!.preflightDigest, "b".repeat(64));
     assert.match(String(admissions[0]!.requestId), /^[a-f0-9]{32}$/);
-    assert.deepEqual((saved[0] as { defaults: { campaignBudget: unknown } }).defaults.campaignBudget, { costUsd: 20, toolCalls: 200 },
-      "Save as Default records the budget the person chose");
+    assert.equal((admissions[0]!.overrides as { budget?: unknown }).budget, undefined, "the campaign is authorized with no limit");
+    assert.deepEqual(saved, [], "launching with no limit saves nothing");
     assert.equal(fixture.requests.length, 0, "ordinary creation never runs");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an optional ceiling under Advanced is authorized as entered and saved as a default only when asked", async () => {
+  const preflights: import("@wollipog/protocol").FullControlLaunchRequest[] = [];
+  const admissions: Array<Record<string, unknown>> = [];
+  const saved: unknown[] = [];
+  const order: string[] = [];
+  const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
+    fullControlLaunchPreflight: async (input) => {
+      preflights.push(structuredClone(input));
+      return { preflight: launchPreflight(input.task !== "Full Control readiness check", input) };
+    },
+    createFullControlCampaign: async (input) => { order.push("admit"); admissions.push(structuredClone(input) as unknown as Record<string, unknown>); return { id: "campaign-1" } as SessionView; },
+    updateOrchestratorSettings: async (input) => { order.push("save"); saved.push(structuredClone(input)); return { defaults: input.defaults, source: "user_default", controlModeSupported: true,
+      capabilities: { models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available" } }; },
+  });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    await chooseControlMode(fixture.container, "Full Control");
+    await settlePreflight();
+    const field = (label: string, advanced: boolean) => [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
+      .find((node) => node.querySelector("span")?.textContent === label && Boolean(node.closest("details")) === advanced)!
+      .querySelector("input, textarea") as HTMLInputElement;
+    assert.equal(field("Cost Limit (USD)", true).placeholder, "No Limit");
+    assert.equal(field("Tool Call Limit", true).placeholder, "No Limit");
+    const saveSwitch = () => [...fixture.container.querySelectorAll<HTMLButtonElement>('details [role="switch"]')]
+      .find((node) => fixture.container.ownerDocument.getElementById(node.getAttribute("aria-labelledby")!)?.textContent === "Save Limits as Default");
+    await act(async () => fireDomEvent.change(field("Task", false), { target: { value: "Deliver #12" } }));
+    await act(async () => fireDomEvent.change(field("Cost Limit (USD)", true), { target: { value: "20" } }));
+    await settlePreflight();
+    assert.deepEqual(preflights.at(-1)!.overrides!.budget, { costUsd: 20 }, "one ceiling alone is a valid envelope");
+    assert.match(fixture.container.textContent ?? "", /Budget\$20 · 4 at a time/);
+    assert.equal(saveSwitch(), undefined, "a default needs both amounts");
+    await act(async () => fireDomEvent.change(field("Tool Call Limit", true), { target: { value: "200" } }));
+    await settlePreflight();
+    assert.deepEqual(preflights.at(-1)!.overrides!.budget, { costUsd: 20, toolCalls: 200 });
+    assert.equal(saveSwitch()!.getAttribute("aria-checked"), "false", "saving a default is never implied");
+    await act(async () => saveSwitch()!.click());
+    assert.equal(saved.length, 0, "nothing is saved while the person is still reviewing");
+    await act(async () => authorizeButton(fixture.container).click());
+    assert.deepEqual((admissions[0]!.overrides as { budget: unknown }).budget, { costUsd: 20, toolCalls: 200 });
+    assert.deepEqual(order, ["admit", "save"], "the default is saved only after the reviewed launch is admitted");
+    assert.deepEqual((saved[0] as { defaults: { campaignBudget: unknown } }).defaults.campaignBudget, { costUsd: 20, toolCalls: 200 });
   } finally { await unmountFixture(fixture); }
 });
 
@@ -1934,7 +1981,7 @@ test("Full Control limits keep exactly what was typed through mount, remount, ou
     const advancedLabels = ["Accepted Follow-Ups", "Maximum Issues"];
 
     // L1 initial mount: every limit is an empty text entry that means "use the derived value".
-    for (const input of [field("Cost Limit (USD)", false), field("Tool Call Limit", false), ...advancedLabels.map((label) => field(label, true))]) {
+    for (const input of [field("Cost Limit (USD)", true), field("Tool Call Limit", true), ...advancedLabels.map((label) => field(label, true))]) {
       assert.equal(input!.type, "text");
       assert.equal(input!.value, "");
       assert.equal(input!.getAttribute("aria-invalid"), "false");
@@ -1973,8 +2020,8 @@ test("Full Control limits keep exactly what was typed through mount, remount, ou
     await settlePreflight();
     assert.equal(followUps().value, "6e");
     assert.equal(preflights.length, checked, "no readiness check runs while an entry is invalid");
-    await type(field("Cost Limit (USD)", false), "20");
-    await type(field("Tool Call Limit", false), "200");
+    await type(field("Cost Limit (USD)", true), "20");
+    await type(field("Tool Call Limit", true), "200");
 
     // L6 blur changes nothing.
     await act(async () => { followUps().focus(); followUps().blur(); });
@@ -4476,9 +4523,7 @@ test("a saved Orchestrator default this runner can't honor opens Options and nam
 
 test("a Full Control launch that fails with Options closed opens Options and shows why; one not ready names itself in the head (#2954)", async () => {
   const fixture = await mountFixture({ runners: [fullControlRunner()] }, undefined, undefined, undefined, undefined, undefined, {
-    fullControlLaunchPreflight: async (input) => ({
-      preflight: launchPreflight(Boolean(input.overrides?.budget?.costUsd && input.overrides.budget.toolCalls && input.task !== "Full Control readiness check"), input),
-    }),
+    fullControlLaunchPreflight: async (input) => ({ preflight: launchPreflight(input.task !== "Full Control readiness check", input) }),
     createFullControlCampaign: async () => { throw new ApiError("The campaign budget is above your remaining allowance.", 409); },
   });
   const head = () => optionsHead(fixture.container);
@@ -4497,8 +4542,6 @@ test("a Full Control launch that fails with Options closed opens Options and sho
       .find((node) => node.querySelector("span")?.textContent === label && !node.closest("details"))!.querySelector("input, textarea") as HTMLInputElement;
     await act(async () => fireDomEvent.change(field("Task"), { target: { value: "Deliver #12" } }));
     await act(async () => fireDomEvent.change(field("Issue Numbers"), { target: { value: "#12" } }));
-    await act(async () => fireDomEvent.change(field("Cost Limit (USD)"), { target: { value: "20" } }));
-    await act(async () => fireDomEvent.change(field("Tool Call Limit"), { target: { value: "200" } }));
     await settlePreflight();
     assert.equal(authorizeButton(fixture.container).disabled, false);
     await act(async () => { head().click(); });

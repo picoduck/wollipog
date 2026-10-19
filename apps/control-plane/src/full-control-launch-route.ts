@@ -150,7 +150,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const { preflight, proposal } = campaignLaunchPreflight({
       request: body, plan, runner: runnerNow, inspection, organizationId: principal.organizationId,
       projectDefaults: plan.projectId ? db.projectChildSessionDefaults(plan.projectId) : null,
-      accountingError: db.campaignBudgetAccountingError(plan.driver, plan.config.model, true),
+      accountingError: (costProtected) => db.campaignBudgetAccountingError(plan.driver, plan.config.model, costProtected),
       dailyLimit: db.getUsageDailyBudget(plan.scope.organizationId).perUserUsd !== null,
       invalidPolicyIds: policyIds.filter((id) => !sessions.governancePolicies().some((rule) =>
         rule.policyId === id && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),
@@ -250,7 +250,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         return Boolean(child && !["completed", "failed", "stopped"].includes(child.status) && ceiling(limits(childId)));
       }),
       projectDefaults: session.projectId ? db.projectChildSessionDefaults(session.projectId) : null,
-      accountingError: db.campaignBudgetAccountingError(session.driver, plan.config.model, true),
+      accountingError: (costProtected) => db.campaignBudgetAccountingError(session.driver, plan.config.model, costProtected),
       dailyLimit: db.getUsageDailyBudget(scope.organizationId).perUserUsd !== null,
       invalidPolicyIds: (body.overrides?.delegatablePolicyIds ?? []).filter((policyId) => !sessions.governancePolicies().some((rule) =>
         rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),

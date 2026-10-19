@@ -720,6 +720,35 @@ test("native service binds authority, assigned scope, canonical PR and server-on
   } finally {h.db.close();}
 });
 
+test("with no campaign ceiling, controlled review still reserves each job's own bound and meters its usage",()=>{
+  const h=harness();
+  try {
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const grant:CampaignBudgetAuthority={version:1,accounting:"managed_workers_only",unpriced:"stop",concurrency:2,acceptedFollowUps:0,controlledReview:profile};
+    assert.ok(validCampaignBudgetAuthority(grant),"no cost or tool-call ceiling is a valid controlled-review envelope");
+    assert.equal(validCampaignBudgetAuthority({...grant,concurrency:undefined}),false,"controlled review still needs a concurrency limit");
+    h.metadata.runtime={dataDir:"/runner",worktreeRoot:"/runner/worktrees",maxConcurrentSessions:4,campaignReview:profile};
+    h.db.registerRunner(h.metadata,10,PROTOCOL_VERSION);
+    assert.ok(h.enable(grant).ok);
+    h.make("worker","root");h.db.setWorktreePath("worker","/runner/worktrees/worker");
+    const plan=h.svc.recordCampaignPlan("root",{planComplete:true,items:[{key:"picoduck/wollipog#2936",issue:{repository:"picoduck/wollipog",number:2936}}]});
+    assert.ok(plan.ok,plan.error??"plan refused");
+    const workItemId=plan.data!.items[0]!.workItemId;
+    assert.ok(h.svc.assignCampaignWorkItem("root",{workItemId,childSessionId:"worker"}).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
+    const result=h.svc.requestCampaignReviewJob("root",{requestId:"unbounded",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},
+      baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."});
+    assert.ok(result.ok,result.error??"review refused");
+    assert.deepEqual(h.db.campaignBudgets.allocation(result.data!.jobId),{sessionId:result.data!.jobId,costUsd:5,toolCalls:20},"the job's own bound is reserved");
+    const command=h.db.campaignReviewJobs.command(result.data!.jobId)!;
+    h.svc.onCampaignReviewJobUpdate("r",{type:"campaign_review_job_update",jobId:command.jobId,nonce:command.nonce,state:"completed",costUsd:2,toolCalls:3,attemptValid:true,attemptConsumed:true,vote:"UPVOTE",receiptSha256:"c".repeat(64),report:"UPVOTE"});
+    const view=h.db.campaignBudgets.view("root")!;
+    assert.equal(view.state,"active");
+    assert.deepEqual(view.remaining,{costUsd:null,toolCalls:null});
+    assert.ok(view.actual.costUsd>=2,"the review's usage is metered against the unbounded campaign");
+  } finally {h.db.close();}
+});
+
 test("recording a planned follow-up cannot bypass the accepted-work allowance",()=>{
   const h=harness();
   try {

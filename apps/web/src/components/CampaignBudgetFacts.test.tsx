@@ -40,3 +40,20 @@ test("recorded campaign spend says when it includes an estimate for running turn
   assert.equal(recordedSpend(budget({ costAccounting: "unavailable", actual: { costUsd: 4.25, toolCalls: 12, includesEstimate: true } })),
     "Cost unavailable, 12 tool calls", "no estimate is claimed for a cost that is not shown");
 });
+
+/** The Campaign Allowance value without its note, as text. */
+function allowance(view: CampaignBudgetView): string {
+  const window = new Window();
+  window.document.body.innerHTML = `<dl>${renderToStaticMarkup(<CampaignBudgetFacts budget={view} />)}</dl>`;
+  const term = [...window.document.querySelectorAll("dt")].find((dt) => dt.textContent === "Campaign Allowance");
+  assert.ok(term, "the allowance row is shown");
+  return term.nextElementSibling!.firstChild!.textContent ?? "";
+}
+
+test("a campaign authorized without a ceiling says No limit, and a single ceiling is shown alone", () => {
+  const unbounded = budget({ authority: { version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 4, acceptedFollowUps: 0 },
+    remaining: { costUsd: null, toolCalls: null } });
+  assert.equal(allowance(unbounded), "No limit, 4 concurrent workers, 0 accepted follow-ups");
+  assert.equal(recordedSpend(unbounded), "$4.25, 12 tool calls", "usage is still metered and shown");
+  assert.equal(allowance(budget()), "$10.00");
+});

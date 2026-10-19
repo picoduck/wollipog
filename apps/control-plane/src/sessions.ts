@@ -4703,7 +4703,9 @@ export class SessionsService {
       const authoritySupport = campaignAuthorityPreflight(control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
       if (!authoritySupport.supported) return fail(authoritySupport.reason ?? "campaign authority is unsupported", 409);
-      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, true);
+      // A launch with no cost ceiling still meters cost, but only an explicit ceiling needs it priced.
+      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model,
+        control.boundary.budgetAuthority?.costUsd !== undefined);
       if (accountingError) return fail(accountingError, 409);
       const nativeReview = control.boundary.budgetAuthority?.controlledReview;
       if (nativeReview && (!runner.runtime?.campaignReview || controlledReviewCapabilityKey(nativeReview) !== controlledReviewCapabilityKey(runner.runtime.campaignReview))) {

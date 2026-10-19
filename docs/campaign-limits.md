@@ -76,7 +76,9 @@ parent total is not billed twice; independently reported managed sessions count 
 The optional human-minted `budgetAuthority.controlledReview` binds the exact
 `native_opus_5_5_high_read_only` profile, audited installed controller SHA-256, native executable
 SHA-256, Claude CLI 2.1.296, existing runner-default Claude account, and provider admission agent
-identity. It requires finite campaign cost, tool and concurrency ceilings. Numeric protocol218
+identity. It requires a campaign concurrency ceiling; cost and tool-call ceilings are optional,
+because every review job reserves its own finite cost and tool-call bound, which is metered and
+charged to the campaign whether or not the campaign has a ceiling (#2940). Numeric protocol218
 alone does not establish this capability; the runner must advertise the matching `campaignReview`
 descriptor. Other versions, execution-isolation contexts and unknown pricing fail closed. No
 installed skill, account, hosting setting or permission is edited by this adapter.
