@@ -39,6 +39,23 @@ const machineRow = (page: import("@playwright/test").Page, name = "Design Workst
 /** Design Workstation's own route, which wider than a phone opens it beside the list (#2985). */
 const DESIGN_WORKSTATION = "machine=native-t14s";
 
+/**
+ * Settings… (#2988): beside ⋯ in the detail's title row, and on a phone the first item of the
+ * detail bar's ⋯.
+ */
+async function openSettings(page: import("@playwright/test").Page) {
+  const button = page.locator(".machine-detail-title-row").getByRole("button", { name: "Settings…", exact: true });
+  if (await button.isVisible()) {
+    await button.click();
+    return;
+  }
+  await page.locator(".detail-bar").getByRole("button", { name: "Machine Actions" }).click();
+  await page.getByRole("menu", { name: "Machine Actions" }).getByRole("menuitem", { name: "Settings…" }).click();
+}
+
+/** The open machine's one lifecycle notice (#2988). */
+const machineNotice = (page: import("@playwright/test").Page) => page.locator("article.machine-detail > .notice");
+
 test.beforeEach(async ({ page }) => {
   // A phone shows the list alone (#2985). Wider, nothing is selected by itself (#2986), so the
   // scenarios open Design Workstation by its route.
@@ -61,7 +78,7 @@ test("Connections distinguish verified, unavailable, and unverified agents", asy
 
 test("Machine settings show competing installations and switch the saved target", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
-  await page.getByRole("button", { name: "New Harness Release · View Settings" }).click();
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const system = dialog.locator(".machine-harness-installation").filter({ hasText: "/usr/bin/codex" });
   const local = dialog.locator(".machine-harness-installation").filter({ hasText: "/home/example/.local/bin/codex" });
@@ -83,7 +100,7 @@ test("Machine settings show competing installations and switch the saved target"
 
 test("Machine and Connections explain pinned, suppressed, failed, and unavailable harness states", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states"));
-  await page.getByRole("button", { name: "New Harness Release · View Settings" }).click();
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const installation = (path: string) => dialog.locator(".machine-harness-installation").filter({ hasText: path });
   await expect(installation("Codex Tools")).toContainText("Pinned by Machine Policy");
@@ -215,7 +232,7 @@ test("older Windows runner update instructions are suppressed in Details and Mac
   await details.getByText(/No copyable update command is available/).scrollIntoViewIfNeeded();
   await page.screenshot({ path: "test-results/older-runner-guidance-details-mobile.png", fullPage: true });
   await details.getByRole("button", { name: "Close" }).last().click();
-  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  await openSettings(page);
   const settings = page.getByRole("dialog", { name: "Manage Design Workstation" });
   await expect(settings.getByText(/No copyable update command is available/)).toBeVisible();
   await expect(settings).not.toContainText("Run `& 'C:\\Windows");
@@ -231,17 +248,20 @@ test("offline Machines retain last-reported harness status without a fresh relea
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
   await setOffline(page);
   await expect(page.getByRole("button", { name: "New Harness Release · View Settings" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  await openSettings(page);
   await expect(page.getByRole("dialog").locator(".machine-harness-installation").first()).toContainText("Last Reported: New Release Published");
   await page.screenshot({ path: "test-results/harness-installations-offline-desktop.png", fullPage: true });
 });
 
 test("failed release guidance names the SSH Machine's Reconnect action", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states-ssh"));
-  const card = page.locator(".box-card").filter({ hasText: "Design Workstation" });
-  await expect(card.getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
-  await card.locator(".runner-head-right").screenshot({ path: "test-results/failed-harness-check-ssh-action.png" });
-  await card.getByRole("button", { name: "Manage", exact: true }).click();
+  const detail = page.locator('article.machine-detail[data-kind="ssh"]');
+  await detail.getByRole("button", { name: "Machine Actions" }).click();
+  const actions = page.getByRole("menu", { name: "Machine Actions" });
+  await expect(actions.getByRole("menuitem", { name: "Reconnect", exact: true })).toBeVisible();
+  await actions.screenshot({ path: "test-results/failed-harness-check-ssh-action.png" });
+  await page.keyboard.press("Escape");
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const failedInstallation = dialog.locator(".machine-harness-installation").filter({ hasText: "Pi\\pi.exe" });
   await expect(failedInstallation).toContainText("Reconnect for an SSH Machine after active sessions finish");
@@ -250,7 +270,7 @@ test("failed release guidance names the SSH Machine's Reconnect action", async (
 
 test("Machine settings keep same-name container installations scoped to their targets", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("target-installations"));
-  await page.getByRole("button", { name: "Manage" }).click();
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const installationSection = dialog.locator(".machine-settings-section").filter({ hasText: "Agent Harness Installations" });
   const alpha = dialog.locator(".machine-harness-installation").filter({ hasText: "Alpha Image" });
@@ -410,10 +430,10 @@ test("Connections show installation guidance for protocol v154 verified-unavaila
   )).toHaveCount(0);
 });
 
-test("offline recovery stays stacked and usable in a narrow card on a desktop viewport", async ({ page }) => {
+test("offline recovery stays stacked and usable in a narrow detail on a desktop viewport", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await setOffline(page);
-  const card = page.locator(".runner-card");
+  const card = page.locator("article.machine-detail");
   await card.evaluate((element) => { (element as HTMLElement).style.width = "260px"; });
 
   await expect.poll(() => card.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThan(280);
@@ -421,7 +441,7 @@ test("offline recovery stays stacked and usable in a narrow card on a desktop vi
 
   const repair = page.getByRole("button", { name: "Repair Connection…", exact: true });
   await expect(repair).toHaveText("Repair Connection…");
-  const geometry = await page.locator('[aria-label="Connection Offline"]').evaluate(recoveryGeometry);
+  const geometry = await machineNotice(page).evaluate(recoveryGeometry);
   expect(geometry.button).not.toBeNull();
   // A Notice puts its actions in a row under the body (docs/design-system.md §13.2): the content
   // gap plus the row's top margin, 8px, replacing the old box hint's 12px.
@@ -452,7 +472,7 @@ test.describe("on a touch phone", () => {
 
     const repair = page.getByRole("button", { name: "Repair Connection…", exact: true });
     await expect(repair).toBeVisible();
-    const geometry = await page.locator('[aria-label="Connection Offline"]').evaluate(recoveryGeometry);
+    const geometry = await machineNotice(page).evaluate(recoveryGeometry);
     expect(geometry.button).not.toBeNull();
     expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 7);
     expect(Math.abs(geometry.button!.left - geometry.message.left)).toBeLessThanOrEqual(0.5);
@@ -473,11 +493,11 @@ test.describe("on a touch phone", () => {
   });
 });
 
-test("non-admin recovery guidance wraps inside a narrow mobile card", async ({ page }) => {
+test("non-admin recovery guidance wraps inside a narrow mobile detail", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 720 });
   await page.goto("/machine-management-e2e.html?role=viewer");
   await machineRow(page).click();
-  await expect(page.locator(".runner-card").getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Design Workstation", exact: true })).toBeVisible();
   await setOffline(page);
 
   await expect(page.getByRole("button", { name: "Repair Connection…", exact: true })).toHaveCount(0);
@@ -507,7 +527,7 @@ test("non-admin recovery guidance wraps inside a narrow mobile card", async ({ p
 
 });
 test("Machine settings rename the Machine and register a Workspace without creating a Project", async ({ page }) => {
-  await page.getByRole("button", { name: "Manage" }).click();
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   await expect(dialog.getByText("Misko-T14s-G6", { exact: true })).toBeVisible();
 
@@ -529,7 +549,7 @@ test("Machine settings rename the Machine and register a Workspace without creat
 });
 
 test("Machine settings explain live Runner Capacity and apply an authorized increase", async ({ page }) => {
-  await page.getByRole("button", { name: "Manage" }).click();
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   await expect(dialog.getByRole("heading", { name: "Runner Capacity" })).toBeVisible();
   await expect(dialog.getByLabel("Runner Capacity Usage")).toContainText("12 Units");
@@ -550,7 +570,7 @@ test("Machine settings explain live Runner Capacity and apply an authorized incr
 });
 
 test("Machine settings require the terms warning before enabling Automatic Account Switching", async ({ page }) => {
-  await page.getByRole("button", { name: "Manage" }).click();
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   await expect(dialog.getByRole("heading", { name: "Automatic Account Switching" })).toBeVisible();
   await expect(dialog.getByText("Disabled. Provider usage limits continue to park sessions as before.", {
@@ -576,7 +596,7 @@ test("Machine settings require the terms warning before enabling Automatic Accou
 });
 
 test("Machine settings save independent Claude and Codex default accounts", async ({ page }) => {
-  await page.getByRole("button", { name: "Manage" }).click();
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   await expect(dialog.getByRole("heading", { name: "Default Provider Accounts" })).toBeVisible();
   const defaults = dialog.locator("section.machine-settings-section")
@@ -607,7 +627,7 @@ test("Machine settings save independent Claude and Codex default accounts", asyn
   const personal = page.locator("details.runner-agents .agent-row").filter({ hasText: "Personal" });
   await personal.getByRole("button", { name: "Remove" }).click();
   await page.getByRole("dialog", { name: "Remove Account" }).getByRole("button", { name: "Remove Account" }).click();
-  await page.getByRole("button", { name: "Manage" }).click();
+  await openSettings(page);
   const reopened = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const missing = reopened.locator("section.machine-settings-section").filter({ hasText: "Default Provider Accounts" });
   await expect(missing).toContainText("The saved account is no longer on this Machine");
@@ -617,14 +637,14 @@ test("Machine settings save independent Claude and Codex default accounts", asyn
 test("ordinary members can inspect Runner Capacity but cannot change it", async ({ page }) => {
   await page.goto(`/machine-management-e2e.html?role=viewer&${DESIGN_WORKSTATION}`);
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
-  await expect(page.getByLabel("System Details")).toContainText("12 of 16 Units Used");
-  await expect(page.getByRole("button", { name: "Manage" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Capacity" })).toContainText("12 of 16 Units Used");
+  await expect(page.getByRole("button", { name: "Settings…" })).toHaveCount(0);
 });
 
 test("a Machine owner can change capacity without receiving organization-wide controls", async ({ page }) => {
   await page.goto(`/machine-management-e2e.html?role=machine-owner&${DESIGN_WORKSTATION}`);
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
-  await page.getByRole("button", { name: "Manage" }).click();
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   await expect(dialog.getByLabel("Runner Capacity", { exact: true })).toBeEnabled();
   await expect(dialog.getByRole("heading", { name: "Machine Details" })).toHaveCount(0);
@@ -633,7 +653,7 @@ test("a Machine owner can change capacity without receiving organization-wide co
 });
 
 test("Machine settings expose deletion with an explicit history warning", async ({ page }) => {
-  await page.getByRole("button", { name: "Manage" }).click();
+  await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const deleteMachine = dialog.getByRole("button", { name: "Delete Machine" });
   await expect(deleteMachine).toBeDisabled();
@@ -643,7 +663,7 @@ test("Machine settings expose deletion with an explicit history warning", async 
   await deleteMachine.click();
 
   const confirmation = page.getByRole("dialog", { name: "Delete Machine" });
-  await expect(confirmation).toContainText("its sessions and its multi-agent runs are permanently deleted");
+  await expect(confirmation).toContainText("Design Workstation, its sessions and its multi-agent runs are deleted from Wollipog. Files on the machine stay where they are.");
   await confirmation.getByRole("button", { name: "Delete Machine" }).click();
   await expect(page.getByText("No Machines Yet")).toBeVisible();
   // The empty tab owns the create actions, so the header no longer offers Add Machine (#2984).
@@ -877,4 +897,124 @@ test.describe("the Machines list and detail on a touch phone", () => {
     expect(await listBody.evaluate((element) => element.scrollTop)).toBe(300);
     await expect(page.locator(".row.is-selected")).toHaveCount(0);
   });
+});
+
+/** The detail's meta line and every control in its title row and the app bar (#2988). */
+const headerGeometry = (page: import("@playwright/test").Page) => page.evaluate(() => {
+  const meta = document.querySelector<HTMLElement>(".machine-detail-meta")!;
+  const controls = [...document.querySelectorAll<HTMLElement>(".machine-detail-title-row button, .detail-bar button")]
+    .filter((control) => control.getClientRects().length > 0);
+  const root = document.scrollingElement!;
+  const detail = document.querySelector<HTMLElement>(".master-detail-detail")!;
+  return {
+    metaRight: meta.getBoundingClientRect().right,
+    metaOverflows: meta.scrollWidth > meta.clientWidth,
+    metaTransforms: [...meta.querySelectorAll("li")].map((item) => getComputedStyle(item).textTransform),
+    metaText: [...meta.querySelectorAll("li")].map((item) => item.textContent),
+    metaLines: Math.round(meta.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(meta).lineHeight)),
+    pageScrollsSideways: root.scrollWidth > root.clientWidth || detail.scrollWidth > detail.clientWidth,
+    controls: controls.map((control) => {
+      // The hit area may reach past the visible box (§15.3): measure what a tap at each edge hits.
+      control.scrollIntoView({ block: "nearest" });
+      const rect = control.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const reach = (dx: number, dy: number) => control.contains(document.elementFromPoint(x + dx, y + dy));
+      return {
+        name: control.getAttribute("aria-label") ?? control.textContent?.trim(),
+        tall: reach(0, -21.5) && reach(0, 21.5),
+        wide: reach(-21.5, 0) && reach(21.5, 0),
+      };
+    }),
+  };
+});
+
+for (const width of [320, 390]) {
+  test.describe(`the machine detail on a ${width}px touch phone`, () => {
+    test.use({ viewport: { width, height: 800 }, hasTouch: true, isMobile: true });
+
+    test("the meta line truncates on one line, keeps the OS's own casing, and every app bar control is 44px (#2988)", async ({ page }) => {
+      await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__
+        .setRunnerHostname("design-workstation-in-the-third-floor-studio.corp.example.com"));
+      await machineRow(page).click();
+      await expect(page.locator(".detail-bar")).toContainText("Design Workstation");
+      const geometry = await headerGeometry(page);
+      expect(geometry.metaText).toEqual(["Native Runner", "design-workstation-in-the-third-floor-studio.corp.example.com", "Windows"]);
+      expect(geometry.metaTransforms.every((transform) => transform === "none"), geometry.metaTransforms.join()).toBe(true);
+      expect(geometry.metaLines).toBe(1);
+      expect(geometry.metaRight).toBeLessThanOrEqual(width + 0.5);
+      expect(geometry.pageScrollsSideways).toBe(false);
+      expect(geometry.controls.map((control) => control.name)).toEqual(expect.arrayContaining(["Back to Connections", "Machine Actions"]));
+      for (const control of geometry.controls) expect(control, `${control.name} is a 44px target`).toMatchObject({ tall: true, wide: true });
+    });
+
+    test("the app bar's ⋯ starts with Settings…, and Delete Machine… replaces the sheet with a confirmation that has Back (#2988)", async ({ page }) => {
+      await setOffline(page);
+      await machineRow(page).click();
+      const detail = page.locator("article.machine-detail");
+      await expect(detail.getByRole("button", { name: "Settings…" })).toHaveCount(0);
+      await page.locator(".detail-bar").getByRole("button", { name: "Machine Actions" }).click();
+      const sheet = page.getByRole("menu", { name: "Machine Actions" });
+      await expect(sheet.getByRole("menuitem")).toHaveText([
+        "Settings…", "Repair Connection…", "Connection Details…", "Delete Machine…",
+      ].map((label) => new RegExp(`^${label}`)));
+      await sheet.getByRole("menuitem", { name: "Delete Machine…" }).click();
+      const confirmation = page.getByRole("dialog", { name: "Delete Machine" });
+      await expect(confirmation).toBeVisible();
+      await expect(sheet).toHaveCount(0);
+      await confirmation.getByRole("button", { name: "Back to More Actions" }).click();
+      await expect(page.getByRole("menu", { name: "Machine Actions" })).toBeVisible();
+    });
+  });
+}
+
+test.describe("the machine detail with a coarse pointer at tablet width", () => {
+  test.use({ viewport: { width: 834, height: 900 }, hasTouch: true, isMobile: true });
+
+  test("Settings… and ⋯ in the title row are 44px targets (#2988)", async ({ page }) => {
+    await expect(page.locator(".machine-detail-title-row").getByRole("button", { name: "Settings…" })).toBeVisible();
+    const geometry = await headerGeometry(page);
+    expect(geometry.controls.map((control) => control.name)).toEqual(["Settings…", "Machine Actions"]);
+    for (const control of geometry.controls) expect(control, `${control.name} is a 44px target`).toMatchObject({ tall: true, wide: true });
+    expect(geometry.metaTransforms.every((transform) => transform === "none")).toBe(true);
+  });
+});
+
+test("an SSH machine's busy update asks to interrupt its sessions, and Connection Details copies every fact (#2988)", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/machine-management-e2e.html?ssh=online&outdated&busy");
+  const notice = machineNotice(page);
+  await expect(notice).toContainText("Runner Update Required");
+  await notice.getByRole("button", { name: "Update Runner…" }).click();
+  const interrupt = page.getByRole("dialog", { name: "Interrupt Sessions and Update" });
+  await expect(interrupt).toContainText("Updating this runner will interrupt 2 active sessions.");
+  await expect(interrupt).toContainText("Fix the half-cent rounding bug");
+  await interrupt.getByRole("button", { name: "Interrupt Sessions and Update" }).click();
+  await expect(page.getByText("Deploying the update. The status changes when the runner is back online.")).toBeVisible();
+
+  await page.locator(".machine-detail-title-row").getByRole("button", { name: "Machine Actions" }).click();
+  await page.getByRole("menu", { name: "Machine Actions" }).getByRole("menuitem", { name: "Connection Details…" }).click();
+  const details = page.getByRole("dialog", { name: "Connection Details" });
+  await expect(details.locator(".facts dt")).toHaveText([
+    "Connection", "SSH Target", "Host", "Operating System", "Runner Version", "Last Seen", "Worktree Storage", "Sandboxing",
+    "Deployed Build", "Platform",
+  ]);
+  await expect(details.locator(".facts dd").nth(6)).toHaveText("Not available");
+  await details.getByRole("button", { name: "Copy All" }).click();
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  for (const label of ["Connection: SSH", "SSH Target: misko@design-workstation", "Operating System: Windows", "Deployed Build: 0.42.0+fixture", "Platform: x86_64-pc-windows-msvc"]) {
+    expect(copied).toContain(label);
+  }
+});
+
+test("an SSH connection refused for its key says so and keeps ssh's words behind Show Details (#2988)", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?ssh=failed");
+  const notice = machineNotice(page);
+  await expect(notice).toHaveCount(1);
+  await expect(notice).toContainText("Couldn't Connect to Design Workstation");
+  await expect(notice).toContainText("The host refused your SSH key. Load the key with ssh-add, then try again.");
+  await expect(notice).not.toContainText("publickey");
+  await notice.getByRole("button", { name: "Show Details" }).click();
+  await expect(notice).toContainText("Permission denied (publickey).");
+  await expect(notice.getByRole("button", { name: "Try Again" })).toBeVisible();
 });

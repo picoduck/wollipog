@@ -10,7 +10,7 @@ for (const width of [1280, 390]) {
     // The machine opens from its row: as the detail route on a phone (#2985), beside the list and its
     // All Machines overview wider (#2986).
     await page.getByRole("complementary", { name: "Machines" }).locator("button.row.row-2").click();
-    await expect(page.locator(".runner-card").getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Design Workstation", exact: true })).toBeVisible();
     const disclosure = page.locator("details.machine-skills");
     await disclosure.locator("summary").click();
     await expect(disclosure.getByRole("heading", { name: "Unmanaged Skills" })).toBeVisible();

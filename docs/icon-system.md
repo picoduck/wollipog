@@ -176,13 +176,14 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `GuardrailsIcon` | Lucide | `Fence` | A session's limits: the + menu's Guardrails… row. `Gauge` already means the Fast service tier. |
 | `OrchestratorControlsIcon` | Lucide | `Waypoints` | An Orchestrator's parent control and workflow gates: the + menu's Orchestrator Controls… row, and Settings › Orchestrator. `Workflow` already means workflow runs. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
-| `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion. |
+| `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion, and a machine's Repair Connection… (#2988). |
 | `HeldIcon` | Lucide | `CirclePause` | Child sessions held from starting their next turn: the Held Children campaign notice. |
 | `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows, and Settings › Experimental. |
 | `AppearanceIcon` | Lucide | `Palette` | Settings › Appearance: theme, color scheme, density and navigation. |
 | `NotificationsIcon` | Lucide | `Bell` | Settings › Notifications: alerts when a session needs you. |
 | `StorageIcon` | Lucide | `Database` | Settings › Storage: how long archived sessions keep their history. |
 | `NetworkIcon` | Lucide | `Wifi` | Settings › Network: reaching this machine from other devices. `Network` already means child session requests, and `Globe` a remote host. |
+| `WifiOffIcon` | Lucide | `WifiOff` | A machine Wollipog can't reach: the machine detail's This Machine Is Offline notice (#2988). |
 | `VersionIcon` | Lucide | `Tag` | A numbered version ("v3") in a meta row. |
 | `UpdatedIcon` | Lucide | `Clock` | When something last changed, in a meta row. |
 | `HistoryIcon` | Lucide | `History` | Decision History, in the Session Tools list and the tool switcher (#2844). |

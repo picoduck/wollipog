@@ -1446,6 +1446,25 @@ variant by default and offers side by side as a user preference (§6.3).
   disconnected the last-known rows stay in `StaleContent` under a compact "Reconnecting…" notice
   in the list head. A phone's machine route replaces the header and its tabs with a `DetailBar`,
   "Back to Connections" and the machine's name. Connecting a machine over SSH selects it.
+- **Machine detail (#2988).** Every machine, native or SSH, is one `MachineDetail`
+  (`MachineDetail.tsx`), never a card. Its title row is the name as an `h2` (`--type-title`, one
+  line, its tooltip the full name), the one `machineStatus()` badge, **Settings…** (owners, admins
+  and the machine's own manager) and ⋯ **Machine Actions**; under it one §11.3 meta line, the kind
+  with its icon, the host (the hostname, or the SSH target), the OS from `osLabel()` and, when
+  offline, "Last seen 4m ago". It stays on one line and truncates, the host first. ⋯ holds, in
+  order, Rediscover Agents (native) or Reconnect (SSH), Find Agent Sessions… (online), Connection
+  Details…, and after a separator Delete Machine… (disabled with "Stop the runner to delete." while
+  a native runner is online); Repair Connection… replaces the first two while a native runner is
+  offline, and a viewer's ⋯ holds Connection Details… alone. On a phone the detail bar carries the
+  name and the same ⋯ led by Settings…, and the body keeps the badge and the meta line. Under the
+  header is at most one lifecycle notice, the first that applies (`machineNoticeKind()`): This
+  Machine Is Offline (neutral, `WifiOff`), Couldn't Connect to <name> (danger, the
+  `describeSshFailure()` sentence with ssh's words behind Show Details), Connecting… (info), Runner
+  Update Required (warning) and Older Runner Data Found (warning). Update Runner…, Reconnect and
+  Adopt Legacy Data… ask to interrupt the sessions a `409 BOX_HAS_ACTIVE_SESSIONS` names, and their
+  results are toasts. `confirmDeleteMachine()` is the one Delete Machine confirmation, here and in
+  Machine Settings. Connection Details is one `.facts` list for every machine, "Not available" in
+  `--text-faint` for a missing value, with Copy All beside Done.
 - **Settings (#3018).** Each section is a route, and the list takes the width's shape. Desktop: a
   sticky 192px `nav.settings-nav` of `.row.settings-nav-item` links at `--control-h`, each a 16px
   icon and the section name; the current one is `aria-current="page"` with the §5.2 selected state
@@ -3701,12 +3720,13 @@ local name so the two do not collide.
 - **Settings:** `.setting-row` details, `.set-sublabel`, `.update-block`, `.modal-body.allow-overflow`
   (unneeded once #1800 portals menus out of dialogs).
 
-**Remaining `<dl>` recipes.** Ten other label and value lists still carry their own rules and
+**Remaining `<dl>` recipes.** Eight other label and value lists still carry their own rules and
 move onto `.facts` with their area: `.context-popover-facts`, `.session-usage-facts`,
 `.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts`,
-`.runner-meta`, `.connection-details-list`, `.approval-selector-context` and `.automation-facts`.
-(`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177, and
-`.campaign-held-child-hold` with Held Children, #2157.)
+`.approval-selector-context` and `.automation-facts`.
+(`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177,
+`.campaign-held-child-hold` with Held Children, #2157, and `.runner-meta` and
+`.connection-details-list` with the machine detail's Connection Details, #2988.)
 
 ---
 

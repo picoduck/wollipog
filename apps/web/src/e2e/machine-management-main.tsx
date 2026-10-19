@@ -196,6 +196,34 @@ const holdSnapshot = fixtureParams.get("snapshot") === "hold";
 let connectionHeld = false;
 let socket: FixtureSocket | null = null;
 let box: BoxView | null = null;
+// `outdated` gives Design Workstation an older runner protocol (#2988's Runner Update Required).
+if (fixtureParams.has("outdated") && runner) runner.protocolVersion = PROTOCOL_VERSION - 1;
+/**
+ * `ssh=<state>` makes Design Workstation an SSH machine in one lifecycle state (#2988): `online`,
+ * `connecting` (bootstrapping), `failed` (its key refused), `ended` (an SSH session that simply
+ * ended) or `legacy` (older runner data found).
+ */
+const sshState = fixtureParams.get("ssh");
+if (sshState && runner) {
+  box = {
+    boxId: "demo-box", runnerId: runner.runnerId, displayName: "Design Workstation", sshTarget: "misko@design-workstation",
+    status: sshState === "connecting" ? "bootstrapping" : sshState === "failed" ? "failed" : sshState === "ended" ? "offline" : "online",
+    lastError: sshState === "failed" ? "misko@design-workstation: Permission denied (publickey)." : null,
+    createdAt: 1, deployedVersion: "0.42.0+fixture", triple: "x86_64-pc-windows-msvc",
+    ...(sshState === "legacy" ? { runnerDataLayout: "legacy" as const, legacyDataAccountStatus: "unclaimed" as const } : {}),
+  };
+  if (sshState === "connecting") runner = null;
+  else if (sshState !== "online" && sshState !== "legacy") Object.assign(runner, { status: "offline", lastSeen: Date.now() - 4 * 60_000 });
+}
+/** How many lifecycle requests the busy machine refuses before it is forced (`busy` in the URL). */
+const busyMachine = fixtureParams.has("busy");
+const activeSessionsConflict = () => new ApiError("this machine has 2 active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
+  activeSessions: [
+    { id: "s1", title: "Fix the half-cent rounding bug", status: "running" },
+    { id: "s2", title: "Draft the release notes", status: "idle" },
+  ],
+  activeSessionCount: 2,
+});
 let lastRegisteredWorkspace: { name: string; path: string } | null = null;
 let lastAddBoxRequest: AddBoxRequest | null = null;
 /** How Connect via SSH's request answers (#2987): accepted, refused with this message, or held open. */
@@ -524,6 +552,25 @@ const client = {
     runner = null;
     socket?.push({ type: "runner_removed", runnerId });
   },
+  removeBox: async (boxId: string) => {
+    box = null;
+    socket?.push({ type: "box_removed", boxId });
+  },
+  // The machine's lifecycle actions (#2988). With `busy`, each refuses first for its active sessions.
+  rediscover: async () => ({ ok: true as const }),
+  reconnectBox: async (_boxId: string, force = false) => {
+    if (busyMachine && !force) throw activeSessionsConflict();
+    return { ok: true as const };
+  },
+  updateBoxRunner: async (_boxId: string, force = false) => {
+    if (busyMachine && !force) throw activeSessionsConflict();
+    return { ok: true as const, status: "started" as const, expectedVersion: "0.43.0", source: "release-cache" as const,
+      triple: "x86_64-pc-windows-msvc", releaseTag: "v0.43.0" };
+  },
+  adoptLegacyBoxData: async (_boxId: string, force = false) => {
+    if (busyMachine && !force) throw activeSessionsConflict();
+    return { ok: true as const, status: "started" as const };
+  },
 } as ApiClient;
 
 declare global {
@@ -538,6 +585,8 @@ declare global {
         "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper" |
         "explicit-interpreter" | "older-interpreter-guidance"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
+      /** A host name long enough that the detail's meta line has to truncate (#2988). */
+      setRunnerHostname(hostname: string): void;
       restoreIdentity(): void;
       /** Drops the connection and keeps it down: the list shows its last-known rows (#2985). */
       disconnect(): void;
@@ -714,6 +763,13 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
   setRunnerStatus: (status) => {
     if (!runner) return;
     runner.status = status;
+    // An offline machine says when it was last seen (#2988): a few minutes ago, as a real one would.
+    if (status === "offline") runner.lastSeen = Date.now() - 4 * 60_000;
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+  },
+  setRunnerHostname: (hostname) => {
+    if (!runner) return;
+    runner.hostname = hostname;
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
   },
   restoreIdentity: () => { identityFails = false; },

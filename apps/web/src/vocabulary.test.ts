@@ -61,6 +61,7 @@ test("no user-facing string calls a Machine a box", () => {
   // control plane, which is correct; it must not reach a label, tooltip, or sentence a user reads.
   for (const path of [
     "./components/RunnersView.tsx",
+    "./components/MachineDetail.tsx",
     "./components/AddBoxDialog.tsx",
     "./components/InstancesPanel.tsx",
   ]) {
@@ -101,7 +102,7 @@ test("known placeholders read as hint text, not labels", () => {
  */
 const EXPECTED_TOOLTIPS: ReadonlyArray<[string, string]> = [
   ["./components/GitDiffViewer.tsx", "Add a finding on this line"],
-  ["./components/RunnersView.tsx", "Reconnect this machine"],
+  ["./components/RunnersView.tsx", "Run `codex login`, then rediscover."],
 ];
 
 test("tooltips stay in sentence case", () => {

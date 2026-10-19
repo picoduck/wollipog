@@ -5,8 +5,8 @@ import { statusMeta } from "../status-meta.js";
 import {
   agentAvailabilityLabel,
   availableAgentCount,
-  lifecycleConflictPresentation,
 } from "./RunnersView.js";
+import { lifecycleConflictPresentation } from "./MachineDetail.js";
 
 test("Connections counts only verified runnable agents and labels legacy rows unverified", () => {
   const base = { name: "Agent", command: "agent", args: [], env: {} };

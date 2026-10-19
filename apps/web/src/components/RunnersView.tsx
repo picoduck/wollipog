@@ -10,7 +10,6 @@ import {
   runnerSupportsProtocol,
   type AgentContext,
   type AgentDefinition,
-  type BoxStatus,
   type BoxView,
   type IdentityAdministrationView,
   type IdentityContextView,
@@ -20,36 +19,28 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
 import { activeSessionCounts } from "../rail-attention.js";
-import { osLabel, relativeTime, sshErrorHint, titleCaseLabel } from "../format.js";
+import { titleCaseLabel } from "../format.js";
 import {
   agentInstallHints,
   codexUpgradeGuidance,
   harnessUpdateGuidance,
-  formatAdmissionPolicy,
   machineListEntries,
-  formatExecutionIsolation,
   machineSettingsMutationError,
-  nativeRunnerUpdateHint,
-  outdatedBoxHint,
-  outdatedRunnerTitle,
   runnerDisplay,
-  runnerOutdated,
-  sshRunnerLifecycleHint,
-  unknownRunnerTitle,
 } from "../runners.js";
 
-import { CopyButton, DetailSkeleton, Modal, Spinner } from "./common.js";
+import { CopyButton, DetailSkeleton, Modal } from "./common.js";
+import { confirmDeleteMachine, lifecycleConflictPresentation, MachineDetail, phoneMachineMenu, useMachineActions } from "./MachineDetail.js";
+import { DetailSection } from "./DetailSection.js";
 import { MachineList } from "./MachineList.js";
 import { MachinesOverview } from "./MachinesOverview.js";
 import { StaleContent } from "./StaleContent.js";
-import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
-import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { InstallManuallyDialog } from "./InstallManuallyDialog.js";
 import { RepairConnectionDialog } from "./RepairConnectionDialog.js";
 import { SetUpThisMachineDialog } from "./SetUpThisMachineDialog.js";
 import { AddBoxDialog } from "./AddBoxDialog.js";
-import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
+import { useFeedback } from "./FeedbackProvider.js";
 import { agentDisplayName, agentDriverDescription, agentDriverLabel } from "../agent-presentation.js";
 import {
   ChevronRightIcon,
@@ -57,17 +48,11 @@ import {
   InfoIcon,
   NetworkIcon,
   PlusIcon,
-  RefreshIcon,
-  SearchIcon,
-  SettingsIcon,
   ComputerIcon,
-  UpdateIcon,
 } from "./Icons.js";
 import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
-import { AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { InstancesPanel } from "./InstancesPanel.js";
 import { ProviderAccountsSection } from "./ProviderAccountsSection.js";
-import { activeSessionConflict } from "./active-session-conflict.js";
 import { MachineSkillsSection } from "./MachineSkillsSection.js";
 import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettings.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
@@ -391,7 +376,7 @@ function AgentRow({
               {registryBusy ? "Updating…" : registryAction === "approve" ? "Approve Exact Launch…" : "Revoke Approval"}
             </button>
           )}
-          {registryError && <div className="empty-sub box-error">{registryError}</div>}
+          {registryError && <Notice tone="danger" role="alert" compact>{registryError}</Notice>}
         </div>
       )}
     </div>
@@ -400,233 +385,103 @@ function AgentRow({
   );
 }
 
-/** The meta + agents + workspaces body shared by runner cards and (once online) box cards. */
-function RunnerDetails({ runner, online, canManageProfiles = false }: {
+/**
+ * A machine's sections under its header and notice (#2988), each its own block so the units that
+ * restyle them (#2989 Capacity, Workspaces and Skills; #2990 Agents; #2995 Provider Accounts) each
+ * change one. They keep their current content until then.
+ */
+function MachineSections({ runner, online, canManageProfiles = false }: {
   runner: RunnerView;
   online: boolean;
   /** The viewer may use the provider profile routes: see `canManageProviderProfiles`. */
   canManageProfiles?: boolean;
 }) {
-  const pv = runner.protocolVersion;
-  const [findingSessions, setFindingSessions] = useState(false);
-  const externalSessionsSupported = runnerSupportsProtocol(pv, "externalSessions");
-  const unsupported = runnerCapabilityRequirement(pv, "externalSessions", "finding agent sessions");
+  const capacity = runner.capacity
+    ? runner.capacity.usedUnits === undefined
+      ? `${runner.capacity.configuredUnits} Units`
+      : `${runner.capacity.usedUnits} of ${runner.capacity.configuredUnits} Units Used`
+    : runner.runtime ? `${runner.runtime.maxConcurrentSessions} Units` : null;
   return (
-    <div className="runner-details">
-      <div className="runner-details-body">
-        <dl className="runner-meta runner-system-meta" aria-label="System Details">
-          <div>
-            <dt>Host</dt>
-            <dd>{runner.hostname}</dd>
-          </div>
-          <div>
-            <dt>Runner Version</dt>
-            <dd>
-              {runner.version || "—"}
-              {pv != null && runnerOutdated(pv) && (
-                <span className="outdated-badge" title={outdatedRunnerTitle()}>
-                  Outdated
-                </span>
-              )}
-              {pv == null && (
-                <span className="outdated-badge" title={unknownRunnerTitle()}>
-                  Protocol Unknown
-                </span>
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt>Protocol</dt>
-            <dd>{pv == null ? "Unknown" : `v${pv}`}</dd>
-          </div>
-          <div>
-            <dt>Last Seen</dt>
-            <dd>{relativeTime(runner.lastSeen)}</dd>
-          </div>
-          {runner.capacity && (
-            <div>
-              <dt>Runner Capacity</dt>
-              <dd>
-                {runner.capacity.usedUnits === undefined
-                  ? `${runner.capacity.configuredUnits} Units`
-                  : `${runner.capacity.usedUnits} of ${runner.capacity.configuredUnits} Units Used`}
-              </dd>
-            </div>
-          )}
-          {runner.runtime && (
+    <div className="machine-detail-sections">
+      {capacity && (
+        <DetailSection title="Capacity">
+          <p className="machine-capacity-line">{capacity}</p>
+        </DetailSection>
+      )}
+      <details className="runner-agents disclosure">
+        <summary>
+          <ChevronRightIcon className="disclosure-chevron" />
+          <span className="runner-agents-label">Agents</span>
+          <span className="group-count">{runner.agents.length}</span>
+          <span className="runner-agents-summary">
+            {availableAgentCount(runner.agents)} Available
+          </span>
+        </summary>
+        <div className="runner-agents-body">
+          {runner.agents.length > 0 ? (
             <>
-              {!runner.capacity && <div><dt>Runner Capacity</dt><dd>{runner.runtime.maxConcurrentSessions} Units</dd></div>}
-              {formatAdmissionPolicy(runner.runtime) && (
-                <div>
-                  <dt>Admission Policy</dt>
-                  <dd>{formatAdmissionPolicy(runner.runtime)}</dd>
-                </div>
-              )}
-              <div>
-                <dt>Worktree Storage</dt>
-                <dd title={runner.runtime.worktreeRoot}>{runner.runtime.worktreeRoot}</dd>
-              </div>
-              <div>
-                <dt>Execution Policy</dt>
-                <dd>{formatExecutionIsolation(runner.runtime)}</dd>
-              </div>
-            </>
-          )}
-        </dl>
-        <ProviderAccountsSection runner={runner} online={online} canManageProfiles={canManageProfiles} />
-        <details className="runner-agents disclosure">
-          <summary>
-            <ChevronRightIcon className="disclosure-chevron" />
-            <span className="runner-agents-label">Agents</span>
-            <span className="group-count">{runner.agents.length}</span>
-            <span className="runner-agents-summary">
-              {availableAgentCount(runner.agents)} Available
-            </span>
-          </summary>
-          <div className="runner-agents-body">
-            {runner.agents.length > 0 ? (
-              <>
-                <div className="agent-list">
-                  {runner.agents.map((a) => (
-                    <AgentRow
-                      a={a}
-                      os={runner.os}
-                      runnerId={runner.runnerId}
-                      online={online}
-                      protocolVersion={runner.protocolVersion}
-                      key={a.id}
-                    />
-                  ))}
-                </div>
-                {runner.agents.every((agent) => agent.available !== true) && (
-                  <div className="install-hints">
-                    {runnerSupportsProtocol(runner.protocolVersion, "verifiedAgentAvailability") ? (
-                      <>
-                        <p className="hint">No usable agent CLIs found on this machine — install one:</p>
-                        {agentInstallHints(runner.os).map((h) => (
-                          <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
-                            {h.command ?? h.guidance}
-                            {h.command && <CopyButton text={h.command} />}
-                          </pre>
-                        ))}
-                      </>
-                    ) : (
-                      <p className="hint">Update this runner to verify its configured agent availability.</p>
-                    )}
-                  </div>
-                )}
-              </>
-            ) : runner.agentsRefreshed ? (
-              <div className="install-hints">
-                <p className="hint">No agent CLIs found on this machine — install one:</p>
-                {agentInstallHints(runner.os).map((h) => (
-                  <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
-                    {h.command ?? h.guidance}
-                    {h.command && <CopyButton text={h.command} />}
-                  </pre>
+              <div className="agent-list">
+                {runner.agents.map((a) => (
+                  <AgentRow
+                    a={a}
+                    os={runner.os}
+                    runnerId={runner.runnerId}
+                    online={online}
+                    protocolVersion={runner.protocolVersion}
+                    key={a.id}
+                  />
                 ))}
               </div>
-            ) : (
-              <p className="hint">Probing for agent CLIs…</p>
-            )}
-          </div>
-        </details>
-        <MachineSkillsSection runner={runner} />
-        <div className="group runner-workspaces">
-          <div className="group-head">
-            Workspaces <span className="group-count">{runner.workspaces.length}</span>
-          </div>
-          <ul className="workspace-list">
-            {runner.workspaces.map((w) => (
-              <li key={w.id}>
-                <span className="ws-name">{w.name}</span>
-                <span className="ws-path">{w.path}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-        {online && (
-          <div className="group runner-agent-sessions">
-            <div className="group-head">Agent Sessions</div>
-            <div className="runner-agent-sessions-action">
-              <p>Continue a session that was started outside Wollipog on this machine.</p>
-              <button
-                type="button"
-                className="btn sm btn-rediscover"
-                onClick={() => setFindingSessions(true)}
-                disabled={!externalSessionsSupported}
-                title={externalSessionsSupported ? "Choose an agent and scan its external sessions" : unsupported}
-              >
-                <SearchIcon />
-                <span>Find Agent Sessions</span>
-              </button>
+              {runner.agents.every((agent) => agent.available !== true) && (
+                <div className="install-hints">
+                  {runnerSupportsProtocol(runner.protocolVersion, "verifiedAgentAvailability") ? (
+                    <>
+                      <p className="hint">No usable agent CLIs found on this machine — install one:</p>
+                      {agentInstallHints(runner.os).map((h) => (
+                        <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
+                          {h.command ?? h.guidance}
+                          {h.command && <CopyButton text={h.command} />}
+                        </pre>
+                      ))}
+                    </>
+                  ) : (
+                    <p className="hint">Update this runner to verify its configured agent availability.</p>
+                  )}
+                </div>
+              )}
+            </>
+          ) : runner.agentsRefreshed ? (
+            <div className="install-hints">
+              <p className="hint">No agent CLIs found on this machine — install one:</p>
+              {agentInstallHints(runner.os).map((h) => (
+                <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
+                  {h.command ?? h.guidance}
+                  {h.command && <CopyButton text={h.command} />}
+                </pre>
+              ))}
             </div>
-            {!externalSessionsSupported && <Notice tone="neutral" compact>{unsupported}</Notice>}
-          </div>
-        )}
+          ) : (
+            <p className="hint">Probing for agent CLIs…</p>
+          )}
+        </div>
+      </details>
+      <ProviderAccountsSection runner={runner} online={online} canManageProfiles={canManageProfiles} />
+      <div className="group runner-workspaces">
+        <div className="group-head">
+          Workspaces <span className="group-count">{runner.workspaces.length}</span>
+        </div>
+        <ul className="workspace-list">
+          {runner.workspaces.map((w) => (
+            <li key={w.id}>
+              <span className="ws-name">{w.name}</span>
+              <span className="ws-path">{w.path}</span>
+            </li>
+          ))}
+        </ul>
       </div>
-      {findingSessions && (
-        <AgentSessionDiscoveryDialog runner={runner} onClose={() => setFindingSessions(false)} />
-      )}
+      <MachineSkillsSection runner={runner} />
     </div>
   );
-}
-
-function NativeRunnerHealth({
-  runner,
-  onRepair,
-  canRepair,
-}: {
-  runner: RunnerView;
-  onRepair: () => void;
-  canRepair: boolean;
-}) {
-  const hint = nativeRunnerUpdateHint(runner.protocolVersion);
-  if (runner.status === "offline") {
-    return (
-      <Notice tone="warning" role="status" ariaLabel="Connection Offline" title="Connection Offline"
-        actions={canRepair && <button className="btn sm" type="button" onClick={onRepair}>Repair Connection…</button>}>
-        <p>The runner process may be stopped or its saved credential may no longer be active.</p>
-        {!canRepair && <p>Ask an organization owner or admin to repair this connection.</p>}
-      </Notice>
-    );
-  }
-  if (!hint) return null;
-  return (
-    <Notice tone="warning" role="status" title="Native Runner Update Required">
-      {hint} Standalone installs should rerun the matching <code>scripts/install-runner</code> installer before
-      relaunching. See <code>docs/runner-updates.md</code>.
-    </Notice>
-  );
-}
-
-function boxStatusMeta(status: BoxStatus): StatusMeta {
-  return statusMeta("machine", status);
-}
-
-export interface LifecycleConflictPresentation {
-  message: string;
-  /** The interrupted sessions the server listed, for the confirmation's detail rows. */
-  detailRows: ConfirmationDetailRow[];
-  /** Interrupted sessions the server counted but did not list (beyond its limit, or not visible to
-   * this person). */
-  detailRowsOverflow: number;
-}
-
-export function lifecycleConflictPresentation(
-  error: ApiError,
-  action: "update" | "reconnect" | "adopt",
-): LifecycleConflictPresentation {
-  const { count, detailRows, detailRowsOverflow } = activeSessionConflict(error);
-  const actionLabel = action === "update" ? "Updating" : action === "reconnect" ? "Reconnecting" : "Adopting legacy data for";
-  const message = count == null
-    ? `${actionLabel} this runner will interrupt active work.`
-    : `${actionLabel} this runner will interrupt ${count} active session${count === 1 ? "" : "s"}.`;
-  return { message, detailRows, detailRowsOverflow };
-}
-
-function updateSourceLabel(source: "staged" | "release-cache", releaseTag: string): string {
-  return source === "staged" ? "local development build" : `release ${releaseTag}`;
 }
 
 function workspaceNameFromPath(path: string): string {
@@ -673,8 +528,6 @@ function MachineSettingsDialog({
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceName, setWorkspaceName] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [adoptingLegacyData, setAdoptingLegacyData] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const canBrowse = runner?.status === "online" &&
     runnerSupportsProtocol(runner.protocolVersion, "directoryListing");
@@ -808,62 +661,11 @@ function MachineSettingsDialog({
     }
   };
 
+  // The deletion runs inside the confirmation, which keeps a failure in view (§7.4).
   const deleteMachine = async () => {
-    const approved = await confirm({
-      title: "Delete Machine",
-      message: box
-        ? `The connection to ${display.name} is removed, and its sessions and multi-agent runs are permanently deleted from Wollipog. Files on the machine are not deleted.`
-        : `${display.name}, its sessions and its multi-agent runs are permanently deleted from Wollipog; files on the machine are not. Stop an online native runner before deleting it.`,
-      confirmLabel: "Delete Machine",
-      tone: "danger",
-    });
-    if (!approved) return;
-    setDeleting(true);
     setError(null);
-    try {
-      await onDelete();
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-      setDeleting(false);
-    }
-  };
-
-  const adoptLegacyData = async () => {
-    if (!box || adoptingLegacyData) return;
-    const approved = await confirm({
-      title: "Adopt Legacy Data",
-      message: `Confirm that every legacy runner process using this SSH account on ${display.name} is stopped. Wollipog keeps the existing state and allows one migration attempt.`,
-      confirmLabel: "Adopt Legacy Data",
-      tone: "danger",
-    });
-    if (!approved) return;
-    setAdoptingLegacyData(true);
-    setError(null);
-    try {
-      try {
-        await api.adoptLegacyBoxData(box.boxId, false);
-      } catch (cause) {
-        if (!(cause instanceof ApiError) || cause.status !== 409 || cause.code !== "BOX_HAS_ACTIVE_SESSIONS") throw cause;
-        setAdoptingLegacyData(false);
-        const conflict = lifecycleConflictPresentation(cause, "adopt");
-        const force = await confirm({
-          title: "Interrupt Sessions and Adopt Legacy Data",
-          message: conflict.message,
-          detailRows: conflict.detailRows,
-          detailRowsOverflow: conflict.detailRowsOverflow,
-          confirmLabel: "Interrupt Sessions and Adopt Legacy Data",
-          tone: "danger",
-        });
-        if (!force) return;
-        setAdoptingLegacyData(true);
-        await api.adoptLegacyBoxData(box.boxId, true);
-      }
-    } catch (cause) {
-      setError(machineSettingsMutationError(cause));
-    } finally {
-      setAdoptingLegacyData(false);
-    }
+    const deleted = await confirmDeleteMachine(confirm, { name: display.name, kind: box ? "ssh" : "native", onDelete });
+    if (deleted) onClose();
   };
 
   return (
@@ -894,7 +696,7 @@ function MachineSettingsDialog({
             {savingName ? "Saving…" : "Save Changes"}
           </button>
         </div>
-        <dl className="runner-meta runner-system-meta">
+        <dl className="facts">
           <div><dt>Connection Type</dt><dd>{box ? "SSH" : "Native"}</dd></div>
           {runner && <div><dt>Hostname</dt><dd>{runner.hostname}</dd></div>}
           {box && <div><dt>SSH Target</dt><dd>{box.sshTarget}</dd></div>}
@@ -1037,7 +839,7 @@ function MachineSettingsDialog({
             <p className="muted">Waiting for live capacity usage from this Machine.</p>
           ) : (
             <>
-              <dl className="runner-meta runner-system-meta" aria-label="Runner Capacity Usage">
+              <dl className="facts" aria-label="Runner Capacity Usage">
                 <div><dt>Configured</dt><dd>{runner.capacity.configuredUnits} Units</dd></div>
                 <div><dt>Used</dt><dd>{runner.capacity.usedUnits} Units</dd></div>
                 <div><dt>Available</dt><dd>{runner.capacity.availableUnits} Units</dd></div>
@@ -1048,7 +850,7 @@ function MachineSettingsDialog({
               </p>
               {runner.capacity.dimensions && (
                 <>
-                  <dl className="runner-meta runner-system-meta" aria-label="Capacity Dimensions">
+                  <dl className="facts" aria-label="Capacity Dimensions">
                     <div>
                       <dt>Active Turns</dt>
                       <dd>{runner.capacity.dimensions.activeTurns.used} of {runner.capacity.dimensions.activeTurns.limit}</dd>
@@ -1200,104 +1002,22 @@ function MachineSettingsDialog({
         )}
       </section>}
 
+      {/* Older runner data is adopted from the machine's notice now (#2988); #2991 moves Delete
+          Machine… into this dialog's footer. */}
       {!capacityOnly && <section className="machine-settings-section machine-danger-zone">
         <h3>Danger Zone</h3>
-        {box?.runnerDataLayout === "legacy" && box.legacyDataAccountStatus === "adopted" && (
-          <div className="machine-settings-danger-action">
-            <h4>Legacy Runner Data Adopted</h4>
-            <p>
-              This SSH account&apos;s legacy data is already owned. This Machine uses the current runner&apos;s
-              owner-aware isolated namespace and does not require another adoption.
-            </p>
-          </div>
-        )}
-        {box?.runnerDataLayout === "legacy" && box.legacyDataAccountStatus === "pending"
-          && box.legacyDataAdoption?.status !== "pending" && (
-          <div className="machine-settings-danger-action">
-            <h4>Legacy Data Adoption in Progress</h4>
-            <p>
-              Another Machine on this SSH account is adopting the shared legacy data. This Machine remains
-              parked until that exact current-runner registration completes.
-            </p>
-          </div>
-        )}
-        {box?.runnerDataLayout === "legacy" && box.legacyDataAccountStatus !== "adopted"
-          && (box.legacyDataAccountStatus !== "pending" || box.legacyDataAdoption?.status === "pending") && (
-          <div className="machine-settings-danger-action">
-            <h4>Legacy Runner Data</h4>
-            <p>
-              This Machine predates isolated managed-runner data. Stop every legacy runner on its SSH account,
-              then authorize one state-preserving migration attempt.
-            </p>
-            <button
-              type="button"
-              className="btn ghost danger"
-              disabled={adoptingLegacyData || box.legacyDataAdoption?.status === "pending"}
-              onClick={() => void adoptLegacyData()}
-            >
-              {box.legacyDataAdoption?.status === "pending"
-                ? "Legacy Data Adoption Pending"
-                : adoptingLegacyData ? "Authorizing…" : "Adopt Legacy Data"}
-            </button>
-          </div>
-        )}
         <p>Deleting a Machine removes its sessions and run history from Wollipog. Files on the Machine remain in place.</p>
         <button
           type="button"
           className="btn ghost danger"
-          disabled={deleting || onlineNativeRunner}
+          disabled={onlineNativeRunner}
           title={onlineNativeRunner ? "Stop this native runner before deleting the Machine" : undefined}
           onClick={() => void deleteMachine()}
         >
-          {deleting ? "Deleting…" : "Delete Machine"}
+          Delete Machine
         </button>
       </section>}
       {error && <div className="form-error" role="alert">{error}</div>}
-    </Modal>
-  );
-}
-
-function BoxConnectionDetailsDialog({ box, onClose }: { box: BoxView; onClose: () => void }) {
-  const build = box.deployedVersion?.trim() || "Not Available";
-  const platform = box.triple?.trim() || "Not Available";
-  return (
-    <Modal
-      title={`${box.sshTarget} Connection Details`}
-      onClose={onClose}
-      className="connection-details-dialog"
-      footer={<button type="button" className="btn" onClick={onClose}>Close</button>}
-    >
-      <dl className="connection-details-list">
-        <div>
-          <dt>Connection Type</dt>
-          <dd>SSH</dd>
-        </div>
-        <div>
-          <dt>SSH Target</dt>
-          <dd>{box.sshTarget}</dd>
-        </div>
-        <div className="connection-details-wide">
-          <dt>Last Deployed Build</dt>
-          <dd className="code-well">
-            <code>{build}</code>
-            {box.deployedVersion && (
-              <CopyButton
-                text={box.deployedVersion}
-                iconOnly
-                ariaLabel="Copy Last Deployed Build"
-                className="copy-btn icon-only-copy"
-              />
-            )}
-          </dd>
-        </div>
-        <div className="connection-details-wide">
-          <dt>Runner Platform</dt>
-          <dd className="code-well"><code>{platform}</code></dd>
-        </div>
-      </dl>
-      <p className="connection-details-note">
-        These details can help troubleshoot connection updates or provide information to support.
-      </p>
     </Modal>
   );
 }
@@ -1310,278 +1030,6 @@ export function canManageProviderProfiles(
 ): boolean {
   return !!context && (context.role === "owner" || context.role === "admin") &&
     context.organizationId === PERSONAL_ORGANIZATION_ID;
-}
-
-/** A box card: SSH target + bootstrap status + actions, with the runner's details once online. */
-export function BoxCard({
-  box,
-  runner,
-  canManage,
-  canManageProfiles = false,
-  onReconnect,
-  onRemove,
-}: {
-  box: BoxView;
-  runner: RunnerView | undefined;
-  canManage: boolean;
-  /** See `canManageProviderProfiles`. */
-  canManageProfiles?: boolean;
-  onReconnect: (boxId: string, force: boolean) => Promise<void>;
-  onRemove: (boxId: string) => Promise<void>;
-}) {
-  const api = useApi();
-  const { confirm } = useFeedback();
-  const inProgress = box.status === "bootstrapping" || box.status === "deploying";
-  const dot = box.status === "online" ? "online" : inProgress ? "connecting" : "offline";
-  // A connection-blocked SSH error (VPN/firewall) gets an actionable hint; null otherwise. lastError
-  // is cleared once a box is online, so this is naturally absent on healthy boxes.
-  const connHint = sshErrorHint(box.lastError);
-  // Only a known older protocol proves that the deployed runner is out of date. An absent
-  // protocol version is unknown rather than stale, so do not offer a destructive redeploy on a
-  // guess. The runner details still explain the unknown-version compatibility limitations.
-  const needsUpdate = !!runner && runnerOutdated(runner.protocolVersion);
-  const harnessStatusCurrent = box.status === "online" && runner?.status === "online";
-  const display = runnerDisplay(runner, box, box.runnerId);
-  const [updating, setUpdating] = useState(false);
-  const [reconnecting, setReconnecting] = useState(false);
-  const [showConnectionDetails, setShowConnectionDetails] = useState(false);
-  const [showMachineSettings, setShowMachineSettings] = useState(false);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const [updateResult, setUpdateResult] = useState<string | null>(null);
-  const updateRunner = async () => {
-    setUpdating(true);
-    setUpdateError(null);
-    setUpdateResult(null);
-    try {
-      let result: Awaited<ReturnType<typeof api.updateBoxRunner>>;
-      try {
-        result = await api.updateBoxRunner(box.boxId, false);
-      } catch (cause) {
-        if (!(cause instanceof ApiError) || cause.status !== 409 || cause.code !== "BOX_HAS_ACTIVE_SESSIONS") throw cause;
-        setUpdating(false);
-        const conflict = lifecycleConflictPresentation(cause, "update");
-        const approved = await confirm({
-          title: "Interrupt Sessions and Update",
-          message: conflict.message,
-          detailRows: conflict.detailRows,
-          detailRowsOverflow: conflict.detailRowsOverflow,
-          confirmLabel: "Interrupt Sessions and Update",
-          tone: "danger",
-        });
-        if (!approved) return;
-        setUpdating(true);
-        result = await api.updateBoxRunner(box.boxId, true);
-      }
-      const source = updateSourceLabel(result.source, result.releaseTag);
-      if (result.status === "already_current") {
-        setUpdateResult(`Already current · build ${result.expectedVersion} · ${source}`);
-      } else if (result.status === "started") {
-        setUpdateResult(`Deploying build ${result.expectedVersion} from ${source}. Connection status will confirm when it is online.`);
-      } else {
-        setUpdateResult(`A newer connection action took over. Build ${result.expectedVersion} is ready for the next reconnect.`);
-      }
-    } catch (e) {
-      setUpdateError((e as Error).message);
-    } finally {
-      setUpdating(false);
-    }
-  };
-  const reconnect = async () => {
-    setReconnecting(true);
-    setUpdateError(null);
-    setUpdateResult(null);
-    try {
-      try {
-        await onReconnect(box.boxId, false);
-      } catch (cause) {
-        if (!(cause instanceof ApiError) || cause.status !== 409 || cause.code !== "BOX_HAS_ACTIVE_SESSIONS") throw cause;
-        setReconnecting(false);
-        const conflict = lifecycleConflictPresentation(cause, "reconnect");
-        const approved = await confirm({
-          title: "Interrupt Sessions and Reconnect",
-          message: conflict.message,
-          detailRows: conflict.detailRows,
-          detailRowsOverflow: conflict.detailRowsOverflow,
-          confirmLabel: "Interrupt Sessions and Reconnect",
-          tone: "danger",
-        });
-        if (!approved) return;
-        setReconnecting(true);
-        await onReconnect(box.boxId, true);
-      }
-    } catch (error) {
-      setUpdateError(`Reconnect failed: ${(error as Error).message}`);
-    } finally {
-      setReconnecting(false);
-    }
-  };
-  return (
-    <>
-    <article className={`runner-card box-card status-${dot}`}>
-      <div className="runner-head">
-        <div className="runner-id">
-          <span className={`status-dot ${dot}`} />
-          <h2>{display.name}</h2>
-          <StatusBadge meta={boxStatusMeta(box.status)} />
-        </div>
-      </div>
-      <div className="runner-head-right runner-card-actions">
-        <span className="os-badge">SSH</span>
-        {harnessStatusCurrent && runner.agents.some((agent) => agent.update?.status === "update_available") &&
-          (canManage || runner.canManage === true) && (
-          <button type="button" className="btn sm btn-rediscover needs-update" onClick={() => setShowMachineSettings(true)}>
-            <span>New Harness Release · View Settings</span>
-          </button>
-        )}
-        {canManage && needsUpdate && !inProgress && (
-          <button
-            className="btn sm btn-rediscover update-runner needs-update"
-            onClick={() => void updateRunner()}
-            disabled={updating || inProgress}
-            title={outdatedBoxHint()}
-          >
-            {updating ? <Spinner decorative /> : <UpdateIcon />}
-            <span>{updating ? "Checking…" : "Update Runner"}</span>
-          </button>
-        )}
-        {canManage && (
-          <>
-            <button
-              className="btn sm btn-rediscover"
-              onClick={() => void reconnect()}
-              disabled={inProgress || reconnecting}
-              title="Reconnect this machine"
-            >
-              <RefreshIcon />
-              <span>{reconnecting ? "Reconnecting…" : "Reconnect"}</span>
-            </button>
-          </>
-        )}
-        {(canManage || runner?.canManage === true) && (
-          <button className="btn sm btn-rediscover" onClick={() => setShowMachineSettings(true)} title="Manage this Machine">
-            <SettingsIcon />
-            <span>Manage</span>
-          </button>
-        )}
-        <button
-          type="button"
-          className="connection-details-trigger"
-          onClick={() => setShowConnectionDetails(true)}
-          aria-label={`View ${box.sshTarget} Connection Details`}
-          title="Connection Details"
-        >
-          <InfoIcon />
-        </button>
-      </div>
-      <dl className="runner-meta runner-connection-meta">
-        <div>
-          <dt>SSH Target</dt>
-          <dd>{box.sshTarget}</dd>
-        </div>
-        <div>
-          <dt>Status</dt>
-          <dd>{boxStatusMeta(box.status).label}</dd>
-        </div>
-      </dl>
-      {box.status === "failed" && box.lastError && <div className="empty-sub box-error">{box.lastError}</div>}
-      {updateError && (
-        <div className="empty-sub box-error" role="alert">
-          {updateError.startsWith("Reconnect") || updateError.startsWith("Remove") ? updateError : `Update failed: ${updateError}`}
-        </div>
-      )}
-      {updateResult && <div className="runner-update-result" role="status">{updateResult}</div>}
-      {connHint && <Notice tone="info">{connHint}</Notice>}
-      <Notice tone="neutral">{sshRunnerLifecycleHint()}</Notice>
-      {runner ? (
-        <RunnerDetails runner={runner} online={harnessStatusCurrent} canManageProfiles={canManageProfiles} />
-      ) : inProgress ? (
-        <div className="empty-sub">Waiting for the runner to come online…</div>
-      ) : box.status === "offline" ? (
-        <div className="empty-sub">Offline — the SSH session ended. Reconnect to retry.</div>
-      ) : null}
-    </article>
-    {showMachineSettings && (
-      <MachineSettingsDialog
-        runner={runner}
-        box={box}
-        onClose={() => setShowMachineSettings(false)}
-        onDelete={() => onRemove(box.boxId)}
-        capacityOnly={!canManage}
-      />
-    )}
-    {showConnectionDetails && <BoxConnectionDetailsDialog box={box} onClose={() => setShowConnectionDetails(false)} />}
-    </>
-  );
-}
-
-/** A native runner card, exported so browser fixtures exercise the production component. */
-export function NativeRunnerCard({
-  runner,
-  canManage,
-  canManageProfiles = false,
-  busy,
-  removeError,
-  onRediscover,
-  onManage,
-  onRepair,
-}: {
-  runner: RunnerView;
-  canManage: boolean;
-  /** See `canManageProviderProfiles`. */
-  canManageProfiles?: boolean;
-  busy: boolean;
-  removeError?: string;
-  onRediscover: (runnerId: string) => void | Promise<void>;
-  onManage: (runnerId: string) => void;
-  onRepair: (runnerId: string) => void;
-}) {
-  return (
-    <article className={`runner-card status-${runner.status}`}>
-      <div className="runner-head">
-        <div className="runner-id">
-          {/* Full literals so the stylesheet guardrails see these classes rendered. */}
-          <span className={runner.status === "online" ? "status-dot online" : "status-dot offline"} />
-          <h2>{runnerDisplay(runner, undefined, runner.runnerId).name}</h2>
-          <StatusBadge meta={statusMeta("machine", runner.status === "online" ? "online" : "offline")} />
-        </div>
-      </div>
-      <div className="runner-head-right runner-card-actions">
-        <span className={`os-badge os-${runner.os}`}>{osLabel(runner.os)}</span>
-        {runner.status === "online" && runner.agents.some((agent) => agent.update?.status === "update_available") &&
-          (canManage || runner.canManage === true) && (
-          <button type="button" className="btn sm btn-rediscover needs-update" onClick={() => onManage(runner.runnerId)}>
-            <span>New Harness Release · View Settings</span>
-          </button>
-        )}
-        {canManage && <button
-          className="btn sm btn-rediscover"
-          disabled={runner.status !== "online" || busy}
-          onClick={() => void onRediscover(runner.runnerId)}
-          title="Re-probe this host for installed agents"
-        >
-          <RefreshIcon />
-          <span>{busy ? "Rediscovering…" : "Rediscover"}</span>
-        </button>}
-        {(canManage || runner.canManage === true) && (
-          <button
-            className="btn sm btn-rediscover"
-            onClick={() => onManage(runner.runnerId)}
-            title="Manage this Machine"
-          >
-            <SettingsIcon />
-            <span>Manage</span>
-          </button>
-        )}
-      </div>
-      {removeError && <div className="empty-sub box-error" role="alert">{removeError}</div>}
-      <RunnerDetails runner={runner} online={runner.status === "online"} canManageProfiles={canManageProfiles} />
-      <NativeRunnerHealth
-        runner={runner}
-        canRepair={canManage}
-        onRepair={() => onRepair(runner.runnerId)}
-      />
-    </article>
-  );
 }
 
 /** One way to connect a machine: an item of the Add Machine menu and a row of the empty Machines tab. */
@@ -1692,13 +1140,11 @@ export function RunnersView() {
   const { confirm } = useFeedback();
   const instances = useInstances();
   const bundledLocalRunner = hasBundledLocalRunner();
-  const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [onboarding, setOnboarding] = useState<"local" | "manual" | null>(null);
   const [localRunnerStatus, setLocalRunnerStatus] = useState<LocalRunnerStatus | null>(null);
   const [repairRunnerId, setRepairRunnerId] = useState<string | null>(null);
   const [addingBox, setAddingBox] = useState(false);
   const [settingsRunnerId, setSettingsRunnerId] = useState<string | null>(null);
-  const [removeError, setRemoveError] = useState<Record<string, string>>({});
   const [identity, setIdentity] = useState<IdentityAdministrationView | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
   // Instances is a desktop-app feature with nothing to do on a phone, so a narrowed window drops the
@@ -1785,24 +1231,6 @@ export function RunnersView() {
     if (!machineId && listBodyRef.current) listBodyRef.current.scrollTop = listScrollTop.current;
   }, [machineId]);
 
-  const rediscover = async (runnerId: string) => {
-    setBusy((b) => ({ ...b, [runnerId]: true }));
-    setRemoveError((errors) => {
-      const { [runnerId]: _drop, ...rest } = errors;
-      return rest;
-    });
-    try {
-      await api.rediscover(runnerId);
-    } catch (error) {
-      setRemoveError((errors) => ({ ...errors, [runnerId]: `Rediscovery failed: ${(error as Error).message}` }));
-    } finally {
-      setTimeout(() => setBusy((b) => ({ ...b, [runnerId]: false })), 1500);
-    }
-  };
-
-  const reconnectBox = async (boxId: string, force: boolean) => {
-    await api.reconnectBox(boxId, force);
-  };
   // The overview's Reconnect (#2986), confirming first when it would interrupt sessions, as the
   // machine's own Reconnect does.
   const reconnectFromOverview = async (boxId: string) => {
@@ -1822,9 +1250,8 @@ export function RunnersView() {
       if (approved) await api.reconnectBox(boxId, true);
     }
   };
-  const removeBox = async (boxId: string) => {
-    await api.removeBox(boxId);
-  };
+  // Settings… opens on the machine it was chosen for, while that machine is still listed.
+  const settingsMachine = settingsRunnerId ? machines.find((machine) => machine.runnerId === settingsRunnerId) ?? null : null;
   const dialogs = (
     <>
       {onboarding === "local" && (
@@ -1844,11 +1271,15 @@ export function RunnersView() {
           }}
         />
       )}
-      {settingsRunnerId && runners.get(settingsRunnerId) && (
+      {settingsMachine && (
         <MachineSettingsDialog
-          runner={runners.get(settingsRunnerId)}
+          runner={settingsMachine.runner}
+          box={settingsMachine.box}
           onClose={() => setSettingsRunnerId(null)}
-          onDelete={() => api.removeRunner(settingsRunnerId)}
+          onDelete={async () => {
+            if (settingsMachine.box) await api.removeBox(settingsMachine.box.boxId);
+            else await api.removeRunner(settingsMachine.runnerId);
+          }}
           capacityOnly={!canManageMachines}
         />
       )}
@@ -1866,6 +1297,11 @@ export function RunnersView() {
     }
     setRepairRunnerId(runnerId);
   };
+  const selectedActions = useMachineActions(selectedMachine, {
+    canManage: canManageMachines,
+    canOpenSettings: canManageMachines || selectedMachine?.runner?.canManage === true,
+    canFindSessions: identityRole !== null && identityRole !== "viewer",
+  }, { onSettings: setSettingsRunnerId, onRepair: repairRunner });
   // "local" onboarding drives the desktop bridge, whose runner credential and socket work is
   // hard-coded to the loopback control plane, so on a remote instance it would set up a machine the
   // page in front of you does not show, and could overwrite the local runner while doing it.
@@ -1913,28 +1349,17 @@ export function RunnersView() {
   const detail = snapshot.loading ? (
     // While the first snapshot loads, the list's skeleton is the one announcement.
     <DetailSkeleton />
-  ) : selectedMachine?.box ? (
-    <BoxCard
-      key={selectedMachine.runnerId}
-      box={selectedMachine.box}
-      runner={selectedMachine.runner}
-      canManage={canManageMachines}
-      canManageProfiles={canManageProfiles}
-      onReconnect={reconnectBox}
-      onRemove={removeBox}
-    />
-  ) : selectedMachine?.runner ? (
-    <NativeRunnerCard
-      key={selectedMachine.runnerId}
-      runner={selectedMachine.runner}
-      canManage={canManageMachines}
-      canManageProfiles={canManageProfiles}
-      busy={Boolean(busy[selectedMachine.runnerId])}
-      removeError={removeError[selectedMachine.runnerId]}
-      onRediscover={rediscover}
-      onManage={setSettingsRunnerId}
-      onRepair={repairRunner}
-    />
+  ) : selectedMachine ? (
+    <MachineDetail key={selectedMachine.runnerId} entry={selectedMachine} actions={selectedActions} showTitle={!isMobile}>
+      {selectedMachine.runner && (
+        <MachineSections
+          runner={selectedMachine.runner}
+          // An SSH machine's harness status is current only while its connection is up too.
+          online={selectedMachine.runner.status === "online" && (!selectedMachine.box || selectedMachine.box.status === "online")}
+          canManageProfiles={canManageProfiles}
+        />
+      )}
+    </MachineDetail>
   ) : machineId && !stale && machineId !== arrivingMachineId ? (
     <State
       compact
@@ -1968,6 +1393,8 @@ export function RunnersView() {
           title={selectedMachine?.name ?? "Machine"}
           backLabel={backLabel("runners")}
           onBack={() => selectMachine(null)}
+          menu={selectedMachine ? phoneMachineMenu(selectedActions) : []}
+          menuLabel="Machine Actions"
         />
       )}
       {/* The tabs sit in the page header's tab slot (§4.2, §10.1), under its title and actions. */}

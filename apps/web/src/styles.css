@@ -10314,90 +10314,118 @@ textarea {
   border-radius: var(--radius);
   padding: var(--runner-card-pad-y) var(--runner-card-pad-x);
 }
-.runner-card.status-online {
-  border-color: color-mix(in srgb, var(--green) 30%, transparent);
-}
-.runner-card.status-offline {
-  border-color: color-mix(in srgb, var(--red) 30%, transparent);
-}
-.runner-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.runner-id {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  font-weight: 600;
-  font-size: 15px;
-}
-.runner-id h2,
-.runner-card .runner-id:is(h2) {
-  margin: 0;
-  font: inherit;
-}
-.status-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--text-faint);
-}
-.status-dot.online {
-  background: var(--green);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent);
-}
-.status-dot.offline {
-  background: var(--red);
-}
-.os-badge {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  padding: 3px 9px;
-  border-radius: 6px;
-  border: 1px solid var(--border-strong);
-  color: var(--text-dim);
-}
-.runner-meta {
+/* The machine detail (#2988): one title row, one meta line, at most one lifecycle notice, then the
+   sections (§4.5, §11.3, §13.2). A machine is no longer a card; `.runner-card` stays for Usage. */
+.machine-detail {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  margin: 0 0 14px;
-  padding: 12px 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-}
-.runner-connection-meta {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-/* Grid items default to min-width:auto, so long values can widen a track past the card edge. */
-.runner-meta > div {
+  align-content: start;
+  gap: var(--space-4);
   min-width: 0;
 }
-.runner-meta dt {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--text-faint);
-  margin-bottom: 3px;
+.machine-detail-head {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
 }
-.runner-meta dd {
+.machine-detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--control-h);
+}
+/* 16/600 on one line; the full name is its tooltip. */
+.machine-detail-title {
+  flex: 0 1 auto;
+  min-width: 0;
   margin: 0;
-  font-size: 13px;
   overflow: hidden;
+  font: var(--type-title);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.runner-details {
-  margin-top: 14px;
+.machine-detail-status { flex: none; }
+.machine-detail-title-row > .actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
 }
-.runner-system-meta {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-bottom: 0;
+/* Neutral facts on one line (§11.3). Nothing wraps or scrolls: the host gives way first, then each
+   fact truncates, and its tooltip holds the whole of it. */
+.machine-detail-meta {
+  display: flex;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  list-style: none;
+  white-space: nowrap;
+}
+.machine-detail-meta > li {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+/* The kind and the OS are short and say the most, so they keep their width while the host can. */
+.machine-detail-meta > li:is([data-fact="kind"], [data-fact="os"]) { flex-shrink: 0; }
+.machine-detail-meta > li[data-fact="host"] { flex-shrink: 100; min-width: 4em; }
+.machine-detail-meta > li > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.machine-detail-meta > li > svg { flex: none; }
+/* The sections keep their own content until #2989, #2990 and #2995; the detail spaces them. */
+.machine-detail-sections {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.machine-detail-sections > * { margin-top: 0; margin-bottom: 0; }
+/* Wrapped onto two rows, the notice's buttons each borrow 4px for a 44px target (§2.8, §15.3), so
+   the rows sit 12px apart and a tap below one never lands on the next. */
+@media (pointer: coarse) {
+  .machine-detail > .notice .notice-actions { row-gap: var(--space-3); }
+}
+.machine-capacity-line {
+  margin: 0;
+  font: var(--type-body);
+}
+.machine-notice-error {
+  margin: 0;
+  font: var(--type-small);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Connection Details (#2988): a value, its copy button, and any note or badge after it. */
+.connection-details .facts dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+.connection-fact {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.connection-fact-mono {
+  font: var(--type-small);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.connection-fact-missing,
+.connection-fact-note {
+  color: var(--text-faint);
 }
 .runner-agents {
   margin-top: 14px;
@@ -10560,27 +10588,8 @@ textarea {
   background: none;
 }
 .provider-login-card[data-embedded] :is(p, form, .provider-login-device-code) { margin: 0; }
-.runner-details-body {
-  padding-bottom: 2px;
-}
 .runner-workspaces {
   margin-top: 16px;
-}
-/* A machine card's notices (offline recovery, update guidance) follow its facts at card rhythm. */
-.runner-card > .notice { margin-top: var(--space-3); }
-.update-runner.needs-update {
-  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
-  color: var(--amber);
-}
-.runner-update-result {
-  margin-top: 10px;
-  padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--green) 28%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--green) 8%, transparent);
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.45;
 }
 .group {
   margin-top: 13px;
@@ -10632,94 +10641,7 @@ button.chip:hover { color: var(--text); border-color: var(--border-strong); }
 button.chip[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
 button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 
-/* --- Discovery: runner agent rows + rediscover --- */
-.runner-head-right {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.runner-card-actions {
-  min-height: 28px;
-  margin-bottom: 14px;
-}
-.connection-details-trigger {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: var(--bg-elev-3);
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-}
-.connection-details-trigger:hover {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--text);
-}
-.connection-details-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 18px;
-  margin: 0;
-}
-.connection-details-list > div {
-  min-width: 0;
-}
-.connection-details-list dt {
-  margin-bottom: 5px;
-  color: var(--text-faint);
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.connection-details-list dd {
-  margin: 0;
-  color: var(--text);
-  font-size: 12.5px;
-}
-.connection-details-wide {
-  grid-column: 1 / -1;
-}
-.connection-details-note {
-  color: var(--text-faint);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-/* A machine-card action. It is a `.btn.sm`, so its height, padding and touch hit area come from the
-   button recipe; this keeps only the card's pill look until §2.5 makes it rectangular. */
-.btn-rediscover {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  font-size: 12px;
-  border-radius: 999px;
-  background: var(--bg-elev-3);
-  border: 1px solid var(--border-strong);
-  color: var(--text-dim);
-  cursor: pointer;
-  line-height: 1.2;
-  white-space: nowrap; /* keep the icon + label on one line */
-  flex: none; /* don't shrink below the label width */
-  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-}
-@media (hover: hover) {
-  .btn-rediscover:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--text);
-  }
-}
-.btn-rediscover:disabled {
-  color: var(--text-faint);
-  cursor: not-allowed;
-}
+/* --- Discovery: runner agent rows --- */
 .agent-list {
   display: flex;
   flex-direction: column;
@@ -11024,21 +10946,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .machine-sign-in-form > label { color: var(--text-dim); font: var(--type-small); }
 .machine-sign-in-form > input { flex: 1 1 160px; min-width: 0; }
 
-/* Version-skew: the runner registered with an older PROTOCOL_VERSION than this dashboard. */
-.outdated-badge {
-  display: inline-block;
-  margin-left: 8px;
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  color: var(--amber-on-tint);
-  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
-  background: color-mix(in srgb, var(--amber) 12%, var(--bg-elev-2));
-  vertical-align: middle;
-}
 /* Install guidance shown in place of the agent list when discovery found no agent CLIs. */
 .install-hints {
   display: flex;
@@ -11186,11 +11093,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .machine-danger-zone {
   align-items: flex-start;
-}
-.machine-settings-danger-action {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }
 @media (max-width: 680px) {
   .machine-name-row,
@@ -12301,13 +12203,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: flex;
   gap: 8px;
   align-items: center;
-}
-.box-card {
-  border-left: 3px solid var(--accent);
-}
-.box-error {
-  color: var(--danger-text);
-  word-break: break-word;
 }
 /* ---- Copy button (reused in onboarding) ---- */
 .copy-btn {
@@ -14340,22 +14235,6 @@ button.review-finding-location {
 }
 
 /* ---- Offline banner (control plane unreachable) ---- */
-/* Agent-first discovery for unmanaged (CLI-started) sessions. */
-.runner-agent-sessions-action {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-}
-.runner-agent-sessions-action p {
-  margin: 0;
-  color: var(--text-faint);
-  font-size: 12px;
-  line-height: 1.45;
-}
-.runner-agent-sessions-action .btn-rediscover {
-  flex: none;
-}
 .agent-session-intro {
   margin: 0;
   color: var(--text-dim);
@@ -14430,16 +14309,6 @@ button.review-finding-location {
 .agent-session-error-detail {
   font-family: var(--font-mono);
   overflow-wrap: anywhere;
-}
-
-@media (max-width: 620px) {
-  .runner-agent-sessions-action {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .runner-agent-sessions-action .btn-rediscover {
-    width: 100%;
-  }
 }
 
 /* --------- Gap-review fixes: board drag-drop, error boundary, jump-to-latest ---------- */
@@ -15299,16 +15168,6 @@ button.review-finding-location {
   }
   .runner-card {
     padding: 14px;
-  }
-  .runner-head,
-  .runner-head-right {
-    align-items: stretch;
-  }
-  .runner-head-right {
-    width: 100%;
-  }
-  .runner-meta {
-    grid-template-columns: 1fr 1fr;
   }
   .runner-agents-summary {
     overflow: hidden;

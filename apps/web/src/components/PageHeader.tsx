@@ -61,6 +61,8 @@ export interface PageMenuAction extends Omit<PageAction, "onClick"> {
   checked?: boolean;
   /** A plain count in the trailing slot. */
   count?: number;
+  /** The 16px leading icon slot (§9.1); a spinner there shows the item's action running. */
+  icon?: ReactNode;
 }
 
 /** One item of a menu-button secondary: a label and an optional one-line description (§9.1). */
@@ -613,6 +615,7 @@ export function ActionsMenu({ className, overflow = "always", label = "More Acti
               <MenuItem
                 role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"}
                 checked={item.checked}
+                icon={item.icon}
                 danger={item.danger}
                 data-slot={item.slot}
                 disabled={item.disabled}

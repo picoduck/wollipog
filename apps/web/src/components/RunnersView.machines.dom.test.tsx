@@ -184,7 +184,9 @@ const rows = (body: HTMLElement) => [...list(body).querySelectorAll<HTMLButtonEl
 const rowNames = (body: HTMLElement) => rows(body).map((row) => row.querySelector(".row-title")?.textContent);
 const row = (body: HTMLElement, name: string) => rows(body).find((item) => item.querySelector(".row-title")?.textContent === name)!;
 const detail = (body: HTMLElement) => body.querySelector<HTMLElement>(".master-detail-detail")!;
-const detailName = (body: HTMLElement) => detail(body).querySelector(".runner-id h2")?.textContent;
+/** The open machine (#2988), named on every width: a phone's detail has no title of its own. */
+const machineDetail = (body: HTMLElement) => detail(body).querySelector<HTMLElement>("article.machine-detail");
+const detailName = (body: HTMLElement) => machineDetail(body)?.getAttribute("aria-label");
 /** The All Machines row (#2986) and the overview it opens. */
 const allMachinesRow = (body: HTMLElement) => list(body).querySelector<HTMLButtonElement>("button.row.machine-list-overview");
 const overview = (body: HTMLElement) => detail(body).querySelector<HTMLElement>(".machines-overview");
@@ -415,7 +417,7 @@ test("an SSH machine is one row named by its box, and connecting one selects it 
     assert.deepEqual([...row(view.body, "Build Box").querySelectorAll(".machine-row-meta > span")].map((span) => span.textContent), ["SSH"]);
     await act(async () => row(view.body, "Build Box").click());
     await settle();
-    assert.ok(detail(view.body).querySelector(".box-card"), "an SSH machine's detail is its box card");
+    assert.equal(machineDetail(view.body)?.dataset.kind, "ssh", "an SSH machine's detail is the same detail, as SSH");
   } finally {
     await view.unmount();
   }
@@ -544,7 +546,7 @@ test("connecting a machine over SSH selects it, and its detail waits for it rath
     await view.push({ type: "box_upsert", box: arriving });
     assert.ok(row(view.body, "Golf Sim").classList.contains("is-selected"));
     assert.equal(detailName(view.body), "Golf Sim");
-    assert.match(detail(view.body).querySelector(".box-card .status")?.textContent ?? "", /Bootstrapping/);
+    assert.match(machineDetail(view.body)?.querySelector(".machine-detail-status")?.textContent ?? "", /Bootstrapping/);
   } finally {
     await view.unmount();
   }
@@ -564,19 +566,17 @@ test("connecting a machine over SSH selects it, and its detail waits for it rath
  * A delete request and the stream's removal can arrive in any order, and nothing depends on it.
  */
 
+/** Delete Machine… from ⋯ Machine Actions: the detail's on a desktop, the detail bar's on a phone. */
 async function deleteSelectedMachine(view: Awaited<ReturnType<typeof mount>>, name: string) {
-  const card = detail(view.body).querySelector(".runner-card")!;
-  await act(async () => [...card.querySelectorAll<HTMLButtonElement>("button")]
-    .find((button) => button.textContent?.trim() === "Manage")!.click());
-  const dialog = [...view.body.querySelectorAll<HTMLElement>('[role="dialog"]')]
-    .find((candidate) => candidate.textContent?.includes(`Manage ${name}`))!;
-  assert.ok(dialog, `Manage ${name} opens`);
-  await act(async () => [...dialog.querySelectorAll<HTMLButtonElement>("button")]
-    .find((button) => button.textContent?.trim() === "Delete Machine")!.click());
+  await act(async () => view.body.querySelector<HTMLButtonElement>('button[aria-label="Machine Actions"]')!.click());
+  const menu = view.body.querySelector<HTMLElement>('[role="menu"][aria-label="Machine Actions"]')!;
+  await act(async () => [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((item) => item.textContent?.includes("Delete Machine…"))!.click());
   await settle();
   const confirmation = [...view.body.querySelectorAll<HTMLElement>('[role="alertdialog"], [role="dialog"]')]
-    .find((candidate) => candidate !== dialog && candidate.textContent?.includes("permanently deleted"))!;
+    .find((candidate) => candidate.textContent?.includes(`deleted from Wollipog`))!;
   assert.ok(confirmation, "the deletion asks first");
+  assert.match(confirmation.textContent ?? "", new RegExp(name));
   await act(async () => [...confirmation.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent?.trim() === "Delete Machine")!.click());
   await settle();
@@ -643,7 +643,7 @@ test("deleting the only SSH machine ends on No Machines Yet, whichever arrives f
     const request = deferred();
     const view = await mount({ view: machineView("box-solo-runner"), runners: [], boxes: [box], client: { removeBox: () => request.promise } as Partial<ApiClient> });
     try {
-      assert.ok(detail(view.body).querySelector(".box-card"));
+      assert.equal(machineDetail(view.body)?.dataset.kind, "ssh");
       await deleteSelectedMachine(view, "Solo Box");
       if (order === "response first") await request.resolve();
       await view.push({ type: "box_removed", boxId: "box-solo" } as never);
