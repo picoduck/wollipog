@@ -127,7 +127,9 @@ test("source and actual POSIX SEA refuse corrupt, partial and substituted instal
       ownedChildrenClosed = false;
       const result = spawnSync(sea ? binary : process.execPath,
         [...(sea ? [] : ["--require", require.resolve("tsx/cjs"), entry]), mode, caseRoot], {
-          env: { HOME: home, TMPDIR: temporary, TMP: temporary, TEMP: temporary, PATH: "/usr/bin:/bin", WOLLIPOG_LEASE_HELPER_ROOT: installedRoot },
+          // The source loader must not add its own cache while the evidence snapshot is frozen.
+          env: { HOME: home, TMPDIR: temporary, TMP: temporary, TEMP: temporary, PATH: "/usr/bin:/bin",
+            TSX_DISABLE_CACHE: "1", WOLLIPOG_LEASE_HELPER_ROOT: installedRoot },
           encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024,
         });
       ownedChildrenClosed = !result.error && Number.isSafeInteger(result.status);

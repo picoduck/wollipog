@@ -11,13 +11,15 @@
 import { build } from "esbuild";
 import { inject } from "postject";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readCompatibleEnv } from "../../../scripts/env-compat.mjs";
 import { assertRunnerTargetHost, controlPlaneArtifactName, publishLegacyRunnerAlias } from "../../runner/scripts/runner-artifacts.mjs";
 import { removeWindowsSignature, signWindowsBinary } from "../../runner/scripts/windows-authenticode.mjs";
-import { helperAssociationName, helperReleaseAssetName, installLeaseHelper, LEASE_HELPER_LIMITS, parseHelperAssociation, readHelperFile } from "../../../scripts/lease-helper-distribution.mjs";
+import { helperAssociationName, helperDigest, helperReleaseAssetName, LEASE_HELPER_LIMITS, parseHelperAssociation, readHelperFile } from "../../../scripts/lease-helper-distribution.mjs";
+import { stageDesktopLeaseHelperResource } from "./lease-helper-resources.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..", "..", ".."); // repo root
@@ -114,9 +116,16 @@ const legacyRunner = join(runnerBuildDir, `agent-manager-runner-${triple}${exe}`
 // the build so name preference can never select stale bytes from a prior producer generation.
 rmSync(canonicalRunner, { force: true });
 rmSync(legacyRunner, { force: true });
+// An offline compiler/installation parent must pass the unchanged physical owner proof.
+// Host-owned container checkout ancestors are not installation authority. Never chown them
+// or retry a failed explicit root; retain this one fresh build workspace on any failure.
+const helperBuildRoot = process.platform === "win32" ? undefined
+  : process.env.WOLLIPOG_LEASE_HELPER_ROOT
+    || mkdtempSync(join(realpathSync(tmpdir()), "wollipog-desktop-helper-build-"));
 execFileSync(process.execPath, [runnerBuildScript], {
   stdio: "inherit",
-  env: { ...process.env, TARGET_TRIPLE: triple },
+  env: { ...process.env, TARGET_TRIPLE: triple,
+    ...(helperBuildRoot ? { WOLLIPOG_LEASE_HELPER_ROOT: helperBuildRoot } : {}) },
 });
 const builtRunner = [canonicalRunner, legacyRunner].find(existsSync);
 if (!builtRunner) throw new Error(`runner build produced no compatible binary for ${triple}`);
@@ -129,15 +138,20 @@ const bundledRunner = join(binDir, `runner-${triple}${exe}`);
 copyFileSync(builtRunner, bundledRunner);
 console.log("local runner sidecar built ->", bundledRunner);
 
-// Offline resource publication only. Runtime selects this already-installed immutable input;
-// it never copies/extracts a companion into the desktop's mutable application-data directory.
+// Offline packaging outputs are outside runtime installation/cache accounting. Assemble
+// only the closed, bounded resource layout here; foreign checkout ancestors grant no runtime
+// authority. The final installed desktop still passes the unchanged owner/identity checks.
 const leaseResourceRoot = join(buildDir, "lease-helper");
-mkdirSync(leaseResourceRoot, { recursive: true, mode: 0o700 });
-if (process.platform !== "win32") {
+if (process.platform === "win32") mkdirSync(leaseResourceRoot, { recursive: true, mode: 0o700 });
+else {
   const association = parseHelperAssociation(readHelperFile(join(runnerBuildDir, helperAssociationName(triple)), LEASE_HELPER_LIMITS.contractBytes, undefined, false).bytes);
+  if (association.helper.target !== triple ||
+      association.helper.sourceSha256 !== helperDigest(readFileSync(join(root, "apps/runner/native/provider-home-lease-io.c"))) ||
+      association.runnerSha256 !== helperDigest(readFileSync(bundledRunner))) {
+    throw new Error("offline desktop runner/helper association mismatch; preserve build outputs");
+  }
   const image = readHelperFile(join(runnerBuildDir, helperReleaseAssetName(triple)), association.helper.imageBytes).bytes;
-  const chunks = function* () { for (let offset = 0; offset < image.length; offset += 65536) yield image.subarray(offset, offset + 65536); };
-  await installLeaseHelper(leaseResourceRoot, association.helper, chunks());
+  stageDesktopLeaseHelperResource(leaseResourceRoot, association.helper, image);
 }
 
 /** The Rust host target triple (e.g. aarch64-pc-windows-msvc). */

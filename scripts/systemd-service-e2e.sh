@@ -3,9 +3,9 @@
 #
 # This installs, kills, restarts, and removes the real wollipog-control-plane.service and
 # wollipog-runner.service units, so it must only ever run as root on a disposable host (a CI VM).
-# It refuses to run on a host that already has Wollipog units installed. The control plane and
-# runner run from this checkout through tiny wrapper executables, so the checkout must be readable
-# by the `wollipog` service account (the CI workflow opens the runner's home directory for that).
+# It refuses to run on a host that already has Wollipog units installed. The control plane runs
+# from this checkout through a wrapper; the runner is the real built SEA. The checkout must be
+# readable by the `wollipog` service account (the workflow opens the runner's home directory).
 #
 # What it proves, beyond the unit tests:
 #   1. install creates the account, units, config, and credentials; both units are active and
@@ -49,7 +49,7 @@ command -v jq >/dev/null || fail "jq is required"
 command -v curl >/dev/null || fail "curl is required"
 [ -x "$node_bin" ] || fail "node not found (set NODE_BIN)"
 
-cli() { "$node_bin" --import tsx "$repo/apps/runner/src/cli.ts" --wollipog-cli "$@"; }
+cli() { "$wrapper_dir/wollipog-runner" --wollipog-cli "$@"; }
 prop() { systemctl show -p "$1" --value "$2"; }
 wait_until() { # wait_until <seconds> <description> <command...>
   local deadline=$(( $(date +%s) + $1 )); local what=$2; shift 2
@@ -88,12 +88,25 @@ cat > "$wrapper_dir/wollipog-control-plane" <<EOF
 export TSX_DISABLE_CACHE=1
 exec "$node_bin" --import "$tsx_loader" "$repo/apps/control-plane/src/index.ts" "\$@"
 EOF
-cat > "$wrapper_dir/wollipog-runner" <<EOF
-#!/bin/sh
-export TSX_DISABLE_CACHE=1
-exec "$node_bin" --import "$tsx_loader" "$repo/apps/runner/src/cli.ts" "\$@"
-EOF
-chmod 0755 "$wrapper_dir"/wollipog-control-plane "$wrapper_dir"/wollipog-runner
+# The CLI and service executable are the same real built runner, never a normalized wrapper.
+target=x86_64-unknown-linux-gnu
+[ "$(uname -m)" = x86_64 ] || fail "this fixture requires the native x86_64 runner build"
+built_runner="$repo/apps/runner/dist-bin/wollipog-runner-$target"
+association_file="$repo/apps/runner/dist-bin/wollipog-runner-lease-contract-$target.json"
+helper_image="$repo/apps/runner/dist-bin/wollipog-provider-home-lease-io-$target"
+[ -x "$built_runner" ] && [ -s "$association_file" ] && [ -s "$helper_image" ] || fail "build the matching runner and helper before this fixture"
+install -m 0755 "$built_runner" "$wrapper_dir/wollipog-runner"
+chmod 0755 "$wrapper_dir/wollipog-control-plane"
+# The unchanged closed installer verifies this association against its own built tuple/digest.
+[ "$(stat -c %s "$association_file")" -le 16384 ] || fail "association exceeds fixed byte limit"
+association=$(base64 -w0 "$association_file")
+association_sha=$(sha256sum "$association_file" | cut -d' ' -f1)
+image_sha=$(sha256sum "$helper_image" | cut -d' ' -f1)
+"$wrapper_dir/wollipog-runner" --lease-helper-install \
+  --parent "$wrapper_dir" --association "$association" --association-sha256 "$association_sha" \
+  --image "$helper_image" --image-sha256 "$image_sha" > "$wrapper_dir/helper-install.json"
+jq -e --arg target "$target" '.schema == "WPLIM1" and .target == $target and .runtimeCacheEntries == 0' "$wrapper_dir/helper-install.json" >/dev/null
+"$wrapper_dir/wollipog-lease-helper-00/lease-io" --probe
 
 step "1. service install --system"
 install_json=$(cli service install --system --control-plane-bin "$wrapper_dir/wollipog-control-plane" --runner-bin "$wrapper_dir/wollipog-runner" --port "$port" --json) || {
@@ -102,6 +115,7 @@ echo "$install_json" | jq .
 echo "$install_json" | jq -e '.health.controlPlane.ok == true' >/dev/null || fail "install did not report a healthy control plane"
 echo "$install_json" | jq -e '.health.runnerOnline == true' >/dev/null || fail "install did not report the runner online"
 id wollipog >/dev/null || fail "service account wollipog was not created"
+sudo -u wollipog "$wrapper_dir/wollipog-lease-helper-00/lease-io" --probe
 sudo -u wollipog test -r "$repo/package.json" || fail "the wollipog account cannot read the checkout at $repo (open the parent directories with chmod o+rx)"
 for unit in "$cp_unit" "$runner_unit"; do
   [ "$(systemctl is-active "$unit")" = active ] || fail "$unit is not active after install"
