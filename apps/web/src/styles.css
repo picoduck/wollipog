@@ -17364,8 +17364,9 @@ button.setting-row { cursor: pointer; }
 }
 .session-options-folder > .checkbox-label { font-family: var(--font-mono); font-size: var(--text-sm); }
 /* Cloud Budget stays a §8.3 number field with USD inside it, 96px (120px where field text is 16px),
-   although this 560px dialog stacks every row: under its sentence, at the row's start, rather than
-   stretched across it as a stacked number row otherwise is. */
+   in this 560px dialog's narrow surfaces: where its row stacks (Orchestrator Policy, Options on a
+   phone), under its sentence at the row's start, rather than stretched across it as a stacked
+   number row otherwise is; beside its sentence in Options on desktop (below). */
 @container (max-width: 559px) {
   :is(.session-options-body, .orchestrator-policy-panel) .setting-row-number .input-affix { align-self: flex-start; }
   :is(.session-options-body, .orchestrator-policy-panel) .setting-row-number .w-xs { width: 96px; }
@@ -17374,6 +17375,18 @@ button.setting-row { cursor: pointer; }
   @container (max-width: 559px) {
     :is(.session-options-body, .orchestrator-policy-panel) .setting-row-number .w-xs:has(> .input-affix-text:last-child) { width: 120px; }
   }
+}
+/* In the desktop dialog (a 520px surface) Options keeps each control beside its text, as Settings
+   does above 560px, so Orchestrator's rows fit #2955's 700px budget; below 480px (phones) they stack
+   as every narrow group does. Extra Folders' mono paths keep the row's width, and a row with nothing
+   to operate keeps its sentence whole. */
+@container (min-width: 480px) {
+  .session-options-body .setting-row:has(> .setting-row-control):not(.setting-row-trailing, .session-options-folders-row) {
+    grid-template-columns: minmax(0, 1fr) var(--setting-control-w);
+    padding-block: var(--space-2);
+  }
+  .session-options-body .setting-row-value > .setting-row-control { justify-content: flex-end; }
+  .session-options-body .setting-row-number .input-affix { align-self: flex-end; }
 }
 /* Full Control's Campaign Budget and Campaign Limits (FullControlPreparation.tsx). */
 .full-control-limits {

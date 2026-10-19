@@ -42,11 +42,12 @@ const REFLOW_WIDTH = 320;
  */
 const VIEWPORTS = [
   // The reported defect: a phone, where the pointer is what activates the floor.
-  { name: "phone", width: 390, height: 780, touch: true, floor: true, tapOnly: true },
+  { name: "phone", width: 390, height: 780, touch: true, floor: true, tapOnly: true, stacked: true },
   // The WCAG reflow minimum with a MOUSE: no touch floor, but the phone-width tap-only pickers.
-  { name: "reflow-minimum", width: REFLOW_WIDTH, height: 640, touch: false, floor: false, tapOnly: true },
-  // Wide and fine-pointered: no floor at all, so the compact budget must still be used.
-  { name: "desktop", width: 1280, height: 900, touch: false, floor: false, tapOnly: false },
+  { name: "reflow-minimum", width: REFLOW_WIDTH, height: 640, touch: false, floor: false, tapOnly: true, stacked: true },
+  // Wide and fine-pointered: no floor at all, so the compact budget must still be used. Options'
+  // 520px surface keeps each control beside its text here (#2955).
+  { name: "desktop", width: 1280, height: 900, touch: false, floor: false, tapOnly: false, stacked: false },
 ] as const;
 
 async function openDialog(page: Page, query = "") {
@@ -249,9 +250,9 @@ for (const viewport of VIEWPORTS) {
         await expect(page.getByRole("combobox", { name: "Agent" })).toBeVisible();
       }
 
-      // Every segmented control is full width (`.seg.block`): it spans its row's control, which in
-      // this dialog's surface is the whole row under its text (§8.2's 560px rule), at 44px on touch
-      // with #1799's hit areas.
+      // Every segmented control is full width (`.seg.block`): it spans its row's control column. On a
+      // phone that is the whole row under its text (§8.2's narrow rule), at 44px on touch with
+      // #1799's hit areas; in the desktop dialog it is the 240px column beside the text (#2955).
       for (const name of ["Role", "Harness", "Working Copy"]) {
         const seg = page.getByRole("radiogroup", { name });
         await expect(seg).toHaveClass(/\bblock\b/);
@@ -259,7 +260,14 @@ for (const viewport of VIEWPORTS) {
         const rowBox = (await settingRow(seg).boundingBox())!;
         const column = (await seg.locator("xpath=..").boundingBox())!;
         expect(Math.abs(segBox.width - column.width), `${name} spans its control column`).toBeLessThanOrEqual(1);
-        expect(segBox.width, `${name} spans most of its row`).toBeGreaterThan(rowBox.width * 0.85);
+        if (viewport.stacked) {
+          expect(segBox.width, `${name} spans most of its row`).toBeGreaterThan(rowBox.width * 0.85);
+        } else {
+          const text = (await settingRow(seg).locator(".setting-row-text").boundingBox())!;
+          expect(Math.round(segBox.width), `${name} fills the 240px control column`).toBe(240);
+          expect(segBox.x, `${name} sits beside its text`).toBeGreaterThan(text.x + text.width);
+          expect(segBox.y, `${name} shares its text's line`).toBeLessThan(text.y + text.height);
+        }
         for (const option of await seg.getByRole("radio").all()) {
           const box = (await option.boundingBox())!;
           expect(box.x).toBeGreaterThanOrEqual(segBox.x - 1);
