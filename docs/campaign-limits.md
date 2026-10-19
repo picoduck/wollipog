@@ -62,7 +62,9 @@ launches, Codex Exec and unadmitted external reviewer subprocesses are unsupport
 ceiling, mixed priced and unpriced records stop further protected admission, rather than displaying
 unknown cost as zero. Without a cost ceiling (#2940) unpriced usage, live or settled, stops nothing:
 the campaign keeps counting tool calls, any tool-call ceiling stays enforced, final usage settles at
-its recorded cost, and the projection reports `costAccounting: "unavailable"`. Controlled and media
+its recorded cost, and the projection reports `costAccounting: "unavailable"`. That availability is
+durable: the campaign records the first unpriced record, settled or live, and never clears it, so
+deleting an unpriced member cannot make the total read as priced. Controlled and media
 review jobs keep refusing unpriced settlement, because each reserves its own cost bound. Cost
 checkpoints need a cost ceiling; a launch naming checkpoints without one is refused. An
 exhausted, revoked or accounting-unavailable envelope cannot be reset by toggling mode or restart.

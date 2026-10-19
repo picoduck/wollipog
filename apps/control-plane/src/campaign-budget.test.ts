@@ -465,6 +465,46 @@ test("with no cost ceiling, unpriced usage leaves the campaign running, counting
   } finally { h.db.close(); }
 });
 
+test("a deleted unpriced worker leaves the campaign's cost unavailable, its tool calls recorded and the campaign running (#2940)", () => {
+  const unbounded: CampaignBudgetAuthority = { version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 2, acceptedFollowUps: 0 };
+  for (const path of ["service", "storage"] as const) {
+    const h = harness();
+    try {
+      assert.ok(h.enable(unbounded).ok);
+      h.make("worker", "root");
+      h.usage("root", 1);
+      const unpriced: SessionEventPayload = { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "unpriced-model" };
+      if (path === "service") {
+        h.svc.onSessionEvent("worker", unpriced);
+        for (const id of ["a", "b"]) h.svc.onSessionEvent("worker", { kind: "tool_call", toolCallId: id, title: "Read", status: "completed" });
+        assert.equal(h.db.campaignBudgets.view("root")!.costAccounting, "unavailable");
+      } else {
+        // Written straight to storage, so no view runs before the deletion: the marker alone must hold it.
+        h.db.appendEvent("worker", unpriced, 5, { accrueUsage: true });
+        h.tool("worker", "a"); h.tool("worker", "b");
+      }
+      h.db.updateSessionStatus("worker", "completed", 7);
+      h.db.deleteSession("worker");
+      assert.equal(h.db.getSession("worker"), null);
+      const view = h.db.campaignBudgets.view("root")!;
+      assert.deepEqual([view.state, view.costAccounting], ["active", "unavailable"], `${path}: deletion never makes unknown cost read as priced`);
+      assert.equal(view.actual.toolCalls, 2, `${path}: the deleted worker's tool calls stay recorded`);
+    } finally { h.db.close(); }
+  }
+});
+
+test("under a cost ceiling, unpriced usage of a worker deleted before any read still stops protected admission", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 100 })).ok);
+    h.make("worker", "root");
+    h.db.appendEvent("worker", { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "unpriced-model" }, 5, { accrueUsage: true });
+    h.db.updateSessionStatus("worker", "completed", 7);
+    h.db.deleteSession("worker");
+    assert.deepEqual([h.db.campaignBudgets.view("root")!.state, h.db.campaignBudgets.view("root")!.costAccounting], ["accounting_unavailable", "unavailable"]);
+  } finally { h.db.close(); }
+});
+
 test("with only a tool-call ceiling, unpriced usage keeps the campaign running until that ceiling is reached (#2940)", () => {
   const h = harness();
   try {

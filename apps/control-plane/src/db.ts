@@ -13149,6 +13149,7 @@ export class ControlPlaneDb {
         for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
+      this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(row.runner_id); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(row.runner_id); // cascades members
       this.stmt("DELETE FROM boxes WHERE box_id=?").run(boxId);
@@ -13207,6 +13208,7 @@ export class ControlPlaneDb {
         for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
+      this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(runnerId); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(runnerId); // cascades members
       this.stmt("DELETE FROM boxes WHERE runner_id=?").run(runnerId); // if it was a box
@@ -21729,6 +21731,9 @@ export class ControlPlaneDb {
     // session id as provenance and live until their durable workflow run is deleted.
     this.stmt("DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL").run(id);
     this.deleteSessionSearchRows(id);
+    // A campaign member's unpriced usage stays known after its usage rows cascade away (#2940).
+    const campaignRoot = this.campaignBudgets.root(id);
+    if (campaignRoot) this.campaignBudgets.noteUnpriced(campaignRoot);
     this.stmt("DELETE FROM sessions WHERE id=?").run(id);
   }
 

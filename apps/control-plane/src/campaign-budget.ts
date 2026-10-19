@@ -66,6 +66,24 @@ export class CampaignBudgetLedger {
     for (const row of sql.prepare("SELECT session_id FROM campaign_budget_members WHERE generation=''").all() as Array<{session_id:string}>) {
       sql.prepare("UPDATE campaign_budget_members SET generation=? WHERE session_id=?").run(randomUUID(),row.session_id);
     }
+    // Cost availability outlives the usage rows that showed it: deleting an unpriced member drops
+    // its usage state, but its cost stays unknown. The marker is set once and never cleared (#2940).
+    // It is written from code, on every read and before any session deletion, rather than by
+    // triggers on usage tables, so migrations of those tables stay independent of this ledger.
+    if (!(sql.prepare("PRAGMA table_info(campaign_budgets)").all() as Array<{name:string}>).some((c) => c.name === "cost_unpriced")) {
+      sql.exec("ALTER TABLE campaign_budgets ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
+    }
+    // Usage recorded before this marker existed.
+    this.noteUnpriced();
+  }
+
+  /** Persist that a campaign (every campaign when omitted) has unpriced usage, from its members'
+   * current rows. Callers deleting sessions call it first, while those rows still exist. */
+  noteUnpriced(rootId?: string): void {
+    this.sql.prepare(`UPDATE campaign_budgets SET cost_unpriced=1 WHERE cost_unpriced=0 AND (? IS NULL OR root_id=?) AND root_id IN (
+        SELECT m.root_id FROM campaign_budget_members m JOIN usage_session_state u ON u.session_id=m.session_id WHERE u.unpriced_records>0
+        UNION SELECT m.root_id FROM campaign_budget_members m JOIN sessions s ON s.id=m.session_id
+          WHERE s.live_settling=0 AND s.live_unpriced_records>0)`).run(rootId ?? null, rootId ?? null);
   }
 
   private atomic<T>(work: () => T): T {
@@ -80,14 +98,17 @@ export class CampaignBudgetLedger {
 
   view(rootId: string): CampaignBudgetView | undefined {
     const header = this.sql.prepare("SELECT * FROM campaign_budgets WHERE root_id=?").get(rootId) as
-      { authority: string; state: CampaignBudgetView["state"]; reason: string | null; accepted_follow_ups: number } | undefined;
+      { authority: string; state: CampaignBudgetView["state"]; reason: string | null; accepted_follow_ups: number; cost_unpriced: number } | undefined;
     if (!header) return undefined;
     const authority = JSON.parse(header.authority) as CampaignBudgetAuthority;
-    // An open live request without a rate is unpriced usage too, not free (#3196).
-    const unpriced = Boolean(this.sql.prepare(`SELECT 1 FROM usage_session_state u
+    // An open live request without a rate is unpriced usage too, not free (#3196). The durable
+    // marker keeps it unpriced after a member's usage rows are deleted.
+    const observed = Boolean(this.sql.prepare(`SELECT 1 FROM usage_session_state u
       JOIN campaign_budget_members m ON m.session_id=u.session_id WHERE m.root_id=? AND u.unpriced_records>0 LIMIT 1`).get(rootId)) ||
       Boolean(this.sql.prepare(`SELECT 1 FROM sessions s JOIN campaign_budget_members m ON m.session_id=s.id
         WHERE m.root_id=? AND s.live_settling=0 AND s.live_unpriced_records>0 LIMIT 1`).get(rootId));
+    if (observed && header.cost_unpriced !== 1) this.noteUnpriced(rootId);
+    const unpriced = observed || header.cost_unpriced === 1;
     // Only a cost ceiling needs priced usage. Without one the campaign keeps running, counts tool
     // calls and reports its cost as unavailable (#2940).
     if (header.state === "active" && unpriced && authority.costUsd !== undefined) {
@@ -436,6 +457,8 @@ export class CampaignBudgetLedger {
         VALUES (?,?,0,0,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET cost_limit=excluded.cost_limit,tool_limit=excluded.tool_limit,active=excluded.active`)
         .run(allocation.sessionId,rootId,allocation.costUsd??null,allocation.toolCalls??null,userLimits.costUsd??null,userLimits.toolCalls??null,activate?1:0);
       if (activate) this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(allocation.sessionId);
+      // A member that joins with unpriced usage already recorded makes the campaign's cost unknown.
+      this.noteUnpriced(rootId);
     });
   }
 
