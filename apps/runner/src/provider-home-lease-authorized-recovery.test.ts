@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseDarwinBootTime } from "./provider-home-lease-boot.js";
 import type { LeaseProcessProbe } from "./provider-home-lease-evidence.js";
-import { providerHomeLeaseRefusalKind, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { providerHomeLeaseRefusalKind, ProviderHomeLeaseRegistry, type ProviderHomeLeaseOptions } from "./provider-home-lease.js";
 import { writeProviderProfileMarker, type ProviderProfileMarker } from "./provider-profile.js";
 
 const previousMask = process.umask(0o077);
@@ -45,13 +45,32 @@ function legacyHome(t: { after: (fn: () => void) => void }, overrides: Record<st
   return home;
 }
 
-function registry(options: { owner?: string; bootedAt?: number | null; probe?: LeaseProcessProbe; alive?: boolean; instance?: string } = {}) {
+function registry(options: {
+  owner?: string; bootedAt?: number | null; probe?: LeaseProcessProbe; alive?: boolean; instance?: string;
+  hooks?: Pick<ProviderHomeLeaseOptions, "afterTransitionPublishForTest" | "beforeInitializationMirrorForTest">;
+} = {}) {
   return new ProviderHomeLeaseRegistry(options.owner ?? OWNER_B, {
     pid: 202, hostname: "host-a", controlPlaneInstanceId: options.instance ?? INSTANCE_ID,
     isProcessAlive: () => options.alive ?? false,
     bootTimeMs: () => (options.bootedAt === undefined ? WRITTEN + 3_600_000 : options.bootedAt),
     processProbe: options.probe ?? null,
+    ...options.hooks,
   });
+}
+
+/** Every file of the HOME's lease journal, by relative path, with its bytes. */
+function journalBytes(home: string): Record<string, string> {
+  const { root } = leasePaths(home);
+  const files: Record<string, string> = {};
+  const walk = (directory: string, prefix: string) => {
+    if (!existsSync(directory)) return;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) walk(join(directory, entry.name), `${prefix}${entry.name}/`);
+      else files[`${prefix}${entry.name}`] = readFileSync(join(directory, entry.name), "utf8");
+    }
+  };
+  walk(root, "");
+  return files;
 }
 
 function refusal(action: () => unknown): string | null {
@@ -205,6 +224,46 @@ test("forged authorized notes are refused by readers", { skip }, (t) => {
   assert.equal(forge({ ...valid, authorizationId: "not-a-uuid" }), "unverifiable");
   assert.equal(forge({ ...valid, extra: true }), "unverifiable");
   assert.equal(forge(valid, { hostname: "host-b" }), "unverifiable", "a recovery is never across hosts");
+});
+
+test("an authorization never completes this registry's own pending initialization (CR-1.1)", { skip }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-authorized-pending-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  let failOnce = true;
+  const initializing = registry({ owner: OWNER_A, hooks: { beforeInitializationMirrorForTest: () => {
+    if (failOnce) { failOnce = false; throw new Error("transient mirror failure"); }
+  } } });
+  assert.notEqual(refusal(() => initializing.acquireHome(home, "claude")), null, "the first initialization failed and left a reservation");
+  const before = journalBytes(home);
+  assert.equal(refusal(() => initializing.recoverStaleLease(home, "claude", { staleTipHash: "f".repeat(64), authorizationId: AUTHORIZATION })),
+    "stale_tip_changed");
+  assert.deepEqual(journalBytes(home), before, "nothing was completed, published or released");
+});
+
+test("a recovery that fails after publication is unconfirmed, never a refusal (CR-1.2)", { skip }, (t) => {
+  {
+    const home = legacyHome(t);
+    const failing = registry({ hooks: { afterTransitionPublishForTest: () => { throw new Error("I/O failure after publication"); } } });
+    const inspection = failing.inspectHome(home);
+    assert.equal(refusal(() => failing.recoverStaleLease(home, "claude", { staleTipHash: inspection.tipHash!, authorizationId: AUTHORIZATION })),
+      "recovery_unconfirmed");
+    assert.deepEqual(successor(home, LEGACY_ID)!.recovery, { proof: "authorized", authorizationId: AUTHORIZATION, basis: "booted_after" },
+      "the authorized successor was published");
+  }
+  {
+    const home = legacyHome(t);
+    const recovering = registry();
+    const inspection = recovering.inspectHome(home);
+    (recovering as unknown as { releaseHeld: () => boolean }).releaseHeld = () => false;
+    assert.equal(refusal(() => recovering.recoverStaleLease(home, "claude", { staleTipHash: inspection.tipHash!, authorizationId: AUTHORIZATION })),
+      "recovery_unconfirmed", "a recovered lease whose immediate release fails is unconfirmed");
+  }
+  {
+    // A refusal before anything was published stays a refusal.
+    const home = legacyHome(t);
+    assert.equal(refusal(() => registry({ bootedAt: WRITTEN }).recoverStaleLease(home, "claude", { staleTipHash: registry().inspectHome(home).tipHash!, authorizationId: AUTHORIZATION })),
+      "no_reboot_proof");
+  }
 });
 
 test("macOS kern.boottime output is parsed exactly", () => {

@@ -360,12 +360,13 @@ function unexpectedEntries(lockDir: string): Error {
  * everything the registry cannot prove. The `profile_*` kinds are pre-acquisition provider-profile
  * refusals (#3239), decided before any lease journal I/O. `stale_tip_changed` and `no_reboot_proof`
  * refuse an authorized recovery (#3241): the lease is no longer the authorized record, or the host
- * has not booted since that record (without lifecycle evidence) was written. */
+ * has not booted since that record (without lifecycle evidence) was written. `recovery_unconfirmed`
+ * is not a refusal: an authorized recovery failed after it may have been published. */
 export type ProviderHomeLeaseRefusalKind = "busy" | "foreign_owner" | "foreign_host" | "unverifiable" | "stale_tip_changed" | "no_reboot_proof" |
-  ProviderProfileDenial | ProviderProfileChangeRefusal;
+  "recovery_unconfirmed" | ProviderProfileDenial | ProviderProfileChangeRefusal;
 
 class ProviderHomeLeaseRefusal extends Error {
-  constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind) { super(message); }
+  constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind, options?: ErrorOptions) { super(message, options); }
 }
 
 /** The typed refusal kind, or null when `error` is not a registry refusal. */
@@ -876,10 +877,29 @@ export class ProviderHomeLeaseRegistry {
    * check still applies to a HOME with a marker; the record must still be proved abandoned, by its
    * lifecycle evidence or, without evidence, by a boot after it was written. Refused as
    * `stale_tip_changed` when the lease is no longer that record (including when it was released).
+   *
+   * Only a typed refusal while this attempt holds nothing proves nothing was published. Any other
+   * failure, or a failure once the successor is held (completion or the immediate release), may
+   * follow publication of the authorized record, so it is `recovery_unconfirmed`, never a refusal.
    */
   recoverStaleLease(requestedHome: string, provider: string, authorization: LeaseRecoveryAuthorization, profile?: ProviderProfileAccess): void {
-    const receipt = this.acquireReceiptFor(requestedHome, provider, profile, authorization);
-    if (!receipt.cancel()) throw new Error("the recovered provider HOME lease could not be released; preserve all evidence and retry release");
+    const unconfirmed = (cause: unknown) => new ProviderHomeLeaseRefusal("recovery could not be confirmed",
+      "the provider HOME lease recovery may have been recorded but could not be confirmed; inspect the lease again before retrying", "recovery_unconfirmed", { cause });
+    let heldBefore = false;
+    try { heldBefore = this.held.has(realpathSync(requestedHome)); } catch { /* an unavailable HOME is refused below */ }
+    let receipt: { first: boolean; cancel: () => boolean };
+    try {
+      receipt = this.acquireReceiptFor(requestedHome, provider, profile, authorization);
+    } catch (error) {
+      // This attempt published its successor only if it now holds a HOME it did not hold before.
+      const home = this.lastAcquisitionHome;
+      const published = !heldBefore && home !== undefined && this.held.has(home);
+      if (error instanceof ProviderHomeLeaseRefusal && !published) throw error;
+      throw unconfirmed(error);
+    }
+    let released: boolean;
+    try { released = receipt.cancel(); } catch (error) { throw unconfirmed(error); }
+    if (!released) throw unconfirmed(new Error("the recovered provider HOME lease could not be released"));
   }
 
   /** A worker-private reference receipt. Cancellation never re-resolves a mutable HOME alias. */
@@ -997,9 +1017,9 @@ export class ProviderHomeLeaseRegistry {
     const key = home;
     const recoveryProfileId = this.assertProfileAccess(home, lockDir, profile);
     const borrowed = this.held.get(key);
-    // A lease this runner holds is no stale record of anyone's, and an authorized recovery
-    // succeeds an existing journal's exact tip: it never creates or initializes one.
-    if (authorization && (borrowed || !lstatExists(lockDir))) throw staleTipChanged(lockDir);
+    // A lease this runner holds or is still initializing is no stale record of anyone's, and an
+    // authorized recovery succeeds an existing journal's exact tip: it never creates or initializes one.
+    if (authorization && (borrowed || this.failedInitializations.has(key) || !lstatExists(lockDir))) throw staleTipChanged(lockDir);
     if (borrowed) {
       const pending = this.pendingCompletions.get(key);
       if (pending) return withLeaseIoOptions({ fenceWaitMs: 10000 }, () => this.finishAcquisition(key, root, lockDir, pending));

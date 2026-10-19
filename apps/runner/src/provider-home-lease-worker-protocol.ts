@@ -54,7 +54,7 @@ export function leaseWorkerOperationTakesProfile(method: LeaseWorkerOperation["m
 }
 export type LeaseWorkerError = "busy" | "unavailable" | "foreign_owner" | "foreign_host" | "refusal" | "cancelled" | "cancel_release_failed" | "expired" |
   "profile_unsupported_control_plane" | "profile_unverifiable" | "profile_not_granted" | "profile_changed" | "profile_grant_limit" |
-  "stale_tip_changed" | "no_reboot_proof";
+  "stale_tip_changed" | "no_reboot_proof" | "recovery_unconfirmed";
 /** #3241 part 2: a HOME's lease state, as an Owner or Admin sees it before authorizing a recovery. */
 export interface LeaseWorkerInspection {
   state: "none" | "released" | "held" | "stale" | "unverifiable";
@@ -82,6 +82,7 @@ export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
   profile_grant_limit: "This provider profile already records the maximum number of control-plane grants. Revoke an unused grant before granting another control plane.",
   stale_tip_changed: "This provider HOME's lease is no longer the stale lease that was authorized for recovery. Inspect it again before authorizing a recovery.",
   no_reboot_proof: "This stale provider HOME lease was written during the current boot and records no process evidence, so it can be recovered only after the host restarts.",
+  recovery_unconfirmed: "The provider HOME lease recovery may have been recorded but could not be confirmed. Inspect the lease again before retrying.",
 };
 /** A worker refusal with its typed code, so callers can choose a recovery action without parsing text. */
 export class ProviderHomeLeaseError extends Error {

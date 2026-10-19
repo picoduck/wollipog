@@ -43,7 +43,7 @@ export function runProviderHomeLeaseWorker(): void {
   const code = (kind: ProviderHomeLeaseRefusalKind | null): LeaseWorkerError | undefined =>
     kind === "busy" || kind === "foreign_owner" || kind === "foreign_host" || kind === "profile_unsupported_control_plane" ||
     kind === "profile_unverifiable" || kind === "profile_not_granted" || kind === "profile_changed" || kind === "profile_grant_limit" ||
-    kind === "stale_tip_changed" || kind === "no_reboot_proof" ? kind : undefined;
+    kind === "stale_tip_changed" || kind === "no_reboot_proof" || kind === "recovery_unconfirmed" ? kind : undefined;
   const fail = (error: unknown): LeaseWorkerError => {
     const known = code(providerHomeLeaseRefusalKind(error));
     if (known) return known;

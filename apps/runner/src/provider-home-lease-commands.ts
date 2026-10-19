@@ -33,7 +33,8 @@ export function providerHomeLeaseRecoveryCode(code: LeaseWorkerError): ProviderH
     case "foreign_host": return "FOREIGN_HOST";
     case "profile_unsupported_control_plane": case "profile_unverifiable": case "profile_not_granted": case "profile_changed": case "profile_grant_limit":
       return "PROFILE_REFUSED";
-    case "unavailable": case "expired": case "cancelled": case "cancel_release_failed":
+    // Nothing decided, or an outcome that may have been published: the control plane records it as unknown.
+    case "unavailable": case "expired": case "cancelled": case "cancel_release_failed": case "recovery_unconfirmed":
       return undefined;
     default: return "UNVERIFIABLE";
   }

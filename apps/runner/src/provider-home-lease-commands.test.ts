@@ -59,7 +59,7 @@ test("a recovery passes the exact authorization through and maps refusals; trans
   }
   const expected: Array<[LeaseWorkerError, string | undefined]> = [
     ["stale_tip_changed", "TIP_CHANGED"], ["no_reboot_proof", "NO_REBOOT_PROOF"], ["busy", "HOME_IN_USE"], ["foreign_host", "FOREIGN_HOST"],
-    ["profile_not_granted", "PROFILE_REFUSED"], ["refusal", "UNVERIFIABLE"], ["foreign_owner", "UNVERIFIABLE"], ["unavailable", undefined], ["expired", undefined],
+    ["profile_not_granted", "PROFILE_REFUSED"], ["refusal", "UNVERIFIABLE"], ["foreign_owner", "UNVERIFIABLE"], ["unavailable", undefined], ["expired", undefined], ["recovery_unconfirmed", undefined],
   ];
   for (const [worker, code] of expected) {
     assert.equal(providerHomeLeaseRecoveryCode(worker), code, worker);
