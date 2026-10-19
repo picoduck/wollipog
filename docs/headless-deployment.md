@@ -445,7 +445,8 @@ before the rename, the slot stays in place and a later run can use the same toke
 interrupted after the rename, the attempt is already preserved and only its record is marked
 incomplete. Inspection lists both cases.
 
-Legacy per-release staging from v0.23–v0.29 is also inspectable. Each recognized
+Legacy per-release staging from v0.23–v0.29 is also inspectable. Inspection lists every
+release-tag candidate, including when many interrupted releases have accumulated. Each recognized
 `upgrades/vX.Y.Z[-pre]` candidate has its own `legacy[]` inventory and preservation command in
 JSON output; text output labels it `Legacy` and `Preservation`. Its `sl1-…` token is separate
 from current-slot `sa1-…` tokens. For example, after reviewing the exact token from inspection:

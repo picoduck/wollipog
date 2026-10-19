@@ -176,7 +176,7 @@ export interface StagingInspection {
   legacy: Array<{ tag: string; path: string; entries: StagingEntry[] | null; recovery: StagingInspection["recovery"]; holders: Holders }>;
 }
 
-/** Bounded, no-follow inventory; `truncated` when more names exist than the bound. */
+/** No-follow inventory; `truncated` beyond the bound, or complete when the bound is Infinity. */
 function list(path: string, fs: StagingFilesystem, bound: number): { observed: Observed[]; truncated: boolean } {
   const observed: Observed[] = [];
   const dir = fs.directory(path);
@@ -343,7 +343,9 @@ function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesyst
     return evidence;
   }
   evidence.parentStat = parentStat;
-  const parentList = list(parent, fs, MAX_ENTRIES);
+  // Legacy releases each have their own parent entry. The single-slot content bound
+  // must not hide candidates when many interrupted releases have accumulated.
+  const parentList = list(parent, fs, Infinity);
   inspection.parentEntries = parentList.observed.map(({ entry }) => ({ name: entry.name, kind: entry.kind }));
   if (parentList.observed.length === 0) { refuse("staging is clear; there is nothing to recover"); return evidence; }
   inspection.state = "blocked";

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  appendFileSync, chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync,
+  appendFileSync, chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync,
   writeFileSync, writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -466,6 +466,36 @@ function legacyDirectory(f: ReturnType<typeof fixture>, tag = "v0.28.0") {
   writeFileSync(join(path, "SHA256SUMS"), "interrupted manifest", { mode: 0o600 });
   return path;
 }
+
+test("inspection identifies every legacy candidate beyond the current slot's entry bound", linux, (t) => {
+  const f = fixture(t);
+  const tags = Array.from({ length: 20 }, (_, index) => `v0.28.${index}`);
+  for (const tag of tags) legacyDirectory(f, tag);
+  const before = snapshot(f.root);
+  // Model trusted ancestors explicitly: this enumeration test should not depend on an
+  // enclosing agent sandbox's synthetic root permissions. Fixture identities stay real.
+  const fs: StagingFilesystem = { ...stagingFilesystem, lstat: (path) => {
+    const stat = stagingFilesystem.lstat(path);
+    const named = path.replace(/^\/proc\/self\/fd\/\d+/u, (prefix) => readlinkSync(prefix));
+    return named === f.root || named.startsWith(`${f.root}/`) ? stat
+      : Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: 0n, mode: (stat.mode & ~0o7777n) | 0o755n });
+  } };
+  const inspection = inspectStaging(f.data, context, fs, f.procs);
+  assert.equal(inspection.state, "blocked", JSON.stringify({ problem: inspection.problem, recovery: inspection.recovery.reasons }));
+  assert.deepEqual(inspection.parentEntries.map(({ name }) => name).sort(), [...tags].sort());
+  assert.deepEqual(inspection.legacy.map(({ tag }) => tag).sort(), [...tags].sort());
+  for (const candidate of inspection.legacy) {
+    assert.equal(candidate.recovery.eligible, true, candidate.recovery.reasons.join("; "));
+    assert.deepEqual(candidate.entries!.map(({ name }) => name), ["SHA256SUMS"]);
+    assert.match(candidate.recovery.token!, /^sl1-[0-9a-f]{32}$/u);
+  }
+  assert.deepEqual(snapshot(f.root), before, "complete inspection remains read-only");
+  const candidate = inspection.legacy.find(({ tag }) => tag === tags.at(-1))!;
+  const result = recoverStaging(f.data, context, candidate.recovery.token!, fs, f.procs, now);
+  assert.equal(result.admissible, false, "the remaining legacy entries still block an update");
+  assert.equal(readFileSync(join(result.preservedPath, "SHA256SUMS"), "utf8"), "interrupted manifest");
+  assert.equal(inspectStaging(f.data, context, fs, f.procs).legacy.length, tags.length - 1);
+});
 
 test("legacy interrupted downloads are inspected read-only and preserved with a distinct exact token", linux, (t) => {
   const f = fixture(t);
