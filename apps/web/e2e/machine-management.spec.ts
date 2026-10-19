@@ -789,7 +789,9 @@ test("in the compact tier the Machines list is 280px (#2985)", async ({ page }) 
   expect(geometry.detail.left).toBeGreaterThanOrEqual(geometry.list.right - 0.5);
 });
 
-for (const width of [1440, 834]) {
+// 761px leaves this rail-less harness a detail under 440px, as compact widths with the labelled rail
+// do, so Capacity's rows take two lines there (review CR-1.1).
+for (const width of [1440, 834, 761]) {
   test(`at ${width}px the All Machines overview's Capacity meters line up and nothing overflows (#2986)`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/machine-management-e2e.html?machines=10");
@@ -805,6 +807,12 @@ for (const width of [1440, 834]) {
       expect(box.width).toBeCloseTo(boxes[0]!.width, 0);
       expect(box.width, "the meter keeps room to compare").toBeGreaterThanOrEqual(64);
     }
+    const titles = await overview.locator(".machine-capacity-row > .row-title")
+      .evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().width));
+    for (const titleWidth of titles) expect(titleWidth, "every machine's name keeps its room").toBeGreaterThanOrEqual(80);
+    const heights = await overview.locator("button.machine-capacity-row")
+      .evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height));
+    expect(new Set(heights).size, "every Capacity row is one height").toBe(1);
     await expect(overview.locator(".machine-capacity-rest .row-title")).toHaveText("and 2 more machines");
     const overflow = await page.locator(".master-detail-detail").evaluate((element) => element.scrollWidth - element.clientWidth);
     expect(overflow, "the overview never scrolls sideways").toBeLessThanOrEqual(0);

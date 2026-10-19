@@ -9886,6 +9886,22 @@ textarea {
   color: var(--text-dim);
   font: var(--type-body);
 }
+/* A narrow detail (compact widths with the labelled rail) has no room for four columns: every row
+   becomes two lines, the name and figures over a full-width meter, so names never collapse. */
+@container (max-width: 440px) {
+  .machine-capacity-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: auto auto;
+    align-content: center;
+    row-gap: var(--space-2);
+    height: var(--row-h-2);
+  }
+  .machine-capacity-row > .row-title { grid-area: 1 / 1; }
+  .machine-capacity-row > .meter { grid-area: 2 / 1 / 3 / -1; }
+  .machine-capacity-figures { grid-area: 1 / 2; }
+  .machine-capacity-queued { grid-area: 1 / 3; }
+  .machine-capacity-unknown { grid-area: 1 / 2 / 2 / -1; }
+}
 .instances-page {
   min-width: 0;
 }
