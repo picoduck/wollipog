@@ -504,6 +504,13 @@ function AutomationEditorForm({
     to();
   };
 
+  // Whether this editor is still on screen when a save settles (Strict Mode remounts set it again).
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
   const save = async () => {
     let spec: AutomationSpec;
     setFailure(null);
@@ -522,23 +529,28 @@ function AutomationEditorForm({
     try {
       if (automation) {
         const saved = await api.updateAutomation(automation.automationId, spec);
+        showToast("Changes saved.", { tone: "success" });
+        // Left while the update ran: the toast says it saved, and there is no editor to reload.
+        if (!mounted.current) return;
         const next = specOf(saved);
         const reloaded = editDraft(next, runners);
         setEditingSpec(next);
         setSavedName(saved.name);
         setBaseline(reloaded);
         setDraft(reloaded);
-        showToast("Changes saved.", { tone: "success" });
       } else {
         await api.createAutomation(spec);
         showToast("Automation created.", { tone: "success" });
-        leaveTo(() => navigate({ name: "automations" }, { replace: true }));
+        // A create that settles after the person left (Back, then Discard Changes) must not move
+        // them: the page they are on now, possibly another editor's draft, is theirs. A replacing
+        // navigation is not asked by the leave guard, so this check is the only thing in the way.
+        if (mounted.current) leaveTo(() => navigate({ name: "automations" }, { replace: true }));
       }
     } catch (cause) {
       const message = (cause as Error).message;
-      setFailure({ field: isAlternateTargetError(message, form) ? "fallbackRunner" : null, message });
+      if (mounted.current) setFailure({ field: isAlternateTargetError(message, form) ? "fallbackRunner" : null, message });
     } finally {
-      setSaving(false);
+      if (mounted.current) setSaving(false);
     }
   };
 
@@ -599,8 +611,13 @@ function AutomationEditorForm({
     </Notice>
   );
 
+  // Switching the action fills Machine, Folder and Agent only where they are EMPTY. A stored value
+  // the current discovery cannot find (a machine that has not reported, a folder or agent it no
+  // longer lists) is the automation's, and saving must carry it, so it is never replaced here.
+  // Reselecting the checked action (ChoiceRow reports it) changes nothing.
   const chooseAction = (kind: ActionKind) => update((current) => {
     const previous = current.form;
+    if (previous.actionKind === kind) return current;
     let next: FormState = {
       ...previous,
       actionKind: kind,
@@ -609,18 +626,13 @@ function AutomationEditorForm({
     };
     let rebound = current;
     if (kind !== "prompt_session") {
-      // Folder and Agent are re-derived whenever they would be empty while an option exists.
-      const runner = runners.get(next.runnerId);
-      if (!runner) {
+      if (!next.runnerId) {
         next = withMachine(next, firstMachine(runners));
         rebound = { ...current, rebindPrimary: false, primaryAgentTouched: true, workflowBindingEdits: {} };
       } else {
-        if (!runner.workspaces.some((workspace) => workspace.id === next.workspaceId)) {
-          next = { ...next, workspaceId: runner.workspaces[0]?.id ?? "" };
-        }
-        if (kind === "create_session" && !offeredAgents(runner.agents, next.agentId).some((agent) => agent.id === next.agentId)) {
-          next = withAgent(next, defaultAgentId(runner.agents));
-        }
+        const runner = runners.get(next.runnerId);
+        if (!next.workspaceId) next = { ...next, workspaceId: runner?.workspaces[0]?.id ?? "" };
+        if (kind === "create_session" && !next.agentId) next = withAgent(next, defaultAgentId(runner?.agents));
       }
     }
     return { ...rebound, form: next };

@@ -21,6 +21,9 @@ import { ApiProvider } from "../api-context.js";
 import { viewPath, type View, type ViewNavigation } from "../navigation.js";
 import { setExperimentFlag } from "../experiments.js";
 import { MULTI_AGENT_OFF_HELPER } from "./AutomationEditor.js";
+import { FeedbackContext } from "./FeedbackProvider.js";
+
+type FeedbackContextValue = React.ContextType<typeof FeedbackContext>;
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { AutomationsView } from "./AutomationsView.js";
@@ -131,6 +134,9 @@ class FakeSocket implements UiSocket {
     this.onmessage?.({ data: JSON.stringify(message) });
   }
 }
+
+/** Confirmations and toasts for a fixture mounted while it is set; none otherwise (every confirm declines). */
+let feedback: FeedbackContextValue | null = null;
 
 /** The route a fixture opens on: the list, unless a test opens an editor route directly. */
 let initialView: View = { name: "automations" };
@@ -268,11 +274,14 @@ async function mountFixture(
     ...clientOverrides,
   } as unknown as ApiClient;
 
+  const store = (
+    <StoreProvider connection={connection} navigation={navigation}>
+      <AutomationsWhenReady />
+    </StoreProvider>
+  );
   const render = () => root.render(
     <ApiProvider client={client}>
-      <StoreProvider connection={connection} navigation={navigation}>
-        <AutomationsWhenReady />
-      </StoreProvider>
+      {feedback ? <FeedbackContext.Provider value={feedback}>{store}</FeedbackContext.Provider> : store}
     </ApiProvider>,
   );
   await act(async () => { render(); });
@@ -2262,6 +2271,95 @@ test("number fields are 96px wide, units sit in their helpers, and no label hold
       .map((label) => label.textContent ?? "");
     assert.ok(labels.length > 10);
     assert.deepEqual(labels.filter((label) => /\(/.test(label)), [], "no field label holds a unit in parentheses");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("switching or reselecting the action never replaces a stored machine, folder or agent discovery cannot find", async () => {
+  // Review finding CR-1.1: a nonempty stored runner absent from the snapshot was read as "no machine"
+  // and replaced by the first one, and ChoiceRow reports a click on the checked action too.
+  const stored = schedule("missing-machine", "Missing Machine");
+  stored.action = { kind: "create_session", request: {
+    runnerId: "runner-gone", workspaceId: "gone-workspace", agentId: "gone-agent", prompt: "Sweep.",
+    useWorktree: false, config: { model: "opus" },
+  }, installationBindings: { agent: { driver: "claude-code", context: { kind: "native" }, installationId: "system" } } };
+  const fixture = await mountAt(editRoute("missing-machine"), [stored], {}, {}, [], {}, runners, [reviewGraph]);
+  try {
+    await chooseAction(fixture.container, "Start a Session");
+    await chooseAction(fixture.container, "Prompt a Session");
+    await chooseAction(fixture.container, "Run a Workflow");
+    await chooseAction(fixture.container, "Start a Session");
+    await setLabeledInput(fixture.container, "Name", "Missing Machine Renamed");
+    await saveChanges(fixture);
+    assert.equal(fixture.updates.length, 1);
+    assert.deepEqual(fixture.updates[0]!.spec.action, stored.action,
+      "the stored machine, folder, agent, config and installation binding round-trip");
+  } finally {
+    await unmountFixture(fixture);
+  }
+
+  // A stored folder or agent the machine no longer lists is kept the same way.
+  const gone = schedule("missing-folder", "Missing Folder");
+  if (gone.action.kind !== "create_session") throw new Error("expected create-session action");
+  gone.action.request.workspaceId = "gone-workspace";
+  gone.action.request.agentId = "gone-agent";
+  const kept = await mountAt(editRoute("missing-folder"), [gone], {}, {}, [], {}, runners, [reviewGraph]);
+  try {
+    await chooseAction(kept.container, "Run a Workflow");
+    await chooseAction(kept.container, "Start a Session");
+    await setLabeledInput(kept.container, "Name", "Missing Folder Renamed");
+    await saveChanges(kept);
+    assert.deepEqual(kept.updates[0]!.spec.action, gone.action);
+  } finally {
+    await unmountFixture(kept);
+  }
+});
+
+test("a create that settles after the person left does not navigate away from where they went", async () => {
+  // Review finding CR-1.2: the create continuation navigated (replacing, so unasked) after its
+  // editor had unmounted, discarding a newer editor's unsaved draft.
+  let release: () => void = () => {};
+  const confirmations: string[] = [];
+  const toasts: string[] = [];
+  feedback = {
+    confirm: async (options) => { confirmations.push(options.title ?? ""); return true; },
+    showToast: (message) => { toasts.push(message); return 1; },
+    showUndo: () => 1,
+    dismissToast: () => undefined,
+  } as FeedbackContextValue;
+  let fixture: Fixture;
+  try {
+    fixture = await mountFixture([schedule("automation-1", "Nightly")], {}, {}, [], {}, runners, [], {
+      createAutomation: async (spec: AutomationSpec) => {
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { ...schedule("created", spec.name), ...spec };
+      },
+    });
+  } finally {
+    feedback = null;
+  }
+  try {
+    await openNew(fixture);
+    await setLabeledInput(fixture.container, "Name", "Morning Digest");
+    await act(async () => { button(fixture.container, "Create Automation").click(); });
+    // Leave while the create is still running, and discard the draft when asked.
+    await goBack(fixture);
+    assert.deepEqual(confirmations, ["Discard Changes"]);
+    assertNoDomNode(fixture.container.querySelector(".automation-editor"), "Back left the editor");
+
+    // Another editor, with an unsaved change of its own.
+    await expandCard(fixture, "Nightly");
+    await openEdit(fixture);
+    await setLabeledInput(fixture.container, "Name", "Nightly Draft");
+    assert.equal(editorTitle(fixture.container), "Edit Nightly");
+
+    await act(async () => { release(); });
+    await act(settle);
+    assert.equal(editorTitle(fixture.container), "Edit Nightly", "the settled create left the newer editor alone");
+    assert.equal((editorRoot(fixture.container).querySelector("input") as HTMLInputElement).value, "Nightly Draft");
+    assert.match(fixture.container.querySelector(".save-bar")?.textContent ?? "", /Unsaved changes/);
+    assert.ok(toasts.includes("Automation created."), "the person still hears that it was created");
   } finally {
     await unmountFixture(fixture);
   }
