@@ -1,5 +1,6 @@
 import React, { useState, type ReactNode } from "react";
 import { runnerCapabilityRequirement, runnerSupportsProtocol, type BoxView, type RunnerView } from "@wollipog/protocol";
+import type { RunnerCapacityDimensions } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { describeSshFailure, osLabel, relativeTime } from "../format.js";
@@ -537,11 +538,17 @@ interface ConnectionFact {
   extra?: ReactNode;
 }
 
+const IDLE_PROCESS_POLICY_LABELS = {
+  park_when_needed: "Park When Needed",
+  retain: "Retain Idle Processes",
+} as const satisfies Record<RunnerCapacityDimensions["idleProcessPolicy"], string>;
+
 /** The facts Connection Details lists, in order (#2988), and the text Copy All puts on the clipboard. */
 export function connectionFacts(runner: RunnerView | undefined, box: BoxView | undefined, runnerId: string): ConnectionFact[] {
   const runtime = runner?.runtime;
   const pv = runner?.protocolVersion;
   const admission = runtime ? formatAdmissionPolicy(runtime) : null;
+  const idleProcesses = runner?.capacity?.dimensions?.idleProcessPolicy;
   return [
     { label: "Connection", value: box ? "SSH" : "Native Runner" },
     box
@@ -563,6 +570,12 @@ export function connectionFacts(runner: RunnerView | undefined, box: BoxView | u
     { label: "Worktree Storage", value: runtime?.worktreeRoot?.trim() || null, mono: true, copy: true },
     { label: "Sandboxing", value: runtime ? formatExecutionIsolation(runtime) : null },
     ...(admission ? [{ label: "Admission Policy", value: admission }] : []),
+    // Capacity's idle-process policy, set on the machine itself (#2989).
+    {
+      label: "Idle Processes",
+      value: idleProcesses ? IDLE_PROCESS_POLICY_LABELS[idleProcesses] : null,
+      extra: idleProcesses && <span className="connection-fact-note">Set in <code>runner.config.json</code></span>,
+    },
     ...(box ? [
       { label: "Deployed Build", value: box.deployedVersion?.trim() || null, mono: true, copy: true },
       { label: "Platform", value: box.triple?.trim() || null, mono: true },

@@ -89,20 +89,15 @@ test("a machine's actions live in Settings… and ⋯, and Connection Details li
   assert.doesNotMatch(css, /\.runner-card-actions|\.runner-connection-meta|\.connection-details-list|\.os-badge/);
   assert.match(view, /<MachineSettingsDialog/);
   assert.match(view, /<span>Machine Name<\/span>/);
-  assert.match(view, /<span>Add Workspace<\/span>/);
   assert.match(machine, /title: "Delete Machine"/);
   assert.match(view, /confirmDeleteMachine\(confirm, \{ name: display\.name/);
-  assert.match(view, /api\.registerMachineWorkspace/);
   assert.match(view, /<h3>Runner Capacity<\/h3>/);
   assert.match(view, /api\.updateMachineCapacity/);
-  assert.match(view, /aria-label="Runner Capacity Usage"/);
-  assert.match(view, /aria-label="Capacity Dimensions"/);
-  assert.match(view, /<dt>Active Turns<\/dt>/);
-  assert.match(view, /<dt>Resident Process Units<\/dt>/);
-  assert.match(view, /<dt>Retained Resumable Sessions<\/dt>/);
-  assert.match(view, /<dt>Parked Sessions<\/dt>/);
-  assert.match(view, /<dt>Idle Process Policy<\/dt>/);
-  assert.match(view, /aria-label="Current Capacity Bottlenecks"/);
+  // Workspaces and the capacity readouts live in the machine's detail now (#2989).
+  assert.doesNotMatch(view, /registerMachineWorkspace|DirectoryPicker|Add Workspace|<h3>Workspaces<\/h3>/);
+  assert.doesNotMatch(view, /Runner Capacity Usage|Capacity Dimensions|Current Capacity Bottlenecks|Units Used/);
+  assert.doesNotMatch(css, /\.group-head|\.workspace-list|\.ws-(?:name|path)|machine-capacity-blockers|\.machine-workspace-(?:create|form)/);
+  assert.match(machine, /label: "Idle Processes"/);
   assert.match(view, /does not infer it from CPU or memory/);
   assert.match(view, /machineSettingsMutationError\(cause\)/);
   assert.match(view, /disabled=\{onlineNativeRunner\}/);

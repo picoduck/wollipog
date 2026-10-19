@@ -1,24 +1,28 @@
-import { useAccountEmailPrivacy } from "../account-email-privacy.js";
-import React, { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { runnerSupportsProtocol, type RunnerView } from "@wollipog/protocol";
+import { agentDisplayName } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
-import { accountLabelText } from "../personal-identifiers.js";
+import { relativeTime } from "../format.js";
 import {
   normalizeRemovalReporting,
   reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
   type RunnerSkillsResponse,
 } from "../skills.js";
+import { AccountIdentifier } from "./AccountIdentifier.js";
 import { ChevronRightIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
 
 /**
- * Skills on This Machine, in the machine's details in Connections (#1981): what the machine itself
- * reports about skills rather than any one skill. Its unmanaged skills, and every link removal it
- * reported, including those of skills the library no longer has. Read when first opened.
+ * Skills on This Machine, in the machine's detail in Connections (#1981, #2989): what the machine
+ * itself reports about skills rather than any one skill. A disclosure, closed until opened, which
+ * reads the machine's latest report on every opening (§5.5); inside, its unmanaged skills and every
+ * link removal it reported, including those of skills the library no longer has, as rows (§5.2)
+ * whose account labels follow Hide Account Emails (§11.8). A failed read offers Retry (§12.4).
  */
 export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
-  const privacy = useAccountEmailPrivacy();
   const api = useApi();
+  const ids = useId().replace(/:/g, "");
   const [state, setState] = useState<RunnerSkillsResponse | "error" | null>(null);
   const [loading, setLoading] = useState(false);
   /** Whether a read is running, so one opening never reads twice. */
@@ -43,74 +47,101 @@ export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
   const unmanaged = reportedUnmanagedSkills(loaded?.reported);
   const removals = reportedSkillLinkRemovals(loaded?.reported, null);
   const removalReporting = loaded?.removalReporting ?? "unknown";
-  const accountLabel = (providerAccountId: string) => accountLabelText(
-    runner.providerAccounts?.find((account) => account.id === providerAccountId)?.label ?? "Provider Account", undefined, privacy.hide,
-  );
-  const agentName = (agentId: string) => runner.agents.find((agent) => agent.id === agentId)?.name || agentId;
+  const account = (providerAccountId: string, key: string) => {
+    const label = runner.providerAccounts?.find((item) => item.id === providerAccountId)?.label ?? "Provider Account";
+    return (
+      <AccountIdentifier identity={`${runner.runnerId}:${key}`} value={label} label="Account Email" lead="Account"
+        className="machine-skill-meta" />
+    );
+  };
+  const agentName = (agentId: string) => {
+    const agent = runner.agents.find((item) => item.id === agentId);
+    return agent ? agentDisplayName(agent) || agentId : agentId;
+  };
   const reportedAt = loaded?.reported?.removalsUpdatedAt ?? loaded?.reported?.updatedAt;
+  const unmanagedId = `machine-skills-unmanaged-${ids}`;
+  const removalsId = `machine-skills-removals-${ids}`;
 
   return (
-    <details
-      className="runner-agents disclosure machine-skills"
-      onToggle={(event) => { if (event.currentTarget.open) load(); }}
-    >
-      <summary>
-        <ChevronRightIcon className="disclosure-chevron" />
-        <span className="runner-agents-label">Skills on This Machine</span>
-      </summary>
-      <div className="runner-agents-body">
-        {loading && state === null && <p className="hint">Loading…</p>}
-        {state === "error" && (
-          <p className="hint" role="alert">Skills status could not be loaded. Close and reopen this section to try again.</p>
-        )}
-        {loaded && !loaded.reported && <p className="hint">This machine hasn't reported its skills yet.</p>}
-        {loaded?.reported && unmanaged.length === 0 && (
-          <p className="hint">This machine reports no unmanaged skills.</p>
-        )}
-        {unmanaged.length > 0 && (
-          <div className="machine-skills-group">
-            <h5>Unmanaged Skills</h5>
-            <ul>
-              {unmanaged.map((entry) => (
-                <li key={`${entry.providerAccountId ?? "legacy"}:${entry.agentId}:${entry.name}`}>
-                  <strong>{entry.name}</strong>
-                  {entry.providerAccountId && <span className="muted"> · {accountLabel(entry.providerAccountId)}</span>}
-                  <span className="muted"> · {agentName(entry.agentId)}</span>
-                  {entry.description && <span className="muted"> — {entry.description}</span>}
-                </li>
-              ))}
-            </ul>
-            <p className="hint">
-              These skills live on the machine but are not managed here. Use Import from Machine to preview or import a snapshot. On a compatible Linux runner, an identical assigned version can then be adopted with an explicit recovery-aware confirmation.
-            </p>
-          </div>
-        )}
-        {loaded?.reported && (removals.length > 0 || removalReporting !== "unknown") && (
-          <div className="machine-skills-group">
-            <h5>Recent Link Removals</h5>
-            {removalReporting === "unsupported" && (
-              <p className="hint">This runner version cannot report new managed link removals.</p>
-            )}
-            {removalReporting === "supported" && removals.length === 0 && (
-              <p className="hint">No managed link removals have been reported.</p>
-            )}
-            {removals.length > 0 && (
-              <>
-                <p className="hint">Reported {reportedAt === undefined ? "—" : new Date(reportedAt).toLocaleString()}</p>
-                <ul>
-                  {removals.map((entry, index) => (
-                    <li key={`${entry.path}:${entry.reason}:${index}`}>
-                      <strong>{entry.path}</strong>
-                      {entry.providerAccountId && <span className="muted"> · {accountLabel(entry.providerAccountId)}</span>}
-                      <span className="muted"> — {entry.reason}</span>
+    <section className="section" aria-label="Skills on This Machine">
+      <details className="disclosure machine-skills" onToggle={(event) => { if (event.currentTarget.open) load(); }}>
+        <summary>
+          <ChevronRightIcon className="disclosure-chevron" />
+          <span>Skills on This Machine</span>
+        </summary>
+        <div className="disclosure-body">
+          {loading && state === null && <p className="machine-section-state">Loading…</p>}
+          {state === "error" && (
+            <Notice tone="danger" compact role="alert" title="Couldn't Load Skills on This Machine"
+              actions={<button type="button" className="btn sm" disabled={loading} onClick={load}>Retry</button>}>
+              Wollipog couldn't read this machine's skills report.
+            </Notice>
+          )}
+          {loaded && !loaded.reported && <p className="machine-section-state">This machine hasn&apos;t reported its skills yet.</p>}
+          {loaded?.reported && unmanaged.length === 0 && (
+            <p className="machine-section-state">This machine reports no unmanaged skills.</p>
+          )}
+          {unmanaged.length > 0 && (
+            <div className="machine-skills-group">
+              <h4 className="machine-skills-label" id={unmanagedId}>Unmanaged Skills</h4>
+              <ul className="surface machine-skills-rows" aria-labelledby={unmanagedId}>
+                {unmanaged.map((entry) => {
+                  const key = `${entry.providerAccountId ?? "legacy"}:${entry.agentId}:${entry.name}`;
+                  return (
+                    <li key={key} className="row row-2">
+                      <span className="row-body">
+                        <span className="row-line">
+                          <span className="row-title">{entry.name}</span>
+                          <span className="machine-skill-meta">{agentName(entry.agentId)}</span>
+                          {entry.providerAccountId && account(entry.providerAccountId, key)}
+                        </span>
+                        {entry.description && <span className="row-sub" title={entry.description}>{entry.description}</span>}
+                      </span>
                     </li>
-                  ))}
+                  );
+                })}
+              </ul>
+              <p className="section-note">
+                These skills live on the machine but are not managed here. Use Import from Machine to preview or import a snapshot. On a compatible Linux runner, an identical assigned version can then be adopted with an explicit recovery-aware confirmation.
+              </p>
+            </div>
+          )}
+          {loaded?.reported && (removals.length > 0 || removalReporting !== "unknown") && (
+            <div className="machine-skills-group">
+              <div className="machine-skills-head">
+                <h4 className="machine-skills-label" id={removalsId}>Recent Link Removals</h4>
+                {removals.length > 0 && reportedAt !== undefined && (
+                  <span className="machine-skills-reported">Reported {relativeTime(reportedAt)}</span>
+                )}
+              </div>
+              {removalReporting === "unsupported" && (
+                <p className="machine-section-state">This runner version cannot report new managed link removals.</p>
+              )}
+              {removalReporting === "supported" && removals.length === 0 && (
+                <p className="machine-section-state">No managed link removals have been reported.</p>
+              )}
+              {removals.length > 0 && (
+                <ul className="surface machine-skills-rows" aria-labelledby={removalsId}>
+                  {removals.map((entry, index) => {
+                    const key = `${entry.path}:${entry.reason}:${index}`;
+                    return (
+                      <li key={key} className="row row-2">
+                        <span className="row-body">
+                          <span className="row-line">
+                            <span className="row-title machine-skill-path" title={entry.path}><bdi>{entry.path}</bdi></span>
+                            {entry.providerAccountId && account(entry.providerAccountId, key)}
+                          </span>
+                          <span className="row-sub" title={entry.reason}>{entry.reason}</span>
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ul>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-    </details>
+              )}
+            </div>
+          )}
+        </div>
+      </details>
+    </section>
   );
 }

@@ -199,6 +199,21 @@ let socket: FixtureSocket | null = null;
 let box: BoxView | null = null;
 // `outdated` gives Design Workstation an older runner protocol (#2988's Runner Update Required).
 if (fixtureParams.has("outdated") && runner) runner.protocolVersion = PROTOCOL_VERSION - 1;
+// `capacity=waiting` is Design Workstation before its first live report (#2989).
+if (fixtureParams.get("capacity") === "waiting" && runner?.capacity) {
+  runner.capacity = { configuredUnits: runner.capacity.configuredUnits, revision: runner.capacity.revision, authority: "control_plane" };
+}
+// `workspaces=0` leaves Design Workstation without workspaces; `workspaces=long` adds deep paths (#2989).
+if (fixtureParams.get("workspaces") === "0" && runner) runner.workspaces = [];
+if (fixtureParams.get("workspaces") === "long" && runner) {
+  runner.workspaces.push(
+    { id: "storefront", name: "Acme Storefront", path: "C:\\Users\\misko\\src\\clients\\acme\\retail\\web\\packages\\acme-storefront" },
+    { id: "notes", name: "Research Notes With a Long Name for a Narrow Row", path: "D:\\archive\\2026\\research\\notes" },
+  );
+}
+/** `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989). */
+const skillsScenario = fixtureParams.get("skills");
+let skillsFailures = skillsScenario === "fail" ? 1 : 0;
 /**
  * `ssh=<state>` makes Design Workstation an SSH machine in one lifecycle state (#2988): `online`,
  * `connecting` (bootstrapping), `failed` (its key refused), `ended` (an SSH session that simply
@@ -296,22 +311,35 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
+/** The machine's skills report: an unmanaged skill on the Work account, and two link removals. */
+const skillsReport = () => ({
+  removalReporting: "supported" as const,
+  desired: [],
+  reported: {
+    unmanaged: [{ agentId: "custom-acp", name: "local-notes", description: "Scratch notes kept outside Wollipog",
+      providerAccountId: "claude-work" }],
+    removals: [
+      { path: "~/.claude/skills/code-review", reason: "No longer in the desired skill list." },
+      { path: "~/.codex/skills/retired-skill-with-a-long-name-that-wraps", reason: "The canonical location it routes through is conflicted." },
+    ],
+    // Four minutes before the newer inventory: the removals show their own time (#2989).
+    removalsUpdatedAt: Date.now() - 4 * 60_000,
+    updatedAt: Date.now() - 60_000,
+  },
+});
+
 const client = {
   ...api,
   // Skills on This Machine (#1981): the machine's own skills diagnostics, read when opened.
-  runnerSkills: async () => ({
-    removalReporting: "supported",
-    desired: [],
-    reported: {
-      unmanaged: [{ agentId: "custom-acp", name: "local-notes", description: "Scratch notes kept outside Wollipog" }],
-      removals: [
-        { path: "~/.claude/skills/code-review", reason: "No longer in the desired skill list." },
-        { path: "~/.codex/skills/retired-skill-with-a-long-name-that-wraps", reason: "The canonical location it routes through is conflicted." },
-      ],
-      removalsUpdatedAt: 1_699_999_000_000,
-      updatedAt: 1_700_000_000_000,
-    },
-  }),
+  runnerSkills: async () => {
+    if (skillsFailures > 0) {
+      skillsFailures -= 1;
+      throw new ApiError("the runner did not answer", 503);
+    }
+    return skillsScenario === "empty"
+      ? { removalReporting: "supported", desired: [], reported: { unmanaged: [], removals: [], updatedAt: Date.now() - 4 * 60_000 } }
+      : skillsReport();
+  },
   sshConfigHosts: async () => ({
     hosts: [
       { host: "golf-sim", hostName: "100.64.0.10", user: "misko", port: 2222 },

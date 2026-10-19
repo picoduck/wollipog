@@ -31,7 +31,6 @@ import {
 
 import { CopyButton, DetailSkeleton, Modal } from "./common.js";
 import { confirmDeleteMachine, lifecycleConflictPresentation, MachineDetail, phoneMachineMenu, useMachineActions } from "./MachineDetail.js";
-import { DetailSection } from "./DetailSection.js";
 import { MachineList } from "./MachineList.js";
 import { MachinesOverview } from "./MachinesOverview.js";
 import { StaleContent } from "./StaleContent.js";
@@ -47,15 +46,15 @@ import {
   CommandLineIcon,
   InfoIcon,
   NetworkIcon,
-  PlusIcon,
   ComputerIcon,
 } from "./Icons.js";
 import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
 import { InstancesPanel } from "./InstancesPanel.js";
 import { ProviderAccountsSection } from "./ProviderAccountsSection.js";
+import { MachineCapacitySection } from "./MachineCapacitySection.js";
 import { MachineSkillsSection } from "./MachineSkillsSection.js";
+import { MachineWorkspacesSection } from "./MachineWorkspacesSection.js";
 import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettings.js";
-import { DirectoryPicker } from "./DirectoryPicker.js";
 import { formatHarnessLaunchCommand } from "../harness-command.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { DetailBar, PageHeader, type PageHeaderActions } from "./PageHeader.js";
@@ -390,24 +389,19 @@ function AgentRow({
  * restyle them (#2989 Capacity, Workspaces and Skills; #2990 Agents; #2995 Provider Accounts) each
  * change one. They keep their current content until then.
  */
-function MachineSections({ runner, online, canManageProfiles = false }: {
+function MachineSections({ runner, name, online, canManageProfiles = false, canManageMachines, onChangeLimit }: {
   runner: RunnerView;
+  name: string;
   online: boolean;
   /** The viewer may use the provider profile routes: see `canManageProviderProfiles`. */
   canManageProfiles?: boolean;
+  /** An organization owner or admin. */
+  canManageMachines: boolean;
+  onChangeLimit: () => void;
 }) {
-  const capacity = runner.capacity
-    ? runner.capacity.usedUnits === undefined
-      ? `${runner.capacity.configuredUnits} Units`
-      : `${runner.capacity.usedUnits} of ${runner.capacity.configuredUnits} Units Used`
-    : runner.runtime ? `${runner.runtime.maxConcurrentSessions} Units` : null;
   return (
     <div className="machine-detail-sections">
-      {capacity && (
-        <DetailSection title="Capacity">
-          <p className="machine-capacity-line">{capacity}</p>
-        </DetailSection>
-      )}
+      <MachineCapacitySection runner={runner} onChangeLimit={onChangeLimit} />
       <details className="runner-agents disclosure">
         <summary>
           <ChevronRightIcon className="disclosure-chevron" />
@@ -466,27 +460,10 @@ function MachineSections({ runner, online, canManageProfiles = false }: {
         </div>
       </details>
       <ProviderAccountsSection runner={runner} online={online} canManageProfiles={canManageProfiles} />
-      <div className="group runner-workspaces">
-        <div className="group-head">
-          Workspaces <span className="group-count">{runner.workspaces.length}</span>
-        </div>
-        <ul className="workspace-list">
-          {runner.workspaces.map((w) => (
-            <li key={w.id}>
-              <span className="ws-name">{w.name}</span>
-              <span className="ws-path">{w.path}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
+      <MachineWorkspacesSection runner={runner} machineName={name} online={online} canAdd={canManageMachines} />
       <MachineSkillsSection runner={runner} />
     </div>
   );
-}
-
-function workspaceNameFromPath(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/u, "");
-  return trimmed.split(/[\\/]/u).pop() || trimmed || "Workspace";
 }
 
 function MachineSettingsDialog({
@@ -523,14 +500,7 @@ function MachineSettingsDialog({
     runner?.automaticAccountSwitching?.revision ?? 0,
   );
   const [savingAutomaticAccountSwitching, setSavingAutomaticAccountSwitching] = useState(false);
-  const [addingWorkspace, setAddingWorkspace] = useState(false);
-  const [browsing, setBrowsing] = useState(false);
-  const [workspacePath, setWorkspacePath] = useState("");
-  const [workspaceName, setWorkspaceName] = useState("");
-  const [nameEdited, setNameEdited] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const canBrowse = runner?.status === "online" &&
-    runnerSupportsProtocol(runner.protocolVersion, "directoryListing");
   const harnessStatusCurrent = runner?.status === "online" && (!box || box.status === "online");
   const onlineNativeRunner = !box && runner?.status === "online";
   const capacitySupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity");
@@ -590,13 +560,6 @@ function MachineSettingsDialog({
     }
   };
 
-  const pickWorkspace = (path: string) => {
-    setWorkspacePath(path);
-    if (!nameEdited) setWorkspaceName(workspaceNameFromPath(path));
-    setBrowsing(false);
-    setError(null);
-  };
-
   const saveCapacity = async () => {
     if (!runner || !capacityValid || savingCapacity || runner.canManage !== true) return;
     setSavingCapacity(true);
@@ -640,24 +603,6 @@ function MachineSettingsDialog({
       setError(machineSettingsMutationError(cause));
     } finally {
       setSavingAutomaticAccountSwitching(false);
-    }
-  };
-
-  const addWorkspace = async () => {
-    const name = workspaceName.trim();
-    const path = workspacePath.trim();
-    if (!name || !path || addingWorkspace) return;
-    setAddingWorkspace(true);
-    setError(null);
-    try {
-      await api.registerMachineWorkspace(runnerId, { name, path });
-      setWorkspacePath("");
-      setWorkspaceName("");
-      setNameEdited(false);
-    } catch (cause) {
-      setError(machineSettingsMutationError(cause));
-    } finally {
-      setAddingWorkspace(false);
     }
   };
 
@@ -835,61 +780,6 @@ function MachineSettingsDialog({
           {capacitySupported && runner.canManage !== true && (
             <p className="hint">Only the Machine owner or an organization administrator can change Runner Capacity.</p>
           )}
-          {runner.capacity?.usedUnits === undefined ? (
-            <p className="muted">Waiting for live capacity usage from this Machine.</p>
-          ) : (
-            <>
-              <dl className="facts" aria-label="Runner Capacity Usage">
-                <div><dt>Configured</dt><dd>{runner.capacity.configuredUnits} Units</dd></div>
-                <div><dt>Used</dt><dd>{runner.capacity.usedUnits} Units</dd></div>
-                <div><dt>Available</dt><dd>{runner.capacity.availableUnits} Units</dd></div>
-                <div><dt>Queued Sessions</dt><dd>{runner.capacity.queuedSessions}</dd></div>
-              </dl>
-              <p className="machine-capacity-summary">
-                {runner.capacity.usedUnits} of {runner.capacity.configuredUnits} Units Used · {runner.capacity.queuedSessions} Sessions Queued
-              </p>
-              {runner.capacity.dimensions && (
-                <>
-                  <dl className="facts" aria-label="Capacity Dimensions">
-                    <div>
-                      <dt>Active Turns</dt>
-                      <dd>{runner.capacity.dimensions.activeTurns.used} of {runner.capacity.dimensions.activeTurns.limit}</dd>
-                    </div>
-                    <div>
-                      <dt>Resident Process Units</dt>
-                      <dd>
-                        {runner.capacity.dimensions.residentProcessUnits.used} of {runner.capacity.dimensions.residentProcessUnits.limit}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Retained Resumable Sessions</dt>
-                      <dd>{runner.capacity.dimensions.retainedSessions.used} (Unlimited)</dd>
-                    </div>
-                    <div><dt>Parked Sessions</dt><dd>{runner.capacity.dimensions.parkedSessions}</dd></div>
-                    <div>
-                      <dt>Idle Process Policy</dt>
-                      <dd>{runner.capacity.dimensions.idleProcessPolicy === "park_when_needed"
-                        ? "Park When Needed"
-                        : "Retain Idle Processes"}</dd>
-                    </div>
-                  </dl>
-                  <p className="hint">
-                    Active Turns include authoritative background work. Active Turn Capacity and idle-process
-                    parking are configured in <code>runner.config.json</code>.
-                  </p>
-                </>
-              )}
-              {!!runner.capacity.blockers?.length && (
-                <ul className="machine-capacity-blockers" aria-label="Current Capacity Bottlenecks">
-                  {runner.capacity.blockers.map((blocker, index) => (
-                    <li key={`${blocker.kind}:${blocker.agentId ?? ""}:${blocker.targetId ?? ""}:${index}`}>
-                      {blocker.description} · {blocker.waitingSessions} Waiting
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </>
-          )}
         </section>
       )}
 
@@ -930,77 +820,6 @@ function MachineSettingsDialog({
           )}</p>}
         </section>
       )}
-
-      {!capacityOnly && <section className="machine-settings-section">
-        <div className="machine-settings-heading">
-          <div>
-            <h3>Workspaces</h3>
-            <p>Working directories registered on this Machine. Projects can use them as Locations.</p>
-          </div>
-          <button
-            type="button"
-            className="btn"
-            disabled={!canBrowse}
-            title={canBrowse ? "Register another working directory" : "The Machine must be online and support directory browsing"}
-            onClick={() => {
-              setBrowsing((current) => !current);
-              setError(null);
-            }}
-          >
-            <PlusIcon />
-            <span>Add Workspace</span>
-          </button>
-        </div>
-        {runner?.workspaces.length ? (
-          <ul className="workspace-list machine-workspace-list">
-            {runner.workspaces.map((workspace) => (
-              <li key={workspace.id}>
-                <span className="ws-name">{workspace.name}</span>
-                <span className="ws-path">{workspace.path}</span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="muted">No Workspaces Registered</p>
-        )}
-        {browsing && runner && (
-          <div className="machine-workspace-create">
-            <DirectoryPicker
-              runnerId={runner.runnerId}
-              machineName={display.name}
-              protocolVersion={runner.protocolVersion}
-              onPick={pickWorkspace}
-              onCancel={() => setBrowsing(false)}
-            />
-          </div>
-        )}
-        {workspacePath && (
-          <div className="machine-workspace-form">
-            <label className="field">
-              <span>Workspace Name</span>
-              <input
-                value={workspaceName}
-                onChange={(event) => {
-                  setWorkspaceName(event.target.value);
-                  setNameEdited(true);
-                }}
-              />
-            </label>
-            <div className="field">
-              <span>Folder</span>
-              <code title={workspacePath}>{workspacePath}</code>
-            </div>
-            <button
-              type="button"
-              className="btn primary"
-              disabled={!workspaceName.trim() || addingWorkspace}
-              onClick={() => void addWorkspace()}
-            >
-              {addingWorkspace ? "Adding…" : "Add Workspace"}
-            </button>
-          </div>
-        )}
-      </section>}
 
       {/* Older runner data is adopted from the machine's notice now (#2988); #2991 moves Delete
           Machine… into this dialog's footer. */}
@@ -1354,9 +1173,13 @@ export function RunnersView() {
       {selectedMachine.runner && (
         <MachineSections
           runner={selectedMachine.runner}
+          name={selectedMachine.name}
           // An SSH machine's harness status is current only while its connection is up too.
           online={selectedMachine.runner.status === "online" && (!selectedMachine.box || selectedMachine.box.status === "online")}
           canManageProfiles={canManageProfiles}
+          canManageMachines={canManageMachines}
+          // Machine Settings, until #2991 opens it with Capacity Limit focused.
+          onChangeLimit={() => setSettingsRunnerId(selectedMachine.runnerId)}
         />
       )}
     </MachineDetail>
