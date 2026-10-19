@@ -37,6 +37,9 @@ const routes: Array<[View, string]> = [
   [{ name: "runs" }, "/runs"],
   [{ name: "pods" }, "/pods"],
   [{ name: "automations" }, "/automations"],
+  [{ name: "automations", editor: { kind: "new" } }, "/automations/new"],
+  [{ name: "automations", editor: { kind: "edit", automationId: "automation / ✅" } },
+    `/automations/~${encodeResourceId("automation / ✅")}/edit`],
   [{ name: "skills" }, "/skills"],
   [{ name: "skills", id: "skill_abc" }, `/skills/~${encodeResourceId("skill_abc")}`],
   [{ name: "skills", pane: "orphans" }, "/skills/orphans"],
@@ -193,6 +196,12 @@ test("an entity page is titled by its entity once it has loaded", () => {
   assert.equal(viewTitle({ name: "pod", id: "pod-1" }), "Pod");
   assert.equal(viewTitle({ name: "pod", id: "pod-1" }, ""), "Pod");
   assert.equal(viewTitle({ name: "session", id: "s-1" }), "Session");
+  // The Automation editor is titled by what it edits (#2967).
+  assert.equal(viewTitle({ name: "automations", editor: { kind: "new" } }), "New Automation");
+  assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }, "Nightly"), "Edit Nightly");
+  assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }), "Edit Automation");
+  assert.equal(viewFromPath("/automations/~!/edit"), null);
+  assert.equal(viewFromPath(`/automations/~${encodeResourceId("a")}`), null, "the automation page itself is #2968's");
 });
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");

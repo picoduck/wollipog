@@ -5,17 +5,21 @@ import { viewPath } from "../src/navigation.js";
  * #2366: two forms stack labels over their controls outside a `.field`, and their labels are the
  * field label of docs/design-system.md §8.1: --type-label (12px/500 on a 16px line) in --text, 8px
  * above the control. Archived Sessions: the search label and the filters' `.field-label`s. The
- * Automations editor (and the Outbound Events form on its grid): each grid label's own text, each
- * `.automation-field`'s `.field-label`, and its fieldset legends; a grid label's helper stays dim,
- * 4px under the control. The labels that open redesigns owned went with them: Snooze's with #2181,
+ * Automations page's grid forms, Outbound Events and the signed trigger editor: each grid label's own
+ * text, each `.automation-field`'s `.field-label`, and its fieldset legends; a grid label's helper
+ * stays dim, 4px under the control. The Automation editor became a page of `.field`s (#2967), whose
+ * labels are checked here too. The labels that open redesigns owned went with them: Snooze's with #2181,
  * whose Snooze Until is a §8.1 field, Rename Project's with #2199, which made it one `.field`, and
  * the message-action form with #2185, which loads Edit as a New Turn straight into the composer.
  */
 
 type Theme = "dark" | "light";
 
-/** Every label of the Automations editor's grid: a label wrapping its control, or a `.field-label`. */
+/** Every label of the Automations page's grid forms: a label wrapping its control, or a `.field-label`. */
 const AUTOMATION_LABELS = ".automation-form-grid > label, .automation-field > .field-label";
+
+/** Every label of the Automation editor (#2967): each `.field`'s first child, before its control. */
+const EDITOR_LABELS = ".automation-editor-form .field > span:first-child";
 
 /** A token's computed colour, read the way the browser paints it. */
 async function token(page: Page, name: string): Promise<string> {
@@ -95,21 +99,21 @@ for (const theme of ["dark", "light"] as const) {
       test("New Automation's labels are §8.1 field labels", async ({ page }) => {
         await page.goto(`/automations-e2e.html?theme=${theme}&capabilities`);
         await page.getByRole("button", { name: "New Automation" }).click();
-        await expectLabelStyle(page, page.locator(AUTOMATION_LABELS), [
-          "Name", "Cron (Minute Hour Day Month Weekday)", "Timezone", "Action", "Machine", "Workspace", "Agent",
-          "Model", "Reasoning Effort", "Permission Mode", "Workspace Strategy", "Prompt", "Misfire",
-          "Runner Availability", "Concurrency", "Max Additional Cost (USD)", "Max Tool Calls",
+        await expectLabelStyle(page, page.locator(EDITOR_LABELS), [
+          "Name", "Action", "Machine", "Folder", "Agent", "Model", "Reasoning Effort", "Permission Mode",
+          "Workspace Strategy", "Prompt", "Schedule", "Time Zone", "If a Run Is Missed", "If the Machine Is Offline",
+          "If the Last Run Is Still Going", "Cost Limit", "Tool Call Limit", "Web Push",
         ]);
-        await expectLegendStyle(page, page.locator(".automation-form-grid legend"), ["Web Push Events"]);
       });
 
       test("a workflow automation's agent labels are §8.1 field labels", async ({ page }) => {
         await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound&inherited-alternate-pins`);
         await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
         await page.getByRole("button", { name: "Edit", exact: true }).click();
-        await expect(page.locator(".automation-field > .field-label")).toHaveCount(4);
-        await expectLabelStyle(page, page.locator(".automation-field > .field-label"),
-          ["Agent-1 Agent", "Orchestrator Agent", "Alternate Agent-1 Agent", "Alternate Orchestrator Agent"]);
+        const agents = page.locator(EDITOR_LABELS).filter({ hasText: / Agent$/ });
+        await expect(agents).toHaveCount(4);
+        await expectLabelStyle(page, agents,
+          ["Auditor Agent", "Orchestrator Agent", "Other Auditor Agent", "Other Orchestrator Agent"]);
       });
 
       test("the Outbound Events subscription form, on the same grid, has §8.1 field labels", async ({ page }) => {

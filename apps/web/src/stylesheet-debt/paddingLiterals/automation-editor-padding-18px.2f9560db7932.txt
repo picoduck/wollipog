@@ -1,1 +1,0 @@
-|.automation-editor|padding|18px

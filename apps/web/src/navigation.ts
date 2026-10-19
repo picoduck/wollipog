@@ -15,7 +15,7 @@ export type View =
   | { name: "runners"; section?: ConnectionSection; machineId?: string }
   | { name: "runs" }
   | { name: "pods" }
-  | { name: "automations" }
+  | { name: "automations"; editor?: AutomationEditorRoute }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage" }
   | { name: "archived" }
@@ -131,6 +131,13 @@ export function approvalsPolicyAnchorId(policyId: string): string {
 }
 
 export type ConnectionSection = "instances" | "machines" | "people";
+
+/**
+ * The Automation editor's two routes (#2967): `/automations/new` and `/automations/~<id>/edit`. A
+ * route rather than a card in the list, so the editor has an address, a reload keeps it and Back
+ * leaves it.
+ */
+export type AutomationEditorRoute = { kind: "new" } | { kind: "edit"; automationId: string };
 
 /**
  * Agent Skills panes that are not a skill (docs/design-system.md §6): the Orphaned Copies pane and
@@ -252,11 +259,15 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
     // Board mode belongs to the Sessions destination; its page title matches the rail name.
     case "board":
       return destination("inbox").name;
+    case "automations":
+      // The editor is titled by what it edits; the list by its destination.
+      if (view.editor?.kind === "new") return "New Automation";
+      if (view.editor?.kind === "edit") return entityTitle ? `Edit ${entityTitle}` : "Edit Automation";
+      return destination(view.name).name;
     case "inbox":
     case "projects":
     case "runs":
     case "pods":
-    case "automations":
     case "usage":
     case "runners":
     case "archived":
@@ -399,7 +410,9 @@ export function viewPath(view: View): string {
       : `/connections/${view.section ?? "machines"}`;
     case "runs": return "/runs";
     case "pods": return "/pods";
-    case "automations": return "/automations";
+    case "automations": return view.editor?.kind === "new" ? "/automations/new"
+      : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
+        : "/automations";
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return "/usage";
     case "archived": return "/archived";
@@ -469,6 +482,12 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/runs") return { name: "runs" };
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
+  if (path === "/automations/new") return { name: "automations", editor: { kind: "new" } };
+  const automationEditMatch = /^\/automations\/~([^/]+)\/edit$/.exec(path);
+  if (automationEditMatch) {
+    const automationId = decodeResourceId(automationEditMatch[1]!);
+    return automationId === null ? null : { name: "automations", editor: { kind: "edit", automationId } };
+  }
   if (path === "/skills") return { name: "skills" };
   const skillsPaneMatch = /^\/skills\/(orphans|overview)$/.exec(path);
   if (skillsPaneMatch) return { name: "skills", pane: skillsPaneMatch[1] as SkillsPane };

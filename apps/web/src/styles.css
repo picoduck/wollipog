@@ -3044,13 +3044,17 @@ button.status { cursor: pointer; }
 }
 /* In Settings, and in a project's detail pane (#2962), the bar floats 16px above the scrolling
    pane's bottom edge. */
-:is(.settings-panel, .project-detail) > .save-bar { bottom: var(--space-4); }
+:is(.settings-panel, .project-detail, .automation-editor > .page) > .save-bar { bottom: var(--space-4); }
+/* The Automation editor's bar follows its form with a section's space above it (#2967). */
+.automation-editor > .page > .save-bar { margin-top: var(--space-8); }
 /* On a phone its two actions share the full width under the message (and a failure's icon, which
    the message leaves room for), as a phone sheet's footer does (§7.5). */
 @media (max-width: 760px) {
-  :is(.settings-panel, .project-detail) > .save-bar { flex-wrap: wrap; }
-  :is(.settings-panel, .project-detail) > .save-bar > .save-bar-message { flex: 1 1 calc(100% - var(--space-6)); }
-  :is(.settings-panel, .project-detail) > .save-bar > .btn { flex: 1; max-width: none; }
+  :is(.settings-panel, .project-detail, .automation-editor > .page) > .save-bar { flex-wrap: wrap; }
+  :is(.settings-panel, .project-detail, .automation-editor > .page) > .save-bar > .save-bar-message { flex: 1 1 calc(100% - var(--space-6)); }
+  :is(.settings-panel, .project-detail, .automation-editor > .page) > .save-bar > .btn { flex: 1; max-width: none; }
+  /* A full-page editor's bar sits above the phone's safe area (#2967). */
+  .automation-editor > .page > .save-bar { bottom: max(var(--space-4), env(safe-area-inset-bottom, 0px)); }
 }
 
 /* ---------------------------------- Steps ----------------------------------
@@ -16289,19 +16293,18 @@ button.review-finding-location {
 
 
 /* --------------------------- Durable automations -------------------------- */
-.automation-editor h3, .automation-card h3 { margin: 0; }
+.automation-card h3 { margin: 0; }
 .automation-error, .automation-execution-error {
   color: var(--red-on-tint); background: color-mix(in srgb, var(--red) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
   border-radius: 8px; padding: 10px 12px; overflow-wrap: anywhere;
 }
 .automation-error > .btn { display: block; margin-top: 8px; }
-.automation-editor, .automation-card {
-  border: 1px solid var(--border); background: var(--bg-elev); border-radius: 12px; box-shadow: var(--shadow);
+.automation-card {
+  border: 1px solid var(--border); background: var(--bg-elev); border-radius: var(--radius-lg); box-shadow: var(--shadow);
 }
-.automation-editor { padding: 18px; margin-bottom: 18px; }
-.automation-editor-head, .automation-editor-actions, .automation-card-actions {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+.automation-editor-actions, .automation-card-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
 }
 .automation-card-heading { margin: 0; }
 .automation-card-toggle {
@@ -16333,6 +16336,17 @@ button.review-finding-location {
 .automation-hint { color: var(--text-dim); font-size: 12px; line-height: 1.5; }
 .automation-editor-actions { justify-content: flex-end; }
 .automation-list { display: grid; gap: 14px; }
+/* The Automation editor's route (#2967; docs/design-system.md §4.3, §4.5, §8.1, §8.6): the detail bar,
+   then one form column of four sections, 32px apart, whose fields stack 16px apart. The save bar
+   follows the form, sticky at the bottom of the page region. */
+.automation-editor-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding-top: var(--space-6);
+}
+.automation-editor-form > .section { gap: var(--space-4); }
+.automation-editor-form textarea { resize: vertical; }
 .automation-card { padding: 16px; min-width: 0; }
 .automation-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; margin: 14px 0; }
 .automation-facts div { min-width: 0; }
@@ -16683,7 +16697,7 @@ button.review-finding-location {
 @media (max-width: 700px) {
   .automation-form-grid, .automation-facts { grid-template-columns: minmax(0, 1fr); }
   .automation-span { grid-column: auto; }
-  .automation-editor, .automation-card { padding: 14px; }
+  .automation-card { padding: var(--space-4); }
   .automation-card-toggle { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .automation-card-meta { flex-wrap: wrap; }
   .automation-card-actions .btn { flex: 1 1 90px; }
@@ -17908,6 +17922,10 @@ a.tab { text-decoration: none; }
 .ui-select-option.is-selected,
 .ui-searchable-combobox-list .ui-inline-listbox-option.is-selected { color: var(--accent-on-tint); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .ui-select-option-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+/* An option's one status badge (an Offline machine, #2967) ends its row, before the chosen check,
+   and follows the value in the trigger. */
+.ui-select-option-status,
+.ui-select-status { flex: none; }
 .ui-select-option-desc { color: var(--text-dim); font-size: var(--text-xs); line-height: 16px; }
 
 /* A picker's own slots sit INSIDE its field (§8.4): a 16px leading icon before the value and the
