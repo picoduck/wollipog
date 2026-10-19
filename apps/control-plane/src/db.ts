@@ -13142,7 +13142,7 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN");
     try {
       this.detachRunnerProjectLocations(row.runner_id, Date.now());
-      this.stmt("DELETE FROM session_events_fts WHERE session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
+      for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(row.runner_id); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(row.runner_id); // cascades members
@@ -13195,7 +13195,7 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN");
     try {
       this.detachRunnerProjectLocations(runnerId, Date.now());
-      this.stmt("DELETE FROM session_events_fts WHERE session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
+      for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(runnerId); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(runnerId); // cascades members
@@ -16902,6 +16902,7 @@ export class ControlPlaneDb {
            AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
       ).run(id);
       this.recordChildToolCallPeak(id);
+      this.deleteSessionSearchRows(id);
       this.stmt(
         "DELETE FROM session_events WHERE session_id=? AND (kind!='artifact_attached' OR runner_seq IS NOT NULL)",
       ).run(id);
@@ -16909,7 +16910,6 @@ export class ControlPlaneDb {
       for (const [index, attachment] of attachments.entries()) {
         resequence.run(index + 1, attachment.id);
       }
-      this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
       this.stmt(
         `UPDATE managed_background_deliveries
             SET transcript_projected_at=NULL, projected_event_epoch=NULL, projected_event_seq=NULL
@@ -17087,8 +17087,8 @@ export class ControlPlaneDb {
            AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
       ).run(id);
       this.recordChildToolCallPeak(id);
+      this.deleteSessionSearchRows(id);
       this.stmt("DELETE FROM session_events WHERE session_id=?").run(id);
-      this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
       this.stmt(`UPDATE session_attention SET meaningful_at=(SELECT created_at FROM sessions WHERE id=?),
         result_revision=NULL,result_at=NULL,pending_response=0,human_handoff_revision=NULL,revision=revision+1
         WHERE session_id=?`).run(id, id);
@@ -17255,6 +17255,23 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT session_id, seq, length(text) AS length FROM session_events_fts WHERE rowid=?")
       .get(rowid) as { session_id: string; seq: number; length: number } | undefined;
     return row && row.session_id === sessionId && Number(row.seq) === seq ? { rowid, length: row.length } : null;
+  }
+
+  /** Call inside the deleting/resetting transaction, before removing or resequencing events:
+   * their ids and cascading legacy mappings are needed to address search rows by key. */
+  private deleteSessionSearchRows(sessionId: string): void {
+    if (this.legacySearchRowsPending()) {
+      // Only the unfinished one-time mapping can leave rows whose keys we cannot yet locate.
+      this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(sessionId);
+      return;
+    }
+    const events = this.stmt("SELECT id, seq FROM session_events WHERE session_id=?")
+      .iterate(sessionId) as Iterable<{ id: number; seq: number }>;
+    const deleteRow = this.stmt("DELETE FROM session_events_fts WHERE rowid=?");
+    for (const event of events) {
+      const row = this.searchRowForEvent(sessionId, event.id, event.seq);
+      if (row) deleteRow.run(row.rowid);
+    }
   }
 
   /** Locate the session's final response: its last top-level agent message, grouped as the
@@ -21701,7 +21718,7 @@ export class ControlPlaneDb {
     // Session-only artifacts follow an explicit session deletion. Run-owned artifacts retain the
     // session id as provenance and live until their durable workflow run is deleted.
     this.stmt("DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL").run(id);
-    this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
+    this.deleteSessionSearchRows(id);
     this.stmt("DELETE FROM sessions WHERE id=?").run(id);
   }
 
