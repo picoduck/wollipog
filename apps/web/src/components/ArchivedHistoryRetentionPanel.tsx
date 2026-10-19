@@ -184,6 +184,7 @@ function ArchivedHistoryRetentionEditor() {
   const lastRun = view?.lastRun ? retentionLastRun(view.lastRun) : null;
   return (
     <SettingsGroup
+      title="Archived Session History"
       intro={view && !canManage ? RETENTION_NO_PERMISSION : isUnsupported ? RETENTION_UNSUPPORTED : undefined}
       notice={source ? <Notice compact tone="neutral" role="note">{source}</Notice> : undefined}
       failure={groupFailure}

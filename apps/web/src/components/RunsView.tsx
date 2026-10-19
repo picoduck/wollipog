@@ -425,6 +425,11 @@ function RunDetailContent({ runId }: { runId: string }) {
             {workflow && <StatusBadge meta={statusMeta("workflow", workflow.status)} />}
           </div>
           {workflowError && <Notice tone="danger" compact>{workflowError}</Notice>}
+          {workflow?.eventHistoryPruned && (
+            <Notice tone="neutral" compact title="Event History Pruned">
+              {workflow.eventHistoryPruned.eventCount.toLocaleString()} workflow events were removed by the {workflow.eventHistoryPruned.retentionDays}-day retention policy. Instance summaries, node outcomes, attempts, artifacts, decisions and action receipts are kept.
+            </Notice>
+          )}
           {workflow && (
             <div className="workflow-node-grid">
               {workflow.nodeStates.map((state) => {

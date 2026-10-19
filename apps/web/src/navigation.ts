@@ -101,8 +101,8 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   {
     id: "storage",
     title: "Storage",
-    description: "History kept for archived sessions.",
-    panelDescription: "How long archived sessions keep their full history in this control plane.",
+    description: "History kept for sessions and workflows.",
+    panelDescription: "How long archived sessions and completed workflows keep their full history in this control plane.",
     scope: "Your Organization",
   },
   {

@@ -8074,6 +8074,7 @@ export interface WorkflowDefinition extends WorkflowDefinitionSpec {
   createdAt: number;
 }
 
+export * from "./workflow-event-retention.js";
 export type WorkflowInstanceStatus = "queued" | "running" | "waiting_gate" | "succeeded" | "failed" | "stopped";
 export type WorkflowNodeStatus = "pending" | "ready" | "running" | "waiting_gate" | "succeeded" | "failed" | "skipped" | "stopped";
 export type WorkflowAttemptStatus = "dispatching" | "running" | "awaiting_output" | "succeeded" | "failed" | "timed_out" | "cancelled";
@@ -8092,6 +8093,8 @@ export interface WorkflowNodeState {
 }
 
 export interface WorkflowInstanceView {
+  /** Event history removed by the separate opt-in completion-age retention policy. */
+  eventHistoryPruned?: import("./workflow-event-retention.js").WorkflowEventHistoryPruned;
   instanceId: string;
   workflowId: string;
   workflowVersion: number;

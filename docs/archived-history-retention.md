@@ -81,9 +81,11 @@ Kept in full, because they live outside the transcript:
   preview, cost, pull-request links, parent and child links, attention and acknowledgments;
 - session attachments, which keep their own 180-day expiry.
 
-Separate policies cover the [mutation audit archive](#mutation-audit-archive-retention).
-Workflow runs and their events, and the runners' own session logs, are outside this session-history
-policy. A pruned session's runner keeps its full log until the session is deleted.
+Separate policies cover the [mutation audit archive](#mutation-audit-archive-retention) and
+[workflow event retention](./workflow-event-retention.md). Workflow event retention ages terminal
+instances from completion, with its own Storage controls and environment default. These policies
+are independent. The runners' own session logs are outside this session-history policy. A pruned
+session's runner keeps its full log until the session is deleted.
 
 ## Mutation audit archive retention
 

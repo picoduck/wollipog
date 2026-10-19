@@ -64,6 +64,7 @@ import { NewSessionDialog, type NewSessionPreset } from "../components/NewSessio
 import { PodDetail } from "../components/PodsView.js";
 import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
+import type { WorkflowInstanceDetail } from "@wollipog/protocol";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
 import { SessionTerminalsProvider } from "../session-terminals.js";
@@ -1552,6 +1553,19 @@ function rowColumnsReminder(): SessionReminderView {
   };
 }
 
+function prunedWorkflowFixture(): WorkflowInstanceDetail {
+  return {
+    instanceId: "workflow-pruned", workflowId: "workflow", workflowVersion: 1, runId: activeRun.id,
+    status: "succeeded", transitionCount: 3, createdBy: { kind: "system" }, createdAt: 1, updatedAt: 2, completedAt: 2,
+    eventHistoryPruned: { prunedAt: Date.UTC(2026, 9, 16), eventCount: 1_284, retentionDays: 90 },
+    nodeStates: [{ nodeId: "build", status: "succeeded", attemptCount: 1, outcome: "success", completedAt: 2 }],
+    definition: { workflowId: "workflow", version: 1, source: "custom", name: "Build and Review", maxTransitions: 20,
+      edges: [], createdBy: { kind: "system" }, createdAt: 1, nodes: [{ nodeId: "build", kind: "agent", role: "Builder",
+        agentId: "codex", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }] },
+    attempts: [], events: [],
+  };
+}
+
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
@@ -2485,7 +2499,8 @@ const client = {
     if (!fixture) throw new Error("not a git repository");
     return { summary: structuredClone(fixture.summary) };
   },
-  workflowInstances: async () => [],
+  workflowInstances: async () => FIXTURE_QUERY.get("workflowPruned") === "1" ? [prunedWorkflowFixture()] : [],
+  workflowInstance: async () => prunedWorkflowFixture(),
   workflowDefinitions: async () => [],
   projectLocationWorktreeSetup: async (_projectId: string, locationId: string) => ({
     locationId,

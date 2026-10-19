@@ -313,6 +313,7 @@ import {
 import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } from "./web-push.js";
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
+import { WORKFLOW_EVENT_RETENTION_SCHEMA } from "./workflow-event-retention-store.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
 import {
@@ -1872,6 +1873,8 @@ CREATE TABLE IF NOT EXISTS workflow_events (
   FOREIGN KEY (instance_id) REFERENCES workflow_instances(instance_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_events_instance ON workflow_events(instance_id, seq);
+
+${WORKFLOW_EVENT_RETENTION_SCHEMA}
 
 -- Durable schedules are soft-deleted so actor-attributed audit and execution history survives.
 -- Action/config JSON is secret-free and validated at the service boundary before insertion.
@@ -17402,6 +17405,10 @@ export class ControlPlaneDb {
 
   // Archived-history retention (#2777). See docs/archived-history-retention.md.
 
+  /** Retention removal and its marker are atomic and safely repeatable after an OS rollback.
+   * The pass's final FULL commit flushes them, like archived-history retention batches. */
+  workflowEventRetentionCommit<T>(work: () => T): T { return this.relaxedCommit(work); }
+
   getArchivedHistoryRetentionPolicy(organizationId: string): {
     retentionDays: number | null; prunesFrom: number | null;
   } | null {
@@ -27109,11 +27116,14 @@ export class ControlPlaneDb {
   }
 
   private workflowInstanceView(row: WorkflowInstanceRow): WorkflowInstanceView {
+    const pruned = this.stmt("SELECT pruned_at,event_count,retention_days FROM workflow_event_prunes WHERE instance_id=?")
+      .get(row.instance_id) as { pruned_at: number; event_count: number; retention_days: number } | undefined;
     const states = this.stmt("SELECT * FROM workflow_node_states WHERE instance_id=? ORDER BY rowid")
       .all(row.instance_id) as unknown as WorkflowNodeStateRow[];
     return {
       instanceId: row.instance_id,
       workflowId: row.workflow_id,
+      ...(pruned ? { eventHistoryPruned: { prunedAt: pruned.pruned_at, eventCount: pruned.event_count, retentionDays: pruned.retention_days } } : {}),
       workflowVersion: row.workflow_version,
       runId: row.run_id,
       status: row.status,
@@ -27496,8 +27506,10 @@ export class ControlPlaneDb {
   }
 
   private insertWorkflowEvent(event: Omit<WorkflowEventView, "eventId" | "seq">): WorkflowEventView {
-    const seq = ((this.stmt("SELECT MAX(seq) AS seq FROM workflow_events WHERE instance_id=?")
-      .get(event.instanceId) as unknown as { seq: number | null }).seq ?? 0) + 1;
+    const seq = (this.stmt(`SELECT MAX(
+      COALESCE((SELECT MAX(seq) FROM workflow_events WHERE instance_id=?),0),
+      COALESCE((SELECT through_seq FROM workflow_event_prunes WHERE instance_id=?),0)) AS seq`)
+      .get(event.instanceId, event.instanceId) as { seq: number }).seq + 1;
     const info = this.stmt(
       `INSERT INTO workflow_events
        (instance_id, seq, kind, node_id, attempt_id, actor_kind, actor_id, detail, created_at)

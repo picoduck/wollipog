@@ -1,3 +1,4 @@
+import type { WorkflowEventRetentionView, UpdateWorkflowEventRetentionRequest } from "@wollipog/protocol";
 import type {
   CampaignForgeRefreshResponse,
   CampaignWorkItemDetailResponse,
@@ -424,6 +425,10 @@ export function createApiClient(transport: ApiTransport) {
 
   /** The organization's archived-history retention (#2777). `previewDays` adds what that threshold
    * would prune, for confirming a change before it is saved. */
+  workflowEventRetention: (previewDays?: number) => req<WorkflowEventRetentionView>(
+    `/api/workflow-event-retention${previewDays === undefined ? "" : `?previewDays=${previewDays}`}`),
+  updateWorkflowEventRetention: (body: UpdateWorkflowEventRetentionRequest) =>
+    req<WorkflowEventRetentionView>("/api/workflow-event-retention", { method: "PUT", body: JSON.stringify(body) }),
   archivedHistoryRetention: (previewDays?: number) => req<ArchivedHistoryRetentionView>(
     `/api/archived-history-retention${previewDays === undefined ? "" : `?previewDays=${previewDays}`}`,
   ),
