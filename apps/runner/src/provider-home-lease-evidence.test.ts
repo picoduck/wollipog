@@ -102,7 +102,10 @@ test("a marked process forked after the listing by a listed process that then ex
   rmSync(join(proc.root, "232"), { recursive: true });
   let next = 400;
   const churning = linuxLeaseProcessProbe(proc.root, UID, 300, { afterListing: () => { proc.add(next++, {}); } })!;
-  assert.deepEqual(churning.scan(MARKER, "1").uninspectable, [-1], "a process table that never settles proves nothing");
+  assert.deepEqual(churning.scan(MARKER, "1"), { marked: [], uninspectable: [-1] }, "a process table that never settles proves nothing");
+  proc.add(240, { env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  assert.deepEqual(churning.scan(MARKER, "1"), { marked: [240], uninspectable: [-1] },
+    "a marked process seen while the table churns is still reported");
 });
 
 test("the real procfs probe finds a live marked process and stops finding it once it exits", { skip: process.platform !== "linux" }, async (t) => {

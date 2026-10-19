@@ -119,7 +119,11 @@ An unreleased record with evidence is abandoned only when one of these holds:
   whose environment cannot be read (non-dumpable, such as Codex, or set-id) is uninspected unless its
   world-readable `stat` shows it is a zombie, started before the recorded runner, or descends from the
   scanning runner. The scan skips the scanning process itself, which may have inherited a
-  predecessor's marker.
+  predecessor's marker. Only a read that reports the process gone (ENOENT/ESRCH) excuses it; any other
+  read failure leaves it uninspected. The scan repeats the process listing, keyed by PID and start
+  time, until one listing shows only processes already inspected and no listed process vanished
+  before it was read, since a process that exits may have forked first. A table that does not settle
+  within 16 listings, as on a busy host, proves nothing; the next acquisition tries again.
 
 A dead PID alone never proves abandonment, including for the same owner's own restart. A record
 without evidence (an older runner, another platform) keeps the earlier rule: only its own owner

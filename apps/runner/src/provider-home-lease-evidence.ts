@@ -179,6 +179,7 @@ export function linuxLeaseProcessProbe(
       // first). A process alive after that listing was then listed and inspected, or was forked by
       // one that was.
       const verdicts = new Map<string, { pid: number; verdict: Verdict }>();
+      const of = (verdict: Verdict) => [...verdicts.values()].filter((item) => item.verdict === verdict).map((item) => item.pid);
       for (let round = 0; round < MAX_SCAN_ROUNDS; round++) {
         stats.clear();
         let fresh = false;
@@ -197,14 +198,12 @@ export function linuxLeaseProcessProbe(
           fresh = true;
           verdicts.set(key, { pid, verdict: own === "failed" ? "uninspectable" : inspect(pid) });
         }
-        if (!fresh && round > 0) {
-          const of = (verdict: Verdict) => [...verdicts.values()].filter((item) => item.verdict === verdict).map((item) => item.pid);
-          // A marked process seen at any point refuses, even if it has exited since.
-          return { marked: of("marked"), uninspectable: of("uninspectable") };
-        }
+        // A marked process seen at any point refuses, even if it has exited since.
+        if (!fresh && round > 0) return { marked: of("marked"), uninspectable: of("uninspectable") };
       }
-      // The process table never settled; nothing can be proved from a view that keeps changing.
-      return { marked: [], uninspectable: [-1] };
+      // The process table never settled (a busy host may need a later retry); nothing can be proved
+      // from a view that keeps changing, but every marked process seen is still reported.
+      return { marked: of("marked"), uninspectable: [...of("uninspectable"), -1] };
     },
   };
 }
