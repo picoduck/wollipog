@@ -981,6 +981,11 @@ test("New Project… stacks its dialog over New Session, then selects the new pr
     assert.equal(dialogs.length, 2, "New Session stays open under New Project");
     assert.match(dialogs[1]?.textContent ?? "", /Project Name/);
     assert.ok(dialogs[1]?.closest(".modal-backdrop.stacked"), "the child stacks over its parent under one dim");
+    // #2965: the trigger's name is the title; the one-line description says where the project goes.
+    assert.equal(dialogs[1]!.querySelector(".modal-title")?.textContent, "New Project");
+    assert.equal(dialogs[1]!.querySelector(".modal-desc")?.textContent, "It's selected for this session once it's created.");
+    assert.deepEqual([...dialogs[1]!.querySelectorAll(".modal-foot button")].map((button) => button.textContent?.trim()),
+      ["Cancel", "Create Project"]);
 
     const name = dialogs[1]!.querySelector<HTMLInputElement>("input")!;
     await act(async () => { fireDomEvent.change(name, { target: { value: "Payments" } }); });

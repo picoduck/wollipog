@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { BoxView, ProjectLocationView, ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { archiveProjectWithFeedback, projectArchiveMessage } from "../project-actions.js";
 import { ProjectSettings } from "./ProjectSettings.js";
@@ -338,6 +339,37 @@ export function ProjectsView({
       : { projectId: project.id };
   };
 
+  /** The starter setup file onboarding offers for the location it just added. The location exists
+   * whatever happens here, so a failure is a warning about the file, not Add Location's error, and
+   * the location's ⋯ offers Create Starter Setup File again (#2965). Only a refusal proves there is
+   * no file; after a lost reply the warning says so, and the row's own read decides whether its ⋯
+   * still offers one. */
+  const createStarterSetup = async (project: ProjectView, added: ProjectLocationView | undefined) => {
+    const warn = (refused: boolean, raw: string) => showToast(refused
+      ? "Location added, but its starter setup file couldn't be created."
+      : "Location added, but Wollipog couldn't confirm its starter setup file.", {
+      tone: "warning",
+      detail: `${refused
+        ? "Try again from the location's ⋯ menu."
+        : "If the location has none, its ⋯ menu offers Create Starter Setup File."}${raw ? ` ${raw}` : ""}`,
+    });
+    if (!added) {
+      warn(true, "The new location wasn't in Wollipog's reply.");
+      return;
+    }
+    try {
+      await api.generateProjectLocationWorktreeSetup(project.id, added.id);
+    } catch (cause) {
+      warn(cause instanceof ApiError && cause.status < 500,
+        cause instanceof Error ? cause.message.trim() : String(cause).trim());
+      return;
+    }
+    // Best effort, as from the location's ⋯: the session's setup suggestion keeps its own Dismiss.
+    void api.dismissWorktreeSetupNotice(project.id).catch((cause: unknown) => {
+      console.warn("Dismissing the worktree setup notice failed", cause);
+    });
+  };
+
   const openProject = (projectId: string) => navigate({ name: "projects", id: projectId });
   const renameProject = (projectId: string) => {
     setFocusNameOf(projectId);
@@ -570,6 +602,7 @@ export function ProjectsView({
       {dialog?.kind === "create" && (
         <CreateProjectDialog
           accessScopeManagementSupported={accessScopeManagementSupported}
+          projects={allProjects}
           onClose={() => setDialog(null)}
           onCreated={(project) => {
             applyProject(project);
@@ -594,30 +627,16 @@ export function ProjectsView({
             const { project } = await api.addProjectLocation(dialogProject.id, { runnerId: candidate.runnerId, workspaceId: candidate.workspaceId });
             applyProject(project);
             if (generateSetup) {
-              const added = project.locations.find((location) =>
-                location.runnerId === candidate.runnerId && location.workspaceId === candidate.workspaceId);
-              if (!added) throw new Error("Location was added, but its setup configuration could not be generated. Retry from Project Settings.");
-              try {
-                await api.generateProjectLocationWorktreeSetup(project.id, added.id);
-                await api.dismissWorktreeSetupNotice(project.id);
-              } catch (cause) {
-                throw new Error(`Location was added, but setup generation failed: ${(cause as Error).message}. Retry from Project Settings.`);
-              }
+              await createStarterSetup(project, project.locations.find((location) =>
+                location.runnerId === candidate.runnerId && location.workspaceId === candidate.workspaceId));
             }
           }}
           onCreate={async (location, generateSetup) => {
             const { project } = await api.createProjectLocation(dialogProject.id, location);
             applyProject(project);
             if (generateSetup) {
-              const added = project.locations.find((candidate) =>
-                candidate.runnerId === location.runnerId && candidate.path === location.path);
-              if (!added) throw new Error("Location was added, but its setup configuration could not be generated. Retry from Project Settings.");
-              try {
-                await api.generateProjectLocationWorktreeSetup(project.id, added.id);
-                await api.dismissWorktreeSetupNotice(project.id);
-              } catch (cause) {
-                throw new Error(`Location was added, but setup generation failed: ${(cause as Error).message}. Retry from Project Settings.`);
-              }
+              await createStarterSetup(project, project.locations.find((candidate) =>
+                candidate.runnerId === location.runnerId && candidate.path === location.path));
             }
           }}
         />
