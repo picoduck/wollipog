@@ -982,7 +982,7 @@ test.describe("the machine detail with a coarse pointer at tablet width", () => 
 
 test("an SSH machine's busy update asks to interrupt its sessions, and Connection Details copies every fact (#2988)", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.goto("/machine-management-e2e.html?ssh=online&outdated&busy");
+  await page.goto(`/machine-management-e2e.html?ssh=online&outdated&busy&${DESIGN_WORKSTATION}`);
   const notice = machineNotice(page);
   await expect(notice).toContainText("Runner Update Required");
   await notice.getByRole("button", { name: "Update Runner…" }).click();
@@ -1008,7 +1008,7 @@ test("an SSH machine's busy update asks to interrupt its sessions, and Connectio
 });
 
 test("an SSH connection refused for its key says so and keeps ssh's words behind Show Details (#2988)", async ({ page }) => {
-  await page.goto("/machine-management-e2e.html?ssh=failed");
+  await page.goto(`/machine-management-e2e.html?ssh=failed&${DESIGN_WORKSTATION}`);
   const notice = machineNotice(page);
   await expect(notice).toHaveCount(1);
   await expect(notice).toContainText("Couldn't Connect to Design Workstation");
