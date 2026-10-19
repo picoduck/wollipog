@@ -1868,7 +1868,10 @@ at.
 **Narrow.** Under a 560px **container** the control drops below the text at full width; switch, link
 and action rows (`.setting-row-trailing`) keep their control trailing. The container is the group's
 surface, never the viewport, so the rule holds in the settings panel, a dialog and a detail pane
-alike.
+alike. One exception: New Session's Options (#2955) keeps select, segmented, number and value
+controls beside their text down to a 480px surface, so the desktop dialog's 520px surface stays
+within its height budget; phones stack as usual. Extra Folders, rows without a control and
+trailing rows keep their usual layout.
 
 **Group.** `SettingsGroup` (also in `ui/SettingsRows.tsx`, exported for any screen) is a §5.1
 section: an optional head (the title in `--type-section`, written in Title Case with no

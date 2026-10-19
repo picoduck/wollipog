@@ -9,6 +9,8 @@ import { dialogMotionSettled } from "./dialog-motion.js";
  */
 
 const PAGE = "/new-session-choices-e2e.html?defaults=orchestrator&policy=1";
+/** Normal saved defaults on a current control plane, which takes the role and launches Native TUI. */
+const PLAIN = "/new-session-choices-e2e.html?policy=1&role=1&nativeTui=1";
 
 async function openNewSession(page: Page, query = PAGE): Promise<Locator> {
   await page.goto(query);
@@ -49,7 +51,9 @@ test("at 1440px the policy is one summary row with five facts, and Customize… 
   // No policy control is inline any more: Options holds Role, the summary, and its other rows.
   await expect(dialog.getByRole("spinbutton", { name: "Maximum Concurrent Children" })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: /^Child Harness:/ })).toHaveCount(0);
-  // The summary is one row: no taller than the Role row above it plus a line.
+  // The summary is one row: no taller than the Role row above it plus three lines. In the desktop
+  // dialog Role keeps its pills beside its sentence (#2955), and the summary's facts wrap in the
+  // text column beside Customize… with the line about where they come from under them.
   const heights = await dialog.evaluate((node) => {
     const rowOf = (selector: string) => node.querySelector(selector)!.closest(".setting-row")!.getBoundingClientRect().height;
     const description = node.querySelector(".modal-desc")!.getBoundingClientRect();
@@ -63,7 +67,7 @@ test("at 1440px the policy is one summary row with five facts, and Customize… 
     };
   });
   testInfo.annotations.push({ type: "New Session description to footer (px)", description: String(Math.round(heights.descriptionToFooter)) });
-  expect(heights.summary).toBeLessThanOrEqual(heights.role + 24);
+  expect(heights.summary).toBeLessThanOrEqual(heights.role + 48);
 
   const policy = await openPolicy(dialog);
   // Stacked under one shared dim: New Session stays open and visible beneath it (§7.1).
@@ -94,6 +98,60 @@ test("at 1440px the policy is one summary row with five facts, and Customize… 
   const list = await page.getByRole("listbox", { name: "Follow-Ups" }).boundingBox();
   expect(list!.width).toBeGreaterThanOrEqual(280);
   await page.keyboard.press("Escape");
+});
+
+/**
+ * From the description's top to the footer's top, as the whole body would lay out unscrolled, with
+ * Options open and Orchestrator chosen in Role.
+ */
+async function descriptionToFooter(page: Page, query: string, chooseOrchestrator: boolean): Promise<number> {
+  const dialog = await openNewSession(page, query);
+  if (chooseOrchestrator) {
+    await dialog.getByRole("radiogroup", { name: "Role" }).getByRole("radio", { name: "Orchestrator" }).click();
+  }
+  await expect(summaryRow(dialog).getByRole("button", { name: "Customize…" })).toBeVisible();
+  await dialogMotionSettled(page);
+  return dialog.evaluate((node) => {
+    const description = node.querySelector(".modal-desc")!.getBoundingClientRect();
+    const foot = node.querySelector(".modal-foot")!.getBoundingClientRect();
+    const body = node.querySelector(".modal-body")!;
+    return Math.round(foot.top - description.top + body.scrollHeight - body.clientHeight);
+  });
+}
+
+test.describe("New Session's height with Orchestrator at 1440px (#2955)", () => {
+  test.use({ viewport: { width: 1440, height: 1000 } });
+
+  test("Orchestrator chosen at its defaults on a current control plane with one account is at most 700px", async ({ page }, testInfo) => {
+    const height = await descriptionToFooter(page, `${PLAIN}&oneAccount=1`, true);
+    testInfo.annotations.push({ type: "Orchestrator chosen, one account: description to footer (px)", description: String(height) });
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    // The plain state: no Account field and no preset notice, the policy as its five facts.
+    await expect(dialog.getByRole("button", { name: /^Account:/ })).toHaveCount(0);
+    await expect(dialog.locator(".session-options-body .notice")).toHaveCount(0);
+    await expect(summaryRow(dialog).locator(".orchestrator-policy-facts > span")).toHaveCount(5);
+    // Role, Harness and Working Copy keep their pills beside their text in the desktop dialog.
+    for (const name of ["Role", "Harness", "Working Copy"]) {
+      const seg = dialog.getByRole("radiogroup", { name });
+      const row = seg.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' setting-row ')][1]");
+      const text = (await row.locator(".setting-row-text").boundingBox())!;
+      const box = (await seg.boundingBox())!;
+      expect(box.x, `${name} sits beside its text`).toBeGreaterThan(text.x + text.width);
+    }
+    expect(height, `${height}px from the description to the footer`).toBeLessThanOrEqual(700);
+  });
+
+  // Recorded, not asserted: these states are over 700px by their required content (#2955's
+  // delivery comment), and the numbers keep that visible.
+  test("records the two-account and saved-default heights", async ({ page }, testInfo) => {
+    const twoAccounts = await descriptionToFooter(page, PLAIN, true);
+    testInfo.annotations.push({ type: "Orchestrator chosen, two accounts: description to footer (px)", description: String(twoAccounts) });
+    const savedDefault = await descriptionToFooter(page, PAGE, false);
+    await expect(page.getByRole("dialog", { name: "New Session" }).locator(".notice.t-warning"))
+      .toContainText("Permissions Set by the Orchestrator Preset");
+    testInfo.annotations.push({ type: "Saved Orchestrator default with the preset notice, two accounts: description to footer (px)", description: String(savedDefault) });
+    console.log(`New Session at 1440px: two accounts ${twoAccounts}px, saved default with the preset notice ${savedDefault}px`);
+  });
 });
 
 for (const theme of ["dark", "light"] as const) {

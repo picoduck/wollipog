@@ -1529,10 +1529,12 @@ export function NewSessionDialog({
   const permissionsValue = providerPermissionsPreset && !savedOrchestratorDefault ? "Orchestrator Preset" : savedPermissionTitle;
   const permissionsDescription = providerPermissionsPreset ? "The Orchestrator preset sets them for this session."
     : savedPiModeUnavailableForTarget ? "This target can't show Pi's approval prompts, so commands run without them."
+    // An Orchestrator's sentence says only what the role does to them: the composer note would be a
+    // second sentence in the row's narrow text column (#2955's height budget).
     : orchestrator
       ? effectiveIntegrationIsolation
-        ? "An Orchestrator keeps them and adds only its orchestration tools. Change them in the composer after the session opens."
-        : "An Orchestrator keeps them and its integrations, which typed decisions can't intercept. Change them in the composer after the session opens."
+        ? "An Orchestrator keeps them and adds only its orchestration tools."
+        : "An Orchestrator keeps them and its integrations, which typed decisions can't intercept."
       : "Change them in the composer after the session opens.";
   const defaultsFailureId = `${generatedFormId}-defaults-failure`;
   const normalUnavailable = !orchestratorRoleSupported && savedOrchestratorDefault
@@ -1886,6 +1888,7 @@ export function NewSessionDialog({
               {directoryGrants.length > 0 && executionTarget?.adapter === "host" && (
                 <SettingRow
                   title="Extra Folders (Preview)"
+                  className="session-options-folders-row"
                   description="Also let this agent use these folders, for this session only."
                   control={(
                     <div className="session-options-folders" role="group" aria-label="Extra Folders">

@@ -122,6 +122,15 @@ const agentSetup = fixtureParams.get("agentSetup") === "1";
 const noPreset = fixtureParams.get("noPreset") === "1";
 if (savedAgent) saveAgentDefault({}, "runner-1", savedAgent);
 
+/**
+ * #2955: a current control plane and a single account, the plain state New Session's 700px budget is
+ * measured in. `?role=1` takes the Orchestrator role, `?nativeTui=1` launches Native TUI, and
+ * `?oneAccount=1` leaves only Work, so New Session draws no Account field.
+ */
+const currentRole = fixtureParams.get("role") === "1";
+const currentNativeTui = fixtureParams.get("nativeTui") === "1";
+const oneAccount = fixtureParams.get("oneAccount") === "1";
+
 /** `?theme=light|dark` pins the theme; without it the page keeps the app's own default. */
 const fixtureTheme = fixtureParams.get("theme");
 if (fixtureTheme === "light" || fixtureTheme === "dark") document.documentElement.setAttribute("data-theme", fixtureTheme);
@@ -237,12 +246,12 @@ const runner: RunnerView = {
       provider: "claude",
       authStatus: "authenticated",
     },
-    {
+    ...(oneAccount ? [] : [{
       id: "claude-personal",
       label: emailAccounts ? "work.me@example.org" : "Personal",
-      provider: "claude",
-      authStatus: "unauthenticated",
-    },
+      provider: "claude" as const,
+      authStatus: "unauthenticated" as const,
+    }]),
   ],
   workspaces: [{
     id: "workspace-1",
@@ -349,7 +358,8 @@ const snapshot: UiSnapshotMessage = {
     paginatedSessionHistory: false,
     projects: true,
     // The saved Orchestrator default's note appears only when the control plane takes the role.
-    ...(savedDefaults === "orchestrator" ? { orchestratorRole: true } : {}),
+    ...(savedDefaults === "orchestrator" || currentRole ? { orchestratorRole: true } : {}),
+    ...(currentNativeTui ? { nativeTuiLaunch: true } : {}),
   },
   runners: [runner],
   boxes: [],
