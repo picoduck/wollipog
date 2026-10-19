@@ -1260,6 +1260,10 @@ test("staging CLI exposes legacy preservation, requires confirmation, and admits
     assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", `sl1-${"0".repeat(32)}`], working, stale.io), 1);
     assert.equal(stalePrompt, false, "an unmatched legacy token must refuse before asking to move the wrong directory");
     assert.ok(existsSync(path));
+    const staleJson = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", `sl1-${"0".repeat(32)}`, "--yes", "--json"], working, staleJson.io), 1);
+    assert.equal(JSON.parse(staleJson.stdout()).recovery.refused, true);
+    assert.match(JSON.parse(staleJson.stdout()).recovery.next.inspect, /staging inspect/u);
     const recovered = makeIo();
     assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", token, "--yes", "--json"], working, recovered.io), 0, recovered.stdout());
     const result = JSON.parse(recovered.stdout());
