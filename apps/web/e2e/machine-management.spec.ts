@@ -663,6 +663,31 @@ test("at 390px the code field and Submit Code stack at full width, and wrapped s
   }
 });
 
+test("a hidden email's sign-in head reads Signing In to Codex in full at 390px, its badge wrapping under it (#2996)", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
+  for (const [fixture, title] of [["code", "Signing In to Claude"], ["device", "Signing In to Codex"]] as const) {
+    await page.goto(`/machine-management-e2e.html?signIn=${fixture}&emailLabels&${DESIGN_WORKSTATION}`);
+    const row = providerAccounts(page).locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: title }) });
+    const head = async () => row.evaluate((element) => {
+      const name = element.querySelector<HTMLElement>(".row-title")!;
+      const badge = element.querySelector<HTMLElement>(".status")!.getBoundingClientRect();
+      const box = name.getBoundingClientRect();
+      return {
+        text: name.textContent, clipped: name.scrollWidth > name.clientWidth, overflows: element.scrollHeight > element.clientHeight,
+        height: element.getBoundingClientRect().height, badgeBelow: badge.top >= box.bottom, sub: element.querySelector(".row-sub")?.textContent,
+      };
+    });
+    let measured = await head();
+    expect(measured, `${fixture} at 1280`).toMatchObject({ text: title, clipped: false, overflows: false, badgeBelow: false, sub: "Email hidden" });
+    expect(measured.height, "wide enough, the row keeps its 56px").toBe(56);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await row.scrollIntoViewIfNeeded();
+    measured = await head();
+    expect(measured, `${fixture} at 390`).toMatchObject({ text: title, clipped: false, overflows: false, badgeBelow: true, sub: "Email hidden" });
+    await page.setViewportSize({ width: 1280, height: 720 });
+  }
+});
+
 test("Add Account refuses an empty or duplicate label under the field, and shows a request failure above the footer", async ({ page }) => {
   await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
   const dialog = page.getByRole("dialog", { name: "Add Account" });

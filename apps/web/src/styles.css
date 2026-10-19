@@ -10572,6 +10572,22 @@ textarea {
 }
 /* A stale HOME lease (#3241) is line-2 meta in the warning tone; its tooltip says why it cannot be recovered yet. */
 .provider-account-sub .provider-account-lease { color: var(--warning); }
+/* A hidden email's running sign-in is named only by "Signing In to Codex" (#2996), so that title
+   never ellipsizes: where the row is too narrow for it and its badge, the badge wraps under it and
+   the row grows. Wide enough, the row keeps its 56px. */
+.row.row-2.provider-account-hidden-title {
+  height: auto;
+  min-height: var(--row-h-2);
+  padding-block: var(--space-2);
+}
+.provider-account-hidden-title .row-line {
+  flex-wrap: wrap;
+  row-gap: var(--space-1);
+}
+.provider-account-signing-title {
+  flex: none;
+  overflow: visible;
+}
 .provider-account-actions {
   display: flex;
   flex: none;

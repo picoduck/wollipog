@@ -233,11 +233,11 @@ function ProviderAccountRow({ identity, label, hiddenTitle, provider, profile, l
   const meta = status ? statusMeta("provider_account", status) : null;
   return (
     <>
-      <div className="row row-2" data-account-status={status ?? undefined}>
+      <div className={`row row-2${hiddenTitle ? " provider-account-hidden-title" : ""}`} data-account-status={status ?? undefined}>
         <span className="row-icon" aria-hidden="true"><SignInIcon /></span>
         <span className="row-body">
           <span className="row-line">
-            {hiddenTitle ? <span className="row-title">{hiddenTitle}</span>
+            {hiddenTitle ? <span className="row-title provider-account-signing-title">{hiddenTitle}</span>
               : <AccountIdentifier identity={identity} className="row-title" value={label} label="Account Email" />}
             {meta && <StatusBadge meta={meta} inline={status === "signed_in"} />}
           </span>
