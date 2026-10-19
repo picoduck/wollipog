@@ -82,6 +82,7 @@ import {
   Info as LucideInfo,
   Keyboard as LucideKeyboard,
   KeyRound as LucideKeyRound,
+  LayoutGrid as LucideLayoutGrid,
   Link as LucideLink,
   List as LucideList,
   ListChecks as LucideListChecks,
@@ -916,6 +917,11 @@ export function DialIcon(props: IconProps) {
 /** Runner Capacity: the session units a machine runs at once. Both gauges have meanings already. */
 export function CapacityIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCpu} {...props} />;
+}
+
+/** A whole collection at once: the Machines list's All Machines row (#2986). */
+export function AllMachinesIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideLayoutGrid} {...props} />;
 }
 
 export function PullRequestIcon(props: IconProps) {

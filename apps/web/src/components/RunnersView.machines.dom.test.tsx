@@ -5,7 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { BoxView, IdentityAdministrationView, RunnerView, UiSnapshotMessage } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -185,6 +185,15 @@ const rowNames = (body: HTMLElement) => rows(body).map((row) => row.querySelecto
 const row = (body: HTMLElement, name: string) => rows(body).find((item) => item.querySelector(".row-title")?.textContent === name)!;
 const detail = (body: HTMLElement) => body.querySelector<HTMLElement>(".master-detail-detail")!;
 const detailName = (body: HTMLElement) => detail(body).querySelector(".runner-id h2")?.textContent;
+/** The All Machines row (#2986) and the overview it opens. */
+const allMachinesRow = (body: HTMLElement) => list(body).querySelector<HTMLButtonElement>("button.row.machine-list-overview");
+const overview = (body: HTMLElement) => detail(body).querySelector<HTMLElement>(".machines-overview");
+/** Desktop and compact widths with nothing selected: the overview, under the selected All Machines row. */
+function assertOverviewShown(body: HTMLElement, message?: string) {
+  assert.ok(overview(body), message ?? "the detail is the All Machines overview");
+  assert.ok(allMachinesRow(body)?.classList.contains("is-selected"), "All Machines is selected");
+  assert.equal(body.querySelectorAll(".row.is-selected").length, 1, "and no machine is");
+}
 
 async function setWidth(width: number) {
   await act(async () => domWindow.happyDOM.setWindowSize({ width, height: 900 }));
@@ -232,16 +241,32 @@ test("rows are sorted by what needs the person, each with exactly one badge and 
   }
 });
 
-test("with no selection the first row is selected in place, and the detail shows its card", async () => {
+test("at 1440px with no selection, All Machines is selected and the detail is the overview; no machine is auto-selected (#2986)", async () => {
   const view = await mount();
   try {
-    assert.deepEqual(view.history.replaced, [{ name: "runners", section: "machines", machineId: "zeta" }]);
-    assert.equal(view.history.pushed.length, 0, "the default selection adds no history entry");
-    assert.equal(viewPath(view.history.current()), `/connections/machines/~${encodeResourceId("zeta")}`);
-    assert.equal(detailName(view.body), "Zeta");
-    assert.ok(row(view.body, "Zeta").classList.contains("is-selected"));
-    assert.equal(row(view.body, "Zeta").getAttribute("aria-current"), "true");
-    assert.equal(view.body.querySelectorAll(".row.is-selected").length, 1);
+    assert.equal(view.history.replaced.length, 0, "nothing replaces the route");
+    assert.equal(view.history.pushed.length, 0);
+    assert.equal(viewPath(view.history.current()), "/connections/machines");
+    assertNoDomNode(detail(view.body).querySelector(".runner-card"), "no machine's detail");
+    assertOverviewShown(view.body);
+    const all = allMachinesRow(view.body)!;
+    assert.equal(list(view.body).querySelector(".master-detail-list-body button.row"), all, "All Machines is the list's first row");
+    assert.equal(all.getAttribute("aria-current"), "true");
+    assert.ok(!all.classList.contains("row-2"), "a single-line row");
+    assert.equal(all.querySelector(".row-title")?.textContent, "All Machines");
+    assert.equal(all.querySelector(".row-trail")?.textContent, "3", "the machine count as plain trailing text");
+    assert.ok(all.querySelector(".row-icon svg"), "after its icon");
+    assert.equal(overview(view.body)!.querySelector("h2")?.textContent, "All Machines");
+
+    // A machine's row opens it; All Machines comes back to the overview.
+    await act(async () => row(view.body, "Alpha").click());
+    await settle();
+    assert.equal(detailName(view.body), "Alpha");
+    assert.ok(!allMachinesRow(view.body)!.classList.contains("is-selected"));
+    await act(async () => allMachinesRow(view.body)!.click());
+    await settle();
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
+    assertOverviewShown(view.body);
   } finally {
     await view.unmount();
   }
@@ -283,8 +308,8 @@ test("a machine id that no longer exists is Machine Not Found, whose Show All Ma
     await act(async () => showAll.click());
     await settle();
     assert.deepEqual(view.history.pushed, [{ name: "runners", section: "machines" }]);
-    // Then the first row is the default detail again.
-    assert.equal(detailName(view.body), "Zeta");
+    // Then the overview is the default detail again.
+    assertOverviewShown(view.body);
   } finally {
     await view.unmount();
   }
@@ -313,8 +338,9 @@ test("with nine machines the list filters and groups under Needs Attention, Onli
     assert.deepEqual(labels(), ["Needs Attention", "Online", "Offline"]);
     assert.deepEqual(counts(), ["1", "7", "1"]);
     assert.deepEqual(rowNames(view.body), ["Old Laptop", "Build A", "Build B", "Build C", "Build D", "Build E", "GPU Box", "Studio", "Downstairs"]);
-    assert.deepEqual(view.history.replaced.at(-1), { name: "runners", section: "machines", machineId: "old" },
-      "the first row shown is the default selection");
+    assert.equal(view.history.replaced.length, 0, "nothing is selected by itself");
+    assert.equal(list(view.body).querySelector(".master-detail-list-body button.row"), allMachinesRow(view.body),
+      "All Machines leads the groups");
 
     const filter = list(view.body).querySelector<HTMLInputElement>('input[aria-label="Filter Machines"]')!;
     assert.equal(filter.closest(".input-affix")?.parentElement?.classList.contains("master-detail-list-head"), true);
@@ -359,8 +385,12 @@ test("disconnected with machines, the rows stay, dimmed under Reconnecting…; w
     assertNoDomNode(notice.closest(".is-stale"), "the line is never dimmed itself");
     const stale = list(view.body).querySelector(".is-stale")!;
     assert.ok(stale, "the last-known rows are dimmed");
-    assert.deepEqual([...stale.querySelectorAll(".row-title")].map((title) => title.textContent), ["Zeta", "Alpha", "Beta"]);
-    assert.equal(detailName(view.body), "Zeta", "the selected machine stays open");
+    assert.deepEqual([...stale.querySelectorAll(".row-title")].map((title) => title.textContent),
+      ["All Machines", "Zeta", "Alpha", "Beta"]);
+    assert.ok(overview(view.body)?.closest(".is-stale"), "the last-known overview is dimmed too");
+    await act(async () => row(view.body, "Zeta").click());
+    await settle();
+    assert.equal(detailName(view.body), "Zeta", "a last-known machine still opens");
   } finally {
     await view.unmount();
   }
@@ -410,6 +440,10 @@ test("on a phone, a row opens the detail route under Back and the machine's name
   const view = await mount();
   try {
     assert.equal(view.history.replaced.length, 0, "a phone selects nothing by itself");
+    // The list route is the overview: no All Machines row, and no overview beside it (#2986).
+    assertNoDomNode(allMachinesRow(view.body), "no All Machines row at 390px");
+    assertNoDomNode(view.body.querySelector(".machines-overview"));
+    assert.deepEqual(rowNames(view.body), ["Zeta", "Alpha", "Beta"], "/connections/machines shows the list");
     assert.ok(view.body.querySelector('.page-header [role="tablist"][aria-label="Connections"]'), "the list route keeps the tabs");
     assertNoDomNode(view.body.querySelector(".detail-bar"));
     assert.equal(view.body.querySelectorAll(".row.is-selected").length, 0);
@@ -520,11 +554,12 @@ test("connecting a machine over SSH selects it, and its detail waits for it rath
  * The selection's state machine (#2985). The route is the only selection, and every state is derived
  * from it and the live machines; nothing tracks a deletion in flight. The route changes by:
  *   a deep link or reload            → that machine, or Machine Not Found, never replaced;
- *   no selection, wider than a phone → the first row shown, in place (`replace`);
- *   a row or Show All Machines       → pushed, so Back and Forward retrace it;
+ *   no selection                     → nothing is selected: the All Machines overview beside the
+ *                                      list (#2986), or a phone's list;
+ *   a row, All Machines or Show All  → pushed, so Back and Forward retrace it;
  *   Connect via SSH                  → the new machine, pushed, waiting until its box arrives;
- *   the shown machine leaving        → the list, in place (deleted here or anywhere), then the first
- *                                      row or No Machines Yet;
+ *   the shown machine leaving        → the list, in place (deleted here or anywhere), then the
+ *                                      overview or No Machines Yet;
  *   a phone                          → never selects by itself; Back leaves the detail route.
  * A delete request and the stream's removal can arrive in any order, and nothing depends on it.
  */
@@ -555,13 +590,15 @@ function deferred() {
 }
 
 const offlineOnly = runner("solo", { displayName: "Solo", status: "offline" });
+/** A machine's own route, as its row or a link opens it. */
+const machineView = (machineId: string): View => ({ name: "runners", section: "machines", machineId });
 const removed = (runnerId: string) => ({ type: "runner_removed", runnerId }) as never;
 const upserted = (value: RunnerView) => ({ type: "runner_upsert", runner: value }) as never;
 
 test("deleting the only machine ends on No Machines Yet, whichever arrives first, the response or the removal", async () => {
   for (const order of ["response first", "removal first"] as const) {
     const request = deferred();
-    const view = await mount({ runners: [offlineOnly], client: { removeRunner: () => request.promise } as Partial<ApiClient> });
+    const view = await mount({ view: machineView("solo"), runners: [offlineOnly], client: { removeRunner: () => request.promise } as Partial<ApiClient> });
     try {
       assert.equal(detailName(view.body), "Solo");
       await deleteSelectedMachine(view, "Solo");
@@ -584,17 +621,17 @@ test("deleting the only machine ends on No Machines Yet, whichever arrives first
   }
 });
 
-test("deleting the selected one of two selects the other in place once it is removed", async () => {
+test("deleting the selected one of two returns to the overview in place once it is removed", async () => {
   const other = runner("other", { displayName: "Other" });
-  const view = await mount({ runners: [offlineOnly, other], client: { removeRunner: async () => {} } as Partial<ApiClient> });
+  const view = await mount({ view: machineView("solo"), runners: [offlineOnly, other], client: { removeRunner: async () => {} } as Partial<ApiClient> });
   try {
-    assert.equal(detailName(view.body), "Solo", "the offline machine sorts first and is the default selection");
+    assert.equal(detailName(view.body), "Solo");
     await deleteSelectedMachine(view, "Solo");
     await view.push(removed("solo"));
-    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "other" });
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
     assert.equal(view.history.entries.length, 1);
     assert.deepEqual(rowNames(view.body), ["Other"]);
-    assert.equal(detailName(view.body), "Other");
+    assertOverviewShown(view.body);
   } finally {
     await view.unmount();
   }
@@ -604,7 +641,7 @@ test("deleting the only SSH machine ends on No Machines Yet, whichever arrives f
   const box: BoxView = { boxId: "box-solo", runnerId: "box-solo-runner", displayName: "Solo Box", sshTarget: "me@solo", status: "offline", lastError: null, createdAt: 1 };
   for (const order of ["response first", "removal first"] as const) {
     const request = deferred();
-    const view = await mount({ runners: [], boxes: [box], client: { removeBox: () => request.promise } as Partial<ApiClient> });
+    const view = await mount({ view: machineView("box-solo-runner"), runners: [], boxes: [box], client: { removeBox: () => request.promise } as Partial<ApiClient> });
     try {
       assert.ok(detail(view.body).querySelector(".box-card"));
       await deleteSelectedMachine(view, "Solo Box");
@@ -622,7 +659,7 @@ test("deleting the only SSH machine ends on No Machines Yet, whichever arrives f
 test("a machine removed and registered again while its deletion is in flight stays listed and selectable", async () => {
   const request = deferred();
   const other = runner("other", { displayName: "Other" });
-  const view = await mount({ runners: [offlineOnly, other], client: { removeRunner: () => request.promise } as Partial<ApiClient> });
+  const view = await mount({ view: machineView("solo"), runners: [offlineOnly, other], client: { removeRunner: () => request.promise } as Partial<ApiClient> });
   try {
     await deleteSelectedMachine(view, "Solo");
     await view.push(removed("solo"));
@@ -638,7 +675,7 @@ test("a machine removed and registered again while its deletion is in flight sta
 });
 
 test("a removal and a registration in one delivery never leave the selected machine", async () => {
-  const view = await mount({ runners: [offlineOnly] });
+  const view = await mount({ view: machineView("solo"), runners: [offlineOnly] });
   try {
     await act(async () => {
       view.socket.push(removed("solo"));
@@ -653,7 +690,7 @@ test("a removal and a registration in one delivery never leave the selected mach
 });
 
 test("a failed deletion keeps the machine selected and listed", async () => {
-  const view = await mount({ runners: [offlineOnly], client: { removeRunner: async () => { throw new Error("runner is busy"); } } as Partial<ApiClient> });
+  const view = await mount({ view: machineView("solo"), runners: [offlineOnly], client: { removeRunner: async () => { throw new Error("runner is busy"); } } as Partial<ApiClient> });
   try {
     await deleteSelectedMachine(view, "Solo");
     assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "solo" });
@@ -672,11 +709,11 @@ test("a machine deleted elsewhere while open returns to the list; Back to its ol
     await act(async () => row(view.body, "Beta").click());
     await settle();
     await view.push(removed("beta"));
-    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "zeta" },
-      "the list, then its first row, in place");
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" }, "the list, in place");
     assert.equal(view.history.entries.length, 3);
+    assertOverviewShown(view.body);
     await view.push(removed("alpha"));
-    assert.equal(detailName(view.body), "Zeta", "a machine that is not open leaving changes nothing");
+    assertOverviewShown(view.body, "a machine that is not open leaving changes nothing");
     await view.history.back();
     assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "alpha" });
     assert.match(detail(view.body).textContent ?? "", /Machine Not Found/, "a route this page never showed live");
@@ -685,7 +722,7 @@ test("a machine deleted elsewhere while open returns to the list; Back to its ol
   }
 });
 
-test("Back and Forward retrace pushed selections, and the default selection adds no entry", async () => {
+test("Back and Forward retrace pushed selections, and the overview adds no entry", async () => {
   const view = await mount();
   try {
     assert.equal(view.history.entries.length, 1);
@@ -697,7 +734,7 @@ test("Back and Forward retrace pushed selections, and the default selection adds
     await view.history.back();
     assert.equal(detailName(view.body), "Alpha");
     await view.history.back();
-    assert.equal(detailName(view.body), "Zeta", "the first entry is the replaced default selection");
+    assertOverviewShown(view.body, "the first entry is the overview");
     await view.history.forward();
     assert.equal(detailName(view.body), "Alpha");
     assert.equal(view.history.entries.length, 3, "retracing adds nothing");
@@ -706,17 +743,19 @@ test("Back and Forward retrace pushed selections, and the default selection adds
   }
 });
 
-test("a phone never selects by itself; widening the window selects the first row in place", async () => {
+test("a phone never selects by itself; widening the window shows the overview beside the list", async () => {
   await setWidth(390);
   const view = await mount();
   try {
     assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
     assertNoDomNode(view.body.querySelector(".master-detail[data-detail-open]"));
     await setWidth(1440);
-    assert.deepEqual(view.history.current(), { name: "runners", section: "machines", machineId: "zeta" });
+    assert.deepEqual(view.history.current(), { name: "runners", section: "machines" });
     assert.equal(view.history.entries.length, 1);
-    assert.equal(detailName(view.body), "Zeta");
+    assertOverviewShown(view.body);
     // Narrowed again with a machine open, the phone shows it as the detail route.
+    await act(async () => row(view.body, "Zeta").click());
+    await settle();
     await setWidth(390);
     assert.ok(view.body.querySelector(".detail-bar"));
     assert.ok(view.body.querySelector(".master-detail[data-detail-open]"));
@@ -762,6 +801,155 @@ test("on a phone, a machine removed after leaving its detail is Machine Not Foun
       "the entry is kept, not replaced by the list");
     assert.match(detail(view.body).textContent ?? "", /Machine Not Found/);
     assert.ok(view.body.querySelector(".detail-bar"), "the detail route, under Back");
+  } finally {
+    await view.unmount();
+  }
+});
+
+/* The All Machines overview (#2986): which machine needs the person, and where there is room. */
+
+const viewer = { context: { role: "viewer" }, organizations: [], memberships: [], teams: [] } as unknown as IdentityAdministrationView;
+const section = (body: HTMLElement, title: string) => [...overview(body)!.querySelectorAll<HTMLElement>("section")]
+  .find((candidate) => candidate.querySelector(".section-title")?.firstChild?.textContent === title)!;
+const attentionRows = (body: HTMLElement) => [...section(body, "Needs Attention").querySelectorAll<HTMLElement>(".surface > .row")];
+const capacityRows = (body: HTMLElement) => [...section(body, "Capacity").querySelectorAll<HTMLElement>(".surface > .row")];
+const capacityRow = (body: HTMLElement, name: string) => capacityRows(body).find((item) => item.querySelector(".row-title")?.textContent === name)!;
+const units = (configuredUnits: number, usedUnits: number, queuedSessions = 0) =>
+  ({ configuredUnits, usedUnits, queuedSessions, revision: 1, authority: "control_plane" }) as RunnerView["capacity"];
+
+/** One offline native runner, one outdated SSH machine and two online machines (#2986 AC2). */
+const downstairs = runner("downstairs", { displayName: "Downstairs", status: "offline", lastSeen: Date.now() - 4 * 60_000 });
+const buildBox: BoxView = { boxId: "box-build", runnerId: "build", displayName: "Build Box", sshTarget: "me@build", status: "online", lastError: null, createdAt: 1 };
+const buildRunner = runner("build", { protocolVersion: 1 });
+const studio = runner("studio", { displayName: "Studio", capacity: units(40, 30, 3) });
+const laptop = runner("laptop", { displayName: "Laptop", capacity: units(40, 14) });
+const attentionFleet = { runners: [downstairs, buildRunner, studio, laptop], boxes: [buildBox] };
+
+test("Needs Attention lists the offline runner and the outdated SSH machine in list order, with each one's action for an owner", async () => {
+  const view = await mount(attentionFleet);
+  try {
+    assert.equal(overview(view.body)!.querySelector(".machines-overview-summary")?.textContent,
+      "4 machines, 3 online. 44 of 80 units in use on the online machines.");
+    const title = section(view.body, "Needs Attention").querySelector(".section-title")!;
+    assert.equal(title.querySelector(".machines-overview-count")?.textContent, "2");
+    const items = attentionRows(view.body);
+    assert.deepEqual(items.map((item) => item.querySelector(".row-title")?.textContent), ["Build Box", "Downstairs"],
+      "the list's order, and only the machines that need the person");
+    assert.deepEqual(items.map((item) => item.querySelector(".status")?.textContent), ["Update Required", "Offline"]);
+    assert.deepEqual(items.map((item) => item.querySelector(".row-sub")?.textContent), [
+      "Its runner is out of date.",
+      "Last seen 4m ago. Repair its connection to run agents there again.",
+    ]);
+    assert.deepEqual(items.map((item) => item.querySelector("button")?.textContent), ["Review", "Repair Connection…"]);
+    assert.equal(items[1]!.querySelector("button")?.getAttribute("aria-label"), "Repair Connection to Downstairs…");
+
+    await act(async () => items[0]!.querySelector("button")!.click());
+    await settle();
+    assert.deepEqual(view.history.current(), machineView("build"), "Review opens the machine");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a viewer's Needs Attention offers Review on every row", async () => {
+  const view = await mount({ ...attentionFleet, client: { getIdentity: async () => viewer } });
+  try {
+    const items = attentionRows(view.body);
+    assert.deepEqual(items.map((item) => item.querySelector("button")?.textContent), ["Review", "Review"]);
+    assert.equal(items[1]!.querySelector(".row-sub")?.textContent,
+      "Last seen 4m ago. Ask an organization owner or admin to repair its connection.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("with every machine online and current, Needs Attention is the one line \"Every machine is online and ready.\"", async () => {
+  const view = await mount({ runners: [studio, laptop] });
+  try {
+    const needs = section(view.body, "Needs Attention");
+    assertNoDomNode(needs.querySelector(".surface"));
+    assertNoDomNode(needs.querySelector(".machines-overview-count"));
+    const ok = needs.querySelector(".machines-overview-ok")!;
+    assert.equal(ok.textContent, "Every machine is online and ready.");
+    assert.ok(ok.querySelector(".machines-overview-dot"), "after a success dot");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Capacity compares machines with a meter each: warning from 75%, its name the level, Offline and Capacity Unknown", async () => {
+  const view = await mount(attentionFleet);
+  try {
+    const head = section(view.body, "Capacity").querySelector(".section-head")!;
+    assert.equal(head.querySelector(".machines-overview-columns")?.textContent, "Units in Use / Limit");
+    const busy = capacityRow(view.body, "Studio");
+    const meter = busy.querySelector<HTMLElement>(".meter")!;
+    assert.equal(meter.className, "meter t-warning", "30 of 40 is the warning meter");
+    assert.equal(meter.getAttribute("role"), "img");
+    assert.equal(meter.getAttribute("aria-label"), "30 of 40 units in use");
+    assert.equal(busy.querySelector(".machine-capacity-figures")?.textContent, "30 / 40");
+    assert.equal(busy.querySelector(".machine-capacity-queued")?.textContent, "3 Queued");
+    const calm = capacityRow(view.body, "Laptop");
+    assert.equal(calm.querySelector(".meter")?.className, "meter", "14 of 40 is neutral");
+    assertNoDomNode(calm.querySelector(".machine-capacity-queued"), "no Queued while nothing waits");
+
+    const offline = capacityRow(view.body, "Downstairs");
+    assert.equal(offline.querySelector<HTMLElement>(".meter > span")?.style.width, "0%", "an empty meter");
+    assert.equal(offline.querySelector(".machine-capacity-figures")?.textContent, "Offline");
+    assert.equal(capacityRow(view.body, "Build Box").querySelector(".machine-capacity-unknown")?.textContent, "Capacity Unknown");
+    assert.equal(section(view.body, "Capacity").querySelector(".section-note")?.textContent,
+      "A unit is one running agent process. An agent can be set to take more than one.");
+
+    await act(async () => (calm as HTMLButtonElement).click());
+    await settle();
+    assert.deepEqual(view.history.current(), machineView("laptop"), "a Capacity row opens its machine");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("with ten machines, Capacity shows eight rows and sums up the rest", async () => {
+  const fleet = Array.from({ length: 10 }, (_, index) =>
+    runner(`node-${index}`, { displayName: `Node ${index}`, capacity: units(16, index) }));
+  const view = await mount({ runners: fleet });
+  try {
+    assert.equal(capacityRows(view.body).filter((item) => item.tagName === "BUTTON").length, 8);
+    const rest = section(view.body, "Capacity").querySelector(".machine-capacity-rest")!;
+    assert.equal(rest.querySelector(".row-title")?.textContent, "and 2 more machines");
+    assert.equal(rest.querySelector(".machine-capacity-figures")?.textContent, "17 / 32", "Node 8 and Node 9");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Reconnect resolves an offline SSH machine, confirming first when it would interrupt sessions", async () => {
+  const offlineBox: BoxView = { ...buildBox, status: "offline" };
+  const calls: Array<[string, boolean]> = [];
+  const view = await mount({
+    runners: [studio],
+    boxes: [offlineBox],
+    client: {
+      reconnectBox: async (boxId: string, force = false) => {
+        calls.push([boxId, force]);
+        if (!force) throw new ApiError("1 active session", 409, "BOX_HAS_ACTIVE_SESSIONS");
+        return {} as never;
+      },
+    } as Partial<ApiClient>,
+  });
+  try {
+    const item = attentionRows(view.body)[0]!;
+    assert.equal(item.querySelector(".row-sub")?.textContent, "Offline. Reconnect to run agents there again.");
+    const reconnect = item.querySelector<HTMLButtonElement>("button")!;
+    assert.equal(reconnect.textContent, "Reconnect");
+    await act(async () => reconnect.click());
+    await settle();
+    const confirmation = [...view.body.querySelectorAll<HTMLElement>('[role="alertdialog"], [role="dialog"]')]
+      .find((candidate) => candidate.textContent?.includes("Interrupt Sessions and Reconnect"))!;
+    assert.ok(confirmation, "the interruption asks first");
+    await act(async () => [...confirmation.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Interrupt Sessions and Reconnect")!.click());
+    await settle();
+    assert.deepEqual(calls, [["box-build", false], ["box-build", true]]);
   } finally {
     await view.unmount();
   }

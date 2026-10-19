@@ -150,11 +150,11 @@ type MachineStatusRunner = Pick<RunnerView, "status" | "protocolVersion" | "agen
 type MachineStatusBox = Pick<BoxView, "status" | "lastError">;
 
 /** An agent whose installed CLI is too old for the integration Wollipog drives it through. */
-function agentTooOld(agent: AgentDefinition): boolean {
+export function agentTooOld(agent: AgentDefinition): boolean {
   return agent.codexAppServer?.status === "unsupported" || agent.claudeCode?.status === "unsupported";
 }
 
-function agentNeedsSignIn(agent: AgentDefinition): boolean {
+export function agentNeedsSignIn(agent: AgentDefinition): boolean {
   return agent.authStatus === "unauthenticated" || agent.claudeCode?.status === "unauthenticated";
 }
 

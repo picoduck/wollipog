@@ -1440,8 +1440,8 @@ variant by default and offers side by side as a user preference (§6.3).
   whatever is not Online or Connecting first. Past eight machines the head adds "Filter Machines"
   and the rows sit under Needs Attention, Online and Offline with plain counts. The selection is
   `/connections/machines/~<runnerId>` (an SSH machine by its box's runner id); `/connections/machines`
-  selects the first row shown in place on desktop and compact widths until the All Machines
-  overview (#2986). An unknown id is a compact "Machine Not Found" with Show All Machines;
+  selects nothing and shows the All Machines overview (§6.1) on desktop and compact widths, under
+  the list's first row, All Machines. An unknown id is a compact "Machine Not Found" with Show All Machines;
   before the first snapshot the list shows three skeleton rows beside `DetailSkeleton`; while
   disconnected the last-known rows stay in `StaleContent` under a compact "Reconnecting…" notice
   in the list head. A phone's machine route replaces the header and its tabs with a `DetailBar`,
@@ -1488,6 +1488,24 @@ its Name field focused); a project the person can't change offers Open. Most Act
 Changed's place: up to five projects by unarchived sessions. A search changes only the list. On a
 phone the list leads with a Projects Overview row carrying the Needs Attention count (§11.4), which
 opens `/projects/overview`.
+
+**All Machines (#2986).** Connections › Machines follows rule 1 on desktop and compact widths: with
+nothing selected, the detail is `MachinesOverview`, and the list's first row is All Machines (`.row`,
+`AllMachinesIcon`, the machine count as plain trailing text), selected while the overview shows. The
+title row is "All Machines" and "4 machines, 3 online. 44 of 80 units in use on the online machines."
+(the units sentence only while an online machine reports its use). Needs Attention has a row for
+every machine whose `machineStatus()` is not Online or Connecting and every machine the rail's
+Connections dot counts (`machineAttentionReason`, §11.4), in list order: the name and its badge, the
+top reason in one sentence, and Repair Connection… (an offline native runner) or Reconnect (an
+offline, unreachable or failed SSH machine) for owners and admins, otherwise Review. With nothing to
+review it is "Every machine is online and ready." Capacity, with "Units in Use / Limit" as quiet
+text in its head, is a Surface of rows that each open the machine: the name, a `.meter` (§11.6),
+"29 / 40" and "3 Queued" while sessions wait; an offline machine has an empty meter and "Offline",
+and one reporting no use "Capacity Unknown". Past eight rows the rest are one line, "and N more
+machines", with their units summed. A `.section-note` says what a unit counts. While the snapshot
+loads the detail is `DetailSkeleton`; while disconnected, the last-known overview in `StaleContent`.
+A phone has no overview and no All Machines row: its list, sorted by attention with every badge, is
+the overview.
 
 ### 6.2 Phone
 
@@ -2520,7 +2538,9 @@ pointers only; its tooltip names the chord.
   on `.context-control`; below 75% the ring's fill is the neutral `--text-dim` on a `--bg-elev-3`
   track.
 - The element carries `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`
-  and a Title Case `aria-label`.
+  and a Title Case `aria-label`. A meter that compares a level across rows, such as All Machines'
+  Capacity (§6.1, #2986), is instead `role="img"` named by its level in sentence case ("29 of 40
+  units in use"), and the figures beside it are hidden from assistive technology.
 - Replaces the context meter's bar (`.context-popover-bar`). The context control itself (the ring
   button and its popover) is `.context-control`, which is local to the composer.
 

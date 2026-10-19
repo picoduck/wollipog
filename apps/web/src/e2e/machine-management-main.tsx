@@ -161,9 +161,10 @@ function extraRunner(runnerId: string, displayName: string, overrides: Partial<R
     agents: [], workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: PROTOCOL_VERSION, ...overrides,
   };
 }
-const extraMachines: Array<{ runner?: RunnerView; box?: BoxView }> = [
+const statusMachines: Array<{ runner?: RunnerView; box?: BoxView }> = [
   { runner: extraRunner("build-server", "Build Server", { protocolVersion: PROTOCOL_VERSION - 1 }) },
-  { runner: extraRunner("gpu-box", "GPU Box", { status: "offline" }) },
+  // Last seen a few minutes before the page opened, as the overview's reason reads it (#2986).
+  { runner: extraRunner("gpu-box", "GPU Box", { status: "offline", lastSeen: Date.now() - 4 * 60_000 }) },
   { box: { boxId: "box-golf", runnerId: "golf-sim", displayName: "Golf Simulator", sshTarget: "me@golf-sim", status: "bootstrapping" as const, lastError: null, createdAt: 1 } },
   { box: { boxId: "box-archive", runnerId: "archive-nas", displayName: "Archive NAS", sshTarget: "admin@archive", status: "failed" as const, lastError: "Permission denied (publickey).", createdAt: 1 } },
   { runner: extraRunner("studio-mac", "Studio Mac", { os: "macos", capacity: { configuredUnits: 40, usedUnits: 29, revision: 1, authority: "control_plane" } }) },
@@ -174,6 +175,15 @@ const extraMachines: Array<{ runner?: RunnerView; box?: BoxView }> = [
   { runner: extraRunner("travel-laptop", "Travel Laptop", {
     providerAccounts: [{ id: "personal", label: "Personal", provider: "claude", authStatus: "unauthenticated" }],
   }) },
+];
+/**
+ * `fleet=ready` leaves out the machines that need the person, and signs Design Workstation's last
+ * account in: the overview's calm state (#2986).
+ */
+const readyFleet = fixtureParams.get("fleet") === "ready";
+if (readyFleet) for (const account of runner?.providerAccounts ?? []) account.authStatus = "authenticated";
+const extraMachines: Array<{ runner?: RunnerView; box?: BoxView }> = [
+  ...readyFleet ? [] : statusMachines,
   ...Array.from({ length: 12 }, (_, index) => ({
     runner: extraRunner(`ci-runner-${index + 1}`, `CI Runner ${index + 1}`, {
       capacity: { configuredUnits: 8, usedUnits: index % 9, revision: 1, authority: "control_plane" },

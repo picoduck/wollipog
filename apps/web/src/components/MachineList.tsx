@@ -1,4 +1,4 @@
-import { useMemo, useState, type Ref, type UIEventHandler } from "react";
+import { useId, useMemo, useState, type Ref, type UIEventHandler } from "react";
 import {
   filterMachineList,
   groupMachineList,
@@ -7,7 +7,7 @@ import {
   type MachineListEntry,
 } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
-import { CapacityIcon, ComputerIcon, GlobeIcon, SearchIcon } from "./Icons.js";
+import { AllMachinesIcon, CapacityIcon, ComputerIcon, GlobeIcon, SearchIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
 import { State } from "./State.js";
@@ -27,6 +27,11 @@ export interface MachineListProps {
   /** The list's one scroll container, which the page restores on a phone's Back. */
   bodyRef?: Ref<HTMLDivElement>;
   onBodyScroll?: UIEventHandler<HTMLDivElement>;
+  /**
+   * The All Machines row, the list's first, which opens the overview (#2986) and is selected while
+   * the overview shows. A phone passes none: its list is the overview.
+   */
+  overview?: { selected: boolean; onSelect: () => void };
 }
 
 /**
@@ -34,8 +39,9 @@ export interface MachineListProps {
  * sorted by what needs the person. Past eight machines the head offers a filter and the rows sit
  * under Needs Attention, Online and Offline. The filter lives only as long as the page.
  */
-export function MachineList({ entries, selectedId, onSelect, stale, bodyRef, onBodyScroll }: MachineListProps) {
+export function MachineList({ entries, selectedId, onSelect, stale, bodyRef, onBodyScroll, overview }: MachineListProps) {
   const [query, setQuery] = useState("");
+  const overviewCountId = useId();
   const grouped = entries !== null && entries.length > MACHINE_LIST_GROUPING_THRESHOLD;
   // A query typed while the list was long stops applying once it is short again.
   const shown = useMemo(() => entries === null ? [] : grouped ? filterMachineList(entries, query) : [...entries],
@@ -83,6 +89,22 @@ export function MachineList({ entries, selectedId, onSelect, stale, bodyRef, onB
           </div>
         ) : (
           <StaleContent stale={stale}>
+            {overview && (
+              <button
+                type="button"
+                className={`row machine-list-overview${overview.selected ? " is-selected" : ""}`}
+                aria-current={overview.selected ? "true" : undefined}
+                aria-describedby={overviewCountId}
+                onClick={overview.onSelect}
+              >
+                <span className="row-icon"><AllMachinesIcon size={16} aria-hidden="true" /></span>
+                <span className="row-title">All Machines</span>
+                <span className="row-trail" aria-hidden="true">{entries.length}</span>
+                <span id={overviewCountId} className="sr-only">
+                  {`${entries.length} ${entries.length === 1 ? "machine" : "machines"}`}
+                </span>
+              </button>
+            )}
             {entries.length === 0 ? null : shown.length === 0 ? (
               <State
                 variant="no-results"

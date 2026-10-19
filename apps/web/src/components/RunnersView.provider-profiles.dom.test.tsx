@@ -87,7 +87,8 @@ async function profileActions(viewer: IdentityAdministrationView): Promise<strin
         <InstancesContextProvider value={browserInstanceManager}>
           <FeedbackProvider>
             <StoreProvider connection={connection}
-              navigation={{ current: () => ({ name: "runners", section: "machines" }), push() {}, listen: () => () => {} }}>
+              // The machine's own route: with nothing selected the detail is the overview (#2986).
+              navigation={{ current: () => ({ name: "runners", section: "machines", machineId: runner.runnerId }), push() {}, listen: () => () => {} }}>
               <RunnersView />
             </StoreProvider>
           </FeedbackProvider>
