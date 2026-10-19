@@ -33,6 +33,9 @@ for (const [name, value] of Object.entries({
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
   InputEvent: domWindow.InputEvent,
+  // For Memory Sharing's listbox (#2963).
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -610,24 +613,25 @@ test("leaving a project with unsaved settings asks first, and Keep Editing stays
 });
 
 /** A client whose project updates wait until the test settles each one, in order. */
+/** `settleNext(elsewhere)` answers with `elsewhere` applied too: a change another client made meanwhile. */
 function heldClient(base: ProjectView) {
   const updates: unknown[] = [];
-  const held: (() => void)[] = [];
+  const held: ((elsewhere: Partial<ProjectView>) => void)[] = [];
   let current = base;
   const client = {
     ...api,
     updateProject: (_id: string, body: Record<string, unknown>) => {
       updates.push(body);
       return new Promise((resolve) => {
-        held.push(() => {
-          current = { ...current, ...body, updatedAt: current.updatedAt + 1 } as ProjectView;
+        held.push((elsewhere) => {
+          current = { ...current, ...body, ...elsewhere, updatedAt: current.updatedAt + 1 } as ProjectView;
           resolve({ project: current });
         });
       });
     },
   } as unknown as ApiClient;
-  const settleNext = async () => {
-    await act(async () => { held.shift()!(); });
+  const settleNext = async (elsewhere: Partial<ProjectView> = {}) => {
+    await act(async () => { held.shift()!(elsewhere); });
     await settle();
   };
   return { client, updates, settleNext };
@@ -1004,4 +1008,236 @@ test("on a phone the list's first row opens /projects/overview under a Projects 
   } finally {
     restore();
   }
+});
+
+
+/* --- Memory Sharing (#2963) --- */
+
+const claudeAgent = (version: string): RunnerView["agents"][number] => ({
+  id: `claude-${version}`, name: "Claude", command: "claude", args: [], env: {},
+  driver: "claude-code", context: { kind: "native" }, version, available: true,
+});
+/** Four machines, one in each of the policy's states. */
+const memoryRunners: RunnerView[] = [
+  { ...runner, runnerId: "runner-ready", displayName: "Ready Machine", agents: [claudeAgent("2.1.284")] },
+  { ...runner, runnerId: "runner-old", displayName: "Old Machine", agents: [claudeAgent("2.1.284")], protocolVersion: 194 },
+  { ...runner, runnerId: "runner-claude", displayName: "Old Claude Machine", agents: [claudeAgent("2.1.283")] },
+  { ...runner, runnerId: "runner-away", displayName: "Away Machine", agents: [claudeAgent("2.1.284")], status: "offline" },
+];
+function memoryProject(options: Partial<ProjectView> = {}): ProjectView {
+  const base = project(1, { name: "Alpha", memorySharing: "separate" });
+  return {
+    ...base,
+    locations: memoryRunners.map((machine, index) => ({
+      ...base.locations[0]!, id: `location-${machine.runnerId}`, runnerId: machine.runnerId, name: `Location ${index + 1}`,
+      isDefault: index === 0,
+    })),
+    ...options,
+  };
+}
+const memorySection = (body: HTMLElement) => [...body.querySelectorAll<HTMLElement>(".project-detail > section")]
+  .find((section) => text(section.querySelector(".section-title")) === "Memory Sharing")!;
+const memoryTrigger = (body: HTMLElement) =>
+  memorySection(body).querySelector<HTMLButtonElement>('button[aria-label^="Memory Sharing:"]');
+const consentNotice = (body: HTMLElement) => [...memorySection(body).querySelectorAll(".notice")]
+  .find((notice) => text(notice).startsWith("A conversation keeps its history")) ?? null;
+async function chooseMemorySharing(body: HTMLElement, label: string) {
+  await act(async () => memoryTrigger(body)!.click());
+  const option = [...domWindow.document.querySelectorAll('[role="option"]')]
+    .find((node) => node.textContent?.startsWith(label)) as unknown as HTMLElement | undefined;
+  assert.ok(option, `Memory Sharing offers ${label}`);
+  await act(async () => option!.click());
+}
+
+test("Memory Sharing is one sentence, one row, the machine rows and a closed About, and no other paragraph", async () => {
+  const body = await renderSelected([memoryProject()], "Alpha", { runners: memoryRunners });
+  const section = memorySection(body);
+  assert.equal(text(section.querySelector(":scope > .section-note")),
+    "Whether this project's Claude accounts on the same machine share saved memory.");
+  assert.deepEqual(rowTitles(section), ["Memory Sharing"]);
+  assert.equal(memoryTrigger(body)!.getAttribute("aria-label"), "Memory Sharing: Keep Separate");
+  assert.equal(section.querySelectorAll(".project-memory-machine").length, 4);
+  const about = section.querySelector<HTMLDetailsElement>(":scope > details.disclosure")!;
+  assert.equal(text(about.querySelector("summary")), "About Memory Sharing");
+  assert.equal(about.open, false, "About starts closed");
+  assert.deepEqual([...section.querySelectorAll("p")].filter((paragraph) => !about.contains(paragraph)).map(text),
+    ["Whether this project's Claude accounts on the same machine share saved memory."],
+    "the details are behind About; nothing else is a paragraph");
+  assert.equal(section.querySelectorAll(".notice").length, 0, "no notice while the saved choice is shown");
+  assert.doesNotMatch(text(body), /Saved Choice:|Save Memory Policy/u);
+  assert.equal([...body.querySelectorAll("button")].some((button) => text(button) === "Save Memory Policy"), false);
+  assertNoDomNode(saveBar(body), "no save bar while clean");
+});
+
+test("choosing Share Project Memory shows the consent notice and the save bar; Discard removes both", async () => {
+  const alpha = memoryProject();
+  const { client, updates } = recordingClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", { runners: memoryRunners }, client);
+  await act(async () => memoryTrigger(body)!.click());
+  const options = [...domWindow.document.querySelectorAll('[role="option"]')] as unknown as HTMLElement[];
+  const labelledByText = (element: Element) => (element.getAttribute("aria-labelledby") ?? "").split(/\s+/u).filter(Boolean)
+    .map((id) => text(domWindow.document.getElementById(id) as unknown as Element)).join(" ");
+  assert.deepEqual(options.map((option) => [labelledByText(option), describedByText(option)]), [
+    ["Keep Account Memories Separate", ["Each account keeps its own saved memory."]],
+    ["Share Project Memory", ["Accounts on the same machine use this project's shared memory."]],
+  ], "the list names each choice in full, with its sentence");
+  await act(async () => memoryTrigger(body)!.click());
+  await chooseMemorySharing(body, "Share Project Memory");
+  assert.equal(memoryTrigger(body)!.getAttribute("aria-label"), "Memory Sharing: Share Project Memory");
+  assert.equal(text(consentNotice(body)),
+    "A conversation keeps its history when it switches accounts, and that history may already contain memories. "
+    + "Sharing can't remove it, or stop a provider learning from the conversation under its own settings.");
+  assert.ok(consentNotice(body)!.classList.contains("t-info"));
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Unsaved changes");
+  await act(async () => { saveBarButton(body, "Discard")!.click(); });
+  assert.equal(memoryTrigger(body)!.getAttribute("aria-label"), "Memory Sharing: Keep Separate");
+  assertNoDomNode(consentNotice(body), "Discard removes the consent notice");
+  assertNoDomNode(saveBar(body), "and the save bar");
+  // Chosen and chosen back reads clean.
+  await chooseMemorySharing(body, "Share Project Memory");
+  await chooseMemorySharing(body, "Keep Account Memories Separate");
+  assertNoDomNode(saveBar(body));
+  assert.deepEqual(updates, [], "nothing is saved without Save");
+});
+
+test("Save sends memorySharing: \"shared\" in the same request as the other changed fields, then the notice goes", async () => {
+  const alpha = memoryProject();
+  const { client, updates } = recordingClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", { runners: memoryRunners }, client);
+  await type(fieldOf(body, "Name"), "Alpha Renamed");
+  await chooseMemorySharing(body, "Share Project Memory");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settle();
+  assert.deepEqual(updates, [{ name: "Alpha Renamed", memorySharing: "shared" }], "one request");
+  assert.equal(memoryTrigger(body)!.getAttribute("aria-label"), "Memory Sharing: Share Project Memory");
+  assertNoDomNode(consentNotice(body), "shared is now the saved choice");
+  assertNoDomNode(saveBar(body));
+  // Back to separate needs no consent, and is saved on its own.
+  await chooseMemorySharing(body, "Keep Account Memories Separate");
+  assertNoDomNode(consentNotice(body));
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settle();
+  assert.deepEqual(updates, [{ name: "Alpha Renamed", memorySharing: "shared" }, { memorySharing: "separate" }]);
+});
+
+test("a failed save keeps Share Project Memory chosen with its consent notice, and Try Again saves it", async () => {
+  let failing = true;
+  const alpha = memoryProject();
+  const { client, updates } = recordingClient(alpha, () => failing ? new Error("HTTP 500") : null);
+  const body = await renderSelected([alpha], "Alpha", { runners: memoryRunners }, client);
+  await chooseMemorySharing(body, "Share Project Memory");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settle();
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Couldn't save the changes. Nothing was changed.");
+  assert.equal(memoryTrigger(body)!.getAttribute("aria-label"), "Memory Sharing: Share Project Memory");
+  assert.ok(consentNotice(body), "still unsaved, so the consent notice stays");
+  failing = false;
+  await act(async () => { saveBarButton(body, "Try Again")!.click(); });
+  await settle();
+  assert.deepEqual(updates, [{ memorySharing: "shared" }, { memorySharing: "shared" }]);
+  assertNoDomNode(saveBar(body));
+});
+
+test("each machine is a row with its sentence, and with no locations one line shows", async () => {
+  const body = await renderSelected([memoryProject(), project(2, { name: "Empty", memorySharing: "separate", locations: [] })],
+    "Alpha", { runners: memoryRunners });
+  const machines = [...memorySection(body).querySelectorAll(".project-memory-machine")].map((row) =>
+    [text(row.querySelector(".row-title")), text(row.querySelector(".row-sub"))]);
+  assert.deepEqual(machines, [
+    ["Ready Machine", "Supported"],
+    ["Old Machine", "Update Wollipog on this machine to use it"],
+    ["Old Claude Machine", "Install Claude Code 2.1.284 or newer, then refresh agents"],
+    ["Away Machine", "Offline. The saved choice applies when it reconnects."],
+  ]);
+  assert.equal(memorySection(body).querySelector(".project-memory-machines")!.tagName, "UL");
+  await act(async () => { projectRow(body, "Empty").click(); });
+  await settle();
+  assert.equal(memorySection(body).querySelectorAll(".project-memory-machine").length, 0);
+  assert.equal(text(memorySection(body).querySelector(".project-memory-empty")), "Add a location to use this setting.");
+});
+
+test("an older server shows Memory Sharing Needs an Update in the row's place", async () => {
+  const body = await renderSelected([memoryProject({ memorySharing: undefined })], "Alpha", { runners: memoryRunners });
+  const section = memorySection(body);
+  const notice = section.querySelector(".notice.t-warning.compact");
+  assert.equal(text(notice?.querySelector(".notice-title")), "Memory Sharing Needs an Update");
+  assert.equal(text(notice?.querySelector(".notice-body")), "Update Wollipog to choose how accounts share memory.");
+  assertNoDomNode(memoryTrigger(body), "no row");
+  assert.deepEqual(rowTitles(section), []);
+  assert.equal(section.querySelectorAll(".project-memory-machine").length, 0, "no saved choice for a machine to apply");
+});
+
+test("a viewer sees Memory Sharing read-only with the saved value", async () => {
+  const body = await renderSelected([memoryProject({ canManage: false, memorySharing: "shared" })], "Alpha", { runners: memoryRunners });
+  const row = settingRow(body, "Memory Sharing");
+  assert.equal(text(row.querySelector(".setting-row-value-text")), "Share Project Memory");
+  assertNoDomNode(memoryTrigger(body), "nothing to choose");
+  assertNoDomNode(consentNotice(body));
+});
+
+test("a Save queued behind a Sessions tab change never sends Share Project Memory chosen after it was pressed", async () => {
+  const alpha = memoryProject();
+  const { client, updates, settleNext } = heldClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", { runners: memoryRunners }, client);
+  await act(async () => { settingRow(body, "Show as a Sessions Tab").querySelector<HTMLButtonElement>('[role="switch"]')!.click(); });
+  await type(fieldOf(body, "Name"), "Beta");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  assertNoDomNode(consentNotice(body), "no consent notice when Save was pressed");
+  await chooseMemorySharing(body, "Share Project Memory");
+  await settleNext();
+  assert.deepEqual(updates, [{ hidden: true }, { name: "Beta" }], "the queued Save keeps the name, not the later choice");
+  await settleNext();
+  assert.equal(memoryTrigger(body)!.getAttribute("aria-label"), "Memory Sharing: Share Project Memory");
+  assert.ok(consentNotice(body), "the choice waits, with its notice, for a Save of its own");
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Unsaved changes");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  assert.deepEqual(updates.at(-1), { memorySharing: "shared" });
+  await settleNext();
+  assertNoDomNode(saveBar(body));
+});
+
+test("a Save queued while the consent notice showed sends sharing, and a choice withdrawn before it runs is not sent", async () => {
+  const alpha = memoryProject();
+  const { client, updates, settleNext } = heldClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", { runners: memoryRunners }, client);
+  const tab = () => settingRow(body, "Show as a Sessions Tab").querySelector<HTMLButtonElement>('[role="switch"]')!;
+  await act(async () => { tab().click(); });
+  await chooseMemorySharing(body, "Share Project Memory");
+  assert.ok(consentNotice(body));
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await settleNext();
+  assert.deepEqual(updates, [{ hidden: true }, { memorySharing: "shared" }], "pressed while the notice showed");
+  await settleNext();
+  assertNoDomNode(saveBar(body));
+
+  await act(async () => { tab().click(); });
+  await chooseMemorySharing(body, "Keep Account Memories Separate");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  await chooseMemorySharing(body, "Share Project Memory");
+  await settleNext();
+  assert.deepEqual(updates.slice(2), [{ hidden: false }], "the press asked for Keep Separate; the choice was taken back, so nothing is sent");
+  assertNoDomNode(saveBar(body), "and the draft reads the saved choice again");
+});
+
+test("a queued Save pressed while no consent notice showed never shares, even once another client turns sharing off", async () => {
+  const alpha = memoryProject({ memorySharing: "shared" });
+  const { client, updates, settleNext } = heldClient(alpha);
+  const body = await renderSelected([alpha], "Alpha", { runners: memoryRunners }, client);
+  // An explicit shared choice that matches the saved one: clean, and no notice.
+  await chooseMemorySharing(body, "Keep Account Memories Separate");
+  await chooseMemorySharing(body, "Share Project Memory");
+  assertNoDomNode(consentNotice(body));
+  await type(fieldOf(body, "Name"), "Beta");
+  await act(async () => { settingRow(body, "Show as a Sessions Tab").querySelector<HTMLButtonElement>('[role="switch"]')!.click(); });
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  assertNoDomNode(consentNotice(body), "no consent notice at the press");
+  await settleNext({ memorySharing: "separate" });
+  assert.deepEqual(updates, [{ hidden: true }, { name: "Beta" }], "the queued request carries only the name");
+  await settleNext();
+  assert.ok(consentNotice(body), "the shared choice now needs consent, and waits for it");
+  assert.equal(text(saveBar(body)?.querySelector(".save-bar-message")), "Unsaved changes");
+  await act(async () => { saveBarButton(body, "Save")!.click(); });
+  assert.deepEqual(updates.at(-1), { memorySharing: "shared" }, "a Save pressed while it shows shares");
+  await settleNext();
+  assertNoDomNode(saveBar(body));
 });

@@ -12686,6 +12686,25 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   /* A long setup sentence that wraps to a line of its own truncates there rather than clipping. */
   .project-location-setup { flex-shrink: 1; min-width: 0; }
 }
+/* Memory Sharing (ProjectMemorySharing.tsx, #2963): one two-line row per machine in one surface, its
+   support sentence wrapping rather than cut off where it is longer than a phone's row; the single
+   line without locations; and About's paragraphs. */
+.project-memory-machines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.project-memory-machine.row-2 {
+  height: auto;
+  min-height: var(--row-h-2);
+  padding-block: var(--space-2);
+}
+.project-memory-machine .row-sub { white-space: normal; }
+.project-memory-empty { color: var(--text-dim); }
+.project-memory-about > p {
+  margin: 0;
+  color: var(--text-dim);
+}
 /* No Locations (§12.1): one inline row, its sentence wrapping rather than squeezing its action. */
 .project-locations-empty {
   height: auto;

@@ -1,38 +1,40 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
-import type { ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
+import type { ProjectView, RunnerView, UpdateProjectRequest } from "@wollipog/protocol";
 import { useLeaveGuard } from "../leave-guard.js";
+import type { RunnerDisplay } from "../runners.js";
 import {
   draftAfterSave,
+  memorySharingNeedsConsent,
   PROJECT_SETTINGS_FIELDS,
   projectSettingsChanges,
   projectSettingsDirty,
   projectSettingsErrors,
   projectSettingsValues,
   revealedAfterSave,
+  sendableProjectSettings,
   type ProjectSettingsDraft,
   type ProjectSettingsField,
 } from "../project-settings-draft.js";
 import { DetailSection } from "./DetailSection.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { ProjectMemorySharingSection } from "./ProjectMemorySharing.js";
 import { SaveBar } from "./SaveBar.js";
 import { NumberRow, SAVED_MS, SettingRow, SettingsGroup, SwitchRow, type RowFailure } from "./ui/SettingsRows.js";
 
 const READ_ONLY_REASON = "You can't change this project.";
 
 /**
- * A project's Settings and Child Session Defaults (#2962), as setting rows (docs/design-system.md
- * §8.2) on one draft. Name and the two child limits are typed values saved together by one
- * `SaveBar` (§8.6, Editor), in one update request carrying only what changed; Show as a Sessions Tab
- * applies at once (§8.6, Instant). Keyed by project identity by the caller, so another project
- * starts with no draft.
- *
- * `memorySharing` is drawn between the two sections, where Memory Sharing sits until it joins this
- * draft (#2963).
+ * A project's Settings, Memory Sharing and Child Session Defaults, as setting rows
+ * (docs/design-system.md §8.2) on one draft. Name, the Memory Sharing choice (#2963) and the two
+ * child limits are saved together by one `SaveBar` (§8.6, Editor), in one update request carrying
+ * only what changed; Show as a Sessions Tab applies at once (§8.6, Instant). Keyed by project
+ * identity by the caller, so another project starts with no draft.
  */
 export function ProjectSettings({
   project,
   access,
-  memorySharing,
+  runners,
+  machine,
   busy,
   nameInputRef,
   onSave,
@@ -41,7 +43,9 @@ export function ProjectSettings({
   project: ProjectView;
   /** The Access row (#2960's readout with Change…), where access is managed. */
   access?: ReactNode;
-  memorySharing?: ReactNode;
+  /** For Memory Sharing's machine rows. */
+  runners: ReadonlyMap<string, RunnerView>;
+  machine: (runnerId: string) => RunnerDisplay;
   /** The key of the project request in flight, from this editor or any other part of the page. */
   busy: string | null;
   nameInputRef?: Ref<HTMLInputElement>;
@@ -76,8 +80,14 @@ export function ProjectSettings({
   const leaveAfterSave = useRef<(() => void) | null>(null);
   /** Save pressed while another request for this project ran: it runs once that one settles. */
   const saveWhenFree = useRef(false);
+  /**
+   * Whether Memory Sharing's consent notice showed when Save was last pressed (#2963). A request may
+   * share project memory only for such a press, whenever it is sent: at once, queued, or retried.
+   */
+  const sharingConsented = useRef(false);
 
   const values = projectSettingsValues(project, draft);
+  const consentShown = memorySharingNeedsConsent(project, values);
   const dirty = projectSettingsDirty(project, draft);
   const errors = projectSettingsErrors(values);
   const shownError = (field: ProjectSettingsField) => (revealed.has(field) ? errors[field] ?? null : null);
@@ -100,8 +110,10 @@ export function ProjectSettings({
     saveWhenFree.current = false;
   };
 
-  const save = async () => {
+  /** `queued` is the run of a press kept while another request ran, rather than a press now. */
+  const save = async (queued = false) => {
     if (savingRef.current || readOnly) return;
+    if (!queued) sharingConsented.current = consentShown;
     // Another request for this project is still running (a Sessions tab change); the press is kept
     // and Save runs once that request settles, on the draft as it is then.
     if (busy !== null) {
@@ -117,12 +129,15 @@ export function ProjectSettings({
       document.getElementById(inputIds[invalid])?.focus();
       return;
     }
-    const changes = projectSettingsChanges(project, values);
+    // A shared choice without a press that showed its notice stays in the draft, with the notice, for a
+    // Save of its own; the rest of the draft saves now.
+    const sent = sendableProjectSettings(project, values, sharingConsented.current);
+    const heldBack = sent !== values;
+    const changes = projectSettingsChanges(project, sent);
     if (Object.keys(changes).length === 0) {
-      reset();
+      if (!heldBack) reset();
       return;
     }
-    const sent = values;
     savingRef.current = true;
     setSaving(true);
     setSaveError(null);
@@ -143,7 +158,7 @@ export function ProjectSettings({
     }
   };
   useEffect(() => {
-    if (busy === null && saveWhenFree.current) void save();
+    if (busy === null && saveWhenFree.current) void save(true);
   // `save` reads this render's draft, which is the point: it saves what is on screen now.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy]);
@@ -261,7 +276,15 @@ export function ProjectSettings({
           </SettingsGroup>
         </form>
       </DetailSection>
-      {memorySharing}
+      <ProjectMemorySharingSection
+        project={project}
+        runners={runners}
+        machine={machine}
+        value={values.memorySharing ?? "separate"}
+        consentShown={consentShown}
+        readOnly={readOnly}
+        onChange={(memorySharing) => setDraft((current) => ({ ...current, memorySharing }))}
+      />
       {limitsSupported && (
         <DetailSection
           title="Child Session Defaults"

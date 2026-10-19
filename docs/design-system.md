@@ -2013,9 +2013,11 @@ page with a dirty draft asks **Keep Editing** or **Discard Changes** first (`use
 Back and Forward ask too (#3218): the editor's entry is put back while it asks, so Keep Editing loses
 no forward entry, and Discard Changes completes the move.
 
-A project's detail is the second (#2962): Name and the two child-session limits are one draft,
-saved by one bar sticky 16px above the bottom of the detail pane in one update request carrying only
-the changed fields, while Show as a Sessions Tab beside them applies at once. Each field validates on
+A project's detail is the second (#2962): Name, the Memory Sharing choice (#2963) and the two
+child-session limits are one draft, saved by one bar sticky 16px above the bottom of the detail pane
+in one update request carrying only the changed fields, while Show as a Sessions Tab beside them
+applies at once. Choosing Share Project Memory while it is not the saved choice shows its consent
+notice under the row, so sharing is only saved by a Save pressed after it was shown. Each field validates on
 leaving it after an edit and on Save, which moves focus to the first invalid field; a shown error
 blocks Save with "Fix N fields to save". A failed save keeps the draft and reads "Couldn't save the
 changes. Nothing was changed." with Try Again. Leaving the project with a dirty draft asks first, as

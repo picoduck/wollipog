@@ -180,7 +180,10 @@ const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
   ["./components/ProjectLocationDialog.tsx", "title=\"Adding New Folders Needs an Update\""],
   ["./components/ProjectLocationDialog.tsx",
     "This version of Wollipog can't register a new folder as a location. Update or restart Wollipog so it matches this dashboard. You can still add an existing location."],
-  ["./components/ProjectMemorySharing.tsx", "Memory policy is unavailable. Update Wollipog to configure it."],
+  // A project's Memory Sharing on an older server (#2963).
+  ["./components/ProjectMemorySharing.tsx", "title=\"Memory Sharing Needs an Update\""],
+  ["./components/ProjectMemorySharing.tsx", "Update Wollipog to choose how accounts share memory."],
+  ["./components/ProjectMemorySharing.tsx", "\"Update Wollipog on this machine to use it\""],
   // Settings › Behavior › Agent Defaults (#3024).
   ["./components/AgentDefaultsPanel.tsx",
     "This version of Wollipog doesn't support agent defaults. Update or restart Wollipog so it matches this dashboard, then try again."],

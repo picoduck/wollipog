@@ -7,7 +7,10 @@ import {
   projectSettingsDirty,
   projectSettingsErrors,
   projectSettingsValues,
+  memorySharingNeedsConsent,
   revealedAfterSave,
+  sendableProjectSettings,
+  withSavedMemorySharing,
 } from "./project-settings-draft.js";
 
 function project(options: Partial<ProjectView> = {}): ProjectView {
@@ -81,4 +84,50 @@ test("after a save, only fields still in the draft keep their errors shown", () 
   assert.deepEqual([...revealedAfterSave(revealed, {})], []);
   assert.deepEqual([...revealedAfterSave(new Set(["name"] as const), { cost: "-2" })], [],
     "a field typed into but never left keeps waiting for its leave");
+});
+
+test("Memory Sharing is part of the draft: it follows the saved choice, is dirty once changed, and saves with the rest", () => {
+  const separate = project({ memorySharing: "separate" });
+  assert.deepEqual(projectSettingsValues(separate, {}), { name: "Alpha", cost: "5", tools: "100", memorySharing: "separate" });
+  assert.equal(projectSettingsDirty(separate, { memorySharing: "separate" }), false, "chosen back to the saved choice");
+  assert.equal(projectSettingsDirty(separate, { memorySharing: "shared" }), true);
+  const values = projectSettingsValues(separate, { name: "Beta", memorySharing: "shared" });
+  assert.deepEqual(projectSettingsChanges(separate, values), { name: "Beta", memorySharing: "shared" },
+    "one request with the other changed fields");
+  assert.deepEqual(projectSettingsChanges(separate, projectSettingsValues(separate, { memorySharing: "separate" })), {});
+  assert.deepEqual(draftAfterSave({ memorySharing: "shared" }, values), {}, "saved, so it leaves the draft");
+  assert.deepEqual(draftAfterSave({ memorySharing: "separate" }, values), { memorySharing: "separate" },
+    "chosen again while the save ran");
+});
+
+test("a server with no memory policy is never sent one, and a choice left in the draft is not a change", () => {
+  const older = project({ memorySharing: undefined });
+  assert.deepEqual(projectSettingsValues(older, {}), { name: "Alpha", cost: "5", tools: "100" });
+  assert.equal(projectSettingsDirty(older, { memorySharing: "shared" }), false);
+  assert.deepEqual(projectSettingsChanges(older, projectSettingsValues(older, { name: "Beta", memorySharing: "shared" })),
+    { name: "Beta" });
+});
+
+test("a queued save's values keep the typed fields and put Memory Sharing back at the saved choice", () => {
+  const separate = project({ memorySharing: "separate" });
+  const values = projectSettingsValues(separate, { name: "Beta", memorySharing: "shared" });
+  assert.deepEqual(withSavedMemorySharing(separate, values), { name: "Beta", cost: "5", tools: "100", memorySharing: "separate" });
+  assert.deepEqual(projectSettingsChanges(separate, withSavedMemorySharing(separate, values)), { name: "Beta" });
+  assert.deepEqual(draftAfterSave({ name: "Beta", memorySharing: "shared" }, withSavedMemorySharing(separate, values)),
+    { memorySharing: "shared" }, "the later choice stays in the draft");
+  assert.deepEqual(withSavedMemorySharing(project({ memorySharing: undefined }), values), { name: "Beta", cost: "5", tools: "100" });
+});
+
+test("sharing is sendable only with consent from a press that showed the notice; turning it off never needs any", () => {
+  const separate = project({ memorySharing: "separate" });
+  const shared = project({ memorySharing: "shared" });
+  const sharing = projectSettingsValues(separate, { name: "Beta", memorySharing: "shared" });
+  assert.equal(memorySharingNeedsConsent(separate, sharing), true);
+  assert.equal(memorySharingNeedsConsent(shared, sharing), false, "already shared");
+  assert.equal(memorySharingNeedsConsent(project({ memorySharing: undefined }), sharing), false, "no policy on the server");
+  assert.equal(sendableProjectSettings(separate, sharing, true), sharing);
+  assert.deepEqual(projectSettingsChanges(separate, sendableProjectSettings(separate, sharing, false)), { name: "Beta" });
+  const off = projectSettingsValues(shared, { memorySharing: "separate" });
+  assert.equal(sendableProjectSettings(shared, off, false), off);
+  assert.deepEqual(projectSettingsChanges(shared, sendableProjectSettings(shared, off, false)), { memorySharing: "separate" });
 });
