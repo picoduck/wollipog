@@ -121,6 +121,15 @@ function acknowledgementKey(sessionId: string, continuationId: string, kind: Bac
   return JSON.stringify([sessionId, continuationId, kind]);
 }
 
+/** What a receipt is regardless of where the bounded inventory lists it, so its notice entry keeps
+ * its dismissal and "+N More" choice as other receipts come and go. A receipt without a
+ * continuation is the control plane's one held result for its turn, the unknown turn included. */
+function receiptIdentity(delivery: BackgroundDeliveryView): string {
+  return delivery.continuationId != null
+    ? JSON.stringify(["continuation", delivery.continuationId])
+    : JSON.stringify(["held", delivery.parentTurnId]);
+}
+
 /**
  * The recovery a delivery still shows (#2859): its watchdog state, or Result Missing for a missing
  * result the watchdog no longer reports. `null` when there is nothing to recover, or once the person
@@ -268,14 +277,16 @@ export function BackgroundWorkPanel({
     const { continuationId } = acknowledgement;
     const key = acknowledgementKey(session.id, continuationId, acknowledgement.kind);
     if (acknowledgementFeedback.get(key)?.state === "pending") return;
-    const origin = document.activeElement;
+    // Registered before the request: the control plane broadcasts the acknowledged session before
+    // it answers, so the notice can be gone before the response arrives.
+    const focusTarget = { sessionId: session.id, groupKey, origin: document.activeElement };
+    acknowledgedFocus.current = focusTarget;
     const token = Symbol("missing-result-acknowledgement");
     setAcknowledgementFeedback((current) => new Map(current).set(key, { token, state: "pending" }));
     void requestBackgroundDeliveryAcknowledgement(api, session.id, acknowledgement).then((failure) => {
-      if (failure === null) {
-        acknowledgedFocus.current = { sessionId: session.id, groupKey, origin };
-        setLocallyAcknowledged((current) => new Set(current).add(key));
-      }
+      if (failure === null) setLocallyAcknowledged((current) => new Set(current).add(key));
+      // Nothing was acknowledged, so the notice and its focused Acknowledge stay.
+      else if (acknowledgedFocus.current === focusTarget) acknowledgedFocus.current = null;
       setAcknowledgementFeedback((current) => {
         const settled = current.get(key);
         if (settled?.token !== token || settled.state !== "pending") return current;
@@ -373,8 +384,8 @@ export function BackgroundWorkPanel({
       })))
       .sort((a, b) => Number(a.severity !== "warning") - Number(b.severity !== "warning") ||
         a.view.groupIndex - b.view.groupIndex || a.deliveryIndex - b.deliveryIndex);
-    results.forEach(({ delivery, deliveryIndex, state, severity, view: { group, states, counts } }, index) => {
-      const key = `background-result:${delivery.continuationId ?? `${group.key}:${deliveryIndex}`}:${state}`;
+    results.forEach(({ delivery, state, severity, view: { group, states, counts } }, index) => {
+      const key = `background-result:${receiptIdentity(delivery)}:${state}`;
       const title = `${BACKGROUND_DELIVERY_STATUS[state].label} ${inBackgroundTurn(group.parentTurnId, parentTurns.get(group.parentTurnId))}`;
       const deliveredJobs = deliveryJobs(delivery, group);
       const continuationId = delivery.continuationId;
@@ -430,10 +441,10 @@ export function BackgroundWorkPanel({
         ),
       });
     });
-    const acknowledgedResults = groups.flatMap((group) => group.deliveries.flatMap((delivery, deliveryIndex) =>
-      delivery.blockedResultAcknowledgedAt != null ? [{ group, delivery, deliveryIndex }] : []));
-    acknowledgedResults.forEach(({ group, delivery, deliveryIndex }, index) => {
-      const key = `background-result-acknowledged:${group.key}:${delivery.blockedResultRevision ?? deliveryIndex}`;
+    const acknowledgedResults = groups.flatMap((group) => group.deliveries.flatMap((delivery) =>
+      delivery.blockedResultAcknowledgedAt != null ? [{ group, delivery }] : []));
+    acknowledgedResults.forEach(({ group, delivery }, index) => {
+      const key = `background-result-acknowledged:${receiptIdentity(delivery)}:${delivery.blockedResultRevision ?? ""}`;
       const title = `Blocked Result Acknowledged ${inBackgroundTurn(group.parentTurnId, parentTurns.get(group.parentTurnId))}`;
       notices.push({
         key,

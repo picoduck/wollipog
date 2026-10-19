@@ -1693,6 +1693,68 @@ test("after Acknowledge, focus goes to its turn's heading rather than the slot's
   }
 });
 
+// The control plane broadcasts the acknowledged session before it answers the request, so the
+// update can take the notice away while the request is still pending.
+for (const kind of ["missing result", "retry exhaustion"] as const) {
+  test(`after Acknowledge of a ${kind}, focus goes to its turn's heading even when the session update arrives before the response (#2871)`, async () => {
+    const now = Date.now();
+    const requests: Array<(value: SessionView) => void> = [];
+    const respond = () => new Promise<SessionView>((resolve) => { requests.push(resolve); });
+    const client = { acknowledgeBackgroundMissingResult: respond, acknowledgeBackgroundRetryExhaustion: respond } as unknown as ApiClient;
+    const session = kind === "missing result" ? threeResultsSession("session-focus-early-update") : managedSession({
+      id: "session-focus-early-update",
+      backgroundDeliveries: [
+        { continuationId: "bgcont-turn-2", parentTurnId: "turn-2", jobCount: 1, terminalCount: 1,
+          retryExhaustedAt: now - MINUTE, watchdogState: "capacity_retry_exhausted" },
+        { parentTurnId: "turn-3", jobCount: 1, terminalCount: 1, watchdogState: "result_not_projected" },
+      ],
+    });
+    const panel = await mountBackgroundWork({ session, parentTurns: threeTurns }, client);
+    try {
+      const acknowledge = acknowledgeButtons(panel.container)[0]!;
+      acknowledge.focus();
+      await act(async () => { acknowledge.click(); await Promise.resolve(); });
+      const acknowledged = {
+        ...session,
+        backgroundDeliveries: session.backgroundDeliveries!.map((delivery) => delivery.continuationId !== "bgcont-turn-2" ? delivery
+          : kind === "missing result"
+            ? { ...delivery, watchdogState: undefined, missingResultAcknowledgedAt: now }
+            : { ...delivery, watchdogState: undefined, retryExhaustionAcknowledgedAt: now }),
+      };
+      await panel.render({ session: acknowledged, parentTurns: threeTurns });
+      await act(async () => { requests[0]!({} as SessionView); await Promise.resolve(); await Promise.resolve(); });
+      const active = domWindow.document.activeElement as unknown as HTMLElement | null;
+      assert.equal(active?.tagName, "H3", "not the slot's next control");
+      assert.equal(active?.textContent, "Turn 2");
+    } finally {
+      for (const request of requests) request({} as SessionView);
+      await panel.dispose();
+    }
+  });
+}
+
+// A receipt without a continuation is the server's one held result for its turn, whatever else the
+// bounded inventory lists around it, so its entry keeps its identity as receipts come and go.
+for (const parentTurnId of ["unknown", "turn-3"]) {
+  test(`an unchanged ${parentTurnId === "unknown" ? "unknown-turn" : "known-turn"} receipt without a continuation stays dismissed when another receipt enters the inventory (#2871)`, async () => {
+    const now = Date.now();
+    const held = { parentTurnId, jobCount: 1, terminalCount: 1, watchdogState: "result_not_projected" as const };
+    const session = managedSession({ id: `session-stable-${parentTurnId}`, backgroundDeliveries: [held] });
+    const panel = await mountBackgroundWork({ session, parentTurns: threeTurns });
+    try {
+      const notice = panel.container.querySelector<HTMLElement>(".panel-notice-slot > .notice")!;
+      await act(async () => notice.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click());
+      assertNoDomNode(panel.container.querySelector(".notice"), "dismissed");
+      const settled = { continuationId: "bgcont-settled", parentTurnId, jobCount: 1, terminalCount: 1,
+        acceptedAt: now - 2 * MINUTE, runnerResultPersistedAt: now - MINUTE, transcriptProjectedAt: now - MINUTE };
+      await panel.render({ session: { ...session, backgroundDeliveries: [settled, held] }, parentTurns: threeTurns });
+      assertNoDomNode(panel.container.querySelector(".notice"), "a settled receipt listed first does not bring it back");
+    } finally {
+      await panel.dispose();
+    }
+  });
+}
+
 test("after Acknowledge on a Job Detail page, whose list and headings are hidden, focus stays in the notice slot (#2871)", async () => {
   const requests: Array<(value: SessionView) => void> = [];
   const client = {
