@@ -3571,7 +3571,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | literal radii 2/3/5/7/9px | nearest tier | 2–5→`--radius-xs`, 7→`--radius-sm`, 9→`--radius-md`. |
 | `--shadow` | `--elev-2` (popovers) / `--elev-3` (dialogs) | Removed. |
 | `--primary-to`, `--primary-hover-to`, `--primary-active-to`, `--primary-*-border`, `--primary-hover-inset` | unused | Flat primary; keep in schemes until regeneration, then drop. |
-| `--row-pad-*`, `--inbox-row-pad-*`, `--project-row-pad-*`, `--card-pad-*`, `--agent-row-pad-*`, `--finding-row-pad-*`, `--ext-row-pad-*`, `--artifact-row-pad-*`, `--run-card-pad-*`, `--runner-card-pad-*`, `--ws-row-pad-*`, `--files-entry-pad-*`, `--usage-cell-pad-*` | `--row-pad-x` + `--row-h*` | Density changes row height, not per-family padding. |
+| `--row-pad-*`, `--inbox-row-pad-*`, `--project-row-pad-*`, `--card-pad-*`, `--finding-row-pad-*`, `--ext-row-pad-*`, `--artifact-row-pad-*`, `--run-card-pad-*`, `--runner-card-pad-*`, `--ws-row-pad-*`, `--files-entry-pad-*`, `--usage-cell-pad-*` | `--row-pad-x` + `--row-h*` | Density changes row height, not per-family padding. |
 | `--bp-tablet` 900 / `--bp-desktop` 1240 | `--bp-compact` 1100 / `--bp-wide` 1440 | Documentation tokens; media queries use 760 / 1100 / 1440. |
 | where `--radius-sm/-md` live | edit the values in the `:root, :root[data-theme="dark"]` block | They are declared only there, and `:root` also matches in light, so one edit covers both themes. Do not redeclare them in the shared token block (its comment explains the specificity trap). |
 | `--mobile-session-action-gap` 7px | `--space-2` | |
