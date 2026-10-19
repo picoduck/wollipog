@@ -85,7 +85,7 @@ test.describe("at 1440×900", () => {
 
   test("Multi-Agent Runs and Pods create from a 32px primary with a plus icon", async ({ page }) => {
     for (const [path, title, label] of [
-      ["/runs", "Multi-Agent Runs", "New Multi-Agent Run"],
+      ["/runs", "Multi-Agent Runs", "New Run"],
       ["/pods", "Pods", "New Pod"],
     ] as const) {
       await openDestination(page, path, title);

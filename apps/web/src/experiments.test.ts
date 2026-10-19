@@ -153,7 +153,7 @@ test("every surface that exposes a gated feature consults the flags", () => {
     // exactly when the page does.
     ["./App.tsx", /<ExperimentGate experiment="multiAgent"[^>]*>\s*\{view\.name === "runs" \? <RunsView /,
       "the page header's create button is a creation surface and gates with its view"],
-    ["./components/RunsView.tsx", /<PageHeader[^>]*?primary=\{\{ label: "New Multi-Agent Run"/,
+    ["./components/RunsView.tsx", /<PageHeader[^>]*?primary=\{empty \? undefined : \{ label: "New Run"/,
       "the Runs create action belongs to the gated Runs page"],
     ["./components/AutomationsView.tsx", /multiAgentEnabled \|\| form\.actionKind === "workflow_run"/,
       "Automations must not OFFER workflow runs while multi-agent is off, but an automation already using one keeps rendering truthfully"],

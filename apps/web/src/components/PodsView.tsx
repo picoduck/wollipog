@@ -246,7 +246,7 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   return (
     <div className="page">
     {header}
-    <div className="runs-list surface">
+    <div className="surface">
       {list.map((pod) => (
         <button key={pod.id} type="button" className="row row-2" onClick={() => navigate({ name: "pod", id: pod.id })}>
           <span className="row-body">

@@ -1,12 +1,12 @@
-import { RunsIcon } from "./Icons.js";
+import { BotIcon, CompareIcon, ProjectsIcon, RunsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { RunView, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
+import type { RunView, SessionView, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { relativeTime, titleCaseLabel } from "../format.js";
+import { formatRecordedRelativeTime, relativeTime, titleCaseLabel } from "../format.js";
 import { useApi } from "../api-context.js";
 import { SessionStatusIndicators } from "./common.js";
 import { EventTimeline } from "./EventTimeline.js";
@@ -22,6 +22,8 @@ import { ArtifactPreviewDialog, ArtifactRow } from "./ArtifactPreview.js";
 import { ListFoot } from "./ListFoot.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
+import { StaleContent } from "./StaleContent.js";
+import { indexRunWorkflows, runStatus, runType, runTypeLabel, type RunWorkflows } from "../run-status.js";
 import { backLabel, destination, viewTitle } from "../navigation.js";
 import { isTimelineSessionActive, useTimelineClock } from "../timeline-clock.js";
 
@@ -76,64 +78,155 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
   const runsDestination = destination("runs");
   const { navigate } = useStoreActions();
   const runs = useStoreSelector((s) => s.runs);
+  const sessions = useStoreSelector((s) => s.sessions);
   const conn = useStoreSelector((s) => s.conn);
   const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const list = useMemo(
     () => [...runs.values()].sort((a, b) => b.createdAt - a.createdAt),
     [runs],
   );
+  const workflows = useRunWorkflows(list, conn === "online");
+  const now = useTimelineClock(list.length > 0);
 
   let body: ReactNode;
-  if (list.length === 0 && (!snapshotLoaded || conn !== "online")) {
+  const empty = list.length === 0 && snapshotLoaded && conn === "online";
+  if (list.length === 0 && !empty) {
     // An empty map proves nothing before the first snapshot or while disconnected (§12.5).
     const placeholder = listPlaceholder("runs", conn);
     body = <State variant={placeholder.variant} icon={<RunsIcon />} title={placeholder.title}>{placeholder.hint}</State>;
-  } else if (list.length === 0) {
+  } else if (empty) {
     body = (
       <State
         icon={<RunsIcon />}
         title={`No ${runsDestination.name} Yet`}
-        actions={<button type="button" className="btn primary" onClick={onNewRun}>New Multi-Agent Run</button>}
+        actions={<button type="button" className="btn primary" onClick={onNewRun}>New Run</button>}
       >
-        Start one to compare several agents on the same task.
+        Give one task to two or three agents, or run a Build and Review workflow, and compare what each one does.
       </State>
     );
   } else {
-    body = <RunList runs={list} onOpen={(runId) => navigate({ name: "run", id: runId })} />;
+    // Disconnected with runs: the last-known rows stay, dimmed and still openable, under one line
+    // that says why (§12.5). Never an empty state.
+    const stale = conn !== "online";
+    body = (
+      <>
+        {stale && <Notice compact tone="neutral" role="status" className="run-list-reconnecting">Reconnecting…</Notice>}
+        <StaleContent stale={stale}>
+          <div className="surface">
+            {list.map((run) => (
+              <RunRow
+                key={run.id}
+                run={run}
+                sessions={sessions}
+                workflows={workflows}
+                now={now}
+                onOpen={() => navigate({ name: "run", id: run.id })}
+              />
+            ))}
+          </div>
+        </StaleContent>
+      </>
+    );
   }
 
   return (
     <div className="page">
+      {/* The empty state owns the one create action, so the header offers none beside it (§12.1). */}
       <PageHeader
         title={runsDestination.name}
         description={runsDestination.description}
-        primary={{ label: "New Multi-Agent Run", onClick: onNewRun }}
+        primary={empty ? undefined : { label: "New Run", onClick: onNewRun }}
       />
       {body}
     </div>
   );
 }
 
-function RunList({ runs, onOpen }: { runs: RunView[]; onOpen: (runId: string) => void }) {
+/**
+ * Every run's workflow instance and each workflow's name, loaded once with the list and again when a
+ * run's `updatedAt` changes or the connection returns. A newer load always wins. A failed instance
+ * load keeps the last answer, so rows fall back to no type and a status from their members alone; a
+ * failed definition load only costs the workflows their names.
+ */
+function useRunWorkflows(runs: readonly RunView[], online: boolean): RunWorkflows | null {
+  const api = useApi();
+  const [workflows, setWorkflows] = useState<RunWorkflows | null>(null);
+  const alive = useRef(true);
+  const issued = useRef(0);
+  const applied = useRef(0);
+  const key = JSON.stringify(runs.map((run) => [run.id, run.updatedAt]));
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  useEffect(() => {
+    const ids = (JSON.parse(key) as Array<[string, number]>).map(([id]) => id);
+    if (!online || !ids.length) return;
+    const generation = ++issued.current;
+    void Promise.all([api.workflowInstances(), api.workflowDefinitions().catch(() => [])])
+      .then(([instances, definitions]) => {
+        if (!alive.current || generation <= applied.current) return;
+        applied.current = generation;
+        setWorkflows(indexRunWorkflows(instances, definitions, ids));
+      })
+      .catch(() => {});
+  }, [api, key, online]);
+  return workflows;
+}
+
+const SHOWN_AGENTS = 3;
+
+/** The members' agents by name, three at most and then "+N". */
+function runAgentsLabel(run: RunView, sessions: ReadonlyMap<string, SessionView>): string | null {
+  const names = run.sessionIds.flatMap((id) => {
+    const session = sessions.get(id);
+    return session ? [sessionAgentLabel(session.agentName, session.driver, session.agentId)] : [];
+  });
+  if (!names.length) return null;
+  const more = names.length - SHOWN_AGENTS;
+  return `${names.slice(0, SHOWN_AGENTS).join(", ")}${more > 0 ? ` +${more}` : ""}`;
+}
+
+/**
+ * One run (§5.2): a two-line row that opens the run. Line 1 is the title and at most one badge
+ * (`runStatus()`); line 2 is meta 12px apart: the type, the project and the agents by name. The
+ * created time trails. On phones the badge leads line 2, so a long title keeps its width.
+ */
+export function RunRow({ run, sessions, workflows, now, onOpen }: {
+  run: RunView;
+  sessions: ReadonlyMap<string, SessionView>;
+  workflows: RunWorkflows | null;
+  /** The shared clock the created time reads against. */
+  now: number;
+  onOpen: () => void;
+}) {
+  const type = runType(run, workflows);
+  const status = runStatus(run, sessions, type.kind === "workflow" ? type.instance : null);
+  const typeLabel = runTypeLabel(type);
+  const agents = runAgentsLabel(run, sessions);
+  const created = new Date(run.createdAt);
   return (
-    <div className="runs-list surface">
-      {runs.map((run) => (
-        <button key={run.id} type="button" className="row row-2" onClick={() => onOpen(run.id)}>
-          <span className="row-body">
-            <span className="row-line">
-              <span className="row-title">{run.title}</span>
-              <span className="count">
-                {run.sessionIds.length} Agent{run.sessionIds.length === 1 ? "" : "s"}
-              </span>
-            </span>
-            <span className="row-sub">{run.prompt}</span>
-          </span>
-          <span className="row-trail">
-            {run.workspaceName ? `${run.workspaceName} · ` : ""}Created {relativeTime(run.createdAt)}
-          </span>
-        </button>
-      ))}
-    </div>
+    <button type="button" className="row row-2" onClick={onOpen}>
+      <span className="row-icon" aria-hidden="true">
+        {type.kind === "comparison" ? <CompareIcon size={16} /> : type.kind === "workflow" ? <RunsIcon size={16} /> : null}
+      </span>
+      <span className="row-body run-row-body">
+        <span className="row-title" title={run.title}>{run.title}</span>
+        {status && <StatusBadge meta={statusMeta("run", status)} className="run-row-status" />}
+        <span className="row-sub run-row-meta">
+          {typeLabel && <span className="run-row-type">{typeLabel}</span>}
+          {run.workspaceName && (
+            <span className="run-row-project"><ProjectsIcon size={14} aria-hidden="true" /><span>{run.workspaceName}</span></span>
+          )}
+          {agents && <span className="run-row-agents"><BotIcon size={14} aria-hidden="true" /><span>{agents}</span></span>}
+        </span>
+      </span>
+      <span className="row-trail">
+        <time dateTime={created.toISOString()} title={`Created ${created.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`}>
+          {formatRecordedRelativeTime(run.createdAt, now)}
+        </time>
+      </span>
+    </button>
   );
 }
 
