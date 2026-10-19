@@ -115,6 +115,11 @@ test("a session requests a review session: a typed reviewer of the other family,
     assert.equal(reviewSession.parentSessionId ?? null, null);
     assert.equal(h.db.getSession("s1")!.liveChildCapacity?.occupied, 0);
     assert.equal(h.db.getSession("s1")!.kind, undefined, "an ordinary session reports no kind");
+    assert.equal(reviewSession.title, "Codex Review of picoduck/wollipog#3368");
+    // The requester's own view summarizes its reviews, so a client reads them only when there are any.
+    assert.deepEqual(h.db.getSession("s1")!.reviewRuns, { count: 1, active: 1, updatedAt: h.db.reviewSessions.view(view.reviewSessionId)!.updatedAt });
+    assert.equal(h.db.getSession("s2")!.reviewRuns, undefined, "a session that requested none has no summary");
+    assert.equal(reviewSession.reviewRuns, undefined, "a review session reports its link, not a summary");
     assert.deepEqual(h.svc.reviewSessionView("s1", view.reviewSessionId).data, view);
     assert.equal(h.svc.reviewSessionView("s2", view.reviewSessionId).status, 404, "another session cannot read it");
   } finally { h.db.close(); }
@@ -184,6 +189,7 @@ test("a review session is refused without a supporting runner, reviewer or conne
     assert.ok(codex.svc.requestReviewSession("s1", request()).ok);
     const [start] = codex.starts();
     assert.equal(start?.spec.agentId, "claude", "Claude Code reviews Codex");
+    assert.equal(codex.db.getSession(start!.spec.sessionId)!.title, "Claude Review of picoduck/wollipog#3368");
     assert.equal(start?.spec.config?.permissionMode, "dontAsk");
   } finally { codex.db.close(); }
   const offline = harness();

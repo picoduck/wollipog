@@ -379,6 +379,14 @@ first, and `review session cancel` (`cancel_review_session`) stops the review se
 persists the outcome before reporting it and re-sends it at each registration; a runner restart
 fails any unsettled review session for good, and the checkout is removed once the review settles.
 
+In the web app, a review session is titled **Codex Review** or **Claude Review** of its pull
+request. The requester's Review panel lists its reviews under Cross-Model Reviews, newest first:
+each with its round and epoch, one state badge (Requested, Reviewing, Upvote, Downvote, Invalid,
+Failed, Canceled, or Not Validated from an older runner), Stale once a newer review covers another
+head, why an invalid or failed review did not vote, a valid report's findings with their files, and
+Open Transcript. The list is read-only; the requester's own view carries a summary of its reviews
+(`reviewRuns`: count, active, updatedAt), and the panel reads them again whenever it changes.
+
 The routes are `/api/sessions/:id/review-sessions` (POST to request, GET to list),
 `.../:reviewSessionId` and `.../:reviewSessionId/cancel` (POST), with the bridge's credential rules.
 Orchestrator sessions do not have these tools, and a session in a campaign with an allowance is

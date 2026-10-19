@@ -8684,7 +8684,7 @@ export class SessionsService {
       workspaceId: session.workspaceId ?? "",
       ...(workspacePath ? { workspacePath } : {}),
       agentId: reviewer.agentId,
-      title: `${label} Review of ${pullRequest.repository}#${pullRequest.number}`,
+      title: `${harness === "codex" ? "Codex" : "Claude"} Review of ${pullRequest.repository}#${pullRequest.number}`,
       prompt: request.brief,
       useWorktree: false,
       config: {

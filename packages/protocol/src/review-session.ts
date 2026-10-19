@@ -90,6 +90,16 @@ export interface ReviewSessionView {
 
 export interface ReviewSessionsPage { reviews: ReviewSessionView[]; nextAfterReviewSessionId: string | null }
 
+/** #3369: on a requester's own view, what its review sessions add up to, so a client reads them only
+ * when there are any and again whenever one changes. Omitted for a session that requested none. */
+export interface ReviewRunsSummary {
+  count: number;
+  /** Requested or running. */
+  active: number;
+  /** The newest change to any of them. */
+  updatedAt: number;
+}
+
 /** Where an attempt sits in its review run, as the runner planned it. */
 export interface ReviewAttemptRound {
   epoch: number;

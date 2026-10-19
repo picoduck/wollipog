@@ -42,7 +42,7 @@ type FindingRefusal = { reason: string; id: string } | null;
  * measured against the clamp whenever the text or the row's width changes, as Skills' description
  * is, so a body that fits once the panel widens loses its toggle.
  */
-function FindingBody({ text }: { text: string }) {
+export function FindingBody({ text }: { text: string }) {
   const id = `finding-body-${useId().replace(/:/g, "")}`;
   const [expanded, setExpanded] = useState(false);
   const [truncates, setTruncates] = useState(false);

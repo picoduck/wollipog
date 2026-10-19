@@ -16,6 +16,7 @@ import {
   type GitPrSummary,
   type ReviewFinding,
   type ReviewFindingsResponse,
+  type ReviewSessionView,
   type SessionView,
   type SourceLocation,
 } from "@wollipog/protocol";
@@ -57,6 +58,7 @@ import { DiffIcon, FolderIcon, RefreshIcon } from "./Icons.js";
 import { PanelHeaderActions } from "./RightPanel.js";
 import { PanelToolLayout } from "./PanelToolLayout.js";
 import { FindingSelectionBar, ReviewFindings, type FindingSyncControl } from "./ReviewFindings.js";
+import { ReviewRuns } from "./ReviewRuns.js";
 import { isOpenFinding } from "../review-finding-copy.js";
 import { ReviewSummary } from "./ReviewSummary.js";
 import { ReviewToolbar } from "./ReviewToolbar.js";
@@ -193,6 +195,7 @@ export function ReviewPanel({
   onAttachWorkspaceReference,
   focus,
   onFocusHandled,
+  onOpenSession,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -206,6 +209,8 @@ export function ReviewPanel({
   /** A file to bring into view: a transcript edit's Open in Review (#2187). */
   focus?: DiffFileFocus | null;
   onFocusHandled?: () => void;
+  /** Opens another session, for a cross-model review's Open Transcript. */
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const api = useApi();
   const { confirm } = useFeedback();
@@ -523,6 +528,27 @@ export function ReviewPanel({
     return () => { findingReqRef.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, session.id]);
+
+  // The cross-model reviews this session requested (#3369). Its own view summarizes them, and the
+  // control plane republishes that view whenever one changes, so they are read only when there are
+  // any and again whenever that summary moves.
+  const [reviewRuns, setReviewRuns] = useState<ReviewSessionView[]>([]);
+  const reviewRunsReqRef = useRef(0);
+  const reviewRunsKey = session.reviewRuns ? `${session.reviewRuns.count}:${session.reviewRuns.active}:${session.reviewRuns.updatedAt}` : null;
+  useEffect(() => {
+    const request = ++reviewRunsReqRef.current;
+    if (reviewRunsKey === null) {
+      setReviewRuns([]);
+      return;
+    }
+    api.reviewSessions(session.id).then(
+      (page) => { if (request === reviewRunsReqRef.current) setReviewRuns(page.reviews); },
+      // A review that cannot be read now keeps the last one shown; the next change reads it again.
+      () => {},
+    );
+    return () => { reviewRunsReqRef.current += 1; };
+  }, [api, session.id, reviewRunsKey]);
+  useEffect(() => setReviewRuns([]), [session.id]);
 
   const findingRefusal = sessionCommandRefusal(session, "manageReviewFindings");
   const findingRefusalId = "review-findings-refusal";
@@ -1295,6 +1321,12 @@ export function ReviewPanel({
               error={findingError}
               onDismissNotice={() => setFindingNotice(null)}
               triggerRef={findingsTriggerRef}
+            />
+            <ReviewRuns
+              key={`runs-${session.id}`}
+              runs={reviewRuns}
+              onOpenSourceLocation={onOpenSourceLocation}
+              {...(onOpenSession ? { onOpenSession } : {})}
             />
             <div className="git-diff-section" role="group" aria-label="Changes">
               {/* Keyed off !shownDiff (not diffBusy): after a scope switch there is one paint before

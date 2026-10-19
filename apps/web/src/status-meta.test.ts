@@ -172,6 +172,15 @@ const TABLE: readonly Row[] = [
   ["agent", "approval_required", "Approval Required", "warning"],
   ["agent", "unavailable", "Unavailable", "danger"],
   ["agent", "ready_when_last_seen", "Ready When Last Seen", "neutral"],
+  // Cross-model review
+  ["reviewRun", "requested", "Requested", "neutral"],
+  ["reviewRun", "running", "Reviewing", "info"],
+  ["reviewRun", "upvote", "Upvote", "success"],
+  ["reviewRun", "downvote", "Downvote", "warning"],
+  ["reviewRun", "unvalidated", "Not Validated", "neutral"],
+  ["reviewRun", "invalid", "Invalid", "danger"],
+  ["reviewRun", "failed", "Failed", "danger"],
+  ["reviewRun", "canceled", "Canceled", "neutral"],
 ];
 
 test("statusMeta holds every row of the §11.2 vocabulary with its label and tone", () => {
@@ -191,6 +200,7 @@ test("only actively progressing work pulses, and an unverified source draws a ho
   assert.deepEqual(pulsing("queuedMessage"), ["sent", "started", "steering"]);
   // Sending is a spinner beside the word, never a pulsing badge (#2171).
   assert.deepEqual(pulsing("messageReceipt"), []);
+  assert.deepEqual(pulsing("reviewRun"), ["running"]);
   assert.equal(statusMeta("job", "stalled").pulse, false);
   assert.equal(statusMeta("machine", "offline").hollow, true);
   assert.equal(statusMeta("job", "unverified").hollow, true);

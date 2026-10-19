@@ -5336,10 +5336,13 @@ export class ControlPlaneDb {
   readonly campaignReviewJobs: CampaignReviewJobs;
   readonly sessionReviewJobs: SessionReviewJobs;
   readonly reviewSessions: ReviewSessions;
-  /** A review session's immutable kind and what it reviews (#3368); nothing for ordinary sessions. */
-  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review"> {
+  /** A review session's immutable kind and what it reviews (#3368); for a session that requested
+   * reviews, their summary (#3369); nothing else for ordinary sessions. */
+  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review" | "reviewRuns"> {
     const review = this.reviewSessions.link(sessionId);
-    return review ? { kind: "review", review } : {};
+    if (review) return { kind: "review", review };
+    const reviewRuns = this.reviewSessions.summaryFor(sessionId);
+    return reviewRuns ? { reviewRuns } : {};
   }
 
   private constructor(
