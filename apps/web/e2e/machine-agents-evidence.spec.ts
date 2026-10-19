@@ -16,6 +16,7 @@ type Scenario = "agent-states" | "no-agents-ready" | "batch-wrapper";
 test.skip(!evidenceDir, "set WOLLIPOG_EVIDENCE_DIR to capture evidence");
 
 async function open(page: Page, theme: (typeof THEMES)[number], scenario: Scenario): Promise<void> {
+  await page.emulateMedia({ colorScheme: theme });
   await page.addInitScript((value) => {
     localStorage.setItem("wollipog.theme", value);
     document.documentElement.dataset.theme = value;
@@ -24,6 +25,12 @@ async function open(page: Page, theme: (typeof THEMES)[number], scenario: Scenar
   await page.goto("/machine-management-e2e.html?machine=native-t14s");
   await expect(page.locator("article.machine-detail")).toBeVisible();
   await page.evaluate((value) => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario(value), scenario);
+  // The fixture has no appearance bootstrap; set the theme on the document it renders into.
+  await page.evaluate((value) => {
+    document.documentElement.dataset.theme = value;
+    document.documentElement.style.colorScheme = value;
+  }, theme);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 }
 
 const agentRow = (page: Page, name: string) => page.locator("article.machine-detail button.row")
