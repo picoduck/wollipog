@@ -183,8 +183,15 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
   const pending = [...new Map(chosen.map((session) => [worktreeReadKey(session, generation), session.id])).entries()]
     .filter(([key]) => !reads.has(key));
   const pendingKey = pending.map(([key]) => key).join(" ");
+  // Set on every setup, not only the first: StrictMode replays setup and cleanup once, and a flag
+  // only ever cleared would drop every answer after the replay, leaving Merge at "Checking…".
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  // A replayed setup finds a read already in flight and does not repeat it; that read's answer
+  // lands under its own key. A remount is a new dialog with its own set, so no key is stranded.
   const inFlight = useRef(new Set<string>());
   useEffect(() => {
     for (const [key, sessionId] of pending) {

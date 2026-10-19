@@ -111,14 +111,18 @@ async function mount(pods: PodView[], members: SessionView[], overrides: Partial
     ...overrides,
   } as unknown as ApiClient;
   const navigation: ViewNavigation = { current: () => ({ name: "pod", id: "pod-1" }), push() {}, listen: () => () => {} };
+  // Under StrictMode, as main.tsx renders the app: every effect's setup and cleanup is replayed
+  // once, so a ref an effect only ever clears, or a request repeated per setup, shows up here.
   await act(async () => root.render(
-    <ApiProvider client={client}>
-      <FeedbackProvider>
-        <StoreProvider connection={connection} navigation={navigation}>
-          <PodDetail podId="pod-1" />
-        </StoreProvider>
-      </FeedbackProvider>
-    </ApiProvider>,
+    <React.StrictMode>
+      <ApiProvider client={client}>
+        <FeedbackProvider>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <PodDetail podId="pod-1" />
+          </StoreProvider>
+        </FeedbackProvider>
+      </ApiProvider>
+    </React.StrictMode>,
   ));
   await act(async () => socket.push({
     type: "snapshot",
@@ -650,6 +654,21 @@ test("two workers with one agent and one title stay distinguishable in From, Int
     assert.notEqual(closed("From")!.slice("From: ".length), closed("Into")!.slice("Into: ".length));
     const row = dialog.querySelector(".pod-merge-row .row-title")?.textContent ?? "";
     assert.equal(row, "Worker · Codex App Server: migrate call sites (worker) into Worker · Codex App Server: migrate call sites (worker-2)");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("under StrictMode's replayed effects, status answers still land and each member is read once (CR-3.1)", async () => {
+  const reads = statusReads();
+  const view = await mount([pod()], sessions(), { git: reads.git } as unknown as Partial<ApiClient>);
+  try {
+    const dialog = await openDialog("Merge Work…", "Merge Work");
+    assert.equal(reads.waitingFor("lead"), 1, "the replayed setup does not read the lead again");
+    assert.equal(reads.waitingFor("worker"), 1, "the replayed setup does not read the worker again");
+    await reads.answer("lead", false);
+    await reads.answer("worker", false);
+    assert.equal(mergeReason(dialog), null, "the answers count after StrictMode's replay");
   } finally {
     await view.unmount();
   }
