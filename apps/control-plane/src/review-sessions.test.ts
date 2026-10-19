@@ -169,6 +169,23 @@ test("malformed review session requests are refused before anything is created o
   } finally { h.db.close(); }
 });
 
+test("a discovery result replaces the reviewer capability a registration made before discovery", () => {
+  // Registered before discovery: no agent was available yet, so no Codex reviewer was advertised.
+  const h = harness({ reviewSession: { reviewers: [], unavailable: { codex: "no available native agent uses this harness" } } });
+  try {
+    assert.match(h.svc.requestReviewSession("s1", request()).error!, /Codex reviewer is unavailable/u);
+    h.db.updateRunnerReviewSessionCapability("r", CAPABILITY);
+    assert.deepEqual(h.db.getRunner("r")!.runtime?.reviewSession, CAPABILITY);
+    assert.equal(h.db.getRunner("r")!.runtime?.maxConcurrentSessions, 4, "the rest of the runtime is kept");
+    assert.ok(h.svc.requestReviewSession("s1", request()).ok, "the discovered reviewer is used");
+    // A malformed capability is dropped, so the next request is refused rather than launched on it.
+    h.db.updateRunnerReviewSessionCapability("r", { reviewers: [{ harness: "bash", agentId: "x" }] } as never);
+    assert.equal(h.db.getRunner("r")!.runtime?.reviewSession, undefined);
+    h.db.updateRunnerReviewSessionCapability("r", null);
+    assert.equal(h.db.getRunner("r")!.runtime?.reviewSession, undefined);
+  } finally { h.db.close(); }
+});
+
 test("a review session is refused without a supporting runner, reviewer or connection, and for unsupported requesters", () => {
   const old = harness({ protocol: 223 });
   try {

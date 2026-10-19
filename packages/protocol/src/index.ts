@@ -8894,6 +8894,10 @@ export interface AgentsUpdatedMessage {
   editors?: EditorInfo[];
   /** Protocol v176: target-local harness probes refreshed without replacing the target template. */
   executionTargets?: ExecutionTargetDefinition[];
+  /** #3369: the review-session capability, which depends on discovered agents. A registration made
+   * before discovery advertised it stale; each discovery pass replaces it (null: none). Older
+   * control planes ignore it. */
+  reviewSession?: import("./review-session.js").ReviewSessionCapability | null;
 }
 
 /** Authoritative replacement of one runner's active/recent provider-login cards. */
