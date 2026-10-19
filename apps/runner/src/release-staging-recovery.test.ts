@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  appendFileSync, chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync,
+  appendFileSync, chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync,
   writeFileSync, writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -486,6 +486,8 @@ test("legacy interrupted downloads are inspected read-only and preserved with a 
   assert.equal(readFileSync(join(result.preservedPath, "SHA256SUMS"), "utf8"), "interrupted manifest");
   assert.equal(readFileSync(join(result.preservedPath, "web", "assets", "app.js"), "utf8"), "inert web");
   const record = JSON.parse(readFileSync(join(result.container, "recovery.json"), "utf8"));
+  assert.equal(result.nonce, null, "legacy staging has no attempt nonce");
+  assert.equal(result.nonce, record.nonce);
   assert.equal(record.sourceKind, "legacy");
   assert.equal(record.source, path);
   assert.equal(record.state, "preserved");
@@ -615,4 +617,23 @@ test("interrupted legacy preservation retains the source or diagnoses its preser
     }
     assert.equal(f.inspect().preserved[0]!.state, "incomplete");
   });
+});
+
+test("legacy recovery refuses a process executing a staged binary with no staging descriptors or cwd", linux, async (t) => {
+  const f = fixture(t);
+  const path = legacyDirectory(f);
+  const binary = join(path, "wollipog-runner-x86_64-unknown-linux-gnu");
+  copyFileSync("/bin/sleep", binary);
+  chmodSync(binary, 0o755);
+  const token = f.inspect().legacy[0]!.recovery.token!;
+  const child = spawn(binary, ["30"], { cwd: f.root, stdio: "ignore" });
+  t.after(() => { child.kill("SIGKILL"); });
+  await new Promise((resolve) => child.once("spawn", resolve));
+  const procs = { ...procProcesses(), list: () => [child.pid!] };
+  assert.equal(f.inspect(procs).legacy[0]!.recovery.eligible, false);
+  assert.ok(f.inspect(procs).legacy[0]!.holders.pids.includes(child.pid!));
+  assert.throws(() => f.recover(token, stagingFilesystem, procs, true), RecoveryRefusedError);
+  child.kill("SIGKILL");
+  await new Promise((resolve) => child.once("exit", resolve));
+  assert.equal(f.inspect(procs).legacy[0]!.recovery.eligible, true);
 });

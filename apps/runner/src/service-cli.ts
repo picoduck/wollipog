@@ -1129,7 +1129,9 @@ async function staging(args: string[], words: string[], host: ServiceHost, io: S
 
   const options = { acceptUninspectable: flag(args, "--accept-uninspectable-processes") };
   const before = inspectStaging(layout.dataDir, context, fs, procs, options);
-  const source = before.legacy.find((entry) => entry.recovery.token === token)?.path ?? before.slot;
+  const legacy = before.legacy.find((entry) => entry.recovery.token === token);
+  if (token!.startsWith("sl1-") && !legacy) throw new CliError(`recovery refused: the token does not match a current legacy directory; inspect again with ${inspect}. Nothing was changed.`, 1);
+  const source = legacy?.path ?? before.slot;
   if (!flag(args, "--yes")) {
     if (!io.stdinIsTTY) throw new CliError("refusing to recover staging without confirmation; pass --yes in non-interactive use", 2);
     if (!(await io.confirm(`Move attempt ${token} from ${source} into ${before.recovery.destination}/ (nothing is deleted)?`))) {

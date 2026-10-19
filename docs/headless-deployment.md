@@ -424,7 +424,7 @@ pins the staging directories, inspects again, and refuses unless all of the foll
   declared size, or, only when the attempt selected the web archive, the extracted `web/`
   directory (preserved without traversal);
 - the updater process recorded for the attempt is not running, and no inspectable process
-  has its working directory, root, or a descriptor inside the staging parent (a live updater
+  has its working directory, root, executable, or a descriptor inside the staging parent (a live updater
   holds both open for its whole attempt; this also catches a concurrent recovery);
 - `<data-dir>/upgrade-recovery/` is absent or a private directory on the same filesystem.
 
@@ -472,8 +472,8 @@ inventoried entry's identity, size, permissions, link count and modification/cha
 Recovery pins the source and destination, repeats those checks immediately before the atomic
 move, and retains the directory as `upgrade-recovery/<time>-<nonce>-<random>/<tag>/` with a
 `recovery.json` record. Legacy staging has no updater identity or reliable phase history:
-preservation makes no claim about what was installed. A process holding the staging parent or
-anything inside it blocks preservation, including a concurrent update or recovery. Uninspectable
+preservation makes no claim about what was installed. A process with its working directory, root, executable or a descriptor inside the staging
+parent blocks preservation, including a concurrent update or recovery. Uninspectable
 processes always require explicit `--accept-uninspectable-processes` attestation for legacy
 staging; an unavailable process table refuses even with that flag.
 

@@ -39,7 +39,7 @@ export interface StagingProcesses {
   list(): number[];
   /** Real, effective, saved and filesystem UIDs, or null when the process has exited. */
   uids(pid: number): number[] | null;
-  /** cwd, root and every descriptor target, or null when the process has exited. Throws when unreadable. */
+  /** cwd, root, executable and every descriptor target, or null when the process has exited. Throws when unreadable. */
   links(pid: number): string[] | null;
   /** Start time and boot ID of a running process, or null when it is not running. */
   identity(pid: number): ProcessIdentity | null;
@@ -67,7 +67,7 @@ export function procProcesses(root = "/proc"): StagingProcesses {
       const base = join(root, String(pid));
       const links: string[] = [];
       try {
-        for (const name of ["cwd", "root"]) {
+        for (const name of ["cwd", "root", "exe"]) {
           try { links.push(readlinkSync(join(base, name))); }
           catch (error) { if (!gone(error)) throw error; }
         }
@@ -105,7 +105,7 @@ export interface Holders {
 }
 
 /**
- * Find processes whose cwd, root or descriptors are inside `target`. A live updater pins the
+ * Find processes whose cwd, root, executable or descriptors are inside `target`. A live updater pins the
  * staging parent and slot for its whole attempt, so a holder means the attempt may be active.
  * Only processes running as `uid` can open the private slot (all processes when root).
  */
@@ -514,7 +514,8 @@ export interface RecoveryResult {
   preservedPath: string;
   container: string;
   tag: string;
-  nonce: string;
+  /** Legacy directories have no recorded attempt nonce. */
+  nonce: string | null;
   /** True when the staging parent was empty after the move, so the next update is admitted. */
   admissible: boolean;
   warnings: string[];
@@ -579,8 +580,8 @@ export function recoverStaging(
     try { destinationDir = pinPrivate(destination, uid, true); }
     catch (error) { throw new RecoveryRefusedError(`recovery refused: ${redactDetail((error as Error).message)}`, inspection); }
     if (destinationDir.dev !== first.parentStat!.dev) throw new RecoveryRefusedError(`recovery refused: ${destination} is not on the staging filesystem`, inspection);
-    const nonce = inspection.owner.nonce ?? randomUUID();
-    const name = `${compactTime(at)}-${nonce.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
+    const preservationNonce = inspection.owner.nonce ?? randomUUID();
+    const name = `${compactTime(at)}-${preservationNonce.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
     const container = join(destination, name);
     fs.mkdir(join(destinationDir.base, name), { mode: 0o700 });
     let containerDir: PinnedDirectory;
@@ -638,7 +639,7 @@ export function recoverStaging(
     if (journalProblem && inspection.journal.evidence === "recorded") warnings.push(`the phase journal was not updated: ${journalProblem}`);
     let admissible = false;
     try { admissible = list(parent, fs, 1).observed.length === 0; } catch { /* reported as not admissible */ }
-    return { preservedPath, container: preservedContainer, tag: inspection.owner.tag!, nonce, admissible, warnings };
+    return { preservedPath, container: preservedContainer, tag: inspection.owner.tag!, nonce: inspection.owner.nonce, admissible, warnings };
   } finally {
     for (const fd of pins) { try { fs.close(fd); } catch { /* descriptor authority is retired either way */ } }
   }
