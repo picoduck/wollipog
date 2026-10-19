@@ -33,6 +33,34 @@ export function projectArchiveMessage(input: {
     : `All ${count} sessions in ${project} move to Archived Sessions. Any that are still running are stopped first.`;
 }
 
+/** The count in a Project archive confirmation's title (#2964): "Archive and Stop 11 Sessions",
+ * "Archive 3 Sessions", "Archive and Stop 1 Session". */
+export function sessionCountLabel(count: number): string {
+  return `${count} Session${count === 1 ? "" : "s"}`;
+}
+
+/** The body of Delete Project's confirmation (#2964), in neutral words: what goes for good, where its
+ * sessions go, and what is kept. `sessionCount` counts archived sessions too, which move as well. */
+export function projectDeleteMessage(projectName: string, sessionCount: number): string {
+  const project = `“${projectName}”`;
+  if (sessionCount === 0) return `${project} is deleted for good. Its location folders are kept.`;
+  return sessionCount === 1
+    ? `${project} is deleted for good, and its 1 session moves to No Project. The session, its files and the location folders are kept.`
+    : `${project} is deleted for good, and its ${sessionCount} sessions move to No Project. The sessions, their files and the location folders are kept.`;
+}
+
+/** The body of Remove Location's confirmation (#2964). The path is not in the sentence: the dialog
+ * shows it as its own mono row. */
+export function projectRemoveLocationMessage(projectName: string, machineName: string): string {
+  return `New sessions in “${projectName}” stop using this folder on ${machineName}. The folder, its sessions and other projects aren't affected.`;
+}
+
+/** The note under Remove Location's body when it removes the project's last location: the limit
+ * the removal leaves, kept out of the body so the body stays two sentences (§7.4). */
+export function projectNoLocationsLeftNote(projectName: string): string {
+  return `“${projectName}” will have no locations left, so it can't start sessions until you add one.`;
+}
+
 /** The result of archiving a Project's sessions, in archiveResultMessage()'s words for a count: a
  * stop that failed and may have left sessions running comes first, then sessions still stopping. */
 export function projectArchiveResultMessage(

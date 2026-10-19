@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
+import { viewPath } from "../src/navigation.js";
 
 // One dialog anatomy with a phone sheet (docs/design-system.md §7, #1800), measured in a browser.
 
@@ -117,12 +118,15 @@ test.describe("desktop", () => {
     const dialog = page.getByRole("dialog", { name: "Delete Project" });
     await dialogMotionSettled(page);
     expect((await anatomy(dialog)).width).toBe(400);
-    await expect(dialog.getByLabel("Type Alpha to Confirm")).toBeFocused();
+    const field = dialog.getByLabel("Type the Project Name to Confirm");
+    await expect(field).toBeFocused();
+    await expect(field).toHaveAccessibleDescription("Enter Alpha exactly.");
+    await expect(dialog.locator(".field-helper code")).toHaveText("Alpha");
     const confirm = dialog.getByRole("button", { name: "Delete Project" });
     await expect(confirm).toBeDisabled();
-    await dialog.getByLabel("Type Alpha to Confirm").fill("Alph");
+    await field.fill("Alph");
     await expect(confirm).toBeDisabled();
-    await dialog.getByLabel("Type Alpha to Confirm").fill("Alpha");
+    await field.fill("Alpha");
     await expect(confirm).toBeEnabled();
     await expect(dialog.getByRole("button", { name: "Cancel" })).toHaveClass("btn");
   });
@@ -196,6 +200,44 @@ test.describe("phone", () => {
     await expect(confirmation).toHaveCount(0);
     await expect(manage).toBeVisible();
     await expect(manage.getByRole("checkbox").first()).toBeChecked({ checked: !checked });
+  });
+
+  test("a project's confirmations replace the ⋯ sheet they came from, with two equal 48px buttons and Back (#2964)", async ({ page }) => {
+    const url = `/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent(viewPath({ name: "projects", id: "alpha" }))}`;
+    await page.goto(url);
+    await page.evaluate(() => localStorage.clear());
+    await page.goto(url);
+    const bar = page.locator(".detail-bar");
+    await expect(bar.getByRole("heading", { name: "Alpha" })).toBeVisible();
+    const location = page.locator(".project-location").first();
+    const cases: Array<[trigger: Locator, menu: string, item: RegExp, title: RegExp]> = [
+      [bar.getByRole("button", { name: "Project Actions" }), "Project Actions", /^Delete Project…/, /^Delete Project$/],
+      [bar.getByRole("button", { name: "Project Actions" }), "Project Actions", /^Archive/, /^Archive (and Stop )?\d+ Sessions?$/],
+      [location.getByRole("button", { name: / Actions$/ }), "", /^Remove Location…/, /^Remove Location$/],
+    ];
+    for (const [trigger, menuName, item, title] of cases) {
+      await trigger.click();
+      const menu = menuName ? page.getByRole("menu", { name: menuName }) : page.getByRole("menu");
+      await menu.getByRole("menuitem", { name: item }).click();
+      const dialog = page.getByRole("dialog", { name: title });
+      await expect(dialog).toBeVisible();
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await expect(page.locator(".modal")).toHaveCount(1);
+      await dialogMotionSettled(page);
+      expect(await anatomy(dialog)).toMatchObject({ backdropParentIsBody: true, width: 390, bottomGap: 0, header: 48 });
+      const buttons = await dialog.locator(".modal-foot .btn").evaluateAll((elements) =>
+        elements.map((element) => [Math.round(element.getBoundingClientRect().width), element.getBoundingClientRect().height]));
+      expect(buttons).toHaveLength(2);
+      expect(buttons[0]![0]).toBe(buttons[1]![0]);
+      expect(buttons.map(([, height]) => height)).toEqual([48, 48]);
+      await dialog.getByRole("button", { name: "Back to More Actions" }).click();
+      await expect(dialog).toHaveCount(0);
+      const reopened = page.getByRole("menu");
+      await expect(reopened).toBeVisible();
+      await expect(reopened.getByRole("menuitem", { name: item })).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(reopened).toHaveCount(0);
+    }
   });
 
   test("the composer's model-settings sheet shows the same 36px grabber", async ({ page }) => {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { MOBILE_BREAKPOINT_PX } from "./components/useIsMobile.js";
+import { projectDeleteMessage } from "./project-actions.js";
 
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const offlineBanner = readFileSync(new URL("./components/OfflineBanner.tsx", import.meta.url), "utf8");
@@ -373,7 +374,8 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   assert.doesNotMatch(newSessionDialog, /project-manager-empty/);
   assert.doesNotMatch(css, /\.project-manager-empty\.compact/,
     "the compact empty state has no user left");
-  assert.match(projectsView, /its sessions move to No Project[\s\S]*Sessions and files are not deleted/,
+  assert.match(projectsView, /message: projectDeleteMessage\(/, "Project deletion uses the tested message");
+  assert.match(projectDeleteMessage("Alpha", 3), /its 3 sessions move to No Project\. The sessions, their files and the location folders are kept\./,
     "Project deletion states its non-destructive consequences");
   // #2220: a group whose authoritative count says sessions are coming shows skeleton rows, never a
   // state card in between (sessions-states.test.ts covers the count).
@@ -385,7 +387,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "create cannot be dismissed while its mutation is in flight");
   assert.match(projectLocationDialog, /const close = \(\) => \{\s*if \(!busy\) onClose\(\);/,
     "location changes cannot be dismissed while their mutation is in flight");
-  assert.equal(projectsView.match(/const close = \(\) => \{\s*if \(!busy\) onClose\(\);/g)?.length, 1,
+  assert.match(projectsView, /title: "Delete Project",[\s\S]{0,800}cancelWhileRunning: false,[\s\S]{0,400}onConfirm:/,
     "delete confirmation cannot be dismissed while its mutation is in flight");
   assert.match(projectLocationDialog, /candidates\.length === 0\s*\? "There are no locations to add yet\. Add a new folder instead\."\s*: "No locations match\./,
     "an empty search result stays distinct from having no Locations to manage");

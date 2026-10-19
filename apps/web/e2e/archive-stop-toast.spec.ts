@@ -26,7 +26,7 @@ async function archiveFromProjects(page: Page, archiveStop: "failed" | "pending"
   // The archive item lives in the detail's ⋯ (#2959), named for what it will do.
   await page.locator(".project-detail-title-row").getByRole("button", { name: "Project Actions" }).click();
   await page.getByRole("menu", { name: "Project Actions" }).getByRole("menuitem", { name: "Archive and Stop Sessions…" }).click();
-  await page.getByRole("dialog", { name: "Archive and Stop Sessions" }).getByRole("button", { name: "Archive and Stop" }).click();
+  await page.getByRole("dialog", { name: /^Archive and Stop \d+ Sessions?$/ }).getByRole("button", { name: "Archive and Stop" }).click();
 }
 
 async function expectToast(page: Page, message: RegExp, tone: "t-warning" | "t-info", icon: string) {

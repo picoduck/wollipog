@@ -82,6 +82,11 @@ export interface ConfirmationOptions {
    * dialog shows a field for it, opens with focus there rather than on Cancel, and compares exactly
    * (case and spaces included). */
   typeToConfirm?: string;
+  /** A fixed Title Case label for the `typeToConfirm` field, for text that would make "Type <text>
+   * to Confirm" run long, such as a project's name: "Type the Project Name to Confirm". The field's
+   * helper then shows the text to type, "Enter <text> exactly.", with the text as an inline code
+   * chip. Without it the label names the text, as Delete Group's does. */
+  typeToConfirmLabel?: string;
   /** Durable element to restore focus to after settling. Needed when the invoking control is
    * a menu item that unmounts as the confirmation opens — the activeElement snapshot below
    * would then be disconnected by the time focus can be restored. */
@@ -129,6 +134,7 @@ function confirmationFingerprint(options: ConfirmationOptions): string {
     options.cancelLabel ?? "",
     options.secondaryAction?.label ?? "",
     options.typeToConfirm ?? "",
+    options.typeToConfirmLabel ?? "",
   ].join("\u0000");
 }
 
@@ -619,6 +625,8 @@ function ConfirmationDialog({ request, onSettle }: {
   const typeToConfirm = request.typeToConfirm;
   const [typed, setTyped] = useState("");
   const typedId = useId();
+  const typedHelperId = useId();
+  const typeToConfirmLabel = request.typeToConfirmLabel;
   /** Until the typed text matches, the confirm button is disabled and confirming does nothing. */
   const typedMismatch = typeToConfirm !== undefined && typed !== typeToConfirm;
   /** The running `onConfirm`, if any. Cleared before settling, so a finished action is never aborted
@@ -744,10 +752,11 @@ function ConfirmationDialog({ request, onSettle }: {
       )}
       {moreRows > 0 && <p className="confirmation-rows-more" id={moreId}>and {moreRows} more</p>}
       {typeToConfirm !== undefined && (
-        <label className="field" htmlFor={typedId}>
-          <span>Type {typeToConfirm} to Confirm</span>
+        <div className="field">
+          <label className="field-label" htmlFor={typedId}>{typeToConfirmLabel ?? `Type ${typeToConfirm} to Confirm`}</label>
           {/* Focused on open, on every pointer: nothing else can happen until the text is typed (§7.4). */}
           <input id={typedId} autoFocus value={typed} autoComplete="off" spellCheck={false} readOnly={running}
+            aria-describedby={typeToConfirmLabel !== undefined ? typedHelperId : undefined}
             onChange={(event) => setTyped(event.target.value)}
             onKeyDown={(event) => {
               // An input method's commit Enter is not a confirmation; some report it only as keyCode 229.
@@ -755,7 +764,13 @@ function ConfirmationDialog({ request, onSettle }: {
               event.preventDefault();
               void confirm();
             }} />
-        </label>
+          {/* The helper names the text, so the label can stay short for a long name. */}
+          {typeToConfirmLabel !== undefined && (
+            <p className="field-helper" id={typedHelperId}>
+              Enter <code className="confirmation-typed-text">{typeToConfirm}</code> exactly.
+            </p>
+          )}
+        </div>
       )}
       {failure && (
         // Show Details needs the action row under the sentence, which a one-line notice lacks.

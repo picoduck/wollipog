@@ -2150,8 +2150,10 @@ test("one exact Location can be launched from two Projects and unlinked independ
   await gammaSharedLocation.getByRole("button", { name: / Actions$/ }).click();
   await page.getByRole("menuitem", { name: "Remove Location…" }).click();
   const confirmation = page.getByRole("dialog", { name: "Remove Location" });
-  await expect(confirmation).toContainText("The folder is not deleted");
-  await expect(confirmation).toContainText("other Projects are unaffected");
+  await expect(confirmation).toContainText("The folder, its sessions and other projects aren't affected.");
+  // The path is its own mono row, not part of the sentence (#2964).
+  await expect(confirmation.locator(".confirmation-rows .row-title.mono")).toHaveText("/repos/alpha");
+  await expect(confirmation.locator(".confirmation-message")).not.toContainText("/repos/alpha");
   await confirmation.getByRole("button", { name: "Remove Location" }).click();
   await expect(gammaSharedLocation).toHaveCount(0);
   await expect.poll(async () => page.evaluate(() => {
@@ -2179,9 +2181,9 @@ test("deleting a Project explicitly retains sessions and moves them to No Projec
   await page.locator(".project-detail-title-row").getByRole("button", { name: "Project Actions" }).click();
   await page.getByRole("menuitem", { name: "Delete Project…" }).click();
   const dialog = page.getByRole("dialog", { name: "Delete Project" });
-  await expect(dialog).toContainText("its sessions move to No Project");
-  await expect(dialog).toContainText("Sessions and files are not deleted");
-  await dialog.getByLabel("Type Alpha to Confirm").fill("Alpha");
+  await expect(dialog).toContainText(/ is deleted for good, and its \d+ sessions? moves? to No Project\./);
+  await expect(dialog).toContainText(/files and the location folders are kept\./);
+  await dialog.getByLabel("Type the Project Name to Confirm").fill("Alpha");
   await dialog.getByRole("button", { name: "Delete Project" }).click();
   await expect.poll(async () => page.evaluate(() => {
     const value = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model();

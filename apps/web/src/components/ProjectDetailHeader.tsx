@@ -3,7 +3,7 @@ import type { ProjectView, RunnerView } from "@wollipog/protocol";
 import type { LocationMachineName } from "../project-management.js";
 import { isLaunchableProjectLocation } from "../project-session-selection.js";
 import { FolderIcon, InboxIcon, ShieldIcon } from "./Icons.js";
-import { ActionsMenu, type PageAction, type PageMenuAction } from "./PageHeader.js";
+import { ActionsMenu, type ActionsMenuChoice, type PageAction, type PageMenuAction } from "./PageHeader.js";
 
 /** ⋯'s name in the detail and in the phone detail bar (§9.1). */
 export const PROJECT_ACTIONS_LABEL = "Project Actions";
@@ -41,8 +41,8 @@ export function projectNewSessionBlocker(
  */
 export function projectDetailMenu(project: ProjectView, state: { stopsRuntime: boolean; busy: boolean }, actions: {
   onCopyId: () => void;
-  onArchive: () => void;
-  onDelete: () => void;
+  onArchive: (choice: ActionsMenuChoice) => void;
+  onDelete: (choice: ActionsMenuChoice) => void;
 }): PageMenuAction[] {
   const copy: PageMenuAction = { label: "Copy Project ID", onClick: actions.onCopyId };
   if (project.canManage === false) return [copy];
