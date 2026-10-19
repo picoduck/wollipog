@@ -91,14 +91,14 @@ export function authorizeCreatedProviderProfileGrant(
   principal: AuthPrincipal | null,
   provider: "claude" | "codex",
   now: number,
+  requestId: string,
 ): string | undefined {
   if (!runnerSupportsProtocol(runner.protocolVersion, "providerProfiles") || principal?.kind !== "human") return undefined;
   const grantId = randomUUID();
-  const authorized = db.authorizeProviderProfileGrant({
+  const authorized = db.authorizeAndEnrollProviderProfileDispatch({
     grantId, runnerId: runner.runnerId, providerAccountId: createdGrantPlaceholder(grantId), provider, origin: "created",
-    grantedBy: principal.userId, grantedRole: principal.role, now,
+    grantedBy: principal.userId, grantedRole: principal.role, now, requestId, kind: "login",
   });
-  if (authorized && !authorized.created) throw new ProviderPublicationUnavailable();
   return authorized?.grant.grantId;
 }
 
@@ -394,11 +394,12 @@ export function registerProviderProfileRoutes(
       ? live.find((grant) => grant.status === "active" && grant.profileId === account.profile!.id)
       : undefined;
     if (active) return { status: "active", profileId: active.profileId, grantId: active.grantId };
+    const requestId = `provider_profile_adopt_${randomUUID()}`;
     let authorized;
     try {
-      authorized = deps.db.authorizeProviderProfileGrant({
+      authorized = deps.db.authorizeAndEnrollProviderProfileDispatch({
         grantId: randomUUID(), runnerId: id, providerAccountId: accountId, provider: account.provider, origin: "adopted",
-        grantedBy: principal.userId, grantedRole: principal.role, now: now(),
+        grantedBy: principal.userId, grantedRole: principal.role, now: now(), requestId, kind: "adopt",
       });
     } catch (error) {
       if (!(error instanceof ProviderPublicationUnavailable)) throw error;
@@ -406,13 +407,6 @@ export function registerProviderProfileRoutes(
     }
     if (!authorized) return reply.code(404).send({ error: "runner not found" });
     const { grantId } = authorized.grant;
-    const requestId = `provider_profile_adopt_${randomUUID()}`;
-    try {
-      deps.db.enrollProviderProfileDispatch({ grantId, requestId, runnerId: id, kind: "adopt" });
-    } catch (error) {
-      if (!(error instanceof ProviderPublicationUnavailable)) throw error;
-      return reply.code(503).send({ error: error.message, code: error.code });
-    }
     const observe = (observation: PublicationObservation) => {
       try { deps.db.observeProviderProfileDispatch(requestId, observation); }
       catch {

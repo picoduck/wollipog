@@ -30,9 +30,14 @@ support. Existing direct-name HOMEs are not a new, proved retirement cohort.
 All four grant writers (authorize, bind created account, complete, revoke) and completion's exact
 superseded grant use a dedicated outermost `BEGIN IMMEDIATE` transaction. It rejects an existing
 transaction or `synchronous != FULL` before any mutation, never joins `atomic()` and never changes
-event-ingest durability. Grant changes and their observations commit together. A separate FULL
-transaction rechecks the pending grant and source preimage and enrolls adoption/Add Account before
-dispatch. Only a completed COMMIT returns admission. A request already enrolled cannot admit a
+event-ingest durability. Grant changes and their observations commit together. Both adoption and
+Add Account authorize and enroll dispatch in one outermost FULL transaction. If enrollment refuses,
+only a fresh grant inserted under that same uninterrupted writer lock is marked revoked before
+commit; it is never externally visible as pending. Its immutable authorization intent remains.
+A reused/preexisting grant or uncertain earlier dispatch is retained: `created: true` from an older
+transaction is not proof that no other connection has used the grant. Inventory completion keeps
+its existing behavior and does not become proof of dispatch completeness. Only a completed COMMIT
+returns admission. A request already enrolled cannot admit a
 second dispatch; no outbox executor, automatic retry or command resumption was added.
 
 Current production callers run after registration/agent-inventory/login-inventory commits, or
@@ -43,11 +48,26 @@ false completion. Direct unsafe-context calls refuse, including revocation; no n
 claim a caller's future commit. Supported outermost revocation still works without audit capacity.
 
 The per-database limits are one source row, 4,096 immutable intent rows, 32,768 event rows and 4,096
-UTF-8 bytes per canonical record. Identifiers are at most 128 characters, UUIDs 36, digests 64 and
+UTF-8 bytes per canonical record. Canonical grant/request identifiers are at most 128 characters;
+hashed raw runner/account identities are nonempty, well-formed text bounded to 128 JavaScript code
+units and 512 UTF-8 bytes. They retain their exact spelling and existing hash domain, without
+trimming, case folding or Unicode normalization. Observation hashing adds no business charset rule;
+existing runner/account validation and internal login placeholders remain compatible. Bad caller
+input refuses locally without changing evidence or degrading the source. UUIDs are 36, digests 64 and
 canonical uint64 revision strings 20. Private diagnostic reads use 64-row keyset pages with one
 lookahead (at most 266,240 record bytes), not a complete history materialization. Counters and
 preimages are checked while SQLite holds the writer lock. There is no eviction, automatic reset,
 compaction or cascading foreign key for these records.
+
+These are permanent lifetime limits for the whole control-plane database. A fresh grant plus its
+dispatch usually consumes two intents, so 4,096 intents typically permit about 2,048 such lifetime
+pairs, including failed or cancelled attempts. Other observations, limits and faults can stop new
+admission earlier. Once saturated/degraded, NEW grant authorization and Add Account/adoption
+dispatch admission refuse permanently across all runners of that control plane. There is no
+supported reset or recovery operation; existing-grant revocation, binding and completion continue
+under the documented durability requirements. This permanent availability risk requires explicit
+consideration at later human merge consent. No reset, eviction, quota increase, complete history or
+physical retirement eligibility is introduced here.
 
 Saturation, revision exhaustion or an audit-write failure rolls evidence back to a savepoint and
 commits a sticky degraded fence in the outer grant transaction. New grant authorization and new

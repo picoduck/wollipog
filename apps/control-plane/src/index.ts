@@ -2991,8 +2991,7 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   let profileGrantId: string | undefined;
   try {
     profileGrantId = hasAccountId ? undefined
-      : authorizeCreatedProviderProfileGrant(db, runner, principal, body.provider as "claude" | "codex", Date.now());
-    if (profileGrantId) db.enrollProviderProfileDispatch({ grantId: profileGrantId, requestId, runnerId: id, kind: "login" });
+      : authorizeCreatedProviderProfileGrant(db, runner, principal, body.provider as "claude" | "codex", Date.now(), requestId);
   } catch (error) {
     // Only unsupported peers/non-human/no-scope callers get the existing no-grant compatibility
     // behavior. An expected grant's audit failure must not silently start an unmanaged sign-in.

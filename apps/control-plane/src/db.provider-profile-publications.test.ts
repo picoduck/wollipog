@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,10 @@ import { reconcileProviderProfileGrants } from "./provider-profile-route.js";
 
 const PROFILE = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
 const EPOCH_KEY = "provider_profile_publication_epoch_v1";
+const grantInput = (grantId = randomUUID(), providerAccountId = "work", origin: "created" | "adopted" = "adopted", runnerId = "runner-a") => ({
+  grantId, runnerId, providerAccountId, origin, provider: "claude" as const,
+  grantedBy: "private-fixture-actor", grantedRole: "owner" as const, now: 1,
+});
 function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), "wollipog-publications-")), path = join(directory, "db.sqlite");
   let db = ControlPlaneDb.open(path);
@@ -199,7 +203,7 @@ test("stale source preimages and revoked-before-enrollment refuse; revoked-after
   assert.equal(f.db.providerPublicationIntent("late"), null);
 });
 
-test("uint64 exhaustion and oversized identifiers fence new work while preserving revocation", t => {
+test("uint64 exhaustion is sticky while oversized caller identifiers refuse locally", t => {
   const f = fixture(t), grant = f.authorize();
   f.db.raw().exec("UPDATE provider_profile_publication_source SET revision='18446744073709551615'");
   assert.throws(() => f.db.enrollProviderProfileDispatch({ grantId: grant.grantId, requestId: "counter-overflow", runnerId: "runner-a", kind: "adopt" }), ProviderPublicationUnavailable);
@@ -207,8 +211,186 @@ test("uint64 exhaustion and oversized identifiers fence new work while preservin
   assert.equal(f.revoke(grant.grantId)?.status, "revoked");
   const other = fixture(t), existing = other.authorize();
   assert.throws(() => other.db.enrollProviderProfileDispatch({ grantId: existing.grantId, requestId: "r".repeat(129), runnerId: "runner-a", kind: "adopt" }), ProviderPublicationUnavailable);
-  assert.equal(other.db.providerPublicationStatus().status, "degraded");
+  assert.equal(other.db.providerPublicationStatus().status, "healthy");
+  assert.ok(other.authorize("still-available"));
   assert.equal(other.revoke(existing.grantId)?.status, "revoked");
+});
+
+test("raw runner and account identities retain exact bounded spelling across all grant writers", t => {
+  const f = fixture(t);
+  const identities = ["box@lab", "ci+1", "Müller-PC", "_build", "Case-runner", "case-runner",
+    "é-runner", "e\u0301-runner", "R".repeat(128), "🙂".repeat(64)];
+  const accountId = "A" + ".".repeat(126) + "9";
+  const runnerKeys = new Set<string>();
+  for (const runnerId of identities) {
+    f.db.registerRunner({ runnerId, hostname: "fixture", os: "linux", version: "fixture", agents: [], workspaces: [] }, 1, 225);
+    const grantId = randomUUID(), placeholder = `login:${grantId}`;
+    const admitted = f.db.authorizeAndEnrollProviderProfileDispatch({
+      ...grantInput(grantId, placeholder, "created", runnerId), requestId: randomUUID(), kind: "login",
+    })!;
+    assert.equal(admitted.grant.runnerId, runnerId);
+    assert.equal(f.db.bindCreatedProviderProfileGrant(grantId, placeholder, accountId), true);
+    assert.equal(f.db.completeProviderProfileGrant(grantId, randomUUID(), 2), true);
+    assert.equal(f.revoke(grantId)?.status, "revoked");
+    const record = f.peer.prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?")
+      .get(`grant:${grantId}`) as { record: string };
+    const parsed = JSON.parse(record.record) as { runnerKey: string; accountKey: string };
+    assert.equal(parsed.runnerKey, createHash("sha256").update("wollipog:cp-provider-publication:v1:runner\0").update(runnerId).digest("hex"));
+    assert.equal(parsed.accountKey, createHash("sha256").update("wollipog:cp-provider-publication:v1:account\0").update(placeholder).digest("hex"));
+    runnerKeys.add(parsed.runnerKey);
+    assert.equal(record.record.includes(runnerId), false);
+    assert.equal(record.record.includes(placeholder), false);
+    assert.equal(f.db.providerPublicationStatus().status, "healthy");
+  }
+  assert.equal(runnerKeys.size, identities.length, "case and NFC/NFD spellings must not be normalized together");
+  const evidence = JSON.stringify(f.db.providerPublicationEvents().records);
+  assert.equal(evidence.includes(accountId), false);
+  assert.equal(evidence.includes("private-fixture-actor"), false);
+  assert.equal(f.db.providerPublicationStatus().physicalRetirementEligible, false);
+  assert.ok(f.authorize("unrelated-runner-remains-available"));
+});
+
+test("bad raw identities and canonical IDs refuse without grant, evidence or global source mutation", t => {
+  const f = fixture(t), grant = f.authorize(), before = f.db.providerPublicationStatus();
+  const events = f.db.providerPublicationEvents();
+  const rows = f.peer.prepare("SELECT count(*) AS n FROM provider_profile_grants").get();
+  for (const bad of [null, undefined, 7, "", "x".repeat(129), "\ud800"]) {
+    for (const field of ["runnerId", "providerAccountId"] as const) {
+      const input = { ...grantInput(), [field]: bad as string };
+      assert.throws(() => f.db.authorizeProviderProfileGrant(input), ProviderPublicationUnavailable);
+      assert.throws(() => f.db.authorizeAndEnrollProviderProfileDispatch({ ...input, requestId: randomUUID(), kind: "adopt" }), ProviderPublicationUnavailable);
+    }
+  }
+  for (const bad of ["", "bad/id", "x".repeat(129), undefined, 7]) {
+    const requestId = bad as string;
+    assert.throws(() => f.db.enrollProviderProfileDispatch({ grantId: grant.grantId, requestId, runnerId: "runner-a", kind: "adopt" }), ProviderPublicationUnavailable);
+    assert.throws(() => f.db.authorizeAndEnrollProviderProfileDispatch({ ...grantInput(), requestId, kind: "adopt" }), ProviderPublicationUnavailable);
+  }
+  assert.throws(() => f.db.authorizeProviderProfileGrant({ ...grantInput(), grantId: "bad/id" }), ProviderPublicationUnavailable);
+  assert.deepEqual(f.db.providerPublicationStatus(), before);
+  assert.deepEqual(f.db.providerPublicationEvents(), events);
+  assert.deepEqual(f.peer.prepare("SELECT count(*) AS n FROM provider_profile_grants").get(), rows);
+  assert.equal(f.db.getProviderProfileGrant(grant.grantId)?.status, "pending");
+  assert.ok(f.authorize("valid-after-local-refusal"));
+});
+
+test("same-writer fresh grant refusal excludes competing dispatch and inventory before committing its tombstone", t => {
+  const f = fixture(t), second = ControlPlaneDb.open(f.path), grantId = randomUUID();
+  second.raw().exec("PRAGMA busy_timeout=0");
+  const raw = f.db.raw(), exec = raw.exec.bind(raw);
+  let savepoints = 0, competed = false;
+  raw.exec = (sql: string) => {
+    if (sql === "SAVEPOINT provider_publication_evidence" && ++savepoints === 2) {
+      assert.equal(raw.isTransaction, true);
+      assert.equal(f.peer.prepare("SELECT status FROM provider_profile_grants WHERE grant_id=?").get(grantId), undefined,
+        "the inserted pending row has not been published to another connection");
+      assert.throws(() => second.enrollProviderProfileDispatch({ grantId, requestId: "competitor", runnerId: "runner-a", kind: "adopt" }), /locked/);
+      assert.throws(() => second.completeProviderProfileGrant(grantId, PROFILE, 2), /locked/);
+      competed = true;
+    }
+    exec(sql);
+  };
+  f.db.raw().exec(`CREATE TRIGGER fresh_dispatch_fault BEFORE INSERT ON provider_profile_publication_events
+    WHEN json_extract(NEW.record,'$.kind')='adopt' BEGIN SELECT RAISE(ABORT,'fixture dispatch fault'); END`);
+  try {
+    assert.throws(() => f.db.authorizeAndEnrollProviderProfileDispatch({ ...grantInput(grantId), requestId: "fresh-failed", kind: "adopt" }), ProviderPublicationUnavailable);
+    assert.equal(competed, true);
+    assert.equal(second.getProviderProfileGrant(grantId)?.status, "revoked");
+    assert.deepEqual(f.db.liveProviderProfileGrantsForAccount("runner-a", "work"), []);
+    assert.equal(f.db.providerPublicationIntent("fresh-failed"), null);
+    assert.equal(f.db.providerPublicationIntent("competitor"), null);
+    const intent = f.peer.prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?").get(`grant:${grantId}`);
+    assert.ok(intent, "the immutable authorization intent survives refusal");
+    assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", [
+      { id: "work", label: "fixture", provider: "claude", authStatus: "authenticated", profile: { id: PROFILE, access: "granted" } },
+    ], 3), [], "later inventory cannot activate this never-published fresh pending row");
+    assert.equal(second.completeProviderProfileGrant(grantId, PROFILE, 3), false);
+    raw.exec = exec;
+    f.reopen();
+    assert.equal(f.db.getProviderProfileGrant(grantId)?.status, "revoked");
+    assert.equal(f.db.providerPublicationStatus().status, "degraded");
+    assert.deepEqual(f.peer.prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?").get(`grant:${grantId}`), intent);
+  } finally { raw.exec = exec; second.close(); }
+});
+
+test("reused ambiguous grants and existing active grants survive another producer's enrollment refusal", t => {
+  const f = fixture(t), active = f.authorize("already-active"), profile = randomUUID();
+  f.db.completeProviderProfileGrant(active.grantId, profile, 2);
+  const pending = f.authorize("work", "created");
+  f.db.enrollProviderProfileDispatch({ grantId: pending.grantId, requestId: "uncertain-earlier", runnerId: "runner-a", kind: "login" });
+  f.db.observeProviderProfileDispatch("uncertain-earlier", "uncertain");
+  const intent = f.db.providerPublicationIntent("uncertain-earlier"), before = f.db.providerPublicationEvents();
+  const second = ControlPlaneDb.open(f.path);
+  try {
+    assert.throws(() => second.authorizeAndEnrollProviderProfileDispatch({
+      ...grantInput(randomUUID(), "work", "created"), requestId: "unexpected-login-reuse", kind: "login",
+    }), ProviderPublicationUnavailable);
+    assert.equal(f.db.providerPublicationStatus().status, "healthy");
+    assert.deepEqual(f.db.providerPublicationEvents(), before);
+    f.db.raw().exec(`CREATE TRIGGER reused_dispatch_fault BEFORE INSERT ON provider_profile_publication_events
+      WHEN json_extract(NEW.record,'$.kind')='adopt' BEGIN SELECT RAISE(ABORT,'fixture dispatch fault'); END`);
+    assert.throws(() => second.authorizeAndEnrollProviderProfileDispatch({ ...grantInput(), requestId: "reused-failed", kind: "adopt" }), ProviderPublicationUnavailable);
+    assert.equal(f.db.getProviderProfileGrant(pending.grantId)?.status, "pending");
+    assert.equal(f.db.getProviderProfileGrant(active.grantId)?.status, "active");
+    assert.deepEqual(f.db.providerPublicationIntent("uncertain-earlier"), intent);
+    assert.deepEqual(f.db.providerPublicationEvents(), before);
+    assert.equal(f.db.completeProviderProfileGrant(pending.grantId, PROFILE, 4), true,
+      "existing inventory completion semantics are preserved, not treated as a new dispatch proof");
+    assert.equal(f.db.getProviderProfileGrant(active.grantId)?.status, "active");
+    assert.deepEqual(f.db.providerPublicationIntent("uncertain-earlier"), intent);
+  } finally { second.close(); }
+});
+
+test("capacity between fresh authorization and enrollment commits no live login placeholder", async t => {
+  for (const column of ["intent_count", "event_count"] as const) await t.test(column, sub => {
+    const f = fixture(sub), old = f.authorize("existing"), grantId = randomUUID();
+    const limit = column === "intent_count" ? PROVIDER_PUBLICATION_LIMITS.intents : PROVIDER_PUBLICATION_LIMITS.events;
+    f.db.raw().exec(`UPDATE provider_profile_publication_source SET ${column}=${limit - 1}`);
+    assert.throws(() => f.db.authorizeAndEnrollProviderProfileDispatch({
+      ...grantInput(grantId, `login:${grantId}`, "created"), requestId: "capacity-login", kind: "login",
+    }), ProviderPublicationUnavailable);
+    assert.equal(f.db.providerPublicationStatus().status, "degraded");
+    assert.equal(f.db.getProviderProfileGrant(grantId)?.status, "revoked");
+    assert.deepEqual(f.db.liveProviderProfileGrantsForAccount("runner-a", `login:${grantId}`), []);
+    assert.ok(f.peer.prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?").get(`grant:${grantId}`));
+    assert.equal(f.db.providerPublicationIntent("capacity-login"), null);
+    assert.equal(f.db.getProviderProfileGrant(old.grantId)?.status, "pending");
+    assert.equal(f.revoke(old.grantId)?.status, "revoked");
+  });
+});
+
+test("composite COMMIT failure rolls back both grant and immutable intent insertions", t => {
+  const f = fixture(t), grantId = randomUUID(), before = f.db.providerPublicationStatus();
+  const raw = f.db.raw(), exec = raw.exec.bind(raw);
+  raw.exec = (sql: string) => { if (sql === "COMMIT") throw new Error("fixture composite commit fault"); exec(sql); };
+  try {
+    assert.throws(() => f.db.authorizeAndEnrollProviderProfileDispatch({ ...grantInput(grantId), requestId: "commit-lost", kind: "adopt" }), /fixture composite commit fault/);
+  } finally { raw.exec = exec; }
+  assert.equal(f.db.getProviderProfileGrant(grantId), null);
+  assert.equal(f.db.providerPublicationIntent("commit-lost"), null);
+  assert.equal(f.peer.prepare("SELECT 1 FROM provider_profile_publication_intents WHERE intent_key=?").get(`grant:${grantId}`), undefined);
+  assert.deepEqual(f.db.providerPublicationStatus(), before);
+});
+
+test("opening schema probe follows busy_timeout and closes its newly opened handle on error", t => {
+  const prepare = DatabaseSync.prototype.prepare, close = DatabaseSync.prototype.close;
+  const probe = "SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1";
+  let opened: DatabaseSync | undefined, closed = 0;
+  t.mock.method(DatabaseSync.prototype, "prepare", function(this: DatabaseSync, sql: string) {
+    if (sql === probe) {
+      opened = this;
+      assert.ok((prepare.call(this, "PRAGMA busy_timeout").get() as { timeout: number }).timeout > 0);
+      throw new Error("fixture schema probe fault");
+    }
+    return prepare.call(this, sql);
+  });
+  t.mock.method(DatabaseSync.prototype, "close", function(this: DatabaseSync) { if (this === opened) closed++; close.call(this); });
+  try {
+    assert.throws(() => ControlPlaneDb.open(":memory:"), /fixture schema probe fault/);
+    assert.ok(opened);
+    assert.equal(closed, 1);
+    assert.throws(() => prepare.call(opened, "SELECT 1"), /not open|closed/);
+  } finally { t.mock.restoreAll(); }
 });
 
 test("competing real connections serialize admission, reject stale preimages and preserve the winner's ticket", t => {

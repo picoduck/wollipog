@@ -2545,6 +2545,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       action: "start", ok: false, error: "Unexpected fixture sign-in command" }));
   };
   runner.addEventListener("message", rejectUnexpectedLogin);
+  const placeholderCount = (status: "pending" | "revoked") => (publications.prepare(`SELECT count(*) AS n
+    FROM provider_profile_grants WHERE origin='created' AND status=? AND provider_account_id LIKE 'login:%'`)
+    .get(status) as { n: number }).n;
+  const pendingPlaceholders = placeholderCount("pending"), revokedPlaceholders = placeholderCount("revoked");
   publications.exec(`CREATE TRIGGER publication_login_fault BEFORE INSERT ON provider_profile_publication_events
     WHEN json_extract(NEW.record,'$.kind')='login' BEGIN SELECT RAISE(ABORT,'fixture publication unavailable'); END`);
   const deniedLogin = await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-logins`, ownerToken, {
@@ -2553,12 +2557,16 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal(deniedLogin.status, 503, await deniedLogin.clone().text());
   assert.equal((await deniedLogin.json() as { code: string }).code, "PROVIDER_PUBLICATION_UNAVAILABLE");
   assert.equal(refusedStarts, 0, "dispatch-write failure must not silently fall through to ungranted Add Account");
+  assert.equal(placeholderCount("pending"), pendingPlaceholders, "failed enrollment must not publish a new unbindable pending grant");
+  assert.equal(placeholderCount("revoked"), revokedPlaceholders + 1, "the fresh grant is spent under the same writer lock");
   assert.equal((publications.prepare("SELECT degraded FROM provider_profile_publication_source").get() as { degraded: number }).degraded, 1);
   publications.exec("DROP TRIGGER publication_login_fault");
   const degradedLogin = await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-logins`, ownerToken, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude", label: "Still Blocked" }),
   });
   assert.equal(degradedLogin.status, 503, "committed degradation continues to refuse after the write fault disappears");
+  assert.equal(placeholderCount("pending"), pendingPlaceholders);
+  assert.equal(placeholderCount("revoked"), revokedPlaceholders + 1, "already-degraded refusal creates no additional grant");
   assert.equal(refusedStarts, 0);
   runner.removeEventListener("message", rejectUnexpectedLogin);
 

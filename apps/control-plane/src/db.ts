@@ -7,7 +7,7 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
 
 import { DatabaseSync } from "node:sqlite";
 import {
-  installProviderPublicationStore, ProviderProfilePublicationStore, ProviderPublicationUnavailable,
+  installProviderPublicationStore, ProviderProfilePublicationStore, ProviderPublicationUnavailable, validProviderPublicationInput,
   type PublicationDispatchKind, type PublicationObservation,
 } from "./provider-profile-publication-store.js";
 import { CampaignBudgetLedger } from "./campaign-budget.js";
@@ -3256,6 +3256,11 @@ interface SessionStopIntentRow {
   failure_message: string | null;
 }
 
+interface ProviderProfileGrantAuthorizationInput {
+  grantId: string; runnerId: string; providerAccountId: string; provider: "claude" | "codex";
+  origin: "adopted" | "created"; grantedBy: string; grantedRole: OrganizationRole; now: number;
+}
+
 /** One audited provider-profile grant (#3239); see the provider_profile_grants schema. */
 export interface ProviderProfileGrantRecord {
   grantId: string;
@@ -5901,10 +5906,13 @@ export class ControlPlaneDb {
       ? new MemoryArtifactBlobStore()
       : new FileArtifactBlobStore(options.artifactBlobDir ?? defaultArtifactBlobRoot(location));
     const db = new DatabaseSync(location);
-    // Capture before SCHEMA; a preexisting database can only start incomplete observation history.
-    const publicationNewDatabase = !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
-    // First, so the journal-mode switch below also waits out a brief lock from another connection.
+    // First, so schema inspection and the journal-mode switch wait out a brief connection lock.
     db.exec(`PRAGMA busy_timeout = ${CONTROL_PLANE_DB_BUSY_TIMEOUT_MS};`);
+    // Capture before SCHEMA; a preexisting database can only start incomplete observation history.
+    let publicationNewDatabase: boolean;
+    try {
+      publicationNewDatabase = !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
+    } catch (error) { db.close(); throw error; }
     const journalMode = (db.prepare("PRAGMA journal_mode = WAL;").get() as { journal_mode: string })
       .journal_mode;
     // FULL flushes the WAL at every commit, so control-plane decisions are durable once
@@ -12897,16 +12905,55 @@ export class ControlPlaneDb {
    * lost reply) never admits another dispatch. This method does not send or retry a command. */
   enrollProviderProfileDispatch(input: { grantId: string; requestId: string; runnerId: string;
     kind: PublicationDispatchKind; expectedRevision?: string }): string {
-    const ticket = this.providerPublications.transaction(() => {
-      const grant = this.getProviderProfileGrant(input.grantId);
-      if (!grant || grant.status !== "pending" || grant.runnerId !== input.runnerId ||
-          (input.kind === "login" && grant.origin !== "created")) return null;
-      return this.providerPublications.record(input.kind, grant, {
-        requestId: input.requestId, ...(input.expectedRevision !== undefined ? { expectedRevision: input.expectedRevision } : {}),
-      });
-    });
+    const ticket = this.providerPublications.transaction(() => this.enrollProviderProfileDispatchInTransaction(input));
     if (!ticket) throw new ProviderPublicationUnavailable();
     return ticket;
+  }
+
+  private enrollProviderProfileDispatchInTransaction(input: { grantId: string; requestId: string; runnerId: string;
+    kind: PublicationDispatchKind; expectedRevision?: string }): string | null {
+    if (!this.db.isTransaction) throw new ProviderPublicationUnavailable();
+    const grant = this.getProviderProfileGrant(input.grantId);
+    if (!grant || grant.status !== "pending" || grant.runnerId !== input.runnerId ||
+        (input.kind === "login" && grant.origin !== "created")) return null;
+    return this.providerPublications.record(input.kind, grant, {
+      requestId: input.requestId, ...(input.expectedRevision !== undefined ? { expectedRevision: input.expectedRevision } : {}),
+    });
+  }
+
+  /** Both producers use this single writer transaction. A fresh pending row is never visible
+   * between authorization and dispatch admission. Only this transaction's own freshly inserted
+   * row may be spent on refusal; reused/uncertain grants and all intents remain intact. */
+  authorizeAndEnrollProviderProfileDispatch(input: ProviderProfileGrantAuthorizationInput & {
+    requestId: string; kind: PublicationDispatchKind;
+  }): { grant: ProviderProfileGrantRecord; created: boolean; ticket: string } | null {
+    if (!validProviderPublicationInput({ ...input, profileId: null }, input.requestId) ||
+        typeof input.requestId !== "string" || !["login", "adopt"].includes(input.kind) ||
+        (input.kind === "login" && input.origin !== "created")) throw new ProviderPublicationUnavailable();
+    const result = this.providerPublications.transaction(() => {
+      const authorized = this.authorizeProviderProfileGrantInTransaction(input);
+      if (authorized === null || authorized === "unavailable") return authorized;
+      // A placeholder collision/reuse is not authority to send or revoke someone else's work.
+      if (input.kind === "login" && !authorized.created) return "unavailable" as const;
+      const ticket = this.enrollProviderProfileDispatchInTransaction({
+        grantId: authorized.grant.grantId, runnerId: input.runnerId, requestId: input.requestId, kind: input.kind,
+      });
+      if (ticket) return { ...authorized, ticket };
+      if (authorized.created) {
+        this.providerPublications.record("revoke", authorized.grant);
+        const changed = this.stmt(`UPDATE provider_profile_grants
+          SET status='revoked', revoked_at=?, revoked_by=?, revoked_role=?
+          WHERE grant_id=? AND status='pending' AND profile_id IS NULL`).run(
+          input.now, input.grantedBy, input.grantedRole, authorized.grant.grantId,
+        ).changes;
+        if (changed !== 1) throw new Error("fresh provider grant changed inside its writer transaction");
+      }
+      return "unavailable" as const;
+    });
+    // Commit any sticky degradation and fresh-row tombstone before refusing. SQL/COMMIT failures
+    // instead roll back and propagate; no admission escapes and neither producer sends an RPC.
+    if (result === "unavailable") throw new ProviderPublicationUnavailable();
+    return result;
   }
 
   /** Observations never resolve/retire an intent, even for a refused command or revoked grant. */
@@ -12924,40 +12971,39 @@ export class ControlPlaneDb {
    * per runner account; a repeat returns it, so a retried adoption reuses the same grant id. Returns
    * null when the runner has no recorded scope.
    */
-  authorizeProviderProfileGrant(input: {
-    grantId: string;
-    runnerId: string;
-    providerAccountId: string;
-    provider: "claude" | "codex";
-    origin: "adopted" | "created";
-    grantedBy: string;
-    grantedRole: OrganizationRole;
-    now: number;
-  }): { grant: ProviderProfileGrantRecord; created: boolean } | null {
-    const result = this.providerPublications.transaction(() => {
-      const ownership = this.stmt(
-        "SELECT organization_id, owner_kind, owner_id FROM runner_ownership WHERE runner_id=?",
-      ).get(input.runnerId) as { organization_id: string; owner_kind: string; owner_id: string } | undefined;
-      if (!ownership) return null;
-      if (this.providerPublications.status().status !== "healthy") return "unavailable" as const;
-      const pending = this.stmt(
-        "SELECT * FROM provider_profile_grants WHERE runner_id=? AND provider_account_id=? AND status='pending'",
-      ).get(input.runnerId, input.providerAccountId) as ProviderProfileGrantRow | undefined;
-      if (pending) return { grant: this.providerProfileGrantRecord(pending), created: false };
-      if (!this.providerPublications.record("authorize", { ...input, profileId: null })) return "unavailable" as const;
-      this.stmt(
-        `INSERT INTO provider_profile_grants
-           (grant_id, profile_id, control_plane_instance_id, organization_id, owner_kind, owner_id, scope,
-            runner_id, provider_account_id, provider, origin, status, granted_by, granted_role, created_at)
-         VALUES (?, NULL, ?, ?, ?, ?, 'provider_home', ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-      ).run(input.grantId, this.controlPlaneInstanceId, ownership.organization_id, ownership.owner_kind, ownership.owner_id,
-        input.runnerId, input.providerAccountId, input.provider, input.origin, input.grantedBy, input.grantedRole, input.now);
-      return { grant: this.getProviderProfileGrant(input.grantId)!, created: true };
-    });
+  authorizeProviderProfileGrant(input: ProviderProfileGrantAuthorizationInput): {
+    grant: ProviderProfileGrantRecord; created: boolean;
+  } | null {
+    if (!validProviderPublicationInput({ ...input, profileId: null })) throw new ProviderPublicationUnavailable();
+    const result = this.providerPublications.transaction(() => this.authorizeProviderProfileGrantInTransaction(input));
     // In particular, do not turn this into Add Account's legitimate old-peer/no-scope fallback.
     // Degradation has already committed; throwing inside the transaction would undo its fence.
     if (result === "unavailable") throw new ProviderPublicationUnavailable();
     return result;
+  }
+
+  private authorizeProviderProfileGrantInTransaction(input: ProviderProfileGrantAuthorizationInput): {
+    grant: ProviderProfileGrantRecord; created: boolean;
+  } | "unavailable" | null {
+    if (!this.db.isTransaction) throw new ProviderPublicationUnavailable();
+    const ownership = this.stmt(
+      "SELECT organization_id, owner_kind, owner_id FROM runner_ownership WHERE runner_id=?",
+    ).get(input.runnerId) as { organization_id: string; owner_kind: string; owner_id: string } | undefined;
+    if (!ownership) return null;
+    if (this.providerPublications.status().status !== "healthy") return "unavailable" as const;
+    const pending = this.stmt(
+      "SELECT * FROM provider_profile_grants WHERE runner_id=? AND provider_account_id=? AND status='pending'",
+    ).get(input.runnerId, input.providerAccountId) as ProviderProfileGrantRow | undefined;
+    if (pending) return { grant: this.providerProfileGrantRecord(pending), created: false };
+    if (!this.providerPublications.record("authorize", { ...input, profileId: null })) return "unavailable" as const;
+    this.stmt(
+      `INSERT INTO provider_profile_grants
+         (grant_id, profile_id, control_plane_instance_id, organization_id, owner_kind, owner_id, scope,
+          runner_id, provider_account_id, provider, origin, status, granted_by, granted_role, created_at)
+       VALUES (?, NULL, ?, ?, ?, ?, 'provider_home', ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+    ).run(input.grantId, this.controlPlaneInstanceId, ownership.organization_id, ownership.owner_kind, ownership.owner_id,
+      input.runnerId, input.providerAccountId, input.provider, input.origin, input.grantedBy, input.grantedRole, input.now);
+    return { grant: this.getProviderProfileGrant(input.grantId)!, created: true };
   }
 
   /**

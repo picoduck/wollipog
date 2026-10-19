@@ -11,6 +11,11 @@ const COUNTER = /^(0|[1-9][0-9]{0,19})$/u;
 const MAX_COUNTER = (1n << 64n) - 1n;
 const HASH = /^[a-f0-9]{64}$/u;
 const identifier = (value: unknown): value is string => typeof value === "string" && ID.test(value);
+// Runner/account values are hashed raw identities, not canonical ledger identifiers. Preserve
+// their exact spelling and the existing UTF-8 hash domain; never narrow them to ID's charset.
+const rawIdentity = (value: unknown): value is string => typeof value === "string" &&
+  value.length > 0 && value.length <= 128 && Buffer.byteLength(value) <= 512 &&
+  Buffer.from(value, "utf8").toString("utf8") === value;
 const uuid = (value: unknown): value is string => typeof value === "string" && UUID.test(value);
 const digest = (value: unknown): value is string => typeof value === "string" && HASH.test(value);
 
@@ -50,6 +55,11 @@ function encode(value: Record<string, string | number | null>): string {
 
 export interface PublicationGrant {
   grantId: string; profileId: string | null; runnerId: string; providerAccountId: string; provider: "claude" | "codex";
+}
+export function validProviderPublicationInput(grant: PublicationGrant, requestId?: unknown): boolean {
+  return identifier(grant.grantId) && rawIdentity(grant.runnerId) && rawIdentity(grant.providerAccountId) &&
+    (grant.profileId === null || uuid(grant.profileId)) && ["claude", "codex"].includes(grant.provider) &&
+    (requestId === undefined || identifier(requestId));
 }
 export type PublicationDispatchKind = "login" | "adopt";
 export type PublicationObservation = "reply" | "not_sent" | "uncertain";
@@ -144,6 +154,10 @@ export class ProviderProfilePublicationStore {
   record(kind: "authorize" | "bind" | "complete" | "revoke" | "supersede" | PublicationDispatchKind | "observe",
     grant: PublicationGrant, options: { requestId?: string; observation?: PublicationObservation; expectedRevision?: string } = {}): string | null {
     if (!this.db.isTransaction) throw new ProviderPublicationUnavailable();
+    // A bad caller value refuses only this observation. It is not evidence/store corruption and
+    // must not permanently disable unrelated authorization or existing grant security controls.
+    if (!validProviderPublicationInput(grant, options.requestId) ||
+        ((kind === "login" || kind === "adopt") && options.requestId === undefined)) return null;
     const source = this.source();
     if (!source || source.degraded) return null;
     if (options.expectedRevision !== undefined && options.expectedRevision !== source.revision) return null;
@@ -151,10 +165,6 @@ export class ProviderProfilePublicationStore {
     try {
       const dispatch = kind === "login" || kind === "adopt";
       const intentKey = kind === "authorize" ? `grant:${grant.grantId}` : dispatch ? `request:${options.requestId}` : null;
-      if (!identifier(grant.grantId) || !identifier(grant.runnerId) || !identifier(grant.providerAccountId) ||
-          (grant.profileId !== null && !uuid(grant.profileId)) ||
-          !["claude", "codex"].includes(grant.provider) ||
-          (options.requestId !== undefined && !identifier(options.requestId))) throw new ProviderPublicationUnavailable();
       if (intentKey && this.db.prepare("SELECT 1 FROM provider_profile_publication_intents WHERE intent_key=?").get(intentKey)) {
         // A committed/ambiguous dispatch intent can NEVER issue a second admission.
         this.db.exec("RELEASE provider_publication_evidence");
