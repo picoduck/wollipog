@@ -350,3 +350,18 @@ test("older reviews beyond the first page load on request, and the count is the 
       "no more pages, so no Load Older Reviews");
   } finally { await h.unmount(); }
 });
+
+
+test("a continuation delivery refreshes a completed review from Delivering Findings to Fixing", async () => {
+  const pending = { ...latest, continuation: "pending" as const };
+  const session = { ...baseSession, reviewRuns: { count: 1, active: 0, updatedAt: 20 } };
+  const h = await mount(session, [pending]);
+  try {
+    const phase = () => reviews(h.container)!.querySelector(".review-findings-head .status")!.textContent;
+    assert.equal(phase(), "Delivering Findings");
+    await h.rerender({ ...session, reviewRuns: { ...session.reviewRuns, updatedAt: 21 } },
+      [{ ...pending, continuation: "delivered" }]);
+    assert.equal(h.reads.length, 2, "the continuation-only summary change fetches the settled review again");
+    assert.equal(phase(), "Fixing");
+  } finally { await h.unmount(); }
+});

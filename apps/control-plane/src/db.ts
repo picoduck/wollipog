@@ -20222,7 +20222,9 @@ export class ControlPlaneDb {
 
   // Review continuations (#3369): each finished review owes its requester one prompt, carried by
   // a durable command exactly as a restart notice is (#1861). The owed state is written with the
-  // review's outcome (ReviewSessions.accept / abandon); these move it.
+  // review's outcome (ReviewSessions.accept / abandon); these move it. Each transition advances
+  // the requester-wide summary clock, even in the same millisecond or after a newer review, so
+  // ReviewPanel reloads continuation-only changes without waiting for another review outcome.
 
   /** Whether this requester is owed a review continuation, held or in flight. */
   hasOpenReviewContinuations(requesterSessionId: string): boolean {
@@ -20240,7 +20242,9 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN");
     try {
       const update = this.stmt(
-        `UPDATE review_sessions SET continuation_state='delivering', continuation_command_id=?, continuation_updated_at=?
+        `UPDATE review_sessions SET continuation_state='delivering', continuation_command_id=?, continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
          WHERE review_session_id=? AND requester_session_id=? AND continuation_state='held'`,
       );
       const staged = this.stageSessionPromptCommand(input.command);
@@ -20263,7 +20267,9 @@ export class ControlPlaneDb {
     try {
       return this.atomic(() => {
         const update = this.stmt(
-          `UPDATE review_sessions SET continuation_state='delivered', continuation_command_id=NULL, continuation_updated_at=?
+          `UPDATE review_sessions SET continuation_state='delivered', continuation_command_id=NULL, continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
            WHERE review_session_id=? AND requester_session_id=? AND continuation_state='held'`,
         );
         for (const id of reviewSessionIds) {
@@ -20279,7 +20285,9 @@ export class ControlPlaneDb {
   /** The immediate send that followed a claim failed synchronously: owe the continuations again. */
   releaseReviewContinuationClaim(requesterSessionId: string, reviewSessionIds: readonly string[], now: number): void {
     const update = this.stmt(
-      `UPDATE review_sessions SET continuation_state='held', continuation_updated_at=?
+      `UPDATE review_sessions SET continuation_state='held', continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
        WHERE review_session_id=? AND requester_session_id=? AND continuation_state='delivered' AND continuation_command_id IS NULL`,
     );
     for (const id of reviewSessionIds) update.run(now, id, requesterSessionId);
@@ -20295,7 +20303,9 @@ export class ControlPlaneDb {
 
   setReviewContinuationCommandState(commandId: string, state: "delivered" | "uncertain" | "failed", now: number): number {
     return Number(this.stmt(
-      `UPDATE review_sessions SET continuation_state=?, continuation_updated_at=?
+      `UPDATE review_sessions SET continuation_state=?, continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
        WHERE continuation_command_id=? AND continuation_state='delivering'`,
     ).run(state, now, commandId).changes);
   }
@@ -20306,7 +20316,9 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN");
     try {
       const held = Number(this.stmt(
-        `UPDATE review_sessions SET continuation_state='held', continuation_command_id=NULL, continuation_updated_at=?
+        `UPDATE review_sessions SET continuation_state='held', continuation_command_id=NULL, continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
          WHERE requester_session_id=? AND continuation_command_id=? AND continuation_state='delivering'`,
       ).run(now, requesterSessionId, commandId).changes) > 0;
       if (held) this.dismissTerminalSessionPromptCommand(requesterSessionId, commandId, now);
@@ -20322,7 +20334,9 @@ export class ControlPlaneDb {
    * too, so a late not-sent receipt cannot hold it again. */
   abandonReviewContinuations(requesterSessionId: string, now: number): number {
     return Number(this.stmt(
-      `UPDATE review_sessions SET continuation_state='abandoned', continuation_updated_at=?
+      `UPDATE review_sessions SET continuation_state='abandoned', continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
        WHERE requester_session_id=? AND continuation_state IN ('held','delivering')`,
     ).run(now, requesterSessionId).changes);
   }

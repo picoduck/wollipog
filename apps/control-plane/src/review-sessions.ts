@@ -179,7 +179,7 @@ export class ReviewSessions {
   /** The requester's reviews summarized for its own view, or null when it has none. */
   summaryFor(requesterSessionId: string): ReviewRunsSummary | null {
     const row = this.sql.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(state IN ${ACTIVE}), 0) AS active,
-      MAX(updated_at) AS updated_at FROM review_sessions WHERE requester_session_id=?`)
+      MAX(MAX(updated_at, COALESCE(continuation_updated_at, 0))) AS updated_at FROM review_sessions WHERE requester_session_id=?`)
       .get(requesterSessionId) as { count: number; active: number; updated_at: number | null };
     return row.count > 0 ? { count: row.count, active: row.active, updatedAt: row.updated_at ?? 0 } : null;
   }
@@ -240,15 +240,19 @@ export class ReviewSessions {
    * The extra rounds granted to one epoch of a requester's run (#3369): every approved or consumed
    * review_round_extension decision for exactly that pull request and epoch. `approved` names the
    * ones not yet consumed, which a review request consumes, so a session restart cannot revoke a
-   * grant the run already counts.
+   * grant the run already counts. With a requested head, an unused grant applies only to that exact
+   * head. A newer occurrence for the canonical resource replaces even a consumed but unused grant.
    */
-  extensions(requesterSessionId: string, pullRequest: { repository: string; number: number }, epoch: number): {
+  extensions(requesterSessionId: string, pullRequest: { repository: string; number: number }, epoch: number, headSha?: string): {
     rounds: number; approved: string[];
   } {
     let rows: Array<{ occurrence_id: string; status: string; resource_snapshot: string }>;
     try {
-      rows = this.sql.prepare(`SELECT occurrence_id, status, resource_snapshot FROM workflow_decisions
-        WHERE session_id=? AND category='review_round_extension' AND status IN ('approved','consumed') ORDER BY created_at`)
+      rows = this.sql.prepare(`SELECT d.occurrence_id, d.status, d.resource_snapshot FROM workflow_decisions d
+        WHERE d.session_id=? AND d.category='review_round_extension' AND d.status IN ('approved','consumed')
+          AND NOT EXISTS (SELECT 1 FROM workflow_decisions newer WHERE newer.session_id=d.session_id
+            AND newer.category=d.category AND newer.resource_key=d.resource_key AND newer.rowid>d.rowid)
+        ORDER BY d.rowid`)
         .all(requesterSessionId) as typeof rows;
     } catch {
       // A database without workflow decisions grants none.
@@ -257,18 +261,30 @@ export class ReviewSessions {
     let rounds = 0;
     const approved: string[] = [];
     for (const row of rows) {
-      const snapshot = json<{ repository?: unknown; pullRequest?: unknown; epoch?: unknown; extraRounds?: unknown }>(row.resource_snapshot);
+      const snapshot = json<{ repository?: unknown; pullRequest?: unknown; epoch?: unknown; extraRounds?: unknown; headSha?: unknown; roundsUsed?: unknown }>(row.resource_snapshot);
       if (!snapshot || typeof snapshot.repository !== "string" ||
           snapshot.repository.toLowerCase() !== pullRequest.repository.toLowerCase() ||
           snapshot.pullRequest !== pullRequest.number || snapshot.epoch !== epoch ||
+          typeof snapshot.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(snapshot.headSha) ||
+          !Number.isSafeInteger(snapshot.roundsUsed) || (snapshot.roundsUsed as number) < 1 ||
           !Number.isSafeInteger(snapshot.extraRounds) || (snapshot.extraRounds as number) < 1 || (snapshot.extraRounds as number) > 4) continue;
+      // A consumed decision may have been consumed explicitly before its review request. Until
+      // its exact head has started a planned extra round, it grants no budget to any other head.
+      // Afterwards its remaining rounds belong to the epoch, including subsequent fixed heads.
+      if (headSha !== undefined && snapshot.headSha !== headSha) {
+        const activated = row.status === "consumed" && this.sql.prepare(`SELECT 1 FROM review_sessions
+          WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND head_sha=?
+            AND json_extract(round_json, '$.epoch')=? AND json_extract(round_json, '$.round')>? LIMIT 1`)
+          .get(requesterSessionId, pullRequest.repository, pullRequest.number, snapshot.headSha, epoch, snapshot.roundsUsed as number);
+        if (!activated) continue;
+      }
       rounds += snapshot.extraRounds as number;
       if (row.status === "approved") approved.push(row.occurrence_id);
     }
     return { rounds, approved };
   }
 
-  history(requesterSessionId: string, pullRequest: { repository: string; number: number }): ReviewRunHistory {
+  history(requesterSessionId: string, pullRequest: { repository: string; number: number }, headSha?: string): ReviewRunHistory {
     const rows = this.sql.prepare(`SELECT head_sha, round_json, verdict_json, findings_json FROM review_sessions
       WHERE requester_session_id=? AND repository=? AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
       .all(requesterSessionId, pullRequest.repository, pullRequest.number) as Array<Pick<Row, "head_sha" | "round_json" | "verdict_json" | "findings_json">>;
@@ -285,7 +301,7 @@ export class ReviewSessions {
     const current = attempts.filter((attempt) => attempt.round.epoch === epoch);
     const last = current.at(-1)!;
     history.epoch = epoch;
-    history.roundBudget += this.extensions(requesterSessionId, pullRequest, epoch).rounds;
+    history.roundBudget += this.extensions(requesterSessionId, pullRequest, epoch, headSha).rounds;
     history.lastAttempt = { headSha: last.headSha, round: last.round.round, attempt: last.round.attempt, valid: !!last.verdict?.valid };
     const validVote = (attempt: typeof attempts[number]) => {
       const vote = attempt.verdict?.effectiveVote;

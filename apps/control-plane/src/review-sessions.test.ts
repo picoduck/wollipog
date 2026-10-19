@@ -392,8 +392,10 @@ test("a finished review owes its idle requester exactly one continuation, delive
       output: report(), round: ROUND, verdict: VALID } as never);
     assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "pending");
     assert.equal(continuationCommands(h).size, 0);
+    const heldSummary = h.db.reviewSessions.summaryFor("s1")!;
     h.db.updateSessionStatus("s1", "idle", 10);
     h.svc.retryDuePrompts();
+    assert.ok(h.db.reviewSessions.summaryFor("s1")!.updatedAt > heldSummary.updatedAt, "staging refreshes the summary");
     const commands = continuationCommands(h);
     assert.equal(commands.size, 1, "one durable command carries it");
     const [commandId, text] = [...commands][0]!;
@@ -406,10 +408,12 @@ test("a finished review owes its idle requester exactly one continuation, delive
     h.svc.retryDuePrompts();
     h.svc.retryDuePrompts();
     assert.deepEqual([...continuationCommands(h).keys()], [commandId]);
+    const pendingSummary = h.db.reviewSessions.summaryFor("s1")!;
     h.svc.onDurablePromptReceipt("r", {
       type: "durable_session_command_update", commandId, sessionId: "s1", state: "started", revision: 5,
     } as never);
     assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "delivered");
+    assert.ok(h.db.getSession("s1")!.reviewRuns!.updatedAt > pendingSummary.updatedAt, "the published session invalidates the pending panel");
     h.svc.retryDuePrompts();
     assert.equal(continuationCommands(h).size, 1);
   } finally { h.db.close(); }
@@ -561,7 +565,7 @@ function exhaustRounds(h: ReturnType<typeof harness>): void {
   }
 }
 
-test("a standalone session asks a person for more review rounds, bound to its run, and the run grants them", () => {
+test("a standalone session asks a person for more review rounds, bound to its run, and the run grants them", async () => {
   const h = harness();
   try {
     exhaustRounds(h);
@@ -593,6 +597,9 @@ test("a standalone session asks a person for more review rounds, bound to its ru
     // The approved rounds extend this epoch's budget, and the next request consumes the grant so a
     // restart cannot revoke it.
     assert.equal(h.db.reviewSessions.history("s1", pr).roundBudget, 6);
+    const consumed = await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot });
+    assert.ok(consumed.ok, consumed.error ?? "standalone consumption refused");
+    assert.equal(consumed.data?.status, "consumed");
     const next = h.svc.requestReviewSession("s1", request({ headSha: "c".repeat(40) }));
     assert.ok(next.ok, next.error ?? "refused");
     assert.equal(h.starts().at(-1)!.spec.review?.history?.roundBudget, 6);
@@ -636,5 +643,81 @@ test("a requester's cost budget bounds its review, and an exhausted budget refus
     h.db.updateSessionCostBudget("s2", 1, 5);
     h.db.addSessionUsage("s2", { costUsd: 2 }, 6);
     assert.match(h.svc.requestReviewSession("s2", request()).error!, /no cost budget left/u);
+  } finally { h.db.close(); }
+});
+
+
+for (const preconsume of [false, true]) test(`an extension cannot activate for an unapproved head (preconsumed=${preconsume})`, async () => {
+  const h = harness();
+  try {
+    exhaustRounds(h);
+    const pr = request().pullRequest;
+    const approvedHead = "c".repeat(40);
+    const changedHead = "d".repeat(40);
+    const key = `review_round_extension:${pr.repository}#${pr.number}:epoch-1:rounds-4`;
+    const snapshot = { category: "review_round_extension" as const, repository: pr.repository, pullRequest: pr.number,
+      epoch: 1, headSha: approvedHead, roundsUsed: 4, blockingFindings: 1, extraRounds: 2, reason: "Fix the remaining blocker." };
+    const created = h.svc.createWorkflowDecision("s1", { requestId: "head-bound", resourceKey: key, resourceSnapshot: snapshot });
+    assert.ok(created.ok && created.data, created.error ?? "request refused");
+    assert.ok(h.svc.approve("s1", created.data.occurrenceId, "approve").ok);
+    if (preconsume) {
+      const consumed = await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot });
+      assert.ok(consumed.ok, consumed.error ?? "request refused");
+    }
+    const changed = h.svc.requestReviewSession("s1", request({ headSha: changedHead }));
+    assert.ok(changed.ok && changed.data, changed.error ?? "request refused");
+    assert.equal(h.starts().at(-1)!.spec.review?.history?.roundBudget, 4, "B receives no budget approved for A");
+    assert.equal(h.db.workflowDecisionByOccurrence(created.data.occurrenceId)?.status, preconsume ? "consumed" : "approved",
+      "a mismatched request does not consume or activate the grant");
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: changed.data.reviewSessionId,
+      state: "failed", reason: "the epoch reached its round limit" });
+    // A new exact decision can replace the unused grant even when it was explicitly consumed.
+    const replacement = h.svc.createWorkflowDecision("s1", { requestId: "new-head", resourceKey: key,
+      resourceSnapshot: { ...snapshot, headSha: changedHead } });
+    assert.ok(replacement.ok && replacement.data, replacement.error ?? "request refused");
+    assert.ok(h.svc.approve("s1", replacement.data.occurrenceId, "approve").ok);
+    const next = h.svc.requestReviewSession("s1", request({ headSha: changedHead }));
+    assert.ok(next.ok && next.data, next.error ?? "request refused");
+    assert.equal(h.starts().at(-1)!.spec.review?.history?.roundBudget, 6);
+    assert.equal(h.db.workflowDecisionByOccurrence(replacement.data.occurrenceId)?.status, "consumed");
+    // Once the exact approved head starts its planned round, the remaining rounds belong to the epoch.
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: next.data.reviewSessionId,
+      state: "completed", output: report(changedHead), round: { ...ROUND, round: 5 }, verdict: VALID } as never);
+    const later = h.svc.requestReviewSession("s1", request({ headSha: "e".repeat(40) }));
+    assert.ok(later.ok, later.error ?? "request refused");
+    assert.equal(h.starts().at(-1)!.spec.review?.history?.roundBudget, 6, "an activated grant retains the remaining epoch budget");
+    assert.equal(h.db.reviewSessions.history("s1", pr, approvedHead).roundBudget, 6,
+      "returning to the old head never reactivates a consumed grant replaced by the newer occurrence");
+  } finally { h.db.close(); }
+});
+
+test("every continuation transition invalidates the review summary, including same-millisecond changes", () => {
+  const h = harness();
+  try {
+    const view = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    const completed = h.db.reviewSessions.summaryFor("s1")!;
+    // Another review can have the newest timestamp when an older receipt finally arrives.
+    h.db.reviewSessions.record({ reviewSessionId: "newer", requesterSessionId: "s1", runnerId: "r", pullRequest: request().pullRequest,
+      headSha: HEAD, reviewer: "codex" }, completed.updatedAt + 10);
+    let before = h.db.reviewSessions.summaryFor("s1")!;
+    const transition = (change: (now: number) => void) => {
+      change(before.updatedAt); // A receipt can arrive in the same millisecond as the outcome.
+      const after = h.db.reviewSessions.summaryFor("s1")!;
+      assert.ok(after.updatedAt > before.updatedAt, "each continuation mutation changes the panel's refresh key");
+      before = after;
+    };
+    transition(now => { assert.ok(h.db.claimHeldReviewContinuations("s1", [view.reviewSessionId], now)); });
+    transition(now => h.db.releaseReviewContinuationClaim("s1", [view.reviewSessionId], now));
+    transition(now => {
+      h.db.raw().prepare("UPDATE review_sessions SET continuation_state='delivering', continuation_command_id='receipt' WHERE review_session_id=?")
+        .run(view.reviewSessionId);
+      assert.equal(h.db.setReviewContinuationCommandState("receipt", "delivered", now), 1);
+    });
+    transition(now => {
+      h.db.raw().prepare("UPDATE review_sessions SET continuation_state='held' WHERE review_session_id=?").run(view.reviewSessionId);
+      assert.equal(h.db.abandonReviewContinuations("s1", now), 1);
+    });
   } finally { h.db.close(); }
 });

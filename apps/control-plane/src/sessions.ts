@@ -8855,12 +8855,12 @@ export class SessionsService {
     };
     // #3369: a runner that plans review runs gets the run's history; an older one reviews in full.
     if (runnerSupportsProtocol(runner?.protocolVersion, "reviewRuns")) {
-      policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest);
+      policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest, request.headSha);
       if (request.fullReason !== undefined) policy.fullReason = request.fullReason.trim();
       // An approved extension the history counts is consumed now, so a later restart, which
       // revokes unconsumed decisions, cannot take back rounds the run has been granted.
       const now = Date.now();
-      for (const occurrenceId of this.db.reviewSessions.extensions(session.id, policy.pullRequest, policy.history.epoch).approved) {
+      for (const occurrenceId of this.db.reviewSessions.extensions(session.id, policy.pullRequest, policy.history.epoch, request.headSha).approved) {
         if (this.db.consumeWorkflowDecision(occurrenceId, now)) {
           this.log.info(JSON.stringify({ event: "review_round_extension_consumed", sessionId: session.id, occurrenceId }));
         }
@@ -10077,9 +10077,13 @@ export class SessionsService {
       }
     }
     const policy = parent?.parentControlPolicy;
+    // The same narrow self-control exception as creation/resolution: an ordinary standalone
+    // requester can consume its human-approved review extension, never another self-owned gate.
+    const standaloneReviewExtension = child && parent?.id === child.id && decision.category === "review_round_extension" &&
+      decision.authority === "human" && this.decisionControllerRoot(child) === "none";
     if (!child || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
+        !(standaloneReviewExtension || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
@@ -10517,7 +10521,7 @@ export class SessionsService {
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "review_round_extension" }>,
   ): string | null {
     if (this.db.reviewSessions.isReviewSession(child.id)) return "a review session cannot request more review rounds";
-    const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+    const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest }, snapshot.headSha);
     if (run.epoch === 0 || !run.lastValid) return "this session has no valid review of that pull request to extend";
     if (snapshot.epoch !== run.epoch) return `the review run is in epoch ${run.epoch}, not ${snapshot.epoch}`;
     if (run.lastValid.vote === "UPVOTE") return "the pull request's last valid review is an upvote; it needs no more rounds";
