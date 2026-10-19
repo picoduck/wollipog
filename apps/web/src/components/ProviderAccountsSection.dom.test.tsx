@@ -10,7 +10,7 @@ import {
   type ProviderLoginView,
   type RunnerView,
 } from "@wollipog/protocol";
-import { HIDE_ACCOUNT_EMAILS_STORAGE_KEY } from "../account-email-privacy.js";
+import { HIDE_ACCOUNT_EMAILS_STORAGE_KEY, setHideAccountEmails } from "../account-email-privacy.js";
 import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -58,7 +58,8 @@ function runnerView(overrides: Partial<RunnerView> = {}): RunnerView {
 type Call =
   | { kind: "adopt" | "revoke"; accountId: string; force?: boolean }
   | { kind: "remove"; accountId: string }
-  | { kind: "login"; body: unknown };
+  | { kind: "login"; body: unknown }
+  | { kind: "cancel"; operationId: string };
 
 function client(handlers: {
   adopt?: (accountId: string) => Promise<unknown>;
@@ -80,6 +81,10 @@ function client(handlers: {
     removeProviderAccount: async (_runnerId: string, accountId: string) => {
       calls.push({ kind: "remove", accountId });
       return handlers.remove ? handlers.remove(accountId) : { removed: true, credentialsRetained: false };
+    },
+    cancelProviderLogin: async (_runnerId: string, operationId: string) => {
+      calls.push({ kind: "cancel", operationId });
+      return { login: runningLogin("work", "Work") };
     },
     startProviderLogin: async (_runnerId: string, body: unknown) => {
       calls.push({ kind: "login", body });
@@ -216,6 +221,33 @@ test("a running sign-in reads Signing In with a pulse, and a new account's sign-
     assert.equal(ui.container.querySelector(".section-title")?.textContent, "Provider Accounts 3", "the count is accounts");
     const cards = [...ui.container.querySelectorAll(".provider-account-expansion article")].map((card) => card.getAttribute("aria-label"));
     assert.deepEqual(cards, ["Work Provider Sign-In", "Studio Provider Sign-In"]);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a running retry wins over an earlier failure the control plane kept for the same account", async () => {
+  const failed: ProviderLoginView = {
+    operationId: "login-failed", accountId: "personal", label: "Personal", provider: "claude", status: "failed",
+    error: "The sign-in attempt failed.", startedAt: 1,
+  };
+  const retry: ProviderLoginView = {
+    operationId: "login-retry", accountId: "personal", label: "Personal", provider: "claude", status: "awaiting_code",
+    expectsCode: true, verificationUrl: "https://claude.ai/oauth/authorize?retry", startedAt: 2,
+  };
+  const api = client();
+  const ui = await render({
+    runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, providerLogins: [failed, retry] }), api: api.client, canManageProfiles: false,
+  });
+  try {
+    assert.equal(ui.badge("Personal")?.textContent, "Signing In");
+    const cards = [...ui.container.querySelectorAll<HTMLElement>(".provider-account-expansion article")];
+    assert.equal(cards.length, 1, "the row shows one sign-in");
+    assert.match(cards[0]!.textContent ?? "", /Authorization Code/);
+    assert.doesNotMatch(cards[0]!.textContent ?? "", /The sign-in attempt failed\./);
+    await act(async () => { ui.button(cards[0]!, "Cancel").click(); });
+    await ui.settle();
+    assert.deepEqual(api.calls, [{ kind: "cancel", operationId: "login-retry" }]);
   } finally {
     await ui.unmount();
   }
@@ -391,6 +423,64 @@ test("under Hide Account Emails an email label stays masked in the row, the menu
     }
   });
 });
+
+for (const [item, title] of [
+  ["Adopt as Profile…", "Adopt as Profile"],
+  ["Revoke Access…", "Revoke Access"],
+  ["Remove Account…", "Remove Account"],
+] as const) {
+  test(`${title}: the label stays a live identifier, masked when the preference turns on and revealable when it is on`, async () => {
+    const email = "me@example.com";
+    const runner = runnerView({
+      providerAccounts: [{ id: "mail", label: email, provider: "claude", authStatus: "authenticated", profile: { id: "p", access: "pending" } }],
+    });
+    const openConfirmation = async (ui: Awaited<ReturnType<typeof render>>) => {
+      const trigger = ui.rows()[0]!.querySelector<HTMLButtonElement>('button[aria-label^="More Actions for"]')!;
+      await act(async () => { trigger.click(); });
+      await ui.settle();
+      const match = [...ui.menu()!.querySelectorAll<HTMLButtonElement>(".menu-item")].find((candidate) =>
+        candidate.querySelector(".menu-text")?.textContent === item)!;
+      await act(async () => { match.click(); });
+      await ui.settle();
+      const dialog = ui.dialog()!;
+      assert.equal(dialog.querySelector(".modal-title, h2")?.textContent, title);
+      return dialog;
+    };
+
+    // Opened with the preference off, then turned on in Settings while the dialog is open.
+    const shown = await render({ runner });
+    try {
+      const dialog = await openConfirmation(shown);
+      assert.match(dialog.textContent ?? "", /me@example\.com/);
+      await act(async () => { setHideAccountEmails(true); });
+      await shown.settle();
+      assert.doesNotMatch(dialog.innerHTML, /example\.com/, "the whole confirmation drops the email");
+      await act(async () => { shown.button(dialog, "Cancel").click(); });
+      await shown.settle();
+    } finally {
+      await shown.unmount();
+      await act(async () => { setHideAccountEmails(false); });
+    }
+
+    // Opened with the preference on: masked, and the explicit reveal still works.
+    await withHiddenEmails(async () => {
+      const hidden = await render({ runner });
+      try {
+        const dialog = await openConfirmation(hidden);
+        assert.doesNotMatch(dialog.innerHTML, /example\.com/);
+        const reveal = dialog.querySelector<HTMLButtonElement>('button[aria-label="Show Account Email"]');
+        assert.ok(reveal, "the masked label can be revealed");
+        await act(async () => { reveal.click(); });
+        await hidden.settle();
+        assert.match(dialog.textContent ?? "", /me@example\.com/);
+        await act(async () => { hidden.button(dialog, "Cancel").click(); });
+        await hidden.settle();
+      } finally {
+        await hidden.unmount();
+      }
+    });
+  });
+}
 
 test("a removal that kept credentials says so in the toast's detail line; otherwise the toast is one line", async () => {
   for (const [credentialsRetained, expected] of [

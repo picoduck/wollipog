@@ -80,7 +80,19 @@ export function providerAccountRemovalRefusal(cause: unknown, agents: RunnerView
   return first === raw ? { body: first } : { body: first, details: raw };
 }
 
-type AccountStatus = "signed_in" | "sign_in_required" | "status_unknown" | "signing_in";
+/**
+ * The one sign-in an account's row shows: the newest running one, else the newest settled one. The
+ * control plane keeps a failure until it is dismissed, so an earlier failure can sit beside a
+ * running retry; the retry is the one to act on (#2996 builds the in-row steps on this choice).
+ */
+export function accountLogin(logins: readonly ProviderLoginView[], accountId: string): ProviderLoginView | undefined {
+  const mine = logins.filter((login) => login.accountId === accountId);
+  const newest = (candidates: readonly ProviderLoginView[]) =>
+    candidates.reduce<ProviderLoginView | undefined>((best, login) => !best || login.startedAt >= best.startedAt ? login : best, undefined);
+  return newest(mine.filter(providerLoginRunning)) ?? newest(mine);
+}
+
+type AccountStatus ="signed_in" | "sign_in_required" | "status_unknown" | "signing_in";
 
 function accountStatus(account: ProviderAccountDefinition, signingIn: boolean): AccountStatus {
   if (signingIn) return "signing_in";
@@ -247,7 +259,9 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     login.status !== "succeeded" && login.status !== "cancelled");
   const accountIds = new Set(accounts.map((account) => account.id));
   // A sign-in for a new account has no account row yet: it shows as a row of its own until it lands.
-  const newLogins = logins.filter((login) => !accountIds.has(login.accountId));
+  const newLogins = [...new Set(logins.map((login) => login.accountId))]
+    .filter((accountId) => !accountIds.has(accountId))
+    .map((accountId) => accountLogin(logins, accountId)!);
 
   const masked = (label: string) => accountLabelText(label, undefined, privacy.hide);
   const identifier = (account: Pick<ProviderAccountDefinition, "id" | "label">) => (
@@ -316,7 +330,13 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       }
     });
 
-  const accountRows = (account: ProviderAccountDefinition) => [{ label: masked(account.label), meta: providerName(account.provider) }];
+  // The label stays a live identifier, so the preference changing while the dialog is open still
+  // masks it, and a masked label can still be revealed.
+  const accountRows = (account: ProviderAccountDefinition) => [{
+    label: masked(account.label),
+    labelContent: identifier(account),
+    meta: providerName(account.provider),
+  }];
 
   const adopt = async (account: ProviderAccountDefinition, reopen: () => void) => {
     const approved = await confirm({
@@ -392,7 +412,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     return items;
   };
 
-  const loginFor = (accountId: string) => logins.find((login) => login.accountId === accountId);
+  const loginFor = (accountId: string) => accountLogin(logins, accountId);
   const loginCard = (login: ProviderLoginView | undefined) =>
     login && <ProviderLoginCard runnerId={runner.runnerId} login={login} />;
 
