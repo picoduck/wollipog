@@ -26,6 +26,9 @@ export interface ReviewRunHistory {
     /** Its findings, carried into the next round's prompt. */
     findings: ReviewReportFinding[];
   } | null;
+  /** Before the epoch's first valid round: the earlier epoch's last valid round it started from.
+   * Its findings stay open, and a retry of the epoch's first round still reviews the range-diff. */
+  carried?: { headSha: string; baseSha: string; findings: ReviewReportFinding[] } | null;
   /** The epoch's most recent attempt, valid or not. */
   lastAttempt: { headSha: string; round: number; attempt: number; valid: boolean } | null;
   /** Valid rounds in the epoch. */
@@ -71,15 +74,15 @@ export function planReviewRound(
     return { epoch: Math.max(1, history.epoch), round: 1, attempt: 1, mode: "full", openFindings: [] };
   }
   const { lastValid, lastAttempt } = history;
+  // The last valid review: this epoch's, or the earlier one this epoch has not yet replaced.
+  const origin = lastValid ?? history.carried ?? null;
+  // A requested full review always reviews in full; otherwise a rewrite reviews its range-diff.
+  const fromOrigin = () => origin && !request.fullReason
+    ? { mode: "rebase" as const, rebasedFrom: { baseSha: origin.baseSha, headSha: origin.headSha } }
+    : { mode: "full" as const };
   const reference = lastValid ?? lastAttempt;
   if (reference.headSha !== request.headSha && descendsFromReference !== true) {
-    return {
-      epoch: history.epoch + 1, round: 1, attempt: 1,
-      ...(lastValid
-        ? { mode: "rebase" as const, rebasedFrom: { baseSha: lastValid.baseSha, headSha: lastValid.headSha } }
-        : { mode: "full" as const }),
-      openFindings: lastValid?.findings ?? [],
-    };
+    return { epoch: history.epoch + 1, round: 1, attempt: 1, ...fromOrigin(), openFindings: origin?.findings ?? [] };
   }
   if (lastValid?.vote === "UPVOTE" && lastValid.headSha === request.headSha) return { refusal: REVIEW_ROUND_REFUSALS.upvoted };
   const retry = !lastAttempt.valid && (!lastValid || lastAttempt.round > lastValid.round);
@@ -94,8 +97,10 @@ export function planReviewRound(
     round = lastAttempt.round + 1;
     attempt = 1;
   }
-  const openFindings = lastValid?.findings ?? [];
-  if (!lastValid || request.fullReason) return { epoch: history.epoch, round, attempt, mode: "full", openFindings };
+  const openFindings = origin?.findings ?? [];
+  // Before the epoch's first valid round, a retry reviews what the epoch's first attempt did.
+  if (!lastValid) return { epoch: history.epoch, round, attempt, ...fromOrigin(), openFindings };
+  if (request.fullReason) return { epoch: history.epoch, round, attempt, mode: "full", openFindings };
   if (lastValid.headSha === request.headSha) return { refusal: REVIEW_ROUND_REFUSALS.unchanged };
   return { epoch: history.epoch, round, attempt, mode: "delta", since: lastValid.headSha, openFindings };
 }

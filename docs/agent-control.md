@@ -358,7 +358,9 @@ attempt, mode, base and the files in scope):
 - A head that does not descend from the last valid head (a rebase or force-push) starts a new
   epoch: its first round reviews the range-diff from the earlier base and head (`rebase`), scoped
   to the changed files the rewrite touched, with the open findings carried forward. Without the
-  earlier commits it reviews in full.
+  earlier commits, or with `fullReason`, it reviews in full. Until the new epoch has a valid round,
+  the earlier epoch's last valid review stands: a retry reviews the same range-diff with the same
+  findings.
 - An epoch has at most 4 valid rounds and each round 2 counted attempts. An invalid attempt is
   retried in the same round; an attempt that timed out or failed before producing a report does
   not count. A head with an upvote, a head unchanged since the last valid round, a spent round

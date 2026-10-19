@@ -235,14 +235,25 @@ export class ReviewSessions {
     const last = current.at(-1)!;
     history.epoch = epoch;
     history.lastAttempt = { headSha: last.headSha, round: last.round.round, attempt: last.round.attempt, valid: !!last.verdict?.valid };
+    const validVote = (attempt: typeof attempts[number]) => {
+      const vote = attempt.verdict?.effectiveVote;
+      return attempt.verdict?.valid && (vote === "UPVOTE" || vote === "DOWNVOTE") ? vote : null;
+    };
     for (const attempt of current) {
       if (attempt.round.round === last.round.round && attempt.verdict?.consumed) history.consumedInLastRound += 1;
-      const vote = attempt.verdict?.effectiveVote;
-      if (!attempt.verdict?.valid || (vote !== "UPVOTE" && vote !== "DOWNVOTE")) continue;
+      const vote = validVote(attempt);
+      if (!vote) continue;
       history.validRounds += 1;
       history.lastValid = {
         headSha: attempt.headSha, baseSha: attempt.round.baseSha, round: attempt.round.round, vote,
         findings: json<ReviewReportFinding[]>(attempt.findings) ?? [],
+      };
+    }
+    // Until the epoch has a valid round, the last valid review before it still stands.
+    const earlier = history.lastValid ? undefined : attempts.filter((attempt) => attempt.round.epoch < epoch && validVote(attempt)).at(-1);
+    if (earlier) {
+      history.carried = {
+        headSha: earlier.headSha, baseSha: earlier.round.baseSha, findings: json<ReviewReportFinding[]>(earlier.findings) ?? [],
       };
     }
     return history;

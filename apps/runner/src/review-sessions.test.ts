@@ -346,6 +346,11 @@ test("a head that no longer descends from the reviewed one starts an epoch that 
   assert.match(prepared.prompt, /## Range-Diff\n\n```text\n[^]*answer = 43/u);
   assert.match(prepared.prompt, /Open findings from earlier rounds:\n.*Wrong answer/u);
   f.launcher.release("s_review");
+  // A requested full review covers the whole pull request even across the rewrite.
+  const requested = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE"), fullReason: "Review everything" }), CODEX, "b");
+  assert.deepEqual([requested.round.epoch, requested.round.mode, requested.round.scopeFiles], [2, "full", ["app.ts", "notes.md", "outside"]]);
+  assert.match(requested.prompt, /## Pinned Patch/u);
+  f.launcher.release("s_review");
   // Without the earlier head's objects there is no range-diff: the new epoch reviews in full.
   const g = fixture(t);
   writeFileSync(join(g.worktree, "app.ts"), "export const answer = 43;\n");

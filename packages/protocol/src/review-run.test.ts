@@ -54,4 +54,24 @@ test("a head that does not descend from the reviewed one starts a new epoch over
   // Before any valid round, the reference is the last attempt, and the new epoch is a full review.
   const noValid = history({ lastValid: null, validRounds: 0, lastAttempt: { headSha: A, round: 1, attempt: 1, valid: false } });
   assert.deepEqual(planReviewRound(noValid, { headSha: C }, false), { epoch: 2, round: 1, attempt: 1, mode: "full", openFindings: [] });
+  // A requested full review is full even across a rewrite; the findings still carry forward.
+  assert.deepEqual(planReviewRound(history(), { headSha: C, fullReason: "review everything" }, false),
+    { epoch: 2, round: 1, attempt: 1, mode: "full", openFindings: [finding] });
+});
+
+test("an invalid first attempt of a rebase epoch is retried over the same range-diff with the carried findings", () => {
+  // Epoch 2 started from epoch 1's valid round at A; its first attempt at C was invalid.
+  const retrying = history({
+    epoch: 2, lastValid: null, carried: { headSha: A, baseSha: BASE, findings: [finding] },
+    lastAttempt: { headSha: C, round: 1, attempt: 1, valid: false }, validRounds: 0, consumedInLastRound: 1,
+  });
+  assert.deepEqual(planReviewRound(retrying, { headSha: C }, true), {
+    epoch: 2, round: 1, attempt: 2, mode: "rebase", rebasedFrom: { baseSha: BASE, headSha: A }, openFindings: [finding],
+  });
+  assert.deepEqual(planReviewRound(retrying, { headSha: C, fullReason: "all of it" }, true),
+    { epoch: 2, round: 1, attempt: 2, mode: "full", openFindings: [finding] });
+  // Another rewrite before any valid round of epoch 2 still diffs against the last valid review.
+  assert.deepEqual(planReviewRound(retrying, { headSha: B }, false), {
+    epoch: 3, round: 1, attempt: 1, mode: "rebase", rebasedFrom: { baseSha: BASE, headSha: A }, openFindings: [finding],
+  });
 });

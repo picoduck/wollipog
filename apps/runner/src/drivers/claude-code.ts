@@ -3397,6 +3397,12 @@ export class ClaudeCodeDriver implements Driver {
             /* ignore */
           }
         }
+        if (!parentId && this.opts.review) {
+          // A denial is a tool the preset refused: the attempt broke the reviewer's tool policy,
+          // whether or not the turn then ended in an error.
+          const denials = (msg as { permission_denials?: unknown }).permission_denials;
+          this.lastPermissionDenials = Array.isArray(denials) ? denials.length : denials === undefined ? 0 : 1;
+        }
         if (msg.is_error || msg.subtype === "error_during_execution") {
           if (!parentId) {
             this.streamedAgentResponse = false;
@@ -3430,9 +3436,6 @@ export class ClaudeCodeDriver implements Driver {
         }
         if (!parentId && this.opts.review) {
           this.lastStructuredOutput = msg.structured_output === undefined ? null : JSON.stringify(msg.structured_output);
-          // A denial is a tool the preset refused: the attempt broke the reviewer's tool policy.
-          const denials = (msg as { permission_denials?: unknown }).permission_denials;
-          this.lastPermissionDenials = Array.isArray(denials) ? denials.length : denials === undefined ? 0 : 1;
         }
         if (!parentId && this.streamedAgentResponse) {
           this.streamedAgentResponse = false;

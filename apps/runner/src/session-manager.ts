@@ -2099,7 +2099,7 @@ export class SessionManager {
    * outcome and stop the provider. A turn stopped by its requester is cancelled; a turn past its
    * time limit is judged as timed out (unconsumed when it produced no report).
    */
-  private finishReviewTurn(sessionId: string, client: Driver, stop: Awaited<ReturnType<Driver["prompt"]>>, interrupted: boolean): void {
+  private async finishReviewTurn(sessionId: string, client: Driver, stop: Awaited<ReturnType<Driver["prompt"]>>, interrupted: boolean): Promise<void> {
     if (!this.isReviewSession(sessionId) || this.store.readMeta(sessionId)?.review?.update) return;
     const timedOut = this.reviewsTimedOut.has(sessionId);
     const stopProvider = () => setImmediate(() => {
@@ -2117,26 +2117,26 @@ export class SessionManager {
     const observation: ReviewObservation = {
       output, timedOut, fatal, exitedWithError: stop !== "end_turn" && !timedOut, modelOk: diagnostics.modelOk ?? null,
     };
+    // The turn's caller awaits this, so the outcome is reported before any terminal status: the
+    // control plane fails a review whose session ends without one.
     this.reviewsEvaluating.add(sessionId);
-    void (async () => {
-      let verdict: import("@wollipog/protocol").ReviewAttemptVerdictView | undefined;
-      try {
-        verdict = await this.reviewSessions?.evaluate(sessionId, observation);
-      } catch (error) {
-        this.log(`review session ${sessionId} evaluation failed: ${errText(error)}`);
-      } finally {
-        this.reviewsEvaluating.delete(sessionId);
-      }
-      if (output && verdict) {
-        this.settleReviewSession(sessionId, { state: "completed", output, verdict });
-      } else {
-        this.settleReviewSession(sessionId, {
-          state: "failed", reason: timedOut ? "the reviewer timed out" : "the review ended without a result",
-          ...(verdict ? { verdict } : {}),
-        });
-      }
-      stopProvider();
-    })();
+    let verdict: import("@wollipog/protocol").ReviewAttemptVerdictView | undefined;
+    try {
+      verdict = await this.reviewSessions?.evaluate(sessionId, observation);
+    } catch (error) {
+      this.log(`review session ${sessionId} evaluation failed: ${errText(error)}`);
+    } finally {
+      this.reviewsEvaluating.delete(sessionId);
+    }
+    if (output && verdict) {
+      this.settleReviewSession(sessionId, { state: "completed", output, verdict });
+    } else {
+      this.settleReviewSession(sessionId, {
+        state: "failed", reason: timedOut ? "the reviewer timed out" : "the review ended without a result",
+        ...(verdict ? { verdict } : {}),
+      });
+    }
+    stopProvider();
   }
 
   /** A review session has a fixed time limit: past it, its turn is cancelled and judged as timed
@@ -14261,7 +14261,7 @@ export class SessionManager {
       await this.recordConversationForkPoint(sessionId, entry, stop, postTurnTree);
       if (entry.historyIntegrityFailure) return;
       const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
-      this.finishReviewTurn(sessionId, entry.client, stop, Boolean(interrupted));
+      await this.finishReviewTurn(sessionId, entry.client, stop, Boolean(interrupted));
       // A provider result is the terminal turn boundary even when authentication or governance
       // installs its own independent hold. Clear only the Stop Turn fence before those branches
       // return; their distinct gates continue to block the FIFO.
@@ -14312,7 +14312,7 @@ export class SessionManager {
       }
       entry.currentBackgroundJobIds = undefined;
     } catch (err) {
-      this.finishReviewTurn(sessionId, entry.client, "refusal", false);
+      await this.finishReviewTurn(sessionId, entry.client, "refusal", false);
       // A thrown prompt proves nothing about delivery, so it never extends a rejection streak. A
       // retired generation's late settle must not touch the replacement's streak.
       if (this.active.get(sessionId) === entry) this.lastProviderRejections.delete(sessionId);
@@ -15656,10 +15656,13 @@ export class SessionManager {
 
   stop(sessionId: string): void {
     this.flushTextDeltas(sessionId);
-    // A review being judged settles with its verdict; a stop meanwhile only ends its provider.
-    if (!this.reviewsEvaluating.has(sessionId)) {
-      this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
+    // A review being judged reports its verdict and then stops its own provider; stopping it now
+    // would report the session stopped before its outcome, which fails the review.
+    if (this.reviewsEvaluating.has(sessionId)) {
+      this.log(`review session ${sessionId} stop deferred until its attempt is judged`);
+      return;
     }
+    this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
     // A review session still preparing its snapshot has nothing persisted yet; its launch checks this.
     if (this.reviewsPreparing.has(sessionId)) this.reviewsStoppedBeforeLaunch.add(sessionId);
     // Stop is a terminal lifecycle boundary even while launch is suspended in an asynchronous

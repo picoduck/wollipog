@@ -127,6 +127,25 @@ test("Claude rate-limit events forward during and between turns without transcri
   assert.deepEqual(h.stderr, []);
 });
 
+test("a review session records the root result's permission denials, including on an error result", () => {
+  const h = makeHarness({ review: true });
+  const denied = { permission_denials: [{ tool_name: "Bash", tool_use_id: "toolu_1", tool_input: {} }] };
+  assert.equal(h.feed({ type: "result", subtype: "success", structured_output: { vote: "UPVOTE" }, ...denied }), "end_turn");
+  assert.deepEqual([h.driver.reviewOutput(), h.driver.reviewDiagnostics()], ['{"vote":"UPVOTE"}', { permissionDenials: 1 }]);
+  for (const result of [
+    { type: "result", subtype: "error_during_execution", is_error: true, ...denied },
+    { type: "result", subtype: "error_max_turns", ...denied },
+  ]) {
+    (h.driver as unknown as { lastPermissionDenials: number }).lastPermissionDenials = 0;
+    h.feed(result);
+    assert.deepEqual(h.driver.reviewDiagnostics(), { permissionDenials: 1 }, result.subtype);
+  }
+  // A subagent's result is not the reviewer's.
+  (h.driver as unknown as { lastPermissionDenials: number }).lastPermissionDenials = 0;
+  h.feed({ type: "result", subtype: "success", parent_tool_use_id: "toolu_2", ...denied });
+  assert.deepEqual(h.driver.reviewDiagnostics(), { permissionDenials: 0 });
+});
+
 test("a top-level result with provider tokens reports that the account answered", () => {
   const h = makeHarness();
   const result = (extra: Record<string, unknown> = {}) => ({

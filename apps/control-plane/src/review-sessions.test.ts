@@ -264,6 +264,26 @@ test("a review run records each attempt's round and verdict and sends its histor
   } finally { h.db.close(); }
 });
 
+test("a new epoch without a valid round keeps the earlier epoch's last valid review in its history", () => {
+  const h = harness();
+  try {
+    const update = (sessionId: string, fields: Record<string, unknown>) =>
+      h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId, ...fields } as never);
+    const first = requested(h);
+    update(first.reviewSessionId, { state: "completed", output: report(), round: ROUND, verdict: VALID });
+    const rewritten = "c".repeat(40);
+    const second = h.svc.requestReviewSession("s1", request({ headSha: rewritten })).data!;
+    update(second.reviewSessionId, { state: "failed", reason: "the review ended without a result",
+      round: { ...ROUND, epoch: 2, mode: "rebase", rebasedFrom: { baseSha: BASE, headSha: HEAD } },
+      verdict: { valid: false, consumed: true, effectiveVote: "INVALID", failureClass: "evidence_contract", validationErrors: ["no structured report"] } });
+    assert.deepEqual(h.db.reviewSessions.history("s1", request().pullRequest), {
+      ...EMPTY_HISTORY, epoch: 2, consumedInLastRound: 1,
+      lastAttempt: { headSha: rewritten, round: 1, attempt: 1, valid: false },
+      carried: { headSha: HEAD, baseSha: BASE, findings: [BLOCKER] },
+    }, "the epoch's counters reset while the earlier findings and range-diff origin stay");
+  } finally { h.db.close(); }
+});
+
 test("a valid verdict counts only when the control plane can check the report against its head and scope", () => {
   const cases: Array<[string, Record<string, unknown>, string]> = [
     ["another head", { output: report("c".repeat(40)) }, "reviewed_head"],

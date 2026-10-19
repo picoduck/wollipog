@@ -50,7 +50,7 @@ function reviewSpec(overrides: Partial<SessionLaunchSpec> = {}): SessionLaunchSp
 function harness(t: { after(fn: () => void): void }, options: {
   prepare?: ReviewSessionHooks["prepare"];
   output?: string | null;
-  stop?: "end_turn" | "refusal";
+  stop?: "end_turn" | "refusal" | "cancelled";
   /** The turn finishes only when cancelled or finished explicitly. */
   hold?: boolean;
   /** Outcomes recorded for reviews that ended before their session was persisted. */
@@ -228,20 +228,34 @@ test("a turn without structured output or with a refusal fails the review", asyn
   assert.equal(late.updates()[0]?.state, "completed");
 });
 
-test("a reviewer past its time limit is judged as timed out, and its provider is stopped", async (t) => {
-  const h = harness(t, { hold: true, output: null, evaluate: async (_id, observation) => ({
-    valid: false, consumed: false, effectiveVote: null, failureClass: observation.timedOut ? "timeout" : "evidence_contract",
-    validationErrors: ["the reviewer timed out"],
-  }) });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (h.manager as any).reviewTimeoutMs = 20;
-  assert.equal(await h.manager.start(reviewSpec(), "brief"), true);
-  await until(() => h.updates().length > 0, "the timeout");
-  assert.equal(h.observations[0]?.timedOut, true);
-  assert.equal(h.observations[0]?.exitedWithError, false, "a timeout is not a provider error");
-  assert.deepEqual(h.updates().map((update) => [update.state, update.reason, update.verdict?.failureClass, update.verdict?.consumed]),
-    [["failed", "the reviewer timed out", "timeout", false]]);
-  await until(() => h.store.readMeta("s_review")?.status === "stopped", "the provider stop");
+/** The review's outcome and its session's terminal statuses, in the order they were sent. */
+function outcomeOrder(h: Harness): string[] {
+  return h.sent.flatMap((message) => message.type === "review_session_update" && message.state !== "running" ? ["outcome"]
+    : message.type === "session_status" && message.sessionId === "s_review" && ["stopped", "failed", "completed"].includes(message.status)
+      ? [message.status] : []);
+}
+
+test("a reviewer past its time limit is judged as timed out, reported before its session stops", async (t) => {
+  // A driver may end a cancelled turn as completed or as cancelled; both are judged the same way.
+  for (const stop of ["end_turn", "cancelled"] as const) {
+    const h = harness(t, { hold: true, stop, output: null, evaluate: async (_id, observation) => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return {
+        valid: false, consumed: false, effectiveVote: null, failureClass: observation.timedOut ? "timeout" : "evidence_contract",
+        validationErrors: ["the reviewer timed out"],
+      };
+    } });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.manager as any).reviewTimeoutMs = 20;
+    assert.equal(await h.manager.start(reviewSpec(), "brief"), true);
+    await until(() => h.updates().length > 0, "the timeout");
+    assert.equal(h.observations[0]?.timedOut, true, stop);
+    assert.equal(h.observations[0]?.exitedWithError, false, "a timeout is not a provider error");
+    assert.deepEqual(h.updates().map((update) => [update.state, update.reason, update.verdict?.failureClass, update.verdict?.consumed]),
+      [["failed", "the reviewer timed out", "timeout", false]], stop);
+    await until(() => h.store.readMeta("s_review")?.status === "stopped", "the provider stop");
+    assert.equal(outcomeOrder(h)[0], "outcome", `${stop}: the control plane fails a review whose session ends first`);
+  }
 });
 
 test("a reviewer that ran with refused tools broke the tool policy", async (t) => {
@@ -258,10 +272,13 @@ test("a stop while an attempt is judged ends the provider but keeps the verdict"
   await until(() => judge !== undefined, "the evaluation");
   h.manager.stop("s_review");
   assert.deepEqual(h.updates(), [], "the stop did not settle the review as cancelled");
+  assert.deepEqual(outcomeOrder(h), [], "nor report its session stopped before the verdict");
   judge();
   await until(() => h.updates().length > 0, "the verdict");
   assert.equal(h.updates()[0]?.state, "completed");
   assert.deepEqual(h.updates()[0]?.verdict, VALID);
+  await until(() => h.store.readMeta("s_review")?.status === "stopped", "the deferred stop");
+  assert.deepEqual(outcomeOrder(h), ["outcome", "stopped"]);
 });
 
 test("stopping a running review cancels it once, and a later outcome changes nothing", async (t) => {
