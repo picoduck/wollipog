@@ -38,6 +38,8 @@ export interface AsyncLeaseOptions {
   helperDataDir?: string;
   /** The attested control-plane instance; the worker checks it against a profile marker's grants. */
   controlPlaneInstanceId?: string;
+  /** #3241: the marker this runner's launches inherit, recorded as lease lifecycle evidence. */
+  runnerMarker?: string;
   /** Omitted: acquisitions carry no profile context unless one names an expected profile id. */
   profileAccess?: ProviderProfileAccessSource;
   /** The profile id a configured account recorded for this exact HOME path, used as the expected
@@ -226,7 +228,8 @@ export class AsyncProviderHomeLeaseRegistry {
   private startWorker(): void {
     if (this.worker) return;
     const data = { epoch: this.epoch, ownerHash: this.ownerHash, clock: LEASE_WORKER_CLOCK, helperDataDir: this.options.helperDataDir, tests: this.options.engineOptionsForTest,
-      ...(this.options.controlPlaneInstanceId === undefined ? {} : { controlPlaneInstanceId: this.options.controlPlaneInstanceId }) };
+      ...(this.options.controlPlaneInstanceId === undefined ? {} : { controlPlaneInstanceId: this.options.controlPlaneInstanceId }),
+      ...(this.options.runnerMarker === undefined ? {} : { runnerMarker: this.options.runnerMarker }) };
     if (this.options.workerFactoryForTest) this.worker = this.options.workerFactoryForTest(data);
     else {
       let code: string;
