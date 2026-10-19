@@ -435,12 +435,13 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
 
   const recover = async (account: ProviderAccountDefinition, lease: ProviderHomeLeaseInspection, reopen: () => void) => {
     const recorded = lease.createdAt ? new Date(lease.createdAt) : null;
-    const when = recorded && !Number.isNaN(recorded.getTime()) ? `lease recorded ${recorded.toLocaleString()}` : undefined;
+    const when = recorded && !Number.isNaN(recorded.getTime()) ? `Lease recorded ${recorded.toLocaleString()}` : undefined;
     const approved = await confirm({
       title: "Recover Lease",
       message: "Another runner left this account's HOME leased and no longer holds it. Recovering hands the HOME back to this machine " +
         "once it confirms that runner and every process it started have stopped, or that the machine restarted since.",
-      detailRows: accountRows(account).map((row) => ({ ...row, meta: when ? `${row.meta} · ${when}` : row.meta })),
+      // The record's time is a row of its own, so neither it nor the account's label is truncated.
+      detailRows: [...accountRows(account), ...(when ? [{ label: when }] : [])],
       confirmLabel: "Recover Lease",
       tone: "danger",
       back: backToMenu(reopen),

@@ -978,7 +978,7 @@ test("Recover Lease… confirms with the account and record time, recovers the i
     assert.match(text, /Recover Lease/);
     assert.match(text, /Another runner left this account's HOME leased and no longer holds it\./);
     assert.match(text, /Pending Work/);
-    assert.match(text, /lease recorded/);
+    assert.match(text, /Lease recorded/);
     await act(async () => { ui.button(dialog, "Cancel").click(); });
     await ui.settle();
     assert.deepEqual(api.recovered, [], "Cancel recovers nothing");
