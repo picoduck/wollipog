@@ -1,7 +1,7 @@
 # Managed Provider HOME Retirement Proposal (Refs #3157)
 
-Revision 3. Physical cleanup remains disabled. The isolated state model below is an implemented
-prerequisite; the filesystem/distributed retirement protocol remains a proposal, not a supported
+Revision 4. Physical cleanup remains disabled. The isolated state model and the control-plane
+producer observation slice below are implemented prerequisites; the filesystem/distributed retirement protocol remains a proposal, not a supported
 feature. Account removal continues to return `credentialsRetained: true`. No real credentials may
 be retired during implementation or verification.
 
@@ -13,6 +13,82 @@ digest `b10d60fb850ad5638a9c16382982fc2c05724e52c34e90e741e2ae3876a4c103`, consu
 `approve_isolated_state_model` at receipt `consumedAt: 1792357901882` (policy revision 1,
 authority `orchestrator`, basis `custom_policy`). It authorizes no production integration or
 reviewer launch.
+
+## Control-Plane Producer Enrollment
+
+`provider-profile-publication-store.ts` is now used by production `ControlPlaneDb` grant writers
+and the adoption and Add Account RPC producers. It does **not** import the isolated model, attest
+HOME ownership, or expose a public protocol/API. Its source history is always incomplete and
+physically ineligible. Neither a first-install store epoch, ticket, SQLite commit nor successful
+runner reply grants retirement authority.
+
+The supported applicability remains the same SSH OS account and host: a shared profile root
+outside disposable runner data directories, replacement runners, and multiple control planes with
+explicit grants. This does not establish safe concurrent provider use or cross-host filesystem
+support. Existing direct-name HOMEs are not a new, proved retirement cohort.
+
+All four grant writers (authorize, bind created account, complete, revoke) and completion's exact
+superseded grant use a dedicated outermost `BEGIN IMMEDIATE` transaction. It rejects an existing
+transaction or `synchronous != FULL` before any mutation, never joins `atomic()` and never changes
+event-ingest durability. Grant changes and their observations commit together. A separate FULL
+transaction rechecks the pending grant and source preimage and enrolls adoption/Add Account before
+dispatch. Only a completed COMMIT returns admission. A request already enrolled cannot admit a
+second dispatch; no outbox executor, automatic retry or command resumption was added.
+
+Current production callers run after registration/agent-inventory/login-inventory commits, or
+directly in HTTP authorization, adoption, removal and reply settlement. They do not run inside
+`appendEvent`, `appendHydratedPage`, retention or blob relaxed transactions. Unexpected outer/NORMAL
+inventory calls leave the grant pending and defer to the next existing report, without RPC or
+false completion. Direct unsafe-context calls refuse, including revocation; no nested method can
+claim a caller's future commit. Supported outermost revocation still works without audit capacity.
+
+The per-database limits are one source row, 4,096 immutable intent rows, 32,768 event rows and 4,096
+UTF-8 bytes per canonical record. Identifiers are at most 128 characters, UUIDs 36, digests 64 and
+canonical uint64 revision strings 20. Private diagnostic reads use 64-row keyset pages with one
+lookahead (at most 266,240 record bytes), not a complete history materialization. Counters and
+preimages are checked while SQLite holds the writer lock. There is no eviction, automatic reset,
+compaction or cascading foreign key for these records.
+
+Saturation, revision exhaustion or an audit-write failure rolls evidence back to a savepoint and
+commits a sticky degraded fence in the outer grant transaction. New grant authorization and new
+dispatch then refuse explicitly. In particular, Add Account cannot turn an expected grant's audit
+failure into its old-peer/non-human/no-scope compatibility fallback. Those legitimate fallbacks
+remain as before. Binding/completion of previously authorized work, supersession and revocation
+retain their security semantics under incomplete/degraded history. They cannot manufacture a new
+RPC admission, retire any consumer or erase an outstanding intent. A missing/corrupt source is
+disabled rather than repaired. If the database cannot commit the security mutation itself, the
+caller receives failure, never claimed revocation success.
+
+First installation inspects source-table/epoch-marker footprints before creating them and installs
+them atomically under FULL. An initially empty database records `new-source-incomplete`; a
+preexisting database records `legacy-incomplete`, with no complete historical backfill. A partial
+installation, missing/malformed/mismatched epoch or unknown schema disables admission and is not
+regenerated. Reconnecting cannot replace the source owner/epoch. A coordinated rollback/loss of all
+installation evidence cannot be distinguished from a pre-install database: this is explicitly
+**not** rollback detection, a restored independent anchor, HOME genesis or continuity proof. No
+source from this slice can ever establish physical retirement eligibility.
+
+New evidence allowlists only CP instance/store epoch, grant/request/profile identifiers, provider,
+operation, revision, ticket and observation status. Runner/account identifiers are domain-hashed.
+Actor identities, labels, paths, credentials, codes, full command bodies and error text are omitted.
+The original grant table remains the authoritative permission/audit record. Reply/timeout/not-sent
+observations never settle the retained publication intent or prove process exit. Private status,
+events and structured observation-failure logs help diagnose refusal without a new public API.
+
+Synthetic verification covers the actual HTTP Add Account path and adoption producer, independent
+SQLite visibility after commit, reopen, rollback/commit/audit faults, stale preimages, outer/NORMAL
+refusal, numeric saturation and bounds, missing epochs, revocation/supersession, lost replies and
+immutable unresolved intents. Counter-boundary fixtures avoid allocating unnecessary full-size
+histories; they are not native races, power-loss experiments, anti-rollback proof or process tests.
+
+Remaining original #3157 integration: durable runner config/account/default/session/history/
+switch/recovery/TUI/skill/login/probe/launch/background intents before publication; source barriers
+that really fence every producer/outbox; complete historical owner/store/cohort provenance and
+exact acknowledgements; verified historical-reader and paused-old-cleanup exclusion; native shared
+canonical fencing/private worker capabilities; exhaustive process lifetime proof; terminal CAS,
+no-replace descriptor detach and bounded descriptor-relative removal preserving external evidence.
+Coordinate lifecycle work with #3228 before touching its owner's paths. None of these gaps is
+fulfilled by this producer slice, a grant list, local reservation, released lease or reaper boolean.
 
 ## Isolated State Model and Proof Boundary
 

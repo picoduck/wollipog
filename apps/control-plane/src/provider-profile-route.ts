@@ -11,6 +11,7 @@ import {
 } from "@wollipog/protocol";
 import { parseBoxLifecycleForce } from "./box-lifecycle.js";
 import type { ControlPlaneDb, ProviderProfileGrantRecord } from "./db.js";
+import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
 import type { Hub } from "./hub.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 
@@ -97,7 +98,8 @@ export function authorizeCreatedProviderProfileGrant(
     grantId, runnerId: runner.runnerId, providerAccountId: createdGrantPlaceholder(grantId), provider, origin: "created",
     grantedBy: principal.userId, grantedRole: principal.role, now,
   });
-  return authorized?.created ? authorized.grant.grantId : undefined;
+  if (authorized && !authorized.created) throw new ProviderPublicationUnavailable();
+  return authorized?.grant.grantId;
 }
 
 /**
@@ -116,7 +118,8 @@ export function settleCreatedProviderProfileGrantStart(
   if (outcome.started && typeof outcome.accountId === "string" && ACCOUNT_ID.test(outcome.accountId)) {
     try {
       if (db.bindCreatedProviderProfileGrant(grantId, createdGrantPlaceholder(grantId), outcome.accountId)) return;
-    } catch {
+    } catch (error) {
+      if (error instanceof ProviderPublicationUnavailable) return;
       // A pending grant already exists for that account id; this one cannot be completed.
     }
   }
@@ -142,8 +145,13 @@ export function revokeUnrecordedCreatedProviderProfileGrants(
     for (const grant of db.liveProviderProfileGrantsForAccount(runnerId, login.accountId)) {
       if (grant.status !== "pending" || grant.origin !== "created" || grant.runnerId !== runnerId ||
           grant.providerAccountId !== login.accountId) continue;
-      if (db.revokeProviderProfileGrant({ grantId: grant.grantId, revokedBy: grant.grantedBy, revokedRole: grant.grantedRole, now })) {
-        revoked.push(grant.grantId);
+      try {
+        if (db.revokeProviderProfileGrant({ grantId: grant.grantId, revokedBy: grant.grantedBy, revokedRole: grant.grantedRole, now })) {
+          revoked.push(grant.grantId);
+        }
+      } catch (error) {
+        if (!(error instanceof ProviderPublicationUnavailable)) throw error;
+        // Unexpected enclosing transaction: leave pending, retry on the next inventory frame.
       }
     }
   }
@@ -197,14 +205,23 @@ export function reconcileProviderProfileGrants(
     if (!profile) {
       for (const grant of db.liveProviderProfileGrantsForAccount(runnerId, account.id)) {
         if (grant.status !== "pending" || grant.origin !== "created" || grant.runnerId !== runnerId || grant.providerAccountId !== account.id) continue;
-        db.revokeProviderProfileGrant({ grantId: grant.grantId, revokedBy: grant.grantedBy, revokedRole: grant.grantedRole, now });
+        try {
+          db.revokeProviderProfileGrant({ grantId: grant.grantId, revokedBy: grant.grantedBy, revokedRole: grant.grantedRole, now });
+        } catch (error) {
+          if (!(error instanceof ProviderPublicationUnavailable)) throw error;
+        }
       }
       continue;
     }
     if (profile.access === "not_granted" || !PROFILE_ID.test(profile.id)) continue;
     for (const grant of db.liveProviderProfileGrantsForAccount(runnerId, account.id)) {
       if (grant.status !== "pending" || grant.runnerId !== runnerId || grant.providerAccountId !== account.id) continue;
-      if (db.completeProviderProfileGrant(grant.grantId, profile.id, now)) completed.push(grant.grantId);
+      try {
+        if (db.completeProviderProfileGrant(grant.grantId, profile.id, now)) completed.push(grant.grantId);
+      } catch (error) {
+        if (!(error instanceof ProviderPublicationUnavailable)) throw error;
+        // No RPC, mutation or false completion. The existing next report retries reconciliation.
+      }
     }
   }
   return completed;
@@ -377,20 +394,42 @@ export function registerProviderProfileRoutes(
       ? live.find((grant) => grant.status === "active" && grant.profileId === account.profile!.id)
       : undefined;
     if (active) return { status: "active", profileId: active.profileId, grantId: active.grantId };
-    const authorized = deps.db.authorizeProviderProfileGrant({
-      grantId: randomUUID(), runnerId: id, providerAccountId: accountId, provider: account.provider, origin: "adopted",
-      grantedBy: principal.userId, grantedRole: principal.role, now: now(),
-    });
+    let authorized;
+    try {
+      authorized = deps.db.authorizeProviderProfileGrant({
+        grantId: randomUUID(), runnerId: id, providerAccountId: accountId, provider: account.provider, origin: "adopted",
+        grantedBy: principal.userId, grantedRole: principal.role, now: now(),
+      });
+    } catch (error) {
+      if (!(error instanceof ProviderPublicationUnavailable)) throw error;
+      return reply.code(503).send({ error: error.message, code: error.code });
+    }
     if (!authorized) return reply.code(404).send({ error: "runner not found" });
     const { grantId } = authorized.grant;
     const requestId = `provider_profile_adopt_${randomUUID()}`;
+    try {
+      deps.db.enrollProviderProfileDispatch({ grantId, requestId, runnerId: id, kind: "adopt" });
+    } catch (error) {
+      if (!(error instanceof ProviderPublicationUnavailable)) throw error;
+      return reply.code(503).send({ error: error.message, code: error.code });
+    }
+    const observe = (observation: PublicationObservation) => {
+      try { deps.db.observeProviderProfileDispatch(requestId, observation); }
+      catch {
+        // The original durable intent remains unresolved. Observations cannot cause redispatch.
+        app.log.warn({ event: "provider_publication_observation_unavailable", entryPoint: "profile_adoption", requestId },
+          "Provider publication observation could not be recorded.");
+      }
+    };
     let result;
     try {
       result = await deps.hub.requestFromRunner(id, requestId, { type: "adopt_provider_profile", requestId, accountId, grantId });
     } catch (error) {
+      observe("uncertain");
       // The grant stays pending: the runner reports the profile it wrote, and that completes it.
       return reply.code(504).send({ error: (error as Error).message, status: "pending", grantId });
     }
+    observe("reply");
     if (result.type !== "adopt_provider_profile_result") return reply.code(502).send({ error: "unexpected runner reply" });
     if (!result.ok) {
       // A coded refusal happened before the marker changed, so this authorization is spent.

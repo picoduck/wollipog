@@ -6,6 +6,10 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
  */
 
 import { DatabaseSync } from "node:sqlite";
+import {
+  installProviderPublicationStore, ProviderProfilePublicationStore, ProviderPublicationUnavailable,
+  type PublicationDispatchKind, type PublicationObservation,
+} from "./provider-profile-publication-store.js";
 import { CampaignBudgetLedger } from "./campaign-budget.js";
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
@@ -5315,6 +5319,7 @@ function sessionHistoryRetentionView(
 }
 
 export class ControlPlaneDb {
+  private readonly providerPublications: ProviderProfilePublicationStore;
   readonly campaignBudgets: CampaignBudgetLedger;
   readonly campaignReviewJobs: CampaignReviewJobs;
   readonly sessionReviewJobs: SessionReviewJobs;
@@ -5333,6 +5338,7 @@ export class ControlPlaneDb {
     private readonly walPath: string | null,
     hostRebooted: boolean,
   ) {
+    this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
     this.campaignBudgets = new CampaignBudgetLedger(db);
     this.campaignReviewJobs = new CampaignReviewJobs(db,this.campaignBudgets,(rootId)=>{
       const scope=this.sessionScope(rootId);
@@ -5895,6 +5901,8 @@ export class ControlPlaneDb {
       ? new MemoryArtifactBlobStore()
       : new FileArtifactBlobStore(options.artifactBlobDir ?? defaultArtifactBlobRoot(location));
     const db = new DatabaseSync(location);
+    // Capture before SCHEMA; a preexisting database can only start incomplete observation history.
+    const publicationNewDatabase = !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
     // First, so the journal-mode switch below also waits out a brief lock from another connection.
     db.exec(`PRAGMA busy_timeout = ${CONTROL_PLANE_DB_BUSY_TIMEOUT_MS};`);
     const journalMode = (db.prepare("PRAGMA journal_mode = WAL;").get() as { journal_mode: string })
@@ -6292,6 +6300,8 @@ export class ControlPlaneDb {
       db.close();
       throw new Error("control-plane database has an invalid instance identity");
     }
+    try { installProviderPublicationStore(db, instanceId, publicationNewDatabase); }
+    catch (error) { db.close(); throw error; }
     // Only an OS crash or power loss rolls back a relaxed ingest commit, and both reboot the host.
     // A database last opened by a build that recorded no boot cannot tell, so it assumes none.
     const hostBootId = options.hostBootId ?? currentHostBootId();
@@ -12878,6 +12888,36 @@ export class ControlPlaneDb {
     return row ? this.providerProfileGrantRecord(row) : null;
   }
 
+  /** Private CP diagnostics: never published in registration or API responses. */
+  providerPublicationStatus() { return this.providerPublications.status(); }
+  providerPublicationEvents(after = 0) { return this.providerPublications.events(after); }
+  providerPublicationIntent(requestId: string) { return this.providerPublications.intent(requestId); }
+
+  /** A ticket is returned only after an outermost FULL commit. An existing intent (including a
+   * lost reply) never admits another dispatch. This method does not send or retry a command. */
+  enrollProviderProfileDispatch(input: { grantId: string; requestId: string; runnerId: string;
+    kind: PublicationDispatchKind; expectedRevision?: string }): string {
+    const ticket = this.providerPublications.transaction(() => {
+      const grant = this.getProviderProfileGrant(input.grantId);
+      if (!grant || grant.status !== "pending" || grant.runnerId !== input.runnerId ||
+          (input.kind === "login" && grant.origin !== "created")) return null;
+      return this.providerPublications.record(input.kind, grant, {
+        requestId: input.requestId, ...(input.expectedRevision !== undefined ? { expectedRevision: input.expectedRevision } : {}),
+      });
+    });
+    if (!ticket) throw new ProviderPublicationUnavailable();
+    return ticket;
+  }
+
+  /** Observations never resolve/retire an intent, even for a refused command or revoked grant. */
+  observeProviderProfileDispatch(requestId: string, observation: PublicationObservation): void {
+    this.providerPublications.transaction(() => {
+      const intent = this.providerPublications.intent(requestId);
+      const grant = intent ? this.getProviderProfileGrant(intent.grantId) : null;
+      if (grant) this.providerPublications.record("observe", grant, { requestId, observation });
+    });
+  }
+
   /**
    * Record an Owner/Admin authorization for this control plane to use the profile an account's HOME
    * holds (or will hold), in the runner's organization/owner scope. One pending authorization exists
@@ -12894,15 +12934,17 @@ export class ControlPlaneDb {
     grantedRole: OrganizationRole;
     now: number;
   }): { grant: ProviderProfileGrantRecord; created: boolean } | null {
-    return this.atomic(() => {
-      const pending = this.stmt(
-        "SELECT * FROM provider_profile_grants WHERE runner_id=? AND provider_account_id=? AND status='pending'",
-      ).get(input.runnerId, input.providerAccountId) as ProviderProfileGrantRow | undefined;
-      if (pending) return { grant: this.providerProfileGrantRecord(pending), created: false };
+    const result = this.providerPublications.transaction(() => {
       const ownership = this.stmt(
         "SELECT organization_id, owner_kind, owner_id FROM runner_ownership WHERE runner_id=?",
       ).get(input.runnerId) as { organization_id: string; owner_kind: string; owner_id: string } | undefined;
       if (!ownership) return null;
+      if (this.providerPublications.status().status !== "healthy") return "unavailable" as const;
+      const pending = this.stmt(
+        "SELECT * FROM provider_profile_grants WHERE runner_id=? AND provider_account_id=? AND status='pending'",
+      ).get(input.runnerId, input.providerAccountId) as ProviderProfileGrantRow | undefined;
+      if (pending) return { grant: this.providerProfileGrantRecord(pending), created: false };
+      if (!this.providerPublications.record("authorize", { ...input, profileId: null })) return "unavailable" as const;
       this.stmt(
         `INSERT INTO provider_profile_grants
            (grant_id, profile_id, control_plane_instance_id, organization_id, owner_kind, owner_id, scope,
@@ -12912,6 +12954,10 @@ export class ControlPlaneDb {
         input.runnerId, input.providerAccountId, input.provider, input.origin, input.grantedBy, input.grantedRole, input.now);
       return { grant: this.getProviderProfileGrant(input.grantId)!, created: true };
     });
+    // In particular, do not turn this into Add Account's legitimate old-peer/no-scope fallback.
+    // Degradation has already committed; throwing inside the transaction would undo its fence.
+    if (result === "unavailable") throw new ProviderPublicationUnavailable();
+    return result;
   }
 
   /**
@@ -12921,10 +12967,15 @@ export class ControlPlaneDb {
    * adoption's. Returns false when the grant is no longer that pending placeholder.
    */
   bindCreatedProviderProfileGrant(grantId: string, fromAccountId: string, providerAccountId: string): boolean {
-    return this.stmt(
-      `UPDATE provider_profile_grants SET provider_account_id=?
-        WHERE grant_id=? AND status='pending' AND origin='created' AND provider_account_id=?`,
-    ).run(providerAccountId, grantId, fromAccountId).changes === 1;
+    return this.providerPublications.transaction(() => {
+      const grant = this.getProviderProfileGrant(grantId);
+      if (!grant || grant.status !== "pending" || grant.origin !== "created" || grant.providerAccountId !== fromAccountId) return false;
+      this.providerPublications.record("bind", { ...grant, providerAccountId });
+      return this.stmt(
+        `UPDATE provider_profile_grants SET provider_account_id=?
+          WHERE grant_id=? AND status='pending' AND origin='created' AND provider_account_id=?`,
+      ).run(providerAccountId, grantId, fromAccountId).changes === 1;
+    });
   }
 
   /**
@@ -12934,10 +12985,16 @@ export class ControlPlaneDb {
    * Returns false for an unknown, revoked, or differently-bound grant.
    */
   completeProviderProfileGrant(grantId: string, profileId: string, now: number): boolean {
-    return this.atomic(() => {
+    return this.providerPublications.transaction(() => {
       const row = this.stmt("SELECT * FROM provider_profile_grants WHERE grant_id=?").get(grantId) as ProviderProfileGrantRow | undefined;
       if (!row || row.status === "revoked") return false;
       if (row.status === "active") return row.profile_id === profileId;
+      // The partial unique index admits at most one predecessor. Never materialize all grants.
+      const previous = this.stmt(
+        "SELECT * FROM provider_profile_grants WHERE profile_id=? AND control_plane_instance_id=? AND status='active' AND grant_id<>? LIMIT 1",
+      ).get(profileId, row.control_plane_instance_id, grantId) as ProviderProfileGrantRow | undefined;
+      if (previous) this.providerPublications.record("supersede", this.providerProfileGrantRecord(previous));
+      this.providerPublications.record("complete", { ...this.providerProfileGrantRecord(row), profileId });
       this.stmt(
         `UPDATE provider_profile_grants
             SET status='revoked', revoked_at=?, revoked_by=?, revoked_role=?
@@ -12957,11 +13014,17 @@ export class ControlPlaneDb {
     revokedRole: string | null;
     now: number;
   }): ProviderProfileGrantRecord | null {
-    const changed = this.stmt(
-      `UPDATE provider_profile_grants SET status='revoked', revoked_at=?, revoked_by=?, revoked_role=?
-        WHERE grant_id=? AND status IN ('pending','active')`,
-    ).run(input.now, input.revokedBy, input.revokedRole, input.grantId).changes;
-    return changed === 1 ? this.getProviderProfileGrant(input.grantId) : null;
+    return this.providerPublications.transaction(() => {
+      const grant = this.getProviderProfileGrant(input.grantId);
+      if (!grant || grant.status === "revoked") return null;
+      // An audit quota or broken/missing epoch must never prevent this existing security control.
+      this.providerPublications.record("revoke", grant);
+      const changed = this.stmt(
+        `UPDATE provider_profile_grants SET status='revoked', revoked_at=?, revoked_by=?, revoked_role=?
+          WHERE grant_id=? AND status IN ('pending','active')`,
+      ).run(input.now, input.revokedBy, input.revokedRole, input.grantId).changes;
+      return changed === 1 ? this.getProviderProfileGrant(input.grantId) : null;
+    });
   }
 
   /**

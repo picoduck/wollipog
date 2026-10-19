@@ -72,6 +72,86 @@ const adopted = (profileId = PROFILE): Handler => (_runnerId, message) => ({
   type: "adopt_provider_profile_result", requestId: (message as { requestId: string }).requestId, ok: true, profileId,
 });
 
+test("adoption enrolls before RPC, retains its ticket through concurrent revocation and never readmits it", async () => {
+  const f = await fixture();
+  let finish!: (result: RunnerRequestResult) => void, entered!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  let requestId = "", grantId = "", ticket = "";
+  f.setHandler((_runnerId, message) => {
+    if (message.type !== "adopt_provider_profile") return { type: "revoke_provider_profile_grant_result",
+      requestId: (message as { requestId: string }).requestId, ok: true, markerUpdated: true };
+    requestId = message.requestId; grantId = message.grantId;
+    const intent = f.db.providerPublicationIntent(requestId);
+    assert.equal(intent?.kind, "adopt");
+    assert.equal(intent?.grantId, grantId);
+    assert.equal(f.db.raw().isTransaction, false, "no RPC inside an uncommitted transaction");
+    ticket = intent!.ticket!;
+    entered();
+    return new Promise<RunnerRequestResult>(resolve => { finish = resolve; });
+  });
+  try {
+    const response = f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } }).then(value => value);
+    await reached;
+    f.db.revokeProviderProfileGrant({ grantId, revokedBy: "user-1", revokedRole: "owner", now: 101 });
+    finish({ type: "adopt_provider_profile_result", requestId, ok: true, profileId: PROFILE });
+    assert.equal((await response).statusCode, 409);
+    assert.equal(f.db.providerPublicationIntent(requestId)?.ticket, ticket);
+    assert.equal(f.db.getProviderProfileGrant(grantId)?.status, "revoked");
+    assert.throws(() => f.db.enrollProviderProfileDispatch({ grantId, requestId, runnerId: "runner-a", kind: "adopt" }));
+    assert.equal(f.sent.filter(entry => entry.message.type === "adopt_provider_profile").length, 1);
+    assert.ok(f.db.providerPublicationEvents().records.some(event => event.kind === "observe" && event.observation === "reply"));
+  } finally { await f.close(); }
+});
+
+test("adoption timeout retains durable unknown intent, then inventory completes only the grant", async () => {
+  const f = await fixture();
+  try {
+    const response = await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
+    assert.equal(response.statusCode, 504);
+    const message = f.sent[0]!.message as Extract<ControlPlaneToRunner, { type: "adopt_provider_profile" }>;
+    const intent = f.db.providerPublicationIntent(message.requestId);
+    assert.equal(intent?.kind, "adopt");
+    assert.ok(f.db.providerPublicationEvents().records.some(event => event.observation === "uncertain"));
+    reconcileProviderProfileGrants(f.db, "runner-a", [account("work", { id: PROFILE, access: "granted" })], 101);
+    assert.equal(f.db.getProviderProfileGrant(message.grantId)?.status, "active");
+    assert.deepEqual(f.db.providerPublicationIntent(message.requestId), intent);
+    assert.equal(f.sent.length, 1, "inventory must not retry the unknown command");
+  } finally { await f.close(); }
+});
+
+test("explicit adoption still settles a previously authorized pending Add Account grant", async () => {
+  const f = await fixture({ handler: adopted() });
+  try {
+    const grant = f.db.authorizeProviderProfileGrant({ grantId: randomUUID(), runnerId: "runner-a", providerAccountId: "work",
+      provider: "claude", origin: "created", grantedBy: "user-1", grantedRole: "owner", now: 1 })!.grant;
+    const response = await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
+    assert.equal(response.statusCode, 200);
+    const message = f.sent[0]!.message as Extract<ControlPlaneToRunner, { type: "adopt_provider_profile" }>;
+    assert.equal(message.grantId, grant.grantId);
+    assert.equal(f.db.providerPublicationIntent(message.requestId)?.grantId, grant.grantId);
+    assert.equal(f.db.getProviderProfileGrant(grant.grantId)?.status, "active");
+  } finally { await f.close(); }
+});
+
+test("adoption admission fails before RPC on epoch, capacity, dispatch-write or enclosing-transaction failure", async () => {
+  for (const mode of ["epoch", "capacity", "dispatch", "outer"] as const) {
+    const f = await fixture();
+    try {
+      if (mode === "epoch") f.db.raw().exec("DELETE FROM control_plane_metadata WHERE key='provider_profile_publication_epoch_v1'");
+      if (mode === "capacity") f.db.raw().exec("UPDATE provider_profile_publication_source SET intent_count=4096");
+      if (mode === "dispatch") f.db.raw().exec(`CREATE TRIGGER dispatch_fault BEFORE INSERT ON provider_profile_publication_events
+        WHEN json_extract(NEW.record,'$.kind')='adopt' BEGIN SELECT RAISE(ABORT,'fixture dispatch fault'); END`);
+      if (mode === "outer") f.db.raw().exec("BEGIN");
+      const response = await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
+      assert.equal(response.statusCode, 503, mode);
+      assert.equal(response.json().code, "PROVIDER_PUBLICATION_UNAVAILABLE", mode);
+      assert.equal(f.sent.length, 0, mode);
+      if (mode === "outer") f.db.raw().exec("ROLLBACK");
+      if (mode === "capacity" || mode === "dispatch") assert.equal(f.db.providerPublicationStatus().status, "degraded");
+    } finally { if (f.db.raw().isTransaction) f.db.raw().exec("ROLLBACK"); await f.close(); }
+  }
+});
+
 test("profile routes require an Owner or Admin human, an acknowledgement, and a v225 runner", async () => {
   const f = await fixture({ handler: adopted() });
   try {
