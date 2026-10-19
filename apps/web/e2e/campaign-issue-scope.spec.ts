@@ -2,25 +2,31 @@ import { expect, test } from "@playwright/test";
 import { campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement } from "@wollipog/protocol";
 
 for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
-  test(`unsupported scope target explains placement and refreshes after recovery at ${viewport.width}px`, async ({ page }) => {
-    await page.setViewportSize(viewport);
-    let recovered = false;
-    await page.route("**/api/sessions/*/campaign/issue-scope", async (route) => {
-      await route.fulfill({ status: recovered ? 200 : 409, contentType: "application/json", body: JSON.stringify(recovered
-        ? { campaignSessionId: "s_root", repository: "team/repo", issueNumbers: [123], revision: 1,
-          supported: true, canPropose: true, outsideScope: [], candidates: [] }
-        : { error: "Campaign scope requires a valid local or SSH host execution target belonging to its runner. Container and cloud targets are not supported." }) });
+  for (const [reason, message] of [
+    ["legacy target", "Campaign scope requires a valid local or SSH host execution target belonging to its runner. Container and cloud targets are not supported."],
+    ["stale network", "The campaign's saved network boundary no longer matches the runner's current isolation policy. Review the runner policy and saved placement before retrying."],
+    ["unsupported host boundaries", "The campaign's saved secrets or billing boundary is unsupported for a host placement. Review the saved placement before retrying."],
+  ]) {
+    test(`${reason} scope refusal explains placement and refreshes after recovery at ${viewport.width}px`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      let recovered = false;
+      await page.route("**/api/sessions/*/campaign/issue-scope", async (route) => {
+        await route.fulfill({ status: recovered ? 200 : 409, contentType: "application/json", body: JSON.stringify(recovered
+          ? { campaignSessionId: "s_root", repository: "team/repo", issueNumbers: [123], revision: 1,
+            supported: true, canPropose: true, outsideScope: [], candidates: [] }
+          : { error: message }) });
+      });
+      await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=unsupported-target");
+      const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
+      await expect(scope.getByRole("alert")).toContainText(message);
+      await expect(scope.getByRole("alert")).not.toContainText("gh authentication");
+      recovered = true;
+      await scope.getByRole("button", { name: "Refresh Scope", exact: true }).click();
+      await expect(scope.getByRole("alert")).toHaveCount(0);
+      await expect(scope.getByText("team/repo#123", { exact: true })).toBeVisible();
+      await expect(scope.getByRole("button", { name: "Request Scope Approval", exact: true })).toBeVisible();
     });
-    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=unsupported-target");
-    const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
-    await expect(scope.getByRole("alert")).toContainText("valid local or SSH host execution target");
-    await expect(scope.getByRole("alert")).not.toContainText("gh authentication");
-    recovered = true;
-    await scope.getByRole("button", { name: "Refresh Scope", exact: true }).click();
-    await expect(scope.getByRole("alert")).toHaveCount(0);
-    await expect(scope.getByText("team/repo#123", { exact: true })).toBeVisible();
-    await expect(scope.getByRole("button", { name: "Request Scope Approval", exact: true })).toBeVisible();
-  });
+  }
 
   test(`human scope recovery and epic selection at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);

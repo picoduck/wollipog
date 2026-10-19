@@ -78,6 +78,39 @@ test("scope reads and proposals explain unsupported runner targets without expos
   } finally { h.db.close(); }
 });
 
+test("scope refusals preserve bounded target reasons and safely ignore unknown reasons", async () => {
+  for (const [reason, expected] of [
+    ["runner_mismatch", "saved execution target does not match its runner"],
+    ["unsupported_adapter", "supports only local or SSH host execution targets"],
+    ["workspace_mismatch", "saved workspace strategy does not match"],
+    ["filesystem_mismatch", "saved filesystem boundary does not match"],
+    ["stale_network_policy", "saved network boundary no longer matches"],
+    ["unsupported_host_boundaries", "saved secrets or billing boundary is unsupported"],
+    ["future_reason", "Campaign scope requires a valid local or SSH"],
+    ["__proto__", "Campaign scope requires a valid local or SSH"],
+    [undefined, "Campaign scope requires a valid local or SSH"],
+  ] as const) {
+    const h = harness(false);
+    try {
+      h.hub.requestFromRunner = async (_runner, requestId, message) => {
+        assert.equal(message.type, "campaign_issue_scope");
+        return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: false,
+          failure: "unsupported_execution_target",
+          targetFailureReason: reason as import("@wollipog/protocol").HostExecutionTargetRefusalReason,
+          error: "private runner path and credential text" };
+      };
+      for (const result of [await h.svc.campaignIssueScope("root", 100), await h.proposal("refused")]) {
+        assert.equal(result.status, 409, String(reason));
+        assert.equal(result.ok, false);
+        assert.ok(result.error?.includes(expected), `${reason}: ${result.error}`);
+        assert.equal(JSON.stringify(result).includes("private runner"), false);
+        assert.equal(JSON.stringify(result).includes("gh authentication"), false);
+      }
+      assert.equal(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision, 1);
+    } finally { h.db.close(); }
+  }
+});
+
 test("bounded epic scope records lineage, preserves the authorizing human and revokes outstanding grants atomically", async () => {
   const h = harness();
   try {

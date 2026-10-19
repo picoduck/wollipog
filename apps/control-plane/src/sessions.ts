@@ -20,7 +20,7 @@ import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRoot
 import { CampaignRecoveryService } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
+import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
@@ -9154,7 +9154,7 @@ export class SessionsService {
       }
       if (response.type === "campaign_issue_scope_result" && response.sessionId === root.id && !response.ok &&
           response.failure === "unsupported_execution_target") {
-        return fail("Campaign scope requires a valid local or SSH host execution target belonging to its runner. Container and cloud targets are not supported.", 409);
+        return fail(campaignScopeTargetFailureMessage(response.targetFailureReason), 409);
       }
       if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id || !response.ok ||
           !response.repository || !/^[\w.-]+\/[\w.-]+$/u.test(response.repository) ||
