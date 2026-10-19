@@ -2111,7 +2111,8 @@ test("a save refused for the other machine marks Other Machine; any other refusa
     assert.equal(choiceTrigger(fixture.container, "Other Machine")?.getAttribute("aria-invalid"), null);
     const notices = [...fixture.container.querySelectorAll(".notice.t-danger")];
     assert.equal(notices.length, 1);
-    assert.match(notices[0]!.textContent ?? "", /These changes weren't saved\./);
+    assert.match(notices[0]!.textContent ?? "",
+      /These changes weren't saved\. Fix what the details below describe, then try again\./);
     const form = fixture.container.querySelector(".automation-editor-form")!;
     assert.ok(form.lastElementChild === notices[0], "the notice ends the form");
     assert.ok(form.nextElementSibling?.classList.contains("save-bar"), "the save bar follows it directly");

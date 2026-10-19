@@ -1156,9 +1156,9 @@ function AutomationEditorForm({
           </section>
 
           {failure && !failure.field && (
-            <Notice tone="danger" details={failure.message}>
-              {isNew ? "This automation wasn't created." : "These changes weren't saved."} Change what the details
-              name, then try again.
+            <Notice tone="danger" className="automation-editor-failure" details={failure.message}>
+              {isNew ? "This automation wasn't created." : "These changes weren't saved."} Fix what the details
+              below describe, then try again.
             </Notice>
           )}
         </form>

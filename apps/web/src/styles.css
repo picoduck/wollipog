@@ -16346,6 +16346,11 @@ button.review-finding-location {
   padding-top: var(--space-6);
 }
 .automation-editor-form > .section { gap: var(--space-4); }
+/* The save failure's Show Details is its notice's only action, so its label lines up with the
+   sentence above it: an optical bleed of the ghost button's inset and edge, inside the notice. */
+.automation-editor-failure .notice-actions > .notice-details-toggle:first-child {
+  margin-inline-start: calc(-1 * (var(--space-2) + 1px));
+}
 .automation-editor-form textarea { resize: vertical; }
 .automation-card { padding: 16px; min-width: 0; }
 .automation-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; margin: 14px 0; }
