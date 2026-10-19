@@ -2,6 +2,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { leaseWorkerDelay, leaseWorkerNow, parseLeaseWorkerDeadline } from "./provider-home-lease-clock.js";
 import { ProviderHomeLeaseRegistry, providerHomeLeaseRefusalKind, type ProviderHomeLeaseOptions } from "./provider-home-lease.js";
 import { adoptProviderProfileMarker, createProviderProfileMarker, revokeProviderProfileMarkerGrant } from "./provider-profile.js";
+import { isLeaseRunnerMarker } from "./provider-home-lease-evidence.js";
 import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_CLOCK, LEASE_WORKER_LIMITS, LEASE_WORKER_REFERENCE_LIMIT, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept, type LeaseWorkerError, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** Only the fixed source/SEA entry starts this worker; there is no public RPC/CLI entry. */
@@ -9,9 +10,12 @@ export function runProviderHomeLeaseWorker(): void {
   if (!parentPort || workerData?.clock !== LEASE_WORKER_CLOCK || typeof workerData.epoch !== "string" || !/^[a-f0-9-]{36}$/u.test(workerData.epoch)) throw new Error("invalid lease worker startup");
   const instance: unknown = workerData.controlPlaneInstanceId;
   if (instance !== undefined && (typeof instance !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(instance))) throw new Error("invalid lease worker startup");
+  const marker: unknown = workerData.runnerMarker;
+  if (marker !== undefined && !isLeaseRunnerMarker(marker)) throw new Error("invalid lease worker startup");
   const port = parentPort, epoch: string = workerData.epoch;
   const options: ProviderHomeLeaseOptions = { helperDataDir: workerData.helperDataDir,
     ...(instance === undefined ? {} : { controlPlaneInstanceId: instance.toLowerCase() }),
+    ...(marker === undefined ? {} : { runnerMarker: marker }),
     ...workerData.tests,
     onDiagnostic: d => send({ kind: "diagnostic", epoch, ...d }),
   };

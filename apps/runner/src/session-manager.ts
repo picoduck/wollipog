@@ -211,6 +211,7 @@ import {
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
 import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type LeaseProfileBinding, type ProviderHomeReference, type ProviderProfileAccessSource } from "./provider-home-lease-async.js";
+import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
@@ -1739,6 +1740,7 @@ export class SessionManager {
       onDiagnostic: (diagnostic) => this.log(JSON.stringify(diagnostic)),
       helperDataDir: dataDir ?? join(store.rootPath(), ".runner-data"),
       ...(controlPlaneInstanceId ? { controlPlaneInstanceId } : {}),
+      runnerMarker: providerHomeRunnerMarker(),
       profileAccess: () => this.providerProfileAccess(),
       expectedProfileIdForHome: (home) => this.providerProfileExpectation(home),
     }) : undefined;

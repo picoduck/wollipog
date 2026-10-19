@@ -27,6 +27,7 @@ import {
   terminatePosixProcessBoundaries,
   WORKTREE_DESCENDANT_MARKER_ENV,
 } from "./posix-process-tree.js";
+import { currentProviderHomeRunnerMarker, PROVIDER_HOME_RUNNER_MARKER_ENV } from "./provider-home-lease-evidence.js";
 import { quoteWindowsCmdToken } from "./windows-cmd.js";
 import {
   attachWslAgentControlBroker,
@@ -733,10 +734,14 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     disposeBridge = attachWslAgentControlBroker(bridgeRelay.stdout, bridgeRelay.stdin, bridge);
   }
 
+  // #3241: a provider-HOME lease's lifecycle evidence is this runner's marker; an explicit
+  // environment must not drop or replace it.
+  const leaseRunnerMarker = currentProviderHomeRunnerMarker();
   const launchEnv: NodeJS.ProcessEnv = {
     ...inherited,
     ...explicitEnv,
     ...isolationEnv,
+    ...(leaseRunnerMarker ? { [PROVIDER_HOME_RUNNER_MARKER_ENV]: leaseRunnerMarker } : {}),
     ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
     ...(worktreeDescendantMarker
       ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker }

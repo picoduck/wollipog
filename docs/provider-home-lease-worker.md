@@ -91,16 +91,55 @@ A refusal crosses the boundary as a fixed code, never as the registry's message,
 reaches the parent. The codes are distinct, and callers receive a `ProviderHomeLeaseError` carrying
 the code:
 
-- `busy`: the recorded process is alive, or a publication is in progress.
-- `foreign_owner`: a stale lease from another runner or control plane whose recorded process is gone.
+- `busy`: the recorded process is alive, a process it launched survives, or a publication is in progress.
+- `foreign_owner`: a stale lease from another runner or control plane that this owner may not recover.
 - `foreign_host`: a lease recorded on another host.
 - `unavailable`: the helper is unavailable.
 - `refusal`: everything else the registry cannot prove.
 - `profile_unsupported_control_plane`, `profile_unverifiable`, `profile_not_granted` and
   `profile_changed`: a provider-profile refusal before acquisition (see below).
 
-A foreign-owner lease is still never taken over automatically. Its text names that cause and the
-safe options, instead of the generic "could not be proved" refusal.
+A foreign-owner lease is taken over only through the recovery below. Otherwise its text names that
+cause and the safe options, instead of the generic "could not be proved" refusal.
+
+### Recovering an Abandoned Lease
+
+Since #3241 a runner records lifecycle evidence in every active record it publishes, as an optional
+`process` field: the boot id, its own process start time, and a random marker. Every process the
+runner launches inherits that marker as `WOLLIPOG_PROVIDER_HOME_RUNNER`. A runner sets it in its own
+environment when it starts, replacing any value inherited from a predecessor, and `spawnAgent` adds it
+explicitly so a provider's explicit environment cannot drop it. Only Linux records evidence; other
+platforms publish records without it.
+
+An unreleased record with evidence is abandoned only when one of these holds:
+
+- **Reboot:** the current boot id differs from the recorded one.
+- **Process scan:** in the same boot, no process has the recorded PID and start time, no readable
+  process of this user carries the marker, and no process of this user is left uninspected. A process
+  whose environment cannot be read (non-dumpable, such as Codex, or set-id) is uninspected unless its
+  world-readable `stat` shows it is a zombie, started before the recorded runner, or descends from the
+  scanning runner. The scan skips the scanning process itself, which may have inherited a
+  predecessor's marker.
+
+A dead PID alone never proves abandonment, including for the same owner's own restart. A record
+without evidence (an older runner, another platform) keeps the earlier rule: only its own owner
+reclaims it once its PID is gone.
+
+Another owner may then succeed it only when the HOME's profile marker grants this control plane (the
+acquisition passed the grant check with a profile id). Marker changes (adoption, revocation and
+retirement) and marker-less HOMEs never recover another owner's lease. The successor is an ordinary
+active v2 record with a `recovery` note, `{ proof: "reboot" | "process_scan", profileId }`, appended
+after the stale record and linked to its exact bytes. The stale record is kept, and no release is ever
+written for the old owner. Readers accept an owner change over an active record only with that note,
+on the same host, and over a record that carried evidence. A release never carries the note.
+
+Older runners ignore the `process` field. They refuse a recovery record because they allow no owner
+change over an active record, so a rollback binary fails closed with its generic refusal until a
+checkpoint retires that link. The WSL in-distro helper refuses it the same way.
+
+The scan shares the ledger's known limit: a descendant that scrubs its environment, or that a
+non-dumpable process launched after the recorded runner started and that this runner did not launch,
+cannot be told apart, and the second blocks recovery. A reboot always proves abandonment.
 
 ### Provider Profile Identity
 

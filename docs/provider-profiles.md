@@ -151,8 +151,15 @@ owner-namespaced data directory, the replacement may also retire it when the acc
 
 A runner connected to another control-plane instance is refused at the lease as
 `profile_not_granted`, and its account reports show `not_granted`, until an Owner or Admin there
-adopts the profile. A stale lease left by a crashed predecessor is not taken over; that transition is
-#3241's.
+adopts the profile.
+
+A stale lease left by a crashed predecessor on the same host is recovered when the profile grants the
+replacement's control plane and the predecessor's lifecycle evidence proves nothing it launched
+survives: the host rebooted, or a same-boot process scan finds no survivor (#3241; see
+[the lease worker](provider-home-lease-worker.md#recovering-an-abandoned-lease)). The recovery is an
+explicit journal record; the old lease is kept, never released on its behalf. A lease without
+evidence (from an older runner, or on macOS or Windows), and any lease on a HOME without a profile
+grant, still needs an Owner or Admin's one-time authorization, which a later part of #3241 adds.
 
 ## Web Actions
 
