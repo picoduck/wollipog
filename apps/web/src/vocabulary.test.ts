@@ -24,7 +24,7 @@ const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.m
 const HOST_PICKERS: ReadonlyArray<[string, string]> = [
   ["./components/NewSessionDialog.tsx", "New Session"],
   ["./components/NewRunDialog.tsx", "New Multi-Agent Run"],
-  ["./components/AutomationsView.tsx", "Automations"],
+  ["./components/AutomationEditor.tsx", "Automations"],
 ];
 
 test("host pickers name the Machine, not the Runner that represents it", () => {
@@ -133,7 +133,7 @@ test("machine selectors render disambiguated Machine labels", () => {
   for (const path of [
     "./components/NewSessionDialog.tsx",
     "./components/NewRunDialog.tsx",
-    "./components/AutomationsView.tsx",
+    "./components/AutomationEditor.tsx",
     // Both of these rendered a bare runnerDisplay().name. The Board filter silently hides the
     // sessions you wanted; the Location dialog creates the (Machine, Workspace) pair against the
     // wrong host, which is the costlier of the two.

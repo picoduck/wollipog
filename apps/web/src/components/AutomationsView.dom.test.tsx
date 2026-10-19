@@ -16,13 +16,20 @@ import type {
   UiSnapshotMessage,
   WorkflowDefinition,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import type { ViewNavigation } from "../navigation.js";
+import { viewPath, type View, type ViewNavigation } from "../navigation.js";
+import { setExperimentFlag } from "../experiments.js";
+import { MULTI_AGENT_OFF_HELPER } from "./AutomationEditor.js";
+import { FeedbackContext } from "./FeedbackProvider.js";
+
+type FeedbackContextValue = React.ContextType<typeof FeedbackContext>;
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { AutomationsView } from "./AutomationsView.js";
+import { AutomationEditor } from "./AutomationEditor.js";
 import { agentOptions } from "./agent-options.js";
+import { agentDisplayName } from "../agent-presentation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withScopedClockOverrides } from "./test-clock-overrides.js";
@@ -128,8 +135,13 @@ class FakeSocket implements UiSocket {
   }
 }
 
+/** Confirmations and toasts for a fixture mounted while it is set; none otherwise (every confirm declines). */
+let feedback: FeedbackContextValue | null = null;
+
+/** The route a fixture opens on: the list, unless a test opens an editor route directly. */
+let initialView: View = { name: "automations" };
 const navigation: ViewNavigation = {
-  current: () => ({ name: "automations" }),
+  current: () => initialView,
   push() {},
   listen: () => () => {},
 };
@@ -151,9 +163,14 @@ function snapshot(runnerViews = runners): UiSnapshotMessage {
   };
 }
 
+/** The list, or the editor its New Automation and Edit open, as App routes them. */
 function AutomationsWhenReady() {
   const ready = useStoreSelector((state) => state.snapshotLoaded);
-  return ready ? <AutomationsView /> : null;
+  const view = useStoreSelector((state) => state.view);
+  if (!ready) return null;
+  return view.name === "automations" && view.editor
+    ? <AutomationEditor key={viewPath(view)} route={view.editor} />
+    : <AutomationsView />;
 }
 
 interface Fixture {
@@ -257,11 +274,14 @@ async function mountFixture(
     ...clientOverrides,
   } as unknown as ApiClient;
 
+  const store = (
+    <StoreProvider connection={connection} navigation={navigation}>
+      <AutomationsWhenReady />
+    </StoreProvider>
+  );
   const render = () => root.render(
     <ApiProvider client={client}>
-      <StoreProvider connection={connection} navigation={navigation}>
-        <AutomationsWhenReady />
-      </StoreProvider>
+      {feedback ? <FeedbackContext.Provider value={feedback}>{store}</FeedbackContext.Provider> : store}
     </ApiProvider>,
   );
   await act(async () => { render(); });
@@ -293,22 +313,32 @@ function button(container: HTMLDivElement, label: string): HTMLButtonElement {
   return found;
 }
 
-function nativeSelect(container: HTMLDivElement, label: string): HTMLSelectElement {
-  const wrapper = [...container.querySelectorAll<HTMLLabelElement>("label")]
-    .find((candidate) => candidate.childNodes[0]?.textContent?.trim() === label);
-  const select = wrapper?.querySelector("select") as HTMLSelectElement | null;
-  assert.ok(select, `${label} select is rendered`);
-  return select;
+/** The value a Select shows, from its trigger's name ("Machine: runner-1"). */
+function shownValue(container: HTMLDivElement, label: string): string | undefined {
+  return choiceTrigger(container, label)?.getAttribute("aria-label")?.slice(label.length + 2);
 }
 
-async function changeNativeSelect(container: HTMLDivElement, label: string, value: string): Promise<void> {
-  const select = nativeSelect(container, label);
-  const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLSelectElement.prototype, "value")?.set;
-  assert.ok(setter);
-  await act(async () => {
-    setter.call(select, value);
-    select.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
-  });
+/** A Select's options as listed, with whether each can be chosen; the list is closed again. */
+async function listOptions(container: HTMLDivElement, label: string): Promise<Array<{ label: string; disabled: boolean }>> {
+  const trigger = choiceTrigger(container, label);
+  assert.ok(trigger, `${label} choice is rendered`);
+  await act(async () => { trigger.click(); });
+  const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')].map((option) => ({
+    label: option.querySelector('[id$="-label"]')?.textContent?.trim() ?? "",
+    disabled: option.getAttribute("aria-disabled") === "true",
+  }));
+  await act(async () => { trigger.click(); });
+  return options;
+}
+
+/** Choose the editor's action by its choice row's title. */
+async function chooseAction(container: HTMLDivElement, title: string): Promise<void> {
+  const row = [...container.querySelectorAll<HTMLLabelElement>(".choice-row")]
+    .find((candidate) => candidate.querySelector(".choice-row-title")?.textContent?.trim() === title);
+  const input = row?.querySelector("input");
+  assert.ok(input, `${title} action is rendered`);
+  await act(async () => { input.click(); });
+  await act(settle);
 }
 
 function choiceTrigger(container: HTMLDivElement, label: string): HTMLButtonElement | undefined {
@@ -321,8 +351,9 @@ async function choose(container: HTMLDivElement, label: string, optionLabel: str
   assert.ok(trigger, `${label} choice is rendered`);
   await act(async () => { trigger.click(); });
   const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+  // By the option's label alone: its description and status are its other lines.
   const option = options
-    .find((candidate) => candidate.textContent?.trim() === optionLabel);
+    .find((candidate) => (candidate.querySelector('[id$="-label"]') ?? candidate).textContent?.trim() === optionLabel);
   assert.ok(option, `${optionLabel} option is rendered; found ${options.map((item) => item.textContent?.trim()).join(", ")}`);
   await act(async () => { option.click(); });
   await act(settle);
@@ -330,6 +361,27 @@ async function choose(container: HTMLDivElement, label: string, optionLabel: str
 
 async function openNew(fixture: Fixture): Promise<void> {
   await act(async () => { button(fixture.container, "New Automation").click(); });
+  await act(settle);
+}
+
+/** Edit on an expanded card opens the editor's route, which loads the stored automation. */
+async function openEdit(fixture: Fixture): Promise<void> {
+  await act(async () => { button(fixture.container, "Edit").click(); });
+  await act(settle);
+}
+
+/** Back to the list and Edit again: the editor reloads the automation as it is stored. */
+async function reopenEdit(fixture: Fixture, name: string): Promise<void> {
+  const back = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Back to Automations"]');
+  assert.ok(back, "the editor's Back is rendered");
+  await act(async () => { back.click(); });
+  await act(settle);
+  await expandCard(fixture, name);
+  await openEdit(fixture);
+}
+
+async function saveChanges(fixture: Fixture): Promise<void> {
+  await act(async () => { button(fixture.container, "Save Changes").click(); });
   await act(settle);
 }
 
@@ -341,8 +393,11 @@ async function setLabeledInput(container: HTMLDivElement, label: string, value: 
   const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
   assert.ok(setter);
   await act(async () => {
+    input.focus();
     setter.call(input, value);
     input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: value }) as never);
+    // React reads a text field's change from focus and keyup here, as SessionMoveDialogs' tests do.
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as never);
   });
 }
 
@@ -419,18 +474,18 @@ test("Agent, Machine, and Model controls invoke their capability-transition help
     await choose(fixture.container, "Reasoning Effort", "High");
     await choose(fixture.container, "Permission Mode", "Auto");
 
-    await changeNativeSelect(fixture.container, "Agent", "other-agent");
+    await choose(fixture.container, "Agent", "Other Agent");
     assert.equal(choiceTrigger(fixture.container, "Model")?.getAttribute("aria-label"), "Model: Agent Default");
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort")?.getAttribute("aria-label"), "Reasoning Effort: Agent Default");
     assert.equal(choiceTrigger(fixture.container, "Permission Mode")?.getAttribute("aria-label"), "Permission Mode: Agent Default");
 
     await choose(fixture.container, "Model", "GPT");
     await choose(fixture.container, "Reasoning Effort", "Medium");
-    await changeNativeSelect(fixture.container, "Machine", "runner-2");
+    await choose(fixture.container, "Machine", "runner-2");
     assert.equal(choiceTrigger(fixture.container, "Model")?.getAttribute("aria-label"), "Model: Agent Default");
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort")?.getAttribute("aria-label"), "Reasoning Effort: Agent Default");
 
-    await changeNativeSelect(fixture.container, "Machine", "runner-1");
+    await choose(fixture.container, "Machine", "runner-1");
     await choose(fixture.container, "Model", "Opus");
     await choose(fixture.container, "Reasoning Effort", "High");
     await choose(fixture.container, "Permission Mode", "Auto");
@@ -488,13 +543,13 @@ test("capability controls render only for create-session actions with advertised
     assert.ok(choiceTrigger(fixture.container, "Reasoning Effort"));
     assert.ok(choiceTrigger(fixture.container, "Permission Mode"));
 
-    await changeNativeSelect(fixture.container, "Action", "prompt_session");
+    await chooseAction(fixture.container, "Prompt a Session");
     assert.equal(choiceTrigger(fixture.container, "Model"), undefined);
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort"), undefined);
     assert.equal(choiceTrigger(fixture.container, "Permission Mode"), undefined);
 
-    await changeNativeSelect(fixture.container, "Action", "create_session");
-    await changeNativeSelect(fixture.container, "Agent", "plain-agent");
+    await chooseAction(fixture.container, "Start a Session");
+    await choose(fixture.container, "Agent", "Plain Agent");
     assert.equal(choiceTrigger(fixture.container, "Model"), undefined);
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort"), undefined);
     assert.equal(choiceTrigger(fixture.container, "Permission Mode"), undefined);
@@ -538,39 +593,34 @@ test("editing and saving without changes sends the exact stored multi-alternate 
   const fixture = await mountFixture([stored]);
   try {
     await expandCard(fixture, "Nightly Sweep");
-    await act(async () => { button(fixture.container, "Edit").click(); });
+    await openEdit(fixture);
     const nameInput = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
       .find((candidate) => candidate.childNodes[0]?.textContent?.trim() === "Name")
       ?.querySelector("input") as HTMLInputElement | null;
     assert.equal(nameInput?.value, "Nightly Sweep");
-    assert.equal(nativeSelect(fixture.container, "Machine").value, "runner-1");
-    assert.equal(nativeSelect(fixture.container, "Agent").value, "rich-agent");
+    assert.equal(shownValue(fixture.container, "Machine"), "runner-1");
+    assert.equal(shownValue(fixture.container, "Agent"), "Rich Agent");
     assert.equal(choiceTrigger(fixture.container, "Model")?.getAttribute("aria-label"), "Model: Opus");
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort")?.getAttribute("aria-label"), "Reasoning Effort: High");
     assert.equal(choiceTrigger(fixture.container, "Permission Mode")?.getAttribute("aria-label"), "Permission Mode: Auto");
-    assert.equal(
-      [...nativeSelect(fixture.container, "Machine").options].find((option) => option.value === "runner-3")?.disabled,
-      true,
-    );
-    assert.deepEqual(
-      [...nativeSelect(fixture.container, "Alternate Machine").options].map((option) => option.value),
-      ["", "runner-2"],
-    );
-    assert.match(fixture.container.textContent ?? "", /Additional stored alternate machines are preserved: runner-3\./);
+    assert.equal((await listOptions(fixture.container, "Machine")).find((option) => option.label === "runner-3")?.disabled, true);
+    // The stored first alternate, never "Select…"; a later stored alternate is carried, not offered.
+    assert.equal(shownValue(fixture.container, "Other Machine"), "runner-2");
+    assert.deepEqual((await listOptions(fixture.container, "Other Machine")).map((option) => option.label), ["runner-2"]);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Additional stored alternate machines are preserved/);
 
-    await changeNativeSelect(fixture.container, "Runner Availability", "wait");
-    assert.equal(
-      [...nativeSelect(fixture.container, "Machine").options].find((option) => option.value === "runner-3")?.disabled,
-      false,
-    );
-    await changeNativeSelect(fixture.container, "Runner Availability", "alternate");
+    await choose(fixture.container, "If the Machine Is Offline", "Wait Until It's Back");
+    assert.equal((await listOptions(fixture.container, "Machine")).find((option) => option.label === "runner-3")?.disabled, false);
+    await choose(fixture.container, "If the Machine Is Offline", "Use Another Machine");
+    assertNoDomNode(fixture.container.querySelector(".save-bar"), "a change undone leaves nothing to save");
 
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    // Only the name changes; every other stored field, including both alternates, round-trips.
+    await setLabeledInput(fixture.container, "Name", "Nightly Sweep Renamed");
+    await saveChanges(fixture);
     assert.equal(fixture.updates.length, 1);
     const { automationId: _id, revision: _revision, createdBy: _createdBy,
       createdAt: _createdAt, updatedAt: _updatedAt, ...storedSpec } = stored;
-    assert.deepEqual(fixture.updates[0], { id: stored.automationId, spec: storedSpec });
+    assert.deepEqual(fixture.updates[0], { id: stored.automationId, spec: { ...storedSpec, name: "Nightly Sweep Renamed" } });
   } finally {
     await unmountFixture(fixture);
   }
@@ -600,10 +650,9 @@ test("an unavailable automation installation stays visible until explicitly rebo
   try {
     await expandCard(fixture, "Pinned Sweep");
     assert.match(fixture.container.textContent ?? "", CARD_INSTALLATION_ALERT);
-    await act(async () => { button(fixture.container, "Edit").click(); });
+    await openEdit(fixture);
     await act(async () => { button(fixture.container, "Use Current Installation").click(); });
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    await saveChanges(fixture);
     const action = fixture.updates[0]?.spec.action;
     assert.equal(action?.kind === "create_session" &&
       action.installationBindings?.agent?.installationId, "local");
@@ -634,7 +683,7 @@ test("saving a rebind whose installation disappeared names the machine it needs"
     const fixture = await mountFixture([stored], {}, {}, [], {}, machines);
     try {
       await expandCard(fixture, stored.name);
-      await act(async () => { button(fixture.container, "Edit").click(); });
+      await openEdit(fixture);
       assert.match(fixture.container.textContent ?? "",
         alternate ? SAVED_ALTERNATE_INSTALLATION_WARNING : SAVED_INSTALLATION_WARNING);
       await act(async () => { button(fixture.container, "Use Current Installation").click(); });
@@ -642,12 +691,14 @@ test("saving a rebind whose installation disappeared names the machine it needs"
       await fixture.pushRunners(alternate
         ? [machines[0]!, installed(runners[1]!, "other")]
         : [installed(runners[0]!, "other"), machines[1]!]);
-      await act(async () => { button(fixture.container, "Save Automation").click(); });
-      await act(settle);
+      await saveChanges(fixture);
       assert.equal(fixture.updates.length, 0);
-      assert.match(fixture.container.textContent ?? "", alternate
+      const field = choiceTrigger(fixture.container, alternate ? "Other Agent" : "Agent");
+      assert.equal(field?.getAttribute("aria-invalid"), "true");
+      assert.match(fixture.container.querySelector(`#${field?.getAttribute("aria-describedby")}`)?.textContent ?? "", alternate
         ? /Choose an available installation of this agent on the other machine\./
         : /Choose an available installation of this agent on this machine\./);
+      assertNoDomNode(fixture.container.querySelector(".notice.t-danger"), "a field's error is not repeated in the notice");
     } finally {
       await unmountFixture(fixture);
     }
@@ -673,25 +724,24 @@ test("editing a pinned automation shows its rediscovered installation instead of
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
   try {
     await expandCard(fixture, "Pinned Sweep");
-    await act(async () => { button(fixture.container, "Edit").click(); });
-    assert.equal(nativeSelect(fixture.container, "Agent").value, "system-new");
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    await openEdit(fixture);
+    const agentLabel = (id: string) => agentDisplayName(machine.agents.find((agent) => agent.id === id)!, machine.agents);
+    assert.equal(shownValue(fixture.container, "Agent"), agentLabel("system-new"));
+    await setLabeledInput(fixture.container, "Name", "Pinned Sweep Renamed");
+    await saveChanges(fixture);
     const action = fixture.updates[0]?.spec.action;
     assert.equal(action?.kind === "create_session" && action.request.agentId, "system-new");
     assert.equal(action?.kind === "create_session" &&
       action.installationBindings?.agent?.installationId, "system");
-    await act(async () => { button(fixture.container, "Edit").click(); });
-    await changeNativeSelect(fixture.container, "Agent", "manual");
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    await reopenEdit(fixture, "Pinned Sweep");
+    await choose(fixture.container, "Agent", agentLabel("manual"));
+    await saveChanges(fixture);
     assert.equal(fixture.updates[1]?.spec.action.kind === "create_session" &&
       fixture.updates[1].spec.action.request.agentId, "manual",
     "switching to a config-authored agent clears the automatic installation rebind");
-    await act(async () => { button(fixture.container, "Edit").click(); });
-    await changeNativeSelect(fixture.container, "Agent", "rich-agent");
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    await reopenEdit(fixture, "Pinned Sweep");
+    await choose(fixture.container, "Agent", agentLabel("rich-agent"));
+    await saveChanges(fixture);
     const reselected = fixture.updates[2]?.spec.action;
     assert.equal(reselected?.kind === "create_session" && reselected.request.agentId, "rich-agent");
     assert.deepEqual(reselected?.kind === "create_session" && reselected.installationBindings, {},
@@ -723,20 +773,18 @@ test("a workflow role named orchestrator keeps a role binding separate from its 
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine], [workflow]);
   try {
     await expandCard(fixture, "Workflow Sweep");
-    await act(async () => { button(fixture.container, "Edit").click(); });
+    await openEdit(fixture);
     await act(async () => { button(fixture.container, "Use Current Installation").click(); });
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    await saveChanges(fixture);
     const action = fixture.updates[0]?.spec.action;
     assert.equal(action?.kind === "workflow_run" && action.request.agentBindings?.orchestrator, "orchestrator");
     assert.equal(action?.kind === "workflow_run" && action.request.orchestratorAgentId, undefined);
     assert.equal(action?.kind === "workflow_run" &&
       action.installationBindings?.["role:orchestrator"]?.installationId, "system");
-    await act(async () => { button(fixture.container, "Edit").click(); });
-    await choose(fixture.container, "Orchestrator Agent",
+    await reopenEdit(fixture, "Workflow Sweep");
+    await choose(fixture.container, "Worker Agent",
       agentOptions(machine.agents).find((option) => option.agent.id === "manual")!.label);
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    await saveChanges(fixture);
     const configAction = fixture.updates[1]?.spec.action;
     assert.equal(configAction?.kind === "workflow_run" &&
       configAction.request.agentBindings?.orchestrator, "manual");
@@ -767,8 +815,8 @@ test("switching workflows does not call a new discovered role's installation sav
     [workflow("old-graph"), workflow("new-graph")]);
   try {
     await expandCard(fixture, "Workflow Switch");
-    await act(async () => { button(fixture.container, "Edit").click(); });
-    await changeNativeSelect(fixture.container, "Workflow", "new-graph");
+    await openEdit(fixture);
+    await choose(fixture.container, "Workflow", "new-graph");
     assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ROLE_WARNING);
   } finally {
     await unmountFixture(fixture);
@@ -803,14 +851,13 @@ test("switching workflow Machines stops displaying the old Machine's installatio
   const fixture = await mountFixture([stored], {}, {}, [], {}, [oldMachine, newMachine], [workflow]);
   try {
     await expandCard(fixture, "Workflow Machine");
-    await act(async () => { button(fixture.container, "Edit").click(); });
-    await changeNativeSelect(fixture.container, "Machine", "runner-2");
+    await openEdit(fixture);
+    await choose(fixture.container, "Machine", "runner-2");
     assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ROLE_WARNING);
-    assert.match(choiceTrigger(fixture.container, "Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
-      /Rich-Agent Agent: Rich Agent/,
+    assert.match(choiceTrigger(fixture.container, "Worker Agent")?.getAttribute("aria-label") ?? "",
+      /Worker Agent: Rich Agent/,
     "the new Machine's same-id installation must not replace the role shown in the editor");
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    await saveChanges(fixture);
     const action = fixture.updates[0]?.spec.action;
     assert.equal(action?.kind === "workflow_run" && action.request.runnerId, "runner-2");
     assert.equal(action?.kind === "workflow_run" && action.request.agentBindings, undefined);
@@ -853,13 +900,12 @@ test("switching alternate workflow Machines clears the old alternate installatio
   const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, oldAlternate, newAlternate], [workflow]);
   try {
     await expandCard(fixture, "Alternate Workflow Machine");
-    await act(async () => { button(fixture.container, "Edit").click(); });
-    await changeNativeSelect(fixture.container, "Alternate Machine", "runner-3");
+    await openEdit(fixture);
+    await choose(fixture.container, "Other Machine", "runner-3");
     assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ALTERNATE_ROLE_WARNING);
-    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
-      /Alternate Rich-Agent Agent: Configured Alternate/);
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    assert.match(choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
+      /Other Worker Agent: Configured Alternate/);
+    await saveChanges(fixture);
     const policy = fixture.updates[0]?.spec.runnerPolicy;
     assert.equal(policy?.kind, "alternate");
     assert.equal(policy?.kind === "alternate" && policy.targets[0]?.runnerId, "runner-3");
@@ -894,18 +940,18 @@ test("alternate workflow selectors follow the effective primary choice after a M
   const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate, newPrimary], [workflow]);
   try {
     await expandCard(fixture, "Primary Switch Alternate");
-    await act(async () => { button(fixture.container, "Edit").click(); });
-    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
-      /Alternate Rich-Agent Agent: Codex App Server/);
-    await choose(fixture.container, "Rich-Agent Agent", "Claude Code");
-    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
-      /Alternate Rich-Agent Agent: Claude Code/,
+    await openEdit(fixture);
+    assert.match(choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
+      /Other Worker Agent: Codex App Server/);
+    await choose(fixture.container, "Worker Agent", "Claude Code");
+    assert.match(choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
+      /Other Worker Agent: Claude Code/,
     "the alternate must follow an edited primary role when it has no override");
-    await changeNativeSelect(fixture.container, "Machine", "runner-3");
-    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
-      /Alternate Rich-Agent Agent: Claude Code/,
+    await choose(fixture.container, "Machine", "runner-3");
+    assert.match(choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
+      /Other Worker Agent: Claude Code/,
     "the alternate must not keep the old primary role override after that override is dropped");
-    assert.equal(choiceTrigger(fixture.container, "Alternate Orchestrator Agent"), undefined,
+    assert.equal(choiceTrigger(fixture.container, "Other Orchestrator Agent"), undefined,
       "the alternate must not display an orchestrator that the new primary request drops");
   } finally {
     await unmountFixture(fixture);
@@ -943,20 +989,19 @@ test("inherited alternate installation pins display edited primary workflow iden
   const fixture = await mountFixture([stored], {}, {}, [], {}, [primary, alternate], [workflow]);
   try {
     await expandCard(fixture, "Inherited Alternate Pins");
-    await act(async () => { button(fixture.container, "Edit").click(); });
-    const alternateRole = () => choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "";
-    const alternateOrchestrator = () => choiceTrigger(fixture.container, "Alternate Orchestrator Agent")?.getAttribute("aria-label") ?? "";
+    await openEdit(fixture);
+    const alternateRole = () => choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "";
+    const alternateOrchestrator = () => choiceTrigger(fixture.container, "Other Orchestrator Agent")?.getAttribute("aria-label") ?? "";
     assert.match(alternateRole(), /Claude Code/);
     assert.match(alternateOrchestrator(), /Claude Code/);
 
-    await choose(fixture.container, "Rich-Agent Agent", "Codex App Server");
+    await choose(fixture.container, "Worker Agent", "Codex App Server");
     await choose(fixture.container, "Orchestrator Agent", "Codex App Server");
     assert.match(alternateRole(), /Codex App Server/, "inherited role must display the identity that saving will pin");
     assert.match(alternateOrchestrator(), /Codex App Server/, "inherited Orchestrator must follow the primary edit");
     assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ALTERNATE_ROLE_OR_ORCHESTRATOR_WARNING);
 
-    await act(async () => { button(fixture.container, "Save Automation").click(); });
-    await act(settle);
+    await saveChanges(fixture);
     const saved = fixture.updates[0]?.spec;
     assert.equal(saved?.action.kind, "workflow_run");
     assert.equal(saved.action.request.agentBindings?.["rich-agent"], "other-agent");
@@ -972,14 +1017,14 @@ test("inherited alternate installation pins display edited primary workflow iden
   const unavailableFixture = await mountFixture([stored], {}, {}, [], {}, [primary, missingAlternate], [workflow]);
   try {
     await expandCard(unavailableFixture, "Inherited Alternate Pins");
-    await act(async () => { button(unavailableFixture.container, "Edit").click(); });
-    await choose(unavailableFixture.container, "Rich-Agent Agent", "Codex App Server");
+    await openEdit(unavailableFixture);
+    await choose(unavailableFixture.container, "Worker Agent", "Codex App Server");
     await choose(unavailableFixture.container, "Orchestrator Agent", "Codex App Server");
-    assert.match(choiceTrigger(unavailableFixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+    assert.match(choiceTrigger(unavailableFixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
       /other-agent \(Unavailable\)/);
-    assert.match(choiceTrigger(unavailableFixture.container, "Alternate Orchestrator Agent")?.getAttribute("aria-label") ?? "",
+    assert.match(choiceTrigger(unavailableFixture.container, "Other Orchestrator Agent")?.getAttribute("aria-label") ?? "",
       /other-agent \(Unavailable\)/);
-    assert.equal([...unavailableFixture.container.querySelectorAll('[role="alert"]')]
+    assert.equal([...unavailableFixture.container.querySelectorAll(".notice.t-warning")]
       .filter((alert) => SAVED_ALTERNATE_ROLE_OR_ORCHESTRATOR_WARNING.test(alert.textContent ?? ""))
       .length, 2, "both inherited identities remain fail closed when the edited choice is missing");
   } finally {
@@ -1060,7 +1105,7 @@ test("a legacy create-session Agent with one installation is shown as available"
     await expandCard(fixture, "Legacy Installation");
     assert.doesNotMatch(fixture.container.textContent ?? "",
       CARD_INSTALLATION_ALERT);
-    await act(async () => { button(fixture.container, "Edit").click(); });
+    await openEdit(fixture);
     assert.doesNotMatch(fixture.container.textContent ?? "",
       SAVED_INSTALLATION_WARNING);
   } finally {
@@ -1082,7 +1127,7 @@ test("an explicit empty installation binding remains visibly blocked", async () 
     await expandCard(fixture, "Explicit Unbound");
     assert.match(fixture.container.textContent ?? "",
       CARD_INSTALLATION_ALERT);
-    await act(async () => { button(fixture.container, "Edit").click(); });
+    await openEdit(fixture);
     assert.match(fixture.container.textContent ?? "",
       SAVED_INSTALLATION_WARNING);
   } finally {
@@ -1107,7 +1152,7 @@ test("legacy alternate targets auto-pin while explicitly unbound alternates warn
       await expandCard(fixture, stored.name);
       assert.equal(CARD_INSTALLATION_ALERT.test(
         fixture.container.textContent ?? ""), explicit);
-      await act(async () => { button(fixture.container, "Edit").click(); });
+      await openEdit(fixture);
       assert.equal(SAVED_ALTERNATE_INSTALLATION_WARNING.test(
         fixture.container.textContent ?? ""), explicit);
     } finally {
@@ -1887,3 +1932,435 @@ for (const obsoleteReadFails of [false, true]) {
     });
   });
 }
+
+/* ------------------------- The Automation editor's routes (#2967) ------------------------- */
+
+function editorRoot(container: HTMLDivElement): HTMLElement {
+  const root = container.querySelector<HTMLElement>(".automation-editor");
+  assert.ok(root, "the Automation editor is rendered");
+  return root;
+}
+
+function editorTitle(container: HTMLDivElement): string | null {
+  return container.querySelector(".detail-bar-title")?.textContent ?? null;
+}
+
+async function goBack(fixture: Fixture): Promise<void> {
+  const back = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Back to Automations"]');
+  assert.ok(back, "the editor's Back is rendered");
+  await act(async () => { back.click(); });
+  await act(settle);
+}
+
+/** Mount on a route, as a reload or a link to it does. */
+async function mountAt(view: View, ...args: Parameters<typeof mountFixture>): Promise<Fixture> {
+  initialView = view;
+  try {
+    return await mountFixture(...args);
+  } finally {
+    initialView = { name: "automations" };
+  }
+}
+
+const NEW_ROUTE: View = { name: "automations", editor: { kind: "new" } };
+const editRoute = (automationId: string): View => ({ name: "automations", editor: { kind: "edit", automationId } });
+
+function workflowAutomation(id: string, name: string): AutomationSchedule {
+  const stored = schedule(id, name);
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
+  } };
+  return stored;
+}
+
+const reviewGraph: WorkflowDefinition = {
+  workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
+  createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
+  nodes: [
+    { nodeId: "build", kind: "agent", role: "builder", agentId: "rich-agent",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 },
+    { nodeId: "approve", kind: "human_gate", role: "approver",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 },
+  ],
+};
+
+test("New Automation and Edit open the editor's routes in the list's place, and Back returns to the list", async () => {
+  const fixture = await mountFixture([schedule("automation-1", "Nightly")]);
+  try {
+    assertNoDomNode(fixture.container.querySelector(".automation-editor"), "the list renders no editor");
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Close Automation Editor"]'));
+
+    await openNew(fixture);
+    assert.equal(editorTitle(fixture.container), "New Automation");
+    assertNoDomNode(fixture.container.querySelector(".automation-list"));
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Close Automation Editor"]'));
+    await goBack(fixture);
+    assert.ok(fixture.container.querySelector(".automation-list"));
+
+    await expandCard(fixture, "Nightly");
+    await openEdit(fixture);
+    assert.equal(editorTitle(fixture.container), "Edit Nightly");
+    await goBack(fixture);
+    assert.ok(fixture.container.querySelector(".automation-list"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("each editor route opens directly, in four sections, with no native select for any action", async () => {
+  for (const view of [NEW_ROUTE, editRoute("automation-1")]) {
+    const fixture = await mountAt(view, [schedule("automation-1", "Nightly")], {}, {}, [], {}, runners, [reviewGraph]);
+    try {
+      const root = editorRoot(fixture.container);
+      assert.equal(editorTitle(fixture.container), view.name === "automations" && view.editor?.kind === "new"
+        ? "New Automation" : "Edit Nightly");
+      assert.deepEqual([...root.querySelectorAll(".section-title")].map((title) => title.textContent),
+        ["What to Run", "When to Run", "Limits", "Notifications"]);
+      for (const action of ["Prompt a Session", "Run a Workflow", "Start a Session"]) {
+        await chooseAction(fixture.container, action);
+        await choose(fixture.container, "If the Machine Is Offline", action === "Prompt a Session"
+          ? "Give Up After a While" : "Use Another Machine");
+        assert.equal(root.querySelectorAll("select").length, 0, `${action} renders no native select`);
+      }
+    } finally {
+      await unmountFixture(fixture);
+    }
+  }
+});
+
+test("an edit route for an automation that no longer exists says so and offers Back", async () => {
+  const fixture = await mountAt(editRoute("gone"), [], {}, {}, [], {}, runners, [], {
+    automation: async () => { throw new ApiError("automation not found", 404); },
+  });
+  try {
+    assert.match(editorRoot(fixture.container).textContent ?? "", /Automation Not Found/);
+    assertNoDomNode(fixture.container.querySelector(".automation-editor-form"));
+    assert.ok(button(fixture.container, "Back to Automations"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a new automation starts on the first online machine, and switching the action keeps Folder and Agent filled", async () => {
+  const offline: RunnerView = { ...runners[0]!, status: "offline" };
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, [offline, runners[1]!], [reviewGraph]);
+  try {
+    assert.equal(shownValue(fixture.container, "Machine"), "runner-2");
+    const machine = choiceTrigger(fixture.container, "Machine")!;
+    await act(async () => { machine.click(); });
+    const offlineOption = [...fixture.container.querySelectorAll('[role="option"]')]
+      .find((option) => option.querySelector('[id$="-label"]')?.textContent === "runner-1");
+    assert.match(offlineOption?.textContent ?? "", /Offline/, "an offline machine carries its badge in the list");
+    await act(async () => { machine.click(); });
+    for (const action of ["Prompt a Session", "Run a Workflow", "Start a Session"]) {
+      await chooseAction(fixture.container, action);
+      if (action === "Prompt a Session") continue;
+      assert.equal(shownValue(fixture.container, "Folder"), "runner-2-workspace", `${action} keeps a Folder`);
+      if (action === "Start a Session") assert.equal(shownValue(fixture.container, "Agent"), "Alternate Agent");
+    }
+  } finally {
+    await unmountFixture(fixture);
+  }
+
+  // An automation that prompts a session has no machine; starting a session instead derives one.
+  const prompt = schedule("prompt", "Prompt Sweep");
+  prompt.action = { kind: "prompt_session", sessionId: "session-1", request: { text: "Continue." } };
+  const edit = await mountAt(editRoute("prompt"), [prompt]);
+  try {
+    await chooseAction(edit.container, "Start a Session");
+    assert.equal(shownValue(edit.container, "Machine"), "runner-1");
+    assert.equal(shownValue(edit.container, "Folder"), "runner-1-workspace");
+    assert.equal(shownValue(edit.container, "Agent"), "Rich Agent");
+  } finally {
+    await unmountFixture(edit);
+  }
+});
+
+test("an offline stored other machine shows in Other Machine with its Offline badge", async () => {
+  const stored = schedule("offline-alternate", "Offline Alternate");
+  stored.runnerPolicy = { kind: "alternate", targets: [
+    { runnerId: "runner-2", workspaceId: "runner-2-workspace", agentId: "alternate-agent" },
+  ], expireAfterMinutes: 30 };
+  const fixture = await mountAt(editRoute("offline-alternate"), [stored], {}, {}, [], {}, [
+    runners[0]!, { ...runners[1]!, status: "offline" }, runners[2]!,
+  ]);
+  try {
+    const trigger = choiceTrigger(fixture.container, "Other Machine");
+    assert.equal(trigger?.getAttribute("aria-label"), "Other Machine: runner-2, Offline");
+    assert.match(trigger?.textContent ?? "", /runner-2\s*Offline/);
+    assert.equal(shownValue(fixture.container, "Other Agent"), "Alternate Agent");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a save refused for the other machine marks Other Machine; any other refusal is one notice above the save bar", async () => {
+  const stored = schedule("alternate-refused", "Alternate Refused");
+  stored.runnerPolicy = { kind: "alternate", targets: [
+    { runnerId: "runner-2", workspaceId: "runner-2-workspace", agentId: "alternate-agent" },
+  ], expireAfterMinutes: 60 };
+  let refusal = "alternate runner policy requires unique explicit compatible targets and an optional bounded expiry";
+  const fixture = await mountAt(editRoute("alternate-refused"), [stored], {}, {}, [], {}, runners, [], {
+    updateAutomation: async () => { throw new ApiError(refusal, 400); },
+  });
+  try {
+    await setLabeledInput(fixture.container, "Name", "Renamed");
+    await saveChanges(fixture);
+    const other = choiceTrigger(fixture.container, "Other Machine")!;
+    assert.equal(other.getAttribute("aria-invalid"), "true");
+    assert.match(fixture.container.querySelector(`#${other.getAttribute("aria-describedby")}`)?.textContent ?? "",
+      /alternate runner policy requires/);
+    assert.ok(fixture.container.ownerDocument.activeElement === other, "focus moves to the field it marks");
+    assertNoDomNode(fixture.container.querySelector(".notice.t-danger"));
+    assert.ok(fixture.container.querySelector(".save-bar.is-error"));
+
+    refusal = "Synthetic control plane failure";
+    await act(async () => { button(fixture.container, "Try Again").click(); });
+    await act(settle);
+    assert.equal(choiceTrigger(fixture.container, "Other Machine")?.getAttribute("aria-invalid"), null);
+    const notices = [...fixture.container.querySelectorAll(".notice.t-danger")];
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.textContent ?? "",
+      /These changes weren't saved\. Fix what the details below describe, then try again\./);
+    const form = fixture.container.querySelector(".automation-editor-form")!;
+    assert.ok(form.lastElementChild === notices[0], "the notice ends the form");
+    assert.ok(form.nextElementSibling?.classList.contains("save-bar"), "the save bar follows it directly");
+    await act(async () => { button(fixture.container, "Show Details").click(); });
+    assert.match(notices[0]!.textContent ?? "", /Synthetic control plane failure/);
+    // Nothing at the top of the page: the detail bar is followed by the form's column.
+    assertNoDomNode(fixture.container.querySelector(".automation-error"));
+    assert.ok(fixture.container.querySelector(".automation-editor > .detail-bar + .page > .automation-editor-form"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("on an edit route the save bar appears with a change, discards it, saves it and turns into the error bar", async () => {
+  let fail = false;
+  const fixture = await mountAt(editRoute("automation-1"), [schedule("automation-1", "Nightly")], {}, {}, [], {}, runners, [], {
+    updateAutomation: async (_id: string, spec: AutomationSpec) => {
+      if (fail) throw new Error("Synthetic failure");
+      fixture.updates.push({ id: "automation-1", spec: structuredClone(spec) });
+      return { ...schedule("automation-1", "Nightly"), ...spec };
+    },
+  });
+  try {
+    assertNoDomNode(fixture.container.querySelector(".save-bar"), "a clean edit shows no save bar");
+    await setLabeledInput(fixture.container, "Name", "Nightly Renamed");
+    const bar = () => fixture.container.querySelector(".save-bar");
+    assert.match(bar()?.textContent ?? "", /Unsaved changes/);
+    assert.deepEqual([...bar()!.querySelectorAll("button")].map((item) => item.textContent), ["Discard", "Save Changes"]);
+    await act(async () => { button(fixture.container, "Discard").click(); });
+    assertNoDomNode(bar());
+    assert.equal((editorRoot(fixture.container).querySelector("input") as HTMLInputElement).value, "Nightly");
+
+    await setLabeledInput(fixture.container, "Name", "Nightly Renamed");
+    await saveChanges(fixture);
+    assert.equal(fixture.updates.length, 1);
+    assertNoDomNode(bar(), "a saved edit is clean again");
+    assert.equal(editorTitle(fixture.container), "Edit Nightly Renamed");
+
+    fail = true;
+    await setLabeledInput(fixture.container, "Name", "Nightly Again");
+    await saveChanges(fixture);
+    assert.ok(bar()?.classList.contains("is-error"));
+    assert.match(bar()?.textContent ?? "", /Couldn't save the changes\./);
+    assert.ok(button(fixture.container, "Try Again"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a new automation's save bar shows Cancel and Create Automation at once, and Create keeps its label while busy", async () => {
+  let release: () => void = () => {};
+  const creates: AutomationSpec[] = [];
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners, [], {
+    createAutomation: async (spec: AutomationSpec) => {
+      creates.push(structuredClone(spec));
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { ...schedule("created", spec.name), ...spec };
+    },
+  });
+  try {
+    const bar = fixture.container.querySelector(".save-bar");
+    assert.deepEqual([...bar!.querySelectorAll("button")].map((item) => item.textContent), ["Cancel", "Create Automation"]);
+    await setLabeledInput(fixture.container, "Name", "Morning Digest");
+    await act(async () => { button(fixture.container, "Create Automation").click(); });
+    const create = button(fixture.container, "Create Automation");
+    assert.equal(create.getAttribute("aria-busy"), "true");
+    assert.equal(create.getAttribute("data-busy-spinner"), "prepended", "the spinner sits beside the kept label");
+    assert.equal(creates.length, 1);
+    assert.equal(creates[0]!.name, "Morning Digest");
+    await act(async () => { release(); });
+    await act(settle);
+    assertNoDomNode(fixture.container.querySelector(".automation-editor"), "a created automation returns to the list");
+  } finally {
+    await unmountFixture(fixture);
+  }
+
+  const cancelled = await mountAt(NEW_ROUTE, []);
+  try {
+    await act(async () => { button(cancelled.container, "Cancel").click(); });
+    await act(settle);
+    assertNoDomNode(cancelled.container.querySelector(".automation-editor"));
+  } finally {
+    await unmountFixture(cancelled);
+  }
+});
+
+test("with Multi-Agent Runs off, a stored workflow action keeps its choice, says why and saves unchanged", async () => {
+  setExperimentFlag("multiAgent", false);
+  try {
+    const stored = workflowAutomation("workflow-off", "Workflow Off");
+    const fixture = await mountAt(editRoute("workflow-off"), [stored], {}, {}, [], {}, runners, [reviewGraph]);
+    try {
+      const helper = [...fixture.container.querySelectorAll<HTMLElement>(".field-helper")]
+        .find((item) => item.textContent === MULTI_AGENT_OFF_HELPER);
+      assert.ok(helper, "the helper sentence renders");
+      assertNoDomNode(helper.closest(".notice"), "it is a helper, not a notice");
+      const workflowRow = [...fixture.container.querySelectorAll(".choice-row")]
+        .find((row) => row.querySelector(".choice-row-title")?.textContent === "Run a Workflow");
+      const input = workflowRow?.querySelector("input");
+      assert.equal(input?.checked, true);
+      assert.ok(input?.getAttribute("aria-describedby")?.split(" ").includes(helper.id),
+        "Run a Workflow is described by the helper");
+      assert.ok(helper.previousElementSibling?.classList.contains("choice-rows"), "it sits directly under the choices");
+      // Roles are named by what they do, and a human step is the person.
+      assert.ok(choiceTrigger(fixture.container, "Builder Agent"));
+      const approver = [...fixture.container.querySelectorAll("label")]
+        .find((label) => label.childNodes[0]?.textContent === "Approver")?.querySelector("input");
+      assert.equal(approver?.value, "You, in the run");
+      assert.equal(approver?.readOnly, true);
+
+      await setLabeledInput(fixture.container, "Name", "Workflow Still Off");
+      await saveChanges(fixture);
+      assert.deepEqual(fixture.updates[0]?.spec.action, stored.action);
+    } finally {
+      await unmountFixture(fixture);
+    }
+
+    const fresh = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners, [reviewGraph]);
+    try {
+      assert.deepEqual([...fresh.container.querySelectorAll(".choice-row-title")].map((title) => title.textContent),
+        ["Start a Session", "Prompt a Session"]);
+      assert.equal([...fresh.container.querySelectorAll(".field-helper")]
+        .some((item) => item.textContent === MULTI_AGENT_OFF_HELPER), false);
+    } finally {
+      await unmountFixture(fresh);
+    }
+  } finally {
+    setExperimentFlag("multiAgent", true);
+  }
+});
+
+test("number fields are 96px wide, units sit in their helpers, and no label holds a unit", async () => {
+  const fixture = await mountAt(NEW_ROUTE, []);
+  try {
+    await choose(fixture.container, "If a Run Is Missed", "Catch Up");
+    await choose(fixture.container, "If the Machine Is Offline", "Give Up After a While");
+    const field = (label: string) => [...fixture.container.querySelectorAll<HTMLLabelElement>("label.field")]
+      .find((candidate) => candidate.childNodes[0]?.textContent === label);
+    for (const [label, helper] of [["Catch Up at Most", "Missed runs"], ["Give Up After", "In minutes"],
+      ["Tool Call Limit", "For each run."]] as const) {
+      assert.ok(field(label)?.querySelector("input")?.classList.contains("w-xs"), `${label} is 96px`);
+      assert.equal(field(label)?.querySelector(".field-helper")?.textContent, helper);
+    }
+    const cost = field("Cost Limit")?.querySelector(".input-affix.w-xs");
+    assert.equal(cost?.firstElementChild?.textContent, "$", "Cost Limit's dollar sign is a prefix inside the field");
+    const labels = [...editorRoot(fixture.container).querySelectorAll(".field-label, label.field > span:first-child")]
+      .map((label) => label.textContent ?? "");
+    assert.ok(labels.length > 10);
+    assert.deepEqual(labels.filter((label) => /\(/.test(label)), [], "no field label holds a unit in parentheses");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("switching or reselecting the action never replaces a stored machine, folder or agent discovery cannot find", async () => {
+  // Review finding CR-1.1: a nonempty stored runner absent from the snapshot was read as "no machine"
+  // and replaced by the first one, and ChoiceRow reports a click on the checked action too.
+  const stored = schedule("missing-machine", "Missing Machine");
+  stored.action = { kind: "create_session", request: {
+    runnerId: "runner-gone", workspaceId: "gone-workspace", agentId: "gone-agent", prompt: "Sweep.",
+    useWorktree: false, config: { model: "opus" },
+  }, installationBindings: { agent: { driver: "claude-code", context: { kind: "native" }, installationId: "system" } } };
+  const fixture = await mountAt(editRoute("missing-machine"), [stored], {}, {}, [], {}, runners, [reviewGraph]);
+  try {
+    await chooseAction(fixture.container, "Start a Session");
+    await chooseAction(fixture.container, "Prompt a Session");
+    await chooseAction(fixture.container, "Run a Workflow");
+    await chooseAction(fixture.container, "Start a Session");
+    await setLabeledInput(fixture.container, "Name", "Missing Machine Renamed");
+    await saveChanges(fixture);
+    assert.equal(fixture.updates.length, 1);
+    assert.deepEqual(fixture.updates[0]!.spec.action, stored.action,
+      "the stored machine, folder, agent, config and installation binding round-trip");
+  } finally {
+    await unmountFixture(fixture);
+  }
+
+  // A stored folder or agent the machine no longer lists is kept the same way.
+  const gone = schedule("missing-folder", "Missing Folder");
+  if (gone.action.kind !== "create_session") throw new Error("expected create-session action");
+  gone.action.request.workspaceId = "gone-workspace";
+  gone.action.request.agentId = "gone-agent";
+  const kept = await mountAt(editRoute("missing-folder"), [gone], {}, {}, [], {}, runners, [reviewGraph]);
+  try {
+    await chooseAction(kept.container, "Run a Workflow");
+    await chooseAction(kept.container, "Start a Session");
+    await setLabeledInput(kept.container, "Name", "Missing Folder Renamed");
+    await saveChanges(kept);
+    assert.deepEqual(kept.updates[0]!.spec.action, gone.action);
+  } finally {
+    await unmountFixture(kept);
+  }
+});
+
+test("a create that settles after the person left does not navigate away from where they went", async () => {
+  // Review finding CR-1.2: the create continuation navigated (replacing, so unasked) after its
+  // editor had unmounted, discarding a newer editor's unsaved draft.
+  let release: () => void = () => {};
+  const confirmations: string[] = [];
+  const toasts: string[] = [];
+  feedback = {
+    confirm: async (options) => { confirmations.push(options.title ?? ""); return true; },
+    showToast: (message) => { toasts.push(message); return 1; },
+    showUndo: () => 1,
+    dismissToast: () => undefined,
+  } as FeedbackContextValue;
+  let fixture: Fixture;
+  try {
+    fixture = await mountFixture([schedule("automation-1", "Nightly")], {}, {}, [], {}, runners, [], {
+      createAutomation: async (spec: AutomationSpec) => {
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { ...schedule("created", spec.name), ...spec };
+      },
+    });
+  } finally {
+    feedback = null;
+  }
+  try {
+    await openNew(fixture);
+    await setLabeledInput(fixture.container, "Name", "Morning Digest");
+    await act(async () => { button(fixture.container, "Create Automation").click(); });
+    // Leave while the create is still running, and discard the draft when asked.
+    await goBack(fixture);
+    assert.deepEqual(confirmations, ["Discard Changes"]);
+    assertNoDomNode(fixture.container.querySelector(".automation-editor"), "Back left the editor");
+
+    // Another editor, with an unsaved change of its own.
+    await expandCard(fixture, "Nightly");
+    await openEdit(fixture);
+    await setLabeledInput(fixture.container, "Name", "Nightly Draft");
+    assert.equal(editorTitle(fixture.container), "Edit Nightly");
+
+    await act(async () => { release(); });
+    await act(settle);
+    assert.equal(editorTitle(fixture.container), "Edit Nightly", "the settled create left the newer editor alone");
+    assert.equal((editorRoot(fixture.container).querySelector("input") as HTMLInputElement).value, "Nightly Draft");
+    assert.match(fixture.container.querySelector(".save-bar")?.textContent ?? "", /Unsaved changes/);
+    assert.ok(toasts.includes("Automation created."), "the person still hears that it was created");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

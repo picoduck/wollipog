@@ -106,13 +106,13 @@ for (const theme of ["dark", "light"] as const) {
         })).toEqual({ weight: "500", lineHeight: "16px" });
       });
 
-      test("New Automation's Selects read at its native fields' weight on the body line", async ({ page }) => {
+      test("New Automation's Selects read at its text fields' weight on the body line", async ({ page }) => {
         await page.goto(`/automations-e2e.html?theme=${theme}&capabilities`);
         await page.getByRole("button", { name: "New Automation" }).click();
-        const grid = page.locator(".automation-form-grid");
-        await expectTriggerType(page, grid, ["Model", "Reasoning Effort", "Permission Mode", "Workspace Strategy"],
-          grid.getByRole("combobox", { name: "Action", exact: true }));
-        expect(await weight(grid.getByRole("textbox", { name: "Name", exact: true }))).toBe("400");
+        const form = page.locator(".automation-editor-form");
+        await expectTriggerType(page, form, ["Machine", "Folder", "Agent", "Model", "Reasoning Effort", "Permission Mode",
+          "Workspace Strategy", "If a Run Is Missed", "If the Machine Is Offline", "If the Last Run Is Still Going"],
+        form.getByRole("textbox", { name: "Name", exact: true }));
       });
 
       test("the Outbound Events Selects, inside their labels, read at the Callback URL's weight on the body line", async ({ page }) => {

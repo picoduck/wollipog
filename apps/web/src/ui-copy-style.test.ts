@@ -83,7 +83,7 @@ const MINOR_WORDS = new Set([
  */
 const PHRASAL_PARTICLES = new Set(["down", "in", "off", "on", "out", "over", "up"]);
 const PHRASAL_VERBS = new Set([
-  "back", "check", "clean", "follow", "hand", "log", "look", "opt", "pick", "set", "sign", "signed", "start",
+  "back", "check", "clean", "follow", "give", "hand", "log", "look", "opt", "pick", "set", "sign", "signed", "start",
   "take", "turn",
 ]);
 const LABEL_TAGS = new Set(["button", "BusyButton", "caption", "dt", "h1", "h2", "h3", "h4", "h5", "h6", "legend", "summary", "th"]);

@@ -155,7 +155,7 @@ test("every surface that exposes a gated feature consults the flags", () => {
       "the page header's create button is a creation surface and gates with its view"],
     ["./components/RunsView.tsx", /<PageHeader[^>]*?primary=\{empty \? undefined : \{ label: "New Run"/,
       "the Runs create action belongs to the gated Runs page"],
-    ["./components/AutomationsView.tsx", /multiAgentEnabled \|\| form\.actionKind === "workflow_run"/,
+    ["./components/AutomationEditor.tsx", /const offersWorkflow = multiAgentEnabled \|\| storedWorkflowAction;/,
       "Automations must not OFFER workflow runs while multi-agent is off, but an automation already using one keeps rendering truthfully"],
     ["./components/Board.tsx", /multiAgentEnabled/,
       "the Board's empty-state hint must not point at a control the flags removed"],

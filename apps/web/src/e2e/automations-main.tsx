@@ -12,12 +12,14 @@ import type {
   WorkflowDefinition,
 } from "@wollipog/protocol";
 import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { AutomationsView } from "../components/AutomationsView.js";
+import { AutomationEditor } from "../components/AutomationEditor.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
-import type { ViewNavigation } from "../navigation.js";
-import { StoreProvider } from "../store.js";
+import { setExperimentFlag } from "../experiments.js";
+import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
+import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import "../styles.css";
 
@@ -206,6 +208,42 @@ if (params.has("unavailable-pins")) {
   for (const binding of bindings.flatMap((entry) => Object.values(entry ?? {}))) binding.installationId = "missing";
 }
 
+// The Automation editor's scenarios (#2967).
+// `other-machine-offline`: the first automation falls back to another machine, which is offline.
+const offlineRunner: RunnerView | null = params.has("other-machine-offline") ? {
+  ...runner,
+  runnerId: "runner-offline",
+  hostname: "backup-box",
+  status: "offline",
+  agents: [{ ...runner.agents[0]!, id: "agent-backup", name: "Backup Agent" }],
+  workspaces: [{ id: "workspace-backup", name: "Backup", path: "/home/misko/backup" }],
+} : null;
+if (offlineRunner) items[0]!.runnerPolicy = { kind: "alternate", targets: [{
+  runnerId: "runner-offline", workspaceId: "workspace-backup", agentId: "agent-backup",
+}], expireAfterMinutes: 30 };
+
+// `review-workflow`: the first automation runs a build-and-review workflow with a human approval.
+if (params.has("review-workflow")) {
+  runner.agents.push({ ...runner.agents[0]!, id: "agent-review", name: "Review Agent", driver: "codex-app-server" });
+  const step = { inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 3_600_000 };
+  workflowDefinitions.push({
+    workflowId: "build-review", version: 2, name: "Build and Review", source: "custom", maxTransitions: 4,
+    createdBy: { kind: "human", id: "e2e" }, createdAt: 1, edges: [],
+    nodes: [
+      { nodeId: "build", kind: "agent", role: "builder", agentId: "agent-1", ...step },
+      { nodeId: "review", kind: "agent", role: "reviewer", agentId: "agent-review", ...step },
+      { nodeId: "approve", kind: "human_gate", role: "approver", ...step },
+    ],
+  });
+  items[0]!.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "build-review", workflowVersion: 2,
+    task: "Implement the dependency updates, then review them before they merge.",
+  } };
+}
+
+// `experiment-off`: Multi-Agent Runs is turned off in Settings › Experimental on this device.
+setExperimentFlag("multiAgent", !params.has("experiment-off"));
+
 const triggerItems: AutomationTriggerView[] = [{
   triggerId: "atr_issue_intake",
   automationId: "automation-nightly-sweep",
@@ -294,7 +332,7 @@ const outboundDeliveries: OutboundEventDeliveryView[] = [{
 }];
 
 const fixtureRunners = () => [runner, ...(alternateRunner ? [alternateRunner] : []),
-  ...(workflowSwitchRunner ? [workflowSwitchRunner] : [])];
+  ...(workflowSwitchRunner ? [workflowSwitchRunner] : []), ...(offlineRunner ? [offlineRunner] : [])];
 let liveSocket: FixtureSocket | null = null;
 
 class FixtureSocket implements UiSocket {
@@ -340,11 +378,20 @@ const connection: UiConnectionRuntime = {
   close() {},
 };
 
+// `?route=/automations/new` (or an edit route) opens the editor directly, as a reload does.
 const navigation: ViewNavigation = {
-  current: () => ({ name: "automations" }),
+  current: () => viewFromPath(params.get("route") ?? "/automations") ?? { name: "automations" },
   push() {},
   listen: () => () => {},
 };
+
+/** The list, or the editor New Automation and Edit open, as App routes them. */
+function AutomationsRoute() {
+  const view = useStoreSelector((state) => state.view);
+  return view.name === "automations" && view.editor
+    ? <AutomationEditor key={viewPath(view)} route={view.editor} />
+    : <AutomationsView />;
+}
 
 // Rediscovery while an editor is open: another installation becomes selected on every Machine.
 if (params.has("rediscover")) Object.assign(window, { automationsRediscover: () => {
@@ -394,6 +441,12 @@ const client = {
     if (pollingFixture.failRefreshAfterMutation) pollingFixture.failure = "workflow";
     return items[index]!;
   } } : {}),
+  // `save-error`: the control plane refuses every save, with a reason no field owns.
+  ...(params.has("save-error") ? Object.fromEntries((["createAutomation", "updateAutomation"] as const).map((name) => [name,
+    async () => {
+      throw new ApiError("automation target \"runner-1/workspace-1/agent-1\" cannot honor config: " +
+        "permission mode plan is not advertised by this agent", 400);
+    }])) : {}),
   outboundEventSubscriptions: async () => outboundSubscriptions,
   outboundEventDeliveries: async () => outboundDeliveries,
   workflowDefinitions: async () => {
@@ -409,7 +462,7 @@ createRoot(root).render(
     <ApiProvider client={client}>
       <FeedbackProvider>
         <StoreProvider connection={connection} navigation={navigation}>
-          <main className="main-pane"><AutomationsView /></main>
+          <main className="main-pane"><AutomationsRoute /></main>
         </StoreProvider>
       </FeedbackProvider>
     </ApiProvider>
