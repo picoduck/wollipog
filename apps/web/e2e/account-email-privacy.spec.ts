@@ -248,7 +248,7 @@ test("default account settings follow privacy and changing their selection reset
   const management = await context.newPage();
   // The machine's own route: with nothing selected the detail is the All Machines overview (#2986).
   await management.goto("/machine-management-e2e.html?emailLabels=1&machine=native-t14s");
-  await management.getByRole("button", { name: "Manage", exact: true }).click();
+  await management.locator(".machine-detail-title-row").getByRole("button", { name: "Settings…", exact: true }).click();
   const dialog = management.getByRole("dialog", { name: "Manage Design Workstation" });
   const defaults = dialog.locator("section.machine-settings-section").filter({ hasText: "Default Provider Accounts" });
   const claude = dialog.getByRole("button", { name: /Default Claude Account:/ });

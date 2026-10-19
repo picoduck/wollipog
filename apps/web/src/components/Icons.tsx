@@ -152,6 +152,7 @@ import {
   WandSparkles as LucideWandSparkles,
   Waypoints as LucideWaypoints,
   Wifi as LucideWifi,
+  WifiOff as LucideWifiOff,
   Workflow as LucideWorkflow,
   Wrench as LucideWrench,
   WrapText as LucideWrapText,
@@ -992,6 +993,11 @@ export function StorageIcon(props: IconProps) {
 
 export function NetworkIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideWifi} {...props} />;
+}
+
+/** A machine Wollipog can't reach: the offline notice's subject icon (#2988). */
+export function WifiOffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideWifiOff} {...props} />;
 }
 
 export function VersionIcon(props: IconProps) {

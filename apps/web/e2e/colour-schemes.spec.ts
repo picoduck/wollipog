@@ -1147,30 +1147,31 @@ for (const scheme of SCHEMES) {
 
 for (const scheme of SCHEMES) {
   for (const theme of THEMES) {
-    test(`runner card headings inherit their identity style in ${scheme} ${theme}`, async ({ page }) => {
+    test(`machine detail headings take the title type in ${scheme} ${theme}`, async ({ page }) => {
       expect(SCHEMES).toHaveLength(5);
       await page.goto(`/colour-schemes-e2e.html?scheme=${scheme}&theme=${theme}`);
+      // Runner card headings once kept the browser's h2 margins and size (#237); the one machine
+      // detail (#2988) names both kinds with the same title.
       const headings = [
-        page.locator(".runner-card.box-card .runner-id h2"),
-        page.locator(".runner-card:not(.box-card) .runner-id h2"),
+        page.locator('article.machine-detail[data-kind="ssh"] .machine-detail-title'),
+        page.locator('article.machine-detail[data-kind="native"] .machine-detail-title'),
       ];
 
-      // A missing runner family must fail loudly instead of turning the style assertions vacuous.
+      // A missing machine kind must fail loudly instead of turning the style assertions vacuous.
       await expect(headings[0]!).toHaveCount(1);
       await expect(headings[1]!).toHaveCount(1);
 
       for (const heading of headings) {
         const computed = await heading.evaluate((element) => {
           const style = getComputedStyle(element);
-          const identityStyle = getComputedStyle(element.parentElement!);
           return {
             margin: [style.marginTop, style.marginRight, style.marginBottom, style.marginLeft],
             fontSize: style.fontSize,
-            inheritedFontSize: identityStyle.fontSize,
+            fontWeight: style.fontWeight,
           };
         });
         expect(computed.margin).toEqual(["0px", "0px", "0px", "0px"]);
-        expect(computed.fontSize).toBe(computed.inheritedFontSize);
+        expect(computed).toMatchObject({ fontSize: "16px", fontWeight: "600" });
       }
     });
   }
@@ -1261,8 +1262,8 @@ test("comfortable density gives every row more room than compact", async ({ page
         card: box(".column .card"),
         agent: box(".agent-row"),
         finding: box(".review-finding-row"),
-        boxRunner: box(".runner-card.box-card"),
-        nativeRunner: box(".runner-card:not(.box-card)"),
+        // Usage keeps the runner card (#2988 retired it for machines).
+        usageCard: box(".runner-card"),
         workspace: box(".workspace-list li"),
         // The §5.2 rows and §14 table cells take their height from the row tokens (§19.1), so
         // density moves their height and leaves their padding alone.
@@ -1279,7 +1280,7 @@ test("comfortable density gives every row more room than compact", async ({ page
 
   // Each of the three, not the total: a scale that grew one dimension and shrank another could
   // still add up, and "more room" has to mean more room everywhere it is claimed.
-  for (const family of ["card", "agent", "finding", "boxRunner", "nativeRunner", "workspace"] as const) {
+  for (const family of ["card", "agent", "finding", "usageCard", "workspace"] as const) {
     // A MEANINGFUL step, not "greater than": a subpixel increase satisfied the first version, and
     // a density setting nobody can see is a setting that does not work.
     expect(comfortable[family].height, `a ${family} row must be meaningfully taller`)
@@ -1315,13 +1316,11 @@ test("compact renders exactly what the merge base rendered", async ({ page }) =>
 
   const computed = await page.evaluate(() => {
     const inbox = getComputedStyle(document.querySelector(".inbox-row")!);
-    const boxRunner = getComputedStyle(document.querySelector(".runner-card.box-card")!);
-    const nativeRunner = getComputedStyle(document.querySelector(".runner-card:not(.box-card)")!);
+    const usageCard = getComputedStyle(document.querySelector(".runner-card")!);
     return {
       inboxPadding: `${inbox.paddingTop} ${inbox.paddingRight}`,
       inboxMinHeight: inbox.minHeight,
-      boxRunnerPadding: `${boxRunner.paddingTop} ${boxRunner.paddingRight}`,
-      nativeRunnerPadding: `${nativeRunner.paddingTop} ${nativeRunner.paddingRight}`,
+      usageCardPadding: `${usageCard.paddingTop} ${usageCard.paddingRight}`,
     };
   });
   expect(computed).toEqual({
@@ -1330,7 +1329,6 @@ test("compact renders exactly what the merge base rendered", async ({ page }) =>
     // guessed and failed. Its height is --row-h-2 since #2209, so it pads only its sides.
     inboxPadding: "0px 11px",
     inboxMinHeight: "0px",
-    boxRunnerPadding: "16px 18px",
-    nativeRunnerPadding: "16px 18px",
+    usageCardPadding: "16px 18px",
   });
 });

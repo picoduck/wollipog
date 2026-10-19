@@ -1,1 +1,0 @@
-|.runner-details-body|padding-bottom|2px

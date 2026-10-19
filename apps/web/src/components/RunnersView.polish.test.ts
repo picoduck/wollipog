@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const view = readFileSync(new URL("./RunnersView.tsx", import.meta.url), "utf8");
+const machine = readFileSync(new URL("./MachineDetail.tsx", import.meta.url), "utf8");
 const discovery = readFileSync(new URL("./AgentSessionDiscoveryDialog.tsx", import.meta.url), "utf8");
 const access = readFileSync(new URL("./PeopleDevicesPanel.tsx", import.meta.url), "utf8");
 const icons = readFileSync(new URL("./Icons.tsx", import.meta.url), "utf8");
@@ -22,18 +23,17 @@ test("Connections separates machines from people and exposes durable machine rec
   assert.match(view, /id: "people", label: <>People and Devices/);
   assert.match(view, /const instancesTab = instances\.desktopMultiInstance && !isMobile/);
   assert.match(view, /<PeopleDevicesPanel identity=\{identity\}/);
-  assert.match(view, />Repair Connection…<\/button>/);
-  assert.match(view, /canRepair=\{canManage\}/);
-  assert.match(view, /<NativeRunnerCard[\s\S]*canManage=\{canManageMachines\}/);
-  assert.match(view, /Ask an organization owner or admin to repair this connection/);
+  assert.match(machine, />Repair Connection…<\/button>/);
+  assert.match(machine, /actions=\{access\.canManage && \(/);
+  assert.match(view, /useMachineActions\(selectedMachine, \{\s*canManage: canManageMachines,/);
+  assert.match(machine, /Ask an organization owner or admin to repair this connection/);
   assert.match(view, /runnerId=\{repairRunnerId\}/);
   assert.match(view, /isManagedLocalRunnerRepair\(runnerId, localRunnerStatus, bundledLocalRunner, localInstanceActive\)/);
   assert.match(view, /isManagedLocalRunnerRepair[\s\S]*setOnboarding\("local"\)[\s\S]*setRepairRunnerId\(runnerId\)/);
-  assert.match(view, /onRepair=\{repairRunner\}/);
-  assert.match(view, /const needsUpdate = !!runner && runnerOutdated\(runner\.protocolVersion\)/);
-  assert.match(view, /\{canManage && needsUpdate && !inProgress && \(/);
-  assert.doesNotMatch(view, /\{needsUpdate && !updating && \(/);
-  assert.doesNotMatch(view, /runner\.protocolVersion == null \|\| runnerOutdated/);
+  assert.match(view, /onRepair: repairRunner/);
+  // Only a known older protocol proves an SSH runner is out of date (#2988's Update Required notice).
+  assert.match(machine, /if \(runnerOutdated\(runner\.protocolVersion\)\) return "update_required";/);
+  assert.doesNotMatch(machine, /runner\.protocolVersion == null \|\| runnerOutdated/);
   assert.match(view, /role="alert"/);
 });
 
@@ -49,13 +49,14 @@ test("People and device tasks use progressive disclosure and only Agents collaps
   assert.match(access, /api\.createIdentityTeam\(\{ name: name\.trim\(\), memberUserIds: memberIds \}\)/);
   assert.match(access, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);
   assert.doesNotMatch(access, /device-pair-row/);
-  assert.match(view, /<dl className="runner-meta runner-system-meta" aria-label="System Details">/);
+  // One detail for every machine (#2988): the spec sheet moved into Connection Details.
+  assert.doesNotMatch(view, /runner-meta|runner-system-meta/);
   assert.match(view, /<details className="runner-agents disclosure">/);
   assert.doesNotMatch(view, /<details className="runner-details">/);
-  assert.match(view, /export function BoxCard\(/);
-  assert.match(view, /export function NativeRunnerCard\(/);
-  assert.match(view, /<article className=\{`runner-card status-\$\{runner\.status\}`\}>[\s\S]*<div className="runner-head">[\s\S]*<div className="runner-id">[\s\S]*<h2>\{runnerDisplay\(runner, undefined, runner\.runnerId\)\.name\}<\/h2>/);
-  assert.doesNotMatch(css, /\.runner-card\.status-offline\s*\{[^}]*opacity:/s);
+  assert.match(machine, /export function MachineDetail\(/);
+  assert.doesNotMatch(view, /export function (BoxCard|NativeRunnerCard)\(/);
+  assert.match(machine, /<h2 className="machine-detail-title" title=\{name\}>\{name\}<\/h2>/);
+  assert.doesNotMatch(css, /\.runner-card\.status-offline/);
   // auto-FILL, not auto-fit: auto-fit collapses the empty tracks so a single instance stretched to
   // a full-bleed card holding two fields.
   const rule = /\.instance-grid\s*\{[^}]*\}/s.exec(css)?.[0];
@@ -71,26 +72,26 @@ test("People and device tasks use progressive disclosure and only Agents collaps
 test("Connections controls use one centered SVG icon system instead of font glyphs", () => {
   assert.match(icons, /strokeLinecap="round"/);
   assert.match(icons, /className=\{`app-icon/);
-  assert.match(view, /<UpdateIcon \/>/);
-  assert.match(view, /<RefreshIcon \/>/);
-  assert.match(view, /<SettingsIcon \/>/);
-  assert.doesNotMatch(view.slice(view.indexOf("function BoxCard")), /⬆|↻|✕|🔍/);
-  assert.match(css, /\.btn-rediscover\s*\{[^}]*display: inline-flex;[^}]*align-items: center;/s);
+  assert.match(machine, /<RefreshIcon \/>/);
+  assert.match(machine, /<SettingsIcon \/>/);
+  assert.match(machine, /<WifiOffIcon \/>/);
+  assert.doesNotMatch(machine, /⬆|↻|✕|🔍/);
+  // Rediscover and Reconnect are ⋯ items now, not pill buttons (#2988).
+  assert.doesNotMatch(css + view + machine, /btn-rediscover/);
 });
 
-test("machine cards use consistent action rows and progressively disclose deployment diagnostics", () => {
-  assert.match(view, /className="runner-head-right runner-card-actions"/);
-  assert.match(view, /title="Connection Details"/);
-  assert.match(view, /<BoxConnectionDetailsDialog box=\{box\}/);
-  assert.match(view, /<dt>Last Deployed Build<\/dt>/);
-  assert.match(view, /<dt>Runner Platform<\/dt>/);
-  assert.doesNotMatch(view, /<dt>Deployed Binary<\/dt>/);
-  assert.match(css, /\.runner-card-actions\s*\{[^}]*margin-bottom: 14px;/s);
-  assert.match(css, /\.runner-connection-meta\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/s);
+test("a machine's actions live in Settings… and ⋯, and Connection Details lists its facts", () => {
+  assert.match(machine, /<ActionsMenu label="Machine Actions" items=\{actions\.menu\} \/>/);
+  assert.match(machine, /<ConnectionDetailsDialog runner=\{runner\} box=\{box\}/);
+  assert.match(machine, /label: "Deployed Build"/);
+  assert.match(machine, /label: "Platform"/);
+  assert.doesNotMatch(view + machine, /<dt>Deployed Binary<\/dt>|connection-details-trigger|runner-head|os-badge/);
+  assert.doesNotMatch(css, /\.runner-card-actions|\.runner-connection-meta|\.connection-details-list|\.os-badge/);
   assert.match(view, /<MachineSettingsDialog/);
   assert.match(view, /<span>Machine Name<\/span>/);
   assert.match(view, /<span>Add Workspace<\/span>/);
-  assert.match(view, /"Delete Machine"/);
+  assert.match(machine, /title: "Delete Machine"/);
+  assert.match(view, /confirmDeleteMachine\(confirm, \{ name: display\.name/);
   assert.match(view, /api\.registerMachineWorkspace/);
   assert.match(view, /<h3>Runner Capacity<\/h3>/);
   assert.match(view, /api\.updateMachineCapacity/);
@@ -104,16 +105,16 @@ test("machine cards use consistent action rows and progressively disclose deploy
   assert.match(view, /aria-label="Current Capacity Bottlenecks"/);
   assert.match(view, /does not infer it from CPU or memory/);
   assert.match(view, /machineSettingsMutationError\(cause\)/);
-  assert.match(view, /disabled=\{deleting \|\| onlineNativeRunner\}/);
-  assert.match(view, /box\?\.runnerDataLayout === "legacy"/);
-  assert.match(view, /box\.legacyDataAccountStatus === "adopted"/);
-  assert.match(view, /Legacy Runner Data Adopted/);
-  assert.match(view, /Legacy Data Adoption in Progress/);
-  assert.match(view, /Confirm that every legacy runner process using this SSH account on \$\{display\.name\} is stopped\./);
-  assert.match(view, /confirmLabel: "Adopt Legacy Data"/);
-  assert.match(view, /confirmLabel: "Interrupt Sessions and Adopt Legacy Data"/);
-  assert.match(view, /api\.adoptLegacyBoxData\(box\.boxId, false\)/);
-  assert.match(view, /api\.adoptLegacyBoxData\(box\.boxId, true\)/);
+  assert.match(view, /disabled=\{onlineNativeRunner\}/);
+  // Older runner data is the machine's notice now, not Machine Settings' Danger Zone (#2988).
+  assert.doesNotMatch(view, /runnerDataLayout|adoptLegacyBoxData/);
+  assert.match(machine, /if \(box\.runnerDataLayout === "legacy"\) return "legacy_data";/);
+  assert.match(machine, /box\.legacyDataAccountStatus === "adopted"/);
+  assert.match(machine, /title="Older Runner Data Found"/);
+  assert.match(machine, /Confirm that every legacy runner process using this SSH account on \$\{name\} is stopped\./);
+  assert.match(machine, /confirmLabel: "Adopt Legacy Data",\n\s*\}\);/, "a non-destructive confirmation");
+  assert.match(machine, /adopt: "Interrupt Sessions and Adopt"/);
+  assert.match(machine, /api\.adoptLegacyBoxData\(box\.boxId, force\)/);
 });
 
 test("runner repair preserves identity and rotates when needed; adding and repairing are separate dialogs (#2992)", () => {
@@ -131,8 +132,10 @@ test("runner repair preserves identity and rotates when needed; adding and repai
 });
 
 test("agent session discovery is a progressive modal instead of an inline runner-card list", () => {
-  assert.match(view, /<AgentSessionDiscoveryDialog runner=\{runner\}/);
-  assert.match(view, /setFindingSessions\(true\)/);
+  assert.match(machine, /<AgentSessionDiscoveryDialog runner=\{runner\}/);
+  assert.match(machine, /setFindingSessionsFor\(runnerId\)/);
+  // Find Agent Sessions… is a ⋯ item (#2988); the Agent Sessions promo group is gone.
+  assert.doesNotMatch(view + machine, /runner-agent-sessions/);
   assert.doesNotMatch(view, /function ExternalSessions/);
   assert.doesNotMatch(view, /<ul className="ext-session-list">/);
   assert.match(discovery, /title="Find Agent Sessions"/);

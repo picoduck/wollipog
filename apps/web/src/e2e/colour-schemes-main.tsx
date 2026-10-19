@@ -8,7 +8,8 @@ import { PROTOCOL_VERSION, type BoxView, type RunnerView } from "@wollipog/proto
 import { createRoot } from "react-dom/client";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
-import { BoxCard, NativeRunnerCard } from "../components/RunnersView.js";
+import { MachineDetail, useMachineActions } from "../components/MachineDetail.js";
+import { machineListEntries } from "../runners.js";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../navigation.js";
 import { COLOR_SCHEMES, THEME_OPTIONS } from "../theme.js";
 import "../styles.css";
@@ -108,7 +109,14 @@ const PICKER_COMMANDS = buildComposerCommandRegistry({
 }).filter((command) => command.source === "provider" || command.name === "stop");
 
 const noopRunnerAction = () => {};
-const noopBoxAction = async () => {};
+
+/** A real machine detail (#2988), as a viewer sees it, so its header is the production one. */
+function FixtureMachine({ runner, box }: { runner: RunnerView; box?: BoxView }) {
+  const entry = machineListEntries(new Map([[runner.runnerId, runner]]), box ? [box] : [])[0]!;
+  const actions = useMachineActions(entry, { canManage: false, canOpenSettings: false, canFindSessions: false },
+    { onSettings: noopRunnerAction, onRepair: noopRunnerAction });
+  return <MachineDetail entry={entry} actions={actions} showTitle />;
+}
 
 const contrastSelectors = [
   ".picker-reason",
@@ -305,32 +313,22 @@ function Sample() {
               is a measurement rather than a claim about which rules I remembered to edit. */}
           <div className="agent-list"><div className="agent-row"><span>An agent row</span></div></div>
           {/* Status chips whose fill comes from the base class and whose ink comes from a modifier
-              (#1892), so no single rule states the pair. The runner card below renders its agent
-              chips inside a collapsed `<details>`, where nothing is measured. */}
+              (#1892), so no single rule states the pair. A machine detail keeps its agent chips in a
+              collapsed `<details>`, where nothing is measured. */}
           <div className="agent-row-meta">
             <span className="atag discovered">Discovered</span>
             <span className="atag broken">Not Signed In</span>
           </div>
           <div className="review-findings-list"><div className="review-finding-row"><span /><span>A finding</span><span /></div></div>
-          {/* Real production runner cards. Their headings caused #237, and copied markup would
-              allow the fixture to stay green while the components regress again. */}
+          {/* Real production machine details (#2988). Runner card headings caused #237, and copied
+              markup would allow the fixture to stay green while the components regress again. */}
           <div>
-            <BoxCard
-              box={box}
-              runner={boxRunner}
-              canManage={false}
-              onReconnect={noopBoxAction}
-              onRemove={noopBoxAction}
-            />
-            <NativeRunnerCard
-              runner={nativeRunner}
-              canManage={false}
-              busy={false}
-              onRediscover={noopRunnerAction}
-              onManage={noopRunnerAction}
-              onRepair={noopRunnerAction}
-            />
+            <FixtureMachine runner={boxRunner} box={box} />
+            <FixtureMachine runner={nativeRunner} />
           </div>
+          {/* Usage's cards keep `.runner-card` and its density padding after the machine detail
+              stopped being a card (#2988). */}
+          <article className="runner-card"><span>A usage card</span></article>
           <ul className="workspace-list"><li><span>A workspace row</span></li></ul>
           <div className="table-wrap"><table className="table"><tbody><tr><td>A usage cell</td></tr></tbody></table></div>
           <div className="codeview">
