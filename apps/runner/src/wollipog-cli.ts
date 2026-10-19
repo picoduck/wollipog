@@ -486,7 +486,11 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       let brief: string;
       try { brief = readFileSync(resolvePath(briefFile), "utf8"); }
       catch (error) { return { error: `could not read the brief: ${(error as Error).message}` }; }
-      return { tool: "request_review_session", input: { repository, number: Number(number), headSha, brief } };
+      const fullReason = option(args, "--full-reason");
+      if (optionPresent(args, "--full-reason") && (!fullReason?.trim() || fullReason.startsWith("--"))) {
+        return { error: "review session run --full-reason needs text" };
+      }
+      return { tool: "request_review_session", input: { repository, number: Number(number), headSha, brief, ...(fullReason ? { fullReason } : {}) } };
     }
     if ((verb === "get" || verb === "cancel") && words[3]) {
       return { tool: verb === "get" ? "get_review_session" : "cancel_review_session", input: { reviewSessionId: words[3] } };

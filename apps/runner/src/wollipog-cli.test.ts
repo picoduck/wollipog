@@ -1513,6 +1513,9 @@ test("review session commands map to the session's own review session tools (#33
     assert.equal(last().method, "POST");
     assert.equal(last().url, "http://cp/api/sessions/self/review-sessions");
     assert.deepEqual(JSON.parse(last().body!), { pullRequest: { repository: "picoduck/wollipog", number: 3368 }, headSha: head, brief: "# Intent\nReview #3368.\n" });
+    assert.equal(await invoke(["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "3368", "--head", head, "--brief-file", brief,
+      "--full-reason", "Rebased onto main", "--json"]), 0);
+    assert.equal(JSON.parse(last().body!).fullReason, "Rebased onto main");
     assert.equal(await invoke(["review", "session", "get", "s_review", "--json"]), 0);
     assert.equal(last().url, "http://cp/api/sessions/self/review-sessions/s_review");
     assert.equal(await invoke(["review", "session", "list", "--limit", "5", "--cursor", "s_review", "--json"]), 0);
@@ -1525,6 +1528,7 @@ test("review session commands map to the session's own review session tools (#33
       ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head],
       ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "0", "--head", head, "--brief-file", brief],
       ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head, "--brief-file", join(root, "missing.md")],
+      ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head, "--brief-file", brief, "--full-reason", "--json"],
       ["review", "session", "get", "s_review", "--session", "other"],
       ["review", "session", "get"],
     ]) assert.equal(await invoke([...args, "--json"]), 2, args.join(" "));

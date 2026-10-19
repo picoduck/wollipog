@@ -164,7 +164,11 @@ import {
   REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, type ReviewSessionUpdate,
 } from "@wollipog/protocol";
 import { ReviewScopeRefusal } from "./review-snapshot.js";
-import type { ReviewSessionHooks } from "./review-sessions.js";
+import type { ReviewObservation, ReviewSessionHooks } from "./review-sessions.js";
+
+/** A reviewer's time limit, as the cross-model-review skill sets it, and the grace after it. */
+const REVIEW_TIMEOUT_MS = 30 * 60_000;
+const REVIEW_TIMEOUT_GRACE_MS = 60_000;
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_WORKTREE_PORTS } from "./config.js";
 import type { RunnerAdmissionPolicy, RunnerExecutionIsolation, RunnerWorktreePorts } from "./config.js";
@@ -1961,6 +1965,15 @@ export class SessionManager {
   private reviewSessions: ReviewSessionHooks | null = null;
   /** Review sessions whose snapshot is being prepared, and those stopped meanwhile. */
   private readonly reviewsPreparing = new Set<string>();
+  /** Rounds planned by preparation, until the review session's metadata records them. */
+  private readonly preparedReviewRounds = new Map<string, import("@wollipog/protocol").ReviewAttemptRound>();
+  /** Reviews whose finished turn is being judged; nothing else may settle them meanwhile. */
+  private readonly reviewsEvaluating = new Set<string>();
+  /** Reviews past their time limit, and the timers that enforce it. */
+  private readonly reviewsTimedOut = new Set<string>();
+  private readonly reviewTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private reviewTimeoutMs = REVIEW_TIMEOUT_MS;
+  private reviewTimeoutGraceMs = REVIEW_TIMEOUT_GRACE_MS;
   private readonly reviewsStoppedBeforeLaunch = new Set<string>();
 
   setReviewSessions(hooks: ReviewSessionHooks): void {
@@ -2026,6 +2039,9 @@ export class SessionManager {
       this.send({ type: "session_status", sessionId: spec.sessionId, status: "stopped", detail: reason });
       return { error: reason };
     }
+    this.preparedReviewRounds.set(spec.sessionId, prepared.round);
+    // The planned round goes up now, so the requester can see which round is under review.
+    this.send({ type: "review_session_update", sessionId: spec.sessionId, state: "running", round: prepared.round });
     return {
       spec: {
         ...spec,
@@ -2051,7 +2067,10 @@ export class SessionManager {
   private settleReviewSession(sessionId: string, outcome: Omit<ReviewSessionUpdate, "type" | "sessionId">): void {
     const meta = this.store.readMeta(sessionId);
     if (!meta?.review || meta.review.update) return;
+    this.clearReviewTimer(sessionId);
     const update: ReviewSessionUpdate = { type: "review_session_update", sessionId, state: outcome.state };
+    if (meta.review.round) update.round = meta.review.round;
+    if (outcome.verdict) update.verdict = outcome.verdict;
     if (outcome.output !== undefined) {
       const bytes = Buffer.from(outcome.output, "utf8");
       const truncated = bytes.length > REVIEW_SESSION_OUTPUT_LIMIT_BYTES;
@@ -2075,21 +2094,74 @@ export class SessionManager {
     ];
   }
 
-  /** The reviewer's one turn has settled: record its outcome and stop the provider. */
+  /**
+   * The reviewer's one turn has settled: judge it against the review contract, record its one
+   * outcome and stop the provider. A turn stopped by its requester is cancelled; a turn past its
+   * time limit is judged as timed out (unconsumed when it produced no report).
+   */
   private finishReviewTurn(sessionId: string, client: Driver, stop: Awaited<ReturnType<Driver["prompt"]>>, interrupted: boolean): void {
-    if (!this.isReviewSession(sessionId)) return;
-    const output = client.reviewOutput?.() ?? null;
-    if (interrupted || stop === "cancelled") {
-      this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
-    } else if (stop === "end_turn" && output) {
-      this.settleReviewSession(sessionId, { state: "completed", output });
-    } else {
-      this.settleReviewSession(sessionId, { state: "failed", reason: "the review ended without a result" });
-    }
-    // A review session does one turn; its provider is not kept for another.
-    setImmediate(() => {
+    if (!this.isReviewSession(sessionId) || this.store.readMeta(sessionId)?.review?.update) return;
+    const timedOut = this.reviewsTimedOut.has(sessionId);
+    const stopProvider = () => setImmediate(() => {
       try { this.stop(sessionId); } catch (error) { this.log(`review session ${sessionId} stop failed: ${errText(error)}`); }
     });
+    if (!timedOut && (interrupted || stop === "cancelled")) {
+      this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
+      stopProvider();
+      return;
+    }
+    const output = client.reviewOutput?.() ?? null;
+    const diagnostics = client.reviewDiagnostics?.() ?? {};
+    const fatal: ReviewObservation["fatal"] = [];
+    if (diagnostics.permissionDenials) fatal.push({ failureClass: "tool_policy", message: "permission denials were recorded" });
+    const observation: ReviewObservation = {
+      output, timedOut, fatal, exitedWithError: stop !== "end_turn" && !timedOut, modelOk: diagnostics.modelOk ?? null,
+    };
+    this.reviewsEvaluating.add(sessionId);
+    void (async () => {
+      let verdict: import("@wollipog/protocol").ReviewAttemptVerdictView | undefined;
+      try {
+        verdict = await this.reviewSessions?.evaluate(sessionId, observation);
+      } catch (error) {
+        this.log(`review session ${sessionId} evaluation failed: ${errText(error)}`);
+      } finally {
+        this.reviewsEvaluating.delete(sessionId);
+      }
+      if (output && verdict) {
+        this.settleReviewSession(sessionId, { state: "completed", output, verdict });
+      } else {
+        this.settleReviewSession(sessionId, {
+          state: "failed", reason: timedOut ? "the reviewer timed out" : "the review ended without a result",
+          ...(verdict ? { verdict } : {}),
+        });
+      }
+      stopProvider();
+    })();
+  }
+
+  /** A review session has a fixed time limit: past it, its turn is cancelled and judged as timed
+   * out; if the turn does not end, the review fails and its provider is stopped. */
+  private armReviewTimer(sessionId: string): void {
+    this.clearReviewTimer(sessionId);
+    const timer = setTimeout(() => {
+      this.reviewsTimedOut.add(sessionId);
+      try { this.cancel(sessionId); } catch (error) { this.log(`review session ${sessionId} cancel failed: ${errText(error)}`); }
+      const grace = setTimeout(() => {
+        if (this.reviewsEvaluating.has(sessionId)) return;
+        this.settleReviewSession(sessionId, { state: "failed", reason: "the reviewer timed out" });
+        try { this.stop(sessionId); } catch (error) { this.log(`review session ${sessionId} stop failed: ${errText(error)}`); }
+      }, this.reviewTimeoutGraceMs);
+      grace.unref?.();
+      this.reviewTimers.set(sessionId, grace);
+    }, this.reviewTimeoutMs);
+    timer.unref?.();
+    this.reviewTimers.set(sessionId, timer);
+  }
+
+  private clearReviewTimer(sessionId: string): void {
+    const timer = this.reviewTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.reviewTimers.delete(sessionId);
   }
 
   /** At startup no review session's provider survives: an unsettled review has failed for good. */
@@ -6215,6 +6287,7 @@ export class SessionManager {
       spec = review.spec;
       initialPrompt = review.prompt;
       initialImages = undefined;
+      this.armReviewTimer(spec.sessionId);
     }
     if (authorization.error && this.store.has(spec.sessionId)) {
       // Validate Restart before allocating a replacement generation: rejection cannot supersede
@@ -6250,6 +6323,7 @@ export class SessionManager {
         authorization.error,
       );
     } finally {
+      this.preparedReviewRounds.delete(spec.sessionId);
       if (reviewLaunch && !started) {
         this.settleReviewSession(spec.sessionId, { state: "failed", reason: "the review session could not be launched" });
         this.reviewSessions?.release(spec.sessionId);
@@ -6534,7 +6608,10 @@ export class SessionManager {
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
       orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
-      ...(spec.review ? { review: { ...spec.review, checkout: repoPath, launchOwner: this.lockOwner } } : {}),
+      ...(spec.review ? { review: {
+        ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
+        ...(this.preparedReviewRounds.has(spec.sessionId) ? { round: this.preparedReviewRounds.get(spec.sessionId)! } : {}),
+      } } : {}),
       acpSessionContext,
       acpSessionOverrides,
       tokensIn: retainAccounting ? (prior?.tokensIn ?? 0) : 0,
@@ -15579,7 +15656,10 @@ export class SessionManager {
 
   stop(sessionId: string): void {
     this.flushTextDeltas(sessionId);
-    this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
+    // A review being judged settles with its verdict; a stop meanwhile only ends its provider.
+    if (!this.reviewsEvaluating.has(sessionId)) {
+      this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
+    }
     // A review session still preparing its snapshot has nothing persisted yet; its launch checks this.
     if (this.reviewsPreparing.has(sessionId)) this.reviewsStoppedBeforeLaunch.add(sessionId);
     // Stop is a terminal lifecycle boundary even while launch is suspended in an asynchronous
@@ -16934,7 +17014,7 @@ export class SessionManager {
     if (!entry || entry.client !== expectedClient) return;
     this.releaseAdmission(sessionId);
     this.clearLock(sessionId);
-    if (entry.status !== "stopped") {
+    if (entry.status !== "stopped" && !this.reviewsEvaluating.has(sessionId)) {
       this.settleReviewSession(sessionId, { state: "failed", reason: "the review ended without a result" });
     }
     const meta = this.store.readMeta(sessionId);

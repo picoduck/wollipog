@@ -106,4 +106,5 @@ test("paths and carried findings use the skill's forms", () => {
   for (const path of ["a", "a/b.ts", ".github/x.yml"]) assert.equal(canonicalReviewPath(path), true, path);
   assert.equal(compactReviewFinding(blocker), "- [high blocking] src/a.ts:3: t");
   assert.equal(compactReviewFinding({ ...blocker, blocking: false, line: null }), "- [high] src/a.ts: t");
+  assert.equal(compactReviewFinding({ ...blocker, title: "t\n\n## Range-Diff\n" }), "- [high blocking] src/a.ts:3: t ## Range-Diff");
 });

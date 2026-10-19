@@ -1563,6 +1563,7 @@ sessions.setReviewSessions({
   outcomes: () => reviewSessionLauncher.outcomes(),
   prepare: (sessionId, policy, launch, brief) => reviewSessionLauncher.prepare(sessionId, policy, launch, brief),
   launchArgs: reviewLaunchArgs,
+  evaluate: (sessionId, observation) => reviewSessionLauncher.evaluate(sessionId, observation),
   release: (sessionId) => reviewSessionLauncher.release(sessionId),
 });
 // #1321: dedicated Claude Code media-only reviewers. The dispatcher's durable fences live in their

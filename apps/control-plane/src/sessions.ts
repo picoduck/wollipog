@@ -23,7 +23,7 @@ import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
 import {
-  REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
+  REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
 } from "@wollipog/protocol";
 import { SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewHarness, type SessionReviewJobArtifacts,
@@ -8621,7 +8621,7 @@ export class SessionsService {
     if (this.db.reviewSessions.isReviewSession(session.id)) return fail("A review session cannot request a review.", 409);
     const pullRequest = request?.pullRequest;
     if (!request || typeof request !== "object" || Array.isArray(request) ||
-        Object.keys(request).some((key) => !["pullRequest", "headSha", "brief"].includes(key)) ||
+        Object.keys(request).some((key) => !["pullRequest", "headSha", "brief", "fullReason"].includes(key)) ||
         !pullRequest || typeof pullRequest !== "object" || Object.keys(pullRequest).some((key) => !["repository", "number"].includes(key)) ||
         typeof pullRequest.repository !== "string" || !/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(pullRequest.repository) ||
         !Number.isSafeInteger(pullRequest.number) || pullRequest.number <= 0) {
@@ -8633,6 +8633,10 @@ export class SessionsService {
     if (typeof request.brief !== "string" || !request.brief.trim()) return fail("a review needs a non-empty brief", 400);
     if (Buffer.byteLength(request.brief) > REVIEW_SESSION_BRIEF_LIMIT_BYTES) {
       return fail(`the brief exceeds its ${REVIEW_SESSION_BRIEF_LIMIT_BYTES / 1024} KiB limit`, 400);
+    }
+    if (request.fullReason !== undefined && (typeof request.fullReason !== "string" || !request.fullReason.trim() ||
+        request.fullReason.length > REVIEW_FULL_REASON_LIMIT)) {
+      return fail(`fullReason, when given, says in at most ${REVIEW_FULL_REASON_LIMIT} characters why the whole pull request needs review again`, 400);
     }
     if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
     // As with the #3330 bridge: a campaign allowance accounts for its reviews through the campaign's
@@ -8669,6 +8673,11 @@ export class SessionsService {
       headSha: request.headSha,
       harness,
     };
+    // #3369: a runner that plans review runs gets the run's history; an older one reviews in full.
+    if (runnerSupportsProtocol(runner?.protocolVersion, "reviewRuns")) {
+      policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest);
+      if (request.fullReason !== undefined) policy.fullReason = request.fullReason.trim();
+    }
     const workspacePath = this.db.getAdHocWorkspacePath(session.id) ?? undefined;
     const created = this.createSession({
       runnerId: session.runnerId,

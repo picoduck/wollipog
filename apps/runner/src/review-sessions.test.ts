@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  REVIEW_CONTRACT, REVIEW_OUTPUT_SCHEMA, type AgentDefinition, type ReviewLaunchPolicy,
+  REVIEW_CONTRACT, REVIEW_OUTPUT_SCHEMA, REVIEW_ROUND_REFUSALS, type AgentDefinition, type ReviewLaunchPolicy, type ReviewRunHistory,
 } from "@wollipog/protocol";
 import { ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
@@ -38,6 +38,8 @@ interface Fixture {
   metas: Map<string, SessionMeta>;
   launcher: ReviewSessionLauncher;
   logs: string[];
+  /** The forge's facts for the pull request; a test that pushes again updates its head. */
+  facts: PullRequestFacts;
   policy(overrides?: Partial<ReviewLaunchPolicy>): ReviewLaunchPolicy;
 }
 
@@ -75,14 +77,15 @@ function fixture(t: { after(fn: () => void): void }, options: {
   } as unknown as SessionMeta;
   const metas = new Map<string, SessionMeta>([[requester.sessionId, requester]]);
   const logs: string[] = [];
+  const facts: PullRequestFacts = {
+    state: "open", baseRepository: "acme/widget", headRepository: "acme/widget", headRef: "fix/feature",
+    headSha: head, baseSha: base, ...options.pr,
+  };
   const exec: ReviewSessionDependencies["exec"] = async (command, args, execOptions) =>
     execFileSync(command, args, { encoding: "utf8", ...(execOptions?.cwd ? { cwd: execOptions.cwd } : {}), env: execOptions?.env });
   const deps: ReviewSessionDependencies = {
     exec,
-    pullRequest: async () => ({
-      state: "open", baseRepository: "acme/widget", headRepository: "acme/widget", headRef: "fix/feature",
-      headSha: head, baseSha: base, ...options.pr,
-    }),
+    pullRequest: async () => ({ ...facts }),
     tools: () => options.tools ?? { git: GIT, gh: "/trusted/gh" },
     verifyCommand: () => { if (options.untrusted) throw new Error("planted"); },
     agents: () => options.agents ?? AGENTS,
@@ -92,9 +95,9 @@ function fixture(t: { after(fn: () => void): void }, options: {
   const snapshots = new ReviewSnapshotter(join(root, "snapshots"), exec, (message) => logs.push(message));
   const launcher = new ReviewSessionLauncher(join(root, "snapshots"), snapshots, { readMeta: (id) => metas.get(id) ?? null }, deps);
   return {
-    root, repo, worktree, base, head, requester, metas, launcher, logs,
+    root, repo, worktree, base, head, requester, metas, launcher, logs, facts,
     policy: (overrides = {}) => ({
-      requesterSessionId: "s_requester", pullRequest: { repository: "acme/widget", number: 7 }, headSha: head,
+      requesterSessionId: "s_requester", pullRequest: { repository: "acme/widget", number: 7 }, headSha: facts.headSha,
       harness: "codex", ...overrides,
     }),
   };
@@ -213,6 +216,11 @@ test("prepare checks out the exact pushed head privately and pins the patch in t
   assert.equal(readFileSync(join(prepared.checkout, "outside"), "utf8"), "/etc/hostname");
   assert.match(prepared.prompt, /-export const answer = 41;\n\+export const answer = 42;/u);
   assert.match(prepared.prompt, new RegExp(`- Reviewed head: ${f.head}`, "u"));
+  // Without history, this is the first attempt of the first round: a full review.
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 1, attempt: 1, mode: "full", baseSha: f.base, scopeFiles: ["app.ts", "notes.md", "outside"],
+  });
+  assert.match(prepared.prompt, /- Mode: full review of the pull request\n/u);
   // Nothing was written into the requester's worktree or its repository's refs.
   assert.equal(git(f.worktree, "status", "--porcelain"), "");
   assert.equal(git(f.repo, "for-each-ref", "--format=%(refname)").split("\n").filter((ref) => ref.startsWith("refs/session/")).length, 0);
@@ -265,6 +273,112 @@ test("prepare refuses every request outside the requester's own pull request at 
   assert.equal(await refusal(untrusted.launcher.prepare("s_review", untrusted.policy(), CODEX, "b")),
     "the runner cannot launch this reviewer");
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
+});
+
+const FINDING = {
+  severity: "high" as const, blocking: true, file: "app.ts", line: 1, title: "Wrong answer", scenario: "s", evidence: "e", verify: "v",
+};
+
+/** An epoch whose one valid round reviewed `headSha` with this vote. */
+function reviewed(f: Fixture, vote: "UPVOTE" | "DOWNVOTE", headSha = f.head): ReviewRunHistory {
+  return {
+    epoch: 1, lastValid: { headSha, baseSha: f.base, round: 1, vote, findings: vote === "DOWNVOTE" ? [FINDING] : [] },
+    lastAttempt: { headSha, round: 1, attempt: 1, valid: true }, validRounds: 1, consumedInLastRound: 1,
+    roundBudget: 4, attemptsPerRound: 2,
+  };
+}
+
+/** Commit in the requester's worktree and make it the pull request's pushed head. */
+function push(f: Fixture, ...args: string[]): string {
+  git(f.worktree, "commit", "--quiet", ...args);
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  return f.facts.headSha;
+}
+
+test("a later round reviews only the changes since the last valid head, with its open findings", async (t) => {
+  const f = fixture(t);
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.unchanged);
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "UPVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.upvoted);
+  // A new head that changes no file has nothing for a follow-up round to review.
+  push(f, "--allow-empty", "-m", "empty");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.unchanged);
+  assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
+
+  writeFileSync(join(f.worktree, "notes.md"), "Uses no fences.\n");
+  git(f.worktree, "add", "notes.md");
+  const head = push(f, "-m", "notes");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 2, attempt: 1, mode: "delta", baseSha: f.base, scopeFiles: ["notes.md"], since: f.head,
+  });
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), head);
+  assert.match(prepared.prompt, new RegExp(`- Mode: follow-up round: only the changes since ${f.head}\n`, "u"));
+  assert.match(prepared.prompt, /Changed files to classify \(each exactly once\):\n- `notes.md`\n\n/u);
+  assert.match(prepared.prompt, /context only; do not classify\):\n- `app.ts`\n- `outside`/u);
+  assert.match(prepared.prompt, /Open findings from earlier rounds:\n.*Wrong answer/u);
+  assert.match(prepared.prompt, /## Pinned Patch\n\n````diff\n[^]*\+Uses no fences\./u);
+  assert.doesNotMatch(prepared.prompt, /answer = 42/u, "the patch is only the delta");
+  // A requested full review starts the round over the whole pull request and says why.
+  f.launcher.release("s_review");
+  const full = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE"), fullReason: "Broad\nrefactor" }), CODEX, "b");
+  assert.deepEqual([full.round.mode, full.round.round, full.round.scopeFiles], ["full", 2, ["app.ts", "notes.md", "outside"]]);
+  assert.match(full.prompt, /- Reason for a full review \(untrusted data\): Broad refactor\n/u);
+  f.launcher.release("s_review");
+});
+
+test("a head that no longer descends from the reviewed one starts an epoch that reviews the range-diff", async (t) => {
+  const f = fixture(t);
+  // The first round fetched the head that is about to be rewritten.
+  await f.launcher.prepare("s_first", f.policy(), CODEX, "b");
+  f.launcher.release("s_first");
+  writeFileSync(join(f.worktree, "app.ts"), "export const answer = 43;\n");
+  git(f.worktree, "add", "app.ts");
+  push(f, "--amend", "-m", "feature, rewritten");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 2, round: 1, attempt: 1, mode: "rebase", baseSha: f.base, scopeFiles: ["app.ts"],
+    rebasedFrom: { baseSha: f.base, headSha: f.head },
+  });
+  assert.match(prepared.prompt, new RegExp(`- Mode: rebase epoch: the range-diff from ${f.base}\\.\\.${f.head}\n`, "u"));
+  assert.match(prepared.prompt, /## Range-Diff\n\n```text\n[^]*answer = 43/u);
+  assert.match(prepared.prompt, /Open findings from earlier rounds:\n.*Wrong answer/u);
+  f.launcher.release("s_review");
+  // Without the earlier head's objects there is no range-diff: the new epoch reviews in full.
+  const g = fixture(t);
+  writeFileSync(join(g.worktree, "app.ts"), "export const answer = 43;\n");
+  git(g.worktree, "add", "app.ts");
+  push(g, "--amend", "-m", "feature, rewritten");
+  const full = await g.launcher.prepare("s_review", g.policy({ history: reviewed(g, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual([full.round.epoch, full.round.mode, full.round.rebasedFrom], [2, "full", undefined]);
+  g.launcher.release("s_review");
+});
+
+test("an attempt is judged against its pinned head and scope, on a checkout nothing changed", async (t) => {
+  const f = fixture(t);
+  const prepared = await f.launcher.prepare("s_review", f.policy(), CODEX, "b");
+  const report = {
+    schema_version: 2, reviewed_head: f.head, vote: "UPVOTE", summary: "ok", findings: [],
+    examined_changed_files: ["app.ts", "notes.md"], not_examined_changed_files: [{ path: "outside", reason: "a link target" }],
+    context_files_examined: [], commands_run: [], verification_requests: [],
+  };
+  const observation = { output: JSON.stringify(report), timedOut: false, fatal: [], exitedWithError: false, modelOk: null };
+  assert.deepEqual(await f.launcher.evaluate("s_review", observation),
+    { valid: true, consumed: true, effectiveVote: "UPVOTE", failureClass: null, validationErrors: [] });
+  const unclassified = await f.launcher.evaluate("s_review", {
+    ...observation, output: JSON.stringify({ ...report, examined_changed_files: ["app.ts"] }),
+  });
+  assert.deepEqual([unclassified.valid, unclassified.failureClass], [false, "evidence_contract"]);
+  // A reviewer that wrote into its checkout invalidated its own evidence.
+  writeFileSync(join(prepared.checkout, "planted.txt"), "x");
+  const changed = await f.launcher.evaluate("s_review", observation);
+  assert.deepEqual([changed.valid, changed.failureClass], [false, "snapshot"]);
+  // A lost context cannot be verified at all.
+  f.launcher.release("s_review");
+  const lost = await f.launcher.evaluate("s_review", observation);
+  assert.deepEqual([lost.valid, lost.failureClass], [false, "snapshot"]);
 });
 
 test("a snapshot that cannot be prepared is refused with a fixed reason and leaves no checkout", async (t) => {

@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { ReviewSessionUpdate, RunnerToControlPlane, SessionLaunchSpec } from "@wollipog/protocol";
+import type {
+  ReviewAttemptRound, ReviewAttemptVerdictView, ReviewSessionUpdate, RunnerToControlPlane, SessionLaunchSpec,
+} from "@wollipog/protocol";
 import type { DriverOptions } from "./drivers/driver.js";
 import { ReviewScopeRefusal } from "./review-snapshot.js";
 import { reviewLaunchArgs, type ReviewSessionHooks } from "./review-sessions.js";
@@ -12,6 +14,11 @@ import { SessionStore } from "./session-store.js";
 
 const HEAD = "c".repeat(40);
 const OUTPUT = JSON.stringify({ schema_version: 2, vote: "UPVOTE" });
+const ROUND: ReviewAttemptRound = { epoch: 1, round: 1, attempt: 1, mode: "full", baseSha: "b".repeat(40), scopeFiles: ["a.ts"] };
+const VALID: ReviewAttemptVerdictView = { valid: true, consumed: true, effectiveVote: "UPVOTE", failureClass: null, validationErrors: [] };
+const NO_REPORT: ReviewAttemptVerdictView = {
+  valid: false, consumed: true, effectiveVote: "INVALID", failureClass: "evidence_contract", validationErrors: ["no structured report"],
+};
 
 interface Harness {
   root: string;
@@ -23,7 +30,10 @@ interface Harness {
   released: string[];
   prepared: Array<{ sessionId: string; brief: string }>;
   finishTurn(): void;
+  /** Outcomes and refusals; `running()` holds the planned-round reports. */
   updates(): ReviewSessionUpdate[];
+  running(): ReviewSessionUpdate[];
+  observations: Array<Parameters<ReviewSessionHooks["evaluate"]>[1]>;
 }
 
 function reviewSpec(overrides: Partial<SessionLaunchSpec> = {}): SessionLaunchSpec {
@@ -45,6 +55,9 @@ function harness(t: { after(fn: () => void): void }, options: {
   hold?: boolean;
   /** Outcomes recorded for reviews that ended before their session was persisted. */
   outcomes?: ReviewSessionUpdate[];
+  evaluate?: ReviewSessionHooks["evaluate"];
+  /** Permission denials the fake Claude driver reports for the turn. */
+  denials?: number;
 } = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-session-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -73,6 +86,7 @@ function harness(t: { after(fn: () => void): void }, options: {
           return options.stop ?? "end_turn";
         },
         reviewOutput: () => options.output === undefined ? OUTPUT : options.output,
+        reviewDiagnostics: () => ({ permissionDenials: options.denials ?? 0 }),
         cancel: () => finish?.(),
         dispose: () => { record.disposed = true; },
         setConfig: () => {},
@@ -88,17 +102,22 @@ function harness(t: { after(fn: () => void): void }, options: {
   );
   t.after(() => manager.shutdownAll());
   const released: string[] = [];
+  const observations: Harness["observations"] = [];
   const prepared: Harness["prepared"] = [];
   const preparing: string[] = [];
   const recorded: ReviewSessionUpdate[] = [];
   manager.setReviewSessions({
     markPreparing: (sessionId) => { preparing.push(sessionId); },
+    evaluate: async (sessionId, observation) => {
+      observations.push(observation);
+      return options.evaluate ? options.evaluate(sessionId, observation) : observation.output ? VALID : NO_REPORT;
+    },
     recordOutcome: (update) => { recorded.push(update); released.push(update.sessionId); },
     outcomes: () => [...(options.outcomes ?? []), ...recorded],
     prepare: options.prepare ?? (async (sessionId, _policy, launch, brief) => {
       assert.deepEqual(launch, { driver: "claude-code", agentId: "claude", command: "claude" }, "the authorized launch is re-verified");
       prepared.push({ sessionId, brief });
-      return { checkout, prompt: "REVIEW PROMPT", baseSha: "b".repeat(40) };
+      return { checkout, prompt: "REVIEW PROMPT", baseSha: "b".repeat(40), round: ROUND };
     }),
     launchArgs: reviewLaunchArgs,
     release: (sessionId) => released.push(sessionId),
@@ -110,7 +129,9 @@ function harness(t: { after(fn: () => void): void }, options: {
   return {
     root, checkout, store, manager, sent, drivers, released, prepared,
     finishTurn: () => finish?.(),
-    updates: () => sent.filter((message): message is ReviewSessionUpdate => message.type === "review_session_update"),
+    updates: () => sent.filter((message): message is ReviewSessionUpdate => message.type === "review_session_update" && message.state !== "running"),
+    running: () => sent.filter((message): message is ReviewSessionUpdate => message.type === "review_session_update" && message.state === "running"),
+    observations,
   };
 }
 
@@ -136,7 +157,10 @@ test("a review session launches past full capacity, read-only in its checkout, a
   assert.equal(driver.options.isolation, undefined, "outside every runner sandbox");
   assert.deepEqual(driver.options.args, reviewLaunchArgs("claude-code", h.checkout));
   assert.deepEqual(driver.prompts, ["REVIEW PROMPT"]);
-  assert.deepEqual(h.updates(), [{ type: "review_session_update", sessionId: "s_review", state: "completed", output: OUTPUT }]);
+  assert.deepEqual(h.running(), [{ type: "review_session_update", sessionId: "s_review", state: "running", round: ROUND }],
+    "the planned round is reported before the reviewer runs");
+  assert.deepEqual(h.updates(), [{ type: "review_session_update", sessionId: "s_review", state: "completed", output: OUTPUT, round: ROUND, verdict: VALID }]);
+  assert.deepEqual(h.observations, [{ output: OUTPUT, timedOut: false, fatal: [], exitedWithError: false, modelOk: null }]);
   const meta = h.store.readMeta("s_review")!;
   assert.equal(meta.review?.checkout, h.checkout);
   assert.equal(meta.review?.update?.state, "completed");
@@ -190,11 +214,54 @@ test("a turn without structured output or with a refusal fails the review", asyn
   await until(() => empty.updates().length > 0, "the empty outcome");
   assert.deepEqual(empty.updates(), [{
     type: "review_session_update", sessionId: "s_review", state: "failed", reason: "the review ended without a result",
+    round: ROUND, verdict: NO_REPORT,
   }]);
-  const refused = harness(t, { stop: "refusal" });
+  const refused = harness(t, { stop: "refusal", output: null });
   assert.equal(await refused.manager.start(reviewSpec(), "brief"), true);
   await until(() => refused.updates().length > 0, "the refused outcome");
   assert.equal(refused.updates()[0]?.state, "failed");
+  assert.equal(refused.observations[0]?.exitedWithError, true, "a provider error before any report is observed");
+  // A report that arrived before an error is still judged on its contract, as the skill does.
+  const late = harness(t, { stop: "refusal" });
+  assert.equal(await late.manager.start(reviewSpec(), "brief"), true);
+  await until(() => late.updates().length > 0, "the judged outcome");
+  assert.equal(late.updates()[0]?.state, "completed");
+});
+
+test("a reviewer past its time limit is judged as timed out, and its provider is stopped", async (t) => {
+  const h = harness(t, { hold: true, output: null, evaluate: async (_id, observation) => ({
+    valid: false, consumed: false, effectiveVote: null, failureClass: observation.timedOut ? "timeout" : "evidence_contract",
+    validationErrors: ["the reviewer timed out"],
+  }) });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.manager as any).reviewTimeoutMs = 20;
+  assert.equal(await h.manager.start(reviewSpec(), "brief"), true);
+  await until(() => h.updates().length > 0, "the timeout");
+  assert.equal(h.observations[0]?.timedOut, true);
+  assert.equal(h.observations[0]?.exitedWithError, false, "a timeout is not a provider error");
+  assert.deepEqual(h.updates().map((update) => [update.state, update.reason, update.verdict?.failureClass, update.verdict?.consumed]),
+    [["failed", "the reviewer timed out", "timeout", false]]);
+  await until(() => h.store.readMeta("s_review")?.status === "stopped", "the provider stop");
+});
+
+test("a reviewer that ran with refused tools broke the tool policy", async (t) => {
+  const h = harness(t, { denials: 2 });
+  assert.equal(await h.manager.start(reviewSpec(), "brief"), true);
+  await until(() => h.updates().length > 0, "the outcome");
+  assert.deepEqual(h.observations[0]?.fatal, [{ failureClass: "tool_policy", message: "permission denials were recorded" }]);
+});
+
+test("a stop while an attempt is judged ends the provider but keeps the verdict", async (t) => {
+  let judge!: () => void;
+  const h = harness(t, { evaluate: () => new Promise((resolve) => { judge = () => resolve(VALID); }) });
+  assert.equal(await h.manager.start(reviewSpec(), "brief"), true);
+  await until(() => judge !== undefined, "the evaluation");
+  h.manager.stop("s_review");
+  assert.deepEqual(h.updates(), [], "the stop did not settle the review as cancelled");
+  judge();
+  await until(() => h.updates().length > 0, "the verdict");
+  assert.equal(h.updates()[0]?.state, "completed");
+  assert.deepEqual(h.updates()[0]?.verdict, VALID);
 });
 
 test("stopping a running review cancels it once, and a later outcome changes nothing", async (t) => {
@@ -206,7 +273,7 @@ test("stopping a running review cancels it once, and a later outcome changes not
   await pending;
   await until(() => h.updates().length > 0, "the cancellation");
   assert.deepEqual(h.updates(), [{
-    type: "review_session_update", sessionId: "s_review", state: "cancelled", reason: "the review was cancelled",
+    type: "review_session_update", sessionId: "s_review", state: "cancelled", round: ROUND, reason: "the review was cancelled",
   }]);
   await new Promise<void>((resolve) => setTimeout(resolve, 30));
   assert.equal(h.updates().length, 1);
@@ -217,7 +284,7 @@ test("a stop that arrives while the snapshot is prepared cancels the review befo
   const h = harness(t, {
     prepare: async () => {
       await new Promise<void>((resolve) => { release = resolve; });
-      return { checkout: "/never", prompt: "P", baseSha: "b".repeat(40) };
+      return { checkout: "/never", prompt: "P", baseSha: "b".repeat(40), round: ROUND };
     },
   });
   const pending = h.manager.start(reviewSpec(), "brief");

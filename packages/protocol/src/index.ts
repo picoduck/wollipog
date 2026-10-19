@@ -699,7 +699,11 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `session_worktree` operation, `SessionWorktreeResultMessage.refDeletion` and the
 //      `worktree_refs_deleted` audit event. The control plane sends it only to a v227+ runner, and
 //      the session tools refuse against an older control plane.
-export const PROTOCOL_VERSION = 227;
+// 228: review runs (#3369): `ReviewLaunchPolicy.history`/`fullReason`, and `round`/`verdict` on
+//      `review_session_update`. The control plane sends a run's history only to a v228+ runner,
+//      which plans the round, scopes delta and rebase reviews and validates every attempt against
+//      the review contract; an older runner keeps reviewing full and unvalidated.
+export const PROTOCOL_VERSION = 228;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -948,6 +952,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v227 runner deletes an isolated session's own sequencer leftovers and recorded branches
    * (#3316); the session tools check the same floor against the connected control plane. */
   sessionWorktreeRefDeletion: 227,
+  /** v228 runner plans review rounds and validates review attempts (#3369). */
+  reviewRuns: 228,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,

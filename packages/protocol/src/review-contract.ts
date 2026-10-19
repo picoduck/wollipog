@@ -234,8 +234,10 @@ export function evaluateReviewAttempt(evidence: ReviewAttemptEvidence, context: 
 
 /** One line per open finding, carried into a follow-up round's prompt. */
 export function compactReviewFinding(finding: Pick<ReviewReportFinding, "severity" | "blocking" | "file" | "line" | "title">): string {
-  const where = finding.line ? `${finding.file}:${finding.line}` : finding.file;
-  return `- [${finding.severity}${finding.blocking ? " blocking" : ""}] ${where}: ${finding.title}`;
+  // A reviewer wrote these: one bounded line each, so none can open a section of the next prompt.
+  const line = (text: string) => text.replace(/\s+/gu, " ").trim().slice(0, 200);
+  const where = finding.line ? `${line(finding.file)}:${finding.line}` : line(finding.file);
+  return `- [${finding.severity}${finding.blocking ? " blocking" : ""}] ${where}: ${line(finding.title)}`;
 }
 
 /** The review-run policy the skill states and Wollipog enforces. */
