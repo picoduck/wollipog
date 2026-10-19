@@ -129,6 +129,8 @@ async function mount(session: SessionView, runs: ReviewSessionView[]) {
   /** The cursor of the newest page, and the pages after it by cursor. */
   let next: string | null = null;
   let older: Record<string, { reviews: ReviewSessionView[]; next: string | null }> = {};
+  /** While set, newest-page reads wait on it. */
+  let newestGate: Promise<void> | null = null;
   const client = {
     ...api,
     gitDiff: async (_id: string, scope: GitDiffScope) => ({
@@ -145,6 +147,7 @@ async function mount(session: SessionView, runs: ReviewSessionView[]) {
     }),
     reviewSessions: async (sessionId: string, page: { afterReviewSessionId?: string } = {}) => {
       reads.push(page.afterReviewSessionId ? `${sessionId} after ${page.afterReviewSessionId}` : sessionId);
+      if (!page.afterReviewSessionId && newestGate) await newestGate;
       if (failing) throw new Error("The control plane could not be reached.");
       if (page.afterReviewSessionId) {
         const found = older[page.afterReviewSessionId]!;
@@ -184,6 +187,15 @@ async function mount(session: SessionView, runs: ReviewSessionView[]) {
     },
     fail: (value: boolean) => { failing = value; },
     pages: (newestNext: string | null, pages: typeof older) => { next = newestNext; older = pages; },
+    /** Hold newest-page reads until the returned function releases them. */
+    holdNewest: () => {
+      let release!: () => void;
+      newestGate = new Promise<void>((resolve) => { release = resolve; });
+      return async () => {
+        newestGate = null;
+        await act(async () => { release(); });
+      };
+    },
     refresh: async () => {
       const button = (head as unknown as HTMLElement).querySelector<HTMLButtonElement>('button[aria-label="Refresh Review"]');
       assert.ok(button, "the header Refresh is rendered");
@@ -288,6 +300,34 @@ test("a first read that fails still shows the section with the reason", async ()
     assert.ok(section, "the section shows though nothing could be read");
     assert.match(section.textContent ?? "", /Cross-Model Reviews\s*2/u);
     assert.match(section.textContent ?? "", /could not be reached/u);
+  } finally { await h.unmount(); }
+});
+
+test("Load Older Reviews waits for a newest-page read in flight, so no review is skipped", async () => {
+  const numbered = (n: number) => run({ reviewSessionId: `s_r${n}`, findings: [] });
+  const range = (from: number, to: number) => Array.from({ length: from - to + 1 }, (_, i) => numbered(from - i));
+  // 26 reviews: the newest page shows 26 to 2, and the cursor continues after 2.
+  const session = { ...baseSession, reviewRuns: { count: 26, active: 0, updatedAt: 10 } };
+  const h = await mount({ ...baseSession }, range(26, 2));
+  try {
+    h.pages("s_r2", { s_r2: { reviews: [numbered(1)], next: null } });
+    await h.rerender(session);
+    const ids = () => [...reviews(h.container)!.querySelectorAll("article[aria-label]")].length;
+    const loadOlder = () => [...reviews(h.container)!.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.includes("Load Older Reviews"));
+    assert.equal(ids(), 25);
+    // Review 27 arrives; its newest-page read is held while Load Older Reviews is clicked.
+    const release = h.holdNewest();
+    h.pages("s_r3", { s_r3: { reviews: [numbered(2), numbered(1)], next: null } });
+    await h.rerender({ ...session, reviewRuns: { count: 27, active: 0, updatedAt: 20 } }, range(27, 3));
+    await act(async () => { fireDomEvent.click(loadOlder()!); });
+    assert.ok(!h.reads.some((read) => read.endsWith("after s_r2")), "the old cursor is not followed while the list is being replaced");
+    await release();
+    assert.equal(ids(), 25, "the replaced newest page: 27 to 3");
+    await act(async () => { fireDomEvent.click(loadOlder()!); });
+    assert.ok(h.reads.at(-1)?.endsWith("after s_r3"), "the new list's own cursor is followed");
+    assert.equal(ids(), 27, "every review is reachable, with no gap");
+    assert.equal(loadOlder(), undefined);
   } finally { await h.unmount(); }
 });
 

@@ -538,10 +538,19 @@ export function ReviewPanel({
   const [reviewRunsError, setReviewRunsError] = useState<string | null>(null);
   const [loadingOlderReviewRuns, setLoadingOlderReviewRuns] = useState(false);
   const reviewRunsReqRef = useRef(0);
+  // The list on screen and the cursor that continues it, tagged with the read that produced them.
+  // An older page follows only a settled list's own cursor, and lands only on that same list: a
+  // newest-page read that starts first replaces both, so the older page is dropped.
+  const reviewRunsPageRef = useRef({ sessionId: session.id, generation: 0, cursor: null as string | null, settled: true, loadingOlder: false });
   const reviewRunsKey = session.reviewRuns ? `${session.reviewRuns.count}:${session.reviewRuns.active}:${session.reviewRuns.updatedAt}` : null;
   const loadReviewRuns = async () => {
     const request = ++reviewRunsReqRef.current;
+    // Another session's cursor never continues this one's list.
+    const shownCursor = reviewRunsPageRef.current.sessionId === session.id ? reviewRunsPageRef.current.cursor : null;
+    const sessionId = session.id;
+    reviewRunsPageRef.current = { sessionId, generation: request, cursor: shownCursor, settled: false, loadingOlder: false };
     if (!session.reviewRuns) {
+      reviewRunsPageRef.current = { sessionId, generation: request, cursor: null, settled: true, loadingOlder: false };
       setReviewRuns([]);
       setReviewRunsOlder(null);
       setReviewRunsError(null);
@@ -550,21 +559,27 @@ export function ReviewPanel({
     try {
       const page = await api.reviewSessions(session.id);
       if (request !== reviewRunsReqRef.current) return;
+      reviewRunsPageRef.current = { sessionId, generation: request, cursor: page.nextAfterReviewSessionId, settled: true, loadingOlder: false };
       setReviewRuns(page.reviews);
       setReviewRunsOlder(page.nextAfterReviewSessionId);
       setReviewRunsError(null);
     } catch (cause) {
-      if (request === reviewRunsReqRef.current) setReviewRunsError((cause as Error).message);
+      if (request !== reviewRunsReqRef.current) return;
+      // The list on screen is unchanged, and so is the cursor that continues it.
+      reviewRunsPageRef.current = { sessionId, generation: request, cursor: shownCursor, settled: true, loadingOlder: false };
+      setReviewRunsError((cause as Error).message);
     }
   };
   const loadOlderReviewRuns = async () => {
-    // A newer read that starts meanwhile replaces the list, so this page is then dropped.
-    const request = reviewRunsReqRef.current;
-    if (!reviewRunsOlder || loadingOlderReviewRuns) return;
+    const from = reviewRunsPageRef.current;
+    if (!from.settled || from.loadingOlder || !from.cursor || from.generation !== reviewRunsReqRef.current) return;
+    reviewRunsPageRef.current = { ...from, loadingOlder: true };
     setLoadingOlderReviewRuns(true);
+    const current = () => reviewRunsReqRef.current === from.generation && reviewRunsPageRef.current.generation === from.generation;
     try {
-      const page = await api.reviewSessions(session.id, { afterReviewSessionId: reviewRunsOlder });
-      if (request !== reviewRunsReqRef.current) return;
+      const page = await api.reviewSessions(session.id, { afterReviewSessionId: from.cursor });
+      if (!current()) return;
+      reviewRunsPageRef.current = { ...from, cursor: page.nextAfterReviewSessionId, loadingOlder: false };
       setReviewRuns((shown) => {
         const seen = new Set(shown.map((run) => run.reviewSessionId));
         return [...shown, ...page.reviews.filter((run) => !seen.has(run.reviewSessionId))];
@@ -572,8 +587,9 @@ export function ReviewPanel({
       setReviewRunsOlder(page.nextAfterReviewSessionId);
       setReviewRunsError(null);
     } catch (cause) {
-      if (request === reviewRunsReqRef.current) setReviewRunsError((cause as Error).message);
+      if (current()) setReviewRunsError((cause as Error).message);
     } finally {
+      if (current()) reviewRunsPageRef.current = { ...reviewRunsPageRef.current, loadingOlder: false };
       setLoadingOlderReviewRuns(false);
     }
   };
