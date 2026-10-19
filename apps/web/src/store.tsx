@@ -330,6 +330,13 @@ export function isPartialHistory(window: EventWindowState | undefined): boolean 
   return window !== undefined && (window.hasOlder || !window.complete || window.laterGap !== undefined);
 }
 
+/** Whether the server New Project's requests reach honors their request id (#3468). The capability
+ * comes from the snapshot of the live connection; while it is down, a request may reach a server
+ * that restarted on another version before its snapshot arrives, so the answer is no. */
+export function projectCreationRetryAvailable(state: Pick<State, "conn" | "projectCreationRetrySupported">): boolean {
+  return state.conn === "online" && state.projectCreationRetrySupported;
+}
+
 export interface State {
   conn: ConnState;
   currentTurnOpeningSupported: boolean;
@@ -349,6 +356,9 @@ export interface State {
   projectsSupported: boolean;
   /** False against older control planes whose Project API cannot register a newly browsed folder. */
   projectLocationCreationSupported: boolean;
+  /** The last snapshot's server honors New Project's request id (#3468). Read it through
+   * `projectCreationRetryAvailable`, which also needs that server to still be the connected one. */
+  projectCreationRetrySupported: boolean;
   /** False against older control planes without explicit, preflighted access-scope mutations. */
   accessScopeManagementSupported: boolean;
   /** True only when New Session can atomically open the separate Native TUI process. */
@@ -1253,6 +1263,7 @@ function reducer(state: State, action: Action): State {
             pendingSnapshotSessionIds: msg.sessionsComplete === false ? new Set(msg.sessions.map((session) => session.id)) : undefined,
             projectsSupported: msg.capabilities?.projects === true || msg.projects !== undefined,
             projectLocationCreationSupported: msg.capabilities?.createProjectLocations === true,
+            projectCreationRetrySupported: msg.capabilities?.idempotentProjectCreation === true,
             accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
             nativeTuiLaunchSupported: msg.capabilities?.nativeTuiLaunch === true,
             stopBeforeArchiveSupported: msg.capabilities?.stopBeforeArchive === true,
@@ -1712,6 +1723,7 @@ function initialState(
     snapshotRevision: 0,
     projectsSupported: false,
     projectLocationCreationSupported: false,
+    projectCreationRetrySupported: false,
     accessScopeManagementSupported: false,
     nativeTuiLaunchSupported: false,
     stopBeforeArchiveSupported: false,

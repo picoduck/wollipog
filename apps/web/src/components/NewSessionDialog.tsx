@@ -27,7 +27,7 @@ import {
 import { useApi } from "../api-context.js";
 import { SkillsUnavailableNotice, useSessionSkillsUnavailable } from "./SkillsUnavailableNotice.js";
 import { ApiError } from "../api.js";
-import { useStore } from "../store.js";
+import { projectCreationRetryAvailable, useStore } from "../store.js";
 import { legacyWorkspaceLocationsByName, workspaceLocationKey } from "../projects.js";
 import {
   NO_PROJECT_SELECTION,
@@ -66,7 +66,7 @@ import { ChooseFolderDialog } from "./ChooseFolderDialog.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
-import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
+import { projectAvailabilityLabel } from "../project-management.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
@@ -203,6 +203,8 @@ export function NewSessionDialog({
     projects: storedProjects,
     projectsSupported,
     projectLocationCreationSupported,
+    conn,
+    projectCreationRetrySupported,
     accessScopeManagementSupported,
     nativeTuiLaunchSupported,
     orchestratorRoleSupported,
@@ -1990,6 +1992,7 @@ export function NewSessionDialog({
     {creatingProject && (
       <CreateProjectDialog
         accessScopeManagementSupported={accessScopeManagementSupported}
+        retrySupported={projectCreationRetryAvailable({ conn, projectCreationRetrySupported })}
         projects={projectList}
         stacked
         returnFocusRef={projectPickerFocusRef}
@@ -2019,20 +2022,8 @@ export function NewSessionDialog({
           onClose();
           navigate({ name: "runners", section: "machines" });
         }}
-        onAdd={async (candidate: ProjectLocationCandidate) => {
-          const { project } = await api.addProjectLocation(selectedProject.id, {
-            runnerId: candidate.runnerId,
-            workspaceId: candidate.workspaceId,
-          });
+        onAdded={(project, location) => {
           applyProject(project);
-          const location = project.locations.find((item) => item.runnerId === candidate.runnerId && item.workspaceId === candidate.workspaceId);
-          if (location) pickProjectLocation(location);
-        }}
-        onCreate={async (created) => {
-          const { project } = await api.createProjectLocation(selectedProject.id, created);
-          applyProject(project);
-          const location = project.locations.find((item) =>
-            item.runnerId === created.runnerId && item.path === created.path);
           if (location) pickProjectLocation(location);
         }}
       />

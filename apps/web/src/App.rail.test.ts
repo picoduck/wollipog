@@ -394,7 +394,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   assert.match(projectLocationDialog, /alreadyAdded \? "Already Added"\s*: relinkRequired \? "Relink"/,
     "a returned exact workspace offers stable-identity relinking instead of duplicating its tombstone");
   for (const contract of [
-    /await onCreate\(\{[\s\S]*runnerId: selectedRunnerId,[\s\S]*path: selectedFolder,[\s\S]*owner: creationScope\.owner/,
+    /api\.createProjectLocation\(project\.id, \{[\s\S]*runnerId: selectedRunnerId,[\s\S]*path: selectedFolder,[\s\S]*owner: creationScope\.owner/,
     /<span>Machine<\/span>\s*<Select[\s\S]*<span>Folder<\/span>\s*<DirectoryPicker[\s\S]*hideActions/,
   ]) assert.match(projectLocationDialog, contract,
     "Add Location can register a browsed folder on a selected online machine, browsed under the Machine field");
@@ -409,8 +409,12 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   assert.doesNotMatch(projectLocationDialog, /"Add to Project"|<select\b/);
   assert.doesNotMatch(projectLocationDialog, /Move (?:Here|to|Location)/,
     "adding a shared Location does not imply moving it from another Project");
-  assert.match(projectsView, /onCreate=\{async \(location, generateSetup\)[\s\S]*api\.createProjectLocation/,
+  // #3468: Add Location sends its own requests, so it can recover a lost reply; Projects only hears
+  // of the location once it is added.
+  assert.match(projectLocationDialog, /api\.createProjectLocation\(project\.id,/,
     "Project management uses the atomic Project-scoped Location creation API");
+  assert.match(projectsView, /onAdded=\{async \(project, location, generateSetup\)/);
+  assert.doesNotMatch(projectsView, /api\.(?:createProjectLocation|addProjectLocation)\(/);
   assert.doesNotMatch(css, /\.add-location-list[^{]*\{[^}]*(?:overflow|max-height)/,
     "the candidate list has no scroller of its own: the dialog body scrolls");
   // The phone Projects back control is the detail bar's (#1801): an `.icon-btn` named "Back to

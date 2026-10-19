@@ -2254,14 +2254,39 @@ app.post("/api/projects", async (req, reply) => {
       ? { kind: "organization", organizationId: principal.organizationId }
       : { kind: "user", userId: principal.userId },
   };
+  const requestId = body.requestId;
+  if (requestId !== undefined && (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/u.test(requestId))) {
+    return reply.code(400).send({ error: "requestId must be 1-128 letters, digits, dashes or underscores" });
+  }
   const requested = requestedAccessScope(principal, body.owner, defaultScope);
   if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
-  const project = db.createProject({
+  if (requestId === undefined) {
+    const project = db.createProject({
+      name,
+      scope: requested.scope,
+    });
+    hub.projectChanged(project);
+    return reply.code(201).send({ project: db.getProjectForPrincipal(principal, project.id)! });
+  }
+  // A retry after a lost reply (#3468) returns the project the first request created. It is keyed
+  // by this human, and the replayed project must still be one they can see.
+  const result = db.createProjectForRequest({
+    userId: principal.userId,
+    requestId,
     name,
     scope: requested.scope,
   });
-  hub.projectChanged(project);
-  return reply.code(201).send({ project: db.getProjectForPrincipal(principal, project.id)! });
+  if ("refused" in result) {
+    return reply.code(409).send(result.refused === "reused"
+      ? { error: "This request id was already used for a project with a different name or access.", code: "PROJECT_REQUEST_ID_REUSED" }
+      : { error: "The project this request created is no longer available.", code: "PROJECT_REQUEST_UNAVAILABLE" });
+  }
+  const visible = db.getProjectForPrincipal(principal, result.project.id);
+  if (!visible) {
+    return reply.code(409).send({ error: "The project this request created is no longer available.", code: "PROJECT_REQUEST_UNAVAILABLE" });
+  }
+  if (result.created) hub.projectChanged(result.project);
+  return reply.code(result.created ? 201 : 200).send({ project: visible });
 });
 
 app.patch("/api/projects/:id", async (req, reply) => {
@@ -2411,7 +2436,11 @@ app.post("/api/projects/:id/locations/new", async (req, reply) => {
     db.createProjectWorkspace(id, runnerId, { name, path: browsed.data.path }, Date.now(), requested.scope);
   } catch (error) {
     const message = (error as Error).message;
-    return reply.code(message.includes("already registered") ? 409 : 400).send({ error: message });
+    // The code tells Add Location this refusal apart: after a lost reply, the retry is refused this
+    // way when the first request registered the folder (#3468).
+    return message.includes("already registered")
+      ? reply.code(409).send({ error: message, code: "LOCATION_ALREADY_REGISTERED" })
+      : reply.code(400).send({ error: message });
   }
   const project = db.getProject(id)!;
   hub.runnerChanged(runnerId);

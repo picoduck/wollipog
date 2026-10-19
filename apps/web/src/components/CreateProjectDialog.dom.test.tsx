@@ -65,12 +65,24 @@ const createdProject = (name: string, id = "project-new", createdAt = 5): Projec
 interface Rendered {
   requests: unknown[];
   created: ProjectView[];
+  /** The live snapshot's `idempotentProjectCreation` changing under the open dialog. */
+  setRetrySupported: (supported: boolean) => Promise<void>;
   unmount: () => Promise<void>;
+}
+
+/** Each request carries a fresh retry identity (#3468); the rest is what the person asked for. */
+function withoutRequestIds(requests: unknown[]): unknown[] {
+  return requests.map((request) => {
+    const { requestId, ...rest } = request as { requestId?: unknown };
+    assert.equal(typeof requestId, "string");
+    return rest;
+  });
 }
 
 async function render(options: {
   client?: Partial<ApiClient>;
   accessScopeManagementSupported?: boolean;
+  retrySupported?: boolean;
   projects?: readonly ProjectView[];
   stacked?: boolean;
 } = {}): Promise<Rendered> {
@@ -88,23 +100,24 @@ async function render(options: {
     },
     ...options.client,
   } as ApiClient;
-  await act(async () => {
-    root.render(
-      <ApiProvider client={client}>
-        <CreateProjectDialog
-          accessScopeManagementSupported={options.accessScopeManagementSupported ?? false}
-          projects={options.projects ?? []}
-          stacked={options.stacked}
-          onClose={() => {}}
-          onCreated={(project) => { created.push(project); }}
-        />
-      </ApiProvider>,
-    );
-  });
+  const draw = (retrySupported: boolean) => root.render(
+    <ApiProvider client={client}>
+      <CreateProjectDialog
+        accessScopeManagementSupported={options.accessScopeManagementSupported ?? false}
+        retrySupported={retrySupported}
+        projects={options.projects ?? []}
+        stacked={options.stacked}
+        onClose={() => {}}
+        onCreated={(project) => { created.push(project); }}
+      />
+    </ApiProvider>,
+  );
+  await act(async () => { draw(options.retrySupported ?? false); });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
   return {
     requests,
     created,
+    setRetrySupported: async (supported) => { await act(async () => { draw(supported); }); },
     unmount: async () => {
       await act(async () => root.unmount());
       mountPoint.remove();
@@ -193,7 +206,7 @@ test("a name another project uses warns with the count and that name, and creati
     ], "the helper stays and the warning describes the field too");
     assert.equal(nameField().getAttribute("aria-invalid"), null, "a warning is not an error");
     await submit();
-    assert.deepEqual(view.requests, [{ name: "DOCS SITE" }]);
+    assert.deepEqual(withoutRequestIds(view.requests), [{ name: "DOCS SITE" }]);
     assert.equal(view.created[0]?.name, "DOCS SITE");
   } finally {
     await view.unmount();
@@ -220,7 +233,7 @@ test("the Access field is labelled Access with its helper, and creates with the 
     assertNoDomNode(dialog().querySelector(".new-project-reason"), "nothing keeps Create Project off");
     await typeName("Docs Site");
     await submit();
-    assert.deepEqual(view.requests, [{ name: "Docs Site", owner: { kind: "organization", organizationId: ORG } }]);
+    assert.deepEqual(withoutRequestIds(view.requests), [{ name: "Docs Site", owner: { kind: "organization", organizationId: ORG } }]);
   } finally {
     await view.unmount();
   }
@@ -330,6 +343,206 @@ test("another owner's new namesake after a lost reply is not taken for this proj
     await submit();
     assert.deepEqual(view.created, [], "nothing ties the namesake to this request");
     assert.match(text(dialog().querySelector('[role="alert"]')), /may have been created/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+/** A server that honors request ids (#3468): it saves one project per id and answers a repeat
+ * with it. `lose(n)` decides whether the reply to the nth request is lost, after its commit. */
+function idempotentServer(lose: (attempt: number) => Error | null) {
+  const saved = new Map<string, ProjectView>();
+  const ids: string[] = [];
+  return {
+    saved,
+    ids,
+    client: {
+      createProject: async (request: { name: string; requestId?: string }) => {
+        ids.push(request.requestId!);
+        const project = saved.get(request.requestId!) ?? createdProject(request.name, `project-${saved.size + 1}`, 10);
+        saved.set(request.requestId!, project);
+        const failure = lose(ids.length);
+        if (failure) throw failure;
+        return { project };
+      },
+    } as Partial<ApiClient>,
+  };
+}
+const alert = () => dialog().querySelector('[role="alert"]');
+const tryAgain = () => [...(alert()?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
+  .find((button) => text(button) === "Try Again") ?? null;
+async function pressTryAgain() {
+  await act(async () => { tryAgain()!.click(); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+}
+
+test("after a lost reply, Try Again retries the same request and carries on with one project (#3468)", async () => {
+  const server = idempotentServer((attempt) => attempt === 1 ? new RequestTimeoutError(60_000) : null);
+  const view = await render({ client: server.client, retrySupported: true });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    assert.equal(server.saved.size, 1, "the first request saved the project");
+    assert.equal(view.created.length, 0, "a lost reply is not a hand-off");
+    assert.equal(text(alert()?.querySelector(".notice-title")), "Couldn't Create the Project");
+    assert.match(text(alert()), /Wollipog didn't answer, so it may have been created\. Try again to finish; it won't be created twice\./);
+    assert.ok(tryAgain(), "the notice offers Try Again");
+    await pressTryAgain();
+    assert.equal(server.saved.size, 1, "Try Again created no second project");
+    assert.equal(new Set(server.ids).size, 1, "both sends carried one request id");
+    assert.deepEqual(view.created.map((project) => project.id), ["project-1"], "the hand-off carries on with that project");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("against a server without request id support, a lost reply keeps the unknown notice and no Try Again (#3468)", async () => {
+  const server = idempotentServer(() => new TypeError("Failed to fetch"));
+  const view = await render({ client: server.client, retrySupported: false });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    assert.match(text(alert()), /Wollipog didn't answer, so it may have been created\. Check the Projects list before trying again\./);
+    assertNoDomNode(tryAgain());
+  } finally {
+    await view.unmount();
+  }
+});
+
+for (const [label, atSend, atFailure] of [
+  ["a downgrade", true, false],
+  ["an upgrade", false, true],
+] as const) {
+  test(`${label} while the reply is out offers no Try Again, even once support returns (#3468)`, async () => {
+    let view: Rendered | null = null;
+    const server = idempotentServer(() => new RequestTimeoutError(60_000));
+    const changing = {
+      createProject: async (request: { name: string; requestId?: string }) => {
+        // The control plane is replaced while this request is out.
+        await view!.setRetrySupported(atFailure);
+        return server.client.createProject!(request as never);
+      },
+    } as Partial<ApiClient>;
+    view = await render({ client: changing, retrySupported: atSend });
+    try {
+      await typeName("Docs Site");
+      await submit();
+      assertNoDomNode(tryAgain(), "a server that ignored the id once may have made a project a retry would duplicate");
+      assert.match(text(alert()), /Check the Projects list before trying again\./);
+      await view.setRetrySupported(true);
+      assertNoDomNode(tryAgain());
+    } finally {
+      await view.unmount();
+    }
+  });
+}
+
+test("editing the name after a lost reply withdraws Try Again, and the new name is a new request (#3468)", async () => {
+  const server = idempotentServer((attempt) => attempt === 1 ? new RequestTimeoutError(60_000) : null);
+  const view = await render({ client: server.client, retrySupported: true });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    assert.ok(tryAgain());
+    await typeName("Docs Portal");
+    assertNoDomNode(tryAgain(), "Try Again would retry a name that's no longer shown");
+    assert.match(text(alert()), /Check the Projects list before trying again\./);
+    // Back to the same name, the same request may be retried again.
+    await typeName("Docs Site");
+    assert.ok(tryAgain());
+    await typeName("Docs Portal");
+    await submit();
+    assert.equal(server.ids.length, 2);
+    assert.notEqual(server.ids[1], server.ids[0], "another name is another request");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a refused retry after a lost reply doesn't say nothing was created, and the name keeps the focus (#3468)", async () => {
+  const server = idempotentServer((attempt) => attempt === 1
+    ? new TypeError("Failed to fetch")
+    : new ApiError("The project this request created is no longer available.", 409, "PROJECT_REQUEST_UNAVAILABLE"));
+  const view = await render({ client: server.client, retrySupported: true });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    await pressTryAgain();
+    assert.match(text(alert()), /Wollipog refused the retry, but the earlier try may have created it\. Check the Projects list before trying again\./);
+    assert.doesNotMatch(text(alert()), /Nothing was created/);
+    assertNoDomNode(tryAgain());
+    assert.ok(domWindow.document.activeElement === (nameField() as unknown), "focus doesn't fall to the page");
+    // That id's project is gone, so pressing Create Project again is a new request.
+    await submit();
+    assert.equal(new Set(server.ids).size, 2);
+  } finally {
+    await view.unmount();
+  }
+});
+
+/** Moves the wall clock `hours` ahead for the rest of `run`, as a tab asleep that long would see. */
+async function withClockAhead(hours: number, run: () => Promise<void>) {
+  const realNow = Date.now;
+  Date.now = () => realNow() + hours * 60 * 60_000;
+  try {
+    await run();
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+test("Try Again is still offered and safe well inside the server's window (#3468)", async () => {
+  const server = idempotentServer((attempt) => attempt === 1 ? new RequestTimeoutError(60_000) : null);
+  const view = await render({ client: server.client, retrySupported: true });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    await withClockAhead(22, async () => {
+      await view.setRetrySupported(true);
+      assert.ok(tryAgain());
+      await pressTryAgain();
+    });
+    assert.equal(server.saved.size, 1);
+    assert.deepEqual(view.created.map((project) => project.id), ["project-1"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Try Again is withdrawn before the server forgets the request id (#3468)", async () => {
+  const server = idempotentServer(() => new RequestTimeoutError(60_000));
+  const view = await render({ client: server.client, retrySupported: true });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    assert.ok(tryAgain());
+    // An hour before the 24-hour window ends, the offer is gone and the notice points at the list.
+    await withClockAhead(23, async () => {
+      await view.setRetrySupported(true);
+      assertNoDomNode(tryAgain(), "a retry this late could reach a server that has forgotten the id");
+      assert.match(text(alert()), /Check the Projects list before trying again\./);
+    });
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a Try Again left on screen past the window, as in a tab asleep for a day, sends nothing (#3468)", async () => {
+  const server = idempotentServer(() => new RequestTimeoutError(60_000));
+  const view = await render({ client: server.client, retrySupported: true });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    const stale = tryAgain()!;
+    await withClockAhead(25, async () => {
+      await act(async () => { stale.click(); });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+      assert.equal(server.ids.length, 1, "no retry was sent");
+      assertNoDomNode(tryAgain(), "the stale offer is withdrawn");
+      assert.match(text(alert()), /Check the Projects list before trying again\./);
+      assert.ok(domWindow.document.activeElement === (nameField() as unknown), "focus doesn't fall to the page");
+    });
+    assert.deepEqual(view.created, []);
   } finally {
     await view.unmount();
   }
