@@ -55,7 +55,8 @@ for (const path of paths) {
         else if (path === "deleteRunner") db.deleteRunner("runner");
         else if (path === "deleteBox") db.deleteBox("box");
         else db[path]("target");
-        assert.equal(scans.length > 0, pending, "session scan is permitted only during legacy mapping");
+        assert.equal(scans.length, pending ? 1 : 0,
+          "mapping pending permits one scan total, including runner/box deletion with multiple sessions");
         assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM session_events_fts WHERE session_id='target'").get()!.n, 0);
         for (const term of ["legacysecret", "keyedsecret", "fallbacksecret"]) {
           assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM session_events_fts WHERE session_events_fts MATCH ?").get(term)!.n, 0);

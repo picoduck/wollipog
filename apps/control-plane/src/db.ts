@@ -13142,7 +13142,12 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN");
     try {
       this.detachRunnerProjectLocations(row.runner_id, Date.now());
-      for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
+      if (this.legacySearchRowsPending()) {
+        // Until mapping finishes, preserve one bulk scan rather than scanning once per session.
+        this.stmt("DELETE FROM session_events_fts WHERE session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
+      } else {
+        for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
+      }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(row.runner_id); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(row.runner_id); // cascades members
@@ -13195,7 +13200,12 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN");
     try {
       this.detachRunnerProjectLocations(runnerId, Date.now());
-      for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
+      if (this.legacySearchRowsPending()) {
+        // Until mapping finishes, preserve one bulk scan rather than scanning once per session.
+        this.stmt("DELETE FROM session_events_fts WHERE session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
+      } else {
+        for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
+      }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(runnerId); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(runnerId); // cascades members
