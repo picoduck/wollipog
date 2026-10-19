@@ -709,6 +709,7 @@ test("confirmations that differ only in rows, overflow or labels are not merged,
     { ...base, cancelLabel: "Keep Running" },
     { ...base, secondaryAction: { label: "Show Sessions", run: () => undefined } },
     { ...base, typeToConfirm: "Review Team" },
+    { ...base, typeToConfirm: "Review Team", typeToConfirmLabel: "Type the Group Name to Confirm" },
   ];
   await open(base);
   const duplicate = await open({ ...base, detailRows: [...base.detailRows!] });
@@ -748,7 +749,11 @@ test("a type-to-confirm confirmation focuses its field and keeps the danger butt
   const first = await open(deleteGroup);
   const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
   const field = dialog.querySelector<HTMLInputElement>(".modal-body .field input")!;
-  assert.equal(dialog.querySelector(".modal-body .field > span")?.textContent, "Type Review Team to Confirm");
+  const label = dialog.querySelector<HTMLLabelElement>(".modal-body .field > .field-label")!;
+  assert.equal(label.textContent, "Type Review Team to Confirm", "the label names the text when no fixed label is given");
+  assert.equal(label.htmlFor, field.id);
+  assertNoDomNode(dialog.querySelector(".modal-body .field-helper"), "and there is no helper");
+  assert.equal(field.hasAttribute("aria-describedby"), false);
   assert.ok(domWindow.document.activeElement === (field as unknown), "the name field has focus, not Cancel");
   const confirmButton = () => footButtons().find((button) => button.textContent === "Delete Group")!;
   assert.equal(confirmButton().disabled, true, "nothing is typed yet");
@@ -794,6 +799,35 @@ test("a type-to-confirm confirmation focuses its field and keeps the danger butt
   // Without typeToConfirm there is no field.
   await open(INTERRUPT);
   assertNoDomNode(document.querySelector('[role="dialog"] .modal-body input'));
+  await cleanup();
+});
+
+test("typeToConfirmLabel fixes the field's label and names the text in its helper, as a code chip", async () => {
+  const { open, outcomes, footButtons, cleanup } = await renderConfirmationService();
+  const name = "A Very Long Project Name That Would Make the Label a Paragraph ";
+  const first = await open({
+    title: "Delete Project",
+    message: "It is deleted for good.",
+    confirmLabel: "Delete Project",
+    tone: "danger",
+    typeToConfirm: name,
+    typeToConfirmLabel: "Type the Project Name to Confirm",
+  });
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  const field = dialog.querySelector<HTMLInputElement>(".modal-body .field input")!;
+  assert.equal(dialog.querySelector(".modal-body .field > .field-label")?.textContent, "Type the Project Name to Confirm");
+  assert.ok(domWindow.document.activeElement === (field as unknown), "the name field has focus");
+  const helper = document.getElementById(field.getAttribute("aria-describedby") ?? "")!;
+  assert.ok(helper.classList.contains("field-helper"));
+  assert.equal(helper.textContent, `Enter ${name} exactly.`);
+  assert.equal(helper.querySelector("code")?.textContent, name);
+  const confirmButton = () => footButtons().find((button) => button.textContent === "Delete Project")!;
+  await typeInto(field, name.trim());
+  assert.equal(confirmButton().disabled, true, "the trailing space counts");
+  await typeInto(field, name);
+  assert.equal(confirmButton().disabled, false);
+  await act(async () => { confirmButton().click(); await tick(); });
+  assert.equal(outcomes[first], true);
   await cleanup();
 });
 

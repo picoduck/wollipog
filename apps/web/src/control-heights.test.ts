@@ -257,7 +257,6 @@ test("a solid danger button is only ever the confirm of a destructive confirmati
   // a checkbox- or name-gated dialog, or the shared confirmation dialog.
   assert.deepEqual(solidDangerButtons(), [
     'FeedbackProvider.tsx: {`btn ${danger ? "danger" : "primary"}`}',
-    'ProjectsView.tsx: "btn danger"',
     'SkillMachineImportDialog.tsx: "btn danger"',
   ]);
 });

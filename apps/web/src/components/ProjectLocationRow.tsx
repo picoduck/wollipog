@@ -15,7 +15,7 @@ import { AccessScopeChangeDialog, hasOtherAccessChoice } from "./AccessScopeCont
 import { useFeedback } from "./FeedbackProvider.js";
 import { CheckIcon, ComputerIcon, ErrorIcon, FolderIcon, ServerIcon, WrenchIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
-import { ActionsMenu, type PageMenuAction } from "./PageHeader.js";
+import { ActionsMenu, type ActionsMenuChoice, type PageMenuAction } from "./PageHeader.js";
 import { PROJECT_BUSY_REASON } from "./ProjectDetailHeader.js";
 import { Spinner } from "./common.js";
 import { StatusBadge } from "./StatusBadge.js";
@@ -68,7 +68,7 @@ export interface ProjectLocationMenuState {
   createSetup: { reason: string | null } | null;
 }
 
-function item(label: string, onClick: () => void, reason: string | null, extra: Partial<PageMenuAction> = {}): PageMenuAction {
+function item(label: string, onClick: PageMenuAction["onClick"], reason: string | null, extra: Partial<PageMenuAction> = {}): PageMenuAction {
   return { label, onClick, disabled: reason !== null, ...(reason ? { description: reason } : {}), ...extra };
 }
 
@@ -85,7 +85,7 @@ export function projectLocationMenu(location: ProjectLocationView, state: Projec
   onMakeDefault: () => void;
   onChangeAccess: () => void;
   onCreateSetup: () => void;
-  onRemove: () => void;
+  onRemove: (choice: ActionsMenuChoice) => void;
 }): PageMenuAction[] {
   const items: PageMenuAction[] = [];
   if (state.narrow) items.push(item("New Session Here", actions.onNewSession, state.hostReason));
@@ -191,7 +191,8 @@ export function ProjectLocationRow({
   onReveal: () => void;
   onCopyPath: () => void;
   onMakeDefault: () => void;
-  onRemove: () => void;
+  /** Called with ⋯'s choice, so the confirmation can bring the row's ⋯ back as its phone Back (§7.5). */
+  onRemove: (choice: ActionsMenuChoice) => void;
   onAccessChanged: () => void;
 }) {
   const api = useApi();

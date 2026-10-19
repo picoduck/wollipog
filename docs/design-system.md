@@ -1734,6 +1734,10 @@ stacks on the first. Desktop keeps stacked dialogs as above.
 - **Type-to-confirm dialogs focus the name field**, not Cancel: the user must type before
   anything else can happen, and the danger button stays disabled until the name matches, so focus
   there cannot confirm by accident.
+- The field's label names the text: "Type Review Team to Confirm". Where that text can be long, a
+  project's name for Delete Project, `typeToConfirmLabel` gives a fixed label instead ("Type the
+  Project Name to Confirm") and the helper names the text: "Enter <name> exactly.", the name as an
+  inline code chip that shows every space, since the match is exact (#2964).
 - Non-destructive confirmations (Recover Session) use a primary button and no tone icon, and open
   with focus on the primary.
 - `window.confirm` is banned; every confirmation goes through `useFeedback().confirm`.

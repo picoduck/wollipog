@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { BoxView, ProjectLocationView, ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { archiveProjectWithFeedback, projectArchiveMessage } from "../project-actions.js";
+import {
+  archiveProjectWithFeedback,
+  projectArchiveMessage,
+  projectDeleteMessage,
+  projectNoLocationsLeftNote,
+  projectRemoveLocationMessage,
+  sessionCountLabel,
+} from "../project-actions.js";
 import { ProjectSettings } from "./ProjectSettings.js";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
@@ -15,9 +22,10 @@ import { runnerDisplay } from "../runners.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { AccessScopeSettings, useAccessScopeIdentity } from "./AccessScopeControls.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import { ConfirmationFailure, useFeedback } from "./FeedbackProvider.js";
 import { PlusIcon, ProjectsIcon } from "./Icons.js";
-import { DetailBar, PageHeader } from "./PageHeader.js";
+import { DetailBar, PageHeader, type ActionsMenuChoice } from "./PageHeader.js";
+import { archiveDetailRows } from "./ProjectSplitMenu.js";
 import { backLabel, destination, type ProjectsPane } from "../navigation.js";
 import { useIsMobile } from "./useIsMobile.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
@@ -28,7 +36,7 @@ import { accessScopeLabel } from "../access-scopes.js";
 import { writeClipboardText } from "../clipboard.js";
 import { DetailSection } from "./DetailSection.js";
 import { PROJECT_ACTIONS_LABEL, ProjectDetailHeader, projectDetailMenu, projectNewSessionBlocker } from "./ProjectDetailHeader.js";
-import { DetailSkeleton, Modal } from "./common.js";
+import { DetailSkeleton } from "./common.js";
 import { Notice } from "./Notice.js";
 import { ProjectList } from "./ProjectList.js";
 import { ProjectsOverview } from "./ProjectsOverview.js";
@@ -37,8 +45,7 @@ import { State } from "./State.js";
 
 type DialogState =
   | { kind: "create" }
-  | { kind: "add-location"; projectId: string; onboarding?: boolean }
-  | { kind: "delete" };
+  | { kind: "add-location"; projectId: string; onboarding?: boolean };
 
 /** A failed project action: the sentence the detail's notice leads with, and the raw message behind
  * its Show Details (§13.2). */
@@ -47,47 +54,8 @@ interface ProjectActionError {
   detail: string;
 }
 
-function DeleteProjectDialog({ project, busy, error, onClose, onDelete }: {
-  project: ProjectView;
-  busy: boolean;
-  error: string | null;
-  onClose: () => void;
-  onDelete: () => Promise<void>;
-}) {
-  const [confirmation, setConfirmation] = useState("");
-  const close = () => {
-    if (!busy) onClose();
-  };
-  return (
-    <Modal
-      title="Delete Project"
-      size="sm"
-      tone="danger"
-      closeButton={false}
-      onClose={close}
-      describedBy="delete-project-consequences"
-      footer={(
-        <>
-          <button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button>
-          <button type="button" className="btn danger" disabled={busy || confirmation !== project.name} onClick={() => void onDelete()}>
-            {busy ? "Deleting…" : "Delete Project"}
-          </button>
-        </>
-      )}
-    >
-      <div className="form">
-        <div id="delete-project-consequences" className="danger-note">
-          “{project.name}” is permanently deleted: its sessions move to No Project and its Locations are unlinked. Sessions and files are not deleted, and archived sessions stay archived.
-        </div>
-        <label className="field">
-          <span>Type {project.name} to Confirm</span>
-          <input autoFocus value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />
-        </label>
-        {error && <div className="form-error" role="alert">{error}</div>}
-      </div>
-    </Modal>
-  );
-}
+/** A confirmation chosen from a ⋯ sheet replaces it on a phone, and Back brings it back (§7.5). */
+const backToMenu = ({ reopen }: ActionsMenuChoice) => ({ label: "Back to More Actions", run: reopen });
 
 const PROJECTS = destination("projects");
 
@@ -139,6 +107,9 @@ export function ProjectsView({
     runnerDisplay(runners.get(location.runnerId), boxByRunner.get(location.runnerId), location.runnerId).name,
   [boxByRunner, runners]);
   const allProjects = useMemo(() => filterManagedProjects(projectMap.values(), "", "all"), [projectMap]);
+  /** The list when a confirmation settles, which can be well after it opened. */
+  const latestProjects = useRef(allProjects);
+  latestProjects.current = allProjects;
   const visibleProjects = useMemo(() => filterManagedProjects(projectMap.values(), query, visibility, machineName),
     [machineName, projectMap, query, visibility]);
   const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
@@ -233,18 +204,28 @@ export function ProjectsView({
     const project = await runProjectMutation(key, async () => (await api.updateProject(selected.id, changes)).project, null);
     if (!project) throw new Error("Another change to this project is still saving.");
   };
-  const archiveSessions = async () => {
+  const archiveSessions = async (choice: ActionsMenuChoice) => {
     if (!selected || selected.unarchivedSessionCount === 0) return;
+    const count = selected.unarchivedSessionCount;
+    // The sessions the page has loaded, with their shared status; the server archives every
+    // unarchived one, so those it has not loaded join "and N more" (#2051).
+    const { rows, overflow } = archiveDetailRows(
+      [...sessions.values()].filter((session) => session.projectId === selected.id && !session.archived),
+      count,
+    );
     const accepted = await confirm({
-      title: selectedStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions",
+      title: selectedStopsRuntime ? `Archive and Stop ${sessionCountLabel(count)}` : `Archive ${sessionCountLabel(count)}`,
       message: projectArchiveMessage({
         projectName: selected.name,
-        count: selected.unarchivedSessionCount,
+        count,
         stops: selectedStopsRuntime,
         onProjectPage: true,
       }),
+      detailRows: rows,
+      detailRowsOverflow: overflow,
       confirmLabel: selectedStopsRuntime ? "Archive and Stop" : "Archive Sessions",
       ...(selectedStopsRuntime ? { tone: "danger" as const } : {}),
+      back: backToMenu(choice),
     });
     if (!accepted) return;
     setBusy("archive");
@@ -257,14 +238,19 @@ export function ProjectsView({
       setBusy(null);
     }
   };
-  const removeLocation = async (location: ProjectLocationView) => {
+  const removeLocation = async (location: ProjectLocationView, choice: ActionsMenuChoice) => {
     if (!selected) return;
-    const last = selected.locations.length === 1;
     const accepted = await confirm({
       title: "Remove Location",
-      message: `New sessions in “${selected.name}” will no longer use “${location.name}” at ${location.path}. The folder is not deleted, and existing sessions and other Projects are unaffected${last ? "; this Project will have no Locations left" : ""}.`,
+      message: projectRemoveLocationMessage(selected.name, machineName(location)),
+      ...(selected.locations.length === 1
+        ? { details: <p className="confirmation-note">{projectNoLocationsLeftNote(selected.name)}</p> }
+        : {}),
+      // The path is its own mono row rather than wrapping mid-sentence (§11.3).
+      detailRows: [{ label: location.path, labelStyle: "mono" }],
       confirmLabel: "Remove Location",
       tone: "danger",
+      back: backToMenu(choice),
     });
     if (!accepted) return;
     try {
@@ -288,24 +274,41 @@ export function ProjectsView({
       fail("Couldn't reveal the location in the file manager.", cause);
     }
   };
-  const deleteProject = async () => {
-    if (!selected) return;
-    setBusy("delete");
+  const deleteProject = async (choice: ActionsMenuChoice) => {
+    if (!selected || busy) return;
+    const project = selected;
     setError(null);
-    try {
-      await api.deleteProject(selected.id);
-      const next = projectAfterRemoval(allProjects, selected.id);
-      setDeletedIds((current) => new Set(current).add(selected.id));
-      setDialog(null);
-      // A replace: the deleted project's route cannot be shown, so its unsaved settings are not
-      // asked about.
-      navigate(next ? { name: "projects", id: next.id } : { name: "projects" }, { replace: true });
-      showToast("Project deleted. Sessions moved to No Project.");
-    } catch (cause) {
-      fail("Couldn't delete the project.", cause);
-    } finally {
-      setBusy(null);
-    }
+    const deleted = await confirm({
+      title: "Delete Project",
+      message: projectDeleteMessage(project.name, project.totalSessionCount),
+      confirmLabel: "Delete Project",
+      tone: "danger",
+      // A fixed label: a long name would make "Type <name> to Confirm" a paragraph. The helper names it.
+      typeToConfirm: project.name,
+      typeToConfirmLabel: "Type the Project Name to Confirm",
+      progress: "Deleting the project…",
+      // The request cannot be withdrawn once sent, so Cancel waits for its answer.
+      cancelWhileRunning: false,
+      back: backToMenu(choice),
+      // The dialog stays open with the button busy, and a failure stays in it with the typed name (§7.4).
+      onConfirm: async () => {
+        setBusy("delete");
+        try {
+          await api.deleteProject(project.id);
+        } catch (cause) {
+          throw new ConfirmationFailure("Couldn't delete the project. Nothing was changed.", (cause as Error).message);
+        } finally {
+          setBusy(null);
+        }
+      },
+    });
+    if (!deleted) return;
+    const next = projectAfterRemoval(latestProjects.current, project.id);
+    setDeletedIds((current) => new Set(current).add(project.id));
+    // A replace: the deleted project's route cannot be shown, so its unsaved settings are not
+    // asked about.
+    navigate(next ? { name: "projects", id: next.id } : { name: "projects" }, { replace: true });
+    showToast("Project deleted. Sessions moved to No Project.");
   };
   const manageConnections = () => navigate({ name: "runners", section: "machines" });
   const refreshSelectedProject = async () => {
@@ -393,8 +396,8 @@ export function ProjectsView({
   } : null;
   const detailMenu = selected ? projectDetailMenu(selected, { stopsRuntime: selectedStopsRuntime, busy: busy !== null }, {
     onCopyId: () => void copyFromMenu(selected.id, "Project ID copied.", "Couldn't copy the project ID."),
-    onArchive: () => void archiveSessions(),
-    onDelete: () => openDialog({ kind: "delete" }),
+    onArchive: (choice) => void archiveSessions(choice),
+    onDelete: (choice) => void deleteProject(choice),
   }) : [];
   return (
     <section className="page full fill">
@@ -482,8 +485,7 @@ export function ProjectsView({
               {selected.canManage === false && (
                 <Notice tone="neutral" compact role="note">You can view this project, but you can't change it.</Notice>
               )}
-              {/* Delete Project shows its own request's failure (§7.3). */}
-              {error && dialog?.kind !== "delete" && (
+              {error && (
                 <Notice tone="danger" role="alert" onDismiss={() => setError(null)}
                   details={<div className="code-well"><code>{error.detail}</code></div>}>
                   {error.sentence}
@@ -535,7 +537,7 @@ export function ProjectsView({
                         onReveal={() => void reveal(location)}
                         onCopyPath={() => void copyFromMenu(location.path, "Path copied.", "Couldn't copy the path.")}
                         onMakeDefault={() => void makeDefault(location)}
-                        onRemove={() => void removeLocation(location)}
+                        onRemove={(choice) => void removeLocation(location, choice)}
                         onAccessChanged={() => void refreshSelectedProject()}
                       />
                     ))}
@@ -621,9 +623,6 @@ export function ProjectsView({
             }
           }}
         />
-      )}
-      {dialog?.kind === "delete" && selected && (
-        <DeleteProjectDialog project={selected} busy={busy === "delete"} error={error?.detail ?? null} onClose={() => setDialog(null)} onDelete={deleteProject} />
       )}
     </section>
   );
