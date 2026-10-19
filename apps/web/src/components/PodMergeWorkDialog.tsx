@@ -129,14 +129,29 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  // Bumped when the window regains focus or becomes visible: a commit made outside Wollipog (a
+  // terminal, an editor) changes no session activity, so it is the cue to read the worktrees again.
+  const [recheck, setRecheck] = useState(0);
+  useEffect(() => {
+    const again = () => { if (document.visibilityState !== "hidden") setRecheck((count) => count + 1); };
+    window.addEventListener("focus", again);
+    document.addEventListener("visibilitychange", again);
+    return () => {
+      window.removeEventListener("focus", again);
+      document.removeEventListener("visibilitychange", again);
+    };
+  }, []);
 
   const source = pod.members.some((member) => member.sessionId === fromId) ? sessions.get(fromId) : undefined;
   const target = pod.members.some((member) => member.sessionId === intoId) ? sessions.get(intoId) : undefined;
   const runner = target ? runners.get(target.runnerId) : undefined;
   const name = (sessionId: string) => podMemberShortName(pod, sessions, sessionId);
+  // By role and agent, and by task too where two members share both, so From and Into never read alike.
+  const choiceName = (sessionId: string) => podMemberShortName(pod, sessions, sessionId, { withAgent: true });
 
-  // Read each chosen idle member's worktree, again whenever it settles from a turn, so Merge can say
-  // which member still has uncommitted changes. A failed read leaves the decision to the server.
+  // Read each chosen idle member's worktree, again whenever it settles from a turn or the window
+  // comes back, so Merge can say which member still has uncommitted changes. A failed read leaves
+  // the decision to the server. A re-read keeps the last answer until the new one arrives.
   const checks = [source, target]
     .filter((session): session is SessionView => Boolean(session?.worktreePath) && session?.status === "idle")
     .map((session) => `${session.id}@${session.lastEventAt ?? 0}`);
@@ -145,7 +160,9 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
     if (!checkKey) return;
     let current = true;
     const sessionIds = checkKey.split(" ").map((entry) => entry.slice(0, entry.lastIndexOf("@")));
-    setWorktrees((known) => new Map([...known, ...sessionIds.map((id) => [id, "checking"] as const)]));
+    setWorktrees((known) => new Map([...known, ...sessionIds
+      .filter((id) => !known.has(id) || known.get(id) === "unknown")
+      .map((id) => [id, "checking"] as const)]));
     for (const sessionId of sessionIds) {
       api.git(sessionId, { action: "status" })
         .then((data) => data.status ? (data.status.hasChanges ? "changed" : "clean") : "unknown")
@@ -155,7 +172,7 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
         });
     }
     return () => { current = false; };
-  }, [api, checkKey]);
+  }, [api, checkKey, recheck]);
 
   const blockedReason = podMergeBlockedReason({ pod, source, target, runner, worktrees, name });
 
@@ -175,7 +192,9 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
 
   const options = pod.members.map((member) => {
     const session = sessions.get(member.sessionId);
-    return { value: member.sessionId, label: podMemberName(member, session), description: podMemberTask(member, session) || undefined };
+    const label = choiceName(member.sessionId);
+    const task = podMemberTask(member, session);
+    return { value: member.sessionId, label, ...(task && label === podMemberName(member, session) ? { description: task } : {}) };
   });
   const reasonId = `${ids}-reason`;
   const ruleId = `${ids}-rule`;

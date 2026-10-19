@@ -447,3 +447,85 @@ test("Recent Merges name the members in words with an inline status, and keep he
     await view.unmount();
   }
 });
+
+/** A lead and two workers on one agent: role and agent alone cannot tell the workers apart. */
+function twoWorkerPod(reconciliations: PodReconciliation[] = []): { pod: PodView; members: SessionView[] } {
+  const base = pod({}, reconciliations);
+  return {
+    pod: {
+      ...base,
+      members: [
+        ...base.members,
+        { sessionId: "worker-2", joinedAt: 1, role: "worker", contextTokenBudget: null, lastContextSeq: 0 },
+      ],
+    },
+    members: [...sessions(), session("worker-2", "Worker: update the tests")],
+  };
+}
+
+test("two workers on one agent stay distinguishable as From, Into and in Recent Merges (CR-1.2)", async () => {
+  const { pod: shared, members } = twoWorkerPod([{
+    reconciliationId: "r-w", podId: "pod-1", sourceSessionId: "worker", targetSessionId: "worker-2", actorId: "local",
+    status: "applied", createdAt: Date.now() - 60_000, completedAt: Date.now() - 60_000,
+  }]);
+  const view = await mount([shared], members);
+  try {
+    const dialog = await openDialog("Merge Work…", "Merge Work");
+    assert.deepEqual(await optionLabels(dialog, "From"), [
+      "Lead · Codex App Server",
+      "Worker · Codex App Server: migrate call sites",
+      "Worker · Codex App Server: update the tests",
+    ]);
+    await chooseOption(dialog, "Into", "Worker · Codex App Server: update the tests");
+    await chooseOption(dialog, "From", "Worker · Codex App Server: migrate call sites");
+    const closed = (label: string) => dialog.querySelector<HTMLButtonElement>(`[aria-label^="${label}:"]`)!.getAttribute("aria-label");
+    assert.equal(closed("From"), "From: Worker · Codex App Server: migrate call sites");
+    assert.equal(closed("Into"), "Into: Worker · Codex App Server: update the tests");
+    assert.equal(dialog.querySelector(".pod-merge-row .row-title")?.textContent,
+      "Worker · Codex App Server: migrate call sites into Worker · Codex App Server: update the tests");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a member committed outside Wollipog is read again when the window comes back, and Merge enables (CR-1.1)", async () => {
+  let dirty = true;
+  const view = await mount([pod()], sessions(), {
+    git: async (sessionId: string) => ({ status: { hasChanges: dirty && sessionId === "worker" } }),
+  } as unknown as Partial<ApiClient>);
+  try {
+    const dialog = await openDialog("Merge Work…", "Merge Work");
+    await settle();
+    assert.equal(buttonNamed(dialog, "Merge")!.disabled, true, "uncommitted changes block Merge");
+    // A commit in a terminal changes no session activity; returning to the window re-reads.
+    dirty = false;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus") as never); });
+    await settle();
+    assert.equal(buttonNamed(dialog, "Merge")!.disabled, false);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("on a phone the Automatic Turns footer holds Cancel and Save and Start; Save moves to the body's end (CR-1.3)", async () => {
+  await act(async () => domWindow.happyDOM.setWindowSize({ width: 390, height: 844 }));
+  const updates: UpdatePodOrchestrationRequest[] = [];
+  const view = await mount([pod()], sessions(), {
+    updatePodOrchestration: async (_id: string, request: UpdatePodOrchestrationRequest) => { updates.push(request); return { pod: pod() }; },
+  } as Partial<ApiClient>);
+  try {
+    const dialog = await openDialog("Automatic Turns…", "Automatic Turns");
+    await act(async () => radio(dialog, "Round Robin").click());
+    await settle();
+    const footer = dialog.querySelector(".modal-foot")!;
+    assert.deepEqual([...footer.querySelectorAll("button")].map((button) => button.textContent?.trim()), ["Cancel", "Save and Start"]);
+    const save = dialog.querySelector<HTMLButtonElement>(".modal-body .modal-tertiary button");
+    assert.equal(save?.textContent?.trim(), "Save");
+    await act(async () => save!.click());
+    await settle();
+    assert.equal(updates.at(-1)?.mode, "round_robin");
+  } finally {
+    await view.unmount();
+    await act(async () => domWindow.happyDOM.setWindowSize({ width: 1440, height: 900 }));
+  }
+});

@@ -28,13 +28,25 @@ export function podMemberChoiceLabel(member: PodMemberView, session: SessionView
   return task ? `${podMemberName(member, session)}: ${task}` : podMemberName(member, session);
 }
 
-/** A member in a sentence: its role while no other member shares it, else role and agent. A
- * session no longer in the pod is named by its title, or "a former member". */
-export function podMemberShortName(pod: PodView, sessions: ReadonlyMap<string, SessionView>, sessionId: string): string {
+/**
+ * A member by the shortest name no other member shares: its role ("Worker"), else role and agent
+ * ("Worker · Codex"), else those and its task ("Worker · Codex: migrate call sites"), so two
+ * workers on one agent never read alike. `withAgent` starts at role and agent, for a choice that
+ * names members by both. A session no longer in the pod is named by its title, or "A former member".
+ */
+export function podMemberShortName(
+  pod: PodView,
+  sessions: ReadonlyMap<string, SessionView>,
+  sessionId: string,
+  { withAgent = false }: { withAgent?: boolean } = {},
+): string {
   const member = pod.members.find((candidate) => candidate.sessionId === sessionId);
   if (!member) return sessions.get(sessionId)?.title || "A former member";
-  const shared = pod.members.some((other) => other.sessionId !== sessionId && other.role === member.role);
-  return shared ? podMemberName(member, sessions.get(sessionId)) : podRoleLabel(member.role);
+  const others = pod.members.filter((other) => other.sessionId !== sessionId);
+  if (!withAgent && !others.some((other) => other.role === member.role)) return podRoleLabel(member.role);
+  const name = podMemberName(member, sessions.get(sessionId));
+  const sharesName = others.some((other) => podMemberName(other, sessions.get(other.sessionId)) === name);
+  return sharesName ? podMemberChoiceLabel(member, sessions.get(sessionId)) : name;
 }
 
 /** Stop reasons a person caused or already sees elsewhere, which need no banner. */

@@ -8,6 +8,7 @@ import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceRows, Select, type ChoiceRowOption, type SelectOption } from "./ui/ChoiceControls.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 /** The policy a pod without one reports: the control plane's defaults. */
 export const DEFAULT_POD_ORCHESTRATION_POLICY: PodOrchestrationPolicy = {
@@ -80,6 +81,7 @@ export function PodAutomaticTurnsDialog({ pod, sessions, onClose }: {
   const api = useApi();
   const { loadPodContext } = useStoreActions();
   const ids = useId();
+  const phone = useIsMobile();
   const saved = pod.orchestration?.policy ?? DEFAULT_POD_ORCHESTRATION_POLICY;
   const [draft, setDraft] = useState<Draft>(() => ({
     mode: saved.mode,
@@ -210,22 +212,28 @@ export function PodAutomaticTurnsDialog({ pod, sessions, onClose }: {
   const startLabelId = `${ids}-start`;
   const startLabel = draft.mode === "event_triggered" ? "Starting Member" : "First Member";
   const disabled = Boolean(blockedReason);
+  const saveWithoutStarting = (
+    <BusyButton className="btn" busy={busy === "save"} progress="Saving automatic turns…"
+      disabled={disabled || busy === "start"} aria-describedby={blockedReason ? reasonId : undefined}
+      onClick={() => void submit(false)}>
+      Save
+    </BusyButton>
+  );
   return (
     <Modal
       title="Automatic Turns"
       description="Let members take turns without you relaying each step."
       onClose={onClose}
+      // A phone sheet's footer holds two buttons (§7.5): Cancel and the primary. Save without
+      // starting moves to the full-width row at the body's end that the dialog keeps for a third action.
+      tertiary={automatic && phone ? saveWithoutStarting : undefined}
       footer={(
         <>
           {blockedReason && <span className="pod-turns-reason" id={reasonId}>{blockedReason}</span>}
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           {automatic ? (
             <>
-              <BusyButton className="btn" busy={busy === "save"} progress="Saving automatic turns…"
-                disabled={disabled || busy === "start"} aria-describedby={blockedReason ? reasonId : undefined}
-                onClick={() => void submit(false)}>
-                Save
-              </BusyButton>
+              {!phone && saveWithoutStarting}
               <BusyButton className="btn primary" busy={busy === "start"} progress="Starting automatic turns…"
                 disabled={disabled || busy === "save"} aria-describedby={blockedReason ? reasonId : undefined}
                 onClick={() => void submit(true)}>
