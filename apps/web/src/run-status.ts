@@ -23,8 +23,9 @@ export interface RunWorkflows {
   names: ReadonlyMap<string, string>;
   /** The runs the load answered for. A run that arrived after it is not known yet. */
   runIds: ReadonlySet<string>;
-  /** A run created before this may have an instance past the page the server returned, so its type
-   * is unknown rather than Comparison. `-Infinity` when the page held every instance. */
+  /** A run created at or before this may have an instance past the page the server returned (the
+   * page is ordered by time, then id, so instances sharing its last time can straddle the limit), so
+   * its type is unknown rather than Comparison. `-Infinity` when the page held every instance. */
   completeSince: number;
 }
 
@@ -59,7 +60,7 @@ export function runType(run: Pick<RunView, "id" | "createdAt">, workflows: RunWo
   if (!workflows) return { kind: "unknown" };
   const instance = workflows.instances.get(run.id);
   if (instance) return { kind: "workflow", name: workflows.names.get(instance.workflowId) ?? "Workflow", instance };
-  if (!workflows.runIds.has(run.id) || run.createdAt < workflows.completeSince) return { kind: "unknown" };
+  if (!workflows.runIds.has(run.id) || run.createdAt <= workflows.completeSince) return { kind: "unknown" };
   return { kind: "comparison" };
 }
 

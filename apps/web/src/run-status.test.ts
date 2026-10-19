@@ -75,4 +75,7 @@ test("a full page of instances leaves older runs unknown instead of calling them
   const workflows = indexRunWorkflows(page, [definition], ["new", "mid", "recent", "old"], 2);
   assert.equal(runType(run("recent", [], 45), workflows).kind, "comparison");
   assert.equal(runType(run("old", [], 30), workflows).kind, "unknown");
+  // The server pages by time, then id, so instances sharing the boundary time can straddle the
+  // limit: a run created at exactly that time may own one the page left out.
+  assert.equal(runType(run("tied", [], 40), indexRunWorkflows(page, [definition], ["tied"], 2)).kind, "unknown");
 });

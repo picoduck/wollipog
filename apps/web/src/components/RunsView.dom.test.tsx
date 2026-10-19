@@ -444,6 +444,27 @@ describe("Runs list rows (#2974)", () => {
     }
   });
 
+  test("a load the list has moved past never applies, even after the newer one fails", async () => {
+    const loads: Array<{ resolve: (value: WorkflowInstanceView[]) => void; reject: (error: Error) => void }> = [];
+    const fixture = await loaded({
+      workflowInstances: () => new Promise<WorkflowInstanceView[]>((resolve, reject) => { loads.push({ resolve, reject }); }),
+    } as Partial<ApiClient>);
+    try {
+      assert.equal(loads.length, 1);
+      // A workflow instance is attached to the run: its update starts a second load.
+      await act(async () => fixture.socket.onmessage?.({ data: JSON.stringify({ type: "run_upsert", run: { ...gated, updatedAt: 2 } }) }));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+      assert.equal(loads.length, 2);
+      await act(async () => { loads[1]!.reject(new Error("offline")); await new Promise((resolve) => setTimeout(resolve, 0)); });
+      // The first load answered from before the attachment: it must not label the run Comparison.
+      await act(async () => { loads[0]!.resolve([]); await new Promise((resolve) => setTimeout(resolve, 0)); });
+      assert.deepEqual(meta(rowNamed(fixture.container, gated.title)), ["Alpha", "Claude Code"]);
+      assertNoDomNode(rowNamed(fixture.container, gated.title).querySelector(".row-icon svg"), "no type is guessed");
+    } finally {
+      await fixture.unmount();
+    }
+  });
+
   test("a failed definition load only costs a workflow its name", async () => {
     const fixture = await loaded({ workflowDefinitions: async () => { throw new Error("forbidden"); } } as Partial<ApiClient>);
     try {

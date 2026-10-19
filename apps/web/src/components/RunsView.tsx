@@ -144,32 +144,26 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
 
 /**
  * Every run's workflow instance and each workflow's name, loaded once with the list and again when a
- * run's `updatedAt` changes or the connection returns. A newer load always wins. A failed instance
- * load keeps the last answer, so rows fall back to no type and a status from their members alone; a
- * failed definition load only costs the workflows their names.
+ * run's `updatedAt` changes or the connection returns. Only the load for the current runs applies: a
+ * change cancels the one in flight, so an answer from before a workflow was attached can never land
+ * after it, even when the newer load fails. A failed instance load keeps the last answer, so rows
+ * fall back to no type and a status from their members alone; a failed definition load only costs
+ * the workflows their names.
  */
 function useRunWorkflows(runs: readonly RunView[], online: boolean): RunWorkflows | null {
   const api = useApi();
   const [workflows, setWorkflows] = useState<RunWorkflows | null>(null);
-  const alive = useRef(true);
-  const issued = useRef(0);
-  const applied = useRef(0);
   const key = JSON.stringify(runs.map((run) => [run.id, run.updatedAt]));
-  useEffect(() => {
-    alive.current = true;
-    return () => { alive.current = false; };
-  }, []);
   useEffect(() => {
     const ids = (JSON.parse(key) as Array<[string, number]>).map(([id]) => id);
     if (!online || !ids.length) return;
-    const generation = ++issued.current;
+    let current = true;
     void Promise.all([api.workflowInstances(), api.workflowDefinitions().catch(() => [])])
       .then(([instances, definitions]) => {
-        if (!alive.current || generation <= applied.current) return;
-        applied.current = generation;
-        setWorkflows(indexRunWorkflows(instances, definitions, ids));
+        if (current) setWorkflows(indexRunWorkflows(instances, definitions, ids));
       })
       .catch(() => {});
+    return () => { current = false; };
   }, [api, key, online]);
   return workflows;
 }
