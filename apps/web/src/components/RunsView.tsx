@@ -216,7 +216,7 @@ export function RunRow({ run, sessions, workflows, now, onOpen }: {
         <span className="row-sub run-row-meta">
           {typeLabel && <span className="run-row-type">{typeLabel}</span>}
           {run.workspaceName && (
-            <span className="run-row-project"><ProjectsIcon size={14} aria-hidden="true" /><span>{run.workspaceName}</span></span>
+            <span><ProjectsIcon size={14} aria-hidden="true" /><span>{run.workspaceName}</span></span>
           )}
           {agents && <span className="run-row-agents"><BotIcon size={14} aria-hidden="true" /><span>{agents}</span></span>}
         </span>

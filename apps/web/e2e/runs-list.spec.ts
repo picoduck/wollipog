@@ -69,6 +69,45 @@ test.describe("at 390×844", () => {
     expect(Math.abs(geometry.badge!.left - geometry.title!.left)).toBeLessThanOrEqual(1);
   });
 
+  test("line 2 keeps its type whole, its items 12px apart, and folds what does not fit whole", async ({ page }) => {
+    await open(page, "loaded");
+    const rows = await page.locator(".surface > .row").evaluateAll((elements) => elements.map((element) => {
+      const meta = element.querySelector<HTMLElement>(".run-row-meta")!.getBoundingClientRect();
+      const items = [...element.querySelectorAll<HTMLElement>(".run-row-meta > span")].map((item) => {
+        const rect = item.getBoundingClientRect();
+        const text = item.matches(".run-row-type") ? item : item.querySelector<HTMLElement>("span")!;
+        return {
+          text: item.textContent ?? "",
+          type: item.matches(".run-row-type"),
+          visible: rect.top >= meta.top - 1 && rect.bottom <= meta.bottom + 1,
+          hidden: rect.top >= meta.bottom - 1,
+          left: rect.left,
+          right: rect.right,
+          truncated: text.scrollWidth > text.clientWidth,
+          textWidth: text.clientWidth,
+        };
+      });
+      return { title: element.querySelector(".row-title")?.textContent ?? "", items };
+    }));
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      const shown = row.items.filter((item) => item.visible);
+      expect(shown[0]?.type, `${row.title}: the type leads line 2`).toBe(true);
+      expect(shown[0]!.truncated, `${row.title}: the type has room and keeps its words`).toBe(false);
+      for (const item of row.items) {
+        expect(item.visible || item.hidden, `${row.title}: "${item.text}" is either in view or folded away whole`).toBe(true);
+        // A truncated item still shows a few characters: never a lone initial.
+        if (item.visible && item.truncated) expect(item.textWidth, `${row.title}: "${item.text}"`).toBeGreaterThanOrEqual(48);
+      }
+      for (let index = 1; index < shown.length; index += 1) {
+        expect(Math.abs(shown[index]!.left - shown[index - 1]!.right - 12), `${row.title}: items sit 12px apart`).toBeLessThanOrEqual(1);
+      }
+    }
+    // The idle comparison has no badge, so its agents have room to show by name.
+    const idle = rows.find((row) => row.title === "Pick a date library for the scheduler")!;
+    expect(idle.items.filter((item) => item.visible).map((item) => item.text)[1]).toMatch(/^Claude Code/);
+  });
+
   test("a row without a badge starts its meta under the title", async ({ page }) => {
     await open(page, "loaded");
     const geometry = await rowGeometry(page, "Pick a date library for the scheduler");
