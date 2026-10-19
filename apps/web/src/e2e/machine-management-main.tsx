@@ -612,7 +612,8 @@ declare global {
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
         "multiple-installations" | "harness-states" | "harness-states-ssh" |
         "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper" |
-        "explicit-interpreter" | "older-interpreter-guidance" | "agent-states" | "no-agents-ready"): void;
+        "explicit-interpreter" | "older-interpreter-guidance" | "agent-states" |
+        "selected-installation-unavailable"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
       /** A host name long enough that the detail's meta line has to truncate (#2988). */
       setRunnerHostname(hostname: string): void;
@@ -721,7 +722,25 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
             : "This installation uses a Windows batch wrapper. Use the package or version manager that installed this exact copy." },
       }];
       runner.harnessSelections = [];
-    } else if (scenario === "agent-states" || scenario === "no-agents-ready") {
+    } else if (scenario === "selected-installation-unavailable") {
+      // The Machine's chosen Codex fails its check while another installation works (#2990).
+      runner.protocolVersion = PROTOCOL_VERSION;
+      const codex = (id: string, path: string, version: string, selection: "selected" | "other"): RunnerView["agents"][number] => ({
+        id, name: "Codex", command: path, args: [], env: {}, driver: "codex-app-server", context: { kind: "native" },
+        source: "discovered", authStatus: "authenticated", version,
+        installation: { id, path, via: "path", selection },
+        ...(selection === "selected"
+          ? { available: false, codexAppServer: { status: "unsupported" as const, appServerAvailable: false,
+              failure: { code: "probe_failed" as const, message: "Codex exited before it answered the check." } } }
+          : { available: true, codexAppServer: { status: "supported" as const, appServerAvailable: true } }),
+      });
+      runner.agents = [
+        codex("codex-broken", "C:\\Broken\\codex.exe", "0.155.1", "selected"),
+        codex("codex-working", "C:\\Program Files\\Codex\\codex.exe", "0.160.0", "other"),
+      ];
+      runner.harnessSelections = [{ family: "codex", context: { kind: "native" }, installationId: "codex-broken",
+        path: "C:\\Broken\\codex.exe", via: "path", version: "0.155.1", agentId: "codex-broken" }];
+    } else if (scenario === "agent-states") {
       // One agent in each status the Agents section shows (#2990), and three that are not installed.
       runner.protocolVersion = PROTOCOL_VERSION;
       runner.harnessSelections = [];
@@ -750,11 +769,7 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
         { ...discovered, id: "pi", name: "Pi", command: "pi", driver: "pi", available: false,
           unavailableReason: "Pi is not installed. Install @earendil-works/pi-coding-agent, then rediscover." },
       ];
-      runner.agents = scenario === "no-agents-ready" ? [
-        { ...discovered, id: "claude", name: "Claude Code", command: "claude", driver: "claude-code", available: false,
-          claudeCode: claudeCode("unavailable") },
-        ...missing.slice(1),
-      ] : [
+      runner.agents = [
         { ...discovered, id: "claude", name: "Claude Code", command: "C:\\Users\\example\\.local\\bin\\claude.exe",
           driver: "claude-code", available: true, authStatus: "authenticated", version: "2.1.4", claudeCode: claudeCode("ready"),
           installation: { id: "claude-local", path: "C:\\Users\\example\\.local\\bin\\claude.exe", via: "common-dir" },

@@ -100,6 +100,26 @@ test("sizes are classes on the surface, and the panel carries the caller's class
   }
 });
 
+test("an initial focus target inside the dialog takes the opening focus instead of the first field (#2990)", async () => {
+  matchingMedia = new Set(["(pointer: fine)"]);
+  function Opened({ at }: { at: boolean }) {
+    const section = React.useRef<HTMLHeadingElement>(null);
+    return (
+      <Modal title="Settings" onClose={() => undefined} {...(at ? { initialFocusRef: section } : {})}>
+        <input aria-label="Machine Name" />
+        <h3 ref={section} tabIndex={-1}>Installations</h3>
+      </Modal>
+    );
+  }
+  const atSection = await mount(<Opened at />);
+  assert.equal(document.activeElement?.textContent, "Installations");
+  await atSection.unmount();
+  // Without one, the first field keeps the opening focus.
+  const plain = await mount(<Opened at={false} />);
+  assert.equal(document.activeElement?.getAttribute("aria-label"), "Machine Name");
+  await plain.unmount();
+});
+
 test("a child stacks on its parent on desktop, and closing it returns focus inside the parent", async () => {
   matchingMedia = new Set();
   function Parent() {

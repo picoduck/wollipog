@@ -137,6 +137,35 @@ test("Agent Details leads with the fix, and Approve Launch… confirms the exact
     .getByRole("button", { name: "Revoke Approval", exact: true })).toHaveClass(/\bdanger\b/);
 });
 
+test("Choose Another Installation… opens Machine Settings with focus and view on its installations (#2990)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("selected-installation-unavailable"));
+  await agentRow(page, "Codex App Server (v0.155.1)").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server (v0.155.1)" });
+  await expect(details.locator(".notice")).toContainText("Codex exited before it answered the check. Rediscover to check it again.");
+  await details.getByRole("button", { name: "Choose Another Installation…" }).click();
+  const settings = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  const heading = settings.getByRole("heading", { name: "Agent Harness Installations" });
+  // After the opening effects settle, focus and the view agree: the installations, not Machine Name.
+  await page.waitForTimeout(500);
+  await expect(heading).toBeFocused();
+  await expect(heading).toBeInViewport();
+  await expect(settings.getByLabel("Machine Name")).not.toBeFocused();
+  await settings.getByRole("button", { name: "Close", exact: true }).last().click();
+  // Agent Details stayed under Machine Settings.
+  await expect(details).toBeVisible();
+});
+
+test("a machine's own manager gets no Choose Another Installation…, whose installations they cannot see (#2990)", async ({ page }) => {
+  await page.goto(`/machine-management-e2e.html?role=machine-owner&${DESIGN_WORKSTATION}`);
+  await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("selected-installation-unavailable"));
+  await agentRow(page, "Codex App Server (v0.155.1)").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server (v0.155.1)" });
+  await expect(details.locator(".notice")).toContainText("Rediscover to check it again.");
+  await expect(details.getByRole("button", { name: "Choose Another Installation…" })).toHaveCount(0);
+});
+
 test("Machine settings show competing installations and switch the saved target", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
   await openSettings(page);

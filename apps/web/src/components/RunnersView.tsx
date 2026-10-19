@@ -109,14 +109,12 @@ function MachineSettingsDialog({
   onClose: () => void;
   onDelete: () => Promise<void>;
   capacityOnly?: boolean;
-  /** Opened from Agent Details' Choose Another Installation… (#2990): starts at the installations. */
+  /** Opened from Agent Details' Choose Another Installation… (#2990): the installations heading
+   * takes the opening focus, which also brings it into view. #2991 can reuse this per section. */
   atInstallations?: boolean;
 }) {
   const api = useApi();
-  const installationsRef = useRef<HTMLElement>(null);
-  useLayoutEffect(() => {
-    if (atInstallations) installationsRef.current?.scrollIntoView({ block: "start" });
-  }, [atInstallations]);
+  const installationsRef = useRef<HTMLHeadingElement>(null);
   const { confirm } = useFeedback();
   const runnerId = runner?.runnerId ?? box?.runnerId ?? "";
   const display = runnerDisplay(runner, box, runnerId);
@@ -256,6 +254,7 @@ function MachineSettingsDialog({
       onClose={onClose}
       size="lg"
       className="machine-settings-dialog"
+      {...(atInstallations ? { initialFocusRef: installationsRef } : {})}
       footer={<button type="button" className="btn" onClick={onClose}>Close</button>}
     >
       {!capacityOnly && <section className="machine-settings-section">
@@ -288,8 +287,8 @@ function MachineSettingsDialog({
 
       {!capacityOnly && runner && (installations.length > 0 || harnessSelections.length > 0 ||
         targetInstallations.length > 0 || targetHarnessSelections.length > 0) && (
-        <section className="machine-settings-section" ref={installationsRef}>
-          <h3>Agent Harness Installations</h3>
+        <section className="machine-settings-section">
+          <h3 ref={installationsRef} tabIndex={-1}>Agent Harness Installations</h3>
           <p>Choose the executable this Machine uses for each harness and execution context. A missing choice stays saved until you select another installation.</p>
           {!installationSupported && <p className="hint">{runnerCapabilityRequirement(
             runner.protocolVersion, "harnessInstallations", "harness installation selection",
@@ -820,7 +819,9 @@ export function RunnersView() {
           // An SSH machine's harness status is current only while its connection is up too.
           online={selectedMachine.runner.status === "online" && (!selectedMachine.box || selectedMachine.box.status === "online")}
           canFindSessions={canFindSessions}
-          onChooseInstallation={selectedActions.settings ? () => {
+          // Only owners and admins see the installations in Machine Settings; a machine's own
+          // manager gets the capacity alone (`capacityOnly`), so the button would lead nowhere.
+          onChooseInstallation={canManageMachines ? () => {
             setSettingsAtInstallations(true);
             setSettingsRunnerId(selectedMachine.runnerId);
           } : undefined}
