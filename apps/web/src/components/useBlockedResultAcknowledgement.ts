@@ -21,7 +21,9 @@ export function useBlockedResultAcknowledgement(session: SessionView) {
     acknowledged,
     available: targets.some((target) => !isAcknowledged(target.parentTurnId, target.revision)),
     isAcknowledged,
-    acknowledge: () => {
+    /** `onSettled` hears whether any alert was acknowledged, once the request settles; a call while
+     * one is running is ignored and never settles. */
+    acknowledge: (onSettled?: (acknowledged: boolean) => void) => {
       if (pending.current || targets.length === 0) return;
       pending.current = true;
       setBusy(true);
@@ -34,8 +36,10 @@ export function useBlockedResultAcknowledgement(session: SessionView) {
         setAcknowledged((current) => new Set([...current, ...resolved]));
         showToast(resolved.length ? "Blocked-result alerts acknowledged." : "Background results changed. Review the current alerts.",
           { tone: resolved.length ? "success" : "info" });
+        onSettled?.(resolved.length > 0);
       }).catch((error: unknown) => {
         showToast(error instanceof Error ? error.message : "The blocked-result alerts could not be acknowledged.", { tone: "error" });
+        onSettled?.(false);
       }).finally(() => {
         pending.current = false;
         setBusy(false);

@@ -30,7 +30,11 @@ const globals: Record<string, unknown> = {
   window: domWindow,
   document: domWindow.document,
   navigator: domWindow.navigator,
+  Element: domWindow.Element,
   HTMLElement: domWindow.HTMLElement,
+  // The notice slot's "+N More" menu (#2871).
+  HTMLButtonElement: domWindow.HTMLButtonElement,
+  Node: domWindow.Node,
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 };
@@ -80,22 +84,25 @@ test("a job's current state keeps its lifecycle separate from where its result i
     "an offline runner cannot confirm a stalled job any more than a running one");
 });
 
-test("every watchdog is one notice at the top of its highlighted group, and its details wait for Show Details (#2859)", async () => {
+test("every watchdog is one notice in the panel's notice slot, titled with its turn, and its details wait for Show Details (#2859, #2871)", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   const cases = [
-    ["terminal_without_continuation", null, "Returning the result of a background job to this conversation."],
-    ["continuation_blocked", "Result Blocked",
+    ["terminal_without_continuation", "info", "Result Pending in an Earlier Turn",
+      "Returning the result of a background job to this conversation."],
+    ["continuation_blocked", "warning", "Result Blocked in an Earlier Turn",
       "A background job finished, but its result is held because another job has no confirmed end."],
-    ["accepted_without_result", "Result Missing",
+    ["accepted_without_result", "warning", "Result Missing in an Earlier Turn",
       "A background job finished, but its result never reached this conversation. Wollipog won't retry on its own, so the step can't run twice."],
-    ["result_not_projected", null, "The result of a background job reached Wollipog and is being added to this conversation."],
-    ["dashboard_observation_pending", null, "Confirming that this dashboard shows the result of a background job."],
+    ["result_not_projected", "info", "Transcript Delayed in an Earlier Turn",
+      "The result of a background job reached Wollipog and is being added to this conversation."],
+    ["dashboard_observation_pending", "info", "Notification Pending in an Earlier Turn",
+      "Confirming that this dashboard shows the result of a background job."],
   ] as const;
   try {
-    for (const [watchdogState, title, sentence] of cases) {
+    for (const [watchdogState, tone, title, sentence] of cases) {
       await act(async () => root.render(
         <BackgroundWorkPanel
           session={{
@@ -118,24 +125,23 @@ test("every watchdog is one notice at the top of its highlighted group, and its 
       const highlighted = container.querySelector<HTMLElement>(".background-work-turn[data-watchdog-highlighted]");
       assert.equal(highlighted?.dataset["watchdogState"], watchdogState);
       assert.equal(highlighted?.dataset["watchdogHighlighted"], "true");
-      const notices = [...highlighted!.querySelectorAll<HTMLElement>(".notice")];
-      assert.equal(notices.length, 1, `${watchdogState}: one notice`);
-      const notice = notices[0]!;
+      assert.equal(container.querySelectorAll(".notice").length, 1, `${watchdogState}: one notice`);
+      assertNoDomNode(highlighted!.querySelector(".notice"), "no notice renders inside a turn group");
+      const notice = container.querySelector<HTMLElement>(".panel-notice-slot > .notice")!;
       assert.equal(notice.dataset["state"], watchdogState);
-      assert.equal(notice.previousElementSibling?.classList.contains("background-work-turn-head"), true,
-        "the notice is at the top of its group, under the turn's heading");
+      assert.equal(notice.querySelector(".notice-title")?.textContent, title, "the title names the turn");
       assertNoDomNode(highlighted!.querySelector(".background-delivery-summary"));
       assertNoDomNode(highlighted!.querySelector("details"), "no Technical Details disclosure remains");
       assert.doesNotMatch(highlighted!.textContent ?? "", /Completed|Still Pending|Your Action|Recovery State/u);
       assertNoDomNode(highlighted!.querySelector(".row-title"), "the notice stands in for its receipt's row");
-      if (title === null) {
+      if (tone === "info") {
         assert.ok(notice.classList.contains("compact") && notice.classList.contains("t-info"), `${watchdogState}: compact info`);
         assert.equal(notice.querySelector(".notice-body")?.textContent, sentence);
-        assert.equal(notice.querySelectorAll("button").length, 0, "a result on its way asks nothing of the person");
+        assert.deepEqual([...notice.querySelectorAll("button")].map((button) => button.getAttribute("aria-label")), ["Dismiss"],
+          "a result on its way asks nothing of the person; the slot's Dismiss is its only control");
         continue;
       }
       assert.ok(notice.classList.contains("t-warning"), `${watchdogState}: warning`);
-      assert.equal(notice.querySelector(".notice-title")?.textContent, title);
       assert.equal(notice.querySelector(".notice-body p")?.textContent, sentence);
       assertNoDomNode(notice.querySelector(".notice-details-body"), "the details are not in the DOM until opened");
       const toggle = notice.querySelector<HTMLButtonElement>(".notice-details-toggle")!;
@@ -277,7 +283,28 @@ test("only the group holding the watchdog delivery is highlighted, and none with
 const acknowledgeButtons = (container: HTMLElement) => [...container.querySelectorAll<HTMLButtonElement>("button")]
   .filter((button) => button.textContent === "Acknowledge");
 
-test("each missing result is its own notice, acknowledged on its own, and never offers a retry (#2275, #2859)", async () => {
+/** The "+N More" menu's items, portalled to the document body. */
+const noticeMenuItems = () => [...(domWindow.document as unknown as Document).querySelectorAll<HTMLElement>('[role="menuitem"]')];
+
+/** The titles behind the panel slot's "+N More", read by opening its menu and closing it again. */
+async function noticeMenuTitles(container: HTMLElement): Promise<string[]> {
+  const more = container.querySelector<HTMLButtonElement>(".session-notice-more");
+  if (!more) return [];
+  await act(async () => more.click());
+  const titles = noticeMenuItems().map((item) => item.textContent ?? "");
+  await act(async () => more.click());
+  return titles;
+}
+
+/** Shows the slot entry with this title, chosen from "+N More". */
+async function chooseNotice(container: HTMLElement, title: string) {
+  await act(async () => container.querySelector<HTMLButtonElement>(".session-notice-more")!.click());
+  const item = noticeMenuItems().find((candidate) => candidate.textContent === title);
+  assert.ok(item, `"${title}" waits behind "+N More"`);
+  await act(async () => item!.click());
+}
+
+test("each missing result is its own slot entry, acknowledged on its own, and never offers a retry (#2275, #2859, #2871)", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -315,8 +342,10 @@ test("each missing result is its own notice, acknowledged on its own, and never 
         />
       </ApiProvider>,
     ));
-    assert.equal(container.querySelectorAll('.notice[data-state="accepted_without_result"]').length, 2);
-    assert.equal(acknowledgeButtons(container).length, 2);
+    // One shows, in delivery order; the other waits behind "+1 More".
+    assert.equal(container.querySelectorAll('.notice[data-state="accepted_without_result"]').length, 1);
+    assert.equal(container.querySelector(".session-notice-more")?.textContent, "+1 More");
+    assert.equal(acknowledgeButtons(container).length, 1);
     await act(async () => {
       acknowledgeButtons(container)[0]!.click();
       await Promise.resolve();
@@ -326,6 +355,7 @@ test("each missing result is its own notice, acknowledged on its own, and never 
     assert.equal(acknowledgeButtons(container).length, 1,
       "acknowledging one leaves the other independently actionable");
     assert.equal(container.querySelectorAll('.notice[data-state="accepted_without_result"]').length, 1);
+    assertNoDomNode(container.querySelector(".session-notice-more"), "the other is the only condition left");
     assert.deepEqual([...container.querySelectorAll(".background-job-row .status")].map((badge) => badge.textContent),
       ["Missing Result Acknowledged"], "the acknowledged receipt returns as a row");
     assert.equal([...container.querySelectorAll<HTMLButtonElement>("button")]
@@ -477,7 +507,7 @@ test("terminal missing history remains actionable without a watchdog but yields 
   );
   try {
     await act(async () => render(missingDelivery));
-    assert.equal(container.querySelector(".notice-title")?.textContent, "Result Missing");
+    assert.equal(container.querySelector(".notice-title")?.textContent, "Result Missing in an Earlier Turn");
     assert.equal(acknowledgeButtons(container).length, 1,
       "terminal missing audit remains resolvable when attention is suppressed");
     await act(async () => {
@@ -927,7 +957,7 @@ function missingResultSession(id: string, overrides: Partial<SessionView> = {}):
   } as Partial<SessionView>);
 }
 
-test("Result Missing is one title, one sentence naming the job and Acknowledge, and says Result Missing once in its group (#2859)", async () => {
+test("Result Missing is one title naming its turn, one sentence naming the job and Acknowledge, and its group's badge says Result Missing (#2859, #2871)", async () => {
   const panel = await mountBackgroundWork({
     session: missingResultSession("session-missing-once"),
     parentTurns: new Map([["turn-4", { eventId: 40, turn: 4 }]]),
@@ -936,9 +966,10 @@ test("Result Missing is one title, one sentence naming the job and Acknowledge, 
   try {
     const group = panel.container.querySelector<HTMLElement>(".background-work-turn")!;
     assert.equal((group.textContent ?? "").split("Result Missing").length - 1, 1, "the state word appears once in the group");
-    const notice = group.querySelector<HTMLElement>(".notice")!;
+    assertNoDomNode(group.querySelector(".notice"), "the notice is the panel slot's, not the group's");
+    const notice = panel.container.querySelector<HTMLElement>(".panel-notice-slot > .notice")!;
     assert.ok(notice.classList.contains("t-warning"));
-    assert.equal(notice.querySelector(".notice-title")?.textContent, "Result Missing");
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Result Missing in Turn 4");
     assert.deepEqual([...notice.querySelectorAll(".notice-body p")].map((line) => line.textContent), [
       "Shell job a1f3c9 finished, but its result never reached this conversation. Wollipog won't retry on its own, so the step can't run twice.",
     ]);
@@ -947,8 +978,8 @@ test("Result Missing is one title, one sentence naming the job and Acknowledge, 
     const acknowledge = notice.querySelector<HTMLButtonElement>(".notice-actions button")!;
     assert.ok(acknowledge.classList.contains("btn") && acknowledge.classList.contains("sm"));
     assert.equal(acknowledge.classList.contains("ghost"), false, "Acknowledge is the resolving .btn.sm, not a ghost");
-    assertNoDomNode(group.querySelector(".background-work-turn-head .status"),
-      "the notice stands for the group's status until it is acknowledged");
+    assert.equal(group.querySelector(".background-work-turn-head .status")?.textContent, "Result Missing",
+      "the group's badge says it, since its notice can wait behind \"+N More\"");
     assert.equal(group.querySelector(".background-job-row .row-sub")?.textContent, "Result never arrived");
 
     // Show Details: Finished, Missing Since, Acknowledge and Diagnostic, and nothing before it opens.
@@ -1045,15 +1076,26 @@ test("Result Blocked can be acknowledged with an offline runner and keeps all jo
   } } as unknown as ApiClient;
   const panel = await mountBackgroundWork({ session, runnerOnline: false }, client);
   try {
-    const acknowledge = [...panel.container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Acknowledge")!;
+    // Machine Offline leads; Result Blocked waits behind "+1 More" and is chosen from there.
+    assert.equal(panel.container.querySelector(".panel-notice-slot .notice-title")?.textContent, "Machine Offline");
+    assert.deepEqual(await noticeMenuTitles(panel.container), ["Result Blocked in an Earlier Turn"]);
+    await chooseNotice(panel.container, "Result Blocked in an Earlier Turn");
+    const acknowledge = acknowledgeButtons(panel.container)[0]!;
     assert.ok(acknowledge);
     assert.match(panel.container.textContent!, /Background jobs and held results are kept/);
     await act(async () => { acknowledge.click(); });
     assert.equal(calls.length, 1);
     assertNoDomNode(panel.container.querySelector('.notice[data-state="continuation_blocked"]'),
       "the acknowledged blocked-result notice is removed");
-    assert.match(panel.container.textContent!, /Acknowledged/);
+    // The changed set returns the slot to Machine Offline, and the acknowledgement is an entry behind it.
+    assert.equal(panel.container.querySelector(".panel-notice-slot .notice-title")?.textContent, "Machine Offline");
+    assert.deepEqual(await noticeMenuTitles(panel.container), ["Blocked Result Acknowledged in an Earlier Turn"]);
+    await chooseNotice(panel.container, "Blocked Result Acknowledged in an Earlier Turn");
+    const note = panel.container.querySelector<HTMLElement>('.panel-notice-slot > .notice[data-state="blocked_result_acknowledged"]');
+    assert.ok(note, "Acknowledged is an entry of the panel's slot");
+    assert.ok(note!.classList.contains("t-info"));
+    assert.match(note!.textContent!, /The blocked-result alert was acknowledged\. Background jobs and held results are kept\./u);
+    assertNoDomNode(panel.container.querySelector(".background-work-turn .notice"), "and never a notice in its turn group");
     assert.equal(panel.container.querySelectorAll("button.background-job-row").length, session.backgroundJobs!.length);
     assert.equal(session.backgroundJobs!.filter((job) => job.terminalStatus == null).length, 1);
   } finally { await panel.dispose(); }
@@ -1087,7 +1129,7 @@ test("Result Blocked offers Stop <job name>… behind the Job Detail confirmatio
   const notice = () => container.querySelector<HTMLElement>('.notice[data-state="continuation_blocked"]')!;
   try {
     await render(blockedSession("session-blocked-available"));
-    assert.equal(notice().querySelector(".notice-title")?.textContent, "Result Blocked");
+    assert.equal(notice().querySelector(".notice-title")?.textContent, "Result Blocked in an Earlier Turn");
     assert.equal(notice().querySelector(".notice-body p")?.textContent,
       "Agent job 04d2e1 finished, but its result is held because another job has no confirmed end.");
     const stop = notice().querySelector<HTMLButtonElement>(".notice-actions button")!;
@@ -1233,14 +1275,23 @@ test("recovery notices' titles and labels are Title Case and their sentences sen
   const sentences: string[] = [];
   const collect = () => {
     for (const notice of panel.container.querySelectorAll<HTMLElement>(".notice")) {
-      labels.push(...[...notice.querySelectorAll(".notice-title, button")].map((element) => (element.textContent ?? "").replace(/…$/u, "")));
+      labels.push(...[...notice.querySelectorAll(".notice-title, button:not(.session-notice-more)")]
+        .map((element) => (element.textContent ?? "").replace(/…$/u, "")));
       const lines = [...notice.querySelectorAll(".notice-body p")];
       sentences.push(...(lines.length > 0 ? lines : [...notice.querySelectorAll(".notice-body")]).map((element) => element.textContent ?? ""));
     }
   };
   try {
-    assert.equal(panel.container.querySelectorAll(".notice").length, 3, "each turn's one notice");
+    // One notice shows; the other two wait behind "+2 More", and each is read by choosing it there.
+    assert.equal(panel.container.querySelectorAll(".notice").length, 1, "the slot shows one notice");
     collect();
+    const rest = await noticeMenuTitles(panel.container);
+    assert.equal(rest.length, 2);
+    labels.push(...rest);
+    for (const title of rest) {
+      await chooseNotice(panel.container, title);
+      collect();
+    }
     await panel.render({
       session: managedSession({ id: "session-copy", backgroundWorkState: "orphaned", backgroundJobs: blocked.backgroundJobs! }),
       machineName: "Studio Workstation",
@@ -1284,8 +1335,8 @@ test("a partly listed turn still says Result Missing, and Missing Result Acknowl
     } as Partial<SessionView>),
   }, { acknowledgeBackgroundMissingResult: async () => ({} as SessionView) } as unknown as ApiClient);
   try {
-    assertNoDomNode(panel.container.querySelector(".background-work-turn-head .status"),
-      "the notice says Result Missing for the partly listed turn");
+    assert.equal(panel.container.querySelector(".background-work-turn-head .status")?.textContent, "Result Missing",
+      "the partly listed turn's badge says Result Missing, as its notice does");
     await act(async () => {
       acknowledgeButtons(panel.container)[0]!.click();
       await Promise.resolve();
@@ -1504,8 +1555,9 @@ test("retry exhaustion is actionable without replay and cannot acknowledge a lat
   };
   try {
     await render(delivery);
-    assert.equal(container.querySelector(".notice-title")?.textContent, "Retry Exhausted");
-    assert.equal((container.textContent ?? "").split("Retry Exhausted").length - 1, 1);
+    assert.equal(container.querySelector(".notice-title")?.textContent, "Retry Exhausted in an Earlier Turn");
+    assert.equal((container.querySelector(".background-work-turn")?.textContent ?? "").split("Retry Exhausted").length - 1, 1,
+      "the group says it once, in its badge");
     assert.equal(acknowledgeButtons(container).length, 1);
     assert.equal([...container.querySelectorAll("button")].some((button) => /retry|rerun/i.test(button.textContent ?? "")), false);
     await act(async () => { acknowledgeButtons(container)[0]!.click(); await Promise.resolve(); await Promise.resolve(); });
@@ -1516,10 +1568,153 @@ test("retry exhaustion is actionable without replay and cannot acknowledge a lat
     assert.doesNotMatch(container.textContent ?? "", /Retry Exhaustion Acknowledged/);
     await render({ ...delivery, acceptedAt: 6, missingResultAt: 8, retryExhaustionAcknowledgedAt: 7,
       watchdogState: "accepted_without_result" });
-    assert.equal(container.querySelector(".notice-title")?.textContent, "Result Missing");
+    assert.equal(container.querySelector(".notice-title")?.textContent, "Result Missing in an Earlier Turn");
     assert.equal(acknowledgeButtons(container).length, 1, "earlier exhaustion acknowledgement cannot hide later accepted missing-result recovery");
     await act(async () => { acknowledgeButtons(container)[0]!.click(); await Promise.resolve(); await Promise.resolve(); });
     assert.deepEqual(calls, ["exhaustion", "missing"]);
     assert.match(container.textContent ?? "", /Missing Result Acknowledged/);
   } finally { await act(async () => root.unmount()); container.remove(); }
+});
+
+/** Turns 1 and 2 each with a missing result, and Turn 3 with a result still being added (#2871). */
+function threeResultsSession(id: string): SessionView {
+  const now = Date.now();
+  const finishedJob = (jobId: string, parentTurnId: string, minutesAgo: number, continuationId?: string): ManagedBackgroundJobView => ({
+    ...baseJob, id: jobId, parentTurnId, launchType: "shell", registeredAt: now - minutesAgo * MINUTE,
+    lastObservedAt: now - (minutesAgo - 5) * MINUTE, terminalStatus: "completed", terminalObservedAt: now - (minutesAgo - 5) * MINUTE,
+    continuationRequired: true, ...(continuationId ? { continuationId, continuationMissingResultAt: now - (minutesAgo - 8) * MINUTE } : {}),
+  });
+  const missing = (continuationId: string, parentTurnId: string, minutesAgo: number) => ({
+    continuationId, parentTurnId, jobCount: 1, terminalCount: 1, acceptedAt: now - (minutesAgo - 7) * MINUTE,
+    missingResultAt: now - (minutesAgo - 8) * MINUTE, watchdogState: "accepted_without_result" as const,
+  });
+  return managedSession({
+    id,
+    backgroundWorkState: undefined,
+    backgroundJobs: [
+      finishedJob("task-a1f3c9", "turn-1", 60, "bgcont-turn-1"),
+      finishedJob("task-b2c3d4", "turn-2", 30, "bgcont-turn-2"),
+      finishedJob("task-c3d4e5", "turn-3", 15),
+    ],
+    backgroundDeliveries: [
+      missing("bgcont-turn-1", "turn-1", 60),
+      missing("bgcont-turn-2", "turn-2", 30),
+      { parentTurnId: "turn-3", jobCount: 1, terminalCount: 1, watchdogState: "result_not_projected" },
+    ],
+  } as Partial<SessionView>);
+}
+
+const threeTurns = new Map([
+  ["turn-1", { eventId: 10, turn: 1 }], ["turn-2", { eventId: 20, turn: 2 }], ["turn-3", { eventId: 30, turn: 3 }],
+]);
+
+test("two turns' results and Machine Offline are one notice, the rest behind +N More, and none inside a turn group (#2871)", async () => {
+  const panel = await mountBackgroundWork({
+    session: threeResultsSession("session-one-notice"),
+    runnerOnline: false,
+    machineName: "Studio Workstation",
+    parentTurns: threeTurns,
+  });
+  try {
+    assert.equal(panel.container.querySelectorAll(".notice").length, 1, "exactly one notice is visible");
+    assertNoDomNode(panel.container.querySelector(".background-work-turn .notice"), "no notice renders inside a turn group");
+    assert.equal(panel.container.querySelector(".panel-notice-slot .notice-title")?.textContent, "Machine Offline");
+    assert.equal(panel.container.querySelector(".session-notice-more")?.textContent, "+3 More");
+    // Warnings first, in the groups' order (newest turn first), then the info entry.
+    assert.deepEqual(await noticeMenuTitles(panel.container),
+      ["Result Missing in Turn 2", "Result Missing in Turn 1", "Transcript Delayed in Turn 3"]);
+    // Each turn's badge says what its waiting notice would.
+    assert.deepEqual(headings(panel.container).slice(1).map(({ title, status }) => [title, status]),
+      [["Turn 2", "Result Missing"], ["Turn 1", "Result Missing"]]);
+
+    // A chosen entry shows in the slot, still alone, with its turn in its title.
+    await chooseNotice(panel.container, "Result Missing in Turn 1");
+    assert.equal(panel.container.querySelectorAll(".notice").length, 1);
+    assert.equal(panel.container.querySelector(".panel-notice-slot .notice-title")?.textContent, "Result Missing in Turn 1");
+    assert.equal(panel.container.querySelector(".panel-notice-slot .notice-body p")?.textContent,
+      "Shell job a1f3c9 finished, but its result never reached this conversation. Wollipog won't retry on its own, so the step can't run twice.");
+    assertNoDomNode(panel.container.querySelector(".background-work-turn .notice"));
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a result still on its way is a compact, titled entry the person can dismiss (#2871)", async () => {
+  const session = managedSession({
+    id: "session-dismiss-pending",
+    backgroundJobs: [],
+    backgroundDeliveries: [{ parentTurnId: "turn-3", jobCount: 1, terminalCount: 1, watchdogState: "result_not_projected" }],
+  });
+  const panel = await mountBackgroundWork({ session, parentTurns: threeTurns });
+  try {
+    const notice = panel.container.querySelector<HTMLElement>(".panel-notice-slot > .notice")!;
+    assert.ok(notice.classList.contains("compact") && notice.classList.contains("t-info"));
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Transcript Delayed in Turn 3");
+    await act(async () => notice.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click());
+    assertNoDomNode(panel.container.querySelector(".notice"), "dismissed");
+    await panel.render({ session: { ...session }, parentTurns: threeTurns });
+    assertNoDomNode(panel.container.querySelector(".notice"), "and it stays dismissed while its state holds");
+    assert.ok(panel.container.querySelector('.background-work-turn[data-watchdog-state="result_not_projected"]'),
+      "the turn still says where its result is");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("after Acknowledge, focus goes to its turn's heading rather than the slot's next notice; a failure keeps it on Acknowledge (#2871)", async () => {
+  const requests: Array<{ resolve: (value: SessionView) => void; reject: (reason: unknown) => void }> = [];
+  const client = {
+    acknowledgeBackgroundMissingResult: () => new Promise<SessionView>((resolve, reject) => { requests.push({ resolve, reject }); }),
+  } as unknown as ApiClient;
+  const panel = await mountBackgroundWork({ session: threeResultsSession("session-focus-slot"), parentTurns: threeTurns }, client);
+  const shownTitle = () => panel.container.querySelector(".panel-notice-slot .notice-title")?.textContent;
+  try {
+    assert.equal(shownTitle(), "Result Missing in Turn 2");
+    const first = acknowledgeButtons(panel.container)[0]!;
+    first.focus();
+    await act(async () => { first.click(); await Promise.resolve(); });
+    await act(async () => { requests[0]!.resolve({} as SessionView); await Promise.resolve(); await Promise.resolve(); });
+    assert.equal(shownTitle(), "Result Missing in Turn 1", "the next entry takes the slot");
+    const active = domWindow.document.activeElement as unknown as HTMLElement | null;
+    assert.equal(active?.tagName, "H3");
+    assert.equal(active?.textContent, "Turn 2", "focus is on the acknowledged turn's heading");
+    assert.equal(headings(panel.container)[1]?.status, "Missing Result Acknowledged");
+
+    const second = acknowledgeButtons(panel.container)[0]!;
+    second.focus();
+    await act(async () => { second.click(); await Promise.resolve(); });
+    await act(async () => { requests[1]!.reject(new Error("The control plane refused the acknowledgement.")); await Promise.resolve(); await Promise.resolve(); });
+    assert.equal(panel.container.querySelector(".panel-notice-slot [role='alert']")?.textContent,
+      "The control plane refused the acknowledgement.");
+    assert.ok(domWindow.document.activeElement as unknown === second, "a failed acknowledgement leaves focus on Acknowledge");
+  } finally {
+    for (const request of requests) request.resolve({} as SessionView);
+    await panel.dispose();
+  }
+});
+
+test("after a blocked result's Acknowledge, its Acknowledged entry takes the slot and focus goes to the turn's heading (#2871)", async () => {
+  const session = blockedSession("session-blocked-focus");
+  session.backgroundDeliveries![0]!.blockedResultRevision = "snapshot-focus";
+  let settle: ((value: SessionView) => void) | null = null;
+  const client = { acknowledgeBackgroundBlockedResults: () => new Promise<SessionView>((resolve) => { settle = resolve; }) } as unknown as ApiClient;
+  const panel = await mountBackgroundWork({ session }, client);
+  try {
+    const acknowledge = acknowledgeButtons(panel.container)[0]!;
+    acknowledge.focus();
+    await act(async () => { acknowledge.click(); await Promise.resolve(); });
+    await act(async () => {
+      settle!({ ...session, backgroundDeliveries: [{ ...session.backgroundDeliveries![0]!,
+        watchdogState: undefined, blockedResultAcknowledgedAt: Date.now() }] });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(panel.container.querySelector(".panel-notice-slot .notice-title")?.textContent,
+      "Blocked Result Acknowledged in an Earlier Turn");
+    const active = domWindow.document.activeElement as unknown as HTMLElement | null;
+    assert.equal(active?.tagName, "H3", "not the Acknowledged entry's Dismiss");
+    assert.equal(active?.textContent, "Earlier Turn");
+  } finally {
+    await panel.dispose();
+  }
 });

@@ -4369,10 +4369,9 @@ textarea {
   color: var(--text-dim);
   font: var(--type-small);
 }
-/* A turn's recovery notices (#2859, `BackgroundRecoveryNotice`): one `Notice` per recovery delivery,
-   between the turn's heading and its rows. A failed or finished step's line sits under the actions,
-   after Show Details, on a line of its own. */
-.background-recovery-notice { margin-bottom: var(--space-2); }
+/* Background Work's recovery notices (#2859, `BackgroundRecoveryNotice`): one `Notice` per recovery
+   delivery, each an entry of the panel's notice slot (#2871), which spaces them. A failed or finished
+   step's line sits under the actions, after Show Details, on a line of its own. */
 .background-recovery-note {
   flex-basis: 100%;
   order: 1;

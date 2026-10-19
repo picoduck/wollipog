@@ -35,6 +35,15 @@ export function backgroundTurnLabel(parentTurnId: string, turn: BackgroundParent
   return clock ? `Turn at ${clock}` : "Earlier Turn";
 }
 
+/** The same turn after "in", for a title that names it: "Result Missing in Turn 4" (#2871). */
+export function inBackgroundTurn(parentTurnId: string, turn: BackgroundParentTurn | undefined): string {
+  if (parentTurnId === UNKNOWN_PARENT_TURN) return "in an Unknown Turn";
+  if (!turn) return "in an Earlier Turn";
+  if (turn.turn !== undefined) return `in Turn ${turn.turn}`;
+  const clock = formatClock(turn.startedAt);
+  return clock ? `in the Turn at ${clock}` : "in an Earlier Turn";
+}
+
 export interface BackgroundJobGroup {
   key: string;
   parentTurnId: string;

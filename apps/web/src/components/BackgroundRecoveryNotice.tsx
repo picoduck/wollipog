@@ -46,6 +46,12 @@ export interface BlockedResultStopTarget {
 export interface BackgroundRecoveryNoticeProps {
   sessionId: string;
   state: BackgroundDeliveryWatchdogState;
+  /** Title Case, naming the state and its turn: "Result Missing in Turn 4". */
+  title: string;
+  /** The panel notice slot's "+N More", for the title row. */
+  trailing?: ReactNode;
+  /** The slot's dismissal, which only an info notice has. */
+  onDismiss?: () => void;
   subject: BackgroundRecoverySubject;
   /** When the job, or the last of the jobs, finished. */
   finishedAt: number | undefined;
@@ -69,32 +75,43 @@ export interface BackgroundRecoveryNoticeProps {
   historicalRecovery?: boolean;
 }
 
+/** The tone of the notice `BackgroundRecoveryNotice` shows, which is its notice slot severity too:
+ * a result that needs the person is a warning, one still on its way is info. */
+export function backgroundRecoveryNoticeTone(state: BackgroundDeliveryWatchdogState, historicalRecovery = false): "warning" | "info" {
+  const severity = BACKGROUND_DELIVERY_STATUS[state].severity;
+  return severity === "missing" || severity === "blocked" || (historicalRecovery && state === "terminal_without_continuation")
+    ? "warning"
+    : "info";
+}
+
 /**
- * One recovery delivery as one notice at the top of its turn group (docs/design-system.md §4.10,
- * §13.2; #2859). Result Missing is a warning with one sentence, Acknowledge and Show Details; Result
- * Blocked a warning with Stop <job name>… or why it can't be offered; Result Pending, Transcript
- * Delayed and Notification Pending one compact info line with no action.
+ * One recovery delivery as one entry of Background Work's panel notice slot (docs/design-system.md
+ * §4.10, §13.2; #2859, #2871), titled with its state and its turn. Result Missing is a warning with
+ * one sentence, Acknowledge and Show Details; Result Blocked a warning with Stop <job name>… or why it
+ * can't be offered; Result Pending, Transcript Delayed and Notification Pending one compact, titled
+ * info line with no action but the slot's Dismiss.
  */
 export function BackgroundRecoveryNotice(props: BackgroundRecoveryNoticeProps) {
-  const { state, subject } = props;
-  const severity = BACKGROUND_DELIVERY_STATUS[state].severity;
-  if (severity === "missing" || state === "capacity_retry_exhausted") return <ResultMissingNotice {...props} />;
-  if (severity === "blocked") return <ResultBlockedNotice {...props} />;
-  if (props.historicalRecovery && state === "terminal_without_continuation") {
-    return <ResultBlockedNotice {...props} />;
+  const { state, subject, title, trailing, onDismiss } = props;
+  if (backgroundRecoveryNoticeTone(state, props.historicalRecovery) === "warning") {
+    return BACKGROUND_DELIVERY_STATUS[state].severity === "missing" || state === "capacity_retry_exhausted"
+      ? <ResultMissingNotice {...props} />
+      : <ResultBlockedNotice {...props} />;
   }
   return (
-    <Notice tone="info" compact role="status" className="background-recovery-notice" dataState={state}>
+    <Notice tone="info" compact role="status" title={title} trailing={trailing} onDismiss={onDismiss}
+      className="background-recovery-notice" dataState={state}>
       {backgroundRecoverySentence(state, subject)}
     </Notice>
   );
 }
 
-function ResultMissingNotice({ state, subject, finishedAt, now, missingSince, acknowledgement }: BackgroundRecoveryNoticeProps) {
+function ResultMissingNotice({ state, title, trailing, subject, finishedAt, now, missingSince, acknowledgement }: BackgroundRecoveryNoticeProps) {
   return (
     <Notice
       tone="warning"
-      title={BACKGROUND_DELIVERY_STATUS[state].label}
+      title={title}
+      trailing={trailing}
       className="background-recovery-notice"
       dataState={state}
       actions={acknowledgement && (
@@ -123,6 +140,8 @@ function ResultMissingNotice({ state, subject, finishedAt, now, missingSince, ac
 function ResultBlockedNotice({
   sessionId,
   state,
+  title,
+  trailing,
   subject,
   finishedAt,
   now,
@@ -179,7 +198,8 @@ function ResultBlockedNotice({
   return (
     <Notice
       tone="warning"
-      title={BACKGROUND_DELIVERY_STATUS[state].label}
+      title={title}
+      trailing={trailing}
       className="background-recovery-notice"
       dataState={state}
       actions={(blockedAcknowledgement || button || outcome) && <>

@@ -58,7 +58,11 @@ for (const width of [390, 1440]) for (const theme of ["dark", "light"] as const)
       await pinned.getByTitle("Open Background Work", { exact: true }).click();
       const panel = page.locator('#right-panel[data-mode="background"]');
       const notice = panel.locator('.notice[data-state="continuation_blocked"]');
-      await expect(panel.locator(".notice-title").filter({ hasText: /^Acknowledged$/ })).toBeVisible();
+      // #2871: the acknowledgement is an entry of the panel's one notice slot, never a group's notice.
+      const acknowledged = panel.locator(".panel-notice-slot .notice-title")
+        .filter({ hasText: /^Blocked Result Acknowledged in an Earlier Turn$/ });
+      await expect(acknowledged).toBeVisible();
+      await expect(panel.locator(".background-work-turn .notice")).toHaveCount(0);
       await expect(panel.locator("button.background-job-row")).toHaveCount(2);
 
       // A new result in the same launching turn must appear as a new alert.
@@ -71,7 +75,8 @@ for (const width of [390, 1440]) for (const theme of ["dark", "light"] as const)
       await acknowledge.press("Enter");
       await expect(notice).toHaveCount(0);
       await expect(status).not.toHaveAccessibleName(/Result Blocked/);
-      await expect(panel.locator(".notice-title").filter({ hasText: /^Acknowledged$/ })).toBeVisible();
+      await expect(acknowledged).toBeVisible();
+      await expect(panel.locator(".notice")).toHaveCount(1);
       await expect(panel.locator("button.background-job-row")).toHaveCount(2);
       await expect(panel.locator("h3.background-work-turn-title")).toBeFocused();
       await capture("panel-after");
