@@ -78,7 +78,7 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
 
 ## Reviews and Campaigns
 
-- Sessions can launch a separate read-only reviewer against a runner-owned snapshot of their
+- Sessions on supported Linux runners can launch a separate read-only reviewer against a runner-owned snapshot of their
   pushed PR head. Review attempts are checked against a structured contract, with round and
   epoch planning. An installed supported reviewer is still required.
 - Full Control launch presents a concise server summary and one human authorization, saves
