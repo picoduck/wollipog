@@ -247,3 +247,22 @@ test("failed unlinks do not claim reclaimed disk bytes and a later pass retries 
     f.store.flushAll(); rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("retained hot appends do not re-read the unchanged manifest to append an index checkpoint", async () => {
+  const f = fixture(5);
+  try {
+    await f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq }, "trim");
+    f.append({ kind: "user_message", text: "Resume" });
+    const internals = f.store as unknown as {
+      readHistoryManifest: (...args: unknown[]) => unknown;
+      historyLayoutCache: Map<string, { validatedAt: number; fullyValidatedAt: number }>;
+    };
+    const read = internals.readHistoryManifest.bind(f.store);
+    let manifestReads = 0;
+    internals.readHistoryManifest = (...args) => { manifestReads++; return read(...args); };
+    const cached = internals.historyLayoutCache.get("s_test")!;
+    cached.validatedAt = cached.fullyValidatedAt = performance.now() + 60_000;
+    for (let n = 0; n < 300; n++) f.append({ kind: "command_output", text: "Live output" });
+    assert.equal(manifestReads, 0, "crossing an index checkpoint must not validate every cold segment on the hot path");
+  } finally { f.store.flushAll(); rmSync(f.root, { recursive: true, force: true }); }
+});

@@ -8893,6 +8893,7 @@ export interface TrimSessionHistoryResultMessage {
   sessionId: string;
   ok: boolean;
   trimmed?: boolean;
+  /** Bytes successfully unlinked from superseded files, excluding new-file allocations. */
   bytesRemoved?: number;
   error?: string;
 }

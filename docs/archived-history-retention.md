@@ -246,6 +246,10 @@ and a crash after it keeps the complete retained log readable. The next pass fin
 superseded generations, including the original monolithic log. Open-file deletion failures are
 retried. Files are unlinked, not securely overwritten.
 
+Completion logs count the bytes of superseded files actually unlinked, consistently on the first
+pass and on cleanup retries. This is a deletion counter, rather than the net change in directory
+size after allocating kept data and its derived index.
+
 The runner keeps its event sequence high-water and epoch. Only certified gaps in the retained
 prefix are permitted; appends after that boundary remain contiguous. Control-plane hydration
 cursors, accounting epochs and campaign proofs do not change. Resume and restart use the same

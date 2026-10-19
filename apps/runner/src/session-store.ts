@@ -794,6 +794,7 @@ export class SessionStore {
   /** Tokens of compactions this process is preparing. Their files are unreferenced until publication,
    * so orphan collection must leave them alone even with a zero grace period. */
   private readonly compactionsInFlight = new Set<string>();
+  private readonly historyIndexFiles = new Map<string, { manifestKey: string; file: string }>();
   constructor(
     private readonly root: string = join(homedir(), ".agent-manager", "sessions"),
     private readonly historyScanObserver?: (startOffset: number, endOffset: number) => void,
@@ -845,7 +846,18 @@ export class SessionStore {
     return join(this.dir(id), "events.legacy-fence.json");
   }
   private historyIndexPath(id: string): string {
-    return join(this.dir(id), this.readHistoryManifest(id)?.indexFile ?? "events.idx");
+    // Index seeks and appends must not validate every cold segment merely to locate the index.
+    // Atomic manifest replacement invalidates this derived name with one bounded metadata read.
+    const manifestKey = this.historyManifestKey(id);
+    if (manifestKey === null) {
+      this.historyIndexFiles.delete(id);
+      return join(this.dir(id), "events.idx");
+    }
+    const cached = this.historyIndexFiles.get(id);
+    if (cached?.manifestKey === manifestKey) return join(this.dir(id), cached.file);
+    const file = this.readHistoryManifest(id)?.indexFile ?? "events.idx";
+    if (this.historyManifestKey(id) === manifestKey) this.historyIndexFiles.set(id, { manifestKey, file });
+    return join(this.dir(id), file);
   }
   private historyResetPath(id: string): string {
     return join(this.dir(id), "events.reset.json");
@@ -2570,7 +2582,7 @@ export class SessionStore {
       this.recoverLegacyFence(id, manifest);
       this.compactionsInFlight.delete(token);
       const deletedBytes = await this.cleanupRetainedHistory(id);
-      return { trimmed: true, bytesRemoved: Math.max(0, deletedBytes - bytes - toolBytes) };
+      return { trimmed: true, bytesRemoved: deletedBytes };
     } finally {
       this.compactionsInFlight.delete(token);
       if (publicationStarted) {
@@ -3734,6 +3746,7 @@ export class SessionStore {
     this.checkpointCache.delete(id);
     this.historyLayoutCache.delete(id);
     this.historyIndexInfoCache.delete(id);
+    this.historyIndexFiles.delete(id);
     this.historyBoundaryCache.delete(id);
     this.eventProjectionIndexes.delete(id);
     for (const path of [...this.verifiedHistorySegments.keys()]) {
