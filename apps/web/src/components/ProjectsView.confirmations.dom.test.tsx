@@ -327,6 +327,56 @@ test("a removal broadcast before the delete answers still lands on the deleted p
   assert.deepEqual(currentView, { name: "projects", id: "gamma" });
 });
 
+test("an answer before the removal broadcast lands on the neighbour once, and the later broadcast changes nothing", async () => {
+  const { client, release } = deletingClient();
+  const projects = [project("alpha", "Alpha"), project("beta", "Beta"), project("gamma", "Gamma")];
+  const body = await renderSelected(projects, "Beta", client);
+  const dialog = await choose(body.querySelector(".project-detail-title-row")!, "Project Actions", "Delete Project…");
+  await type(dialog.querySelector<HTMLInputElement>(".field input")!, "Beta");
+  await act(async () => { footButton(dialog, "Delete Project").click(); });
+  routes.length = 0;
+  await release();
+  await act(async () => { socket.push({ type: "project_removed", projectId: "beta" } as never); });
+  await settle();
+  assert.deepEqual(routes, [{ how: "replace", view: { name: "projects", id: "gamma" } }]);
+  assert.deepEqual(currentView, { name: "projects", id: "gamma" });
+});
+
+/** Deletes Beta from Alpha, Beta and Gamma; the server removes it, but its answer is lost. The
+ * removal arrives `removal` the failed answer. Returns the dialog, still open on the failure. */
+async function lostAnswer(removal: "before" | "after") {
+  const { client, release } = deletingClient();
+  const projects = [project("alpha", "Alpha"), project("beta", "Beta"), project("gamma", "Gamma")];
+  const body = await renderSelected(projects, "Beta", client);
+  const dialog = await choose(body.querySelector(".project-detail-title-row")!, "Project Actions", "Delete Project…");
+  await type(dialog.querySelector<HTMLInputElement>(".field input")!, "Beta");
+  await act(async () => { footButton(dialog, "Delete Project").click(); });
+  routes.length = 0;
+  const removed = () => act(async () => { socket.push({ type: "project_removed", projectId: "beta" } as never); });
+  if (removal === "before") await removed();
+  await release(new Error("network connection was lost"));
+  if (removal === "after") await removed();
+  await settle();
+  return dialog;
+}
+
+for (const removal of ["before", "after"] as const) {
+  test(`with its answer lost and the removal arriving ${removal} it, closing the failed delete still lands on the neighbour`, async () => {
+    const dialog = await lostAnswer(removal);
+    assert.ok(doc.contains(dialog), "the failure stays in the dialog");
+    assert.match(text(dialog.querySelector(".notice.t-danger")), /^Couldn't delete the project\./);
+    assert.deepEqual(routes, [], "nothing moves while the dialog is open");
+    await act(async () => { footButton(dialog, "Cancel").click(); });
+    await settle();
+    assertNoDomNode(doc.querySelector('[role="dialog"]'));
+    assert.deepEqual(routes, [{ how: "replace", view: { name: "projects", id: "gamma" } }],
+      "the page leaves the deleted project's route for its neighbour");
+    assert.deepEqual(currentView, { name: "projects", id: "gamma" });
+    assert.match(text(doc.querySelector(".toast-region")), /Project deleted\. Sessions moved to No Project\./,
+      "and says the project went after all");
+  });
+}
+
 test("a delete whose neighbour went away while it ran lands on a project that is still there", async () => {
   const { client, release } = deletingClient();
   const projects = [project("alpha", "Alpha"), project("beta", "Beta"), project("gamma", "Gamma")];
@@ -361,6 +411,15 @@ test("a failed delete stays in the dialog as its danger notice, with the typed n
   assertNoDomNode(body.querySelector(".master-detail-detail .notice.t-danger"), "the failure is not repeated on the page");
   assert.deepEqual(currentView, { name: "projects", id: "acme" });
   assert.deepEqual(deletes, ["acme"]);
+
+  // The project is still there, so closing the failed delete stays on it.
+  routes.length = 0;
+  await act(async () => { footButton(dialog, "Cancel").click(); });
+  await settle();
+  assertNoDomNode(doc.querySelector('[role="dialog"]'));
+  assert.deepEqual(routes, []);
+  assert.deepEqual(currentView, { name: "projects", id: "acme" });
+  assertNoDomNode(doc.querySelector(".toast-region .toast"), "and says nothing was deleted");
 });
 
 test("Archive and Stop counts every unarchived session in its title and lists five with status badges and and 2 more", async () => {

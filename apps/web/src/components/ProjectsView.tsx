@@ -90,6 +90,10 @@ export function ProjectsView({
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<ProjectActionError | null>(null);
+  /** The project whose Delete Project has sent its request and not yet settled. Its removal can
+   * arrive before the answer, or with the answer lost; the delete settles where to go, not the
+   * missing-route fallback. */
+  const [deleting, setDeleting] = useState<string | null>(null);
   const { identity: accessIdentity, error: accessIdentityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const createButtonRef = useRef<HTMLButtonElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
@@ -110,9 +114,9 @@ export function ProjectsView({
   /** The list when a confirmation settles, which can be well after it opened. */
   const latestProjects = useRef(allProjects);
   latestProjects.current = allProjects;
-  /** The project a running Delete Project is removing. Its removal can arrive before the request
-   * answers; the delete then chooses where to go, not the missing-route fallback below. */
-  const deletingId = useRef<string | null>(null);
+  /** The route's project when a confirmation settles, which Back can have changed meanwhile. */
+  const routeProjectId = useRef(selectedProjectId);
+  routeProjectId.current = selectedProjectId;
   const visibleProjects = useMemo(() => filterManagedProjects(projectMap.values(), query, visibility, machineName),
     [machineName, projectMap, query, visibility]);
   const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
@@ -126,11 +130,12 @@ export function ProjectsView({
   ) : false;
 
   useEffect(() => {
-    if (!selected && selectedProjectId && snapshotLoaded && deletingId.current !== selectedProjectId) {
+    // While its Delete Project is open, the delete decides where to go once it settles.
+    if (!selected && selectedProjectId && snapshotLoaded && deleting !== selectedProjectId) {
       const fallback = visibleProjects[0] ?? allProjects[0];
       navigate(fallback ? { name: "projects", id: fallback.id } : { name: "projects" });
     }
-  }, [allProjects, navigate, selected, selectedProjectId, snapshotLoaded, visibleProjects]);
+  }, [allProjects, deleting, navigate, selected, selectedProjectId, snapshotLoaded, visibleProjects]);
   // Each pane scrolls on its own (§6). A new route starts the detail at its top; on a phone, where
   // the route swaps the whole screen, focus moves to the new page title, which shows no ring (§16.1).
   const listBodyRef = useRef<HTMLDivElement>(null);
@@ -299,28 +304,32 @@ export function ProjectsView({
         // The neighbour is chosen before the request: the server broadcasts the removal before it
         // answers, and a list read after that no longer holds the project to find it by.
         successor = projectAfterRemoval(latestProjects.current, project.id)?.id ?? null;
-        deletingId.current = project.id;
+        setDeleting(project.id);
         setBusy("delete");
         try {
           await api.deleteProject(project.id);
         } catch (cause) {
-          deletingId.current = null;
           throw new ConfirmationFailure("Couldn't delete the project. Nothing was changed.", (cause as Error).message);
         } finally {
           setBusy(null);
         }
       },
     });
-    deletingId.current = null;
-    if (!deleted) return;
-    // The neighbour if it is still there; another change while the request ran may have removed it.
-    const remaining = latestProjects.current.filter((candidate) => candidate.id !== project.id);
-    const next = remaining.find((candidate) => candidate.id === successor) ?? remaining[0] ?? null;
-    setDeletedIds((current) => new Set(current).add(project.id));
-    // A replace: the deleted project's route cannot be shown, so its unsaved settings are not
-    // asked about.
-    navigate(next ? { name: "projects", id: next.id } : { name: "projects" }, { replace: true });
-    showToast("Project deleted. Sessions moved to No Project.");
+    // One step once the confirmation is over, whatever the order of the answer and the broadcast:
+    // the project is gone if the request said so, or if the server's removal arrived even though
+    // the answer was lost.
+    const gone = deleted || !latestProjects.current.some((candidate) => candidate.id === project.id);
+    if (gone && routeProjectId.current === project.id) {
+      // The neighbour if it is still there; another change while the request ran may have removed it.
+      const remaining = latestProjects.current.filter((candidate) => candidate.id !== project.id);
+      const next = remaining.find((candidate) => candidate.id === successor) ?? remaining[0] ?? null;
+      // A replace: the deleted project's route cannot be shown, so its unsaved settings are not
+      // asked about. Navigating first lets the render that clears `deleting` see the new route.
+      navigate(next ? { name: "projects", id: next.id } : { name: "projects" }, { replace: true });
+    }
+    if (gone) setDeletedIds((current) => new Set(current).add(project.id));
+    setDeleting(null);
+    if (gone) showToast("Project deleted. Sessions moved to No Project.");
   };
   const manageConnections = () => navigate({ name: "runners", section: "machines" });
   const refreshSelectedProject = async () => {
