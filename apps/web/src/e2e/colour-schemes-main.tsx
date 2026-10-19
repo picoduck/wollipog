@@ -314,7 +314,7 @@ function Sample() {
           <div className="review-findings-list"><div className="review-finding-row"><span /><span>A finding</span><span /></div></div>
           {/* Real production runner cards. Their headings caused #237, and copied markup would
               allow the fixture to stay green while the components regress again. */}
-          <div className="runner-grid">
+          <div>
             <BoxCard
               box={box}
               runner={boxRunner}

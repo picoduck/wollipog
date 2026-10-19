@@ -96,6 +96,8 @@ const VOCABULARY = {
     bootstrapping: info("Bootstrapping", { pulse: true }),
     deploying: info("Deploying Runner", { pulse: true }),
     update_required: warning("Update Required"),
+    /** A Registry agent on the machine waits for its exact launch to be approved. */
+    approval_required: warning("Approval Required"),
     sign_in_required: warning("Sign-In Required"),
     pairing_required: warning("Pairing Required"),
     unreachable: danger("Unreachable"),

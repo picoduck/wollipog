@@ -14,7 +14,7 @@ import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { RunnersView } from "../components/RunnersView.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
-import type { ViewNavigation } from "../navigation.js";
+import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import "../styles.css";
@@ -150,6 +150,40 @@ if (fixtureParams.get("local") === "setup") {
     },
   });
 }
+/**
+ * `machines=N` adds machines beside Design Workstation, one of each status first, so the list sorts,
+ * groups past eight and filters (#2985). They are view-only: the scenarios act on Design Workstation.
+ */
+const extraMachineCount = Math.max(0, Number(fixtureParams.get("machines") ?? "1") - 1);
+function extraRunner(runnerId: string, displayName: string, overrides: Partial<RunnerView> = {}): RunnerView {
+  return {
+    runnerId, displayName, hostname: `${runnerId}.local`, os: "linux", version: "1", status: "online",
+    agents: [], workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: PROTOCOL_VERSION, ...overrides,
+  };
+}
+const extraMachines: Array<{ runner?: RunnerView; box?: BoxView }> = [
+  { runner: extraRunner("build-server", "Build Server", { protocolVersion: PROTOCOL_VERSION - 1 }) },
+  { runner: extraRunner("gpu-box", "GPU Box", { status: "offline" }) },
+  { box: { boxId: "box-golf", runnerId: "golf-sim", displayName: "Golf Simulator", sshTarget: "me@golf-sim", status: "bootstrapping" as const, lastError: null, createdAt: 1 } },
+  { box: { boxId: "box-archive", runnerId: "archive-nas", displayName: "Archive NAS", sshTarget: "admin@archive", status: "failed" as const, lastError: "Permission denied (publickey).", createdAt: 1 } },
+  { runner: extraRunner("studio-mac", "Studio Mac", { os: "macos", capacity: { configuredUnits: 40, usedUnits: 29, revision: 1, authority: "control_plane" } }) },
+  { runner: extraRunner("media-pc", "Media PC", {
+    agents: [{ id: "gemini", name: "Gemini", command: "npx", args: [], env: {}, driver: "acp", available: true,
+      registry: { installStatus: "approval-required" } as RunnerView["agents"][number]["registry"] }],
+  }) },
+  { runner: extraRunner("travel-laptop", "Travel Laptop", {
+    providerAccounts: [{ id: "personal", label: "Personal", provider: "claude", authStatus: "unauthenticated" }],
+  }) },
+  ...Array.from({ length: 12 }, (_, index) => ({
+    runner: extraRunner(`ci-runner-${index + 1}`, `CI Runner ${index + 1}`, {
+      capacity: { configuredUnits: 8, usedUnits: index % 9, revision: 1, authority: "control_plane" },
+    }),
+  })),
+].slice(0, extraMachineCount);
+// `snapshot=hold` never delivers the first snapshot: the tab stays loading.
+const holdSnapshot = fixtureParams.get("snapshot") === "hold";
+/** After `disconnect()` the connection stays down, so the last-known rows stay on screen. */
+let connectionHeld = false;
 let socket: FixtureSocket | null = null;
 let box: BoxView | null = null;
 let lastRegisteredWorkspace: { name: string; path: string } | null = null;
@@ -167,8 +201,14 @@ function snapshot(): UiSnapshotMessage {
       projects: true,
       createProjectLocations: true,
     },
-    runners: runner ? [structuredClone(runner)] : [],
-    boxes: box ? [structuredClone(box)] : [],
+    runners: [
+      ...(runner ? [structuredClone(runner)] : []),
+      ...extraMachines.flatMap((machine) => machine.runner ? [structuredClone(machine.runner)] : []),
+    ],
+    boxes: [
+      ...(box ? [structuredClone(box)] : []),
+      ...extraMachines.flatMap((machine) => machine.box ? [structuredClone(machine.box)] : []),
+    ],
     projects: [],
     sessions: [],
     runs: [],
@@ -183,6 +223,7 @@ class FixtureSocket implements UiSocket {
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   constructor() {
+    if (holdSnapshot || connectionHeld) return;
     window.setTimeout(() => {
       this.onopen?.();
       this.push(snapshot());
@@ -205,8 +246,13 @@ const connection: UiConnectionRuntime = {
   close() {},
 };
 
+// `machine=<runnerId>` opens that machine's route, as a link or a reload does (#2985).
+const initialMachine = fixtureParams.get("machine");
+const initialView: View = initialMachine
+  ? { name: "runners", section: "machines", machineId: initialMachine }
+  : { name: "runners", section: "machines" };
 const navigation: ViewNavigation = {
-  current: () => ({ name: "runners", section: "machines" }),
+  current: () => initialView,
   push() {},
   listen: () => () => {},
 };
@@ -483,6 +529,8 @@ declare global {
         "explicit-interpreter" | "older-interpreter-guidance"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
       restoreIdentity(): void;
+      /** Drops the connection and keeps it down: the list shows its last-known rows (#2985). */
+      disconnect(): void;
     };
   }
 }
@@ -659,6 +707,10 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
   },
   restoreIdentity: () => { identityFails = false; },
+  disconnect: () => {
+    connectionHeld = true;
+    socket?.onclose?.({ code: 1006 });
+  },
 };
 
 const root = document.getElementById("root");
@@ -669,7 +721,15 @@ createRoot(root).render(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            <RunnersView />
+            {/* The app's main column: its height for the fill page, and the `app` size container
+                the compact tier answers to (#2985). */}
+            <div className="app">
+              <main className="main">
+                <div className="main-body">
+                  <RunnersView />
+                </div>
+              </main>
+            </div>
           </StoreProvider>
         </FeedbackProvider>
       </ApiProvider>

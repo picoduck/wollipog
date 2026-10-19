@@ -56,18 +56,16 @@ test("People and device tasks use progressive disclosure and only Agents collaps
   assert.match(view, /export function NativeRunnerCard\(/);
   assert.match(view, /<article className=\{`runner-card status-\$\{runner\.status\}`\}>[\s\S]*<div className="runner-head">[\s\S]*<div className="runner-id">[\s\S]*<h2>\{runnerDisplay\(runner, undefined, runner\.runnerId\)\.name\}<\/h2>/);
   assert.doesNotMatch(css, /\.runner-card\.status-offline\s*\{[^}]*opacity:/s);
-  // auto-FILL, not auto-fit: auto-fit collapses the empty tracks so a single machine — the default
-  // for a new install — stretched to a full-bleed card holding two fields.
-  // Asserted per grid: an unscoped match would be satisfied by .instance-grid alone, letting
-  // .runner-grid regress to a single full-width column without failing.
-  for (const selector of [".runner-grid", ".instance-grid"]) {
-    const rule = new RegExp(`\\${selector}\\s*\\{[^}]*\\}`, "s").exec(css)?.[0];
-    assert.ok(rule, `${selector} rule must exist`);
-    assert.match(rule!, /repeat\(auto-fill, minmax\(min\(100%, 360px\), 1fr\)\)/,
-      `${selector} must use auto-fill so one card does not span the row`);
-    assert.doesNotMatch(rule!, /auto-fit/, `${selector} must not reintroduce auto-fit`);
-  }
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.runner-grid\s*\{\s*grid-template-columns: minmax\(0, 1fr\)/);
+  // auto-FILL, not auto-fit: auto-fit collapses the empty tracks so a single instance stretched to
+  // a full-bleed card holding two fields.
+  const rule = /\.instance-grid\s*\{[^}]*\}/s.exec(css)?.[0];
+  assert.ok(rule, ".instance-grid rule must exist");
+  assert.match(rule!, /repeat\(auto-fill, minmax\(min\(100%, 360px\), 1fr\)\)/,
+    ".instance-grid must use auto-fill so one card does not span the row");
+  assert.doesNotMatch(rule!, /auto-fit/, ".instance-grid must not reintroduce auto-fit");
+  // Machines are rows beside their detail now (#2985): the card grid is gone.
+  assert.doesNotMatch(css, /\.runner-grid\b/);
+  assert.doesNotMatch(view, /runner-grid/);
 });
 
 test("Connections controls use one centered SVG icon system instead of font glyphs", () => {

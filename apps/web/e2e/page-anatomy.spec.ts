@@ -13,8 +13,9 @@ const DESTINATIONS = [
   { path: "/projects", title: "Projects", description: true },
   { path: "/runs", title: "Multi-Agent Runs", description: true, max: 960 },
   { path: "/pods", title: "Pods", description: true, max: 960 },
-  // Connections puts its tabs in the header's tab slot (#1803).
-  { path: "/connections", title: "Connections", max: 960, tabs: true },
+  // Connections puts its tabs in the header's tab slot (#1803); its Machines tab is a full-width
+  // master-detail (#2985).
+  { path: "/connections", title: "Connections", tabs: true },
   { path: "/skills", title: "Agent Skills", description: true },
   { path: "/archived", title: "Archived Sessions", max: 1200 },
   { path: "/usage", title: "Usage and Cost", description: true, max: 1200 },

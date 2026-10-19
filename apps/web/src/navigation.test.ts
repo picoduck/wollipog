@@ -33,6 +33,7 @@ const routes: Array<[View, string]> = [
   [{ name: "runners", section: "machines" }, "/connections/machines"],
   [{ name: "runners", section: "instances" }, "/connections/instances"],
   [{ name: "runners", section: "people" }, "/connections/people"],
+  [{ name: "runners", section: "machines", machineId: "runner / ✅" }, `/connections/machines/~${encodeResourceId("runner / ✅")}`],
   [{ name: "runs" }, "/runs"],
   [{ name: "pods" }, "/pods"],
   [{ name: "automations" }, "/automations"],
@@ -85,6 +86,22 @@ test("the Projects Overview has its own route, and a project id wins over it", (
   assert.equal(viewFromPath("/projects/Overview"), null);
   assert.equal(viewFromPath("/projects/unknown"), null);
   assert.equal(sameView({ name: "projects", pane: "overview" }, { name: "projects" }), false, "Back can leave the overview");
+});
+
+test("a machine is selected by its runner id under the Machines tab, and old Connections links still work (#2985)", () => {
+  assert.deepEqual(viewFromPath(`/connections/machines/~${encodeResourceId("native-t14s")}`),
+    { name: "runners", section: "machines", machineId: "native-t14s" });
+  assert.deepEqual(viewFromPath("/connections/machines"), { name: "runners", section: "machines" });
+  assert.deepEqual(viewFromPath("/connections"), { name: "runners", section: "machines" });
+  assert.deepEqual(viewFromPath("/runners"), { name: "runners", section: "machines" });
+  // A machine id names the Machines tab whatever section a caller passed with it.
+  assert.equal(viewPath({ name: "runners", section: "people", machineId: "a" }), `/connections/machines/~${encodeResourceId("a")}`);
+  assert.equal(viewFromPath("/connections/people/~YQ"), null);
+  assert.equal(viewFromPath("/connections/machines/~"), null);
+  assert.equal(viewFromPath("/connections/machines/~!"), null);
+  assert.equal(viewFromPath(`/connections/machines/~${encodeResourceId("a")}/more`), null);
+  assert.equal(sameView({ name: "runners", section: "machines", machineId: "a" }, { name: "runners", section: "machines" }), false,
+    "Back can return to the previous selection");
 });
 
 test("every dashboard view has a canonical round-tripping path", () => {

@@ -24,7 +24,8 @@ const ROUTES = [
   { name: "Projects", url: shell("/projects"), current: /^Projects/, list: true },
   { name: "Multi-Agent Runs", url: shell("/runs"), current: /^Multi-Agent/, list: false },
   { name: "Pods", url: shell("/pods"), current: /Pods/, list: false },
-  { name: "Connections", url: shell("/connections"), current: /^Connections/, list: false },
+  // The Machines tab is a list beside the detail (#2985).
+  { name: "Connections", url: shell("/connections"), current: /^Connections/, list: true },
   { name: "Agent Skills", url: shell("/skills"), current: /Skills/, list: true },
   { name: "Archived Sessions", url: shell("/archived"), current: /^Archived/, list: false },
   { name: "Usage and Cost", url: shell("/usage"), current: /^Usage/, list: false },

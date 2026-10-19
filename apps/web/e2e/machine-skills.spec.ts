@@ -7,7 +7,9 @@ for (const width of [1280, 390]) {
   test(`Skills on This Machine lists unmanaged skills and the whole removal history at ${width}`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/machine-management-e2e.html");
-    await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+    // A phone opens the machine from its row (#2985); wider, it opens beside the list.
+    if (width <= 760) await page.getByRole("complementary", { name: "Machines" }).locator("button.row").click();
+    await expect(page.locator(".runner-card").getByRole("heading", { name: "Design Workstation" })).toBeVisible();
     const disclosure = page.locator("details.machine-skills");
     await disclosure.locator("summary").click();
     await expect(disclosure.getByRole("heading", { name: "Unmanaged Skills" })).toBeVisible();

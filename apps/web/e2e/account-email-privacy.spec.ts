@@ -153,7 +153,8 @@ for (const width of [390, 1440]) {
     const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
     const management = await context.newPage();
     await management.setViewportSize({ width, height: 1000 });
-    await management.goto("/machine-management-e2e.html?emailLabels=1");
+    // The machine's own route, which a phone opens as its detail (#2985).
+    await management.goto("/machine-management-e2e.html?emailLabels=1&machine=native-t14s");
     await management.getByText("Accounts", { exact: true }).click();
     const row = management.locator(".agent-row").filter({ hasText: "work@example.com" });
     await expect(row).toBeVisible();

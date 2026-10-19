@@ -45,6 +45,7 @@ const TABLE: readonly Row[] = [
   ["machine", "connecting", "Connecting", "info"],
   ["machine", "offline", "Offline", "neutral"],
   ["machine", "update_required", "Update Required", "warning"],
+  ["machine", "approval_required", "Approval Required", "warning"],
   ["machine", "sign_in_required", "Sign-In Required", "warning"],
   ["machine", "pairing_required", "Pairing Required", "warning"],
   ["machine", "unreachable", "Unreachable", "danger"],

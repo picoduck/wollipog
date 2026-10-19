@@ -9817,6 +9817,47 @@ textarea {
   .add-machine-method .row-sub { white-space: normal; }
   .add-machine-method > .btn { margin-left: calc(var(--icon) + var(--space-3)); }
 }
+/* The Machines tab is a master-detail (§6, #2985): the panel fills the page under the header and
+   gives the panes, or the state spanning them, the height a permission notice leaves. The panel
+   takes the gutter, so its edge is the title's (§4.5); on a phone its children take it instead. */
+.connections-panel.machines-panel {
+  display: flex;
+  flex-direction: column;
+  margin-left: var(--page-gutter);
+}
+.machines-panel > :is(.master-detail, .master-detail-state) {
+  flex: 1 1 0;
+  min-height: 0;
+  margin-left: 0;
+}
+.machines-panel > .notice { margin: var(--space-3) var(--page-gutter) 0 0; }
+@media (max-width: 760px) {
+  .connections-panel.machines-panel { margin-left: 0; }
+  .machines-panel > :is(.master-detail-state, .notice) { margin-left: var(--page-gutter); }
+}
+/* MachineList.tsx. The head holds the Reconnecting… line over the filter, either alone. */
+.machine-list-head {
+  display: grid;
+  gap: var(--space-2);
+}
+.machine-list-group { display: grid; }
+.machine-list-group + .machine-list-group { margin-top: var(--space-3); }
+/* Line 1 is the name and the one status at the row's end; line 2 its meta, each fact after its 14px
+   icon and 12px apart (§5.2, §11.3). */
+.machine-row-status { margin-left: auto; }
+.machine-row-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.machine-row-meta > span {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.machine-row-meta > span:last-child { flex: 0 1 auto; overflow: hidden; }
 .instances-page {
   min-width: 0;
 }
@@ -10221,13 +10262,6 @@ textarea {
 }
 .connection-access-error .btn {
   margin-left: auto;
-}
-/* auto-FILL for the same reason as .instance-grid: a user with one machine — the default for a new
-   install — otherwise gets a full-bleed card that is mostly empty space. */
-.runner-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
-  gap: 16px;
 }
 .runner-card {
   min-width: 0;
@@ -15204,10 +15238,6 @@ button.review-finding-location {
   .connection-access-error .btn {
     width: 100%;
   }
-  .runner-grid {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 12px;
-  }
   .instance-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
@@ -15535,19 +15565,19 @@ button.review-finding-location {
 .skill-row .row-sub.is-empty { color: var(--text-faint); }
 /* No results (§12.2), inline in the list at the rows' inset: the icon beside its sentence. */
 /* The Projects list's no-match row is the same (#2957). */
-.state:is(.skill-list-no-results, .project-list-no-results) { padding: var(--space-3) var(--space-3) 0; }
-:is(.skill-list-no-results, .project-list-no-results) .state-body {
+.state:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results) { padding: var(--space-3) var(--space-3) 0; }
+:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results) .state-body {
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
-:is(.skill-list-no-results, .project-list-no-results) .state-body > svg { flex: none; }
+:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results) .state-body > svg { flex: none; }
 /* The foot's Orphaned Copies entry is one line in the foot's --text-dim (§5.6). */
 .list-foot > .skill-list-orphans { color: inherit; }
 .skill-list-orphans > .row-title { font: var(--type-body); }
 /* Skeleton rows are the row itself, holding a title bar over a meta bar (§12.3). */
-/* The Projects list's are the same (#2957). */
-:is(.skill-row-skeleton, .project-row-skeleton) > .row-body { gap: var(--space-2); }
+/* The Projects and Machines lists' are the same (#2957, #2985). */
+:is(.skill-row-skeleton, .project-row-skeleton, .machine-row-skeleton) > .row-body { gap: var(--space-2); }
 /* The phone's first row (#1971): it opens the Library Overview, a step apart from the groups. The
    Projects list's opens the Projects Overview (#2958). */
 :is(.skill-list-overview, .project-list-overview) { margin-bottom: var(--space-2); }
