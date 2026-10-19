@@ -20217,6 +20217,131 @@ export class ControlPlaneDb {
     ).all(...(runnerId ? [runnerId, limit] : [limit])) as Array<{ id: string }>).map((row) => row.id);
   }
 
+  // Review continuations (#3369): each finished review owes its requester one prompt, carried by
+  // a durable command exactly as a restart notice is (#1861). The owed state is written with the
+  // review's outcome (ReviewSessions.accept / abandon); these move it.
+
+  /** Whether this requester is owed a review continuation, held or in flight. */
+  hasOpenReviewContinuations(requesterSessionId: string): boolean {
+    return this.stmt(
+      "SELECT 1 FROM review_sessions WHERE requester_session_id=? AND continuation_state IN ('held','delivering') LIMIT 1",
+    ).get(requesterSessionId) !== undefined;
+  }
+
+  /** Stage the command that carries these held continuations and bind each to it in one
+   * transaction. Throws, staging nothing, unless every one is still held. */
+  stageReviewContinuation(input: {
+    reviewSessionIds: readonly string[];
+    command: Parameters<ControlPlaneDb["stageSessionPromptCommand"]>[0];
+  }): SessionPromptCommandRecord {
+    this.db.exec("BEGIN");
+    try {
+      const update = this.stmt(
+        `UPDATE review_sessions SET continuation_state='delivering', continuation_command_id=?, continuation_updated_at=?
+         WHERE review_session_id=? AND requester_session_id=? AND continuation_state='held'`,
+      );
+      const staged = this.stageSessionPromptCommand(input.command);
+      for (const id of input.reviewSessionIds) {
+        if (Number(update.run(staged.commandId, input.command.now, id, input.command.sessionId).changes) !== 1) {
+          throw new Error("review continuation changed before it could be staged");
+        }
+      }
+      this.db.exec("COMMIT");
+      return staged;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Record held continuations delivered just before they go out on the immediate lane, which has
+   * no receipt to follow. All or nothing: false, claiming none, unless every one is still held. */
+  claimHeldReviewContinuations(requesterSessionId: string, reviewSessionIds: readonly string[], now: number): boolean {
+    try {
+      return this.atomic(() => {
+        const update = this.stmt(
+          `UPDATE review_sessions SET continuation_state='delivered', continuation_command_id=NULL, continuation_updated_at=?
+           WHERE review_session_id=? AND requester_session_id=? AND continuation_state='held'`,
+        );
+        for (const id of reviewSessionIds) {
+          if (Number(update.run(now, id, requesterSessionId).changes) !== 1) throw new Error("review continuation changed");
+        }
+        return true;
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /** The immediate send that followed a claim failed synchronously: owe the continuations again. */
+  releaseReviewContinuationClaim(requesterSessionId: string, reviewSessionIds: readonly string[], now: number): void {
+    const update = this.stmt(
+      `UPDATE review_sessions SET continuation_state='held', continuation_updated_at=?
+       WHERE review_session_id=? AND requester_session_id=? AND continuation_state='delivered' AND continuation_command_id IS NULL`,
+    );
+    for (const id of reviewSessionIds) update.run(now, id, requesterSessionId);
+  }
+
+  /** The requester whose continuation this command carries, if it is still in flight. */
+  reviewContinuationRequesterForCommand(commandId: string): string | null {
+    const row = this.stmt(
+      "SELECT requester_session_id FROM review_sessions WHERE continuation_command_id=? AND continuation_state='delivering' LIMIT 1",
+    ).get(commandId) as { requester_session_id: string } | undefined;
+    return row?.requester_session_id ?? null;
+  }
+
+  setReviewContinuationCommandState(commandId: string, state: "delivered" | "uncertain" | "failed", now: number): number {
+    return Number(this.stmt(
+      `UPDATE review_sessions SET continuation_state=?, continuation_updated_at=?
+       WHERE continuation_command_id=? AND continuation_state='delivering'`,
+    ).run(state, now, commandId).changes);
+  }
+
+  /** The runner reported the command not sent because the requester's worktree needs recovery:
+   * owe the continuation again and retire the not-sent row in one transaction. */
+  holdReviewContinuationCommand(requesterSessionId: string, commandId: string, now: number): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const held = Number(this.stmt(
+        `UPDATE review_sessions SET continuation_state='held', continuation_command_id=NULL, continuation_updated_at=?
+         WHERE requester_session_id=? AND continuation_command_id=? AND continuation_state='delivering'`,
+      ).run(now, requesterSessionId, commandId).changes) > 0;
+      if (held) this.dismissTerminalSessionPromptCommand(requesterSessionId, commandId, now);
+      this.db.exec("COMMIT");
+      return held;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** A requester that ended for good is owed no continuation any more; one in flight is abandoned
+   * too, so a late not-sent receipt cannot hold it again. */
+  abandonReviewContinuations(requesterSessionId: string, now: number): number {
+    return Number(this.stmt(
+      `UPDATE review_sessions SET continuation_state='abandoned', continuation_updated_at=?
+       WHERE requester_session_id=? AND continuation_state IN ('held','delivering')`,
+    ).run(now, requesterSessionId).changes);
+  }
+
+  sessionsWithHeldReviewContinuations(runnerId?: string): string[] {
+    return (this.stmt(
+      `SELECT DISTINCT r.requester_session_id AS id FROM review_sessions r JOIN sessions s ON s.id=r.requester_session_id
+       WHERE r.continuation_state='held' ${runnerId ? "AND s.runner_id=?" : ""}`,
+    ).all(...(runnerId ? [runnerId] : [])) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /** Commands carrying an in-flight continuation whose outcome is recorded but never applied to it. */
+  settledReviewContinuationCommands(runnerId?: string, limit = 100): string[] {
+    return (this.stmt(
+      `SELECT DISTINCT r.continuation_command_id AS id FROM review_sessions r
+       JOIN session_prompt_commands c ON c.command_id=r.continuation_command_id
+       WHERE r.continuation_state='delivering' AND c.state IN ('started','completed','failed','uncertain')
+         ${runnerId ? "AND c.runner_id=?" : ""}
+       LIMIT ?`,
+    ).all(...(runnerId ? [runnerId, limit] : [limit])) as Array<{ id: string }>).map((row) => row.id);
+  }
+
   /** Descendants held from starting their next turn (#1650), without hydrating full views. Only a
    * live session is held: a terminal one has nothing left to start. `readerFor` writes each
    * session's hold advice for the principal reading it (#1863). */
@@ -23393,7 +23518,9 @@ export class ControlPlaneDb {
       const rows = this.stmt(
         `SELECT c.command_id, c.state, d.occurrence_id,
            EXISTS (SELECT 1 FROM session_restart_notices n
-             WHERE n.command_id=c.command_id AND n.state='delivering') AS restart_notice
+             WHERE n.command_id=c.command_id AND n.state='delivering') OR
+           EXISTS (SELECT 1 FROM review_sessions r
+             WHERE r.continuation_command_id=c.command_id AND r.continuation_state='delivering') AS restart_notice
          FROM session_prompt_commands c
          LEFT JOIN workflow_decisions d ON d.resume_command_id=c.command_id AND d.resume_state='delivering'
          WHERE c.session_id=? AND c.state IN ('pending','sent','accepted','queued','started')`,

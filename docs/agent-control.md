@@ -379,6 +379,26 @@ first, and `review session cancel` (`cancel_review_session`) stops the review se
 persists the outcome before reporting it and re-sends it at each registration; a runner restart
 fails any unsettled review session for good, and the checkout is removed once the review settles.
 
+#### Review Continuation
+
+A finished review owes its requester exactly one continuation (#3369), recorded with the review's
+outcome so a crash cannot lose it. A review the requester cancelled, or one whose launch was
+refused at once, owes nothing. The continuation is a framed prompt,
+`[Wollipog Cross-Model Review — <reviewSessionId>]` … `[End Wollipog Cross-Model Review]`:
+- the reviewer, the pull request, its head, and the round and epoch;
+- the outcome: a valid UPVOTE or DOWNVOTE with its findings (up to 20, one bounded line each), an
+  invalid attempt with its first reason, or the fixed reason a review failed;
+- an instruction to read the full report with `get_review_session`, adjudicate every finding,
+  and request the next round once fixes are pushed.
+
+Like a restart notice, it goes only to an idle requester that nothing would refuse it for. A
+requester mid-turn takes it after its turn settles, through the control plane's retry sweep. A
+worktree-backed session receives it as a durable command that a reconnect or runner restart
+delivers exactly once; any other session receives it on the immediate lane, recorded as
+delivered before the send. A requester that ends for good is owed nothing more. The review's
+`continuation` field reads `pending`, `delivered`, `uncertain`, `failed` or `abandoned`, or
+null when nothing was owed.
+
 In the web app, a review session is titled **Codex Review** or **Claude Review** of its pull
 request. The requester's Review panel lists its reviews under Cross-Model Reviews, newest first:
 each with its round and epoch, one state badge (Requested, Reviewing, Upvote, Downvote, Invalid,
