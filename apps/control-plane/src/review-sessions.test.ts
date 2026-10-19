@@ -348,6 +348,109 @@ test("a runner below review runs gets no history and reviews without a verdict",
   } finally { h.db.close(); }
 });
 
+/** The prompts the requester's runner was sent as durable commands, by command id. */
+function continuationCommands(h: ReturnType<typeof harness>): Map<string, string> {
+  const commands = new Map<string, string>();
+  for (const message of h.sent) {
+    if (message.type !== "durable_session_command") continue;
+    const command = (message as unknown as { commandId: string; command: { type: string; text?: string } });
+    if (command.command.type === "prompt_session") commands.set(command.commandId, command.command.text ?? "");
+  }
+  return commands;
+}
+
+/** The prompts the requester's runner was sent on the immediate lane. */
+function immediatePrompts(h: ReturnType<typeof harness>): string[] {
+  return h.sent.filter((message) => message.type === "prompt_session" && (message as { sessionId?: string }).sessionId === "s1")
+    .map((message) => String((message as { text?: unknown }).text ?? ""));
+}
+
+test("without a worktree the continuation goes out once on the immediate lane, claimed before the send", () => {
+  const h = harness();
+  try {
+    h.db.updateSessionStatus("s1", "idle", 10);
+    const view = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "completed",
+      output: report(), round: ROUND, verdict: VALID } as never);
+    assert.equal(immediatePrompts(h).length, 1);
+    assert.match(immediatePrompts(h)[0]!, /valid DOWNVOTE/u);
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "delivered");
+    h.svc.retryDuePrompts();
+    assert.equal(immediatePrompts(h).length, 1, "a later sweep sends nothing again");
+  } finally { h.db.close(); }
+});
+
+test("a finished review owes its idle requester exactly one continuation, delivered durably", () => {
+  const h = harness();
+  try {
+    // A worktree-backed idle session takes control-plane prompts on the durable lane.
+    h.db.setWorktreePath("s1", "/repo/worktrees/s1");
+    const view = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "running", round: ROUND } as never);
+    // The requester is mid-turn (polling the review, say): the continuation waits for it to settle.
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "completed",
+      output: report(), round: ROUND, verdict: VALID } as never);
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "pending");
+    assert.equal(continuationCommands(h).size, 0);
+    h.db.updateSessionStatus("s1", "idle", 10);
+    h.svc.retryDuePrompts();
+    const commands = continuationCommands(h);
+    assert.equal(commands.size, 1, "one durable command carries it");
+    const [commandId, text] = [...commands][0]!;
+    assert.match(text, new RegExp(`^\\[Wollipog Cross-Model Review — ${view.reviewSessionId}\\]`, "u"));
+    assert.match(text, /Codex Review of picoduck\/wollipog#3368 at a{12} \(round 1, epoch 1\) ended with a valid DOWNVOTE with 1 finding\(s\), 1 blocking\./u);
+    assert.match(text, /- \[high blocking\] src\/a\.ts:3: Wrong/u);
+    assert.match(text, /Adjudicate every finding/u);
+    assert.match(text, /\[End Wollipog Cross-Model Review\]$/u);
+    // Later sweeps follow that command; none stages another.
+    h.svc.retryDuePrompts();
+    h.svc.retryDuePrompts();
+    assert.deepEqual([...continuationCommands(h).keys()], [commandId]);
+    h.svc.onDurablePromptReceipt("r", {
+      type: "durable_session_command_update", commandId, sessionId: "s1", state: "started", revision: 5,
+    } as never);
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "delivered");
+    h.svc.retryDuePrompts();
+    assert.equal(continuationCommands(h).size, 1);
+  } finally { h.db.close(); }
+});
+
+test("a failed review is reported to its requester; one it cancelled is not", () => {
+  const h = harness();
+  try {
+    h.db.updateSessionStatus("s1", "idle", 10);
+    const failed = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: failed.reviewSessionId, state: "failed",
+      reason: "the reviewer timed out", round: ROUND,
+      verdict: { valid: false, consumed: false, effectiveVote: null, failureClass: "timeout", validationErrors: ["the reviewer timed out"] } } as never);
+    const text = immediatePrompts(h)[0]!;
+    assert.match(text, /ended with an invalid attempt that does not count as a review: "the reviewer timed out" \(it did not use one of the round's attempts\)\./u);
+    // Cancelled by the requester itself: nothing is owed.
+    h.db.updateSessionStatus("s1", "idle", 11);
+    const cancelled = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: cancelled.reviewSessionId, state: "cancelled",
+      reason: "the review was cancelled" });
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.reviewSessions.view(cancelled.reviewSessionId)!.continuation, null);
+    assert.equal(immediatePrompts(h).length, 1);
+  } finally { h.db.close(); }
+});
+
+test("a requester that ends for good is owed no continuation", () => {
+  const h = harness();
+  try {
+    const view = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "completed",
+      output: report(), round: ROUND, verdict: VALID } as never);
+    assert.equal(h.db.hasOpenReviewContinuations("s1"), true);
+    assert.equal(h.db.abandonReviewContinuations("s1", 20), 1);
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "abandoned");
+    h.db.updateSessionStatus("s1", "idle", 21);
+    h.svc.retryDuePrompts();
+    assert.equal(immediatePrompts(h).length, 0);
+  } finally { h.db.close(); }
+});
+
 test("an undelivered review launch leaves no active review behind", () => {
   const h = harness();
   try {

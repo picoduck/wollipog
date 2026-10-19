@@ -80,6 +80,10 @@ export interface ReviewSessionView {
   findings: ReviewReportFinding[];
   /** A newer review of the same pull request has a different head. */
   stale: boolean;
+  /** #3369: the one continuation a finished review owes its requester: pending until the
+   * requester's session takes it, then delivered (or failed, uncertain or abandoned). Null when none
+   * is owed (a review still running, or one its requester cancelled). */
+  continuation?: ReviewContinuationState | null;
   output: string | null;
   outputTruncated: boolean;
   reason: string | null;
@@ -89,6 +93,8 @@ export interface ReviewSessionView {
 }
 
 export interface ReviewSessionsPage { reviews: ReviewSessionView[]; nextAfterReviewSessionId: string | null }
+
+export type ReviewContinuationState = "pending" | "delivered" | "uncertain" | "failed" | "abandoned";
 
 /** #3369: on a requester's own view, what its review sessions add up to, so a client reads them only
  * when there are any and again whenever one changes. Omitted for a session that requested none. */

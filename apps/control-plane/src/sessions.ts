@@ -24,7 +24,7 @@ import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, 
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
-  type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
+  compactReviewFinding, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
 } from "@wollipog/protocol";
 import { SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewHarness, type SessionReviewJobArtifacts,
   type SessionReviewJobCommand, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
@@ -682,6 +682,45 @@ const MALFORMED_ANCESTRY_DECISION_REFUSAL =
 const MALFORMED_ANCESTRY_AUTHORITY_REFUSAL =
   "this session's ancestry is malformed (a cycle, a missing parent session, or more than 64 levels of " +
   "nesting), so its campaign policy and Parent Control authority cannot be determined";
+
+/** How one finished review reads in its requester's continuation (#3369). Reviewer-written text is
+ * bounded to single lines (compactReviewFinding) or quoted, so it can never forge a framing line. */
+function reviewContinuationOutcome(review: ReviewSessionView): string[] {
+  const reviewer = review.reviewer === "codex" ? "Codex Review" : "Claude Review";
+  const round = review.round ? ` (round ${review.round.round}, epoch ${review.round.epoch})` : "";
+  const head = `${review.pullRequest.repository}#${review.pullRequest.number} at ${review.headSha.slice(0, 12)}`;
+  const verdict = review.verdict;
+  let outcome: string;
+  if (review.state === "completed" && verdict?.valid) {
+    const blocking = review.findings.filter((finding) => finding.blocking).length;
+    outcome = verdict.effectiveVote === "UPVOTE"
+      ? `a valid UPVOTE${review.findings.length ? ` with ${review.findings.length} non-blocking finding(s)` : ""}`
+      : `a valid DOWNVOTE with ${review.findings.length} finding(s), ${blocking} blocking`;
+  } else if (verdict && !verdict.valid) {
+    const why = verdict.validationErrors[0];
+    outcome = `an invalid attempt that does not count as a review${why ? `: ${decisionLiteral(why)}` : ""}` +
+      (verdict.consumed ? "" : " (it did not use one of the round's attempts)");
+  } else if (review.state === "completed") {
+    outcome = "a report that was not checked against the review contract (an older runner)";
+  } else {
+    outcome = `no review: ${decisionLiteral(review.reason ?? "the review ended without a result")}`;
+  }
+  const shown = review.findings.slice(0, 20).map(compactReviewFinding);
+  return [
+    `[Wollipog Cross-Model Review — ${review.reviewSessionId}]`,
+    `${reviewer} of ${head}${round} ended with ${outcome}.`,
+    ...shown,
+    ...(review.findings.length > shown.length ? [`- and ${review.findings.length - shown.length} more`] : []),
+    `Read the full report with get_review_session ${review.reviewSessionId} before acting. Adjudicate every finding: ` +
+      "prove it against the code, fix what holds, and request the next round once the fixes are pushed. " +
+      "A review grants no merge approval. If you have already acted on this review, continue from where you are.",
+    "[End Wollipog Cross-Model Review]",
+  ];
+}
+
+function reviewContinuationPrompt(reviews: readonly ReviewSessionView[]): string {
+  return reviews.flatMap(reviewContinuationOutcome).join("\n");
+}
 
 /** What a restarted child is told about the decisions its restart revoked (#1779). Revocation on a
  * lifecycle end is deliberate and stays: a relaunched provider must never act on a grant made to the
@@ -4934,7 +4973,7 @@ export class SessionsService {
           this.db.deleteSession(id);
           // An undelivered review never ran: it settles, so it no longer holds its requester's one
           // active review, and stays on record.
-          if (creationContext?.review) this.db.reviewSessions.abandon(id, "the review session could not be launched", Date.now());
+          if (creationContext?.review) this.db.reviewSessions.abandon(id, "the review session could not be launched", Date.now(), false);
           this.hub.sessionRemoved(id);
           if (session.parentSessionId) this.hub.sessionChangedById(session.parentSessionId);
           return fail("runner disconnected while launching the session", 409);
@@ -5458,6 +5497,13 @@ export class SessionsService {
     for (const sessionId of this.db.sessionsWithHeldRestartNotices(runnerId)) {
       this.deliverHeldRestartNotices(sessionId, now);
     }
+    // And for a finished review's continuation to its requester (#3369).
+    for (const commandId of this.db.settledReviewContinuationCommands(runnerId)) {
+      this.reconcileReviewContinuationCommand(commandId, now);
+    }
+    for (const sessionId of this.db.sessionsWithHeldReviewContinuations(runnerId)) {
+      this.deliverHeldReviewContinuations(sessionId, now);
+    }
     return this.promptOutbox.flush(now, runnerId);
   }
 
@@ -5474,6 +5520,7 @@ export class SessionsService {
       this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
       this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
       this.reconcileRestartNoticeCommand(message.commandId, Date.now());
+      this.reconcileReviewContinuationCommand(message.commandId, Date.now());
     }
     return handled;
   }
@@ -8722,7 +8769,7 @@ export class SessionsService {
     this.db.reviewSessions.requestCancel(reviewSessionId, Date.now());
     const stopped = this.stop(reviewSessionId);
     // A review whose session is already gone cannot report: it ends here.
-    if (!stopped.ok && this.db.reviewSessions.abandon(reviewSessionId, "the review was cancelled", Date.now())) {
+    if (!stopped.ok && this.db.reviewSessions.abandon(reviewSessionId, "the review was cancelled", Date.now(), false)) {
       this.log.info(JSON.stringify({ event: "review_session_abandoned", reviewSessionId, reason: "cancelled without a session" }));
     }
     this.hub.sessionChangedById(requesterSessionId);
@@ -8737,6 +8784,7 @@ export class SessionsService {
     this.log.info(JSON.stringify({ event: "review_session_update", reviewSessionId: view.reviewSessionId,
       requesterSessionId: view.requesterSessionId, state: view.state, reviewer: view.reviewer, reason: view.reason,
       outputTruncated: view.outputTruncated }));
+    if (view.terminal) this.deliverHeldReviewContinuations(view.requesterSessionId);
   }
 
   /** A review session's own status moves its review: launched is running, and a session that ends
@@ -8750,6 +8798,7 @@ export class SessionsService {
     if (!changed) return;
     const view = this.db.reviewSessions.view(sessionId)!;
     this.hub.sessionChangedById(view.requesterSessionId);
+    if (view.terminal) this.deliverHeldReviewContinuations(view.requesterSessionId, now);
   }
 
   /** On registration: a runner without review sessions can no longer report its reviews. */
@@ -8759,7 +8808,72 @@ export class SessionsService {
       if (!this.db.reviewSessions.abandon(reviewSessionId, "the review session's runner no longer supports review sessions", Date.now())) continue;
       const view = this.db.reviewSessions.view(reviewSessionId)!;
       this.hub.sessionChangedById(view.requesterSessionId);
+      this.deliverHeldReviewContinuations(view.requesterSessionId);
     }
+  }
+
+  /**
+   * Offer a requester the continuations its finished reviews owe it (#3369): one framed prompt
+   * naming each review's outcome, carried by a durable command bound to every review it names, so
+   * a reconnect or runner restart delivers it exactly once. Like a restart notice (#1861), it goes
+   * only to an idle session nothing would refuse it for; a requester mid-turn (often polling the
+   * review itself) takes it at its next settle, through the retry sweep. Returns why it is still
+   * held, or null once nothing is owed.
+   */
+  private deliverHeldReviewContinuations(requesterSessionId: string, now = Date.now()): string | null {
+    const held = this.db.reviewSessions.heldContinuations(requesterSessionId);
+    if (!held.length) return null;
+    const session = this.db.getSession(requesterSessionId);
+    if (!session) return "session not found";
+    if (session.status !== "idle") return `session is ${session.status}`;
+    if (!this.hub.isRunnerOnline(session.runnerId)) return "runner is offline";
+    if (session.worktreeRecovery) return "worktree recovery is required";
+    if (hasBlockingPendingRequest(session.pendingApproval)) return "a request is waiting for an answer";
+    const daily = this.dailyBudgetFor(requesterSessionId);
+    if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
+    const ids = held.map((review) => review.reviewSessionId);
+    let claimed = false;
+    const sent = this.prompt(
+      requesterSessionId, reviewContinuationPrompt(held), [], undefined, undefined, undefined, "session", true, {
+        admitAs: "queued" as const,
+        stage: (runnerId, command, at) => this.promptOutbox.stageReviewContinuation(ids, requesterSessionId, runnerId, command, at),
+        // Without a durable command there is no receipt to follow: recorded delivered before the
+        // send, so a crash between the two can lose it but never send it twice.
+        claimImmediate: () => (claimed = this.db.claimHeldReviewContinuations(requesterSessionId, ids, now)),
+      },
+    );
+    if (!sent.ok) {
+      if (claimed) this.db.releaseReviewContinuationClaim(requesterSessionId, ids, Date.now());
+      return sent.error ?? "the continuation was refused";
+    }
+    this.hub.sessionChangedById(requesterSessionId);
+    return null;
+  }
+
+  /** Follow the durable command that carries a review continuation, as a restart notice's is. */
+  private reconcileReviewContinuationCommand(commandId: string, now: number): void {
+    const requesterSessionId = this.db.reviewContinuationRequesterForCommand(commandId);
+    if (!requesterSessionId) return;
+    const command = this.db.getSessionPromptCommand(commandId);
+    if (!command) return;
+    if (command.state === "failed" && command.errorCode === "WORKTREE_RECOVERY_REQUIRED" &&
+        command.userEventSeq === undefined) {
+      if (!this.db.holdReviewContinuationCommand(requesterSessionId, commandId, now)) return;
+      this.hub.sessionChangedById(requesterSessionId);
+      this.deliverHeldReviewContinuations(requesterSessionId, now);
+      return;
+    }
+    const state = command.state === "started" || command.state === "completed" ? "delivered" as const
+      : command.state === "uncertain" ? "uncertain" as const
+      : command.state === "failed" ? "failed" as const
+      : null;
+    if (!state) return;
+    this.db.setReviewContinuationCommandState(commandId, state, now);
+    if (state === "failed") {
+      this.log.warn(`review continuation failed for ${requesterSessionId}: ${command.error ?? "unknown error"}`);
+    }
+    this.hub.sessionChangedById(requesterSessionId);
+    this.settleQueuedAdmission(command, now);
   }
 
   recoverCampaignBudgetAllocations(runnerId:string):void {
@@ -11039,7 +11153,10 @@ export class SessionsService {
     this.db.abandonHeldWorkflowDecisionResumes(sessionId, Date.now());
     // A restart owes its child the notice it cannot yet deliver, and a later restart adds to that
     // notice rather than replacing it; every other end means no child is left to tell (#1861).
-    if (actorId !== "session-restarted") this.db.abandonRestartNotices(sessionId, Date.now());
+    if (actorId !== "session-restarted") {
+      this.db.abandonRestartNotices(sessionId, Date.now());
+      this.db.abandonReviewContinuations(sessionId, Date.now());
+    }
   }
 
   /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
@@ -11817,8 +11934,10 @@ export class SessionsService {
         this.gateOnPolicy(sessionId, now);
         this.reconcilePolicyHookTimeouts(now, sessionId);
         this.clearSettledPolicyResumeStatus(sessionId);
-        // A restart notice this card kept back goes out now if nothing else holds it (#1861).
+        // A restart notice this card kept back goes out now if nothing else holds it (#1861), and
+        // so does a finished review's continuation (#3369).
         this.deliverHeldRestartNotices(sessionId, now);
+        this.deliverHeldReviewContinuations(sessionId, now);
       } else {
         // Declining stops the turn and records nothing, so the same checkpoint asks again on the
         // next turn that crosses it.
@@ -15628,6 +15747,7 @@ export class SessionsService {
             this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
             this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
             this.db.hasOpenRestartNotices(snap.id) ||
+            this.db.hasOpenReviewContinuations(snap.id) ||
             this.db.listOpenPolicyHookApprovals(snap.id).length > 0 ||
             this.db.policyResumeStatus(snap.id) !== null) return [];
         campaignBefore(existing);
@@ -15726,6 +15846,7 @@ export class SessionsService {
         this.restorePendingWorkflowDecisionCards(snap.id);
         this.deliverHeldWorkflowDecisionResumes(snap.id, now);
         this.deliverHeldRestartNotices(snap.id, now);
+        this.deliverHeldReviewContinuations(snap.id, now);
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
@@ -15874,6 +15995,7 @@ export class SessionsService {
     this.restorePendingWorkflowDecisionCards(snapshot.id);
     this.deliverHeldWorkflowDecisionResumes(snapshot.id, now);
     this.deliverHeldRestartNotices(snapshot.id, now);
+    this.deliverHeldReviewContinuations(snapshot.id, now);
     this.hub.sessionChangedById(snapshot.id);
     this.publishCampaignAttentionTransition(campaignBefore, batch);
   }

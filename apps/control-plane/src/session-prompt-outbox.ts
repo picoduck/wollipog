@@ -108,6 +108,29 @@ export class SessionPromptOutbox {
     });
   }
 
+  /** Stage the command that carries a requester's review continuation (#3369), bound to each
+   * review it names in the same transaction. Throws, staging nothing, unless each is still held. */
+  stageReviewContinuation(
+    reviewSessionIds: readonly string[],
+    sessionId: string,
+    runnerId: string,
+    command: DurableSessionCommand,
+    now = Date.now(),
+  ): SessionPromptCommandRecord {
+    return this.db.stageReviewContinuation({
+      reviewSessionIds,
+      command: {
+        commandId: `prompt_${randomUUID()}`,
+        sessionId,
+        runnerId,
+        payloadJson: canonicalAutomationCommandJson(command),
+        payloadSha256: automationCommandDigest(command),
+        expiresAt: now + RECEIPT_HORIZON_MS,
+        now,
+      },
+    });
+  }
+
   stageCampaignContinuation(input: {
     continuationId: string;
     campaignSessionId: string;

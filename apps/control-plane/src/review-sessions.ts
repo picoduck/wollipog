@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   REVIEW_ATTEMPTS_PER_ROUND, REVIEW_ROUND_BUDGET, REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, validateReviewReport,
-  type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewFailureClass, type ReviewReport, type ReviewReportFinding,
+  type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewContinuationState, type ReviewFailureClass, type ReviewReport, type ReviewReportFinding,
   type ReviewRunHistory, type ReviewSessionLink, type ReviewSessionState, type ReviewSessionUpdate, type ReviewSessionView,
   type ReviewRunsSummary, type ReviewSessionsPage, type SessionReviewHarness,
 } from "@wollipog/protocol";
@@ -11,6 +11,7 @@ type Row = {
   head_sha: string; reviewer: SessionReviewHarness; state: ReviewSessionState; output: string | null;
   output_truncated: number; reason: string | null; cancel_requested: number; created_at: number; updated_at: number;
   round_json: string | null; verdict_json: string | null; findings_json: string | null;
+  continuation_state: string | null;
 };
 
 const TERMINAL = new Set<string>(["completed", "failed", "cancelled"]);
@@ -136,10 +137,17 @@ export class ReviewSessions {
       WHERE state IN ${ACTIVE};`);
     // v228 (#3369): each attempt's planned round, its contract verdict and a valid report's findings.
     const columns = new Set((sql.prepare("PRAGMA table_info(review_sessions)").all() as Array<{ name: string }>).map((c) => c.name));
-    for (const column of ["round_json", "verdict_json", "findings_json"]) {
+    // #3369: the one continuation each finished review owes its requester, and the durable prompt
+    // command that carries it: held -> delivering -> delivered | uncertain | failed, or abandoned.
+    for (const column of ["round_json", "verdict_json", "findings_json", "continuation_state", "continuation_command_id"]) {
       if (!columns.has(column)) sql.exec(`ALTER TABLE review_sessions ADD COLUMN ${column} TEXT`);
     }
-    sql.exec("CREATE INDEX IF NOT EXISTS review_sessions_run ON review_sessions(requester_session_id,repository,pr_number)");
+    if (!columns.has("continuation_updated_at")) sql.exec("ALTER TABLE review_sessions ADD COLUMN continuation_updated_at INTEGER");
+    sql.exec(`CREATE INDEX IF NOT EXISTS review_sessions_run ON review_sessions(requester_session_id,repository,pr_number);
+      CREATE INDEX IF NOT EXISTS review_sessions_continuation_held ON review_sessions(requester_session_id)
+        WHERE continuation_state='held';
+      CREATE INDEX IF NOT EXISTS review_sessions_continuation_command ON review_sessions(continuation_command_id)
+        WHERE continuation_state='delivering';`);
   }
 
   private row(reviewSessionId: string): Row | undefined {
@@ -211,6 +219,9 @@ export class ReviewSessions {
       verdict,
       findings: verdict?.valid ? json<ReviewReportFinding[]>(row.findings_json) ?? [] : [],
       stale,
+      continuation: row.continuation_state === null ? null
+        : row.continuation_state === "held" || row.continuation_state === "delivering" ? "pending"
+        : row.continuation_state as ReviewContinuationState,
       output: row.output,
       outputTruncated: row.output_truncated === 1,
       reason: row.reason,
@@ -320,20 +331,30 @@ export class ReviewSessions {
       ? invalidVerdict("evidence_contract", ["the runner's verdict was malformed"]) : reported;
     const { verdict, findings } = settledVerdict(row, state, round,
       judged, state === "completed" ? { text: output!.text, truncated } : null);
+    // The requester is owed one continuation, recorded with the outcome so a crash cannot lose it.
+    // A cancellation is the requester's own, so it is owed nothing.
     this.sql.prepare(`UPDATE review_sessions SET state=?, output=?, output_truncated=?, reason=?, round_json=?, verdict_json=?,
-      findings_json=?, updated_at=? WHERE review_session_id=?`).run(
+      findings_json=?, continuation_state=?, continuation_updated_at=?, updated_at=? WHERE review_session_id=?`).run(
       state, state === "completed" ? output!.text : null, truncated ? 1 : 0, reason,
       round ? JSON.stringify(round) : null, verdict ? JSON.stringify(verdict) : null, findings.length ? JSON.stringify(findings) : null,
-      now, row.review_session_id,
+      state === "cancelled" ? null : "held", now, now, row.review_session_id,
     );
     return true;
   }
 
-  /** Settle an unfinished review the runner can no longer report. */
-  abandon(reviewSessionId: string, reason: string, now: number): boolean {
-    return this.sql.prepare(`UPDATE review_sessions SET state='failed', reason=?, updated_at=?
-      WHERE review_session_id=? AND state IN ${ACTIVE}`)
-      .run(sanitizedReviewSessionReason(reason), now, reviewSessionId).changes > 0;
+  /** Settle an unfinished review the runner can no longer report. Its requester is owed a
+   * continuation unless the requester ended it (`owed` false). */
+  abandon(reviewSessionId: string, reason: string, now: number, owed = true): boolean {
+    return this.sql.prepare(`UPDATE review_sessions SET state='failed', reason=?, continuation_state=?, continuation_updated_at=?,
+      updated_at=? WHERE review_session_id=? AND state IN ${ACTIVE}`)
+      .run(sanitizedReviewSessionReason(reason), owed ? "held" : null, now, now, reviewSessionId).changes > 0;
+  }
+
+  /** The finished reviews still owed to this requester as a continuation, oldest first. */
+  heldContinuations(requesterSessionId: string): ReviewSessionView[] {
+    return (this.sql.prepare(`SELECT review_session_id FROM review_sessions WHERE requester_session_id=? AND continuation_state='held'
+      ORDER BY rowid`).all(requesterSessionId) as Array<{ review_session_id: string }>)
+      .map((row) => this.view(row.review_session_id)!);
   }
 
   /** Unfinished reviews on a runner, oldest first. */
