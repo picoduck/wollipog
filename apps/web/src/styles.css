@@ -10649,6 +10649,11 @@ textarea {
     max-width: none;
     margin-top: 0;
   }
+  /* An ending wraps here, so its icon stays on the title's line. */
+  .signin > .notice.compact {
+    align-items: start;
+    padding-block: var(--space-2);
+  }
 }
 /* Choose Another Account's sign-in (#2208): a plain head over the shared steps. */
 .signin-card {
