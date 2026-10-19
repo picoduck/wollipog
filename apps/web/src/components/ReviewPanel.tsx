@@ -531,24 +531,62 @@ export function ReviewPanel({
 
   // The cross-model reviews this session requested (#3369). Its own view summarizes them, and the
   // control plane republishes that view whenever one changes, so they are read only when there are
-  // any and again whenever that summary moves.
+  // any, again whenever that summary moves, and on the header's Refresh. The newest page is read;
+  // Load Older Reviews follows the cursor. A read that fails keeps what is shown and says so.
   const [reviewRuns, setReviewRuns] = useState<ReviewSessionView[]>([]);
+  const [reviewRunsOlder, setReviewRunsOlder] = useState<string | null>(null);
+  const [reviewRunsError, setReviewRunsError] = useState<string | null>(null);
+  const [loadingOlderReviewRuns, setLoadingOlderReviewRuns] = useState(false);
   const reviewRunsReqRef = useRef(0);
   const reviewRunsKey = session.reviewRuns ? `${session.reviewRuns.count}:${session.reviewRuns.active}:${session.reviewRuns.updatedAt}` : null;
-  useEffect(() => {
+  const loadReviewRuns = async () => {
     const request = ++reviewRunsReqRef.current;
-    if (reviewRunsKey === null) {
+    if (!session.reviewRuns) {
       setReviewRuns([]);
+      setReviewRunsOlder(null);
+      setReviewRunsError(null);
       return;
     }
-    api.reviewSessions(session.id).then(
-      (page) => { if (request === reviewRunsReqRef.current) setReviewRuns(page.reviews); },
-      // A review that cannot be read now keeps the last one shown; the next change reads it again.
-      () => {},
-    );
+    try {
+      const page = await api.reviewSessions(session.id);
+      if (request !== reviewRunsReqRef.current) return;
+      setReviewRuns(page.reviews);
+      setReviewRunsOlder(page.nextAfterReviewSessionId);
+      setReviewRunsError(null);
+    } catch (cause) {
+      if (request === reviewRunsReqRef.current) setReviewRunsError((cause as Error).message);
+    }
+  };
+  const loadOlderReviewRuns = async () => {
+    // A newer read that starts meanwhile replaces the list, so this page is then dropped.
+    const request = reviewRunsReqRef.current;
+    if (!reviewRunsOlder || loadingOlderReviewRuns) return;
+    setLoadingOlderReviewRuns(true);
+    try {
+      const page = await api.reviewSessions(session.id, { afterReviewSessionId: reviewRunsOlder });
+      if (request !== reviewRunsReqRef.current) return;
+      setReviewRuns((shown) => {
+        const seen = new Set(shown.map((run) => run.reviewSessionId));
+        return [...shown, ...page.reviews.filter((run) => !seen.has(run.reviewSessionId))];
+      });
+      setReviewRunsOlder(page.nextAfterReviewSessionId);
+      setReviewRunsError(null);
+    } catch (cause) {
+      if (request === reviewRunsReqRef.current) setReviewRunsError((cause as Error).message);
+    } finally {
+      setLoadingOlderReviewRuns(false);
+    }
+  };
+  useEffect(() => {
+    void loadReviewRuns();
     return () => { reviewRunsReqRef.current += 1; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, session.id, reviewRunsKey]);
-  useEffect(() => setReviewRuns([]), [session.id]);
+  useEffect(() => {
+    setReviewRuns([]);
+    setReviewRunsOlder(null);
+    setReviewRunsError(null);
+  }, [session.id]);
 
   const findingRefusal = sessionCommandRefusal(session, "manageReviewFindings");
   const findingRefusalId = "review-findings-refusal";
@@ -1060,7 +1098,7 @@ export function ReviewPanel({
   const refreshReview = async () => {
     setRefreshing(true);
     try {
-      await Promise.all([runnerOnline ? git.refresh() : null, loadDiff(), loadFindings()]);
+      await Promise.all([runnerOnline ? git.refresh() : null, loadDiff(), loadFindings(), loadReviewRuns()]);
     } finally {
       setRefreshing(false);
     }
@@ -1325,6 +1363,9 @@ export function ReviewPanel({
             <ReviewRuns
               key={`runs-${session.id}`}
               runs={reviewRuns}
+              total={session.reviewRuns?.count ?? 0}
+              error={reviewRunsError}
+              older={reviewRunsOlder === null ? null : { loading: loadingOlderReviewRuns, onLoad: () => void loadOlderReviewRuns() }}
               onOpenSourceLocation={onOpenSourceLocation}
               {...(onOpenSession ? { onOpenSession } : {})}
             />

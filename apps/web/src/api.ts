@@ -1021,8 +1021,11 @@ export function createApiClient(transport: ApiTransport) {
     ),
 
   /** The cross-model reviews this session requested (#3369), newest first. */
-  reviewSessions: (sessionId: string, limit = 25) =>
-    req<ReviewSessionsPage>(`/api/sessions/${encodeURIComponent(sessionId)}/review-sessions?limit=${limit}`),
+  reviewSessions: (sessionId: string, page: { limit?: number; afterReviewSessionId?: string } = {}) => {
+    const query = new URLSearchParams({ limit: String(page.limit ?? 25) });
+    if (page.afterReviewSessionId) query.set("afterReviewSessionId", page.afterReviewSessionId);
+    return req<ReviewSessionsPage>(`/api/sessions/${encodeURIComponent(sessionId)}/review-sessions?${query}`);
+  },
 
   bundleReviewFindings: (sessionId: string, body: BundleReviewFindingsRequest) =>
     req<ReviewFindingsResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/review-findings/bundle`, {

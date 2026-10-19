@@ -14,7 +14,9 @@ import { statusMeta } from "../status-meta.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { ArrowUpRightIcon, ChevronRightIcon } from "./Icons.js";
 import { FindingBody } from "./ReviewFindings.js";
+import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { BusyButton } from "./ui/BusyButton.js";
 
 function ReportFindingRow({ finding, onOpenSourceLocation }: {
   finding: ReviewReportFinding;
@@ -97,9 +99,15 @@ function ReviewRunRow({ run, now, onOpenSession, onOpenSourceLocation }: {
  * another head; a valid report's findings follow it as rows, each opening its file in Files; and
  * Open Transcript goes to the review session itself. Read-only: the implementer adjudicates.
  */
-export function ReviewRuns({ runs, onOpenSession, onOpenSourceLocation }: {
-  /** Newest first. */
+export function ReviewRuns({ runs, total, error, older, onOpenSession, onOpenSourceLocation }: {
+  /** Newest first: the pages read so far. */
   runs: ReviewSessionView[];
+  /** How many the session has requested, from its own view; more than `runs` while pages remain. */
+  total: number;
+  /** Why the last read failed; Refresh reads them again. */
+  error: string | null;
+  /** Present while older reviews remain to be read. */
+  older: { loading: boolean; onLoad: () => void } | null;
   onOpenSession?: (sessionId: string) => void;
   onOpenSourceLocation: (location: SourceLocation) => void;
 }) {
@@ -108,7 +116,7 @@ export function ReviewRuns({ runs, onOpenSession, onOpenSourceLocation }: {
   const active = runs.some((run) => !run.terminal);
   const now = useTimelineClock(runs.length > 0);
   const latest = runs[0];
-  if (!latest) return null;
+  if (!latest && total === 0) return null;
   return (
     <section className="review-findings" aria-label="Cross-Model Reviews">
       <div className="review-findings-head">
@@ -121,11 +129,12 @@ export function ReviewRuns({ runs, onOpenSession, onOpenSourceLocation }: {
         >
           <ChevronRightIcon className="disclosure-chevron" size={14} aria-hidden="true" />
           Cross-Model Reviews
-          <span className="review-findings-count">{runs.length}</span>
+          <span className="review-findings-count">{Math.max(total, runs.length)}</span>
         </button>
         {/* The newest review's state is the section's summary; while one runs, that is Reviewing. */}
-        <StatusBadge meta={statusMeta("reviewRun", active ? "running" : reviewRunState(latest))} />
+        {latest && <StatusBadge meta={statusMeta("reviewRun", active ? "running" : reviewRunState(latest))} />}
       </div>
+      {error && <Notice tone="danger" compact>Cross-model reviews: {error}</Notice>}
       <div id={bodyId} hidden={!expanded}>
         <div className="review-findings-list">
           {runs.map((run) => (
@@ -138,6 +147,11 @@ export function ReviewRuns({ runs, onOpenSession, onOpenSourceLocation }: {
             />
           ))}
         </div>
+        {older && (
+          <BusyButton className="btn sm ghost" busy={older.loading} progress="Loading older reviews…" onClick={older.onLoad}>
+            Load Older Reviews
+          </BusyButton>
+        )}
       </div>
     </section>
   );

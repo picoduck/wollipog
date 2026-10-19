@@ -125,6 +125,10 @@ async function mount(session: SessionView, runs: ReviewSessionView[]) {
   const opened: SourceLocation[] = [];
   const openedSessions: string[] = [];
   let shown = runs;
+  let failing = false;
+  /** The cursor of the newest page, and the pages after it by cursor. */
+  let next: string | null = null;
+  let older: Record<string, { reviews: ReviewSessionView[]; next: string | null }> = {};
   const client = {
     ...api,
     gitDiff: async (_id: string, scope: GitDiffScope) => ({
@@ -139,9 +143,14 @@ async function mount(session: SessionView, runs: ReviewSessionView[]) {
       findings: [],
       summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" as const },
     }),
-    reviewSessions: async (sessionId: string) => {
-      reads.push(sessionId);
-      return { reviews: shown, nextAfterReviewSessionId: null };
+    reviewSessions: async (sessionId: string, page: { afterReviewSessionId?: string } = {}) => {
+      reads.push(page.afterReviewSessionId ? `${sessionId} after ${page.afterReviewSessionId}` : sessionId);
+      if (failing) throw new Error("The control plane could not be reached.");
+      if (page.afterReviewSessionId) {
+        const found = older[page.afterReviewSessionId]!;
+        return { reviews: found.reviews, nextAfterReviewSessionId: found.next };
+      }
+      return { reviews: shown, nextAfterReviewSessionId: next };
     },
   } as unknown as ApiClient;
   const git: GitStatus = {
@@ -169,9 +178,16 @@ async function mount(session: SessionView, runs: ReviewSessionView[]) {
     reads,
     opened,
     openedSessions,
-    rerender: async (next: SessionView, nextRuns = shown) => {
+    rerender: async (nextSession: SessionView, nextRuns = shown) => {
       shown = nextRuns;
-      await act(async () => { root.render(tree(next)); });
+      await act(async () => { root.render(tree(nextSession)); });
+    },
+    fail: (value: boolean) => { failing = value; },
+    pages: (newestNext: string | null, pages: typeof older) => { next = newestNext; older = pages; },
+    refresh: async () => {
+      const button = (head as unknown as HTMLElement).querySelector<HTMLButtonElement>('button[aria-label="Refresh Review"]');
+      assert.ok(button, "the header Refresh is rendered");
+      await act(async () => { fireDomEvent.click(button); });
     },
     unmount: async () => {
       await act(async () => { root.unmount(); });
@@ -239,5 +255,58 @@ test("a change to the session's review summary reads its reviews again; an uncha
     await h.rerender({ ...session, reviewRuns: { count: 1, active: 0, updatedAt: 20 } }, [{ ...latest, reviewSessionId: "s_review_3" }]);
     assert.equal(h.reads.length, 2);
     assert.match(reviews(h.container)!.querySelector(".review-findings-head")!.textContent ?? "", /Downvote/u);
+  } finally { await h.unmount(); }
+});
+
+test("a read that fails says so and keeps what was shown, and Refresh reads the reviews again", async () => {
+  const running = run({ reviewSessionId: "s_review_3", state: "running", terminal: false, verdict: null, validated: false, findings: [], output: null, round: null });
+  const session = { ...baseSession, reviewRuns: { count: 1, active: 1, updatedAt: 10 } };
+  const h = await mount(session, [running]);
+  try {
+    // The read that the review's completion triggers fails: Reviewing stays, with the reason beside it.
+    h.fail(true);
+    await h.rerender({ ...session, reviewRuns: { count: 1, active: 0, updatedAt: 20 } }, [{ ...latest, reviewSessionId: "s_review_3" }]);
+    const section = reviews(h.container)!;
+    assert.match(section.querySelector(".review-findings-head")!.textContent ?? "", /Reviewing/u);
+    assert.match(section.textContent ?? "", /Cross-model reviews: The control plane could not be reached\./u);
+    // No summary change follows, so the header's Refresh is what reads them again.
+    h.fail(false);
+    await h.refresh();
+    assert.equal(h.reads.length, 3);
+    assert.match(reviews(h.container)!.querySelector(".review-findings-head")!.textContent ?? "", /Downvote/u);
+    assert.doesNotMatch(reviews(h.container)!.textContent ?? "", /could not be reached/u);
+  } finally { await h.unmount(); }
+});
+
+test("a first read that fails still shows the section with the reason", async () => {
+  const session = { ...baseSession, reviewRuns: { count: 2, active: 0, updatedAt: 10 } };
+  const h = await mount({ ...baseSession }, [latest]);
+  try {
+    h.fail(true);
+    await h.rerender(session);
+    const section = reviews(h.container);
+    assert.ok(section, "the section shows though nothing could be read");
+    assert.match(section.textContent ?? "", /Cross-Model Reviews\s*2/u);
+    assert.match(section.textContent ?? "", /could not be reached/u);
+  } finally { await h.unmount(); }
+});
+
+test("older reviews beyond the first page load on request, and the count is the session's total", async () => {
+  const session = { ...baseSession, reviewRuns: { count: 3, active: 0, updatedAt: 10 } };
+  const h = await mount({ ...baseSession }, [latest]);
+  try {
+    h.pages("s_review_2", { s_review_2: { reviews: [earlier, latest], next: null } });
+    await h.rerender(session);
+    const section = reviews(h.container)!;
+    assert.match(section.querySelector(".review-findings-head")!.textContent ?? "", /Cross-Model Reviews\s*3/u);
+    assert.equal(section.querySelectorAll("article[aria-label]").length, 1);
+    const loadOlder = [...section.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Load Older Reviews"));
+    assert.ok(loadOlder, "Load Older Reviews is offered while a cursor remains");
+    await act(async () => { fireDomEvent.click(loadOlder); });
+    assert.deepEqual(h.reads, [session.id, `${session.id} after s_review_2`]);
+    // The older page's review is added once; one already shown is not repeated.
+    assert.equal(reviews(h.container)!.querySelectorAll("article[aria-label]").length, 2);
+    assert.ok(![...reviews(h.container)!.querySelectorAll("button")].some((button) => button.textContent?.includes("Load Older Reviews")),
+      "no more pages, so no Load Older Reviews");
   } finally { await h.unmount(); }
 });
