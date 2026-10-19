@@ -14,8 +14,10 @@ import "../styles.css";
  * Two projects are already named Docs Site, so typing it shows the duplicate warning. Query string,
  * so every state is a clean reload: `?theme=light`; `?role=viewer` is a Viewer; `?scopes=loading`
  * never answers the access levels; `?fail=refused` is a server that refuses the name; `?fail=1` loses
- * the reply, so the dialog can't tell whether the project was created; `?parent=1`
- * opens it over a New Session dialog, whose phone sheet it takes over with Back.
+ * the reply, so the dialog can't tell whether the project was created; `?fail=once` saves the project
+ * and loses only the first reply; `?retry=1` is a server that honors request ids (#3468), so a lost
+ * reply offers Try Again; `?parent=1` opens it over a New Session dialog, whose phone sheet it takes
+ * over with Back.
  */
 
 const params = new URLSearchParams(window.location.search);
@@ -59,10 +61,14 @@ window.__NEW_PROJECT_E2E__ = { created: [], closed: 0 };
 
 const client = {
   getIdentity: () => params.get("scopes") === "loading" ? new Promise(() => {}) : Promise.resolve(identity),
-  createProject: async (request: { name: string }) => {
+  createProject: async (request: { name: string; requestId?: string }) => {
     if (params.get("fail") === "refused") throw new ApiError("A project name can't contain control characters.", 400);
     if (params.get("fail") === "1") throw new TypeError("Failed to fetch");
-    window.__NEW_PROJECT_E2E__.created.push(request);
+    // A server that honors request ids answers a repeat with the project the first one saved.
+    const repeat = window.__NEW_PROJECT_E2E__.created.some((saved) =>
+      (saved as { requestId?: string }).requestId === request.requestId);
+    if (!repeat) window.__NEW_PROJECT_E2E__.created.push(request);
+    if (params.get("fail") === "once" && !repeat) throw new TypeError("Failed to fetch");
     return { project: project("project-new", request.name) };
   },
 } as unknown as ApiClient;
@@ -74,6 +80,7 @@ function Harness() {
   const dialog = open && (
     <CreateProjectDialog
       accessScopeManagementSupported
+      retrySupported={params.get("retry") === "1"}
       projects={projects}
       stacked={stacked}
       returnFocusRef={stacked ? parentRef : undefined}

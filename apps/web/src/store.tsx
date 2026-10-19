@@ -349,6 +349,8 @@ export interface State {
   projectsSupported: boolean;
   /** False against older control planes whose Project API cannot register a newly browsed folder. */
   projectLocationCreationSupported: boolean;
+  /** New Project may retry with the same request id after a lost reply (#3468). */
+  projectCreationRetrySupported: boolean;
   /** False against older control planes without explicit, preflighted access-scope mutations. */
   accessScopeManagementSupported: boolean;
   /** True only when New Session can atomically open the separate Native TUI process. */
@@ -1253,6 +1255,7 @@ function reducer(state: State, action: Action): State {
             pendingSnapshotSessionIds: msg.sessionsComplete === false ? new Set(msg.sessions.map((session) => session.id)) : undefined,
             projectsSupported: msg.capabilities?.projects === true || msg.projects !== undefined,
             projectLocationCreationSupported: msg.capabilities?.createProjectLocations === true,
+            projectCreationRetrySupported: msg.capabilities?.idempotentProjectCreation === true,
             accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
             nativeTuiLaunchSupported: msg.capabilities?.nativeTuiLaunch === true,
             stopBeforeArchiveSupported: msg.capabilities?.stopBeforeArchive === true,
@@ -1712,6 +1715,7 @@ function initialState(
     snapshotRevision: 0,
     projectsSupported: false,
     projectLocationCreationSupported: false,
+    projectCreationRetrySupported: false,
     accessScopeManagementSupported: false,
     nativeTuiLaunchSupported: false,
     stopBeforeArchiveSupported: false,

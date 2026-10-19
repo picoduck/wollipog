@@ -342,6 +342,9 @@ export const FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS: readonly string[] = [
 export const MAX_UNRESOLVED_STEERING_ATTEMPTS = 50;
 export const MAX_PENDING_STEERING_RESOLUTION_REPLAYS = 50;
 const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
+/** How long New Project's retry identity lasts (#3468), and how many one human keeps. */
+export const PROJECT_CREATION_REQUEST_WINDOW_MS = 24 * 60 * 60_000;
+export const PROJECT_CREATION_REQUESTS_PER_USER = 100;
 const SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT = 128;
 
 function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullable<RunnerView["providerAccounts"]> {
@@ -608,6 +611,20 @@ CREATE TABLE IF NOT EXISTS project_child_session_defaults (
   cost_budget_usd REAL NOT NULL CHECK (cost_budget_usd > 0),
   max_tool_calls INTEGER NOT NULL CHECK (max_tool_calls > 0)
 );
+
+-- New Project's retry identity (#3468): one human's recent create requests and the project each
+-- produced, so a retry after a lost reply returns that project instead of creating another. A
+-- deleted project leaves its row with no project, so a late retry is refused rather than replayed.
+CREATE TABLE IF NOT EXISTS project_creation_requests (
+  user_id    TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  digest     TEXT NOT NULL,
+  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_creation_requests_created
+  ON project_creation_requests(created_at);
 
 CREATE TABLE IF NOT EXISTS project_locations (
   id           TEXT PRIMARY KEY,
@@ -8407,6 +8424,55 @@ export class ControlPlaneDb {
       this.insertProjectOwnership(projectId, scope, now);
     });
     return this.getProject(projectId)!;
+  }
+
+  /**
+   * New Project with a retry identity (#3468): the project this human's earlier request with the
+   * same `requestId` created, or a new one. Lookup and insert share one transaction, so concurrent
+   * repeats also yield one project. The digest covers the name and access the request asked for:
+   * the same id asking for something else is `reused`, and an id whose project was deleted is
+   * `unavailable`; neither creates a project. The caller still checks the replayed project is
+   * visible to the principal. Rows expire after the window, and each human keeps a bounded number.
+   */
+  createProjectForRequest(input: {
+    userId: string;
+    requestId: string;
+    name: string;
+    scope: ResourceScope;
+    now?: number;
+  }): { project: ProjectView; created: boolean } | { refused: "reused" | "unavailable" } {
+    const name = input.name.trim();
+    const now = input.now ?? Date.now();
+    const owner = input.scope.owner;
+    const ownerId = owner.kind === "organization" ? owner.organizationId
+      : owner.kind === "user" ? owner.userId : owner.teamId;
+    const digest = createHash("sha256")
+      .update(JSON.stringify([input.scope.organizationId, owner.kind, ownerId, name]))
+      .digest("hex");
+    return this.atomic(() => {
+      this.stmt("DELETE FROM project_creation_requests WHERE created_at<?")
+        .run(now - PROJECT_CREATION_REQUEST_WINDOW_MS);
+      const existing = this.stmt(
+        "SELECT digest, project_id FROM project_creation_requests WHERE user_id=? AND request_id=?",
+      ).get(input.userId, input.requestId) as { digest: string; project_id: string | null } | undefined;
+      if (existing) {
+        if (existing.digest !== digest) return { refused: "reused" as const };
+        const project = existing.project_id ? this.getProject(existing.project_id) : null;
+        return project ? { project, created: false } : { refused: "unavailable" as const };
+      }
+      const project = this.createProject({ name, scope: input.scope, now });
+      this.stmt(
+        `INSERT INTO project_creation_requests (user_id, request_id, digest, project_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(input.userId, input.requestId, digest, project.id, now);
+      this.stmt(
+        `DELETE FROM project_creation_requests WHERE user_id=? AND request_id NOT IN (
+           SELECT request_id FROM project_creation_requests WHERE user_id=?
+           ORDER BY created_at DESC, rowid DESC LIMIT ?
+         )`,
+      ).run(input.userId, input.userId, PROJECT_CREATION_REQUESTS_PER_USER);
+      return { project, created: true };
+    });
   }
 
   renameProject(projectId: string, name: string, now = Date.now()): ProjectView | null {

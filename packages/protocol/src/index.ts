@@ -11138,6 +11138,8 @@ export interface UiSnapshotMessage {
     projects?: boolean;
     /** The control plane can register a browsed folder as a new Project Location. */
     createProjectLocations?: boolean;
+    /** POST /api/projects honors `CreateProjectRequest.requestId`, so New Project may retry safely. */
+    idempotentProjectCreation?: boolean;
     /** Project and Location creation/settings support explicit, preflighted access scopes. */
     accessScopeManagement?: boolean;
     /** New Session can atomically create a session and open its separate provider TUI. */
@@ -11556,6 +11558,11 @@ export interface CreateProjectRequest {
   name: string;
   /** Explicit owner. Omitted only for compatibility with older clients. */
   owner?: ResourceOwner;
+  /** Retry identity (#3468): 1-128 letters, digits, `-` or `_`. A repeat from the same human
+   * within a day returns the project the first request created; asking for another name or access
+   * with it is refused. Honored only where the snapshot advertises `idempotentProjectCreation`;
+   * older control planes ignore it. */
+  requestId?: string;
 }
 
 /** Rename and/or show/hide a durable Project. Omitted fields remain unchanged. */

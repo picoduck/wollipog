@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   type AccessScopeChangePreview,
+  type CreateProjectLocationRequest,
   type IdentityAdministrationView,
   type ProjectLocationView,
   type ProjectView,
@@ -10,7 +11,7 @@ import {
   type ResourceScope,
   type RunnerView,
 } from "@wollipog/protocol";
-import type { ApiClient } from "../api.js";
+import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { Modal } from "../components/Modal.js";
 import { ProjectLocationDialog } from "../components/ProjectLocationDialog.js";
@@ -25,7 +26,8 @@ import "../styles.css";
  * mismatch. Build Box is offline with one folder. Query string, so every state is a clean reload:
  * `?theme=light`; `?onboarding=1` opens it as New Project's hand-off; `?update=1` is a server that
  * can't register new folders; `?machines=offline` has no machine online; `?parent=1` opens it from
- * a New Session dialog, whose phone sheet it takes over with Back.
+ * a New Session dialog, whose phone sheet it takes over with Back. `?fail=refused` refuses the add;
+ * `?fail=lost` loses the reply without adding, so the dialog can't confirm it (#3468).
  */
 
 const params = new URLSearchParams(window.location.search);
@@ -122,6 +124,19 @@ declare global {
 window.__ADD_LOCATION_E2E__ = { added: [], created: [], closed: 0 };
 
 let applyAccess: (kind: "project" | "workspace", id: string, owner: ResourceOwner) => void = () => {};
+// The request the dialog last sent, recorded with its starter-setup choice once it reports the add.
+let sent: { kind: "added"; workspaceId: string } | { kind: "created"; body: CreateProjectLocationRequest } | null = null;
+let currentProject: () => ProjectView = () => initialProjects()[0]!;
+
+const failure = params.get("fail");
+const fail = () => {
+  if (failure === "refused") throw new ApiError("workspace is not visible to this principal", 403);
+  if (failure === "lost") throw new TypeError("Failed to fetch");
+};
+const withLocation = (location: ProjectLocationView): { project: ProjectView } => {
+  const project = currentProject();
+  return { project: { ...project, locations: [...project.locations, location] } };
+};
 
 const preview = (resource: "project" | "workspace", current: ResourceScope, owner: ResourceOwner): AccessScopeChangePreview => ({
   resource, resourceId: "fixture", currentScope: current, targetScope: scopeOf(owner),
@@ -131,6 +146,19 @@ const preview = (resource: "project" | "workspace", current: ResourceScope, owne
 
 const client = {
   getIdentity: async () => identity,
+  project: async () => ({ project: currentProject() }),
+  addProjectLocation: async (projectId: string, body: { runnerId: string; workspaceId: string }) => {
+    sent = { kind: "added", workspaceId: body.workspaceId };
+    fail();
+    return withLocation({ ...locationOf(projectId, body.workspaceId, body.workspaceId), runnerId: body.runnerId });
+  },
+  createProjectLocation: async (projectId: string, body: CreateProjectLocationRequest) => {
+    sent = { kind: "created", body };
+    fail();
+    return withLocation({
+      ...locationOf(projectId, "ws-new", body.name), runnerId: body.runnerId, path: body.path, workspaceId: "ws-new",
+    });
+  },
   listDirectory: async (_runnerId: string, path: string) => {
     const at = path || HOME;
     const folder = FOLDERS[at] ?? (at.startsWith(`${HOME}/`) ? { parent: at.slice(0, at.lastIndexOf("/")), entries: [] } : null);
@@ -168,6 +196,7 @@ function Harness() {
     }
   };
   const project = projects[0]!;
+  currentProject = () => project;
   const dialog = open && (
     <ProjectLocationDialog
       project={project}
@@ -181,11 +210,9 @@ function Harness() {
       returnFocusRef={params.get("parent") === "1" ? parentRef : undefined}
       onClose={() => { window.__ADD_LOCATION_E2E__.closed += 1; setOpen(false); }}
       onManageConnections={() => {}}
-      onAdd={async (candidate, generateSetup) => {
-        window.__ADD_LOCATION_E2E__.added.push({ workspaceId: candidate.workspaceId, generateSetup });
-      }}
-      onCreate={async (location, generateSetup) => {
-        window.__ADD_LOCATION_E2E__.created.push({ ...location, generateSetup });
+      onAdded={(_project, _location, generateSetup) => {
+        if (sent?.kind === "added") window.__ADD_LOCATION_E2E__.added.push({ workspaceId: sent.workspaceId, generateSetup });
+        if (sent?.kind === "created") window.__ADD_LOCATION_E2E__.created.push({ ...sent.body, generateSetup });
       }}
     />
   );

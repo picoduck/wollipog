@@ -3,6 +3,7 @@ import type { ProjectView } from "@wollipog/protocol";
 import { accessScopeChoices } from "../access-scopes.js";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { browserRandomUUID } from "../browser-crypto.js";
 import { AccessScopeField, useAccessScopeIdentity } from "./AccessScopeControls.js";
 import { Modal } from "./common.js";
 import { FieldError } from "./FieldError.js";
@@ -37,11 +38,17 @@ export function duplicateProjectNameWarning(name: string, projects: readonly Pic
  * the primary off with the reason in the footer (§7.3). A failed request is a danger notice above the
  * footer with the server's words behind Show Details.
  *
- * Only a refusal (a 4xx answer) proves nothing was created: the server commits a project, with a new
- * id each time, before it answers. A timeout, a lost connection, a 5xx or an unreadable reply may
- * follow a commit, and nothing ties a project in the list to this request (a namesake, or a rename,
- * would look the same), so the notice says the outcome is unknown rather than inviting a duplicate
- * or guessing which project was created.
+ * Only a refusal (a 4xx answer) proves nothing was created: the server commits a project before it
+ * answers. A timeout, a lost connection, a 5xx or an unreadable reply may follow a commit, and
+ * nothing in the list ties a project to this request (a namesake, or a rename, would look the same).
+ *
+ * So every request carries a `requestId` (#3468), kept while the name and access stay the same: a
+ * server that honors it answers a repeat with the first request's project instead of creating
+ * another. After a lost reply the notice offers Try Again only when `retrySupported` held for every
+ * send of that id and still holds: a server that ignored the id once (before an upgrade, or after a
+ * downgrade) may have created a project that a retry would duplicate. Otherwise, or once the name or
+ * access changes, the notice says the outcome is unknown and points at the Projects list. A refused
+ * retry proves nothing about the unanswered send before it, so it doesn't say nothing was created.
  *
  * `stacked` is New Session's: the new project is selected there, so the description says so instead
  * of promising the folders that the Projects page's hand-off asks for next.
@@ -50,6 +57,7 @@ export function CreateProjectDialog({
   onClose,
   onCreated,
   accessScopeManagementSupported,
+  retrySupported = false,
   projects,
   stacked = false,
   returnFocusRef,
@@ -57,6 +65,8 @@ export function CreateProjectDialog({
   onClose: () => void;
   onCreated: (project: ProjectView) => void;
   accessScopeManagementSupported: boolean;
+  /** The server honors `CreateProjectRequest.requestId` (the snapshot's `idempotentProjectCreation`). */
+  retrySupported?: boolean;
   /** The projects the person can see, to warn about a name already in use. */
   projects: readonly Pick<ProjectView, "name">[];
   /** Opened over New Session, which selects the project once it's created. */
@@ -76,7 +86,14 @@ export function CreateProjectDialog({
   const [edited, setEdited] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<{ sentence: string; detail: string | null } | null>(null);
+  // `refused_retry`: a retry was refused after an earlier send of its id went unanswered.
+  const [failure, setFailure] = useState<{ kind: "refused" | "refused_retry" | "unknown"; detail: string | null } | null>(null);
+  // The request a repeat reuses (#3468): its id, what it asks for, whether every send of it reached a
+  // server that honors ids, and whether any send went unanswered.
+  const request = useRef<{ id: string; name: string; scopeKey: string; honored: boolean; unanswered: boolean } | null>(null);
+  // Read when a reply is lost, since the server may have changed while the request was out.
+  const retrySupportedNow = useRef(retrySupported);
+  retrySupportedNow.current = retrySupported;
   const [scopeKey, setScopeKey] = useState("");
   const { identity, error: identityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const scopeChoices = useMemo(() => identity ? accessScopeChoices(identity) : [], [identity]);
@@ -102,8 +119,12 @@ export function CreateProjectDialog({
   const close = () => {
     if (!busy) onClose();
   };
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
+  const sameRequest = request.current !== null &&
+    request.current.name === name.trim() && request.current.scopeKey === scopeKey;
+  const canRetry = failure?.kind === "unknown" && sameRequest && request.current!.honored && retrySupported;
+  /** Create Project submits the form; Try Again calls this without an event. */
+  const submit = async (event?: FormEvent) => {
+    event?.preventDefault();
     if (busy || blockedReason) return;
     const problem = nameProblem(name);
     setNameError(problem);
@@ -112,24 +133,36 @@ export function CreateProjectDialog({
       nameRef.current?.focus();
       return;
     }
+    const current = sameRequest ? request.current! : {
+      id: browserRandomUUID(), name: name.trim(), scopeKey, honored: true, unanswered: false,
+    };
+    current.honored &&= retrySupported;
+    request.current = current;
+    // Try Again keeps its notice, and with it the focus, until the retry settles.
+    const retrying = event === undefined;
     setBusy(true);
-    setFailure(null);
+    if (!retrying) setFailure(null);
     try {
       const { project } = await api.createProject({
-        name: name.trim(),
+        name: current.name,
         ...(selectedScope ? { owner: selectedScope.owner } : {}),
+        requestId: current.id,
       });
       onCreated(project);
     } catch (cause) {
       const raw = cause instanceof Error ? cause.message.trim() : String(cause).trim();
       if (cause instanceof ApiError && cause.status < 500) {
-        setFailure({ sentence: "Wollipog refused the request. Nothing was created.", detail: raw || null });
+        setFailure({ kind: current.unanswered ? "refused_retry" : "refused", detail: raw || null });
+        // The project that id created is gone, so the id has nothing left to protect.
+        if (cause.code === "PROJECT_REQUEST_UNAVAILABLE") request.current = null;
+        // A refused retry takes Try Again away; the name keeps the focus it would have dropped.
+        if (retrying) nameRef.current?.focus();
         return;
       }
-      setFailure({
-        sentence: "Wollipog didn't answer, so it may have been created. Check the Projects list before trying again.",
-        detail: raw || null,
-      });
+      current.unanswered = true;
+      if (!retrySupportedNow.current) current.honored = false;
+      setFailure({ kind: "unknown", detail: raw || null });
+      if (retrying && !current.honored) nameRef.current?.focus();
     } finally {
       setBusy(false);
     }
@@ -212,8 +245,22 @@ export function CreateProjectDialog({
           </Notice>
         )}
         {failure && (
-          <Notice tone="danger" role="alert" title="Couldn't Create the Project" details={failure.detail ?? undefined}>
-            {failure.sentence}
+          <Notice
+            tone="danger"
+            role="alert"
+            title="Couldn't Create the Project"
+            details={failure.detail ?? undefined}
+            actions={canRetry && (
+              <BusyButton className="btn sm" busy={busy} progress="Trying again…" onClick={() => void submit()}>
+                Try Again
+              </BusyButton>
+            )}
+          >
+            {failure.kind === "refused" ? "Wollipog refused the request. Nothing was created."
+              : failure.kind === "refused_retry"
+                ? "Wollipog refused the retry, but the earlier try may have created it. Check the Projects list before trying again."
+                : canRetry ? "Wollipog didn't answer, so it may have been created. Try again to finish; it won't be created twice."
+                  : "Wollipog didn't answer, so it may have been created. Check the Projects list before trying again."}
           </Notice>
         )}
       </form>

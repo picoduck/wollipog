@@ -5,6 +5,8 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
   AccessScopeChangePreview,
+  AddProjectLocationRequest,
+  CreateProjectLocationRequest,
   IdentityAdministrationView,
   ProjectLocationView,
   ProjectView,
@@ -16,7 +18,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
-import type { ProjectLocationCandidate } from "../project-management.js";
+import { RequestTimeoutError } from "../api-transport.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 
 /**
@@ -134,15 +136,22 @@ const rowNamed = (name: string) => [...dialog()!.querySelectorAll<HTMLElement>("
 const settle = () => act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
 
 interface Rendered {
-  added: ProjectLocationCandidate[];
-  /** Each add's `generateSetup`. */
-  generated: boolean[];
-  created: unknown[];
+  /** Each Existing Location request. */
+  added: AddProjectLocationRequest[];
+  /** Each New Folder request. */
+  created: CreateProjectLocationRequest[];
+  /** Each `onAdded`: the location reported and its `generateSetup`. */
+  reported: Array<{ location: ProjectLocationView | undefined; generateSetup: boolean }>;
+  /** How often the dialog read the project again. */
+  rereads: () => number;
   closed: () => number;
   /** The live snapshot's machines changing under the open dialog. */
   setRunners: (runners: readonly RunnerView[]) => Promise<void>;
   unmount: () => Promise<void>;
 }
+
+/** `project` as the server returns it once `added` is one of its locations. */
+const projectWith = (added: ProjectLocationView): ProjectView => ({ ...project, locations: [...project.locations, added] });
 
 async function render(options: {
   client?: Partial<ApiClient>;
@@ -151,17 +160,40 @@ async function render(options: {
   canCreateLocation?: boolean;
   onboarding?: boolean;
   setupFileSupported?: boolean;
-  onAdd?: (candidate: ProjectLocationCandidate) => Promise<void>;
-  onCreate?: () => Promise<void>;
+  /** The Existing Location request; it adds the location unless it throws. */
+  onAdd?: (request: AddProjectLocationRequest) => Promise<void>;
+  /** The New Folder request; it adds the folder unless it throws. */
+  onCreate?: (request: CreateProjectLocationRequest) => Promise<void>;
+  /** The project the dialog reads again after a failure; by default, unchanged. */
+  reread?: () => Promise<ProjectView>;
 } = {}): Promise<Rendered> {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   const root = createRoot(mountPoint);
-  const added: ProjectLocationCandidate[] = [];
-  const generated: boolean[] = [];
-  const created: unknown[] = [];
+  const added: AddProjectLocationRequest[] = [];
+  const created: CreateProjectLocationRequest[] = [];
+  const reported: Rendered["reported"] = [];
+  let rereads = 0;
   let closed = 0;
-  const client = { ...api, getIdentity: async () => identity, ...options.client } as ApiClient;
+  const client = {
+    ...api,
+    getIdentity: async () => identity,
+    addProjectLocation: async (_projectId: string, request: AddProjectLocationRequest) => {
+      added.push(request);
+      await options.onAdd?.(request);
+      return { project: projectWith({ ...location(project.id, request.workspaceId, request.workspaceId, `/repos/${request.workspaceId}`), runnerId: request.runnerId }) };
+    },
+    createProjectLocation: async (_projectId: string, request: CreateProjectLocationRequest) => {
+      created.push(request);
+      await options.onCreate?.(request);
+      return { project: projectWith({ ...location(project.id, "ws-new", request.name, request.path), runnerId: request.runnerId }) };
+    },
+    project: async () => {
+      rereads += 1;
+      return { project: await (options.reread?.() ?? Promise.resolve(project)) };
+    },
+    ...options.client,
+  } as ApiClient;
   const draw = (runners: readonly RunnerView[]) => root.render(
       <ApiProvider client={client}>
         <ProjectLocationDialog
@@ -174,15 +206,7 @@ async function render(options: {
           onboarding={options.onboarding}
           setupFileSupported={options.setupFileSupported}
           onClose={() => { closed += 1; }}
-          onAdd={async (candidate, generateSetup) => {
-            added.push(candidate);
-            generated.push(generateSetup);
-            await options.onAdd?.(candidate);
-          }}
-          onCreate={async (value, generateSetup) => {
-            created.push({ ...value, generateSetup });
-            await options.onCreate?.();
-          }}
+          onAdded={(_project, addedLocation, generateSetup) => { reported.push({ location: addedLocation, generateSetup }); }}
           onManageConnections={() => {}}
         />
       </ApiProvider>,
@@ -191,8 +215,9 @@ async function render(options: {
   await settle();
   return {
     added,
-    generated,
     created,
+    reported,
+    rereads: () => rereads,
     closed: () => closed,
     setRunners: async (runners) => {
       await act(async () => { draw(runners); });
@@ -387,8 +412,10 @@ test("New Folder: Machine is the app's Select, the browser is under it, and the 
     await settle();
     assert.deepEqual(view.created, [{
       runnerId: "runner-1", name: "Acme Storefront", path: "/home/ada/acme-storefront",
-      owner: { kind: "organization", organizationId: ORG }, generateSetup: false,
+      owner: { kind: "organization", organizationId: ORG },
     }]);
+    assert.deepEqual(view.reported.map((report) => ({ path: report.location?.path, generateSetup: report.generateSetup })),
+      [{ path: "/home/ada/acme-storefront", generateSetup: false }]);
   } finally {
     await view.unmount();
   }
@@ -414,7 +441,7 @@ test("onboarding leads with the success notice, offers Skip for Now, and ends wi
     await act(async () => { addButton().click(); });
     await settle();
     assert.deepEqual(view.added.map((candidate) => candidate.workspaceId), ["loose"]);
-    assert.deepEqual(view.generated, [true]);
+    assert.deepEqual(view.reported.map((report) => report.generateSetup), [true]);
   } finally {
     await view.unmount();
   }
@@ -481,8 +508,8 @@ test("an identity failure is one danger notice and adding stays fail-closed", as
   }
 });
 
-test("a failed add is a danger notice above the footer with the raw text behind Show Details", async () => {
-  const view = await render({ onAdd: async () => { throw new Error("workspace is not visible to this principal"); } });
+test("a refused add is a danger notice above the footer with the raw text behind Show Details", async () => {
+  const view = await render({ onAdd: async () => { throw new ApiError("workspace is not visible to this principal", 403); } });
   try {
     await choose("Loose Checkout");
     await act(async () => { addButton().click(); });
@@ -490,7 +517,8 @@ test("a failed add is a danger notice above the footer with the raw text behind 
     assert.equal(view.closed(), 0, "the dialog stays open");
     const notice = dialog()!.querySelector(".modal-body")!.lastElementChild!;
     assert.match(text(notice), /^Couldn't Add the Location/u);
-    assert.match(text(notice), /Wollipog couldn't add this location\. Try again\./u);
+    assert.match(text(notice), /Wollipog refused to add this location\. Nothing was added\./u);
+    assert.equal(view.rereads(), 0, "a refusal is an answer: there is nothing to check");
     assert.doesNotMatch(text(notice), /not visible to this principal/u, "the raw text waits behind Show Details");
     const details = [...notice.querySelectorAll<HTMLButtonElement>("button")].find((button) => text(button) === "Show Details")!;
     await act(async () => { details.click(); });
@@ -594,7 +622,7 @@ test("a machine that drops and returns while a new folder is added leaves the sh
     await act(async () => { rejectFirst(new Error("disk full")); });
     await settle();
     await settle();
-    assert.match(text(dialog()), /Couldn't Add the Location/u);
+    assert.match(text(dialog()), /Couldn't Confirm the Location/u);
     const shown = currentFolder();
     assert.equal(shown, "/repos/a");
     await act(async () => { addButton().click(); });
@@ -677,6 +705,174 @@ test("a server too old to register folders says so in the failed-add notice, wit
     assert.match(text(notice), /^Couldn't Add the Location/u);
     assert.match(text(notice), /This version of Wollipog does not support creating a Location from a new folder\./u);
     assert.equal([...notice.querySelectorAll("button")].some((button) => text(button) === "Show Details"), false);
+  } finally {
+    await view.unmount();
+  }
+});
+
+/** The location the server adds for `loose`, or for New Folder's `/repos/a` on Studio Mac. */
+const looseLocation = location(project.id, "loose", "Loose Checkout", "/repos/loose");
+const folderLocation = location(project.id, "ws-a", "A", "/repos/a");
+const lostReply = () => new RequestTimeoutError(30_000);
+const notice = () => dialog()?.querySelector(".modal-body")!.lastElementChild ?? null;
+
+test("an existing location added before its reply was lost closes as added, without a failure (#3468)", async () => {
+  const view = await render({ onAdd: async () => { throw lostReply(); }, reread: async () => projectWith(looseLocation) });
+  try {
+    await choose("Loose Checkout");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.rereads(), 1, "the dialog checked the project");
+    assert.equal(view.closed(), 1);
+    assert.deepEqual(view.reported.map((report) => report.location?.id), [looseLocation.id], "the caller hears of the add as after a reply");
+    assert.doesNotMatch(text(body()), /Couldn't Add the Location/u);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a new folder added before its reply was lost closes as added, matched by machine and folder (#3468)", async () => {
+  const view = await render({
+    runners: [runner],
+    projects: [project],
+    client: browsingClient(),
+    onCreate: async () => { throw new ApiError("Bad Gateway", 502); },
+    // The server reports the folder with a trailing separator; it is still the same folder.
+    reread: async () => projectWith({ ...folderLocation, path: "/repos/a/" }),
+  });
+  try {
+    await openNewFolder();
+    await openFolder("a");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.closed(), 1);
+    assert.deepEqual(view.reported.map((report) => report.location?.id), [folderLocation.id]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a lost reply with nothing added yet says the outcome couldn't be confirmed, not that nothing was added (#3468)", async () => {
+  const view = await render({ onAdd: async () => { throw lostReply(); } });
+  try {
+    await choose("Loose Checkout");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.closed(), 0);
+    assert.match(text(notice()), /^Couldn't Confirm the Location/u);
+    assert.match(text(notice()), /Wollipog couldn't confirm whether this location was added\. Adding it again is safe: it won't be added twice\./u);
+    assert.doesNotMatch(text(notice()), /Nothing was added|Couldn't Add/u);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a lost reply whose project can't be read again still says the outcome couldn't be confirmed (#3468)", async () => {
+  const view = await render({ onAdd: async () => { throw new TypeError("Failed to fetch"); }, reread: async () => { throw new TypeError("Failed to fetch"); } });
+  try {
+    await choose("Loose Checkout");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.closed(), 0);
+    assert.match(text(notice()), /^Couldn't Confirm the Location/u);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a New Folder retry refused as already registered closes as added when this project lists the folder (#3468)", async () => {
+  let attempts = 0;
+  let listed = false;
+  const view = await render({
+    runners: [runner],
+    projects: [project],
+    client: browsingClient(),
+    onCreate: async () => {
+      attempts += 1;
+      // The first try registers the folder, but its reply is lost before the project lists it.
+      if (attempts === 1) throw lostReply();
+      listed = true;
+      throw new ApiError("This folder is already registered as a Location", 409, "LOCATION_ALREADY_REGISTERED");
+    },
+    reread: async () => listed ? projectWith(folderLocation) : project,
+  });
+  try {
+    await openNewFolder();
+    await openFolder("a");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.match(text(notice()), /^Couldn't Confirm the Location/u);
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.closed(), 1, "the retry's refusal proves the first try added it");
+    assert.deepEqual(view.reported.map((report) => report.location?.id), [folderLocation.id]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an already registered refusal from an older server, without its code, still counts the folder this project lists (#3468)", async () => {
+  const view = await render({
+    runners: [runner],
+    projects: [project],
+    client: browsingClient(),
+    onCreate: async () => { throw new ApiError("This folder is already registered as a Location", 409); },
+    reread: async () => projectWith(folderLocation),
+  });
+  try {
+    await openNewFolder();
+    await openFolder("a");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.closed(), 1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a folder already registered somewhere else stays a refusal (#3468)", async () => {
+  // The same folder on another machine, and another folder on this one, are not this location.
+  const elsewhere = projectWith({ ...folderLocation, runnerId: "runner-2" });
+  const view = await render({
+    runners: [runner],
+    projects: [project],
+    client: browsingClient(),
+    onCreate: async () => { throw new ApiError("This folder is already registered as a Location", 409, "LOCATION_ALREADY_REGISTERED"); },
+    reread: async () => ({ ...elsewhere, locations: [...elsewhere.locations, { ...folderLocation, id: "other", path: "/repos/ab" }] }),
+  });
+  try {
+    await openNewFolder();
+    await openFolder("a");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.rereads(), 1);
+    assert.equal(view.closed(), 0);
+    assert.match(text(notice()), /^Couldn't Add the Location/u);
+    assert.match(text(notice()), /Wollipog refused to add this folder\. Nothing was added\./u);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a refusal after an unanswered try doesn't claim nothing was added (#3468)", async () => {
+  let attempts = 0;
+  const view = await render({
+    onAdd: async () => {
+      attempts += 1;
+      if (attempts === 1) throw lostReply();
+      throw new ApiError("workspace is not visible to this principal", 403);
+    },
+  });
+  try {
+    await choose("Loose Checkout");
+    await act(async () => { addButton().click(); });
+    await settle();
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.rereads(), 2, "the refusal is checked against the project too");
+    assert.match(text(notice()), /^Couldn't Add the Location/u);
+    assert.match(text(notice()), /Wollipog refused to add this location this time, and Project One doesn't list it yet\. An earlier try may still add it\./u);
+    assert.doesNotMatch(text(notice()), /Nothing was added/u);
   } finally {
     await view.unmount();
   }

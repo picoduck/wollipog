@@ -228,6 +228,7 @@ export function InboxView({
   const indefiniteSessionRemindersSupported = useStoreSelector((state) => state.indefiniteSessionRemindersSupported);
   const reminders = useStoreSelector((state) => state.reminders);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
+  const projectCreationRetrySupported = useStoreSelector((state) => state.projectCreationRetrySupported);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
   const stalledRevision = useStoreSelector((state) => state.stalledRevision);
@@ -1960,6 +1961,7 @@ export function InboxView({
       {creatingProject && (
         <CreateProjectDialog
           accessScopeManagementSupported={accessScopeManagementSupported}
+          retrySupported={projectCreationRetrySupported}
           projects={allProjects}
           onClose={() => setCreatingProject(false)}
           onCreated={(project) => {

@@ -924,6 +924,7 @@ export class Hub {
         currentTurnOpening: true,
         projects: true,
         createProjectLocations: true,
+        idempotentProjectCreation: true,
         accessScopeManagement: true,
         nativeTuiLaunch: true,
         stopBeforeArchive: true,

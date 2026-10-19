@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { RunnerMetadata } from "@wollipog/protocol";
-import { ControlPlaneDb, type NewSessionInput } from "./db.js";
+import {
+  ControlPlaneDb,
+  PROJECT_CREATION_REQUEST_WINDOW_MS,
+  PROJECT_CREATION_REQUESTS_PER_USER,
+  type NewSessionInput,
+} from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 
 function runner(
@@ -1231,4 +1236,97 @@ test("active team members atomically narrow Projects, Locations, and sessions to
     narrowedSessionIds: [projectSession.id],
   }]);
   db.close();
+});
+
+test("a project request id replays its project for the same human and never across humans (#3468)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const organizationId = db.localIdentityContext().organizationId;
+  const mine = { organizationId, owner: { kind: "user" as const, userId: "usr_a" } };
+  const shared = { organizationId, owner: { kind: "organization" as const, organizationId } };
+  const named = (name: string) => db.listProjects(true).filter((project) => project.name === name);
+  const first = db.createProjectForRequest({ userId: "usr_a", requestId: "req-1", name: " Acme ", scope: mine, now: 10 });
+  assert.ok("project" in first && first.created);
+  assert.equal(first.project.name, "Acme");
+  // The same request again, whatever spaces surround the name, is that project, not a second one.
+  const repeat = db.createProjectForRequest({ userId: "usr_a", requestId: "req-1", name: "Acme", scope: mine, now: 20 });
+  assert.ok("project" in repeat);
+  assert.equal(repeat.created, false);
+  assert.equal(repeat.project.id, first.project.id);
+  assert.equal(named("Acme").length, 1);
+  // Another name or access with the same id is refused, and creates nothing.
+  assert.deepEqual(db.createProjectForRequest({ userId: "usr_a", requestId: "req-1", name: "Other", scope: mine, now: 21 }),
+    { refused: "reused" });
+  assert.deepEqual(db.createProjectForRequest({ userId: "usr_a", requestId: "req-1", name: "Acme", scope: shared, now: 22 }),
+    { refused: "reused" });
+  assert.deepEqual(named("Other"), []);
+  // Another human's identical id is theirs alone.
+  const theirs = db.createProjectForRequest({ userId: "usr_b", requestId: "req-1", name: "Acme", scope: mine, now: 23 });
+  assert.ok("project" in theirs && theirs.created);
+  assert.notEqual(theirs.project.id, first.project.id);
+  assert.equal(named("Acme").length, 2);
+  db.close();
+});
+
+test("a deleted project's request id is refused rather than replayed or recreated (#3468)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const organizationId = db.localIdentityContext().organizationId;
+  const scope = { organizationId, owner: { kind: "user" as const, userId: "usr_a" } };
+  const first = db.createProjectForRequest({ userId: "usr_a", requestId: "req-1", name: "Acme", scope, now: 10 });
+  assert.ok("project" in first);
+  assert.ok(db.deleteProject(first.project.id, 11));
+  assert.deepEqual(db.createProjectForRequest({ userId: "usr_a", requestId: "req-1", name: "Acme", scope, now: 12 }),
+    { refused: "unavailable" });
+  assert.deepEqual(db.listProjects(true).filter((project) => project.name === "Acme"), []);
+  db.close();
+});
+
+test("project request ids expire after the window and each human keeps a bounded number (#3468)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const organizationId = db.localIdentityContext().organizationId;
+  const scope = { organizationId, owner: { kind: "user" as const, userId: "usr_a" } };
+  const rows = (userId: string) => (db.raw()
+    .prepare("SELECT request_id FROM project_creation_requests WHERE user_id=? ORDER BY created_at")
+    .all(userId) as Array<{ request_id: string }>).map((row) => row.request_id);
+  const first = db.createProjectForRequest({ userId: "usr_a", requestId: "old", name: "Old", scope, now: 1_000 });
+  assert.ok("project" in first);
+  // Past the window the id is forgotten: a repeat is a new request.
+  const late = db.createProjectForRequest({
+    userId: "usr_a", requestId: "old", name: "Old", scope, now: 1_000 + PROJECT_CREATION_REQUEST_WINDOW_MS + 1,
+  });
+  assert.ok("project" in late && late.created);
+  assert.notEqual(late.project.id, first.project.id);
+  const base = 2_000 + PROJECT_CREATION_REQUEST_WINDOW_MS;
+  db.createProjectForRequest({ userId: "usr_b", requestId: "keep", name: "Kept", scope, now: base });
+  for (let index = 0; index < PROJECT_CREATION_REQUESTS_PER_USER + 5; index += 1) {
+    db.createProjectForRequest({ userId: "usr_a", requestId: `req-${index}`, name: `P${index}`, scope, now: base + index });
+  }
+  const mine = rows("usr_a");
+  assert.equal(mine.length, PROJECT_CREATION_REQUESTS_PER_USER);
+  assert.equal(mine[0], "req-5");
+  assert.equal(mine.at(-1), `req-${PROJECT_CREATION_REQUESTS_PER_USER + 4}`);
+  // One human's history never evicts another's.
+  assert.deepEqual(rows("usr_b"), ["keep"]);
+  db.close();
+});
+
+test("an existing database gains the project request table on reopen (#3468)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-project-requests-"));
+  const path = join(dir, "control-plane.db");
+  try {
+    let db = ControlPlaneDb.open(path);
+    const before = db.createProject({ name: "Before", now: 10 });
+    db.close();
+    const raw = new DatabaseSync(path);
+    raw.exec("DROP TABLE project_creation_requests");
+    raw.close();
+    db = ControlPlaneDb.open(path);
+    const organizationId = db.localIdentityContext().organizationId;
+    const scope = { organizationId, owner: { kind: "organization" as const, organizationId } };
+    const created = db.createProjectForRequest({ userId: "usr_a", requestId: "req-1", name: "After", scope, now: 20 });
+    assert.ok("project" in created && created.created);
+    assert.ok(db.getProject(before.id));
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

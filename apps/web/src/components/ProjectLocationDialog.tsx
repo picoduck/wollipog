@@ -4,12 +4,14 @@ import {
   runnerSupportsProtocol,
   type BoxView,
   type IdentityAdministrationView,
+  type ProjectLocationView,
   type ProjectView,
   type ResourceOwner,
   type ResourceScope,
   type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { useApi } from "../api-context.js";
 import {
   accessScopeChoices,
   accessScopeLabel,
@@ -37,14 +39,29 @@ import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Checkbox, ChoiceRows, SegmentedControl, Select } from "./ui/ChoiceControls.js";
 
-interface NewProjectLocation {
-  runnerId: string;
-  name: string;
-  path: string;
-  owner?: ResourceOwner;
+type AddLocationMode = "existing" | "new";
+
+/** What Add Location is adding: an existing location's workspace, or a folder on a machine. */
+type LocationTarget =
+  | { kind: "existing"; runnerId: string; workspaceId: string }
+  | { kind: "new"; runnerId: string; path: string };
+
+/** "/repos/acme/" and "/repos/acme" are one folder; a root keeps its only separator. */
+const withoutTrailingSeparators = (path: string) => path.replace(/[\\/]+$/u, "") || path;
+
+/** The project's location for `target`: the same workspace, or the same machine and folder. */
+export function projectLocationFor(project: ProjectView, target: LocationTarget): ProjectLocationView | undefined {
+  return project.locations.find((location) => location.runnerId === target.runnerId && (target.kind === "existing"
+    ? location.workspaceId === target.workspaceId
+    : withoutTrailingSeparators(location.path) === withoutTrailingSeparators(target.path)));
 }
 
-type AddLocationMode = "existing" | "new";
+/** A New Folder refusal because the folder is already a location, perhaps by this request's lost
+ * first try. Older servers send only the message. */
+function alreadyRegistered(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.status === 409 &&
+    (cause.code === "LOCATION_ALREADY_REGISTERED" || /already registered/iu.test(cause.message));
+}
 
 export function projectLocationCreationError(cause: unknown): string {
   if (cause instanceof ApiError && cause.status === 404 && cause.message.trim().toLocaleLowerCase() === "not found") {
@@ -124,6 +141,14 @@ type ScopeCorrection = {
  * `onboarding` is the hand-off from New Project: a success notice leads, Cancel reads Skip for Now,
  * and, where the server can generate one (`setupFileSupported`), the Create a Starter Setup File
  * checkbox is the last field and applies to whichever location is added.
+ *
+ * The dialog sends the request itself, so it can tell a refusal from an unknown outcome (#3468). A
+ * refusal (a 4xx) added nothing. A timeout, a lost connection, a 5xx or an unreadable reply may
+ * follow the add, so the dialog reads the project again: when it lists this location (the same
+ * workspace, or the same machine and folder) the location was added, and `onAdded` runs as after a
+ * reply. Otherwise the notice says the outcome couldn't be confirmed, since the request may still
+ * land. Trying again is safe because the server adds a location once. A New Folder retry refused as
+ * already registered was added only if this project lists that folder; elsewhere, it is a refusal.
  */
 export function ProjectLocationDialog({
   project,
@@ -133,8 +158,7 @@ export function ProjectLocationDialog({
   canCreateLocation,
   accessScopeManagementSupported,
   onClose,
-  onAdd,
-  onCreate,
+  onAdded,
   onManageConnections,
   onboarding = false,
   setupFileSupported = false,
@@ -147,8 +171,10 @@ export function ProjectLocationDialog({
   canCreateLocation: boolean;
   accessScopeManagementSupported: boolean;
   onClose: () => void;
-  onAdd: (candidate: ProjectLocationCandidate, generateSetup: boolean) => Promise<void>;
-  onCreate: (location: NewProjectLocation, generateSetup: boolean) => Promise<void>;
+  /** The location was added: the project as the server now has it, and the added location (absent
+   * only if a reply left it out). Runs before the dialog closes, and reports its own failures, since
+   * the location is added whatever happens next. */
+  onAdded: (project: ProjectView, location: ProjectLocationView | undefined, generateSetup: boolean) => void | Promise<void>;
   onManageConnections: () => void;
   /** Opened right after New Project created `project`. */
   onboarding?: boolean;
@@ -157,10 +183,13 @@ export function ProjectLocationDialog({
   /** The control that opened this dialog, for focus to return to (a button inside New Session). */
   returnFocusRef?: { current: HTMLElement | null };
 }) {
+  const api = useApi();
   const ids = useId();
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<{ sentence: string; detail: string | null } | null>(null);
+  const [error, setError] = useState<{ title: string; sentence: string; detail: string | null } | null>(null);
+  // Targets with a request that went unanswered: a later refusal doesn't prove that one added nothing.
+  const unanswered = useRef(new Set<string>());
   const [chosenKey, setChosenKey] = useState<string | null>(null);
   const [runnerId, setRunnerId] = useState("");
   const [locationName, setLocationName] = useState("");
@@ -305,6 +334,67 @@ export function ProjectLocationDialog({
     return null;
   })();
 
+  /** Send the request, and settle it as added, refused or unconfirmed (#3468). */
+  const settle = async (target: LocationTarget, send: () => Promise<{ project: ProjectView }>) => {
+    const setup = onboarding && setupFileSupported && generateSetup;
+    const key = target.kind === "existing"
+      ? `existing\u0000${target.runnerId}\u0000${target.workspaceId}`
+      : `new\u0000${target.runnerId}\u0000${withoutTrailingSeparators(target.path)}`;
+    let added: ProjectView;
+    try {
+      added = (await send()).project;
+    } catch (cause) {
+      const raw = cause instanceof Error ? cause.message.trim() : String(cause).trim();
+      const refused = cause instanceof ApiError && cause.status < 500;
+      const registered = target.kind === "new" && alreadyRegistered(cause);
+      const retried = unanswered.current.has(key);
+      // Whether the project lists the location now; null when it couldn't be read.
+      let listed: { project: ProjectView; location: ProjectLocationView | undefined } | null = null;
+      if (!refused || registered || retried) {
+        try {
+          const { project: current } = await api.project(project.id);
+          listed = { project: current, location: projectLocationFor(current, target) };
+        } catch {
+          listed = null;
+        }
+      }
+      if (listed?.location) {
+        unanswered.current.delete(key);
+        await onAdded(listed.project, listed.location, setup);
+        onClose();
+        return;
+      }
+      const subject = target.kind === "new" ? "this folder" : "this location";
+      if (!refused || (registered && listed === null)) {
+        unanswered.current.add(key);
+        setError({
+          title: "Couldn't Confirm the Location",
+          sentence: `Wollipog couldn't confirm whether ${subject} was added. Adding it again is safe: it won't be added twice.`,
+          detail: raw || null,
+        });
+        return;
+      }
+      // A bare legacy 404 becomes the update sentence; anything else keeps the server's words
+      // behind Show Details (§8.5). The server registers a folder and adds its location together,
+      // so a folder registered while this project doesn't list it is registered elsewhere.
+      const legacy = target.kind === "new" && cause instanceof ApiError && cause.status === 404 &&
+        raw.toLocaleLowerCase() === "not found";
+      setError(legacy
+        ? { title: "Couldn't Add the Location", sentence: projectLocationCreationError(cause), detail: null }
+        : retried && !registered
+          ? {
+            title: "Couldn't Add the Location",
+            sentence: `Wollipog refused to add ${subject} this time, and ${project.name} doesn't list it yet. An earlier try may still add it.`,
+            detail: raw || null,
+          }
+          : { title: "Couldn't Add the Location", sentence: `Wollipog refused to add ${subject}. Nothing was added.`, detail: raw || null });
+      return;
+    }
+    unanswered.current.delete(key);
+    await onAdded(added, projectLocationFor(added, target), setup);
+    onClose();
+  };
+
   const commit = async () => {
     if (busy || blockedReason) return;
     if (mode === "new") {
@@ -319,21 +409,12 @@ export function ProjectLocationDialog({
       setBusy(true);
       setError(null);
       try {
-        await onCreate({
+        await settle({ kind: "new", runnerId: selectedRunnerId, path: selectedFolder }, () => api.createProjectLocation(project.id, {
           runnerId: selectedRunnerId,
           name,
           path: selectedFolder,
           ...(creationScope ? { owner: creationScope.owner } : {}),
-        }, onboarding && setupFileSupported && generateSetup);
-        onClose();
-      } catch (cause) {
-        // A bare legacy 404 becomes the update sentence; anything else keeps the server's words
-        // behind Show Details (§8.5).
-        const raw = cause instanceof Error ? cause.message.trim() : "";
-        const legacy = cause instanceof ApiError && cause.status === 404 && raw.toLocaleLowerCase() === "not found";
-        setError(legacy
-          ? { sentence: projectLocationCreationError(cause), detail: null }
-          : { sentence: "Wollipog couldn't add this folder. Try again.", detail: raw || null });
+        }));
       } finally {
         setBusy(false);
         setSubmittedMachine(null);
@@ -344,13 +425,8 @@ export function ProjectLocationDialog({
     setBusy(true);
     setError(null);
     try {
-      await onAdd(chosen, onboarding && setupFileSupported && generateSetup);
-      onClose();
-    } catch (cause) {
-      setError({
-        sentence: "Wollipog couldn't add this location. Try again.",
-        detail: cause instanceof Error && cause.message.trim() ? cause.message : null,
-      });
+      await settle({ kind: "existing", runnerId: chosen.runnerId, workspaceId: chosen.workspaceId }, () =>
+        api.addProjectLocation(project.id, { runnerId: chosen.runnerId, workspaceId: chosen.workspaceId }));
     } finally {
       setBusy(false);
     }
@@ -608,7 +684,7 @@ export function ProjectLocationDialog({
         />
       )}
       {error && (
-        <Notice tone="danger" role="alert" title="Couldn't Add the Location" details={error.detail ?? undefined}>
+        <Notice tone="danger" role="alert" title={error.title} details={error.detail ?? undefined}>
           {error.sentence}
         </Notice>
       )}

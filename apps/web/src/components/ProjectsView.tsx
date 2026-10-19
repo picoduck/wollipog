@@ -9,7 +9,6 @@ import {
   filterManagedProjects,
   projectAfterRemoval,
   type LocationMachineName,
-  type ProjectLocationCandidate,
   type ProjectVisibilityFilter,
 } from "../project-management.js";
 import { runnerDisplay } from "../runners.js";
@@ -111,6 +110,7 @@ export function ProjectsView({
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projectLocationCreationSupported = useStoreSelector((state) => state.projectLocationCreationSupported);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
+  const projectCreationRetrySupported = useStoreSelector((state) => state.projectCreationRetrySupported);
   const worktreeSetupConfigSupported = useStoreSelector((state) => state.worktreeSetupConfigSupported);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
@@ -602,6 +602,7 @@ export function ProjectsView({
       {dialog?.kind === "create" && (
         <CreateProjectDialog
           accessScopeManagementSupported={accessScopeManagementSupported}
+          retrySupported={projectCreationRetrySupported}
           projects={allProjects}
           onClose={() => setDialog(null)}
           onCreated={(project) => {
@@ -623,21 +624,9 @@ export function ProjectsView({
           setupFileSupported={worktreeSetupConfigSupported}
           onClose={() => setDialog(null)}
           onManageConnections={manageConnections}
-          onAdd={async (candidate: ProjectLocationCandidate, generateSetup) => {
-            const { project } = await api.addProjectLocation(dialogProject.id, { runnerId: candidate.runnerId, workspaceId: candidate.workspaceId });
+          onAdded={async (project, location, generateSetup) => {
             applyProject(project);
-            if (generateSetup) {
-              await createStarterSetup(project, project.locations.find((location) =>
-                location.runnerId === candidate.runnerId && location.workspaceId === candidate.workspaceId));
-            }
-          }}
-          onCreate={async (location, generateSetup) => {
-            const { project } = await api.createProjectLocation(dialogProject.id, location);
-            applyProject(project);
-            if (generateSetup) {
-              await createStarterSetup(project, project.locations.find((candidate) =>
-                candidate.runnerId === location.runnerId && candidate.path === location.path));
-            }
+            if (generateSetup) await createStarterSetup(project, location);
           }}
         />
       )}
