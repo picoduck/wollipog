@@ -42,6 +42,10 @@ export interface ConfirmationOptions {
   title: string;
   /** One or two sentences: what happens, to which named object, and whether it can be undone. */
   message: string;
+  /** Live content drawn in place of `message`, for a sentence that names a personal identifier
+   * which must stay masked and revealable (a provider account label, §11.8). `message` stays the
+   * plain, masked text, which also identifies the request. */
+  messageContent?: ReactNode;
   /** Content under the body that is not a list of affected objects, such as a mono preview. A list
    * uses `detailRows`. */
   details?: ReactNode;
@@ -735,7 +739,7 @@ function ConfirmationDialog({ request, onSettle }: {
         </>
       )}
     >
-      <p className="confirmation-message" id={descriptionId}>{request.message}</p>
+      <p className="confirmation-message" id={descriptionId}>{request.messageContent ?? request.message}</p>
       {request.details && <div id={detailsId}>{request.details}</div>}
       {shownRows.length > 0 && (
         <ul className="surface confirmation-rows" id={rowsId}>

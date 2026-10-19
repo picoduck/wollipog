@@ -10593,35 +10593,30 @@ textarea {
   padding: 0 10px 10px;
   border-top: 1px solid var(--border);
 }
-.provider-accounts-actions,
 .provider-login-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
-.provider-accounts-actions {
-  padding: 10px 2px 2px;
+/* Provider Accounts (#2995, §5.2): line 2 is the provider and the profile access as neutral meta,
+   12px apart; the row's Sign In and ⋯ trail it. */
+.provider-account-sub {
+  display: flex;
+  gap: var(--space-3);
 }
-.provider-accounts-actions p {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
-.provider-account-form,
-.provider-account-form label {
-  display: grid;
-  gap: 8px;
-}
-.provider-account-form label {
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
-.provider-account-remove-target {
-  display: inline-flex;
+.provider-account-actions {
+  display: flex;
+  flex: none;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
+/* The row's expansion: its running sign-in, under the row it belongs to (#2996 steps it in-row). */
+.provider-account-expansion {
+  padding: 0 var(--space-3) var(--space-3);
+}
+.provider-account-expansion > .provider-login-card { margin-top: 0; }
+.provider-accounts-list > .provider-account-expansion + .row { box-shadow: inset 0 1px 0 var(--border); }
 .provider-login-card {
   margin-top: 10px;
   padding: 12px;

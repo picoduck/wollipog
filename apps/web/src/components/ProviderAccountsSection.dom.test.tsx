@@ -3,23 +3,32 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { RUNNER_CAPABILITY_MIN_PROTOCOL, type ProviderAccountDefinition, type RunnerView } from "@wollipog/protocol";
+import {
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+  type AgentDefinition,
+  type ProviderAccountDefinition,
+  type ProviderLoginView,
+  type RunnerView,
+} from "@wollipog/protocol";
+import { HIDE_ACCOUNT_EMAILS_STORAGE_KEY } from "../account-email-privacy.js";
 import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ProviderAccountsSection, providerProfileErrorMessage } from "./ProviderAccountsSection.js";
+import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage } from "./ProviderAccountsSection.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
   window: domWindow, document: domWindow.document, navigator: domWindow.navigator, localStorage: domWindow.localStorage,
   HTMLElement: domWindow.HTMLElement, HTMLButtonElement: domWindow.HTMLButtonElement, HTMLInputElement: domWindow.HTMLInputElement,
   Element: domWindow.Element, Node: domWindow.Node, Event: domWindow.Event, MouseEvent: domWindow.MouseEvent,
+  KeyboardEvent: domWindow.KeyboardEvent,
   requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow), cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   getComputedStyle: domWindow.getComputedStyle.bind(domWindow), React, IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
 const PROFILES = RUNNER_CAPABILITY_MIN_PROTOCOL.providerProfiles;
+const REMOVAL = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountRemoval;
 const CAPABILITY_REFUSAL = "This machine needs a newer runner for provider profiles. Update and restart the runner.";
 
 const ACCOUNTS: ProviderAccountDefinition[] = [
@@ -29,6 +38,16 @@ const ACCOUNTS: ProviderAccountDefinition[] = [
   { id: "legacy", label: "Legacy Work", provider: "codex", authStatus: "authenticated" },
 ];
 
+const SIGN_IN_ACCOUNTS: ProviderAccountDefinition[] = [
+  { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+  { id: "personal", label: "Personal", provider: "claude", authStatus: "unauthenticated" },
+  { id: "mystery", label: "Mystery", provider: "codex", authStatus: "unknown" },
+];
+
+const runningLogin = (accountId: string, label: string): ProviderLoginView => ({
+  operationId: `login-${accountId}`, accountId, label, provider: "claude", status: "waiting_for_provider", startedAt: 1,
+});
+
 function runnerView(overrides: Partial<RunnerView> = {}): RunnerView {
   return {
     runnerId: "runner-1", hostname: "host", os: "linux", version: "1", status: "online", agents: [], lastSeen: 0,
@@ -36,11 +55,16 @@ function runnerView(overrides: Partial<RunnerView> = {}): RunnerView {
   } as RunnerView;
 }
 
-type Call = { kind: "adopt" | "revoke"; accountId: string; force?: boolean };
+type Call =
+  | { kind: "adopt" | "revoke"; accountId: string; force?: boolean }
+  | { kind: "remove"; accountId: string }
+  | { kind: "login"; body: unknown };
 
 function client(handlers: {
   adopt?: (accountId: string) => Promise<unknown>;
   revoke?: (accountId: string, force: boolean) => Promise<unknown>;
+  remove?: (accountId: string) => Promise<unknown>;
+  login?: (body: unknown) => Promise<unknown>;
 } = {}) {
   const calls: Call[] = [];
   const value = {
@@ -53,11 +77,21 @@ function client(handlers: {
       return handlers.revoke ? handlers.revoke(accountId, force)
         : { revoked: true, grantIds: ["g"], markerUpdated: true, runnerNotified: true, forced: force };
     },
+    removeProviderAccount: async (_runnerId: string, accountId: string) => {
+      calls.push({ kind: "remove", accountId });
+      return handlers.remove ? handlers.remove(accountId) : { removed: true, credentialsRetained: false };
+    },
+    startProviderLogin: async (_runnerId: string, body: unknown) => {
+      calls.push({ kind: "login", body });
+      return handlers.login ? handlers.login(body) : { login: runningLogin("new", "New") };
+    },
   } as unknown as ApiClient;
   return { client: value, calls };
 }
 
-async function render(props: { runner?: RunnerView; online?: boolean; canManageProfiles?: boolean; api?: ApiClient }) {
+async function render(props: {
+  runner?: RunnerView; online?: boolean; canManageProfiles?: boolean; api?: ApiClient; machineName?: string;
+}) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -66,14 +100,16 @@ async function render(props: { runner?: RunnerView; online?: boolean; canManageP
     <ApiProvider client={props.api ?? client().client}>
       <FeedbackProvider>
         <ProviderAccountsSection runner={props.runner ?? runnerView()} online={props.online ?? true}
-          canManageProfiles={props.canManageProfiles ?? true} />
+          machineName={props.machineName ?? "Studio Mac"} canManageProfiles={props.canManageProfiles ?? true} />
       </FeedbackProvider>
     </ApiProvider>,
   ));
   await settle();
-  const dialog = () => domWindow.document.body.querySelector('[role="dialog"]') as unknown as HTMLElement | null;
+  const body = domWindow.document.body as unknown as HTMLElement;
+  const dialog = () => body.querySelector('[role="dialog"]') as HTMLElement | null;
+  const rows = () => [...container.querySelectorAll<HTMLElement>(".provider-accounts-list > .row")];
   const row = (label: string) => {
-    const match = [...container.querySelectorAll<HTMLElement>(".agent-row")].find((candidate) => candidate.textContent?.includes(label));
+    const match = rows().find((candidate) => candidate.querySelector(".row-title")?.textContent?.includes(label));
     assert.ok(match, `expected a row for ${label}`);
     return match;
   };
@@ -83,36 +119,523 @@ async function render(props: { runner?: RunnerView; online?: boolean; canManageP
     assert.ok(match, `expected ${name}`);
     return match;
   };
+  const more = (label: string) => row(label).querySelector<HTMLButtonElement>('button[aria-label^="More Actions for"]');
+  const menu = () => body.querySelector<HTMLElement>('[role="menu"]');
+  const openMenu = async (label: string) => {
+    const trigger = more(label);
+    assert.ok(trigger, `expected ⋯ on ${label}`);
+    await act(async () => { trigger.click(); });
+    await settle();
+    const opened = menu();
+    assert.ok(opened, `expected ${label}'s menu`);
+    return opened;
+  };
+  /** Each item's label and, when it has one, its second line. */
+  const menuItems = (scope: HTMLElement) => [...scope.querySelectorAll<HTMLButtonElement>(".menu-item")].map((item) => ({
+    label: item.querySelector(".menu-text")?.textContent ?? "",
+    disabled: item.disabled,
+    reason: item.querySelector(".menu-desc")?.textContent ?? null,
+  }));
+  const choose = async (label: string, item: string) => {
+    const opened = await openMenu(label);
+    const match = [...opened.querySelectorAll<HTMLButtonElement>(".menu-item")].find((candidate) =>
+      candidate.querySelector(".menu-text")?.textContent === item);
+    assert.ok(match, `expected ${item} in ${label}'s menu`);
+    await act(async () => { match.click(); });
+    await settle();
+  };
+  const closeMenu = async () => {
+    const backdrop = body.querySelector<HTMLElement>(".menu-backdrop");
+    await act(async () => { backdrop?.click(); });
+    await settle();
+  };
+  const toasts = () => [...body.querySelectorAll<HTMLElement>(".toast")].map((toast) => toast.textContent ?? "");
   return {
-    container, dialog, row, buttons, button, settle,
-    badges: (label: string) => [...row(label).querySelectorAll(".agent-row-meta .atag")].map((tag) => tag.textContent),
-    error: () => container.querySelector('.form-error[role="alert"]')?.textContent ?? null,
-    unmount: async () => { await act(async () => root.unmount()); container.remove(); },
+    container, body, dialog, rows, row, buttons, button, more, menu, openMenu, menuItems, choose, closeMenu, toasts, settle,
+    badge: (label: string) => row(label).querySelector<HTMLElement>(".status"),
+    sub: (label: string) => [...row(label).querySelectorAll(".provider-account-sub > span")].map((part) => part.textContent),
+    notice: () => container.querySelector<HTMLElement>('.notice[role="alert"]'),
+    error: () => container.querySelector('.notice[role="alert"] .notice-body')?.textContent ?? null,
+    unmount: async () => {
+      await act(async () => root.unmount());
+      container.remove();
+      for (const node of [...body.querySelectorAll(".toast-stack, .toast")]) node.remove();
+    },
   };
 }
 
-test("each profile access state has its badge, and a legacy HOME has none", async () => {
-  const ui = await render({ canManageProfiles: false });
+async function withHiddenEmails(run: () => Promise<void>) {
+  domWindow.localStorage.setItem(HIDE_ACCOUNT_EMAILS_STORAGE_KEY, "true");
   try {
-    assert.deepEqual(ui.badges("Granted Work"), ["Claude", "Logged In", "Profile"]);
-    assert.deepEqual(ui.badges("Pending Work"), ["Claude", "Logged In", "Grant Pending"]);
-    assert.deepEqual(ui.badges("Other Work"), ["Codex", "Logged In", "Not Granted"]);
-    assert.deepEqual(ui.badges("Legacy Work"), ["Codex", "Logged In"]);
-    assert.equal(ui.row("Granted Work").querySelector(".atag.ctx")?.textContent, "Profile");
-    assert.equal(ui.row("Other Work").querySelector(".atag.broken")?.textContent, "Not Granted");
+    await run();
+  } finally {
+    domWindow.localStorage.removeItem(HIDE_ACCOUNT_EMAILS_STORAGE_KEY);
+  }
+}
+
+// --- Section and statuses (#2995) ---
+
+test("each account has one status: Signed In in the success tone inline, Sign-In Required in warning, Status Unknown neutral", async () => {
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }) });
+  try {
+    const heading = ui.container.querySelector(".section-title");
+    assert.equal(heading?.textContent, "Provider Accounts 3");
+    assert.equal(ui.badge("Work")?.textContent, "Signed In");
+    assert.match(ui.badge("Work")!.className, /\bt-success\b/);
+    assert.match(ui.badge("Work")!.className, /\binline\b/);
+    assert.equal(ui.badge("Personal")?.textContent, "Sign-In Required");
+    assert.match(ui.badge("Personal")!.className, /\bt-warning\b/);
+    assert.equal(ui.badge("Mystery")?.textContent, "Status Unknown");
+    assert.match(ui.badge("Mystery")!.className, /\bt-neutral\b/);
+    for (const label of ["Work", "Personal", "Mystery"]) {
+      assert.equal(ui.row(label).querySelectorAll(".status").length, 1, `${label} has one badge`);
+      assert.ok(ui.row(label).classList.contains("row-2"));
+    }
+    assert.deepEqual(ui.sub("Work"), ["Claude"]);
+    assert.deepEqual(ui.sub("Mystery"), ["Codex"]);
+    const text = ui.container.textContent ?? "";
+    assert.doesNotMatch(text, /Logged In|Login Required|Login Unknown/);
+    assert.equal(ui.container.querySelectorAll(".atag, .agent-row, .form-error").length, 0);
+    assert.doesNotMatch(text, /Sign in to Claude or Codex on this machine/, "the intro shows only without accounts");
   } finally {
     await ui.unmount();
   }
 });
 
-test("Owners and Admins get Adopt as Profile and Revoke Access by access state on a v225 runner", async () => {
+test("a running sign-in reads Signing In with a pulse, and a new account's sign-in has a row of its own", async () => {
+  const ui = await render({
+    runner: runnerView({
+      providerAccounts: SIGN_IN_ACCOUNTS,
+      providerLogins: [runningLogin("work", "Work"), runningLogin("studio", "Studio")],
+    }),
+  });
+  try {
+    assert.equal(ui.badge("Work")?.textContent, "Signing In");
+    assert.match(ui.badge("Work")!.className, /\bt-info\b.*\bpulse\b/);
+    assert.equal(ui.badge("Studio")?.textContent, "Signing In");
+    assert.equal(ui.container.querySelector(".section-title")?.textContent, "Provider Accounts 3", "the count is accounts");
+    const cards = [...ui.container.querySelectorAll(".provider-account-expansion article")].map((card) => card.getAttribute("aria-label"));
+    assert.deepEqual(cards, ["Work Provider Sign-In", "Studio Provider Sign-In"]);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("with no accounts the section shows its intro and Add Account…; offline, Add Account… is disabled with the reason", async () => {
+  const ui = await render({ runner: runnerView({ providerAccounts: [] }), online: false });
+  try {
+    assert.match(ui.container.textContent ?? "", /Sign in to Claude or Codex on this machine without opening a shell\./);
+    const add = ui.button(ui.container, "Add Account…");
+    assert.equal(add.disabled, true);
+    const reason = ui.container.querySelector(`#${add.getAttribute("aria-describedby")}`);
+    assert.equal(reason?.textContent, "This machine is offline.");
+    assertNoDomNode(ui.container.querySelector(".surface"));
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a viewer sees the statuses only, with the sentence saying who can manage accounts", async () => {
+  const ui = await render({
+    runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, canManage: false }), canManageProfiles: false,
+  });
+  try {
+    assert.equal(ui.buttons(ui.container).length, 0, "no Add Account…, Sign In or ⋯");
+    assert.match(ui.container.textContent ?? "", /Only this machine's owner or an organization admin can add or remove its accounts\./);
+    assert.equal(ui.badge("Personal")?.textContent, "Sign-In Required");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+// --- Row actions ---
+
+test("a manager's ⋯ starts with the label, offers Sign In Again… on signed-in rows, and ends with Remove Account…", async () => {
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), canManageProfiles: false });
+  try {
+    assert.deepEqual(ui.buttons(ui.row("Personal")).filter((name) => name === "Sign In"), ["Sign In"]);
+    assert.deepEqual(ui.buttons(ui.row("Work")).filter((name) => name === "Sign In"), []);
+    assert.equal(ui.more("Work")?.getAttribute("aria-label"), "More Actions for Work");
+    const work = await ui.openMenu("Work");
+    assert.equal(work.querySelector(".menu-label")?.textContent, "Work");
+    assert.deepEqual(ui.menuItems(work).map((item) => item.label), ["Sign In Again…", "Remove Account…"]);
+    assert.ok(work.querySelector(".menu-sep"), "a separator before Remove Account…");
+    assert.ok(work.querySelector(".menu-item.danger")?.textContent?.includes("Remove Account…"));
+    await ui.closeMenu();
+    const personal = await ui.openMenu("Personal");
+    assert.deepEqual(ui.menuItems(personal).map((item) => item.label), ["Remove Account…"]);
+    assertNoDomNode(personal.querySelector(".menu-sep"));
+    await ui.closeMenu();
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("on a runner without removal a sign-in-required row has no ⋯, and a viewer has none at all", async () => {
+  const older = await render({
+    runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, protocolVersion: REMOVAL - 1 }), canManageProfiles: false,
+  });
+  try {
+    assertNoDomNode(older.more("Personal"));
+    const work = await older.openMenu("Work");
+    assert.deepEqual(older.menuItems(work).map((item) => item.label), ["Sign In Again…"]);
+    await older.closeMenu();
+  } finally {
+    await older.unmount();
+  }
+  const viewer = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, canManage: false }) });
+  try {
+    for (const label of ["Work", "Personal", "Mystery"]) assertNoDomNode(viewer.more(label));
+  } finally {
+    await viewer.unmount();
+  }
+});
+
+test("while Work's sign-in runs, its Remove Account… is disabled with the reason and Personal's stays enabled", async () => {
+  const ui = await render({
+    runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, providerLogins: [runningLogin("work", "Work")] }), canManageProfiles: false,
+  });
+  try {
+    const work = await ui.openMenu("Work");
+    assert.deepEqual(ui.menuItems(work), [
+      { label: "Remove Account…", disabled: true, reason: "A sign-in is running. Cancel it first." },
+    ]);
+    await ui.closeMenu();
+    const personal = await ui.openMenu("Personal");
+    assert.deepEqual(ui.menuItems(personal), [{ label: "Remove Account…", disabled: false, reason: null }]);
+    await ui.closeMenu();
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("offline, Sign In Again… and Remove Account… say the machine is offline", async () => {
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), online: false, canManageProfiles: false });
+  try {
+    const work = await ui.openMenu("Work");
+    assert.deepEqual(ui.menuItems(work), [
+      { label: "Sign In Again…", disabled: true, reason: "This machine is offline." },
+      { label: "Remove Account…", disabled: true, reason: "This machine is offline." },
+    ]);
+    await ui.closeMenu();
+    assert.equal(ui.button(ui.row("Personal"), "Sign In").disabled, true);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Sign In and Sign In Again… start the account's sign-in", async () => {
+  const api = client();
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+  try {
+    await act(async () => { ui.button(ui.row("Personal"), "Sign In").click(); });
+    await ui.settle();
+    await ui.choose("Work", "Sign In Again…");
+    assert.deepEqual(api.calls, [{ kind: "login", body: { accountId: "personal" } }, { kind: "login", body: { accountId: "work" } }]);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+// --- Removal ---
+
+test("the removal confirmation names the account, the provider and the machine, and focuses Cancel", async () => {
+  const api = client();
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+  try {
+    await ui.choose("Work", "Remove Account…");
+    const dialog = ui.dialog()!;
+    assert.equal(dialog.querySelector(".modal-title, h2")?.textContent, "Remove Account");
+    assert.equal(dialog.querySelector(".confirmation-message")?.textContent,
+      "Work (Claude) is removed from Studio Mac, and the sign-in Wollipog stored for it is deleted. " +
+      "Sessions still using it keep working, and the Claude account itself isn't affected.");
+    assert.equal((domWindow.document.activeElement as unknown as HTMLElement | null)?.textContent, "Cancel");
+    assertNoDomNode(dialog.querySelector(".provider-account-remove-target"));
+    await act(async () => { ui.button(dialog, "Cancel").click(); });
+    await ui.settle();
+    assert.deepEqual(api.calls, []);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("under Hide Account Emails an email label stays masked in the row, the menu, the confirmation and the refusal", async () => {
+  await withHiddenEmails(async () => {
+    const email = "me@example.com";
+    const api = client({ remove: async () => { throw new ApiError("Agent 'policy' uses this account as its default in the runner configuration. Change that setting before removing the account.", 409); } });
+    const ui = await render({
+      runner: runnerView({ providerAccounts: [{ id: "mail", label: email, provider: "claude", authStatus: "authenticated" }] }),
+      api: api.client, canManageProfiles: false,
+    });
+    try {
+      const row = ui.rows()[0]!;
+      assert.doesNotMatch(row.textContent ?? "", /example\.com/);
+      const trigger = row.querySelector('button[aria-label^="More Actions for"]')!;
+      assert.equal(trigger.getAttribute("aria-label"), "More Actions for Hidden Account");
+      await act(async () => { (trigger as HTMLButtonElement).click(); });
+      await ui.settle();
+      assert.doesNotMatch(ui.menu()?.textContent ?? "", /example\.com/);
+      assert.doesNotMatch(ui.menu()?.getAttribute("aria-label") ?? "", /example\.com/);
+      const remove = [...ui.menu()!.querySelectorAll<HTMLButtonElement>(".menu-item")].find((item) => item.textContent?.includes("Remove Account…"))!;
+      await act(async () => { remove.click(); });
+      await ui.settle();
+      const dialog = ui.dialog()!;
+      assert.doesNotMatch(dialog.textContent ?? "", /example\.com/);
+      assert.ok(dialog.querySelector(".pid"), "the label is a masked, revealable identifier");
+      await act(async () => { ui.button(dialog, "Remove Account").click(); });
+      await ui.settle();
+      assert.doesNotMatch(ui.notice()?.textContent ?? "", /example\.com/);
+      assert.ok(ui.notice()?.querySelector(".pid"));
+    } finally {
+      await ui.unmount();
+    }
+  });
+});
+
+test("a removal that kept credentials says so in the toast's detail line; otherwise the toast is one line", async () => {
+  for (const [credentialsRetained, expected] of [
+    [true, "Account removed.Its credentials were kept because a session on this machine still uses them."],
+    [false, "Account removed."],
+  ] as const) {
+    const api = client({ remove: async () => ({ removed: true, credentialsRetained }) });
+    const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+    try {
+      await ui.choose("Personal", "Remove Account…");
+      await act(async () => { ui.button(ui.dialog()!, "Remove Account").click(); });
+      await ui.settle();
+      assert.deepEqual(api.calls, [{ kind: "remove", accountId: "personal" }]);
+      const toast = [...ui.body.querySelectorAll<HTMLElement>(".toast")].find((candidate) => candidate.textContent?.includes("Account removed."));
+      assert.ok(toast);
+      const message = toast.querySelector(".toast-message")?.textContent ?? "";
+      const detail = toast.querySelector(".toast-detail")?.textContent ?? "";
+      assert.equal(message + detail, expected);
+    } finally {
+      await ui.unmount();
+    }
+  }
+});
+
+test("while one account is removed only its ⋯ is busy; the other rows stay usable", async () => {
+  let finish!: () => void;
+  const api = client({ remove: () => new Promise((resolve) => { finish = () => resolve({ removed: true, credentialsRetained: false }); }) });
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+  try {
+    await ui.choose("Work", "Remove Account…");
+    await act(async () => { ui.button(ui.dialog()!, "Remove Account").click(); });
+    await ui.settle();
+    assert.equal(ui.more("Work")?.getAttribute("aria-busy"), "true");
+    assert.equal(ui.more("Mystery")?.disabled, false);
+    assert.equal(ui.button(ui.row("Personal"), "Sign In").disabled, false);
+    await act(async () => { finish(); });
+    await ui.settle();
+    assert.equal(ui.more("Work")?.getAttribute("aria-busy"), null);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("an agent-default refusal is a notice naming the agent's display name, not its id", async () => {
+  const agents = [{ id: "policy-claude", name: "Policy Claude", driver: "claude-code", source: "configured" }] as unknown as AgentDefinition[];
+  const api = client({
+    remove: async () => {
+      throw new ApiError("Agent 'policy-claude' uses this account as its default in the runner configuration. " +
+        "Change that setting before removing the account.", 409);
+    },
+  });
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, agents }), api: api.client, canManageProfiles: false });
+  try {
+    await ui.choose("Work", "Remove Account…");
+    await act(async () => { ui.button(ui.dialog()!, "Remove Account").click(); });
+    await ui.settle();
+    const notice = ui.notice()!;
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Remove Work");
+    assert.equal(ui.error(), "Policy Claude uses this account as its default in this machine's runner configuration. " +
+      "Change that setting, then remove the account.");
+    assert.doesNotMatch(notice.textContent ?? "", /policy-claude/);
+    // Between the title and the rows.
+    const order = [...ui.container.querySelectorAll(".section-head, .notice, .surface")].map((node) => node.className.split(" ")[0]);
+    assert.deepEqual(order, ["section-head", "notice", "surface"]);
+    await act(async () => { notice.querySelector<HTMLButtonElement>(".notice-dismiss")!.click(); });
+    await ui.settle();
+    assertNoDomNode(ui.notice());
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("removal refusals read as one sentence, the raw error behind Show Details", () => {
+  assert.deepEqual(providerAccountRemovalRefusal(new ApiError(
+    "A sign-in is running for this account. Cancel it before removing the account.", 409), []),
+  { body: "A sign-in is running for this account. Cancel it, then remove the account." });
+  assert.deepEqual(providerAccountRemovalRefusal(new ApiError("Agent 'gone' uses this account as its default in the runner configuration. x", 409), []),
+    { body: "gone uses this account as its default in this machine's runner configuration. Change that setting, then remove the account." });
+  assert.deepEqual(providerAccountRemovalRefusal(new ApiError("runner is offline", 409), []), { body: "This machine is offline." });
+  assert.deepEqual(providerAccountRemovalRefusal(new ApiError("The account could not be removed. The HOME is locked.", 409), []),
+    { body: "The account could not be removed.", details: "The account could not be removed. The HOME is locked. (HTTP 409)" });
+});
+
+// --- Add Account ---
+
+async function openAdd(ui: Awaited<ReturnType<typeof render>>) {
+  await act(async () => { ui.button(ui.container, "Add Account…").click(); });
+  await ui.settle();
+  const dialog = ui.dialog()!;
+  assert.ok(dialog);
+  const labelFor = [...dialog.querySelectorAll("label")].find((label) => label.textContent === "Account Label")!;
+  const input = dialog.querySelector<HTMLInputElement>(`#${labelFor.getAttribute("for")}`)!;
+  const type = async (value: string) => {
+    await act(async () => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+      // react-dom loads before these globals exist, so it detects changes on keyup.
+      input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+    });
+  };
+  const submit = async () => {
+    await act(async () => { ui.button(dialog, "Start Sign-In").click(); });
+    await ui.settle();
+  };
+  const fieldError = () => dialog.querySelector(".field-error")?.textContent ?? null;
+  return { dialog, input, type, submit, fieldError };
+}
+
+test("Add Account refuses an empty label on submit and a duplicate label under the field without a request", async () => {
+  const api = client();
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+  try {
+    const add = await openAdd(ui);
+    assert.equal(add.dialog.querySelector(".modal-desc")?.textContent, "Studio Mac");
+    assert.ok(add.dialog.querySelector('[role="radiogroup"]'), "Provider is a segmented control");
+    assert.equal(ui.button(add.dialog, "Start Sign-In").disabled, false, "Start Sign-In stays enabled");
+    await add.submit();
+    assert.equal(add.fieldError(), "Enter a label, such as Work or Personal.");
+    await add.type("  work ");
+    assert.equal(add.fieldError(), null, "changing the label clears the error");
+    await add.submit();
+    assert.equal(add.fieldError(),
+      "A Claude account named Work is already on this machine. Choose another label, or use Sign In Again on that account.");
+    assert.equal(add.input.getAttribute("aria-invalid"), "true");
+    assert.equal(domWindow.document.activeElement, add.input as never, "focus returns to the field");
+    assert.deepEqual(api.calls, [], "no request was sent");
+    assert.ok(ui.dialog(), "the dialog stays open");
+    // The same label for the other provider is not a duplicate.
+    const codex = [...add.dialog.querySelectorAll<HTMLElement>('[role="radio"]')].find((radio) => radio.textContent === "Codex")!;
+    await act(async () => { codex.click(); });
+    await ui.settle();
+    assert.equal(add.fieldError(), null, "changing the provider clears the error");
+    await add.submit();
+    assert.deepEqual(api.calls, [{ kind: "login", body: { provider: "codex", label: "work" } }]);
+    assertNoDomNode(ui.dialog(), "success closes the dialog");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Add Account maps the runner's duplicate refusals to the field, and other failures to a notice above the footer", async () => {
+  for (const [message, expected] of [
+    ["A Claude account with this label is already on this Machine. Use Sign In on that account to refresh its login.",
+      "A Claude account named Team is already on this machine. Choose another label, or use Sign In Again on that account."],
+    ["A sign-in for an account with this label is already running.", "A sign-in for a Claude account named Team is already running."],
+  ] as const) {
+    const api = client({ login: async () => { throw new ApiError(message, 409); } });
+    const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+    try {
+      const add = await openAdd(ui);
+      await add.type("Team");
+      await add.submit();
+      assert.equal(add.fieldError(), expected);
+      assertNoDomNode(add.dialog.querySelector(".notice"));
+    } finally {
+      await ui.unmount();
+    }
+  }
+  const api = client({ login: async () => { throw new ApiError("The runner did not answer.", 504); } });
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS }), api: api.client, canManageProfiles: false });
+  try {
+    const add = await openAdd(ui);
+    await add.type("Team");
+    await add.submit();
+    assert.equal(add.fieldError(), null);
+    const notice = add.dialog.querySelector<HTMLElement>('.notice[role="alert"]')!;
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Start the Sign-In");
+    assert.match(notice.textContent ?? "", /The runner did not answer\./);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a label held by a running new-account sign-in is refused without a request", async () => {
+  const api = client();
+  const ui = await render({
+    runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, providerLogins: [runningLogin("studio", "Studio")] }),
+    api: api.client, canManageProfiles: false,
+  });
+  try {
+    const add = await openAdd(ui);
+    await add.type("studio");
+    await add.submit();
+    assert.equal(add.fieldError(), "A sign-in for a Claude account named Studio is already running.");
+    assert.deepEqual(api.calls, []);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("under Hide Account Emails a duplicate email label stays masked in the field error", async () => {
+  await withHiddenEmails(async () => {
+    const api = client();
+    const ui = await render({
+      runner: runnerView({ providerAccounts: [{ id: "mail", label: "me@example.com", provider: "claude", authStatus: "authenticated" }] }),
+      api: api.client, canManageProfiles: false,
+    });
+    try {
+      const add = await openAdd(ui);
+      await add.type("ME@example.com");
+      await add.submit();
+      const error = add.dialog.querySelector(".field-error")!;
+      assert.doesNotMatch(error.textContent ?? "", /example\.com/);
+      assert.ok(error.querySelector(".pid"));
+      assert.deepEqual(api.calls, []);
+    } finally {
+      await ui.unmount();
+    }
+  });
+});
+
+// --- Provider profiles (#3239), now line-2 meta and ⋯ items ---
+
+test("each profile access state is line-2 meta after the provider, and a legacy HOME has none", async () => {
+  const ui = await render({ canManageProfiles: false });
+  try {
+    assert.deepEqual(ui.sub("Granted Work"), ["Claude", "Profile"]);
+    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending"]);
+    assert.deepEqual(ui.sub("Other Work"), ["Codex", "Not Granted"]);
+    assert.deepEqual(ui.sub("Legacy Work"), ["Codex"]);
+    for (const label of ["Granted Work", "Other Work"]) assert.equal(ui.badge(label)?.textContent, "Signed In");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+const profileItems = async (ui: Awaited<ReturnType<typeof render>>, label: string) => {
+  const opened = await ui.openMenu(label);
+  const names = ui.menuItems(opened).map((item) => item.label).filter((name) => name === "Adopt as Profile…" || name === "Revoke Access…");
+  await ui.closeMenu();
+  return names;
+};
+
+test("Owners and Admins get Adopt as Profile… and Revoke Access… by access state on a v225 runner", async () => {
   const ui = await render({});
   try {
-    const profileButtons = (label: string) => ui.buttons(ui.row(label)).filter((name) => name === "Adopt as Profile" || name === "Revoke Access");
-    assert.deepEqual(profileButtons("Granted Work"), ["Revoke Access"]);
-    assert.deepEqual(profileButtons("Pending Work"), ["Adopt as Profile", "Revoke Access"], "a pending grant can be retried or revoked");
-    assert.deepEqual(profileButtons("Other Work"), ["Adopt as Profile"]);
-    assert.deepEqual(profileButtons("Legacy Work"), ["Adopt as Profile"]);
+    assert.deepEqual(await profileItems(ui, "Granted Work"), ["Revoke Access…"]);
+    assert.deepEqual(await profileItems(ui, "Pending Work"), ["Adopt as Profile…", "Revoke Access…"], "a pending grant can be retried or revoked");
+    assert.deepEqual(await profileItems(ui, "Other Work"), ["Adopt as Profile…"]);
+    assert.deepEqual(await profileItems(ui, "Legacy Work"), ["Adopt as Profile…"]);
+    const opened = await ui.openMenu("Pending Work");
+    assert.deepEqual(ui.menuItems(opened).map((item) => item.label),
+      ["Sign In Again…", "Adopt as Profile…", "Revoke Access…", "Remove Account…"], "Remove Account… stays last");
+    await ui.closeMenu();
   } finally {
     await ui.unmount();
   }
@@ -125,10 +648,12 @@ test("a member with manage rights, or a runner below v225, gets no profile actio
   ]) {
     const ui = await render(props);
     try {
-      const names = ui.buttons(ui.container);
-      assert.ok(!names.includes("Adopt as Profile"), JSON.stringify(props));
-      assert.ok(!names.includes("Revoke Access"), JSON.stringify(props));
-      assert.ok(names.includes("Remove"), "account removal is still offered to a manager");
+      const opened = await ui.openMenu("Legacy Work");
+      const names = ui.menuItems(opened).map((item) => item.label);
+      await ui.closeMenu();
+      assert.ok(!names.includes("Adopt as Profile…"), JSON.stringify(props));
+      assert.ok(!names.includes("Revoke Access…"), JSON.stringify(props));
+      assert.ok(names.includes("Remove Account…"), "account removal is still offered to a manager");
     } finally {
       await ui.unmount();
     }
@@ -138,8 +663,13 @@ test("a member with manage rights, or a runner below v225, gets no profile actio
 test("offline, adoption waits for the Machine while revocation stays available", async () => {
   const ui = await render({ online: false, runner: runnerView({ status: "offline" }) });
   try {
-    assert.equal(ui.button(ui.row("Legacy Work"), "Adopt as Profile").disabled, true);
-    assert.equal(ui.button(ui.row("Granted Work"), "Revoke Access").disabled, false);
+    const legacy = await ui.openMenu("Legacy Work");
+    assert.deepEqual(ui.menuItems(legacy).find((item) => item.label === "Adopt as Profile…"),
+      { label: "Adopt as Profile…", disabled: true, reason: "This machine is offline." });
+    await ui.closeMenu();
+    const granted = await ui.openMenu("Granted Work");
+    assert.equal(ui.menuItems(granted).find((item) => item.label === "Revoke Access…")?.disabled, false);
+    await ui.closeMenu();
   } finally {
     await ui.unmount();
   }
@@ -149,8 +679,7 @@ test("Adopt as Profile explains the strict grant and adopts after confirmation",
   const api = client();
   const ui = await render({ api: api.client });
   try {
-    await act(async () => { ui.button(ui.row("Legacy Work"), "Adopt as Profile").click(); });
-    await ui.settle();
+    await ui.choose("Legacy Work", "Adopt as Profile…");
     const dialog = ui.dialog();
     assert.ok(dialog);
     const text = dialog.textContent ?? "";
@@ -163,8 +692,7 @@ test("Adopt as Profile explains the strict grant and adopts after confirmation",
     await ui.settle();
     assert.deepEqual(api.calls, [], "Cancel adopts nothing");
 
-    await act(async () => { ui.button(ui.row("Legacy Work"), "Adopt as Profile").click(); });
-    await ui.settle();
+    await ui.choose("Legacy Work", "Adopt as Profile…");
     await act(async () => { ui.button(ui.dialog()!, "Adopt as Profile").click(); });
     await ui.settle();
     assert.deepEqual(api.calls, [{ kind: "adopt", accountId: "legacy" }]);
@@ -175,22 +703,19 @@ test("Adopt as Profile explains the strict grant and adopts after confirmation",
   }
 });
 
-test("while adoption runs its button shows the spinner and the other actions wait", async () => {
+test("while adoption runs only that row's ⋯ is busy; the other rows stay usable", async () => {
   let finish!: () => void;
   const api = client({ adopt: () => new Promise((resolve) => { finish = () => resolve({ status: "active", profileId: "p", grantId: "g" }); }) });
   const ui = await render({ api: api.client });
   try {
-    await act(async () => { ui.button(ui.row("Legacy Work"), "Adopt as Profile").click(); });
-    await ui.settle();
+    await ui.choose("Legacy Work", "Adopt as Profile…");
     await act(async () => { ui.button(ui.dialog()!, "Adopt as Profile").click(); });
     await ui.settle();
-    const busy = ui.button(ui.row("Legacy Work"), "Adopt as Profile");
-    assert.equal(busy.getAttribute("aria-busy"), "true");
-    assert.ok(ui.row("Legacy Work").textContent?.includes("Authorizing…"), "the progress is announced");
-    assert.equal(ui.button(ui.row("Granted Work"), "Revoke Access").disabled, true);
+    assert.equal(ui.more("Legacy Work")?.getAttribute("aria-busy"), "true");
+    assert.equal(ui.more("Granted Work")?.disabled, false);
     await act(async () => { finish(); });
     await ui.settle();
-    assert.equal(ui.button(ui.row("Legacy Work"), "Adopt as Profile").getAttribute("aria-busy"), null);
+    assert.equal(ui.more("Legacy Work")?.getAttribute("aria-busy"), null);
   } finally {
     await ui.unmount();
   }
@@ -211,8 +736,7 @@ test("Revoke Access confirms, and active sessions get a second confirmation that
   });
   const ui = await render({ api: api.client });
   try {
-    await act(async () => { ui.button(ui.row("Granted Work"), "Revoke Access").click(); });
-    await ui.settle();
+    await ui.choose("Granted Work", "Revoke Access…");
     const first = ui.dialog()!;
     assert.match(first.textContent ?? "", /This control plane stops using this account's profile, and sessions that use it cannot restart until access is granted again\./);
     assert.match(first.textContent ?? "", /Other control planes' access is not affected\./);
@@ -248,8 +772,7 @@ test("declining the force confirmation revokes nothing more", async () => {
   });
   const ui = await render({ api: api.client });
   try {
-    await act(async () => { ui.button(ui.row("Pending Work"), "Revoke Access").click(); });
-    await ui.settle();
+    await ui.choose("Pending Work", "Revoke Access…");
     await act(async () => { ui.button(ui.dialog()!, "Revoke Access").click(); });
     await ui.settle();
     assert.match(ui.dialog()!.textContent ?? "", /1 active session uses this account's profile\./);
@@ -258,13 +781,13 @@ test("declining the force confirmation revokes nothing more", async () => {
     assertNoDomNode(ui.dialog());
     assert.deepEqual(api.calls, [{ kind: "revoke", accountId: "pending", force: false }]);
     assert.equal(ui.error(), null);
-    assert.equal(ui.button(ui.row("Pending Work"), "Revoke Access").disabled, false);
+    assert.equal(ui.more("Pending Work")?.disabled, false);
   } finally {
     await ui.unmount();
   }
 });
 
-test("a capability refusal and an adoption timeout are shown in the section's alert", async () => {
+test("a capability refusal and an adoption timeout are shown in the section's notice", async () => {
   for (const [failure, expected] of [
     [new ApiError(CAPABILITY_REFUSAL, 409, undefined, { error: CAPABILITY_REFUSAL, requiredRunnerProtocolVersion: PROFILES }), CAPABILITY_REFUSAL],
     [new ApiError("runner request timed out", 504, undefined, { status: "pending", grantId: "g" }),
@@ -273,8 +796,7 @@ test("a capability refusal and an adoption timeout are shown in the section's al
     const api = client({ adopt: async () => { throw failure; } });
     const ui = await render({ api: api.client });
     try {
-      await act(async () => { ui.button(ui.row("Other Work"), "Adopt as Profile").click(); });
-      await ui.settle();
+      await ui.choose("Other Work", "Adopt as Profile…");
       await act(async () => { ui.button(ui.dialog()!, "Adopt as Profile").click(); });
       await ui.settle();
       assert.equal(ui.error(), expected);
