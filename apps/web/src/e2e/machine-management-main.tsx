@@ -94,7 +94,8 @@ let runner: RunnerView | null = {
   providerAccountDefaults: [],
   workspaces: [{ id: "home", name: "Home", path: "C:\\Users\\misko" }],
   connectedAt: 1,
-  lastSeen: 1,
+  // Seen moments ago, as a connected runner is: Connection Details reads its Last Seen (#2988).
+  lastSeen: Date.now() - 30_000,
   protocolVersion: PROTOCOL_VERSION,
   agentsRefreshed: true,
   canManage: identityRole !== "viewer",
