@@ -105,18 +105,6 @@ export function isInboxRunning(session: Pick<SessionView, "status">): boolean {
 
 export const INBOX_COLLAPSED_THREADS_KEY = "wollipog.inbox.collapsedThreads";
 
-/**
- * Human input, outstanding results, unattended work, then quiet sessions. Lifecycle, unread
- * activity, and stalls alone never manufacture an outstanding result.
- */
-export function inboxUrgency(
-  session: Pick<SessionView, "id" | "status" | "pendingApproval"> &
-    Partial<SessionView>,
-  _stalledSessionIds: ReadonlySet<string> = new Set(),
-): number {
-  return sessionFollowUp(session as SessionView).priority;
-}
-
 interface InboxOrderKey {
   pinned: boolean;
   urgency: number;

@@ -33,7 +33,6 @@ import {
   repairInboxSelection,
   repairInboxSelectionAfterSnapshot,
   inboxThreadChildrenLabel,
-  inboxUrgency,
   threadInboxRows,
   repairInboxSelectionForHeldOrder,
   reconcileInboxItems,
@@ -424,7 +423,6 @@ test("sortInboxSessions puts pins first, then input above work and quiet, indepe
   ], new Set(["pinned-settled"]), new Set(["stalled-blocked", "running"]));
   assert.deepEqual(sorted.map(({ id }) => id),
     ["pinned-settled", "blocked", "blocked-newer", "stalled-blocked", "running", "settled-new"]);
-  assert.equal(inboxUrgency(session("s", { status: "running" }), new Set(["s"])), 1, "a stalled RUNNING session is not blocked");
 });
 
 test("sortInboxSessions keeps a family together, placed by its strongest member, parent first", () => {

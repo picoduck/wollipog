@@ -74,16 +74,6 @@ export function requestPanelPositionLabel(position: number, count: number): stri
 /** Where the list was scrolled for each session, so returning from a detail keeps the place (§6.2). */
 const listScrollPositions = new Map<string, number>();
 
-export function descendantRequestCounts(requests: readonly Pick<DescendantRequestView, "responseOwner">[]) {
-  let human = 0;
-  let orchestrator = 0;
-  for (const request of requests) {
-    if (request.responseOwner === "human") human += 1;
-    else orchestrator += 1;
-  }
-  return { human, orchestrator };
-}
-
 function itemKey(sessionId: string, occurrenceId: string): string {
   return JSON.stringify([sessionId, occurrenceId]);
 }
