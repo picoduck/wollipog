@@ -1141,23 +1141,32 @@ and whether their result came back. It is one list of turn groups, never a card 
   then a sentence under it says what happened, or a compact danger notice says why it failed.
   Unavailable, the button stays disabled with its reason as visible text it is described by.
 - **Recovery notices** (`BackgroundRecoveryNotice`, #2859): a result that went wrong is one §13.2
-  `Notice` per delivery at the top of its turn group, under the heading, never a definition list of
-  explanations. Its sentence names the job ("Shell job a1f3c9 …", `backgroundJobSentenceName()`).
+  `Notice` per delivery, never a definition list of explanations, and each is an entry of the panel's
+  one notice slot (§4.9, #2871): the panel shows one notice and the rest wait behind "+N More"; no
+  notice renders inside a turn group. Its title names the state and the turn ("Result Missing in
+  Turn 4", "… in the Turn at 2:14 PM", "… in an Earlier Turn", "… in an Unknown Turn";
+  `inBackgroundTurn()`), and its sentence names the job ("Shell job a1f3c9 …",
+  `backgroundJobSentenceName()`). After Machine Offline and Lost, the warnings come first, then the
+  info entries, each in the groups' order and then the turn's delivery order. Each group's badge keeps
+  its state (Result Missing, Retry Exhausted, Result Blocked) while its notice waits behind "+N More".
   - **Result Missing** (warning): "Shell job a1f3c9 finished, but its result never reached this
     conversation. Wollipog won't retry on its own, so the step can't run twice." then
     **Acknowledge** (a `.btn.sm` `BusyButton`) and Show Details. A failed acknowledgement's message
-    sits under the actions and the notice stays. While it shows, the group's badge is omitted, so the
-    state word appears once in the group; once acknowledged the notice goes and the badge reads
-    Missing Result Acknowledged (neutral).
+    sits under the actions, the notice stays and focus stays on Acknowledge. Once acknowledged the
+    notice goes, focus moves to its turn's heading, and the badge reads Missing Result Acknowledged
+    (neutral). Retry Exhausted works the same way.
   - **Result Blocked** (warning): the finished job's sentence, then **Acknowledge** to clear all
     currently reported blocked-result alerts without confirmation. Helper: "Clears this alert from
-    session status. Background jobs and held results are kept." Acknowledged entries stay as neutral
-    **Acknowledged** notices, with their time; the session's next relevant status appears immediately.
-    New blocked results raise fresh attention. Recovery stays separate: **Stop <job name>…** for the turn's
-    one unfinished job, behind Job Detail's confirmation. Unavailable, the button stays disabled,
-    described by its reason as a body line; with several unfinished jobs the line says to open one.
-  - **Result Pending, Transcript Delayed, Notification Pending** (compact info): one sentence ("Returning
-    shell job a1f3c9's result to this conversation."), no action.
+    session status. Background jobs and held results are kept." Each acknowledged one becomes a
+    dismissible info entry, **Blocked Result Acknowledged in Turn 4**, with its time, after every
+    recovery entry; focus moves to the turn's heading, and the session's next relevant status appears
+    immediately. New blocked results raise fresh attention. Recovery stays separate: **Stop <job
+    name>…** for the turn's one unfinished job, behind Job Detail's confirmation. Unavailable, the
+    button stays disabled, described by its reason as a body line; with several unfinished jobs the
+    line says to open one.
+  - **Result Pending, Transcript Delayed, Notification Pending** (compact info): the title and one
+    sentence ("Returning shell job a1f3c9's result to this conversation."), no action but the slot's
+    Dismiss.
   - Show Details is a `.facts` list: Finished, then Missing Since and Acknowledge ("Clears the alert. It
     doesn't rerun the job or resend the result.") for Result Missing or Other Ways (stopping or
     restarting the session) for Result Blocked, then Diagnostic: the pipeline code and its
@@ -3018,7 +3027,9 @@ so every host of the terminal shows the same ones.
 `PanelNoticeSlot`, directly under the side panel's header (§4.9), with its menu named "Panel Notices"
 and its ranks in `PANEL_NOTICE_RANK`: runner offline 1, load error 2, attention 3, inventory error 4,
 earlier activity not loaded 5, ambiguous identity 6, workflow details unavailable 7, older history
-truncated 8, background work lost 9, stale attention link 10. Unlike the other slots it orders by
+truncated 8, background work lost 9, stale attention link 10, Background Work's recovery deliveries
+11 and acknowledged blocked results 12 (#2871; each a band, which the panel orders itself as §4.10
+says, giving the i-th of n entries the rank base + i / n). Unlike the other slots it orders by
 this table alone, with severity only breaking a tie (#2861): an offline machine explains the errors
 under it, so Machine Offline leads Couldn't Load Recorded Workers, Background Work's Lost and Side
 Chat's Couldn't Refresh, and a worker's request leads an inventory error. Each tool adds its own

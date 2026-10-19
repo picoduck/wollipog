@@ -11,6 +11,7 @@ import {
   backgroundNotificationStage,
   backgroundTurnLabel,
   groupBackgroundHistory,
+  inBackgroundTurn,
 } from "./background-work.js";
 
 const MINUTE = 60_000;
@@ -45,6 +46,14 @@ test("a turn is named by the transcript's number, never its place in the list (#
   assert.equal(backgroundTurnLabel("turn-4", undefined), "Earlier Turn");
   assert.equal(backgroundTurnLabel("unknown", { eventId: 40, turn: 4 }), "Unknown Turn");
   assert.match(backgroundTurnLabel("turn-4", { eventId: 40, startedAt: NOW }), /^Turn at \d{1,2}:\d{2}/u);
+});
+
+test("a notice's title names the same turn after \"in\" (#2871)", () => {
+  assert.equal(inBackgroundTurn("turn-4", { eventId: 40, turn: 4 }), "in Turn 4");
+  assert.equal(inBackgroundTurn("turn-4", undefined), "in an Earlier Turn");
+  assert.equal(inBackgroundTurn("unknown", { eventId: 40, turn: 4 }), "in an Unknown Turn");
+  assert.match(inBackgroundTurn("turn-4", { eventId: 40, startedAt: NOW }), /^in the Turn at \d{1,2}:\d{2}/u);
+  assert.equal(inBackgroundTurn("turn-4", { eventId: 40 }), "in an Earlier Turn");
 });
 
 test("a group's status: waiting, some finished, returning, returned, missing, unverified (#2858)", () => {

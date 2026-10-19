@@ -131,6 +131,11 @@ export const PANEL_NOTICE_RANK = {
   olderHistoryTruncated: 8,
   backgroundWorkLost: 9,
   staleAttentionLink: 10,
+  // Background Work's recovery deliveries, then its acknowledged blocked results (#2871). Each is a
+  // band: the panel orders its own entries (warnings, then turn order, then delivery order) and gives
+  // the i-th of n the rank base + i / n, so they stay in that order after every condition above.
+  backgroundResult: 11,
+  backgroundResultAcknowledged: 12,
 } as const;
 
 /**
@@ -192,7 +197,9 @@ export function revealSessionNotice(sessionId: string, key: string, focus: boole
   return (noticeRevealers.get(sessionId) ?? []).some((revealer) => revealer(key, focus));
 }
 
-export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session Notices", className, order = "severity", onFocusLost }: {
+export function SessionNoticeSlot({
+  sessionId, entries, lead, label = "Session Notices", className, order = "severity", onFocusLost, claimRemovedFocus,
+}: {
   /** Whose info dismissals these are. The Sessions list's slot passes its own fixed scope. */
   sessionId: string;
   entries: readonly SessionNoticeEntry[];
@@ -207,6 +214,10 @@ export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session N
   /** Where focus goes when the slot is gone while a control in it, or its "+N More" menu, held
    * focus: the composer, or the page title when the composer cannot take it. */
   onFocusLost?: () => void;
+  /** Asked first when a commit removed the focused control in the slot with its menu closed: the
+   * owner moves focus where its own action meant it to go (Background Work's Acknowledge to its
+   * turn's heading) and answers true, or answers false to leave the rescue to the slot. */
+  claimRemovedFocus?: () => boolean;
 }) {
   const dismissed = useSyncExternalStore(
     subscribeDismissals,
@@ -294,11 +305,11 @@ export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session N
   // With the menu closed, a condition can still resolve under focus: an entry's own action
   // finishing (Unarchive and Restart restoring the session), or a hidden entry resolving and taking
   // the shown notice's "+N More" with it (#2202). Only a focused control the commit removed counts,
-  // so a person who clicked away keeps their choice. Focus stays in the slot, or with the slot gone
-  // goes to `onFocusLost`.
+  // so a person who clicked away keeps their choice. Focus goes where the owner claims it, else stays
+  // in the slot, or with the slot gone goes to `onFocusLost`.
   const removedFocus = useRemovedFocus(slotRef);
   useLayoutEffect(() => {
-    if (menuOpen || !removedFocus()) return;
+    if (menuOpen || !removedFocus() || claimRemovedFocus?.()) return;
     const target = slotRef.current?.querySelector<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled)") ??
       slotRef.current;
     if (target) target.focus();
