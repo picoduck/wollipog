@@ -54,7 +54,9 @@ interface ProjectActionError {
   detail: string;
 }
 
-/** A confirmation chosen from a ⋯ sheet replaces it on a phone, and Back brings it back (§7.5). */
+/** A confirmation chosen from a ⋯ sheet replaces it on a phone, and Back brings it back (§7.5).
+ * A ⋯ unmounts with what it acts on (a removed location's row, a project gone from the route), so
+ * Back from a confirmation whose object has gone reopens nothing. */
 const backToMenu = ({ reopen }: ActionsMenuChoice) => ({ label: "Back to More Actions", run: reopen });
 
 const PROJECTS = destination("projects");
@@ -90,10 +92,16 @@ export function ProjectsView({
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<ProjectActionError | null>(null);
-  /** The project whose Delete Project has sent its request and not yet settled. Its removal can
-   * arrive before the answer, or with the answer lost; the delete settles where to go, not the
-   * missing-route fallback. */
-  const [deleting, setDeleting] = useState<string | null>(null);
+  /** The project whose Delete Project is open. It can go missing meanwhile (a removal before the
+   * answer, or a snapshot without it), and the confirmation settles where the route goes once it
+   * closes, not the missing-route fallback. */
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  /** False once the page has gone: a confirmation that outlives it must not move the route. */
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const { identity: accessIdentity, error: accessIdentityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const createButtonRef = useRef<HTMLButtonElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
@@ -130,12 +138,12 @@ export function ProjectsView({
   ) : false;
 
   useEffect(() => {
-    // While its Delete Project is open, the delete decides where to go once it settles.
-    if (!selected && selectedProjectId && snapshotLoaded && deleting !== selectedProjectId) {
+    // While its Delete Project is open, the confirmation decides where to go once it closes.
+    if (!selected && selectedProjectId && snapshotLoaded && confirmingDelete !== selectedProjectId) {
       const fallback = visibleProjects[0] ?? allProjects[0];
       navigate(fallback ? { name: "projects", id: fallback.id } : { name: "projects" });
     }
-  }, [allProjects, deleting, navigate, selected, selectedProjectId, snapshotLoaded, visibleProjects]);
+  }, [allProjects, confirmingDelete, navigate, selected, selectedProjectId, snapshotLoaded, visibleProjects]);
   // Each pane scrolls on its own (§6). A new route starts the detail at its top; on a phone, where
   // the route swaps the whole screen, focus moves to the new page title, which shows no ring (§16.1).
   const listBodyRef = useRef<HTMLDivElement>(null);
@@ -283,10 +291,16 @@ export function ProjectsView({
     }
   };
   const deleteProject = async (choice: ActionsMenuChoice) => {
-    if (!selected || busy) return;
+    // One Delete Project at a time: a second would share the first's route suppression.
+    if (!selected || busy || confirmingDelete !== null) return;
     const project = selected;
     setError(null);
-    let successor: string | null = null;
+    // Where to go if the project is gone when the confirmation closes: its neighbour, chosen while
+    // the list still holds it, and chosen again as the request is sent. A removal broadcast can
+    // arrive before the answer, and a list read after it no longer holds the project.
+    let successor = projectAfterRemoval(latestProjects.current, project.id)?.id ?? null;
+    // While the confirmation is open it decides where the route goes, not the missing-route fallback.
+    setConfirmingDelete(project.id);
     const deleted = await confirm({
       title: "Delete Project",
       message: projectDeleteMessage(project.name, project.totalSessionCount),
@@ -301,10 +315,7 @@ export function ProjectsView({
       back: backToMenu(choice),
       // The dialog stays open with the button busy, and a failure stays in it with the typed name (§7.4).
       onConfirm: async () => {
-        // The neighbour is chosen before the request: the server broadcasts the removal before it
-        // answers, and a list read after that no longer holds the project to find it by.
-        successor = projectAfterRemoval(latestProjects.current, project.id)?.id ?? null;
-        setDeleting(project.id);
+        successor = projectAfterRemoval(latestProjects.current, project.id)?.id ?? successor;
         setBusy("delete");
         try {
           await api.deleteProject(project.id);
@@ -315,21 +326,24 @@ export function ProjectsView({
         }
       },
     });
-    // One step once the confirmation is over, whatever the order of the answer and the broadcast:
-    // the project is gone if the request said so, or if the server's removal arrived even though
-    // the answer was lost.
-    const gone = deleted || !latestProjects.current.some((candidate) => candidate.id === project.id);
-    if (gone && routeProjectId.current === project.id) {
-      // The neighbour if it is still there; another change while the request ran may have removed it.
+    // Two separate things once the confirmation closes, in one step whatever the order of the
+    // answer and any broadcast.
+    // 1. Deletion: only a DELETE this client sent and the server confirmed hides the project and
+    //    says so. A project that is merely absent (a removal after a lost answer, or a snapshot
+    //    without it after access changed) is the store's to show or hide.
+    // 2. The route: if the page is still on the project and it is deleted or absent, the route
+    //    goes to the neighbour if it is still there, else the first project, else the overview.
+    //    A replace, so the route that cannot be shown is not left behind.
+    const absent = deleted || !latestProjects.current.some((candidate) => candidate.id === project.id);
+    if (absent && mounted.current && routeProjectId.current === project.id) {
       const remaining = latestProjects.current.filter((candidate) => candidate.id !== project.id);
       const next = remaining.find((candidate) => candidate.id === successor) ?? remaining[0] ?? null;
-      // A replace: the deleted project's route cannot be shown, so its unsaved settings are not
-      // asked about. Navigating first lets the render that clears `deleting` see the new route.
+      // Before clearing `confirmingDelete`, so the render that re-enables the fallback sees it.
       navigate(next ? { name: "projects", id: next.id } : { name: "projects" }, { replace: true });
     }
-    if (gone) setDeletedIds((current) => new Set(current).add(project.id));
-    setDeleting(null);
-    if (gone) showToast("Project deleted. Sessions moved to No Project.");
+    if (deleted) setDeletedIds((current) => new Set(current).add(project.id));
+    setConfirmingDelete(null);
+    if (deleted) showToast("Project deleted. Sessions moved to No Project.");
   };
   const manageConnections = () => navigate({ name: "runners", section: "machines" });
   const refreshSelectedProject = async () => {

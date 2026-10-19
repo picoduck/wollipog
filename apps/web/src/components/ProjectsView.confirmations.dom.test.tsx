@@ -138,6 +138,23 @@ const settle = () => act(async () => { await new Promise((resolve) => setTimeout
 const text = (element: Element | null | undefined) => element?.textContent?.replace(/\s+/g, " ").trim() ?? "";
 
 /** Mounts the page with the real confirmation and opens the project named. */
+/** A full snapshot of the projects given, as the server sends on connecting or reconnecting. */
+function snapshotOf(projects: ProjectView[], snapshot: Partial<UiSnapshotMessage> = {}): UiSnapshotMessage {
+  return {
+    type: "snapshot",
+    capabilities: {
+      sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, stopBeforeArchive: true,
+    },
+    runners: [runner],
+    boxes: [],
+    sessions: [],
+    runs: [],
+    pods: [],
+    projects,
+    ...snapshot,
+  } as UiSnapshotMessage;
+}
+
 async function renderSelected(projects: ProjectView[], name: string, client: ApiClient, snapshot: Partial<UiSnapshotMessage> = {}) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -158,21 +175,7 @@ async function renderSelected(projects: ProjectView[], name: string, client: Api
       </ApiProvider>,
     );
   });
-  await act(async () => {
-    socket.push({
-      type: "snapshot",
-      capabilities: {
-        sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, stopBeforeArchive: true,
-      },
-      runners: [runner],
-      boxes: [],
-      sessions: [],
-      runs: [],
-      pods: [],
-      projects,
-      ...snapshot,
-    } as UiSnapshotMessage);
-  });
+  await act(async () => { socket.push(snapshotOf(projects, snapshot)); });
   await settle();
   const row = [...doc.querySelectorAll<HTMLButtonElement>(".master-detail-list-body .row")]
     .find((candidate) => text(candidate.querySelector(".row-title")) === name.trim());
@@ -372,10 +375,52 @@ for (const removal of ["before", "after"] as const) {
     assert.deepEqual(routes, [{ how: "replace", view: { name: "projects", id: "gamma" } }],
       "the page leaves the deleted project's route for its neighbour");
     assert.deepEqual(currentView, { name: "projects", id: "gamma" });
-    assert.match(text(doc.querySelector(".toast-region")), /Project deleted\. Sessions moved to No Project\./,
-      "and says the project went after all");
+    // The client never saw the server confirm, so it does not claim the delete: the store, which
+    // the removal already updated, decides what shows.
+    assertNoDomNode(doc.querySelector(".toast-region .toast"), "no deleted toast for an unconfirmed delete");
   });
 }
+
+test("Cancel after a snapshot drops the project moves off its route without a tombstone, and restored access shows it again", async () => {
+  const { client, deletes } = deletingClient();
+  const alpha = project("alpha", "Alpha");
+  const beta = project("beta", "Beta");
+  const gamma = project("gamma", "Gamma");
+  const body = await renderSelected([alpha, beta, gamma], "Beta", client);
+  const dialog = await choose(body.querySelector(".project-detail-title-row")!, "Project Actions", "Delete Project…");
+  routes.length = 0;
+  // Access to Beta is lost: the reconnect snapshot no longer lists it.
+  await act(async () => { socket.push(snapshotOf([alpha, gamma])); });
+  await settle();
+  assert.deepEqual(routes, [], "the open confirmation keeps the route until it closes");
+  await act(async () => { footButton(dialog, "Cancel").click(); });
+  await settle();
+  assert.deepEqual(deletes, [], "no DELETE was sent");
+  assertNoDomNode(doc.querySelector('[role="dialog"]'));
+  assert.deepEqual(routes, [{ how: "replace", view: { name: "projects", id: "gamma" } }], "off the missing route, once");
+  assertNoDomNode(doc.querySelector(".toast-region .toast"), "nothing says it was deleted");
+
+  // Access comes back: Beta is listed again, because nothing marked it deleted.
+  await act(async () => { socket.push({ type: "project_upsert", project: beta } as never); });
+  await settle();
+  const titles = [...doc.querySelectorAll(".master-detail-list-body .row .row-title")].map(text);
+  assert.ok(titles.includes("Beta"), `Beta is listed again: ${JSON.stringify(titles)}`);
+  assert.deepEqual(currentView, { name: "projects", id: "gamma" }, "and the page stays where it went");
+  assert.deepEqual(routes, [{ how: "replace", view: { name: "projects", id: "gamma" } }]);
+});
+
+test("Cancel with the project still there changes nothing", async () => {
+  const { client, deletes } = deletingClient();
+  const body = await renderSelected([project("alpha", "Alpha"), project("beta", "Beta")], "Beta", client);
+  const dialog = await choose(body.querySelector(".project-detail-title-row")!, "Project Actions", "Delete Project…");
+  routes.length = 0;
+  await act(async () => { footButton(dialog, "Cancel").click(); });
+  await settle();
+  assert.deepEqual(deletes, []);
+  assert.deepEqual(routes, []);
+  assert.deepEqual(currentView, { name: "projects", id: "beta" });
+  assertNoDomNode(doc.querySelector(".toast-region .toast"));
+});
 
 test("a delete whose neighbour went away while it ran lands on a project that is still there", async () => {
   const { client, release } = deletingClient();
@@ -515,6 +560,44 @@ test("on a phone each confirmation replaces the ⋯ sheet it came from, and Back
       });
       await settle();
     }
+  } finally {
+    restore();
+  }
+});
+
+test("on a phone Back reopens no sheet for a project or location that went away while its confirmation was open", async () => {
+  const restore = stubPhone();
+  try {
+    const alpha = project("alpha", "Alpha");
+    const beta = project("beta", "Beta");
+    beta.locations.push({
+      ...beta.locations[0]!, id: "beta-checkout", workspaceId: "workspace-2", name: "Checkout", path: "/repos/acme/checkout", isDefault: false,
+    });
+    const gamma = project("gamma", "Gamma");
+    const body = await renderSelected([alpha, beta, gamma], "Beta", api);
+
+    // The location goes first: Back does not reopen a ⋯ for a row that is no longer there.
+    let dialog = await choose(body.querySelector(".project-locations")!, "Checkout Actions", "Remove Location…");
+    await act(async () => {
+      socket.push({ type: "project_upsert", project: { ...beta, locations: [beta.locations[0]!], updatedAt: 2 } } as never);
+    });
+    await settle();
+    await act(async () => { dialog.querySelector<HTMLButtonElement>(".modal-back")!.click(); });
+    await settle();
+    assertNoDomNode(doc.querySelector('[role="dialog"]'));
+    assertNoDomNode(doc.querySelector('[role="menu"]'), "no sheet for the removed location");
+
+    // Then the project: Back moves off its route and reopens no sheet for the neighbour.
+    dialog = await choose(body.querySelector(".detail-bar")!, "Project Actions", "Delete Project…");
+    routes.length = 0;
+    await act(async () => { socket.push(snapshotOf([alpha, gamma])); });
+    await settle();
+    await act(async () => { dialog.querySelector<HTMLButtonElement>(".modal-back")!.click(); });
+    await settle();
+    assertNoDomNode(doc.querySelector('[role="dialog"]'));
+    assertNoDomNode(doc.querySelector('[role="menu"]'), "no Project Actions sheet for Gamma");
+    assert.deepEqual(routes, [{ how: "replace", view: { name: "projects", id: "gamma" } }]);
+    assertNoDomNode(doc.querySelector(".toast-region .toast"));
   } finally {
     restore();
   }
