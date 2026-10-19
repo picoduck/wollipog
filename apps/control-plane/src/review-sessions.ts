@@ -236,6 +236,38 @@ export class ReviewSessions {
    * reached the reviewer (those with a planned round). An attempt without a verdict (cancelled, or
    * lost with its runner) is neither valid nor consumed.
    */
+  /**
+   * The extra rounds granted to one epoch of a requester's run (#3369): every approved or consumed
+   * review_round_extension decision for exactly that pull request and epoch. `approved` names the
+   * ones not yet consumed, which a review request consumes, so a session restart cannot revoke a
+   * grant the run already counts.
+   */
+  extensions(requesterSessionId: string, pullRequest: { repository: string; number: number }, epoch: number): {
+    rounds: number; approved: string[];
+  } {
+    let rows: Array<{ occurrence_id: string; status: string; resource_snapshot: string }>;
+    try {
+      rows = this.sql.prepare(`SELECT occurrence_id, status, resource_snapshot FROM workflow_decisions
+        WHERE session_id=? AND category='review_round_extension' AND status IN ('approved','consumed') ORDER BY created_at`)
+        .all(requesterSessionId) as typeof rows;
+    } catch {
+      // A database without workflow decisions grants none.
+      return { rounds: 0, approved: [] };
+    }
+    let rounds = 0;
+    const approved: string[] = [];
+    for (const row of rows) {
+      const snapshot = json<{ repository?: unknown; pullRequest?: unknown; epoch?: unknown; extraRounds?: unknown }>(row.resource_snapshot);
+      if (!snapshot || typeof snapshot.repository !== "string" ||
+          snapshot.repository.toLowerCase() !== pullRequest.repository.toLowerCase() ||
+          snapshot.pullRequest !== pullRequest.number || snapshot.epoch !== epoch ||
+          !Number.isSafeInteger(snapshot.extraRounds) || (snapshot.extraRounds as number) < 1 || (snapshot.extraRounds as number) > 4) continue;
+      rounds += snapshot.extraRounds as number;
+      if (row.status === "approved") approved.push(row.occurrence_id);
+    }
+    return { rounds, approved };
+  }
+
   history(requesterSessionId: string, pullRequest: { repository: string; number: number }): ReviewRunHistory {
     const rows = this.sql.prepare(`SELECT head_sha, round_json, verdict_json, findings_json FROM review_sessions
       WHERE requester_session_id=? AND repository=? AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
@@ -253,6 +285,7 @@ export class ReviewSessions {
     const current = attempts.filter((attempt) => attempt.round.epoch === epoch);
     const last = current.at(-1)!;
     history.epoch = epoch;
+    history.roundBudget += this.extensions(requesterSessionId, pullRequest, epoch).rounds;
     history.lastAttempt = { headSha: last.headSha, round: last.round.round, attempt: last.round.attempt, valid: !!last.verdict?.valid };
     const validVote = (attempt: typeof attempts[number]) => {
       const vote = attempt.verdict?.effectiveVote;

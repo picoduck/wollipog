@@ -120,6 +120,7 @@ test("Parent Control setting and descendant reads use encoded session-scoped end
     merged_branch_deletion: "human",
     follow_up_issue_publication: "human",
     ui_evidence_approval: "human",
+    review_round_extension: "human",
   }, 7);
   const controller = new AbortController();
   assert.deepEqual(await client.descendantRequests("parent/1", controller.signal), { requests: [] });
@@ -140,6 +141,7 @@ test("Parent Control setting and descendant reads use encoded session-scoped end
           merged_branch_deletion: "human",
           follow_up_issue_publication: "human",
           ui_evidence_approval: "human",
+          review_round_extension: "human",
         },
         expectedRevision: 7,
       },

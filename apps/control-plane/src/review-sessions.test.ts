@@ -552,6 +552,71 @@ test("a runner that no longer supports review sessions settles its unfinished re
   } finally { h.db.close(); }
 });
 
+/** Four valid DOWNVOTE rounds of epoch 1 for s1: its review run's round budget is used. */
+function exhaustRounds(h: ReturnType<typeof harness>): void {
+  for (let round = 1; round <= 4; round += 1) {
+    const view = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "completed",
+      output: report(), round: { ...ROUND, round }, verdict: VALID } as never);
+  }
+}
+
+test("a standalone session asks a person for more review rounds, bound to its run, and the run grants them", () => {
+  const h = harness();
+  try {
+    exhaustRounds(h);
+    const pr = request().pullRequest;
+    assert.deepEqual([h.db.reviewSessions.history("s1", pr).validRounds, h.db.reviewSessions.history("s1", pr).roundBudget], [4, 4]);
+    const key = `review_round_extension:${pr.repository}#${pr.number}:epoch-1:rounds-4`;
+    const snapshot = {
+      category: "review_round_extension" as const, repository: pr.repository, pullRequest: pr.number, epoch: 1,
+      headSha: "c".repeat(40), roundsUsed: 4, blockingFindings: 1, extraRounds: 2, reason: "One blocker left; it is a one-line fix.",
+    };
+    const ask = (overrides: Partial<typeof snapshot> = {}, resourceKey = key, requestId = `ext-${Math.random()}`) =>
+      h.svc.createWorkflowDecision("s1", { requestId, resourceKey, resourceSnapshot: { ...snapshot, ...overrides } });
+    // It must describe the run exactly as the control plane records it.
+    assert.match(ask({ epoch: 2 }).error!, /in epoch 1, not 2/u);
+    assert.match(ask({ roundsUsed: 3 }).error!, /used 4 rounds, not 3/u);
+    assert.match(ask({ blockingFindings: 0 }).error!, /1 open blocking finding\(s\), not 0/u);
+    assert.match(ask({}, "review_round_extension:any").error!, /resourceKey must be/u);
+    assert.equal(ask({ extraRounds: 5 }).status, 400);
+    assert.match(h.svc.createWorkflowDecision("s2", { requestId: "x", resourceKey: key, resourceSnapshot: snapshot }).error!,
+      /no valid review of that pull request/u);
+    // With no Orchestrator above it, the session controls its own gate, and a person decides it.
+    const created = ask();
+    assert.ok(created.ok && created.data, created.error ?? "refused");
+    assert.deepEqual([created.data.authority, created.data.controllingSessionId, created.data.status], ["human", "s1", "pending"]);
+    const card = h.db.getSession("s1")!.pendingApproval;
+    assert.ok(card && JSON.stringify(card).includes(created.data.occurrenceId), "the card waits on the session itself");
+    const approved = h.svc.approve("s1", created.data.occurrenceId, "approve");
+    assert.ok(approved.ok, approved.error);
+    // The approved rounds extend this epoch's budget, and the next request consumes the grant so a
+    // restart cannot revoke it.
+    assert.equal(h.db.reviewSessions.history("s1", pr).roundBudget, 6);
+    const next = h.svc.requestReviewSession("s1", request({ headSha: "c".repeat(40) }));
+    assert.ok(next.ok, next.error ?? "refused");
+    assert.equal(h.starts().at(-1)!.spec.review?.history?.roundBudget, 6);
+    assert.equal(h.db.workflowDecisionByOccurrence(created.data.occurrenceId)?.status, "consumed");
+    assert.equal(h.db.reviewSessions.history("s1", pr).roundBudget, 6, "a consumed grant still counts");
+  } finally { h.db.close(); }
+});
+
+test("a run with rounds left, or an upvote, is not extended", () => {
+  const h = harness();
+  try {
+    const pr = request().pullRequest;
+    const first = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: first.reviewSessionId, state: "completed",
+      output: report(), round: ROUND, verdict: VALID } as never);
+    const snapshot = {
+      category: "review_round_extension" as const, repository: pr.repository, pullRequest: pr.number, epoch: 1,
+      headSha: "c".repeat(40), roundsUsed: 1, blockingFindings: 1, extraRounds: 1, reason: "More rounds.",
+    };
+    assert.match(h.svc.createWorkflowDecision("s1", { requestId: "a", resourceKey: "k", resourceSnapshot: snapshot }).error!,
+      /used 1 of its 4 rounds; request a review instead/u);
+  } finally { h.db.close(); }
+});
+
 test("a requester's cost budget bounds its review, and an exhausted budget refuses one", () => {
   const h = harness();
   try {

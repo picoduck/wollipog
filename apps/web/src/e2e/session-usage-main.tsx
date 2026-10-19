@@ -293,6 +293,7 @@ if (composerFixture) {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "orchestrator",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     };
     session.orchestratorPolicy = {
@@ -327,6 +328,7 @@ if (composerFixture) {
             merged_branch_deletion: "user_default",
             follow_up_issue_publication: "session_override",
             ui_evidence_approval: "user_default",
+            review_round_extension: "user_default",
           },
         },
         execution: { strictProjectIsolation: "user_default", integrationIsolation: "user_default" },

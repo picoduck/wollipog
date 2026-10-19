@@ -4314,7 +4314,7 @@ test("the policy row states five facts with Customize…, and Customize… opens
     await choosePolicyTab(fixture.container, "decisions");
     assert.deepEqual([...policyDialog(fixture.container).querySelectorAll('[role="tabpanel"] .setting-row-title')].map((title) => title.textContent), [
       "Orchestrator Control", "Descendant Requests", "Implementation Questions", "PR Merge Approval", "Merged Branch Deletion",
-      "Follow-Up Issue Publication", "UI Evidence Approval",
+      "Follow-Up Issue Publication", "UI Evidence Approval", "Review Round Extensions",
     ]);
   } finally { await unmountFixture(fixture); }
 });

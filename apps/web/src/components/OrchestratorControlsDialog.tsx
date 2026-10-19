@@ -46,6 +46,7 @@ export const WORKFLOW_DECISION_LABELS: Record<DelegatableWorkflowDecisionCategor
   merged_branch_deletion: "Merged Branch Deletion",
   follow_up_issue_publication: "Follow-Up Issue Publication",
   ui_evidence_approval: "UI Evidence Approval",
+  review_round_extension: "Review Round Extensions",
 };
 
 const AUTHORITY_OPTIONS = [

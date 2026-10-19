@@ -24,7 +24,7 @@ import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, 
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
-  compactReviewFinding, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
+  compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
 } from "@wollipog/protocol";
 import { SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewHarness, type SessionReviewJobArtifacts,
   type SessionReviewJobCommand, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
@@ -78,6 +78,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL,
   worktreeRecoveryAction,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
+  completeParentControlDecisions,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
@@ -706,9 +707,15 @@ function reviewContinuationOutcome(review: ReviewSessionView): string[] {
     outcome = `no review: ${decisionLiteral(review.reason ?? "the review ended without a result")}`;
   }
   const shown = review.findings.slice(0, 20).map(compactReviewFinding);
+  const atLimit = review.reason === REVIEW_ROUND_REFUSALS.roundLimit;
   return [
     `[Wollipog Cross-Model Review — ${review.reviewSessionId}]`,
     `${reviewer} of ${head}${round} ended with ${outcome}.`,
+    ...(atLimit ? [
+      "More rounds need a review_round_extension workflow decision (request_workflow_decision) naming this epoch, " +
+        "the rounds it used, the open blocking findings of its last valid round, the head to review, 1 to 4 extra " +
+        "rounds and why. Once its owner approves it, request the review again.",
+    ] : []),
     ...shown,
     ...(review.findings.length > shown.length ? [`- and ${review.findings.length - shown.length} more`] : []),
     `Read the full report with get_review_session ${review.reviewSessionId} before acting. Adjudicate every finding: ` +
@@ -744,11 +751,11 @@ function restartRevokedDecisionsPrompt(revoked: readonly RestartNoticeEntry[]): 
 }
 
 export function validateParentControlDecisions(value: unknown): value is ParentControlDecisionPolicy {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  if (Object.keys(record).length !== WORKFLOW_DECISION_CATEGORIES.length) return false;
-  return WORKFLOW_DECISION_CATEGORIES.every((category) =>
-    record[category] === "human" || record[category] === "orchestrator");
+  const complete = completeParentControlDecisions(value);
+  if (!complete) return false;
+  // A client from before a later category sends no key for it: human-owned, filled in here.
+  Object.assign(value as object, complete);
+  return true;
 }
 
 /** Media types the human review card shows in place, after checking the bytes against the digest. */
@@ -849,6 +856,28 @@ export function normalizeWorkflowDecisionSnapshot(
       reviewResult: value.reviewResult, requiredChecks: {
         headSha, status: "passed", checkedAt: checked, checks: checkRows,
       } });
+  }
+  if (category === "review_round_extension") {
+    // The shape only; the requester's review run is checked against it when it is requested.
+    const repo = repository();
+    const headSha = sha(value.headSha);
+    const count = (candidate: unknown, min: number, max: number) =>
+      Number.isSafeInteger(candidate) && (candidate as number) >= min && (candidate as number) <= max ? candidate as number : null;
+    const pullRequest = count(value.pullRequest, 1, Number.MAX_SAFE_INTEGER);
+    const epoch = count(value.epoch, 1, 10_000);
+    const roundsUsed = count(value.roundsUsed, 1, 1000);
+    const blockingFindings = count(value.blockingFindings, 0, 1000);
+    const extraRounds = count(value.extraRounds, 1, 4);
+    if (!repo || !headSha || pullRequest === null || epoch === null || roundsUsed === null || blockingFindings === null ||
+        extraRounds === null || !boundedDecisionString(value.reason, 1000) ||
+        Object.keys(value).some((key) => ![
+          "category", "repository", "pullRequest", "epoch", "headSha", "roundsUsed", "blockingFindings", "extraRounds", "reason",
+        ].includes(key))) {
+      return fail("a review round extension requires the repository, pull request, epoch, head, rounds used, open blocking " +
+        "findings, 1 to 4 extra rounds and a reason of at most 1000 characters");
+    }
+    return ok({ category, repository: repo, pullRequest, epoch, headSha, roundsUsed, blockingFindings, extraRounds,
+      reason: value.reason as string });
   }
   if (category === "merged_branch_deletion") {
     const repo = repository();
@@ -8724,6 +8753,14 @@ export class SessionsService {
     if (runnerSupportsProtocol(runner?.protocolVersion, "reviewRuns")) {
       policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest);
       if (request.fullReason !== undefined) policy.fullReason = request.fullReason.trim();
+      // An approved extension the history counts is consumed now, so a later restart, which
+      // revokes unconsumed decisions, cannot take back rounds the run has been granted.
+      const now = Date.now();
+      for (const occurrenceId of this.db.reviewSessions.extensions(session.id, policy.pullRequest, policy.history.epoch).approved) {
+        if (this.db.consumeWorkflowDecision(occurrenceId, now)) {
+          this.log.info(JSON.stringify({ event: "review_round_extension_consumed", sessionId: session.id, occurrenceId }));
+        }
+      }
     }
     const workspacePath = this.db.getAdHocWorkspacePath(session.id) ?? undefined;
     const created = this.createSession({
@@ -9568,6 +9605,10 @@ export class SessionsService {
     if (normalized.data.category === "issue_closure" && !internal?.trustedIssueClosure) {
       return fail("use request_github_issue_closure for server-verified issue evidence", 403);
     }
+    if (normalized.data.category === "review_round_extension") {
+      const refused = this.reviewRoundExtensionRefusal(child, request.resourceKey, normalized.data);
+      if (refused) return fail(refused, 409);
+    }
     const controller = this.workflowDecisionController(child, normalized.data.category);
     if (!controller) {
       return fail(this.decisionControllerRoot(child) === "refused"
@@ -9687,6 +9728,8 @@ export class SessionsService {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
         !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && parentSessionId === childSessionId ||
+          // A standalone session's own extra review rounds, which only a person decides (#3369).
+          decision.category === "review_round_extension" && parentSessionId === childSessionId && decision.authority === "human" ||
           this.workflowDecisionRelationship(parentSessionId, childSessionId)) ||
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
@@ -10337,6 +10380,36 @@ export class SessionsService {
     return { decision, commandDigest };
   }
 
+  /**
+   * Why a review_round_extension request does not match the requester's review run (#3369), or
+   * null. It must name the run's current epoch exactly as the control plane records it: every
+   * granted round used, no upvote, and the open blocking findings of its last valid round. Its
+   * resource key is canonical, so a newer request for the same epoch and round count supersedes an
+   * older one and a later extension is a new resource.
+   */
+  private reviewRoundExtensionRefusal(
+    child: SessionView,
+    resourceKey: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "review_round_extension" }>,
+  ): string | null {
+    if (this.db.reviewSessions.isReviewSession(child.id)) return "a review session cannot request more review rounds";
+    const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+    if (run.epoch === 0 || !run.lastValid) return "this session has no valid review of that pull request to extend";
+    if (snapshot.epoch !== run.epoch) return `the review run is in epoch ${run.epoch}, not ${snapshot.epoch}`;
+    if (run.lastValid.vote === "UPVOTE") return "the pull request's last valid review is an upvote; it needs no more rounds";
+    if (run.validRounds < run.roundBudget) {
+      return `the epoch has used ${run.validRounds} of its ${run.roundBudget} rounds; request a review instead`;
+    }
+    if (snapshot.roundsUsed !== run.validRounds) return `the epoch has used ${run.validRounds} rounds, not ${snapshot.roundsUsed}`;
+    const blocking = run.lastValid.findings.filter((finding) => finding.blocking).length;
+    if (snapshot.blockingFindings !== blocking) {
+      return `the last valid round has ${blocking} open blocking finding(s), not ${snapshot.blockingFindings}`;
+    }
+    const key = `review_round_extension:${snapshot.repository}#${snapshot.pullRequest}:epoch-${snapshot.epoch}:rounds-${snapshot.roundsUsed}`;
+    if (resourceKey !== key) return `resourceKey must be ${key}`;
+    return null;
+  }
+
   private workflowDecisionController(child: SessionView, category?: WorkflowDecisionCategory): {
     session: SessionView;
     policy: ParentControlPolicy;
@@ -10353,6 +10426,11 @@ export class SessionsService {
     // owns them, human-only unless its Parent Control policy says otherwise, so no shape moves a
     // gate toward an agent; a refused ancestry has no controller at all.
     const root = this.decisionControllerRoot(child);
+    // A session with no Orchestrator above it still reviews its own pull requests (#3369): its
+    // extra review rounds are its own gate, always human-owned.
+    if (category === "review_round_extension" && root === "none") {
+      return { session: child, policy: { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } };
+    }
     const parent = typeof root === "object" ? this.db.getSession(root.id) : null;
     const controller = parent ? {
       session: parent,
@@ -10637,6 +10715,7 @@ export class SessionsService {
       issue_closure: "Issue Closure Approval Required",
       campaign_issue_scope: "Campaign Issue Scope Approval Required",
       ui_evidence_approval: "UI Evidence Approval Required",
+      review_round_extension: "Review Round Extension Approval Required",
     };
     const options = snapshot.category === "implementation_question"
       ? [

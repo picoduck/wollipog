@@ -22,6 +22,17 @@ export function WorkflowDecisionSummary({ snapshot }: { snapshot: WorkflowDecisi
         <div><dt>Pull Request</dt><dd>#{snapshot.pullRequest}</dd></div>
         <div><dt>Head Commit</dt><dd><code>{snapshot.headSha.slice(0, 12)}</code></dd></div>
       </dl>;
+    case "review_round_extension":
+      // What the person is asked to grant: more cross-model review rounds, and why (#3369).
+      return <dl className="facts">
+        <div><dt>Pull Request</dt><dd>{snapshot.repository}#{snapshot.pullRequest}</dd></div>
+        <div><dt>Head Commit</dt><dd><code>{snapshot.headSha.slice(0, 12)}</code></dd></div>
+        <div><dt>Review Epoch</dt><dd>{snapshot.epoch}</dd></div>
+        <div><dt>Rounds Used</dt><dd>{snapshot.roundsUsed}</dd></div>
+        <div><dt>Open Blocking Findings</dt><dd>{snapshot.blockingFindings}</dd></div>
+        <div><dt>Extra Rounds</dt><dd>{snapshot.extraRounds}</dd></div>
+        <div><dt>Reason</dt><dd>{snapshot.reason}</dd></div>
+      </dl>;
     case "merged_branch_deletion":
       return <dl className="facts">
         <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>

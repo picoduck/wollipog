@@ -155,10 +155,14 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     assert.equal(root.agentId, "claude");
     assert.equal(root.parentControlPolicy!.revision, control.boundary.revision);
     for (const category of [...WORKFLOW_DECISION_CATEGORIES, "issue_closure", "campaign_issue_scope"] as const) {
-      assert.equal(campaignWorkflowOwner(control, root.parentControlPolicy!.decisions, category, true), "orchestrator", category);
+      // Extra review rounds are never part of Full Control's own authority (#3369).
+      assert.equal(campaignWorkflowOwner(control, root.parentControlPolicy!.decisions, category, true),
+        category === "review_round_extension" ? "human" : "orchestrator", category);
     }
     const projection = f.db.campaignProjection(root.id)!;
-    for (const category of WORKFLOW_DECISION_CATEGORIES) assert.equal(projection.decisionOwners[category], "orchestrator", category);
+    for (const category of WORKFLOW_DECISION_CATEGORIES) {
+      assert.equal(projection.decisionOwners[category], category === "review_round_extension" ? "human" : "orchestrator", category);
+    }
     assert.equal(f.db.campaignBudgets.view(root.id)!.state, "active");
     assert.deepEqual(f.db.campaignBudgets.view(root.id)!.authority.controlledReview, review);
     assert.equal(projection.budget!.requiredNativeReview!.supported, true, "the launched campaign can actually admit controlled review");
@@ -809,7 +813,8 @@ test("an existing campaign enables Full Control through one exact reviewed autho
     assert.deepEqual([control.boundary.budgetAuthority!.costUsd, control.boundary.budgetAuthority!.toolCalls], [30, 300]);
     assert.deepEqual(control.boundary.budgetAuthority!.controlledReview, review);
     for (const category of WORKFLOW_DECISION_CATEGORIES) {
-      assert.equal(f.db.campaignProjection(rootId)!.decisionOwners[category], "orchestrator", category);
+      assert.equal(f.db.campaignProjection(rootId)!.decisionOwners[category],
+        category === "review_round_extension" ? "human" : "orchestrator", category);
     }
     const replay = await server.inject({ method: "POST", url, headers: { authorization: "Bearer human" },
       payload: { expectedRevision, preflightDigest: enablePreflight.digest } });

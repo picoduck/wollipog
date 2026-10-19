@@ -44,7 +44,7 @@ export function evaluateCampaignAuthority(
   request: PendingApproval | WorkflowDecisionResourceSnapshot,
   policy: ParentControlPolicy = controller.parentControlPolicy ?? { revision: 0, decisions: {
     implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-    follow_up_issue_publication: "human", ui_evidence_approval: "human",
+    follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
   } },
   controllerProtocol: number | null | undefined = protocol,
   peerContracts?: { requester?: unknown; controller?: unknown },

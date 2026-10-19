@@ -365,6 +365,20 @@ attempt, mode, base and the files in scope):
   retried in the same round; an attempt that timed out or failed before producing a report does
   not count. A head with an upvote, a head unchanged since the last valid round, a spent round
   budget and a spent round are refused with fixed reasons.
+- An epoch that used its rounds without an upvote takes more only through a typed
+  `review_round_extension` workflow decision (`request_workflow_decision`).
+  - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
+    of the last valid round, 1 to 4 extra rounds, and a reason of at most 1000 characters.
+  - **Resource key:** `review_round_extension:<owner/name>#<number>:epoch-<epoch>:rounds-<rounds>`.
+  - **Checks:** the control plane checks the request against the run as it records it. A run with
+    rounds left, an upvote, or any other epoch, round count or blocking count is refused.
+  - **Ownership:** it is human-owned by default. A session with no Orchestrator above it controls it
+    itself, and a person resolves it from its card. Under an Orchestrator it is delegated only by
+    an explicit Parent Control grant; Full Control never takes it as part of its own boundary.
+  - **Effect:** approved and consumed extensions add their rounds to that epoch's budget. The next
+    review request consumes an approved one, so a session restart, which revokes unconsumed
+    decisions, cannot take back rounds already granted. A policy stored before this category
+    existed reads it as human-owned.
 
 Each finished attempt is judged against the review contract (`verdict`: `valid`, `consumed`,
 `effectiveVote`, `failureClass`, at most 8 `validationErrors`): the report must name the reviewed
