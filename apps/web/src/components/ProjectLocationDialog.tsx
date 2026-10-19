@@ -49,9 +49,15 @@ type LocationTarget =
 /** "/repos/acme/" and "/repos/acme" are one folder; a root keeps its only separator. */
 const withoutTrailingSeparators = (path: string) => path.replace(/[\\/]+$/u, "") || path;
 
-/** The project's location for `target`: the same workspace, or the same machine and folder. */
+/**
+ * The project's location for `target` once it is added: the same workspace, or the same machine
+ * and folder. A `runner_removed` row is a detached tombstone, kept for Relink, that an add would
+ * reattach, so it never proves an add; an attached location counts in any other state, offline or
+ * missing included.
+ */
 export function projectLocationFor(project: ProjectView, target: LocationTarget): ProjectLocationView | undefined {
-  return project.locations.find((location) => location.runnerId === target.runnerId && (target.kind === "existing"
+  return project.locations.find((location) => location.availability !== "runner_removed" &&
+    location.runnerId === target.runnerId && (target.kind === "existing"
     ? location.workspaceId === target.workspaceId
     : withoutTrailingSeparators(location.path) === withoutTrailingSeparators(target.path)));
 }

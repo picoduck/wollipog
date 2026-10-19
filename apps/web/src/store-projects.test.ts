@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ProjectView, UiSnapshotMessage } from "@wollipog/protocol";
-import { Store } from "./store.js";
+import { projectCreationRetryAvailable, Store } from "./store.js";
 
 function project(overrides: Partial<ProjectView> = {}): ProjectView {
   return {
@@ -85,4 +85,19 @@ test("removing an unknown Project preserves store identity", () => {
   const before = store.getState();
   store.dispatch({ type: "msg", msg: { type: "project_removed", projectId: "missing" } });
   assert.equal(store.getState(), before);
+});
+
+test("New Project's safe retry needs the advertising server to be the connected one (#3468)", () => {
+  const store = new Store();
+  assert.equal(projectCreationRetryAvailable(store.getState()), false, "nothing is known before a snapshot");
+  store.dispatch({ type: "conn", conn: "online" });
+  store.dispatch({ type: "msg", msg: { ...snapshot([]), capabilities: { projects: true, idempotentProjectCreation: true } }, now: 10 });
+  assert.equal(store.getState().projectCreationRetrySupported, true);
+  assert.equal(projectCreationRetryAvailable(store.getState()), true);
+  // While the connection is down, a request may reach a server that restarted on another version.
+  store.dispatch({ type: "conn", conn: "offline" });
+  assert.equal(projectCreationRetryAvailable(store.getState()), false);
+  store.dispatch({ type: "conn", conn: "online" });
+  store.dispatch({ type: "msg", msg: snapshot([]), now: 20 });
+  assert.equal(projectCreationRetryAvailable(store.getState()), false, "a server that doesn't advertise it");
 });

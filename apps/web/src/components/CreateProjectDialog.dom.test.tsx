@@ -480,6 +480,74 @@ test("a refused retry after a lost reply doesn't say nothing was created, and th
   }
 });
 
+/** Moves the wall clock `hours` ahead for the rest of `run`, as a tab asleep that long would see. */
+async function withClockAhead(hours: number, run: () => Promise<void>) {
+  const realNow = Date.now;
+  Date.now = () => realNow() + hours * 60 * 60_000;
+  try {
+    await run();
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+test("Try Again is still offered and safe well inside the server's window (#3468)", async () => {
+  const server = idempotentServer((attempt) => attempt === 1 ? new RequestTimeoutError(60_000) : null);
+  const view = await render({ client: server.client, retrySupported: true });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    await withClockAhead(22, async () => {
+      await view.setRetrySupported(true);
+      assert.ok(tryAgain());
+      await pressTryAgain();
+    });
+    assert.equal(server.saved.size, 1);
+    assert.deepEqual(view.created.map((project) => project.id), ["project-1"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Try Again is withdrawn before the server forgets the request id (#3468)", async () => {
+  const server = idempotentServer(() => new RequestTimeoutError(60_000));
+  const view = await render({ client: server.client, retrySupported: true });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    assert.ok(tryAgain());
+    // An hour before the 24-hour window ends, the offer is gone and the notice points at the list.
+    await withClockAhead(23, async () => {
+      await view.setRetrySupported(true);
+      assertNoDomNode(tryAgain(), "a retry this late could reach a server that has forgotten the id");
+      assert.match(text(alert()), /Check the Projects list before trying again\./);
+    });
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a Try Again left on screen past the window, as in a tab asleep for a day, sends nothing (#3468)", async () => {
+  const server = idempotentServer(() => new RequestTimeoutError(60_000));
+  const view = await render({ client: server.client, retrySupported: true });
+  try {
+    await typeName("Docs Site");
+    await submit();
+    const stale = tryAgain()!;
+    await withClockAhead(25, async () => {
+      await act(async () => { stale.click(); });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+      assert.equal(server.ids.length, 1, "no retry was sent");
+      assertNoDomNode(tryAgain(), "the stale offer is withdrawn");
+      assert.match(text(alert()), /Check the Projects list before trying again\./);
+      assert.ok(domWindow.document.activeElement === (nameField() as unknown), "focus doesn't fall to the page");
+    });
+    assert.deepEqual(view.created, []);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a known project renamed to the submitted name after a lost reply is not taken for this project", async () => {
   const known = createdProject("Docs Draft", "docs-draft", 1);
   const server = lostReply(() => new TypeError("Failed to fetch"), [{ ...known, name: "Docs Site", updatedAt: 20 }]);

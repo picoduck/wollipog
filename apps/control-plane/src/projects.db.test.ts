@@ -4,10 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { RunnerMetadata } from "@wollipog/protocol";
+import { PROJECT_CREATION_REQUEST_WINDOW_MS, type RunnerMetadata } from "@wollipog/protocol";
 import {
   ControlPlaneDb,
-  PROJECT_CREATION_REQUEST_WINDOW_MS,
   PROJECT_CREATION_REQUESTS_PER_USER,
   type NewSessionInput,
 } from "./db.js";

@@ -330,6 +330,13 @@ export function isPartialHistory(window: EventWindowState | undefined): boolean 
   return window !== undefined && (window.hasOlder || !window.complete || window.laterGap !== undefined);
 }
 
+/** Whether the server New Project's requests reach honors their request id (#3468). The capability
+ * comes from the snapshot of the live connection; while it is down, a request may reach a server
+ * that restarted on another version before its snapshot arrives, so the answer is no. */
+export function projectCreationRetryAvailable(state: Pick<State, "conn" | "projectCreationRetrySupported">): boolean {
+  return state.conn === "online" && state.projectCreationRetrySupported;
+}
+
 export interface State {
   conn: ConnState;
   currentTurnOpeningSupported: boolean;
@@ -349,7 +356,8 @@ export interface State {
   projectsSupported: boolean;
   /** False against older control planes whose Project API cannot register a newly browsed folder. */
   projectLocationCreationSupported: boolean;
-  /** New Project may retry with the same request id after a lost reply (#3468). */
+  /** The last snapshot's server honors New Project's request id (#3468). Read it through
+   * `projectCreationRetryAvailable`, which also needs that server to still be the connected one. */
   projectCreationRetrySupported: boolean;
   /** False against older control planes without explicit, preflighted access-scope mutations. */
   accessScopeManagementSupported: boolean;

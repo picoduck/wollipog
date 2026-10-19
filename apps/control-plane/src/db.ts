@@ -11,6 +11,7 @@ import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
 import { ReviewSessions } from "./review-sessions.js";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
+import { PROJECT_CREATION_REQUEST_WINDOW_MS } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
@@ -342,8 +343,7 @@ export const FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS: readonly string[] = [
 export const MAX_UNRESOLVED_STEERING_ATTEMPTS = 50;
 export const MAX_PENDING_STEERING_RESOLUTION_REPLAYS = 50;
 const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
-/** How long New Project's retry identity lasts (#3468), and how many one human keeps. */
-export const PROJECT_CREATION_REQUEST_WINDOW_MS = 24 * 60 * 60_000;
+/** How many New Project retry identities one human keeps (#3468); the window is the protocol's. */
 export const PROJECT_CREATION_REQUESTS_PER_USER = 100;
 const SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT = 128;
 

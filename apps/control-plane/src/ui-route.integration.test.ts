@@ -1985,6 +1985,26 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.deepEqual(ownerProjects
     .filter((project) => project.name === "Retried Project" && project.id !== operatorRetriedProjectId)
     .map((project) => project.id), [retriedProjectId], "the owner's retries made one project");
+  // A replay never hands over a project its requester can no longer see: here an admin narrows
+  // the operator's new team project to themselves, and the operator's retry is refused.
+  const teamRequest = { name: "Narrowed Later", requestId: "req-narrowed", owner: { kind: "team", teamId: scopeTeam.teamId } };
+  const narrowedFirst = await createWithRequest(operatorToken, teamRequest);
+  assert.equal(narrowedFirst.status, 201);
+  const narrowedProjectId = await projectIdOf(narrowedFirst);
+  const narrowPreview = (await (await ownerFetch(
+    `/api/projects/${narrowedProjectId}/access-scope?ownerKind=user&ownerId=${identity.userId}`,
+  )).json() as { preview: { confirmationToken?: string } }).preview;
+  const narrowed = await ownerFetch(`/api/projects/${narrowedProjectId}/access-scope`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ owner: { kind: "user", userId: identity.userId }, confirmationToken: narrowPreview.confirmationToken }),
+  });
+  assert.equal(narrowed.status, 200);
+  const narrowedReplay = await createWithRequest(operatorToken, teamRequest);
+  assert.equal(narrowedReplay.status, 409);
+  const narrowedBody = await narrowedReplay.json() as { code?: string; project?: unknown };
+  assert.equal(narrowedBody.code, "PROJECT_REQUEST_UNAVAILABLE");
+  assert.equal(narrowedBody.project, undefined, "the narrowed project is not in the refusal");
 
   const deniedOperatorOrganizationProject = await fetch(`${httpBase}/api/projects`, {
     method: "POST",

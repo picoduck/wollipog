@@ -12,7 +12,7 @@ import {
   type ProjectVisibilityFilter,
 } from "../project-management.js";
 import { runnerDisplay } from "../runners.js";
-import { useStoreActions, useStoreSelector } from "../store.js";
+import { projectCreationRetryAvailable, useStoreActions, useStoreSelector } from "../store.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { AccessScopeSettings, useAccessScopeIdentity } from "./AccessScopeControls.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -110,7 +110,7 @@ export function ProjectsView({
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projectLocationCreationSupported = useStoreSelector((state) => state.projectLocationCreationSupported);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
-  const projectCreationRetrySupported = useStoreSelector((state) => state.projectCreationRetrySupported);
+  const projectCreationRetrySupported = useStoreSelector(projectCreationRetryAvailable);
   const worktreeSetupConfigSupported = useStoreSelector((state) => state.worktreeSetupConfigSupported);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);

@@ -27,7 +27,7 @@ import {
 import { useApi } from "../api-context.js";
 import { SkillsUnavailableNotice, useSessionSkillsUnavailable } from "./SkillsUnavailableNotice.js";
 import { ApiError } from "../api.js";
-import { useStore } from "../store.js";
+import { projectCreationRetryAvailable, useStore } from "../store.js";
 import { legacyWorkspaceLocationsByName, workspaceLocationKey } from "../projects.js";
 import {
   NO_PROJECT_SELECTION,
@@ -203,6 +203,7 @@ export function NewSessionDialog({
     projects: storedProjects,
     projectsSupported,
     projectLocationCreationSupported,
+    conn,
     projectCreationRetrySupported,
     accessScopeManagementSupported,
     nativeTuiLaunchSupported,
@@ -1988,7 +1989,7 @@ export function NewSessionDialog({
     {creatingProject && (
       <CreateProjectDialog
         accessScopeManagementSupported={accessScopeManagementSupported}
-        retrySupported={projectCreationRetrySupported}
+        retrySupported={projectCreationRetryAvailable({ conn, projectCreationRetrySupported })}
         projects={projectList}
         stacked
         returnFocusRef={projectPickerFocusRef}

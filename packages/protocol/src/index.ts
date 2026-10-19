@@ -11559,11 +11559,16 @@ export interface CreateProjectRequest {
   /** Explicit owner. Omitted only for compatibility with older clients. */
   owner?: ResourceOwner;
   /** Retry identity (#3468): 1-128 letters, digits, `-` or `_`. A repeat from the same human
-   * within a day returns the project the first request created; asking for another name or access
-   * with it is refused. Honored only where the snapshot advertises `idempotentProjectCreation`;
-   * older control planes ignore it. */
+   * within `PROJECT_CREATION_REQUEST_WINDOW_MS` returns the project the first request created;
+   * asking for another name or access with it is refused. Honored only where the snapshot
+   * advertises `idempotentProjectCreation`; older control planes ignore it. */
   requestId?: string;
 }
+
+/** How long a control plane advertising `idempotentProjectCreation` remembers a project request id
+ * (#3468). The capability promises at least this window: shortening it needs a new capability,
+ * since clients stop offering a safe retry against this value. */
+export const PROJECT_CREATION_REQUEST_WINDOW_MS = 24 * 60 * 60_000;
 
 /** Rename and/or show/hide a durable Project. Omitted fields remain unchanged. */
 export interface UpdateProjectRequest {

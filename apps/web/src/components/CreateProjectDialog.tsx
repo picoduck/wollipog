@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
-import type { ProjectView } from "@wollipog/protocol";
+import { PROJECT_CREATION_REQUEST_WINDOW_MS, type ProjectView } from "@wollipog/protocol";
 import { accessScopeChoices } from "../access-scopes.js";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -12,6 +12,32 @@ import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 const COUNT_WORDS = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"];
+
+interface RetryableRequest {
+  id: string;
+  name: string;
+  scopeKey: string;
+  /** When the id was first sent, by the wall clock and by the monotonic one. */
+  sentAt: number;
+  sentAtMonotonic: number;
+  honored: boolean;
+  unanswered: boolean;
+}
+
+/** Try Again is withdrawn this long before the server forgets the id (#3468), so clock skew and a
+ * slow request can't land a retry just past the window. */
+const RETRY_SAFETY_MARGIN_MS = 60 * 60_000;
+
+/** How much longer a retry of `request` is safe. Either clock running out ends it: the wall clock
+ * keeps counting while the device sleeps, and the monotonic one ignores a clock set backward. */
+function retryRemainingMs(request: RetryableRequest): number {
+  const elapsed = Math.max(Date.now() - request.sentAt, performance.now() - request.sentAtMonotonic);
+  return PROJECT_CREATION_REQUEST_WINDOW_MS - RETRY_SAFETY_MARGIN_MS - elapsed;
+}
+
+function retryExpired(request: RetryableRequest): boolean {
+  return retryRemainingMs(request) <= 0;
+}
 
 /** The duplicate-name warning (#2965): the count and the existing project's own spelling, or null
  * when no project already uses the name. Case-insensitive, like the pickers that would show both. */
@@ -46,9 +72,11 @@ export function duplicateProjectNameWarning(name: string, projects: readonly Pic
  * server that honors it answers a repeat with the first request's project instead of creating
  * another. After a lost reply the notice offers Try Again only when `retrySupported` held for every
  * send of that id and still holds: a server that ignored the id once (before an upgrade, or after a
- * downgrade) may have created a project that a retry would duplicate. Otherwise, or once the name or
- * access changes, the notice says the outcome is unknown and points at the Projects list. A refused
- * retry proves nothing about the unanswered send before it, so it doesn't say nothing was created.
+ * downgrade) may have created a project that a retry would duplicate. The server forgets an id after
+ * `PROJECT_CREATION_REQUEST_WINDOW_MS`, so the offer ends an hour before that. Otherwise, or once
+ * the name or access changes, the notice says the outcome is unknown and points at the Projects
+ * list. A refused retry proves nothing about the unanswered send before it, so it doesn't say
+ * nothing was created.
  *
  * `stacked` is New Session's: the new project is selected there, so the description says so instead
  * of promising the folders that the Projects page's hand-off asks for next.
@@ -88,12 +116,14 @@ export function CreateProjectDialog({
   const [busy, setBusy] = useState(false);
   // `refused_retry`: a retry was refused after an earlier send of its id went unanswered.
   const [failure, setFailure] = useState<{ kind: "refused" | "refused_retry" | "unknown"; detail: string | null } | null>(null);
-  // The request a repeat reuses (#3468): its id, what it asks for, whether every send of it reached a
-  // server that honors ids, and whether any send went unanswered.
-  const request = useRef<{ id: string; name: string; scopeKey: string; honored: boolean; unanswered: boolean } | null>(null);
+  // The request a repeat reuses (#3468): its id, what it asks for, when it was first sent, whether
+  // every send of it reached a server that honors ids, and whether any send went unanswered.
+  const request = useRef<RetryableRequest | null>(null);
   // Read when a reply is lost, since the server may have changed while the request was out.
   const retrySupportedNow = useRef(retrySupported);
   retrySupportedNow.current = retrySupported;
+  // Re-renders when the open Try Again offer expires, so the notice withdraws it on time.
+  const [, setExpiredAt] = useState(0);
   const [scopeKey, setScopeKey] = useState("");
   const { identity, error: identityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const scopeChoices = useMemo(() => identity ? accessScopeChoices(identity) : [], [identity]);
@@ -121,11 +151,25 @@ export function CreateProjectDialog({
   };
   const sameRequest = request.current !== null &&
     request.current.name === name.trim() && request.current.scopeKey === scopeKey;
-  const canRetry = failure?.kind === "unknown" && sameRequest && request.current!.honored && retrySupported;
+  const canRetry = failure?.kind === "unknown" && sameRequest && request.current!.honored && retrySupported &&
+    !retryExpired(request.current!);
+  useEffect(() => {
+    if (!canRetry) return;
+    const timer = window.setTimeout(() => setExpiredAt(Date.now()), Math.max(0, retryRemainingMs(request.current!)));
+    return () => window.clearTimeout(timer);
+  }, [canRetry]);
   /** Create Project submits the form; Try Again calls this without an event. */
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     if (busy || blockedReason) return;
+    const retrying = event === undefined;
+    // A Try Again still on screen past its window (a tab asleep for a day) promises what the server
+    // can no longer keep: it withdraws instead of sending.
+    if (retrying && (!request.current || retryExpired(request.current))) {
+      setExpiredAt(Date.now());
+      nameRef.current?.focus();
+      return;
+    }
     const problem = nameProblem(name);
     setNameError(problem);
     setEdited(true);
@@ -133,13 +177,15 @@ export function CreateProjectDialog({
       nameRef.current?.focus();
       return;
     }
+    // An expired id is still reused: a server that remembers it returns its project, and one that
+    // forgot it creates one as a new id would.
     const current = sameRequest ? request.current! : {
       id: browserRandomUUID(), name: name.trim(), scopeKey, honored: true, unanswered: false,
+      sentAt: Date.now(), sentAtMonotonic: performance.now(),
     };
     current.honored &&= retrySupported;
     request.current = current;
     // Try Again keeps its notice, and with it the focus, until the retry settles.
-    const retrying = event === undefined;
     setBusy(true);
     if (!retrying) setFailure(null);
     try {

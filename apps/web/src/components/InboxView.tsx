@@ -38,7 +38,7 @@ import {
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { isUnread, loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
-import { useStoreActions, useStoreSelector } from "../store.js";
+import { projectCreationRetryAvailable, useStoreActions, useStoreSelector } from "../store.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { destination, encodeResourceId, type AttentionTarget, type SessionsTab } from "../navigation.js";
 import { useApi } from "../api-context.js";
@@ -228,7 +228,7 @@ export function InboxView({
   const indefiniteSessionRemindersSupported = useStoreSelector((state) => state.indefiniteSessionRemindersSupported);
   const reminders = useStoreSelector((state) => state.reminders);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
-  const projectCreationRetrySupported = useStoreSelector((state) => state.projectCreationRetrySupported);
+  const projectCreationRetrySupported = useStoreSelector(projectCreationRetryAvailable);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
   const stalledRevision = useStoreSelector((state) => state.stalledRevision);

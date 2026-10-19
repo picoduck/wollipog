@@ -19,7 +19,7 @@ import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { RequestTimeoutError } from "../api-transport.js";
-import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
+import { ProjectLocationDialog, projectLocationFor } from "./ProjectLocationDialog.js";
 
 /**
  * Add Location (#2966): one Existing Location | New Folder switch, one surface of radio rows with
@@ -155,6 +155,8 @@ const projectWith = (added: ProjectLocationView): ProjectView => ({ ...project, 
 
 async function render(options: {
   client?: Partial<ApiClient>;
+  /** The project locations are added to; `project` by default. */
+  project?: ProjectView;
   runners?: RunnerView[];
   projects?: ProjectView[];
   canCreateLocation?: boolean;
@@ -190,15 +192,15 @@ async function render(options: {
     },
     project: async () => {
       rereads += 1;
-      return { project: await (options.reread?.() ?? Promise.resolve(project)) };
+      return { project: await (options.reread?.() ?? Promise.resolve(options.project ?? project)) };
     },
     ...options.client,
   } as ApiClient;
   const draw = (runners: readonly RunnerView[]) => root.render(
       <ApiProvider client={client}>
         <ProjectLocationDialog
-          project={project}
-          projects={options.projects ?? [project, otherProject]}
+          project={options.project ?? project}
+          projects={options.projects ?? [options.project ?? project, otherProject]}
           runners={new Map(runners.map((value) => [value.runnerId, value]))}
           boxes={new Map()}
           canCreateLocation={options.canCreateLocation ?? true}
@@ -873,6 +875,58 @@ test("a refusal after an unanswered try doesn't claim nothing was added (#3468)"
     assert.match(text(notice()), /^Couldn't Add the Location/u);
     assert.match(text(notice()), /Wollipog refused to add this location this time, and Project One doesn't list it yet\. An earlier try may still add it\./u);
     assert.doesNotMatch(text(notice()), /Nothing was added/u);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("only an attached location proves an add: a detached tombstone doesn't, an offline or missing one does (#3468)", () => {
+  const existing = { kind: "existing" as const, runnerId: "runner-1", workspaceId: "loose" };
+  const folder = { kind: "new" as const, runnerId: "runner-1", path: "/repos/loose" };
+  const withLoose = (availability: ProjectLocationView["availability"]) =>
+    projectWith({ ...looseLocation, availability });
+  assert.equal(projectLocationFor(withLoose("runner_removed"), existing), undefined);
+  assert.equal(projectLocationFor(withLoose("runner_removed"), folder), undefined);
+  for (const availability of ["available", "runner_offline", "workspace_missing"] as const) {
+    assert.equal(projectLocationFor(withLoose(availability), existing)?.id, looseLocation.id, availability);
+    assert.equal(projectLocationFor(withLoose(availability), folder)?.id, looseLocation.id, availability);
+  }
+});
+
+test("a Relink whose reply is lost isn't taken as added while the project still holds the detached tombstone (#3468)", async () => {
+  // The machine was removed and came back with the same folder: the project keeps a detached row.
+  const tombstoned = projectWith({ ...looseLocation, availability: "runner_removed" });
+  const view = await render({
+    project: tombstoned,
+    onAdd: async () => { throw lostReply(); },
+  });
+  try {
+    assert.equal(text(rowNamed("Loose Checkout")!.querySelector(".choice-row-meta")), "Relink");
+    await choose("Loose Checkout");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.rereads(), 1);
+    assert.equal(view.closed(), 0, "the tombstone the dialog started with is not the relinked location");
+    assert.deepEqual(view.reported, []);
+    assert.match(text(notice()), /^Couldn't Confirm the Location/u);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a Relink whose reply is lost closes as added once the location is attached again, even offline (#3468)", async () => {
+  const tombstoned = projectWith({ ...looseLocation, availability: "runner_removed" });
+  const view = await render({
+    project: tombstoned,
+    onAdd: async () => { throw lostReply(); },
+    reread: async () => projectWith({ ...looseLocation, availability: "runner_offline" }),
+  });
+  try {
+    await choose("Loose Checkout");
+    await act(async () => { addButton().click(); });
+    await settle();
+    assert.equal(view.closed(), 1);
+    assert.deepEqual(view.reported.map((report) => report.location?.availability), ["runner_offline"]);
   } finally {
     await view.unmount();
   }
