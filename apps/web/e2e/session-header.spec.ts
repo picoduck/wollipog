@@ -1307,7 +1307,7 @@ test("shared Pod headers keep their trailing controls out of the back-button tra
   await expect(bar.getByRole("button", { name: "Close Pod" })).toHaveCount(0);
   await bar.getByRole("button", { name: "More Actions" }).click();
   const close = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem").last();
-  await expect(close).toHaveText("Close Pod");
+  await expect(close).toHaveText("Close Pod…");
   await expect(close).toHaveClass(/\bdanger\b/);
   await page.keyboard.press("Escape");
 
