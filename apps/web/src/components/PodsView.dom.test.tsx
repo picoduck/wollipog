@@ -46,7 +46,6 @@ function session(id: string): SessionView {
   } as SessionView;
 }
 
-// Both pods carry the same (default) orchestration policy, so no policy value changes on the switch.
 function pod(id: string, title: string, memberIds: string[]): PodView {
   return {
     id, title, objective: `${title} objective`, status: "active", createdAt: 1, updatedAt: 1,
@@ -102,14 +101,6 @@ function buttonNamed(container: ParentNode, pattern: RegExp): HTMLButtonElement 
   return button as HTMLButtonElement;
 }
 
-function fieldSelect(container: ParentNode, label: string): HTMLSelectElement {
-  const field = [...container.querySelectorAll("label")].find((candidate) =>
-    candidate.querySelector(":scope > span")?.textContent === label);
-  const select = field?.querySelector("select");
-  assert.ok(select, `${label} select is rendered`);
-  return select as HTMLSelectElement;
-}
-
 function choose(select: HTMLSelectElement, value: string): void {
   Object.getOwnPropertyDescriptor(domWindow.HTMLSelectElement.prototype, "value")?.set?.call(select, value);
   select.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
@@ -120,7 +111,7 @@ function type(textarea: HTMLTextAreaElement, value: string): void {
   fireDomEvent.change(textarea, { target: textarea });
 }
 
-test("a direct pod-to-pod route change starts from the new pod's own draft, errors, receipts and policy", async () => {
+test("a direct pod-to-pod route change starts from the new pod's own draft, errors and receipts", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -156,12 +147,11 @@ test("a direct pod-to-pod route change starts from the new pod's own draft, erro
 
     const relaySection = () => section(container, "Manual Pod Relay");
     const contextSection = () => section(container, "Shared Huddle Context");
-    const policySection = () => section(container, "Pod Orchestration Policy");
     const relayField = () => relaySection().querySelector("textarea") as HTMLTextAreaElement;
     const contextBox = () => contextSection().querySelector('input[type="checkbox"]') as HTMLInputElement;
 
     // Relay once so pod A has delivery receipts, then leave a failed note, a selected context
-    // entry, an unsaved arbitration change and an add-member choice behind.
+    // entry and an add-member choice behind. Automatic turns keep their draft in their own dialog.
     await act(async () => contextBox().click());
     await act(async () => type(relayField(), "Relayed from pod A"));
     await act(async () => buttonNamed(relaySection(), /^Relay to Selected$/u).click());
@@ -169,14 +159,11 @@ test("a direct pod-to-pod route change starts from the new pod's own draft, erro
     await act(async () => contextBox().click());
     await act(async () => type(relayField(), "Pod A draft"));
     await act(async () => buttonNamed(relaySection(), /^Save Note$/u).click());
-    await act(async () => choose(fieldSelect(policySection(), "Arbitration"), "round_robin"));
     await act(async () => choose(relaySection().querySelector(".pod-add-member select") as HTMLSelectElement, "spare"));
 
     assert.equal(relayField().value, "Pod A draft");
     assert.match(relaySection().textContent ?? "", /Pod A note failed/u);
     assert.match(contextSection().textContent ?? "", /1 Selected/u);
-    assert.equal(fieldSelect(policySection(), "Arbitration").value, "round_robin");
-    assert.equal(buttonNamed(policySection(), /^Save Policy$/u).disabled, false);
     assert.equal((relaySection().querySelector(".pod-add-member select") as HTMLSelectElement).value, "spare");
 
     await act(async () => navigation.jumpTo(podB.id));
@@ -187,8 +174,6 @@ test("a direct pod-to-pod route change starts from the new pod's own draft, erro
     assert.doesNotMatch(relaySection().textContent ?? "", /Pod A note failed/u);
     assert.equal(Boolean(relaySection().querySelector('[aria-label="Relay Delivery Receipts"]')), false, "no receipts carry over");
     assert.match(contextSection().textContent ?? "", /0 Selected/u);
-    assert.equal(fieldSelect(policySection(), "Arbitration").value, "manual");
-    assert.equal(buttonNamed(policySection(), /^Policy Saved$/u).disabled, true);
     assert.equal((relaySection().querySelector(".pod-add-member select") as HTMLSelectElement).value, "");
   } finally {
     await act(async () => root.unmount());

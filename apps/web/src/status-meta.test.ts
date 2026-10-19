@@ -148,6 +148,11 @@ const TABLE: readonly Row[] = [
   ["pod", "paused", "Paused", "neutral"],
   ["pod", "conflicted", "Conflicted", "warning"],
   ["pod", "failed", "Failed", "danger"],
+  ["podMerge", "running", "Running", "info"],
+  ["podMerge", "applied", "Merged", "success"],
+  ["podMerge", "already_applied", "Already Up to Date", "neutral"],
+  ["podMerge", "conflicted", "Conflicted", "warning"],
+  ["podMerge", "failed", "Failed", "danger"],
   // Provider account
   // Member
   // Multi-Agent Run row (#2974)
@@ -230,7 +235,7 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
   for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "automation_run", "tool", "family",
-    "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "run", "pod", "member", "provider_account",
+    "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "run", "pod", "podMerge", "member", "provider_account",
     "shell", "share", "usage", "agent"] as const) {
     for (const value of statusValues(domain)) {
       const { label } = statusMeta(domain, value);

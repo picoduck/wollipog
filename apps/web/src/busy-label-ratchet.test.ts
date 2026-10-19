@@ -47,7 +47,7 @@ const BASELINE: Readonly<Record<string, number>> = {
   "components/PairingBanner.tsx": 2,
   "components/PendingPromptBubbles.tsx": 3,
   "components/PeopleDevicesPanel.tsx": 4,
-  "components/PodsView.tsx": 9,
+  "components/PodsView.tsx": 5,
   "components/RunsView.tsx": 1,
   "components/UsageView.tsx": 4,
 };

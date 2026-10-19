@@ -3407,9 +3407,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   Agent into its Session cell (§14), and keeps that fold above the tier until the main column fits
   the full layout. The Usage API card's description takes the line and its three segmented
   controls follow as one group: beside the description while it keeps 220px (about 30 characters),
-  otherwise together on their own line below it. The Pod Orchestration Controls keep their five
-  fields on one row; each column is at least as wide as its label on one line, and Arbitration as
-  wide as its longest mode.
+  otherwise together on their own line below it.
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
   with the label in its tooltip, keeping the session bar's `+N`; the project crumb is dropped;
   text buttons become icon buttons with tooltips. `DetailBar` (Run, Pod, Project) does this now. Its
