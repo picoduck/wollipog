@@ -141,6 +141,9 @@ export function confirmDeleteMachine(
     tone: "danger",
     progress: "Deleting the machine…",
     onConfirm: onDelete,
+    // A delete request cannot be withdrawn once sent, so Cancel would only hide a deletion that
+    // still happens, and drop its failure.
+    cancelWhileRunning: false,
     ...(back ? { back } : {}),
   });
 }
@@ -359,6 +362,18 @@ function machineNotice(entry: MachineListEntry, access: MachineAccess, actions: 
       {label}
     </BusyButton>
   );
+  const legacy = legacyDataState(box);
+  const adoptLegacyData = (
+    <BusyButton className="btn sm" busy={actions.operation === "adopt" || legacy === "pending"} progress="Adopting the legacy data…"
+      disabled={busy && actions.operation !== "adopt"} onClick={actions.onAdopt}>
+      Adopt Legacy Data…
+    </BusyButton>
+  );
+  // A runner refuses to start on older data until it is adopted, so a machine that cannot connect
+  // keeps the adoption within reach even though its connection notice outranks the data's own.
+  const blockedByLegacyData = legacy === "adoptable" || legacy === "pending";
+  const legacySentence = blockedByLegacyData &&
+    <p>It has older runner data, which its runner needs adopted before it can start.</p>;
   if (kind === "offline") {
     const ssh = Boolean(box);
     return (
@@ -367,12 +382,14 @@ function machineNotice(entry: MachineListEntry, access: MachineAccess, actions: 
           <>
             {ssh ? reconnect("Reconnect")
               : <button type="button" className="btn sm" onClick={actions.onRepair}>Repair Connection…</button>}
+            {blockedByLegacyData && adoptLegacyData}
             <button type="button" className="btn sm" onClick={actions.onConnectionDetails}>Connection Details…</button>
           </>
         )}>
         <p>{ssh
           ? "The SSH session to this machine ended, so Wollipog can't reach its runner."
           : "Wollipog can't reach its runner. The runner may have stopped, or its credential may no longer work."}</p>
+        {legacySentence}
         {!access.canManage && <p>{ssh
           ? "Ask an organization owner or admin to reconnect this machine."
           : "Ask an organization owner or admin to repair this connection."}</p>}
@@ -382,9 +399,10 @@ function machineNotice(entry: MachineListEntry, access: MachineAccess, actions: 
   if (kind === "connection_failed" && box) {
     return (
       <Notice tone="danger" role="alert" title={`Couldn't Connect to ${name}`}
-        actions={access.canManage && reconnect("Try Again")}
+        actions={access.canManage && <>{reconnect("Try Again")}{blockedByLegacyData && adoptLegacyData}</>}
         details={box.lastError ? <pre className="machine-notice-error">{box.lastError}</pre> : undefined}>
         <p>{describeSshFailure(box.lastError, box.sshTarget)}</p>
+        {legacySentence}
       </Notice>
     );
   }
@@ -418,29 +436,31 @@ function machineNotice(entry: MachineListEntry, access: MachineAccess, actions: 
     );
   }
   if (kind === "legacy_data" && box) {
-    const adopted = box.legacyDataAccountStatus === "adopted";
-    // Another machine on this SSH account is adopting the shared data; this one waits for it.
-    const elsewhere = box.legacyDataAccountStatus === "pending" && box.legacyDataAdoption?.status !== "pending";
-    const pending = box.legacyDataAdoption?.status === "pending";
     return (
       <Notice tone="warning" role="status" title="Older Runner Data Found"
-        actions={access.canManage && !adopted && !elsewhere && (
-          <BusyButton className="btn sm" busy={actions.operation === "adopt" || pending} progress="Adopting the legacy data…"
-            disabled={busy && actions.operation !== "adopt"} onClick={actions.onAdopt}>
-            Adopt Legacy Data…
-          </BusyButton>
-        )}>
-        <p>{adopted
+        actions={access.canManage && blockedByLegacyData && adoptLegacyData}>
+        <p>{legacy === "adopted"
           ? "This SSH account's legacy data is already adopted. This machine keeps its own runner data and needs no other adoption."
-          : elsewhere
+          : legacy === "elsewhere"
           ? "Another machine on this SSH account is adopting the shared legacy data. This machine waits until that finishes."
-          : pending
+          : legacy === "pending"
           ? "The legacy data adoption is in progress."
           : "This machine predates separate runner data. Stop every legacy runner on its SSH account, then adopt its data once."}</p>
       </Notice>
     );
   }
   return null;
+}
+
+/**
+ * Where an SSH machine's older runner data stands, or null for a machine without any: one to
+ * adopt, its adoption under way, another machine on the SSH account adopting it, or adopted.
+ */
+export function legacyDataState(box: BoxView | undefined): "adoptable" | "pending" | "elsewhere" | "adopted" | null {
+  if (box?.runnerDataLayout !== "legacy") return null;
+  if (box.legacyDataAccountStatus === "adopted") return "adopted";
+  if (box.legacyDataAdoption?.status === "pending") return "pending";
+  return box.legacyDataAccountStatus === "pending" ? "elsewhere" : "adoptable";
 }
 
 /** The meta line's facts (§11.3): the kind, the host, the OS, and when offline, when it was last seen. */

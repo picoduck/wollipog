@@ -13,7 +13,7 @@ import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { connectionFacts, connectionFactsText, machineMetaFacts, machineNoticeKind } from "./MachineDetail.js";
+import { connectionFacts, connectionFactsText, legacyDataState, machineMetaFacts, machineNoticeKind } from "./MachineDetail.js";
 import { RunnersView } from "./RunnersView.js";
 
 /**
@@ -302,6 +302,85 @@ test("only one lifecycle notice shows: offline outranks a failed connection's up
     assert.match(notices[0]!.textContent ?? "", /This Machine Is Offline/);
     assert.ok(buttonNamed(notices[0]!, "Reconnect"), "an SSH session that ended offers Reconnect");
     assert.doesNotMatch(view.detail().textContent ?? "", /Runner Update Required|Older Runner Data Found/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a machine whose runner can't start on older data keeps Adopt Legacy Data… in its connection notice", async () => {
+  assert.equal(legacyDataState({ ...buildBox, runnerDataLayout: "legacy", legacyDataAccountStatus: "unclaimed" }), "adoptable");
+  assert.equal(legacyDataState({ ...buildBox, runnerDataLayout: "legacy", legacyDataAccountStatus: "pending" }), "elsewhere");
+  assert.equal(legacyDataState({ ...buildBox, runnerDataLayout: "legacy", legacyDataAccountStatus: "pending",
+    legacyDataAdoption: { status: "pending" } as BoxView["legacyDataAdoption"] }), "pending");
+  assert.equal(legacyDataState({ ...buildBox, runnerDataLayout: "legacy", legacyDataAccountStatus: "adopted" }), "adopted");
+  assert.equal(legacyDataState({ ...buildBox, runnerDataLayout: "isolated-v1" }), null);
+
+  // The runner refuses to start without --adopt-legacy-data-dir, so ssh exits with its error.
+  const refused: BoxView = { ...buildBox, status: "offline", lastError: "runner data directory needs adoption",
+    runnerDataLayout: "legacy", legacyDataAccountStatus: "unclaimed" };
+  const adoptions: boolean[] = [];
+  const view = await mount({
+    runners: [{ ...buildRunner, status: "offline" }],
+    boxes: [refused],
+    machineId: "build-runner",
+    client: { adoptLegacyBoxData: async (_boxId: string, force = false) => { adoptions.push(force); return { ok: true, status: "started" }; } } as Partial<ApiClient>,
+  });
+  try {
+    const notices = view.detail().querySelectorAll(".notice");
+    assert.equal(notices.length, 1, "still one notice");
+    assert.match(notices[0]!.textContent ?? "", /Couldn't Connect to Build Box/);
+    assert.match(notices[0]!.textContent ?? "", /It has older runner data, which its runner needs adopted before it can start\./);
+    await act(async () => buttonNamed(notices[0]!, "Adopt Legacy Data…")!.click());
+    await settle();
+    const confirmation = dialogNamed(view.body, "Adopt Legacy Data")!;
+    assert.ok(confirmation, "the adoption asks first");
+    await act(async () => buttonNamed(confirmation, "Adopt Legacy Data")!.click());
+    await settle();
+    assert.deepEqual(adoptions, [false]);
+  } finally {
+    await view.unmount();
+  }
+
+  // An SSH session that simply ended offers it beside Reconnect; a viewer reads why, with no button.
+  for (const role of ["owner", "viewer"] as const) {
+    const ended = await mount({
+      runners: [{ ...buildRunner, status: "offline" }],
+      boxes: [{ ...refused, lastError: null }],
+      machineId: "build-runner",
+      role,
+    });
+    try {
+      const notice = ended.detail().querySelector(".notice")!;
+      assert.match(notice.textContent ?? "", /This Machine Is Offline/);
+      assert.match(notice.textContent ?? "", /older runner data/);
+      assert.equal(Boolean(buttonNamed(notice, "Adopt Legacy Data…")), role === "owner", role);
+    } finally {
+      await ended.unmount();
+    }
+  }
+});
+
+test("once Delete Machine is confirmed it can't be cancelled, since the deletion can't be withdrawn", async () => {
+  let finish!: () => void;
+  const deleting = new Promise<void>((resolve) => { finish = resolve; });
+  const offline = runner("studio", { displayName: "Studio Mac", status: "offline" });
+  const view = await mount({ runners: [offline], machineId: "studio", client: { removeRunner: () => deleting } as Partial<ApiClient> });
+  try {
+    const menu = await openMenu(view.body);
+    await act(async () => menuItems(menu).at(-1)!.click());
+    await settle();
+    const confirmation = dialogNamed(view.body, "Delete Machine")!;
+    await act(async () => buttonNamed(confirmation, "Delete Machine")!.click());
+    await settle();
+    const cancel = buttonNamed(confirmation, "Cancel")!;
+    assert.ok(cancel.disabled || cancel.getAttribute("aria-disabled") === "true", "Cancel is locked while the deletion runs");
+    await act(async () => {
+      confirmation.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event);
+    });
+    await settle();
+    assert.ok(dialogNamed(view.body, "Delete Machine"), "Escape does not dismiss it either");
+    await act(async () => { finish(); await deleting; });
+    await settle();
   } finally {
     await view.unmount();
   }
