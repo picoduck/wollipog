@@ -1407,6 +1407,11 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 }
 
 function sendUp(msg: RunnerToControlPlane): void {
+  // Registration precedes agent discovery, so the review-session capability it advertised can say
+  // no reviewer is available. Every discovery result carries it again, from the agents it found.
+  if (msg.type === "agents_updated" && process.platform === "linux") {
+    msg = { ...msg, reviewSession: reviewSessionCapability() ?? null };
+  }
   if (msg.type === "session_status" && ["completed", "failed", "stopped"].includes(msg.status)) {
     removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
     void agentControlRelays.close(msg.sessionId);
@@ -1659,15 +1664,19 @@ function sessionReviewCapability(): SessionReviewCapability | undefined {
     return undefined;
   }
 }
+/** The review-session capability from the agents discovered so far (#3368, #3369). */
+function reviewSessionCapability(): ReturnType<ReviewSessionLauncher["capability"]> {
+  try {
+    return reviewSessionLauncher.capability();
+  } catch (error) {
+    log(`review session discovery failed: ${errText(error)}`);
+    return undefined;
+  }
+}
 function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]>): NonNullable<RunnerMetadata["runtime"]> {
   const { sessionReview: _previous, reviewSession: _previousReviewSession, ...rest } = runtime;
   const sessionReview = sessionReviewCapability();
-  let reviewSession: ReturnType<ReviewSessionLauncher["capability"]>;
-  try {
-    reviewSession = reviewSessionLauncher.capability();
-  } catch (error) {
-    log(`review session discovery failed: ${errText(error)}`);
-  }
+  const reviewSession = reviewSessionCapability();
   return { ...rest, ...(sessionReview ? { sessionReview } : {}), ...(reviewSession ? { reviewSession } : {}) };
 }
 

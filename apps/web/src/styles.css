@@ -13971,6 +13971,11 @@ button.review-finding-location {
   gap: var(--space-1);
   margin-left: auto;
 }
+/* Cross-Model Reviews (#3369): a review's row names its reviewer; its report's findings follow it,
+   inset one step so they read as that review's. */
+.review-run-title { font: var(--type-body-strong); }
+.review-run-finding { padding-left: calc(var(--finding-row-pad-x) + var(--space-4)); }
+.review-run-finding-title { font: var(--type-body-strong); }
 /* The selection bar (#2850): in the panel's foot in place of the commit bar while findings are
    selected. Its notice sits above the row, beside the button that made it. */
 .finding-selection-bar {

@@ -2361,6 +2361,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Transcript share link | Active: success · Expired, Revoked: neutral. Rendered as the inline badge on Share Transcript's link rows. |
 | Pull request | Open, Draft, Merged and Closed are **facts**: row meta with the Git icon, not status badges. |
 | Pull request checks (Review's summary, #2846) | Checks Failing: danger · Checks Running: info, pulsing. Passing checks get no badge. |
+| Cross-model review (`reviewRun`, Review's Cross-Model Reviews, #3369) | Requested, Canceled, Not Validated (an older runner that does not check reports): neutral · Reviewing: info (pulse) · Upvote: success · Downvote: warning · Invalid, Failed: danger. Only a valid report votes. A review of a head the pull request has moved past adds a separate neutral Stale badge (no dot). |
 
 "Orphaned" is retired everywhere, including the session header badge, which reads "Background Work
 Lost". Update Required applies to machines, instances and devices alike.

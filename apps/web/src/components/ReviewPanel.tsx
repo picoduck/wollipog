@@ -16,6 +16,7 @@ import {
   type GitPrSummary,
   type ReviewFinding,
   type ReviewFindingsResponse,
+  type ReviewSessionView,
   type SessionView,
   type SourceLocation,
 } from "@wollipog/protocol";
@@ -57,6 +58,7 @@ import { DiffIcon, FolderIcon, RefreshIcon } from "./Icons.js";
 import { PanelHeaderActions } from "./RightPanel.js";
 import { PanelToolLayout } from "./PanelToolLayout.js";
 import { FindingSelectionBar, ReviewFindings, type FindingSyncControl } from "./ReviewFindings.js";
+import { ReviewRuns } from "./ReviewRuns.js";
 import { isOpenFinding } from "../review-finding-copy.js";
 import { ReviewSummary } from "./ReviewSummary.js";
 import { ReviewToolbar } from "./ReviewToolbar.js";
@@ -193,6 +195,7 @@ export function ReviewPanel({
   onAttachWorkspaceReference,
   focus,
   onFocusHandled,
+  onOpenSession,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -206,6 +209,8 @@ export function ReviewPanel({
   /** A file to bring into view: a transcript edit's Open in Review (#2187). */
   focus?: DiffFileFocus | null;
   onFocusHandled?: () => void;
+  /** Opens another session, for a cross-model review's Open Transcript. */
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const api = useApi();
   const { confirm } = useFeedback();
@@ -523,6 +528,81 @@ export function ReviewPanel({
     return () => { findingReqRef.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, session.id]);
+
+  // The cross-model reviews this session requested (#3369). Its own view summarizes them, and the
+  // control plane republishes that view whenever one changes, so they are read only when there are
+  // any, again whenever that summary moves, and on the header's Refresh. The newest page is read;
+  // Load Older Reviews follows the cursor. A read that fails keeps what is shown and says so.
+  const [reviewRuns, setReviewRuns] = useState<ReviewSessionView[]>([]);
+  const [reviewRunsOlder, setReviewRunsOlder] = useState<string | null>(null);
+  const [reviewRunsError, setReviewRunsError] = useState<string | null>(null);
+  const [loadingOlderReviewRuns, setLoadingOlderReviewRuns] = useState(false);
+  const reviewRunsReqRef = useRef(0);
+  // The list on screen and the cursor that continues it, tagged with the read that produced them.
+  // An older page follows only a settled list's own cursor, and lands only on that same list: a
+  // newest-page read that starts first replaces both, so the older page is dropped.
+  const reviewRunsPageRef = useRef({ sessionId: session.id, generation: 0, cursor: null as string | null, settled: true, loadingOlder: false });
+  const reviewRunsKey = session.reviewRuns ? `${session.reviewRuns.count}:${session.reviewRuns.active}:${session.reviewRuns.updatedAt}` : null;
+  const loadReviewRuns = async () => {
+    const request = ++reviewRunsReqRef.current;
+    // Another session's cursor never continues this one's list.
+    const shownCursor = reviewRunsPageRef.current.sessionId === session.id ? reviewRunsPageRef.current.cursor : null;
+    const sessionId = session.id;
+    reviewRunsPageRef.current = { sessionId, generation: request, cursor: shownCursor, settled: false, loadingOlder: false };
+    if (!session.reviewRuns) {
+      reviewRunsPageRef.current = { sessionId, generation: request, cursor: null, settled: true, loadingOlder: false };
+      setReviewRuns([]);
+      setReviewRunsOlder(null);
+      setReviewRunsError(null);
+      return;
+    }
+    try {
+      const page = await api.reviewSessions(session.id);
+      if (request !== reviewRunsReqRef.current) return;
+      reviewRunsPageRef.current = { sessionId, generation: request, cursor: page.nextAfterReviewSessionId, settled: true, loadingOlder: false };
+      setReviewRuns(page.reviews);
+      setReviewRunsOlder(page.nextAfterReviewSessionId);
+      setReviewRunsError(null);
+    } catch (cause) {
+      if (request !== reviewRunsReqRef.current) return;
+      // The list on screen is unchanged, and so is the cursor that continues it.
+      reviewRunsPageRef.current = { sessionId, generation: request, cursor: shownCursor, settled: true, loadingOlder: false };
+      setReviewRunsError((cause as Error).message);
+    }
+  };
+  const loadOlderReviewRuns = async () => {
+    const from = reviewRunsPageRef.current;
+    if (!from.settled || from.loadingOlder || !from.cursor || from.generation !== reviewRunsReqRef.current) return;
+    reviewRunsPageRef.current = { ...from, loadingOlder: true };
+    setLoadingOlderReviewRuns(true);
+    const current = () => reviewRunsReqRef.current === from.generation && reviewRunsPageRef.current.generation === from.generation;
+    try {
+      const page = await api.reviewSessions(session.id, { afterReviewSessionId: from.cursor });
+      if (!current()) return;
+      reviewRunsPageRef.current = { ...from, cursor: page.nextAfterReviewSessionId, loadingOlder: false };
+      setReviewRuns((shown) => {
+        const seen = new Set(shown.map((run) => run.reviewSessionId));
+        return [...shown, ...page.reviews.filter((run) => !seen.has(run.reviewSessionId))];
+      });
+      setReviewRunsOlder(page.nextAfterReviewSessionId);
+      setReviewRunsError(null);
+    } catch (cause) {
+      if (current()) setReviewRunsError((cause as Error).message);
+    } finally {
+      if (current()) reviewRunsPageRef.current = { ...reviewRunsPageRef.current, loadingOlder: false };
+      setLoadingOlderReviewRuns(false);
+    }
+  };
+  useEffect(() => {
+    void loadReviewRuns();
+    return () => { reviewRunsReqRef.current += 1; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, session.id, reviewRunsKey]);
+  useEffect(() => {
+    setReviewRuns([]);
+    setReviewRunsOlder(null);
+    setReviewRunsError(null);
+  }, [session.id]);
 
   const findingRefusal = sessionCommandRefusal(session, "manageReviewFindings");
   const findingRefusalId = "review-findings-refusal";
@@ -1034,7 +1114,7 @@ export function ReviewPanel({
   const refreshReview = async () => {
     setRefreshing(true);
     try {
-      await Promise.all([runnerOnline ? git.refresh() : null, loadDiff(), loadFindings()]);
+      await Promise.all([runnerOnline ? git.refresh() : null, loadDiff(), loadFindings(), loadReviewRuns()]);
     } finally {
       setRefreshing(false);
     }
@@ -1295,6 +1375,15 @@ export function ReviewPanel({
               error={findingError}
               onDismissNotice={() => setFindingNotice(null)}
               triggerRef={findingsTriggerRef}
+            />
+            <ReviewRuns
+              key={`runs-${session.id}`}
+              runs={reviewRuns}
+              total={session.reviewRuns?.count ?? 0}
+              error={reviewRunsError}
+              older={reviewRunsOlder === null ? null : { loading: loadingOlderReviewRuns, onLoad: () => void loadOlderReviewRuns() }}
+              onOpenSourceLocation={onOpenSourceLocation}
+              {...(onOpenSession ? { onOpenSession } : {})}
             />
             <div className="git-diff-section" role="group" aria-label="Changes">
               {/* Keyed off !shownDiff (not diffBusy): after a scope switch there is one paint before

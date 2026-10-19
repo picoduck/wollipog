@@ -826,6 +826,7 @@ export function RightPanel({
             onAttachWorkspaceReference={onAttachWorkspaceReference}
             focus={reviewFocus}
             onFocusHandled={onReviewFocusHandled}
+            onOpenSession={onOpenSession}
           />
         );
       case "decisions":

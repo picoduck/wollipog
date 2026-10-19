@@ -394,10 +394,10 @@ export class ReviewSessionLauncher {
       this.deps.verifyCommand(launch.command, this.deps.agentPath(launch.agentId, driver));
     } catch (error) {
       this.deps.log(`review session ${sessionId} reviewer is not trusted: ${(error as Error).message}`);
-      refuseReview("the runner cannot launch this reviewer");
+      refuseReview("the reviewer command is not trusted: install it where sessions cannot write, outside provider homes and caches");
     }
     const tools = this.deps.tools();
-    if ("unavailable" in tools) refuseReview("the runner cannot launch this reviewer");
+    if ("unavailable" in tools) refuseReview("the runner is missing a trusted git or gh for reviews");
     const verified = tools as ReviewTools;
     const env = this.snapshots.helperEnvironment(verified);
     const scope = await bindPullRequestScope({

@@ -193,6 +193,7 @@ import {
   type PodOrchestrationView,
   type PodReconciliation,
   type PodView,
+  type ReviewSessionCapability,
   type RunnerMetadata,
   type RunnerCapacityBlocker,
   type RunnerCapacityConfiguration,
@@ -5346,10 +5347,13 @@ export class ControlPlaneDb {
   readonly campaignReviewJobs: CampaignReviewJobs;
   readonly sessionReviewJobs: SessionReviewJobs;
   readonly reviewSessions: ReviewSessions;
-  /** A review session's immutable kind and what it reviews (#3368); nothing for ordinary sessions. */
-  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review"> {
+  /** A review session's immutable kind and what it reviews (#3368); for a session that requested
+   * reviews, their summary (#3369); nothing else for ordinary sessions. */
+  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review" | "reviewRuns"> {
     const review = this.reviewSessions.link(sessionId);
-    return review ? { kind: "review", review } : {};
+    if (review) return { kind: "review", review };
+    const reviewRuns = this.reviewSessions.summaryFor(sessionId);
+    return reviewRuns ? { reviewRuns } : {};
   }
 
   private constructor(
@@ -7849,6 +7853,27 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw err;
     }
+  }
+
+  /**
+   * Replace a runner's review-session capability (#3369) from a discovery result: the registration
+   * frame's was derived before discovery and can name no reviewer. A malformed value is dropped
+   * rather than stored, so a review is refused as unavailable instead of launched on a bad entry.
+   */
+  updateRunnerReviewSessionCapability(runnerId: string, capability: ReviewSessionCapability | null): void {
+    const row = this.stmt("SELECT runtime FROM runners WHERE runner_id=?").get(runnerId) as { runtime: string | null } | undefined;
+    if (!row?.runtime) return;
+    let runtime: Record<string, unknown>;
+    try { runtime = JSON.parse(row.runtime) as Record<string, unknown>; } catch { return; }
+    const valid = capability !== null && typeof capability === "object" && Array.isArray(capability.reviewers) &&
+      capability.reviewers.length <= 2 && capability.reviewers.every((reviewer) =>
+        (reviewer?.harness === "codex" || reviewer?.harness === "claude-code") &&
+        typeof reviewer.agentId === "string" && reviewer.agentId.length > 0 && reviewer.agentId.length <= 128) &&
+      (capability.unavailable === undefined || (typeof capability.unavailable === "object" && capability.unavailable !== null &&
+        Object.values(capability.unavailable).every((reason) => typeof reason === "string" && reason.length <= 500)));
+    const { reviewSession: _previous, ...rest } = runtime;
+    const next = valid ? { ...rest, reviewSession: capability } : rest;
+    this.stmt("UPDATE runners SET runtime=? WHERE runner_id=?").run(JSON.stringify(next), runnerId);
   }
 
   updateRunnerProviderLogins(runnerId: string, logins: ProviderLoginView[], now: number): void {

@@ -230,6 +230,19 @@ const VOCABULARY = {
     failing: danger("Checks Failing"),
     pending: info("Checks Running", { pulse: true }),
   },
+  /** A cross-model review in Review's Cross-Model Reviews (#3369): where it is, then its verdict once
+   * it ends. Only a valid report votes; Stale is a separate fact, not one of these. */
+  reviewRun: {
+    requested: neutral("Requested"),
+    running: info("Reviewing", { pulse: true }),
+    upvote: success("Upvote"),
+    downvote: warning("Downvote"),
+    /** Completed on a runner that does not check reports against the review contract. */
+    unvalidated: neutral("Not Validated"),
+    invalid: danger("Invalid"),
+    failed: danger("Failed"),
+    canceled: neutral("Canceled"),
+  },
   /** A background result's push notification receipt. */
   notification: {
     pending: neutral("Push Pending"),

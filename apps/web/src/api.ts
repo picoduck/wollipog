@@ -80,6 +80,7 @@ import type {
   ReconcilePodRequest,
   RunView,
   ReviewFindingsResponse,
+  ReviewSessionsPage,
   RunnerCredentialSecret,
   CreateReviewFindingRequest,
   UpdateReviewFindingRequest,
@@ -1018,6 +1019,13 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(sessionId)}/review-findings/${encodeURIComponent(findingId)}`,
       { method: "PATCH", body: JSON.stringify(body) },
     ),
+
+  /** The cross-model reviews this session requested (#3369), newest first. */
+  reviewSessions: (sessionId: string, page: { limit?: number; afterReviewSessionId?: string } = {}) => {
+    const query = new URLSearchParams({ limit: String(page.limit ?? 25) });
+    if (page.afterReviewSessionId) query.set("afterReviewSessionId", page.afterReviewSessionId);
+    return req<ReviewSessionsPage>(`/api/sessions/${encodeURIComponent(sessionId)}/review-sessions?${query}`);
+  },
 
   bundleReviewFindings: (sessionId: string, body: BundleReviewFindingsRequest) =>
     req<ReviewFindingsResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/review-findings/bundle`, {

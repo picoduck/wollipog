@@ -7276,6 +7276,8 @@ export interface SessionView {
   kind?: import("./review-session.js").SessionKind;
   /** v226: present on a review session (#3368): what it reviews and for whom. */
   review?: import("./review-session.js").ReviewSessionLink;
+  /** #3369: the review sessions this session requested, summarized. Omitted when it has none. */
+  reviewRuns?: import("./review-session.js").ReviewRunsSummary;
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
@@ -8903,6 +8905,10 @@ export interface AgentsUpdatedMessage {
   editors?: EditorInfo[];
   /** Protocol v176: target-local harness probes refreshed without replacing the target template. */
   executionTargets?: ExecutionTargetDefinition[];
+  /** #3369: the review-session capability, which depends on discovered agents. A registration made
+   * before discovery advertised it stale; each discovery pass replaces it (null: none). Older
+   * control planes ignore it. */
+  reviewSession?: import("./review-session.js").ReviewSessionCapability | null;
 }
 
 /** Authoritative replacement of one runner's active/recent provider-login cards. */
