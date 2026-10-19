@@ -508,7 +508,7 @@ test("Owners adopt and revoke provider profiles, confirming active sessions; mem
 });
 
 test("Owners recover a stale provider HOME lease only where the Machine can prove it abandoned (#3241)", async ({ page }) => {
-  await page.goto("/machine-management-e2e.html?leases");
+  await page.goto(`/machine-management-e2e.html?leases&${DESIGN_WORKSTATION}`);
   await page.getByText("Accounts", { exact: true }).click();
   const accounts = page.locator("details.runner-agents").filter({ hasText: "Accounts" });
   const row = (label: string) => accounts.locator(".agent-row").filter({ hasText: label });
@@ -528,7 +528,7 @@ test("Owners recover a stale provider HOME lease only where the Machine can prov
   await expect(row("Personal").locator(".atag", { hasText: "Stale Lease" })).toHaveCount(0);
   await accounts.screenshot({ path: "test-results/provider-accounts/lease-recovered.png" });
 
-  await page.goto("/machine-management-e2e.html?leases&role=machine-owner");
+  await page.goto(`/machine-management-e2e.html?leases&role=machine-owner&${DESIGN_WORKSTATION}`);
   await page.getByText("Accounts", { exact: true }).click();
   await expect(accounts.locator(".agent-row").first()).toBeVisible();
   await expect(accounts.getByRole("button", { name: "Recover Lease" })).toHaveCount(0);
