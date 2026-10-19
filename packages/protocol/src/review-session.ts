@@ -157,6 +157,8 @@ const REVIEW_SESSION_REASONS = new Set([
   "the requested head is not the pull request's pushed head",
   "the review snapshot could not be prepared",
   "the runner cannot launch this reviewer",
+  "the reviewer command is not trusted: install it where sessions cannot write, outside provider homes and caches",
+  "the runner is missing a trusted git or gh for reviews",
   "the review session could not be launched",
   "the review was cancelled",
   "the review ended without a result",

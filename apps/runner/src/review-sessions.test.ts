@@ -266,12 +266,13 @@ test("prepare refuses every request outside the requester's own pull request at 
   assert.equal(await refusal(f.launcher.prepare("s_review", f.policy(), { ...CODEX, command: "/tmp/codex" }, "b")),
     "the runner cannot launch this reviewer");
   const planted = fixture(t, { untrusted: true });
-  assert.equal(await refusal(planted.launcher.prepare("s_review", planted.policy(), CODEX, "b")), "the runner cannot launch this reviewer");
+  assert.equal(await refusal(planted.launcher.prepare("s_review", planted.policy(), CODEX, "b")),
+    "the reviewer command is not trusted: install it where sessions cannot write, outside provider homes and caches");
   const noAgent = fixture(t, { agents: [] });
   assert.equal(await refusal(noAgent.launcher.prepare("s_review", noAgent.policy(), CODEX, "b")), "the runner cannot launch this reviewer");
   const untrusted = fixture(t, { tools: { unavailable: "gh is not installed" } });
   assert.equal(await refusal(untrusted.launcher.prepare("s_review", untrusted.policy(), CODEX, "b")),
-    "the runner cannot launch this reviewer");
+    "the runner is missing a trusted git or gh for reviews");
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
 });
 
