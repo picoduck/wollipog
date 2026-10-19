@@ -2499,8 +2499,7 @@ const client = {
     if (!fixture) throw new Error("not a git repository");
     return { summary: structuredClone(fixture.summary) };
   },
-  workflowInstances: async () => FIXTURE_QUERY.get("workflowPruned") === "1" ? [prunedWorkflowFixture()] : [],
-  workflowInstance: async () => prunedWorkflowFixture(),
+  workflowInstances: async () => [],
   workflowDefinitions: async () => [],
   projectLocationWorktreeSetup: async (_projectId: string, locationId: string) => ({
     locationId,
@@ -3380,6 +3379,11 @@ const client = {
       return { locationId, status: structuredClone(LOCATION_SETUP[locationId]!), path: ".wollipog.json" as const, detected: ["pnpm"] };
     },
     dismissWorktreeSetupNotice: async () => undefined,
+  } : {}),
+  // Keep this scenario's complete read responses together, independent of the default run mocks.
+  ...(FIXTURE_QUERY.get("workflowPruned") === "1" ? {
+    workflowInstances: async () => [prunedWorkflowFixture()],
+    workflowInstance: async () => prunedWorkflowFixture(),
   } : {}),
 } as ApiClient;
 
