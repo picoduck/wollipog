@@ -4,6 +4,8 @@ import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { SessionManager } from "./session-manager.js";
 import type { Driver } from "./drivers/driver.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
@@ -137,6 +139,8 @@ process.exit(72);
       const child = spawnSync(process.execPath, ["--import", "tsx", script], { encoding: "utf8" });
       assert.equal(child.status, 71, child.stderr);
       const recovered = new SessionStore(f.root);
+      const preview = recovered.readEventPage("s_test", { afterSeq: 300, limit: 10 }, true);
+      assert.equal(preview.ok, true, JSON.stringify(preview));
       const events = recovered.readEvents("s_test");
       assert.ok(events.some((event) => event.payload.kind === "user_message"));
       const page = recovered.readEventPage("s_test", { afterSeq: 0, limit: 100 });
@@ -197,4 +201,49 @@ test("an empty kept prefix remains readable by indexed peers and never reuses re
     assert.equal(store.appendEvent("s_test", { kind: "user_message", text: "New turn" })!.seq, throughSeq + 1);
     store.flushAll();
   } finally { f.store.flushAll(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("legacy runner-marked background delivery remains durable resume evidence", async () => {
+  const f = fixture(1);
+  try {
+    const marker = f.append({ kind: "stderr", runnerMarker: "background_continuation_delivery", text: "Managed background continuation delivered: continuation" });
+    f.store.flushAll();
+    await f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: marker.seq }, "trim");
+    assert.deepEqual(f.store.readEvents("s_test").find(event => event.seq === marker.seq), marker);
+  } finally { f.store.flushAll(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("retention admits one copy at a time and joins only the exact duplicate boundary", async () => {
+  const f = fixture(200);
+  try {
+    f.store.create({ ...f.store.readMeta("s_test")!, sessionId: "s_other", seq: 0 });
+    f.store.appendEvent("s_other", { kind: "command_output", text: "Discard" });
+    f.store.flushAll();
+    const first = f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq }, "trim");
+    assert.equal(f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq }, "duplicate"), first);
+    assert.equal((await f.store.trimHistory("s_other", { logEpoch: 0, throughSeq: 1 }, "other")).trimmed, false);
+    assert.equal((await f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq + 1 }, "stale")).trimmed, false);
+    assert.equal((await first).trimmed, true);
+    assert.equal((await f.store.trimHistory("s_other", { logEpoch: 0, throughSeq: 1 }, "retry")).trimmed, true);
+  } finally { f.store.flushAll(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("failed unlinks do not claim reclaimed disk bytes and a later pass retries cleanup", async () => {
+  const f = fixture(20);
+  const originalUnlink = fsPromises.unlink;
+  try {
+    fsPromises.unlink = async () => { throw new Error("fixture open-file refusal"); };
+    syncBuiltinESMExports();
+    const result = await f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq }, "trim");
+    assert.equal(result.trimmed, true);
+    assert.equal(result.bytesRemoved, 0);
+    fsPromises.unlink = originalUnlink;
+    syncBuiltinESMExports();
+    assert.ok((await f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq }, "retry")).bytesRemoved > 0);
+    assert.ok(diskBytes(f.root) < 10_000);
+  } finally {
+    fsPromises.unlink = originalUnlink;
+    syncBuiltinESMExports();
+    f.store.flushAll(); rmSync(f.root, { recursive: true, force: true });
+  }
 });

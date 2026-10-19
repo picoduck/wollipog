@@ -582,6 +582,8 @@ function historySequenceFollows(expected: number, actual: number, prunedThrough:
 }
 
 interface HistoryManifest {
+  /** Retention publishes its data and derived index as one atomic cohort. */
+  indexFile?: string;
   retention?: RunnerHistoryRetention;
   version: number;
   logEpoch: number;
@@ -843,7 +845,7 @@ export class SessionStore {
     return join(this.dir(id), "events.legacy-fence.json");
   }
   private historyIndexPath(id: string): string {
-    return join(this.dir(id), "events.idx");
+    return join(this.dir(id), this.readHistoryManifest(id)?.indexFile ?? "events.idx");
   }
   private historyResetPath(id: string): string {
     return join(this.dir(id), "events.reset.json");
@@ -900,7 +902,7 @@ export class SessionStore {
     ) {
       throw new HistoryStoreError("history_corrupt", "session history manifest is invalid");
     }
-    if (manifest.version === 2 && (!manifest.retention ||
+    if (manifest.version === 2 && (!/^events\.index\.retention\.[a-zA-Z0-9.-]+\.idx$/.test(manifest.indexFile ?? "") || !manifest.retention ||
         !Number.isSafeInteger(manifest.retention.throughSeq) || manifest.retention.throughSeq < 1 ||
         !Number.isFinite(manifest.retention.prunedAt) ||
         !/^events\.retention-tools\.[a-zA-Z0-9.-]+\.ndjson$/.test(manifest.retention.toolFile) ||
@@ -1252,7 +1254,8 @@ export class SessionStore {
             entry.name.startsWith("events.active.") ||
             entry.name.startsWith("events.segment.") ||
             entry.name.startsWith("events.retired.") ||
-            entry.name.startsWith("events.retention-tools.")
+            entry.name.startsWith("events.retention-tools.") ||
+            entry.name.startsWith("events.index.")
           ) {
             try { rmSync(join(this.dir(id), entry.name), { force: true }); } catch { /* retryable orphan */ }
           }
@@ -2380,12 +2383,21 @@ export class SessionStore {
     return this.readHistoryManifest(id)?.retention;
   }
 
+  private retainedToolPath(id: string, retention: RunnerHistoryRetention): string {
+    const path = join(this.dir(id), retention.toolFile);
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== retention.toolBytes) {
+      throw new HistoryStoreError("history_corrupt", "retained tool-call evidence is damaged");
+    }
+    return path;
+  }
+
   /** Removed call ids remain accounting evidence without retaining their command/output text. */
   toolCallIds(id: string): string[] {
     const ids = new Set<string>();
     const retention = this.historyRetention(id);
     if (retention) {
-      const bytes = readFileSync(join(this.dir(id), retention.toolFile));
+      const bytes = readFileSync(this.retainedToolPath(id, retention));
       if (bytes.length !== retention.toolBytes || createHash("sha256").update(bytes).digest("hex") !== retention.toolSha256) {
         throw new HistoryStoreError("history_corrupt", "retained tool-call evidence is damaged");
       }
@@ -2402,10 +2414,13 @@ export class SessionStore {
 
   trimHistory(id: string, request: { logEpoch: number; throughSeq: number }, owner: string,
     inactive: () => boolean = () => true): Promise<{ trimmed: boolean; bytesRemoved: number }> {
-    const running = this.historyTrimJobs.get(id);
+    const key = JSON.stringify([id, request.logEpoch, request.throughSeq]);
+    const running = this.historyTrimJobs.get(key);
     if (running) return running;
-    const job = this.trimHistoryPass(id, request, owner, inactive).finally(() => this.historyTrimJobs.delete(id));
-    this.historyTrimJobs.set(id, job);
+    // A timed-out CP request can leave its copy running. Never accumulate concurrent copies.
+    if (this.historyTrimJobs.size > 0) return Promise.resolve({ trimmed: false, bytesRemoved: 0 });
+    const job = this.trimHistoryPass(id, request, owner, inactive).finally(() => this.historyTrimJobs.delete(key));
+    this.historyTrimJobs.set(key, job);
     return job;
   }
 
@@ -2427,8 +2442,8 @@ export class SessionStore {
       manifestKey = this.historyManifestKey(id);
       if ((sourceLayout.manifest?.retention?.throughSeq ?? 0) >= request.throughSeq) {
         this.releaseLock(id, owner);
-        await this.cleanupRetainedHistory(id);
-        return { trimmed: true, bytesRemoved: 0 };
+        const bytesRemoved = await this.cleanupRetainedHistory(id);
+        return { trimmed: true, bytesRemoved };
       }
     } finally { this.releaseLock(id, owner); }
     const layout = sourceLayout!;
@@ -2451,7 +2466,8 @@ export class SessionStore {
     let output: FileHandle | undefined;
     let tools: FileHandle | undefined;
     let indexOut: FileHandle | undefined;
-    const indexTmp = `${this.historyIndexPath(id)}.${token}.tmp`;
+    const indexFile = `events.index.${token}.idx`;
+    const indexTmp = join(this.dir(id), indexFile);
     try {
       const response = new RetentionResponse();
       let lastSeq = 0;
@@ -2474,7 +2490,7 @@ export class SessionStore {
           bytes: segmentBytes, sha256: hash.digest("hex") });
       };
       if (priorRetention) {
-        const prior = await open(join(this.dir(id), priorRetention.toolFile), "r");
+        const prior = await open(this.retainedToolPath(id, priorRetention), "r");
         const priorHash = createHash("sha256");
         try {
           for (let offset = 0; offset < priorRetention.toolBytes;) {
@@ -2515,7 +2531,7 @@ export class SessionStore {
       await Promise.all([tools.close(), indexOut.close()]); tools = indexOut = undefined;
       const active = await open(join(this.dir(id), activeFile), "wx");
       await active.sync(); await active.close();
-      const manifest: HistoryManifest = { version: 2, logEpoch: request.logEpoch, activeFile,
+      const manifest: HistoryManifest = { version: 2, logEpoch: request.logEpoch, activeFile, indexFile,
         segments,
         retention: { throughSeq: request.throughSeq, prunedAt: Date.now(), toolFile, toolBytes, toolSha256: toolHash.digest("hex") } };
       // Preserve the legacy-writer fence when replacing a monolithic generation.
@@ -2524,7 +2540,7 @@ export class SessionStore {
       const published = await this.stageHistoryFile(this.historyManifestPath(id), token, JSON.stringify(manifest));
       staged.push(published);
       await this.fsyncDirectoryAsync(this.dir(id));
-      const preparedKeys = new Map([...outputFiles, activeFile, toolFile].map((file) => [file, this.statKey(join(this.dir(id), file))]));
+      const preparedKeys = new Map([...outputFiles, activeFile, toolFile, indexFile].map((file) => [file, this.statKey(join(this.dir(id), file))]));
       if (!inactive() || !this.acquireFreeLock(id, owner)) return deferred;
       try {
         const current = this.readMeta(id);
@@ -2535,7 +2551,6 @@ export class SessionStore {
         if (layout.sources.some((source) => this.statKey(source.path) !== sourceKeys.get(source.path)) ||
             [...preparedKeys].some(([file, key]) => key === null || this.statKey(join(this.dir(id), file)) !== key) ||
             staged.some((file) => !existsSync(file.tmp))) return deferred;
-        this.publishHistoryIndex(id, indexTmp);
         publicationStarted = true;
         for (const file of staged) this.publishHistoryFile(id, file);
         committed = true;
@@ -2554,8 +2569,8 @@ export class SessionStore {
       } finally { this.releaseLock(id, owner); }
       this.recoverLegacyFence(id, manifest);
       this.compactionsInFlight.delete(token);
-      await this.cleanupRetainedHistory(id);
-      return { trimmed: true, bytesRemoved: Math.max(0, layout.totalBytes - bytes - toolBytes) };
+      const deletedBytes = await this.cleanupRetainedHistory(id);
+      return { trimmed: true, bytesRemoved: Math.max(0, deletedBytes - bytes - toolBytes) };
     } finally {
       this.compactionsInFlight.delete(token);
       if (publicationStarted) {
@@ -2564,7 +2579,7 @@ export class SessionStore {
         this.historyIndexInfoCache.delete(id); this.seqReconciled.delete(id);
       }
       await Promise.all([output?.close(), tools?.close(), indexOut?.close()]);
-      rmSync(indexTmp, { force: true });
+      if (!committed && !publicationStarted) rmSync(indexTmp, { force: true });
       for (const file of staged) rmSync(file.tmp, { force: true });
       if (!committed && !publicationStarted) for (const file of [...outputFiles, activeFile, toolFile]) rmSync(join(this.dir(id), file), { force: true });
     }
@@ -2572,28 +2587,35 @@ export class SessionStore {
 
   /** Superseded generations are no longer authoritative. Unlink asynchronously and in bounded
    * directory pages; an interrupted cleanup is retried by the next control-plane pass. */
-  private async cleanupRetainedHistory(id: string): Promise<void> {
+  private async cleanupRetainedHistory(id: string): Promise<number> {
     const layout = this.historyLayout(id);
-    if (!layout.manifest?.retention) return;
+    if (!layout.manifest?.retention) return 0;
+    let deletedBytes = 0;
     let manifestKey = this.historyManifestKey(id);
-    let kept = new Set([layout.active.file, ...layout.sources.map((source) => source.file), layout.manifest.retention.toolFile]);
+    let kept = new Set([layout.active.file, ...layout.sources.map((source) => source.file), layout.manifest.retention.toolFile, layout.manifest.indexFile!]);
     const directory = await opendir(this.dir(id));
     for await (const entry of directory) {
       const currentKey = this.historyManifestKey(id);
       if (currentKey !== manifestKey) {
         const current = this.historyLayout(id);
-        if (!current.manifest?.retention) return;
-        kept = new Set([current.active.file, ...current.sources.map((source) => source.file), current.manifest.retention.toolFile]);
+        if (!current.manifest?.retention) return deletedBytes;
+        kept = new Set([current.active.file, ...current.sources.map((source) => source.file), current.manifest.retention.toolFile, current.manifest.indexFile!]);
         manifestKey = currentKey;
       }
       if (!entry.isFile() || kept.has(entry.name)) continue;
       if (!/^events\.(segment|active|retired|retention-tools)\..+\.ndjson$/.test(entry.name) &&
           !/^events\.(manifest|legacy-fence)\.json\..+\.tmp$/.test(entry.name) &&
-          !/^events\.idx\..+\.tmp$/.test(entry.name)) continue;
+          !/^events\.(?:idx|index\..+\.idx)(?:\..+\.tmp)?$/.test(entry.name)) continue;
       if ([...this.compactionsInFlight].some((token) => entry.name.includes(token))) continue;
-      await unlink(join(this.dir(id), entry.name)).catch(() => undefined);
+      const path = join(this.dir(id), entry.name);
+      try {
+        const bytes = lstatSync(path).size;
+        await unlink(path);
+        deletedBytes += bytes;
+      } catch { /* An open file can refuse unlinking; the next pass retries without claiming space. */ }
       await yieldToEventLoop();
     }
+    return deletedBytes;
   }
 
   /** Move one bounded, newline-aligned prefix of the mutable active log into a content-addressed,
@@ -2686,7 +2708,7 @@ export class SessionStore {
       }
       // Stage the control files too, so publication is only renames plus one directory fsync.
       const manifest: HistoryManifest = {
-        ...(layout.manifest?.retention ? { retention: layout.manifest.retention } : {}),
+        ...(layout.manifest?.retention ? { retention: layout.manifest.retention, indexFile: layout.manifest.indexFile } : {}),
         version: layout.manifest?.retention ? 2 : HISTORY_MANIFEST_VERSION,
         logEpoch: epoch,
         activeFile,

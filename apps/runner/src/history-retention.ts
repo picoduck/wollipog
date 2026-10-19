@@ -74,6 +74,7 @@ export class RetentionResponse {
   }
   keep(event: RetentionEvent): boolean {
     const p = event.payload;
+    if (p.kind === "stderr" && p.runnerMarker !== undefined) return true;
     if (p.kind === "agent_message") return p.parentToolUseId === undefined && (
       (p.final === true && p.text.trim() !== "") ||
       (this.messageId !== undefined ? p.messageId === this.messageId :

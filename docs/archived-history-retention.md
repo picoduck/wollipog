@@ -239,7 +239,7 @@ unchanged. Provider-native transcripts outside the runner store are out of scope
 
 Copying reads 64 KiB slices and yields to live I/O, with bounded record buffers. Kept data is
 written into immutable segments targeting 1 MiB (a single record can exceed that target, up to
-the existing history-page record limit). An index is built during the copy. The writer lock is
+the existing history-page record limit). An index is built during the copy and named by the same manifest, so data and index switch together. At most one retention copy runs per runner, including after a control-plane request times out. The writer lock is
 free during copying; any live provider or changed source wins and defers trimming. New files
 are flushed before an atomic manifest switch; a crash before it keeps the original readable,
 and a crash after it keeps the complete retained log readable. The next pass finishes unlinking
