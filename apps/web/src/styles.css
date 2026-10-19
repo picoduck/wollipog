@@ -310,8 +310,6 @@
   --finding-row-pad-x: 11px;
   --runner-card-pad-y: 19px;
   --runner-card-pad-x: 21px;
-  --ws-row-pad-y: 10px;
-  --ws-row-pad-x: 12px;
 }
 
 
@@ -404,8 +402,6 @@
   --finding-row-pad-x: 9px;
   --runner-card-pad-y: 16px;
   --runner-card-pad-x: 18px;
-  --ws-row-pad-y: 7px;
-  --ws-row-pad-x: 10px;
 
   --space-0-5: 2px;
   --space-1: 4px;
@@ -10385,18 +10381,128 @@ textarea {
 /* The sections keep their own content until #2989, #2990 and #2995; the detail spaces them. */
 .machine-detail-sections {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-8);
   min-width: 0;
 }
 .machine-detail-sections > * { margin-top: 0; margin-bottom: 0; }
+/* A section's own state sentence: waiting for a report, empty, or loading (§12). */
+.machine-section-state {
+  margin: 0;
+  color: var(--text-faint);
+  font: var(--type-body);
+}
+/* Capacity (#2989): the figure beside its meter, then the dimensions as one meta line (§11.3,
+   §11.6), its items 12px apart with no dots between them. */
+.machine-capacity-level {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.machine-capacity-figure {
+  flex: none;
+  font: var(--type-body-strong);
+  font-variant-numeric: tabular-nums;
+}
+.machine-capacity-level > .meter { flex: 1; max-width: 320px; }
+.machine-capacity-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.machine-capacity-meta-label { color: var(--text-dim); }
+/* Workspaces (#2989): one row each, the path in 11px mono truncated from the start, so the folder
+   it ends in stays; `<bdi>` keeps the path itself left to right. */
+:is(.machine-workspaces, .machine-skills-rows) {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.machine-workspaces > .row > .row-title { flex: 0 1 auto; }
+/* A long name gives way before the path does: the path keeps at least 30% of the row. */
+.machine-workspace-path {
+  flex: 1 0 30%;
+  min-width: 0;
+  overflow: hidden;
+  direction: rtl;
+  color: var(--text-faint);
+  font: var(--type-micro);
+  font-family: var(--font-mono);
+  font-weight: var(--weight-normal);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Skills on This Machine (#1981, #2989): a disclosure sized as the section titles around it. */
+.machine-skills > summary {
+  color: var(--text);
+  font: var(--type-section);
+}
+.machine-skills-group {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.machine-skills-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.machine-skills-label {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-label);
+}
+.machine-skills-reported {
+  color: var(--text-faint);
+  font: var(--type-small);
+}
+.machine-skill-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The account (§11.8): only a shown value truncates. A mask and its reveal control are never
+   clipped, so the control stays whole and clickable on a phone. */
+.machine-skill-account {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.machine-skill-account:not(.pid) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.machine-skill-account.pid[data-revealed="false"],
+.machine-skill-account > :is(.pid-lead, .pid-toggle) { flex: none; }
+.machine-skill-account > .pid-shown { flex: 0 1 auto; overflow: hidden; }
+.machine-skill-account .pid-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.machine-skill-path {
+  direction: rtl;
+  text-align: left;
+}
 /* Wrapped onto two rows, the notice's buttons each borrow 4px for a 44px target (§2.8, §15.3), so
    the rows sit 12px apart and a tap below one never lands on the next. */
 @media (pointer: coarse) {
   .machine-detail > .notice .notice-actions { row-gap: var(--space-3); }
-}
-.machine-capacity-line {
-  margin: 0;
-  font: var(--type-body);
 }
 .machine-notice-error {
   margin: 0;
@@ -10588,22 +10694,6 @@ textarea {
   background: none;
 }
 .provider-login-card[data-embedded] :is(p, form, .provider-login-device-code) { margin: 0; }
-.runner-workspaces {
-  margin-top: 16px;
-}
-.group {
-  margin-top: 13px;
-}
-.group-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  color: var(--text-dim);
-  margin-bottom: 8px;
-}
 .group-count {
   font-size: 10.5px;
   background: var(--bg-elev-2);
@@ -10962,35 +11052,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   gap: 8px;
   padding: 7px 10px;
 }
-.workspace-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.workspace-list li {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: var(--ws-row-pad-y) var(--ws-row-pad-x);
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.ws-name {
-  font-size: 12.5px;
-  font-weight: 500;
-}
-.ws-path {
-  font-size: 11.5px;
-  color: var(--text-faint);
-  font-family: "Cascadia Code", monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .machine-settings-dialog .modal-body {
   display: flex;
   flex-direction: column;
@@ -11051,52 +11112,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex: 0 0 auto;
   white-space: nowrap;
 }
-.machine-workspace-list {
-  max-height: 190px;
-  overflow-y: auto;
-}
-.machine-workspace-create,
-.machine-workspace-form {
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-elev-2);
-}
-.machine-workspace-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto;
-  align-items: end;
-  gap: 10px;
-}
-.machine-workspace-form code {
-  display: block;
-  padding: 9px 10px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.machine-capacity-summary {
-  color: var(--text) !important;
-  font-weight: 600;
-}
-.machine-capacity-blockers {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  padding-left: 20px;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
 .machine-danger-zone {
   align-items: flex-start;
 }
 @media (max-width: 680px) {
-  .machine-name-row,
-  .machine-workspace-form {
+  .machine-name-row {
     grid-template-columns: 1fr;
   }
   .machine-settings-heading {
@@ -16405,12 +16425,6 @@ button.review-finding-location {
   /* The status stays beside the agent's name when a reason wraps under it. */
   .skill-deployment .skill-deployment-agent > .cell-status { align-self: flex-start; }
 }
-/* Skills on This Machine, in a machine's details in Connections (#1981). */
-.machine-skills > .runner-agents-body { display: grid; gap: var(--space-3); padding-top: var(--space-2); }
-.machine-skills-group { display: grid; gap: var(--space-1); min-width: 0; }
-.machine-skills-group h5 { margin: 0; }
-.machine-skills-group ul { display: grid; gap: var(--space-1); margin: 0; padding-left: var(--space-4); }
-.machine-skills-group li { overflow-wrap: anywhere; }
 :is(.skills-hint, .projects-overview-hint) { color: var(--text-dim); font-size: var(--text-sm); line-height: 1.5; margin: 0; }
 /* New Skill (NewSkillDialog.tsx). The Upload Folder dropzone is the §8.4 file picker: an icon, a
    sentence and Choose Folder…, never the native "Choose Files" control. */

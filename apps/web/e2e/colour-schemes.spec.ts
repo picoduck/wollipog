@@ -1264,7 +1264,6 @@ test("comfortable density gives every row more room than compact", async ({ page
         finding: box(".review-finding-row"),
         // Usage keeps the runner card (#2988 retired it for machines).
         usageCard: box(".runner-card"),
-        workspace: box(".workspace-list li"),
         // The §5.2 rows and §14 table cells take their height from the row tokens (§19.1), so
         // density moves their height and leaves their padding alone.
         rowOne: box(".surface > .row:not(.row-2, .dense)"),
@@ -1280,7 +1279,7 @@ test("comfortable density gives every row more room than compact", async ({ page
 
   // Each of the three, not the total: a scale that grew one dimension and shrank another could
   // still add up, and "more room" has to mean more room everywhere it is claimed.
-  for (const family of ["card", "agent", "finding", "usageCard", "workspace"] as const) {
+  for (const family of ["card", "agent", "finding", "usageCard"] as const) {
     // A MEANINGFUL step, not "greater than": a subpixel increase satisfied the first version, and
     // a density setting nobody can see is a setting that does not work.
     expect(comfortable[family].height, `a ${family} row must be meaningfully taller`)

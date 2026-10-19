@@ -467,10 +467,11 @@ test("Connection Details lists every fact, Not available where one is missing, a
   const facts = connectionFacts(buildRunner, buildBox, "build-runner");
   assert.deepEqual(facts.map((fact) => fact.label), [
     "Connection", "SSH Target", "Host", "Operating System", "Runner Version", "Last Seen", "Worktree Storage", "Sandboxing",
-    "Deployed Build", "Platform",
+    "Idle Processes", "Deployed Build", "Platform",
   ]);
   assert.deepEqual(connectionFacts(studio, undefined, "studio").map((fact) => fact.label), [
     "Connection", "Machine ID", "Host", "Operating System", "Runner Version", "Last Seen", "Worktree Storage", "Sandboxing",
+    "Idle Processes",
   ]);
   const text = connectionFactsText("Build Box", facts, PROTOCOL_VERSION);
   for (const fact of facts) assert.match(text, new RegExp(`^${fact.label}: `, "m"), `Copy All includes ${fact.label}`);

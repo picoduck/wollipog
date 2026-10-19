@@ -4,19 +4,30 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { RunnerView } from "@wollipog/protocol";
+import { setHideAccountEmails } from "../account-email-privacy.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { relativeTime } from "../format.js";
 import type { RunnerSkillsResponse } from "../skills.js";
 import { MachineSkillsSection } from "./MachineSkillsSection.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
-  window: domWindow, document: domWindow.document, navigator: domWindow.navigator,
+  window: domWindow, document: domWindow.document, navigator: domWindow.navigator, localStorage: domWindow.localStorage,
   HTMLElement: domWindow.HTMLElement, Node: domWindow.Node, React, IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+
+const labels = (scope: Element) => [...scope.querySelectorAll(".machine-skills-label")].map((label) => label.textContent);
+const surfaces = (scope: Element) => [...scope.querySelectorAll<HTMLElement>(".surface")];
+/** Each row's title, its meta in order, then its second line. */
+const rows = (surface: Element) => [...surface.querySelectorAll(".row.row-2")].map((row) => [
+  row.querySelector(".row-title")?.textContent,
+  ...[...row.querySelectorAll(".row-line > :not(.row-title)")].map((meta) => meta.textContent),
+  ...[...row.querySelectorAll(".row-sub")].map((line) => line.textContent),
+]);
 
 const runner = {
   runnerId: "runner-1", hostname: "runner-1", displayName: "Build Machine", os: "linux", version: "1", status: "online",
@@ -68,16 +79,20 @@ test("Skills on This Machine reads the machine when opened and lists every remov
     await view.toggle(true);
     assert.equal(view.reads(), 1);
     const text = view.container.textContent ?? "";
-    assert.match(text, /Unmanaged Skills/);
-    assert.match(text, /local-notes · Work Account · Claude Code — Scratch skill/);
+    assert.deepEqual(labels(view.container), ["Unmanaged Skills", "Recent Link Removals"]);
+    assertNoDomNode(view.container.querySelector("h5"), "section labels, not h5 groups");
+    assert.doesNotMatch(text, /[·—]/u, "meta sits 12px apart, never dot- or dash-joined");
+    const [unmanaged, removals] = surfaces(view.container);
+    assert.deepEqual(rows(unmanaged!), [["local-notes", "Claude Code", "Work Account", "Scratch skill"]]);
     assert.doesNotMatch(text, /claude-main|acct-work/, "the agent's name and the account's label, never their ids");
     assert.match(text, /can then be adopted with an explicit recovery-aware confirmation/);
-    assert.match(text, /Recent Link Removals/);
     // The machine's whole history: every skill's, including one the library no longer has.
-    assert.match(text, /~\/\.claude\/skills\/code-review — No longer in the desired skill list\./);
-    assert.match(text, /~\/\.codex\/skills\/deleted-skill · Work Account — The canonical location/);
-    assert.match(text, new RegExp(`Reported ${new Date(1_699_999_000_000).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
-      "the removal history's own timestamp, not the newer inventory's");
+    assert.deepEqual(rows(removals!), [
+      ["~/.claude/skills/code-review", "No longer in the desired skill list."],
+      ["~/.codex/skills/deleted-skill", "Work Account", "The canonical location it routes through is conflicted."],
+    ]);
+    assert.equal(view.container.querySelector(".machine-skills-reported")?.textContent, `Reported ${relativeTime(1_699_999_000_000)}`,
+      "the removal history's own time, relative, not the newer inventory's");
     await view.toggle(false);
     await view.toggle(true);
     assert.equal(view.reads(), 2, "each opening reads the machine's latest report");
@@ -103,16 +118,27 @@ test("removal reporting says what the runner can and cannot report", async () =>
   } finally { await unknown.unmount(); }
 });
 
-test("a failed read says so and retries on the next open; a runner without skills shows nothing", async () => {
+test("a failed read is a danger notice whose Retry reads again, as does the next open; a runner without skills shows nothing", async () => {
   let fail = true;
   const view = await open(async () => { if (fail) throw new Error("HTTP 503"); return reported("supported"); });
   try {
     await view.toggle(true);
-    assert.match(view.container.querySelector('[role="alert"]')?.textContent ?? "", /could not be loaded/);
+    const notice = view.container.querySelector<HTMLElement>('.notice.t-danger.compact[role="alert"]')!;
+    assert.match(notice.textContent ?? "", /Couldn't Load Skills on This Machine/);
+    assert.doesNotMatch(notice.textContent ?? "", /close and reopen/i, "Retry, not close and reopen");
     fail = false;
+    const retry = [...notice.querySelectorAll("button")].find((button) => button.textContent === "Retry")!;
+    await act(async () => {
+      retry.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(view.reads(), 2, "Retry reads again");
+    assert.match(view.container.textContent ?? "", /local-notes/);
+    assertNoDomNode(view.container.querySelector(".notice.t-danger"), "the notice goes once the read succeeds");
+    fail = true;
     await view.toggle(false);
     await view.toggle(true);
-    assert.match(view.container.textContent ?? "", /local-notes/);
+    assert.equal(view.reads(), 3, "the next opening reads too");
   } finally { await view.unmount(); }
   const old = await open(async () => reported("supported"), { ...runner, protocolVersion: 1 });
   try {
@@ -134,4 +160,37 @@ test("a machine that hasn't reported yet says so, and a later opening shows its 
     assert.match(view.container.textContent ?? "", /local-notes/);
     assert.doesNotMatch(view.container.textContent ?? "", /hasn't reported/);
   } finally { await view.unmount(); }
+});
+
+test("an account label that is an email is masked under Hide Account Emails, and shown when it is off", async () => {
+  const emailRunner = {
+    ...runner,
+    providerAccounts: [{ id: "acct-work", label: "ada@example.com", provider: "claude", authStatus: "authenticated" }],
+  } as RunnerView;
+  for (const hide of [true, false]) {
+    setHideAccountEmails(hide, domWindow as never);
+    const view = await open(async () => reported("supported"), emailRunner);
+    try {
+      await view.toggle(true);
+      const text = view.container.textContent ?? "";
+      if (hide) {
+        assert.doesNotMatch(text, /ada@example\.com/, "the email is not in the DOM while hidden");
+        assert.match(text, /AccountEmail Hidden/, "the mask follows its visible lead");
+        // A reveal lasts until the disclosure closes (review CR-1.1).
+        const reveal = view.container.querySelector<HTMLButtonElement>('button[aria-label="Show Account Email"]')!;
+        assert.ok(reveal, "the mask has its reveal control");
+        await act(async () => reveal.click());
+        assert.match(view.container.textContent ?? "", /ada@example\.com/, "revealed");
+        await view.toggle(false);
+        await view.toggle(true);
+        assert.doesNotMatch(view.container.textContent ?? "", /ada@example\.com/, "closing hides it again");
+        assert.ok(view.container.querySelector('button[aria-label="Show Account Email"]'), "masked again on reopening");
+      } else {
+        assert.match(text, /ada@example\.com/);
+      }
+    } finally {
+      await view.unmount();
+      setHideAccountEmails(false, domWindow as never);
+    }
+  }
 });

@@ -526,48 +526,78 @@ test("non-admin recovery guidance wraps inside a narrow mobile detail", async ({
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
 
 });
-test("Machine settings rename the Machine and register a Workspace without creating a Project", async ({ page }) => {
+test("Machine settings rename the Machine, and Add Workspace… registers a Workspace without creating a Project", async ({ page }) => {
   await openSettings(page);
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   await expect(dialog.getByText("Misko-T14s-G6", { exact: true })).toBeVisible();
+  // Workspaces live in the machine's detail (#2989).
+  await expect(dialog.getByRole("heading", { name: "Workspaces" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /Add Workspace/ })).toHaveCount(0);
 
   const name = dialog.getByLabel("Machine Name");
   await name.fill("Primary Development Machine");
   await dialog.getByRole("button", { name: "Save Changes" }).click();
   await expect(page.getByRole("heading", { name: "Primary Development Machine", exact: true })).toBeVisible();
-  const renamedDialog = page.getByRole("dialog", { name: "Manage Primary Development Machine" });
+  await page.getByRole("dialog", { name: "Manage Primary Development Machine" }).getByRole("button", { name: "Close" }).last().click();
 
-  await renamedDialog.getByRole("button", { name: "Add Workspace" }).last().click();
-  await renamedDialog.getByRole("button", { name: "repo" }).click();
-  await renamedDialog.getByRole("button", { name: "Use This Folder" }).click();
-  await expect(renamedDialog.getByLabel("Workspace Name")).toHaveValue("repo");
-  await renamedDialog.getByRole("button", { name: "Add Workspace" }).last().click();
+  const workspaces = page.getByRole("region", { name: /^Workspaces/ });
+  await workspaces.getByRole("button", { name: "Add Workspace…" }).click();
+  const add = page.getByRole("dialog", { name: "Add Workspace" });
+  await expect(add).toContainText("Primary Development Machine");
+  await add.getByRole("button", { name: "repo" }).click();
+  await expect(add.getByLabel("Workspace Name")).toHaveValue("repo");
+  await add.getByRole("button", { name: "Add Workspace" }).click();
 
-  await expect(renamedDialog.getByText("C:\\Users\\misko\\repo", { exact: true })).toBeVisible();
+  await expect(add).toHaveCount(0);
+  const row = workspaces.locator(".surface > .row").filter({ hasText: "repo" });
+  await expect(row.locator(".machine-workspace-path")).toHaveAttribute("title", "C:\\Users\\misko\\repo");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.lastRegisteredWorkspace()))
     .toEqual({ name: "repo", path: "C:\\Users\\misko\\repo" });
 });
 
-test("Machine settings explain live Runner Capacity and apply an authorized increase", async ({ page }) => {
-  await openSettings(page);
+test("Capacity shows live usage in the detail, and Change Limit… applies an authorized increase", async ({ page }) => {
+  const capacity = page.getByRole("region", { name: "Capacity" });
+  await expect(capacity.locator(".machine-capacity-figure")).toHaveText("12 of 16 units in use");
+  await expect(capacity.getByRole("progressbar", { name: "Units in Use" })).toHaveClass(/t-warning/);
+  await expect(capacity.getByRole("list", { name: "Capacity Breakdown" }).getByRole("listitem"))
+    .toHaveText(["Active Turns 4 of 4", "Queued 3", "Idle Resumable 9", "Parked 2"]);
+  await expect(capacity.locator(".notice.t-warning")).toHaveText("Claude is using 4 of 4 provider slots. 3 sessions waiting.");
+
+  await capacity.getByRole("button", { name: "Change Limit…" }).click();
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   await expect(dialog.getByRole("heading", { name: "Runner Capacity" })).toBeVisible();
-  await expect(dialog.getByLabel("Runner Capacity Usage")).toContainText("12 Units");
-  await expect(dialog.getByText("12 of 16 Units Used · 3 Sessions Queued", { exact: true })).toBeVisible();
-  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Active Turns4 of 4");
-  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Resident Process Units12 of 16");
-  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Retained Resumable Sessions9 (Unlimited)");
-  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Parked Sessions2");
-  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Idle Process PolicyPark When Needed");
-  await expect(dialog.getByText(/idle-process parking are configured in/)).toBeVisible();
-  await expect(dialog.getByRole("list", { name: "Current Capacity Bottlenecks" }))
-    .toContainText("claude is using 4 of 4 provider slots · 3 Waiting");
-
+  await expect(dialog.getByLabel("Runner Capacity Usage")).toHaveCount(0);
+  await expect(dialog.getByLabel("Capacity Dimensions")).toHaveCount(0);
   await dialog.getByLabel("Runner Capacity", { exact: true }).fill("24");
   await dialog.getByRole("button", { name: "Save Capacity" }).click();
-  await expect(dialog.getByText("12 of 24 Units Used · 3 Sessions Queued", { exact: true })).toBeVisible();
-  await expect(dialog.getByLabel("Runner Capacity Usage")).toContainText("12 Units");
+  await expect(capacity.locator(".machine-capacity-figure")).toHaveText("12 of 24 units in use");
+  await expect(capacity.getByRole("progressbar", { name: "Units in Use" })).not.toHaveClass(/t-warning/);
 });
+
+for (const width of [1440, 390]) {
+  test(`at ${width}px Capacity waits for a report, Workspaces says when it has none, and long paths stay in their rows (#2989)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const open = async (query: string) => {
+      await page.goto(`/machine-management-e2e.html?${query}${width > 760 ? `&${DESIGN_WORKSTATION}` : ""}`);
+      if (width <= 760) await machineRow(page).click();
+      await expect(page.getByRole("region", { name: "Capacity" })).toBeVisible();
+    };
+    await open("capacity=waiting&workspaces=0");
+    await expect(page.getByRole("region", { name: "Capacity" })).toContainText("Waiting for live capacity from this machine.");
+    await expect(page.getByRole("region", { name: "Capacity" }).locator(".meter")).toHaveCount(0);
+    await expect(page.getByRole("region", { name: /^Workspaces/ })).toContainText("No workspaces yet.");
+
+    await open("workspaces=long");
+    const rows = page.getByRole("region", { name: /^Workspaces/ }).locator(".surface > .row");
+    await expect(rows).toHaveCount(3);
+    const heights = await rows.evaluateAll((items) => items.map((item) => item.getBoundingClientRect().height));
+    expect(new Set(heights).size, "every row is one height").toBe(1);
+    const path = rows.filter({ hasText: "Acme Storefront" }).locator(".machine-workspace-path");
+    await expect(path).toHaveAttribute("title", /acme-storefront$/);
+    if (width <= 760) expect(await path.evaluate((element) => element.scrollWidth > element.clientWidth), "a phone truncates the long path").toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  });
+}
 
 test("Machine settings require the terms warning before enabling Automatic Account Switching", async ({ page }) => {
   await openSettings(page);
@@ -637,7 +667,9 @@ test("Machine settings save independent Claude and Codex default accounts", asyn
 test("ordinary members can inspect Runner Capacity but cannot change it", async ({ page }) => {
   await page.goto(`/machine-management-e2e.html?role=viewer&${DESIGN_WORKSTATION}`);
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Capacity" })).toContainText("12 of 16 Units Used");
+  await expect(page.getByRole("region", { name: "Capacity" })).toContainText("12 of 16 units in use");
+  await expect(page.getByRole("button", { name: "Change Limit…" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add Workspace…" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Settings…" })).toHaveCount(0);
 });
 
@@ -997,12 +1029,12 @@ test("an SSH machine's busy update asks to interrupt its sessions, and Connectio
   const details = page.getByRole("dialog", { name: "Connection Details" });
   await expect(details.locator(".facts dt")).toHaveText([
     "Connection", "SSH Target", "Host", "Operating System", "Runner Version", "Last Seen", "Worktree Storage", "Sandboxing",
-    "Deployed Build", "Platform",
+    "Idle Processes", "Deployed Build", "Platform",
   ]);
   await expect(details.locator(".facts dd").nth(6)).toHaveText("Not available");
   await details.getByRole("button", { name: "Copy All" }).click();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
-  for (const label of ["Connection: SSH", "SSH Target: misko@design-workstation", "Operating System: Windows", "Deployed Build: 0.42.0+fixture", "Platform: x86_64-pc-windows-msvc"]) {
+  for (const label of ["Connection: SSH", "SSH Target: misko@design-workstation", "Operating System: Windows", "Deployed Build: 0.42.0+fixture", "Platform: x86_64-pc-windows-msvc", "Idle Processes: Park When Needed"]) {
     expect(copied).toContain(label);
   }
 });
