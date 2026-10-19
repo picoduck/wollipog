@@ -19,6 +19,7 @@ import {
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
+import { activeSessionCounts } from "../rail-attention.js";
 import { osLabel, relativeTime, sshErrorHint, titleCaseLabel } from "../format.js";
 import {
   agentInstallHints,
@@ -26,7 +27,6 @@ import {
   harnessUpdateGuidance,
   formatAdmissionPolicy,
   machineListEntries,
-  machineListOrder,
   formatExecutionIsolation,
   machineSettingsMutationError,
   nativeRunnerUpdateHint,
@@ -40,6 +40,8 @@ import {
 
 import { CopyButton, DetailSkeleton, Modal, Spinner } from "./common.js";
 import { MachineList } from "./MachineList.js";
+import { MachinesOverview } from "./MachinesOverview.js";
+import { StaleContent } from "./StaleContent.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
@@ -1685,8 +1687,9 @@ function connectionsPageClass(section: ConnectionSection): string {
 
 export function RunnersView() {
   const api = useApi();
-  const { runners, boxes, view, navigate } = useStore();
+  const { runners, boxes, sessions, view, navigate } = useStore();
   const snapshot = useSnapshotState();
+  const { confirm } = useFeedback();
   const instances = useInstances();
   const bundledLocalRunner = hasBundledLocalRunner();
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -1743,7 +1746,7 @@ export function RunnersView() {
   const selectedMachine = machineId ? machines.find((machine) => machine.runnerId === machineId) ?? null : null;
   // Everything follows the live machines and the route; nothing tracks a deletion in flight. When the
   // machine on screen leaves them while it stays selected (deleted here or anywhere), its route is
-  // replaced by the list, and the first row or the empty state follows (§6.1). Any other route to a
+  // replaced by the list, and the overview or the empty state follows (§6.1). Any other route to a
   // machine that is not there, a link, a reload or Back to an old entry, is Machine Not Found.
   /** The machine the detail showed as of the last commit, and only while it showed one. */
   const shownMachineId = useRef<string | null>(null);
@@ -1760,13 +1763,9 @@ export function RunnersView() {
   useEffect(() => {
     if (selectedMachine && selectedMachine.runnerId === arrivingMachineId) setArrivingMachineId(null);
   }, [arrivingMachineId, selectedMachine]);
-  // Until the All Machines overview (#2986), the default detail is the first row (§6.1 rule 2):
-  // selected in place on desktop and compact widths, while a phone shows the list.
-  const firstMachineId = useMemo(() => machineListOrder(machines)[0]?.runnerId ?? null, [machines]);
-  useEffect(() => {
-    if (isMobile || section !== "machines" || machineId !== null || !firstMachineId) return;
-    navigate({ name: "runners", section: "machines", machineId: firstMachineId }, { replace: true });
-  }, [firstMachineId, isMobile, machineId, navigate, section]);
+  // With nothing selected, desktop and compact widths show the All Machines overview (§6.1 rule 1,
+  // #2986); a phone shows the list, which is its overview.
+  const activeSessions = useMemo(() => activeSessionCounts(sessions.values()), [sessions]);
 
   // Each pane scrolls on its own (§6). A new selection starts the detail at its top; on a phone, where
   // the route swaps the whole screen, focus moves to the new page title, which shows no ring (§16.1).
@@ -1803,6 +1802,25 @@ export function RunnersView() {
 
   const reconnectBox = async (boxId: string, force: boolean) => {
     await api.reconnectBox(boxId, force);
+  };
+  // The overview's Reconnect (#2986), confirming first when it would interrupt sessions, as the
+  // machine's own Reconnect does.
+  const reconnectFromOverview = async (boxId: string) => {
+    try {
+      await api.reconnectBox(boxId, false);
+    } catch (cause) {
+      if (!(cause instanceof ApiError) || cause.status !== 409 || cause.code !== "BOX_HAS_ACTIVE_SESSIONS") throw cause;
+      const conflict = lifecycleConflictPresentation(cause, "reconnect");
+      const approved = await confirm({
+        title: "Interrupt Sessions and Reconnect",
+        message: conflict.message,
+        detailRows: conflict.detailRows,
+        detailRowsOverflow: conflict.detailRowsOverflow,
+        confirmLabel: "Interrupt Sessions and Reconnect",
+        tone: "danger",
+      });
+      if (approved) await api.reconnectBox(boxId, true);
+    }
   };
   const removeBox = async (boxId: string) => {
     await api.removeBox(boxId);
@@ -1925,6 +1943,20 @@ export function RunnersView() {
     >
       It may have been deleted.
     </State>
+  ) : machineId === null ? (
+    // A phone's list is its overview, so it has no detail here (§6.2).
+    isMobile ? null : (
+      <StaleContent stale={stale}>
+        <MachinesOverview
+          entries={machines}
+          activeSessions={activeSessions}
+          canManage={canManageMachines}
+          onOpen={selectMachine}
+          onRepair={repairRunner}
+          onReconnect={reconnectFromOverview}
+        />
+      </StaleContent>
+    )
   ) : (
     // A machine that is arriving, or one the last-known list lacks while disconnected.
     <DetailSkeleton />
@@ -2035,6 +2067,7 @@ export function RunnersView() {
               // Phone lists never show a selected row (§5.2).
               selectedId={isMobile ? null : machineId}
               onSelect={selectMachine}
+              overview={isMobile ? undefined : { selected: machineId === null, onSelect: () => selectMachine(null) }}
               stale={stale}
               bodyRef={listBodyRef}
               onBodyScroll={(event) => {

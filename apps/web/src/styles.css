@@ -9858,6 +9858,34 @@ textarea {
   min-width: 0;
 }
 .machine-row-meta > span:last-child { flex: 0 1 auto; overflow: hidden; }
+/* MachinesOverview.tsx (#2986). Capacity's column names trail its title as quiet text, and every
+   row keeps the same columns so machines compare at a glance: the name, the meter (§11.6), the
+   figures and the queued sessions, each tabular. */
+.machines-overview-columns {
+  color: var(--text-faint);
+  font: var(--type-small);
+}
+.machine-capacity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(64px, 1fr) 4.5rem 5rem;
+}
+:is(.machine-capacity-figures, .machine-capacity-queued, .machine-capacity-unknown) {
+  color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.machine-capacity-figures {
+  grid-column: 3;
+  text-align: right;
+}
+.machine-capacity-row > .meter + .machine-capacity-figures:not(.is-faint) { color: var(--text-dim); }
+.machine-capacity-queued { grid-column: 4; }
+.machine-capacity-unknown { grid-column: 2 / -1; }
+.machine-capacity-rest > .row-title {
+  color: var(--text-dim);
+  font: var(--type-body);
+}
 .instances-page {
   min-width: 0;
 }
@@ -15580,26 +15608,26 @@ button.review-finding-location {
 :is(.skill-row-skeleton, .project-row-skeleton, .machine-row-skeleton) > .row-body { gap: var(--space-2); }
 /* The phone's first row (#1971): it opens the Library Overview, a step apart from the groups. The
    Projects list's opens the Projects Overview (#2958). */
-:is(.skill-list-overview, .project-list-overview) { margin-bottom: var(--space-2); }
+:is(.skill-list-overview, .project-list-overview, .machine-list-overview) { margin-bottom: var(--space-2); }
 /* The Library Overview (#1971, §6.1): the default detail, top-aligned at the pane's leading edge.
    A title row, then sections 32px apart, each a Surface of two-line rows. The Projects Overview
-   (#2958) is the same recipe. */
-:is(.skills-overview, .projects-overview) {
+   (#2958) and the All Machines overview (#2986) are the same recipe. */
+:is(.skills-overview, .projects-overview, .machines-overview) {
   display: grid;
   align-content: start;
   gap: var(--space-8);
   min-width: 0;
 }
-:is(.skills-overview-head, .projects-overview-head) {
+:is(.skills-overview-head, .projects-overview-head, .machines-overview-head) {
   display: grid;
   gap: var(--space-1);
   min-width: 0;
 }
-:is(.skills-overview-title, .projects-overview-title) {
+:is(.skills-overview-title, .projects-overview-title, .machines-overview-title) {
   margin: 0;
   font: var(--type-title);
 }
-:is(.skills-overview-summary, .projects-overview-summary) {
+:is(.skills-overview-summary, .projects-overview-summary, .machines-overview-summary) {
   margin: 0;
   color: var(--text-dim);
   font: var(--type-body);
@@ -15677,14 +15705,14 @@ button.review-finding-location {
 }
 .skill-orphans-reason { color: var(--amber); }
 /* The section's plain count (§11.4): no pill, faint and tabular. */
-:is(.skills-overview-count, .projects-overview-count) {
+:is(.skills-overview-count, .projects-overview-count, .machines-overview-count) {
   margin-left: var(--space-2);
   color: var(--text-faint);
   font: var(--type-micro);
   font-variant-numeric: tabular-nums;
 }
 /* Actions trail the row and never shrink; the reason gives way first. */
-:is(.skills-overview-row, .projects-overview-row) > .btn,
+:is(.skills-overview-row, .projects-overview-row, .machines-overview-row) > .btn,
 .skills-overview-actions { flex: none; }
 .skills-overview-actions {
   display: flex;
@@ -15692,14 +15720,14 @@ button.review-finding-location {
   gap: var(--space-2);
 }
 /* Nothing to review: one line after a green dot, centred on the first line if it wraps. */
-:is(.skills-overview-ok, .projects-overview-ok) {
+:is(.skills-overview-ok, .projects-overview-ok, .machines-overview-ok) {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
   margin: 0;
   font: var(--type-body);
 }
-:is(.skills-overview-dot, .projects-overview-dot) {
+:is(.skills-overview-dot, .projects-overview-dot, .machines-overview-dot) {
   flex: none;
   width: 8px;
   height: 8px;
