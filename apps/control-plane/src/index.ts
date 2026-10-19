@@ -1796,6 +1796,8 @@ app.register(async (instance) => {
       case "remove_provider_account_result":
       case "adopt_provider_profile_result":
       case "revoke_provider_profile_grant_result":
+      case "inspect_provider_home_lease_result":
+      case "recover_provider_home_lease_result":
         hub.resolveRunnerRequest(msg, runnerId!);
         break;
       case "skills_state": {

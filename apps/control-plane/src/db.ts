@@ -2343,6 +2343,30 @@ CREATE INDEX IF NOT EXISTS idx_provider_profile_grants_scope
   ON provider_profile_grants(control_plane_instance_id, organization_id, owner_kind, owner_id, scope)
   WHERE status IN ('pending','active');
 
+-- #3241: an Owner or Admin's one-time authorization to recover one exact stale provider-HOME lease
+-- record (stale_tip_hash) of one runner account. The runner records authorization_id in the lease
+-- journal; the row records who authorized it and how the runner answered.
+CREATE TABLE IF NOT EXISTS provider_home_lease_recoveries (
+  authorization_id    TEXT PRIMARY KEY,
+  organization_id     TEXT NOT NULL,
+  owner_kind          TEXT NOT NULL CHECK (owner_kind IN ('organization','user','team')),
+  owner_id            TEXT NOT NULL,
+  runner_id           TEXT NOT NULL,
+  provider_account_id TEXT NOT NULL,
+  stale_tip_hash      TEXT NOT NULL CHECK (length(stale_tip_hash) = 64),
+  status              TEXT NOT NULL CHECK (status IN ('pending','recovered','refused','unknown')),
+  result_code         TEXT,
+  authorized_by       TEXT NOT NULL,
+  authorized_role     TEXT NOT NULL CHECK (authorized_role IN ('owner','admin')),
+  created_at          INTEGER NOT NULL,
+  completed_at        INTEGER,
+  CHECK (status = 'pending' OR completed_at IS NOT NULL),
+  CHECK (status = 'refused' OR result_code IS NULL),
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_provider_home_lease_recoveries_account
+  ON provider_home_lease_recoveries(runner_id, provider_account_id, created_at);
+
 CREATE TABLE IF NOT EXISTS workspace_ownership (
   runner_id       TEXT NOT NULL,
   workspace_id    TEXT NOT NULL,
@@ -3288,6 +3312,20 @@ export interface ProviderProfileGrantRecord {
   revokedAt: number | null;
   revokedBy: string | null;
   revokedRole: string | null;
+}
+
+/** #3241: one Owner/Admin authorization to recover a stale provider-HOME lease record. */
+export interface ProviderHomeLeaseRecoveryRecord {
+  authorizationId: string;
+  runnerId: string;
+  providerAccountId: string;
+  staleTipHash: string;
+  status: "pending" | "recovered" | "refused" | "unknown";
+  resultCode: string | null;
+  authorizedBy: string;
+  authorizedRole: "owner" | "admin";
+  createdAt: number;
+  completedAt: number | null;
 }
 
 /** Bound on the grants one runner registration lists: at most one active grant per reported
@@ -13028,6 +13066,55 @@ export class ControlPlaneDb {
         WHERE grant_id=? AND status IN ('pending','active')`,
     ).run(input.now, input.revokedBy, input.revokedRole, input.grantId).changes;
     return changed === 1 ? this.getProviderProfileGrant(input.grantId) : null;
+  }
+
+  /**
+   * #3241: record an Owner/Admin authorization to recover the stale lease record `staleTipHash` of
+   * one runner account, in the runner's organization/owner scope. Each authorization is used once.
+   * Returns null when the runner has no recorded scope.
+   */
+  authorizeProviderHomeLeaseRecovery(input: {
+    authorizationId: string;
+    runnerId: string;
+    providerAccountId: string;
+    staleTipHash: string;
+    authorizedBy: string;
+    authorizedRole: "owner" | "admin";
+    now: number;
+  }): ProviderHomeLeaseRecoveryRecord | null {
+    return this.atomic(() => {
+      const ownership = this.stmt(
+        "SELECT organization_id, owner_kind, owner_id FROM runner_ownership WHERE runner_id=?",
+      ).get(input.runnerId) as { organization_id: string; owner_kind: string; owner_id: string } | undefined;
+      if (!ownership) return null;
+      this.stmt(
+        `INSERT INTO provider_home_lease_recoveries
+           (authorization_id, organization_id, owner_kind, owner_id, runner_id, provider_account_id, stale_tip_hash,
+            status, authorized_by, authorized_role, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      ).run(input.authorizationId, ownership.organization_id, ownership.owner_kind, ownership.owner_id, input.runnerId,
+        input.providerAccountId, input.staleTipHash, input.authorizedBy, input.authorizedRole, input.now);
+      return this.getProviderHomeLeaseRecovery(input.authorizationId);
+    });
+  }
+
+  /** Record how the runner answered a pending recovery authorization. False when it was not pending. */
+  settleProviderHomeLeaseRecovery(authorizationId: string, status: "recovered" | "refused" | "unknown", resultCode: string | null, now: number): boolean {
+    return this.stmt(
+      `UPDATE provider_home_lease_recoveries SET status=?, result_code=?, completed_at=?
+        WHERE authorization_id=? AND status='pending'`,
+    ).run(status, status === "refused" ? resultCode : null, now, authorizationId).changes === 1;
+  }
+
+  getProviderHomeLeaseRecovery(authorizationId: string): ProviderHomeLeaseRecoveryRecord | null {
+    const row = this.stmt("SELECT * FROM provider_home_lease_recoveries WHERE authorization_id=?").get(authorizationId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      authorizationId: row.authorization_id as string, runnerId: row.runner_id as string, providerAccountId: row.provider_account_id as string,
+      staleTipHash: row.stale_tip_hash as string, status: row.status as ProviderHomeLeaseRecoveryRecord["status"],
+      resultCode: (row.result_code as string | null) ?? null, authorizedBy: row.authorized_by as string,
+      authorizedRole: row.authorized_role as "owner" | "admin", createdAt: row.created_at as number, completedAt: (row.completed_at as number | null) ?? null,
+    };
   }
 
   /**
