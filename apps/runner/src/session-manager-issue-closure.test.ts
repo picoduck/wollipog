@@ -6,7 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { CampaignIssueScopeMessage, ExecutionTargetRef, GithubIssueClosureSnapshot } from "@wollipog/protocol";
+import type { CampaignIssueScopeMessage, ExecutionTargetRef, HostExecutionTargetRefusalReason, GithubIssueClosureSnapshot } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
@@ -241,21 +241,25 @@ function target(kind: ExecutionTargetRef["kind"], strategy: "in_place" | "worktr
     boundaries: { filesystem: strategy === "worktree" ? "worktree" : "host", network: "inherit", secrets: "runner_local", billing: "agent_account" } };
 }
 
-const refusedSessions: Array<{ name: string; patch: Partial<SessionMeta>; error: string }> = [
+const refusedSessions: Array<{ name: string; patch: Partial<SessionMeta>; error: string; reason?: HostExecutionTargetRefusalReason }> = [
   { name: "non-Orchestrator", patch: { orchestrator: undefined }, error: "runner-local Orchestrator" },
   { name: "missing repository", patch: { repoPath: "" }, error: "runner-local Orchestrator" },
   { name: "issue outside campaign scope", patch: { orchestrator: { strictProjectIsolation: true, issueNumbers: [456] } }, error: "outside the human-authorized campaign scope" },
   { name: "missing campaign scope", patch: { orchestrator: { strictProjectIsolation: true } }, error: "outside the human-authorized campaign scope" },
   ...(["container", "cloud"] as const).map((kind) => ({
-    name: `${kind} execution target`, patch: { executionTarget: target(kind) }, error: "host execution target",
+    name: `${kind} execution target`, patch: { executionTarget: target(kind) }, error: "host execution target", reason: "unsupported_adapter" as const,
   })),
-  { name: "foreign runner", patch: { executionTarget: { ...target("ssh"), runnerId: "other-runner" } }, error: "host execution target" },
-  { name: "mismatched target identity", patch: { executionTarget: { ...target("ssh"), id: "runner:other:host:in_place" } }, error: "host execution target" },
-  { name: "mismatched host adapter", patch: { executionTarget: { ...target("ssh"), adapter: "container" } }, error: "host execution target" },
-  { name: "mismatched filesystem boundary", patch: { executionTarget: { ...target("ssh"), boundaries: { ...target("ssh").boundaries, filesystem: "container" } } }, error: "host execution target" },
+  { name: "foreign runner", patch: { executionTarget: { ...target("ssh"), runnerId: "other-runner" } }, error: "host execution target", reason: "runner_mismatch" },
+  { name: "mismatched target identity", patch: { executionTarget: { ...target("ssh"), id: "runner:other:host:in_place" } }, error: "host execution target", reason: "runner_mismatch" },
+  { name: "mismatched host adapter", patch: { executionTarget: { ...target("ssh"), adapter: "container" } }, error: "host execution target", reason: "unsupported_adapter" },
+  { name: "mismatched filesystem boundary", patch: { executionTarget: { ...target("ssh"), boundaries: { ...target("ssh").boundaries, filesystem: "container" } } }, error: "host execution target", reason: "filesystem_mismatch" },
+  { name: "mismatched workspace strategy", patch: { executionTarget: { ...target("ssh"), workspaceStrategy: "snapshot" } }, error: "host execution target", reason: "workspace_mismatch" },
+  { name: "stale network boundary", patch: { executionTarget: { ...target("ssh"), boundaries: { ...target("ssh").boundaries, network: "deny" } } }, error: "host execution target", reason: "stale_network_policy" },
+  { name: "unsupported secrets boundary", patch: { executionTarget: { ...target("ssh"), boundaries: { ...target("ssh").boundaries, secrets: "none" } } }, error: "host execution target", reason: "unsupported_host_boundaries" },
+  { name: "unsupported billing boundary", patch: { executionTarget: { ...target("ssh"), boundaries: { ...target("ssh").boundaries, billing: "none" } } }, error: "host execution target", reason: "unsupported_host_boundaries" },
 ];
 
-for (const { name, patch, error } of refusedSessions) {
+for (const { name, patch, error, reason } of refusedSessions) {
   test(`runner refuses inspection and execution for ${name} before invoking commands`, async (t) => {
     const f = fixture(t);
     const snapshot = await f.snapshot();
@@ -280,6 +284,7 @@ for (const { name, patch, error } of refusedSessions) {
       const result = await f.manager().campaignIssueScope({ type: "campaign_issue_scope", sessionId, requestId: message.operation, ...message });
       assert.equal(result.ok, false);
       assert.equal(result.failure, "unsupported_execution_target");
+      assert.equal(result.targetFailureReason, reason);
     }
     let forgeCalls = 0;
     const observed = await f.manager().campaignForgeObserve({ type: "campaign_forge_observe", requestId: "forge", sessionId,
@@ -293,7 +298,7 @@ for (const { name, patch, error } of refusedSessions) {
     const refusal = f.logs.map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .find((entry) => entry?.event === "campaign_issue_scope_refused");
     assert.deepEqual(refusal, { event: "campaign_issue_scope_refused", entryPoint: "inspect", requestId: "inspect",
-      sessionId, failure: "unsupported_execution_target" });
+      sessionId, failure: "unsupported_execution_target", targetFailureReason: reason });
   });
 }
 

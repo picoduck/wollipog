@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExecutionTargetRef } from "@wollipog/protocol";
-import { executionTargetLaunchError, validateHostExecutionTarget } from "./execution-target.js";
+import { executionTargetLaunchError, hostExecutionTargetRefusal, validateHostExecutionTarget } from "./execution-target.js";
 import type { ContainerTargetRegistry } from "./container-target.js";
 import type { CloudTargetRegistry } from "./cloud-target.js";
 
@@ -24,6 +24,29 @@ test("fails closed on runner, strategy, adapter, and policy drift", () => {
   assert.match(validateHostExecutionTarget(target({ workspaceStrategy: "in_place" }), "r1", true, isolation)!, /strategy/);
   assert.match(validateHostExecutionTarget(target({ adapter: "cloud" }), "r1", true, isolation)!, /adapter/);
   assert.match(validateHostExecutionTarget(target({ boundaries: { ...target().boundaries, network: "inherit" } }), "r1", true, isolation)!, /stale/);
+});
+
+test("host validation returns bounded refusal reasons, including non-host identities", () => {
+  for (const kind of ["local", "ssh"] as const) {
+    for (const [overrides, reason] of [
+      [{ runnerId: "other" }, "runner_mismatch"],
+      [{ id: "runner:other:host:worktree" }, "runner_mismatch"],
+      [{ id: "runner:r1:container:tools", kind: "container", adapter: "container" }, "unsupported_adapter"],
+      [{ kind: "cloud", adapter: "cloud" }, "unsupported_adapter"],
+      [{ workspaceStrategy: "in_place" }, "workspace_mismatch"],
+      [{ boundaries: { ...target().boundaries, filesystem: "host" } }, "filesystem_mismatch"],
+      [{ boundaries: { ...target().boundaries, network: "inherit" } }, "stale_network_policy"],
+      [{ boundaries: { ...target().boundaries, secrets: "none" } }, "unsupported_host_boundaries"],
+      [{ boundaries: { ...target().boundaries, billing: "none" } }, "unsupported_host_boundaries"],
+    ] as const) {
+      const input = target({ kind, ...overrides });
+      const refusal = hostExecutionTargetRefusal(input, "r1", true, isolation);
+      assert.equal(refusal?.reason, reason);
+      assert.equal(validateHostExecutionTarget(input, "r1", true, isolation), refusal?.error);
+    }
+    assert.equal(hostExecutionTargetRefusal(target({ kind }), "r1", true, isolation), null);
+  }
+  assert.equal(hostExecutionTargetRefusal(undefined, "r1", true, isolation), null);
 });
 
 test("routes container validation to the configured registry without host fallback", () => {

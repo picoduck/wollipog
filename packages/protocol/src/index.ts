@@ -4538,6 +4538,15 @@ export type CampaignIssueScopeMessage = {
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
      { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl });
 
+/** Bounded host-placement diagnostic; never carries configuration values or runner output. */
+export type HostExecutionTargetRefusalReason =
+  | "runner_mismatch"
+  | "unsupported_adapter"
+  | "workspace_mismatch"
+  | "filesystem_mismatch"
+  | "stale_network_policy"
+  | "unsupported_host_boundaries";
+
 export interface CampaignIssueScopeResultMessage {
   type: "campaign_issue_scope_result";
   requestId: string;
@@ -4545,6 +4554,8 @@ export interface CampaignIssueScopeResultMessage {
   ok: boolean;
   /** Fixed refusal classification; older runners omit it. Never surface raw runner error text. */
   failure?: "unsupported_execution_target";
+  /** Optional refinement; old peers keep the generic failure classification. */
+  targetFailureReason?: HostExecutionTargetRefusalReason;
   repository?: string;
   revision?: number;
   candidates?: CampaignIssueScopeView["candidates"];

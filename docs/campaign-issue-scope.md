@@ -120,3 +120,18 @@ scope revision was applied? `campaign_issue_admission`, `campaign_authority_eval
 `campaign_issue_scope_approved` provide entry point, request/occurrence, owner, reason and revision
 fields; workflow audit and stored scope disposition retain the distinct human/agent identities.
 No issue bodies, comments, prompts or credentials enter these diagnostic events.
+
+### Execution-Target Refusal Reasons
+
+Scope inspection, proposal inspection and synchronization retain the generic
+`unsupported_execution_target` failure for older peers and may add a bounded
+`targetFailureReason`: `runner_mismatch`, `unsupported_adapter`, `workspace_mismatch`,
+`filesystem_mismatch`, `stale_network_policy` or `unsupported_host_boundaries`.
+The control plane maps recognized reasons to fixed recovery guidance; unknown or
+absent reasons keep the generic safe diagnostic. It never displays runner error text.
+Older control planes ignore the optional refinement and keep the existing refusal.
+
+The `campaign_issue_scope_refused` log includes the same reason alongside its
+operation (`entryPoint`), request and session correlation fields. No placement values
+or command output are added. These diagnostics do not modify saved placement,
+runner isolation, scope authority or closure approval requirements.

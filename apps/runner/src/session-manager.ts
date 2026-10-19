@@ -172,7 +172,7 @@ const REVIEW_TIMEOUT_GRACE_MS = 60_000;
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_WORKTREE_PORTS } from "./config.js";
 import type { RunnerAdmissionPolicy, RunnerExecutionIsolation, RunnerWorktreePorts } from "./config.js";
-import { executionTargetLaunchError, validateHostExecutionTarget } from "./execution-target.js";
+import { executionTargetLaunchError, hostExecutionTargetRefusal } from "./execution-target.js";
 import type { ContainerTargetRegistry } from "./container-target.js";
 import type { CloudTargetRegistry } from "./cloud-target.js";
 import {
@@ -17848,10 +17848,10 @@ export class SessionManager {
     };
   }
 
-  private campaignHostTargetError(meta: SessionMeta): string | null {
+  private campaignHostTargetRefusal(meta: SessionMeta) {
     // Placement describes the original launch. Selecting or retiring a worktree later does not
     // change that placement; validate its own strategy rather than the current selected path.
-    return validateHostExecutionTarget(meta.executionTarget, this.runnerId,
+    return hostExecutionTargetRefusal(meta.executionTarget, this.runnerId,
       meta.executionTarget?.workspaceStrategy === "worktree", this.executionIsolation);
   }
 
@@ -17864,7 +17864,7 @@ export class SessionManager {
   ): Promise<CampaignForgeObserveResultMessage> {
     const base = { type: "campaign_forge_observe_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
-    if (!meta?.orchestrator || !meta.repoPath || this.campaignHostTargetError(meta)) {
+    if (!meta?.orchestrator || !meta.repoPath || this.campaignHostTargetRefusal(meta)) {
       return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
     }
     try {
@@ -17885,10 +17885,12 @@ export class SessionManager {
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, error: "Campaign issue scope requires a runner-local Orchestrator repository" };
     }
-    if (this.campaignHostTargetError(meta)) {
+    const targetRefusal = this.campaignHostTargetRefusal(meta);
+    if (targetRefusal) {
       this.log(JSON.stringify({ event: "campaign_issue_scope_refused", entryPoint: message.operation,
-        requestId: message.requestId, sessionId: message.sessionId, failure: "unsupported_execution_target" }));
-      return { ...base, ok: false, failure: "unsupported_execution_target",
+        requestId: message.requestId, sessionId: message.sessionId, failure: "unsupported_execution_target",
+        targetFailureReason: targetRefusal.reason }));
+      return { ...base, ok: false, failure: "unsupported_execution_target", targetFailureReason: targetRefusal.reason,
         error: "Campaign issue scope requires a valid local or SSH host execution target belonging to its runner" };
     }
     try {
@@ -17936,7 +17938,7 @@ export class SessionManager {
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, error: "Issue closure requires a runner-local Orchestrator repository" };
     }
-    if (this.campaignHostTargetError(meta)) {
+    if (this.campaignHostTargetRefusal(meta)) {
       return { ...base, ok: false, error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
     }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;

@@ -6,6 +6,26 @@ import { campaignBoundaryCurrent } from "./campaign-authority.js";
 
 export const issueEvidenceDigest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+/** Allowlisted messages only: runner reason fields and error text are untrusted input. */
+export function campaignScopeTargetFailureMessage(reason: unknown): string {
+  switch (reason) {
+    case "runner_mismatch":
+      return "The campaign's saved execution target does not match its runner. Verify the assigned runner and saved placement before retrying.";
+    case "unsupported_adapter":
+      return "Campaign scope supports only local or SSH host execution targets. Use a supported host placement before retrying.";
+    case "workspace_mismatch":
+      return "The campaign's saved workspace strategy does not match its execution target. Verify the saved placement before retrying.";
+    case "filesystem_mismatch":
+      return "The campaign's saved filesystem boundary does not match its host placement. Verify the saved placement before retrying.";
+    case "stale_network_policy":
+      return "The campaign's saved network boundary no longer matches the runner's current isolation policy. Review the runner policy and saved placement before retrying.";
+    case "unsupported_host_boundaries":
+      return "The campaign's saved secrets or billing boundary is unsupported for a host placement. Review the saved placement before retrying.";
+    default:
+      return "Campaign scope requires a valid local or SSH host execution target belonging to its runner. Container and cloud targets are not supported.";
+  }
+}
+
 export function issueBoundary(root: SessionView) {
   const control = root.orchestratorPolicy?.control;
   return control?.mode === "full_control" && campaignBoundaryCurrent(root) && control.boundary.issueAuthority ? control.boundary : null;
