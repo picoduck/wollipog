@@ -17,7 +17,7 @@ import { MoreHorizontalIcon, SignInIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
-import { ProviderLoginCard } from "./ProviderLoginCard.js";
+import { ProviderSignIn, providerSignInAlreadyOnMachine, providerSignInHiddenTitle } from "./ProviderLoginCard.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
@@ -115,7 +115,7 @@ export function accountLogin(logins: readonly ProviderLoginView[], accountId: st
   return newest(mine.filter(providerLoginRunning)) ?? newest(mine);
 }
 
-type AccountStatus ="signed_in" | "sign_in_required" | "status_unknown" | "signing_in";
+type AccountStatus = "signed_in" | "sign_in_required" | "status_unknown" | "signing_in" | "not_added";
 
 function accountStatus(account: ProviderAccountDefinition, signingIn: boolean): AccountStatus {
   if (signingIn) return "signing_in";
@@ -130,7 +130,7 @@ const PROFILE_ACCESS: Readonly<Record<NonNullable<ProviderAccountDefinition["pro
   not_granted: "Not Granted",
 };
 
-type BusyAction = "sign_in" | "remove" | "adopt" | "revoke" | "recover";
+type BusyAction = "sign_in" | "cancel" | "remove" | "adopt" | "revoke" | "recover";
 
 interface RowMenuItem {
   label: string;
@@ -215,11 +215,13 @@ function AccountMenu({ name, heading, busy, items }: {
 /**
  * One account (§5.2): a key icon, the label (masked under Hide Account Emails), the provider and its
  * profile access as line 2, the one status badge, then the row's actions. `children` is the row's
- * expansion under it, where its running sign-in shows (#2996 turns it into the in-row steps).
+ * expansion under it: its sign-in's steps or ending (#2996). While a sign-in runs for a label that is
+ * a hidden email, `hiddenTitle` ("Signing In to Codex") replaces the mask, with "Email hidden" as line 2.
  */
-function ProviderAccountRow({ identity, label, provider, profile, lease, status, actions, children }: {
+function ProviderAccountRow({ identity, label, hiddenTitle, provider, profile, lease, status, actions, children }: {
   identity: string;
   label: string;
+  hiddenTitle?: string | null;
   provider: ProviderAccountDefinition["provider"];
   profile?: string;
   /** A stale HOME lease (#3241), with why it cannot be recovered now, if it cannot. */
@@ -235,12 +237,17 @@ function ProviderAccountRow({ identity, label, provider, profile, lease, status,
         <span className="row-icon" aria-hidden="true"><SignInIcon /></span>
         <span className="row-body">
           <span className="row-line">
-            <AccountIdentifier identity={identity} className="row-title" value={label} label="Account Email" />
+            {hiddenTitle ? <span className="row-title">{hiddenTitle}</span>
+              : <AccountIdentifier identity={identity} className="row-title" value={label} label="Account Email" />}
             {meta && <StatusBadge meta={meta} inline={status === "signed_in"} />}
           </span>
           <span className="row-sub provider-account-sub">
-            <span>{providerName(provider)}</span>
-            {profile && <span>{profile}</span>}
+            {hiddenTitle ? <span>Email hidden</span> : (
+              <>
+                <span>{providerName(provider)}</span>
+                {profile && <span>{profile}</span>}
+              </>
+            )}
             {lease && <span className="provider-account-lease" title={lease.title}>{lease.label}</span>}
           </span>
         </span>
@@ -327,6 +334,15 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       await api.startProviderLogin(runner.runnerId, { accountId: account.id });
     } catch (cause) {
       setNotice({ title: <>Couldn't Sign In to {identifier(account)}</>, body: (cause as Error).message });
+    }
+  });
+
+  const cancel = (login: ProviderLoginView) => void track(login.accountId, "cancel", async () => {
+    setNotice(null);
+    try {
+      await api.cancelProviderLogin(runner.runnerId, login.operationId);
+    } catch (cause) {
+      setNotice({ title: <>Couldn't Cancel Signing In to {identifier({ id: login.accountId, label: login.label })}</>, body: (cause as Error).message });
     }
   });
 
@@ -492,8 +508,19 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   };
 
   const loginFor = (accountId: string) => accountLogin(logins, accountId);
-  const loginCard = (login: ProviderLoginView | undefined) =>
-    login && <ProviderLoginCard runnerId={runner.runnerId} login={login} />;
+  // The row's expansion: the sign-in's steps, or its ending, whose Try Again starts the same sign-in.
+  const signInSteps = (login: ProviderLoginView | undefined, existing: boolean) => login && (
+    <ProviderSignIn key={login.operationId} runnerId={runner.runnerId} login={login}
+      {...(supported && canManage && online
+        ? { restart: existing ? { accountId: login.accountId } : { provider: login.provider, label: login.label } } : {})} />
+  );
+  const cancelButton = (login: ProviderLoginView) => (
+    <BusyButton className="btn sm ghost" busy={busy[login.accountId] === "cancel"} progress="Canceling the sign-in…"
+      disabled={!online || (busy[login.accountId] !== undefined && busy[login.accountId] !== "cancel")}
+      onClick={() => cancel(login)}>
+      Cancel
+    </BusyButton>
+  );
 
   if (!supported && accounts.length === 0) return null;
   const canAdd = supported && canManage;
@@ -533,12 +560,14 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
             const signingIn = login !== undefined && providerLoginRunning(login);
             const status = accountStatus(account, signingIn);
             const action = busy[account.id];
-            const showSignIn = supported && canManage && status === "sign_in_required";
+            // An ending offers Try Again itself, so Sign In waits until it is dismissed.
+            const showSignIn = supported && canManage && status === "sign_in_required" && login === undefined;
             return (
               <ProviderAccountRow
                 key={account.id}
                 identity={`${runner.runnerId}:${account.id}`}
                 label={account.label}
+                hiddenTitle={login && providerSignInHiddenTitle(login, privacy.hide)}
                 provider={account.provider}
                 profile={account.profile ? PROFILE_ACCESS[account.profile.access] : undefined}
                 lease={leaseActions && leases[account.id]?.state === "stale" ? {
@@ -548,6 +577,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 status={status}
                 actions={canManage && (
                   <>
+                    {signingIn && cancelButton(login)}
                     {showSignIn && (
                       <BusyButton className="btn sm" busy={action === "sign_in"} progress="Starting the sign-in…"
                         disabled={!online || (action !== undefined && action !== "sign_in")}
@@ -564,21 +594,26 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                   </>
                 )}
               >
-                {loginCard(login)}
+                {signInSteps(login, true)}
               </ProviderAccountRow>
             );
           })}
-          {newLogins.map((login) => (
-            <ProviderAccountRow
-              key={login.operationId}
-              identity={`${runner.runnerId}:${login.accountId}`}
-              label={login.label}
-              provider={login.provider}
-              status={providerLoginRunning(login) ? "signing_in" : null}
-            >
-              {loginCard(login)}
-            </ProviderAccountRow>
-          ))}
+          {newLogins.map((login) => {
+            const running = providerLoginRunning(login);
+            return (
+              <ProviderAccountRow
+                key={login.operationId}
+                identity={`${runner.runnerId}:${login.accountId}`}
+                label={login.label}
+                hiddenTitle={providerSignInHiddenTitle(login, privacy.hide)}
+                provider={login.provider}
+                status={running ? "signing_in" : providerSignInAlreadyOnMachine(login) ? "not_added" : null}
+                actions={running && canManage ? cancelButton(login) : undefined}
+              >
+                {signInSteps(login, false)}
+              </ProviderAccountRow>
+            );
+          })}
         </div>
       )}
       {adding && (

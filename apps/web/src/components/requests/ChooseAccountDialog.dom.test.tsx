@@ -262,6 +262,37 @@ test("the primary follows the chosen row: Use Account, Check and Use, or waiting
   }
 });
 
+test("a sign-in started here shows the same two steps and endings inside the dialog, under a plain head without ⋯ (#2996)", async () => {
+  const running = {
+    operationId: "login_old", accountId: "claude-old", label: "Claude Old", provider: "claude", status: "awaiting_code",
+    verificationUrl: "https://claude.ai/oauth/authorize", expectsCode: true, startedAt: 1,
+  } as const;
+  const view = await renderDialog({ runnerOverrides: { providerLogins: [running] } });
+  try {
+    const card = view.dialog()!.querySelector<HTMLElement>("article.signin-card")!;
+    assert.ok(card, "the sign-in is inside the dialog");
+    assert.equal(card.querySelector(".signin-head-title")?.textContent, "Claude Old");
+    assert.equal(card.querySelector(".signin-head .status")?.textContent, "Signing In");
+    assertNoDomNode(card.querySelector('[aria-haspopup="menu"]'), "a plain head, without the row's ⋯");
+    const steps = [...card.querySelectorAll("ol.steps > li")];
+    assert.equal(steps.length, 2);
+    assert.equal(steps[0]!.querySelector("a")?.textContent, "Open Claude Sign-In");
+    assert.equal(steps[1]!.querySelector("label")?.textContent, "Paste the Code It Shows");
+
+    await view.setAccounts([WORK, PERSONAL, OLD, MAYBE], {
+      providerLogins: [{ ...running, status: "failed", expectsCode: false, error: "The provider did not confirm authentication." }],
+    });
+    const ended = view.dialog()!.querySelector<HTMLElement>("article.signin-card")!;
+    assertNoDomNode(ended.querySelector("ol.steps"));
+    assert.equal(ended.querySelector(".notice-title")?.textContent, "Sign-In Failed");
+    const tryAgain = [...ended.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Try Again")!;
+    await act(async () => { tryAgain.click(); await tick(); });
+    assert.deepEqual(view.signIns, [{ accountId: "claude-old" }], "Try Again starts the same account");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a signed-out account offers Sign In in its trailing slot, outside the row's label, to someone who may start it", async () => {
   const view = await renderDialog();
   try {

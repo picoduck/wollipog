@@ -420,7 +420,8 @@ export function ChooseAccountDialog({
           </section>
         )}
         {accountLogins.map((login) => (
-          <ProviderLoginCard key={login.operationId} runnerId={session.runnerId} login={login} />
+          <ProviderLoginCard key={login.operationId} runnerId={session.runnerId} login={login}
+            {...(canStartSignIn ? { restart: { accountId: login.accountId } } : {})} />
         ))}
       </div>
     </Modal>

@@ -330,6 +330,8 @@ const VOCABULARY = {
     signed_out: neutral("Signed Out"),
     /** The machine could not confirm the account's sign-in; using it rechecks first (#2208). */
     status_unknown: neutral("Status Unknown"),
+    /** A new account's sign-in ended because the account is already on the machine (#2996). */
+    not_added: neutral("Not Added", { hollow: true }),
   },
   /** A terminal tab's shell (#2864). A running shell carries no status; its tab is the fact. */
   shell: {
