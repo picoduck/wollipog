@@ -233,7 +233,10 @@ export function Modal({
     const parent = phone ? bodyRef.current : footRef.current;
     if (!parent) return;
     const before = phone ? null : parent.firstChild;
-    if (tertiaryHost.parentElement !== parent || (!phone && parent.firstChild !== tertiaryHost)) {
+    // Content the body mounts later (a loaded state replacing a skeleton) is appended after the
+    // tertiary, so on a phone it is moved back to the end whenever it is no longer last.
+    const placed = phone ? parent.lastChild === tertiaryHost : parent.firstChild === tertiaryHost;
+    if (tertiaryHost.parentElement !== parent || !placed) {
       moveKeepingFocus(tertiaryHost, parent, before === tertiaryHost ? tertiaryHost.nextSibling : before, lastFocusRef.current);
     }
   });

@@ -163,6 +163,9 @@ const TABLE: readonly Row[] = [
   ["usage", "available", "Available", "success"],
   ["usage", "approaching_limit", "Approaching Limit", "warning"],
   ["usage", "temporarily_unavailable", "Temporarily Unavailable", "danger"],
+  // Agent on a machine
+  ["agent", "ready", "Ready", "success"],
+  ["agent", "needs_attention", "Needs Attention", "warning"],
 ];
 
 test("statusMeta holds every row of the §11.2 vocabulary with its label and tone", () => {
@@ -196,7 +199,7 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
   for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "tool", "family",
     "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "pod", "member", "provider_account",
-    "shell", "share", "usage"] as const) {
+    "shell", "share", "usage", "agent"] as const) {
     for (const value of statusValues(domain)) {
       const { label } = statusMeta(domain, value);
       for (const text of [label]) {

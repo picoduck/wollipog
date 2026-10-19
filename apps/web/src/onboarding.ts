@@ -1,7 +1,7 @@
 /** Pure helpers for the "Add a runner" onboarding flow (no DOM, unit-tested). */
 
 import { CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
-import { agentDriverLabel } from "./agent-presentation.js";
+import { agentDisplayName, agentDriverLabel } from "./agent-presentation.js";
 import { codexUpgradeGuidance } from "./runners.js";
 
 export interface RunnerConfigWorkspaceOption {
@@ -94,7 +94,7 @@ export function buildRunnerStartCommand(allowInsecureTransport = false): string 
 export type OnboardingHealthStatus = "pass" | "waiting" | "pending" | "warning" | "fail";
 
 export interface OnboardingHealthCheck {
-  id: "control-plane" | "credentials" | "runner" | "workspace" | "agents";
+  id: "control-plane" | "credentials" | "local-runner" | "runner" | "workspace" | "agents";
   label: string;
   status: OnboardingHealthStatus;
   detail: string;
@@ -161,11 +161,31 @@ function agentVerifiedReady(agent: AgentDefinition, os: RunnerView["os"]): boole
   return agent.available === true || agent.claudeCode?.status === "ready" || agent.codexAppServer?.status === "supported";
 }
 
+/** One agent the bundled runner found, as a row in Set Up This Machine. */
+export interface LocalRunnerAgent {
+  id: string;
+  name: string;
+  /** Where it runs: "Native", or the WSL distribution. */
+  context: string;
+  driver: NonNullable<AgentDefinition["driver"]>;
+  ready: boolean;
+}
+
 export interface LocalRunnerReadiness {
   state: "starting" | "discovering" | "ready" | "needs-attention";
   title: string;
   detail: string;
-  agentLabels: string[];
+  agents: LocalRunnerAgent[];
+}
+
+function localRunnerAgents(runner: RunnerView): LocalRunnerAgent[] {
+  return runner.agents.filter((agent) => !isRetiredCodexExec(agent)).map((agent) => ({
+    id: agent.id,
+    name: agentDisplayName(agent),
+    context: agent.context?.kind === "wsl" ? `WSL: ${agent.context.distro}` : "Native",
+    driver: agent.driver ?? "acp",
+    ready: agentVerifiedReady(agent, runner.os),
+  }));
 }
 
 /** Human-scale progress for the config-free runner bundled with the desktop app. */
@@ -175,7 +195,7 @@ export function localRunnerReadiness(runner: RunnerView | undefined): LocalRunne
       state: "starting",
       title: "Starting the Local Runner",
       detail: "Wollipog is connecting the bundled runner. No terminal or configuration file is required.",
-      agentLabels: [],
+      agents: [],
     };
   }
   if (runner.agentsRefreshed !== true) {
@@ -183,28 +203,52 @@ export function localRunnerReadiness(runner: RunnerView | undefined): LocalRunne
       state: "discovering",
       title: "Discovering Coding Agents",
       detail: "Scanning this machine and its WSL distributions for supported agent CLIs.",
-      agentLabels: [],
+      agents: [],
     };
   }
-  const agents = runner.agents;
-  const labels = [...new Set(agents.filter((agent) => !isRetiredCodexExec(agent)).map(agentDriverLabel))];
-  const ready = agents.filter((agent) => agentVerifiedReady(agent, runner.os));
+  const agents = localRunnerAgents(runner);
+  const ready = runner.agents.filter((agent) => agentVerifiedReady(agent, runner.os));
   if (ready.length) {
     return {
       state: "ready",
-      title: "This Machine Is Connected",
+      title: "This Machine Is Ready",
       detail: `${ready.length} coding agent${ready.length === 1 ? " is" : "s are"} ready to use.`,
-      agentLabels: labels,
+      agents,
     };
   }
-  const problem = agents.map((agent) => agentProblem(agent, runner.os))
+  const problem = runner.agents.map((agent) => agentProblem(agent, runner.os))
     .find((item): item is NonNullable<typeof item> => item != null);
   return {
     state: "needs-attention",
-    title: agents.length ? "Agents Need Attention" : "No Supported Agents Found",
-    detail: problem?.detail ?? "Install or sign in to a supported coding agent, then use Rediscover on this runner.",
-    agentLabels: labels,
+    title: runner.agents.length ? "Agents Need Attention" : "No Supported Agents Found",
+    detail: problem?.detail ?? "Install or sign in to a supported coding agent, then use Rediscover.",
+    agents,
   };
+}
+
+/**
+ * Set Up This Machine's Connection Check (#2993): the bundled runner starts, connects, then reports
+ * its agents. `starting` is the desktop bridge still creating the credential and starting the
+ * runner. Only the step Wollipog is working on spins; the steps after it wait.
+ */
+export function localSetupHealth(input: { starting: boolean; runner?: RunnerView }): OnboardingHealthCheck[] {
+  const { starting, runner } = input;
+  const online = !starting && runner?.status === "online" ? runner : null;
+  return [
+    starting
+      ? { id: "local-runner", label: "Bundled Runner", status: "pending", detail: "Creating a private credential and starting the bundled runner…" }
+      : { id: "local-runner", label: "Bundled Runner", status: "pass", detail: "The bundled runner is set up and starts with Wollipog." },
+    online
+      ? { id: "runner", label: "Runner Connection", status: "pass", detail: `${online.hostname} is online as ${online.runnerId}.` }
+      : starting
+        ? { id: "runner", label: "Runner Connection", status: "waiting", detail: "Checked once the runner starts." }
+        : { id: "runner", label: "Runner Connection", status: "pending", detail: "Waiting for the runner to connect…" },
+    !online
+      ? { id: "agents", label: "Agent Readiness", status: "waiting", detail: "Checked once the runner connects." }
+      : online.agentsRefreshed === true
+        ? agentsCheck(online, true, false)
+        : { id: "agents", label: "Agent Readiness", status: "pending", detail: "Scanning this machine and its WSL distributions for supported agent CLIs." },
+  ];
 }
 
 /**

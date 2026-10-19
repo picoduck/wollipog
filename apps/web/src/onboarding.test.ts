@@ -6,6 +6,7 @@ import {
   buildRunnerStartCommand,
   firstWorkspace,
   localRunnerReadiness,
+  localSetupHealth,
   onboardingHealth,
   runnerHostLabel,
   RUNNER_START_COMMAND,
@@ -354,7 +355,10 @@ test("discovery's restart-only exec row does not make Codex ready when App Serve
   const readiness = localRunnerReadiness(runner({ agents }));
   assert.equal(readiness.state, "needs-attention");
   assert.equal(readiness.detail, message, "a failed check is fixed by rediscovering, not by an upgrade");
-  assert.deepEqual(readiness.agentLabels, ["Codex App Server"]);
+  // The retired exec row is not listed.
+  assert.deepEqual(readiness.agents, [
+    { id: "codex", name: "Codex App Server", context: "Native", driver: "codex-app-server", ready: false },
+  ]);
 
   const health = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceIds: ["repo"], runner: runner({ agents }) });
   const check = health.find((item) => item.id === "agents")!;
@@ -379,7 +383,10 @@ test("local runner readiness moves from startup through discovery to agent-ready
     }],
   }));
   assert.equal(readiness.state, "ready");
-  assert.deepEqual(readiness.agentLabels, ["Codex App Server"]);
+  assert.equal(readiness.title, "This Machine Is Ready");
+  assert.deepEqual(readiness.agents, [
+    { id: "codex", name: "Codex", context: "Native", driver: "codex-app-server", ready: true },
+  ]);
 });
 
 test("local runner readiness names discovered agents that still need attention", () => {
@@ -396,8 +403,59 @@ test("local runner readiness names discovered agents that still need attention",
     }],
   }));
   assert.equal(readiness.state, "needs-attention");
-  assert.deepEqual(readiness.agentLabels, ["Claude Code Native"]);
+  assert.deepEqual(readiness.agents, [
+    { id: "claude-code", name: "Claude Code", context: "Native", driver: "claude-code", ready: false },
+  ]);
   assert.match(readiness.detail, /not signed in/);
+});
+
+test("local readiness lists each agent with where it runs, a WSL one by its distribution (#2993)", () => {
+  const readiness = localRunnerReadiness(runner({
+    agents: [
+      {
+        id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server",
+        available: true, authStatus: "authenticated", codexAppServer: { status: "supported", appServerAvailable: true },
+      },
+      {
+        id: "claude-wsl", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code",
+        context: { kind: "wsl", distro: "Ubuntu" }, available: false, authStatus: "unauthenticated",
+      },
+    ],
+  }));
+  assert.equal(readiness.state, "ready");
+  assert.equal(readiness.detail, "1 coding agent is ready to use.");
+  assert.deepEqual(readiness.agents.map(({ name, context, ready }) => [name, context, ready]), [
+    ["Codex", "Native", true],
+    ["Claude Code", "WSL: Ubuntu", false],
+  ]);
+});
+
+test("Set Up This Machine's check spins only on the step Wollipog is working on (#2993)", () => {
+  const states = (checks: ReturnType<typeof localSetupHealth>) => checks.map((check) => [check.label, check.status]);
+  // The desktop bridge is creating the credential and starting the runner.
+  assert.deepEqual(states(localSetupHealth({ starting: true, runner: runner() })), [
+    ["Bundled Runner", "pending"],
+    ["Runner Connection", "waiting"],
+    ["Agent Readiness", "waiting"],
+  ]);
+  // Started, not connected yet.
+  for (const machine of [undefined, runner({ status: "offline" })]) {
+    assert.deepEqual(states(localSetupHealth({ starting: false, runner: machine })), [
+      ["Bundled Runner", "pass"],
+      ["Runner Connection", "pending"],
+      ["Agent Readiness", "waiting"],
+    ]);
+  }
+  // Connected, still discovering agents.
+  const discovering = localSetupHealth({ starting: false, runner: runner({ agentsRefreshed: false }) });
+  assert.deepEqual(states(discovering), [
+    ["Bundled Runner", "pass"],
+    ["Runner Connection", "pass"],
+    ["Agent Readiness", "pending"],
+  ]);
+  assert.equal(discovering[1]!.detail, "devbox is online as laptop.");
+  // Discovery finished with no agent: the agents row says so.
+  assert.equal(localSetupHealth({ starting: false, runner: runner() })[2]!.status, "fail");
 });
 
 test("suggestRunnerId avoids collisions", () => {
