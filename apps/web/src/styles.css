@@ -10499,6 +10499,42 @@ textarea {
   direction: rtl;
   text-align: left;
 }
+/* MachineAgentsSection.tsx (#2990): each agent is a two-line row that opens Agent Details, its one
+   badge trailing line 1 and never squeezed; line 2 is the integration, where it runs and the
+   version, 12px apart (§5.2, §11.3). A phone keeps only the integration. */
+.machine-agent-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.machine-agent-status { margin-left: auto; }
+.machine-agent-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.machine-agent-meta > span { flex: none; }
+.machine-agent-meta > span:last-child {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 760px) {
+  .machine-agent-meta-extra { display: none; }
+}
+/* No Agents Ready: its sentence, then each install command's well. */
+.machine-agents-empty > .state-body {
+  display: grid;
+  gap: var(--space-2);
+}
+/* Agent Details' Launch Command: the heading, its sentence and the well, 8px apart. */
+.machine-agent-launch {
+  display: grid;
+  gap: var(--space-2);
+}
+.machine-agent-launch > :is(h3, p) { margin: 0; }
 /* Wrapped onto two rows, the notice's buttons each borrow 4px for a 44px target (§2.8, §15.3), so
    the rows sit 12px apart and a tap below one never lands on the next. */
 @media (pointer: coarse) {
@@ -10553,12 +10589,6 @@ textarea {
 }
 .runner-agents > summary::-webkit-details-marker {
   display: none;
-}
-.runner-agents-summary {
-  margin-left: auto;
-  color: var(--text-faint);
-  font-size: 11px;
-  font-weight: 400;
 }
 .runner-agents-body {
   padding: 0 10px 10px;
@@ -10747,14 +10777,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
 }
-.agent-row .empty-sub {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.agent-row .empty-sub code {
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
 .agent-row-head {
   display: flex;
   align-items: center;
@@ -10775,67 +10797,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.agent-ver {
-  font-size: 11px;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-}
-.agent-details-trigger {
-  flex: none;
-  padding: 5px;
-  color: var(--text-faint);
-}
-@media (hover: hover) {
-  .agent-details-trigger:hover {
-    background: var(--bg-elev-3);
-  }
-}
-.agent-details-summary {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.55;
-}
-/* At the top of the dialog body the body's 16px gap spaces it (§7.2). */
-.agent-details-section > .facts { margin-top: var(--space-2); }
-.agent-details-section h3 {
-  margin: 0 0 5px;
-  color: var(--text);
-  font-size: 12px;
-}
-.agent-details-section p {
-  margin: 0;
-  color: var(--text-faint);
-  font-size: 12px;
-  line-height: 1.5;
-}
-.agent-details-command {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin-top: 8px;
-}
-.agent-details-command code {
-  min-width: 0;
-  flex: 1;
-  padding: 8px 10px;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-.auth-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: none;
-  background: var(--text-faint);
-}
-.auth-dot.authenticated {
-  background: var(--green);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--green) 60%, transparent);
-}
-.auth-dot.unauthenticated {
-  background: var(--red);
-}
 .atag {
   font-size: 10.5px;
   line-height: 1;
@@ -10849,19 +10810,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .atag.ctx {
   color: var(--teal);
   border-color: color-mix(in srgb, var(--teal) 30%, transparent);
-}
-.atag.driver-claude-code {
-  color: var(--agent-claude);
-  border-color: color-mix(in srgb, var(--accent-2) 35%, transparent);
-}
-.atag.driver-codex,
-.atag.driver-codex-app-server {
-  color: var(--positive-text);
-  border-color: color-mix(in srgb, var(--green) 35%, transparent);
-}
-.atag.driver-acp {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 .atag.discovered {
   color: var(--amber-on-tint);
@@ -11036,15 +10984,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .machine-sign-in-form > label { color: var(--text-dim); font: var(--type-small); }
 .machine-sign-in-form > input { flex: 1 1 160px; min-width: 0; }
 
-/* Install guidance shown in place of the agent list when discovery found no agent CLIs. */
-.install-hints {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.install-hints .hint {
-  margin: 0;
-}
 .install-cmd {
   display: flex;
   align-items: center;
@@ -12211,11 +12150,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .instances-page > .toolbar {
   justify-content: space-between;
   margin-bottom: var(--space-4);
-}
-.empty-sub {
-  margin-top: 12px;
-  font-size: 12px;
-  color: var(--text-faint);
 }
 
 /* ---- Boxes (SSH-bootstrapped runners) ---- */
@@ -15189,11 +15123,6 @@ button.review-finding-location {
   .runner-card {
     padding: 14px;
   }
-  .runner-agents-summary {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   /* The generic 16px rule below is (0,0,1); the desktop .pairing-controls input rule is
      (0,1,1) and would win — restate it at equal specificity so iOS doesn't focus-zoom. */
   .pairing-controls input {
@@ -15505,7 +15434,7 @@ button.review-finding-location {
 .skill-list-orphans > .row-title { font: var(--type-body); }
 /* Skeleton rows are the row itself, holding a title bar over a meta bar (§12.3). */
 /* The Projects and Machines lists' are the same (#2957, #2985). */
-:is(.skill-row-skeleton, .project-row-skeleton, .machine-row-skeleton) > .row-body { gap: var(--space-2); }
+:is(.skill-row-skeleton, .project-row-skeleton, .machine-row-skeleton, .machine-agent-row-skeleton) > .row-body { gap: var(--space-2); }
 /* The phone's first row (#1971): it opens the Library Overview, a step apart from the groups. The
    Projects list's opens the Projects Overview (#2958). */
 :is(.skill-list-overview, .project-list-overview, .machine-list-overview) { margin-bottom: var(--space-2); }

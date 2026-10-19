@@ -204,7 +204,7 @@ test("Capacity shows the units in use beside a warning meter from 75%, a meta li
       "Runner Capacity is 30 of 40 units used; this session needs 12. 1 session waiting.",
     ]);
     assert.deepEqual(sectionOrder(view.detail()).filter((title) => title !== undefined),
-      ["Capacity", "Workspaces", "Skills on This Machine"], "Capacity first, Workspaces and Skills after the others");
+      ["Capacity", "Agents", "Workspaces", "Skills on This Machine"], "Capacity first, Workspaces and Skills after the others");
   } finally {
     await view.unmount();
   }

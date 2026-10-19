@@ -357,7 +357,8 @@ test("discovery's restart-only exec row does not make Codex ready when App Serve
   assert.equal(readiness.detail, message, "a failed check is fixed by rediscovering, not by an upgrade");
   // The retired exec row is not listed.
   assert.deepEqual(readiness.agents, [
-    { id: "codex", name: "Codex App Server", context: "Native", driver: "codex-app-server", ready: false },
+    // A check that failed is no reason to update (#2990).
+    { id: "codex", name: "Codex App Server", context: "Native", driver: "codex-app-server", status: "unavailable" },
   ]);
 
   const health = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceIds: ["repo"], runner: runner({ agents }) });
@@ -385,7 +386,7 @@ test("local runner readiness moves from startup through discovery to agent-ready
   assert.equal(readiness.state, "ready");
   assert.equal(readiness.title, "This Machine Is Ready");
   assert.deepEqual(readiness.agents, [
-    { id: "codex", name: "Codex", context: "Native", driver: "codex-app-server", ready: true },
+    { id: "codex", name: "Codex", context: "Native", driver: "codex-app-server", status: "ready" },
   ]);
 });
 
@@ -404,7 +405,7 @@ test("local runner readiness names discovered agents that still need attention",
   }));
   assert.equal(readiness.state, "needs-attention");
   assert.deepEqual(readiness.agents, [
-    { id: "claude-code", name: "Claude Code", context: "Native", driver: "claude-code", ready: false },
+    { id: "claude-code", name: "Claude Code", context: "Native", driver: "claude-code", status: "sign_in_required" },
   ]);
   assert.match(readiness.detail, /not signed in/);
 });
@@ -424,9 +425,9 @@ test("local readiness lists each agent with where it runs, a WSL one by its dist
   }));
   assert.equal(readiness.state, "ready");
   assert.equal(readiness.detail, "1 coding agent is ready to use.");
-  assert.deepEqual(readiness.agents.map(({ name, context, ready }) => [name, context, ready]), [
-    ["Codex", "Native", true],
-    ["Claude Code", "WSL: Ubuntu", false],
+  assert.deepEqual(readiness.agents.map(({ name, context, status }) => [name, context, status]), [
+    ["Codex", "Native", "ready"],
+    ["Claude Code", "WSL: Ubuntu", "sign_in_required"],
   ]);
 });
 

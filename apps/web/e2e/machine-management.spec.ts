@@ -53,6 +53,12 @@ async function openSettings(page: import("@playwright/test").Page) {
   await page.getByRole("menu", { name: "Machine Actions" }).getByRole("menuitem", { name: "Settings…" }).click();
 }
 
+/** An agent's row in the machine's Agents section (#2990), by its exact name. */
+const agentRow = (page: import("@playwright/test").Page, name: string) =>
+  page.locator("article.machine-detail button.row").filter({
+    has: page.locator(".row-title", { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }),
+  });
+
 /** The open machine's one lifecycle notice (#2988). */
 const machineNotice = (page: import("@playwright/test").Page) => page.locator("article.machine-detail > .notice");
 
@@ -64,16 +70,100 @@ test.beforeEach(async ({ page }) => {
   await expect(phone ? machineRow(page) : page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
 });
 
-test("Connections distinguish verified, unavailable, and unverified agents", async ({ page }) => {
-  await expect(page.locator(".runner-agents-summary")).toHaveText("1 Available");
-  await page.getByText("Agents", { exact: true }).click();
+test("each agent row shows one status, and an agent not installed folds away (#2990)", async ({ page }) => {
+  await expect(agentRow(page, "Custom ACP").locator(".status")).toHaveText("Ready");
+  await expect(agentRow(page, "Legacy Unverified ACP").locator(".status")).toHaveText("Unavailable");
+  const notInstalled = page.locator("article.machine-detail details.disclosure").filter({ hasText: "1 Agent Not Installed" });
+  await expect(notInstalled).not.toHaveAttribute("open", "");
+  await expect(agentRow(page, "Missing ACP")).toBeHidden();
+  await notInstalled.locator("summary").click();
+  await expect(agentRow(page, "Missing ACP").locator(".status")).toHaveText("Not Installed");
+  await expect(page.getByRole("region", { name: /^Agents/ }).locator(".atag, .auth-dot, pre")).toHaveCount(0);
+  await agentRow(page, "Missing ACP").click();
+  const details = page.getByRole("dialog", { name: "Missing ACP" });
+  await expect(details.locator(".notice")).toContainText("configured command was not found");
+});
 
-  await expect(page.getByText("Custom ACP", { exact: true })).toBeVisible();
-  await expect(page.getByText("Missing ACP", { exact: true })).toBeVisible();
-  await expect(page.getByText("Legacy Unverified ACP", { exact: true })).toBeVisible();
-  await expect(page.locator(".atag.broken", { hasText: "Unavailable" })).toHaveCount(1);
-  await expect(page.locator(".atag.broken", { hasText: "Unverified" })).toHaveCount(1);
-  await expect(page.getByText(/configured command was not found/u)).toBeVisible();
+test("each agent row keeps one whole badge, and at 390px only its integration under the name (#2990)", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("agent-states"));
+  const badges: Array<[string, string]> = [
+    ["Claude Code (v2.1.4)", "Ready"],
+    ["Codex App Server (v0.155.1)", "Sign-In Required"],
+    ["Codex App Server (v0.140.0)", "Update Required"],
+    ["Gemini CLI", "Approval Required"],
+    ["Goose", "Ready"],
+  ];
+  for (const [name, status] of badges) await expect(agentRow(page, name).locator(".status")).toHaveText(status);
+  await expect(page.locator("article.machine-detail details.disclosure > summary").filter({ hasText: "3 Agents Not Installed" }))
+    .toBeVisible();
+  await expect(agentRow(page, "Claude Code (v2.1.4)").locator(".row-sub > span:visible")).toHaveText(
+    ["Claude Code Native", "Native", "v2.1.4"],
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const [name] of badges) {
+    const row = agentRow(page, name);
+    await expect(row.locator(".row-sub > span:visible")).toHaveCount(1);
+    const fits = await row.evaluate((element) => {
+      const badge = element.querySelector<HTMLElement>(".status")!;
+      return badge.scrollWidth <= badge.clientWidth && badge.getBoundingClientRect().right <= element.getBoundingClientRect().right;
+    });
+    expect(fits, `${name}'s badge is whole and inside its row`).toBe(true);
+  }
+});
+
+test("Agent Details leads with the fix, and Approve Launch… confirms the exact preview (#2990)", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("agent-states"));
+  await agentRow(page, "Codex App Server (v0.155.1)").click();
+  const signIn = page.getByRole("dialog", { name: "Codex App Server (v0.155.1)" });
+  await expect(signIn.locator(".notice")).toContainText("Sign-In Required");
+  await expect(signIn.locator(".notice .code-well code")).toHaveText("codex login");
+  await expect(signIn.getByRole("button", { name: "Find Sessions…" })).toBeVisible();
+  await signIn.getByRole("button", { name: "Done" }).click();
+  await expect(agentRow(page, "Codex App Server (v0.155.1)")).toBeFocused();
+
+  await agentRow(page, "Gemini CLI").click();
+  const gemini = page.getByRole("dialog", { name: "Gemini CLI" });
+  await gemini.getByRole("button", { name: "Approve Launch…" }).click();
+  const approve = page.getByRole("dialog", { name: "Approve Launch" });
+  await expect(approve.locator(".code-well pre")).toHaveText("npx --yes @google/gemini-cli@1.2.0 --experimental-acp");
+  await expect(approve.getByRole("button", { name: "Approve Launch", exact: true })).toHaveClass(/\bprimary\b/);
+  await approve.getByRole("button", { name: "Cancel" }).click();
+  await gemini.getByRole("button", { name: "Done" }).click();
+
+  await agentRow(page, "Goose").click();
+  const goose = page.getByRole("dialog", { name: "Goose" });
+  await goose.getByRole("button", { name: "Revoke Approval…" }).click();
+  await expect(page.getByRole("alertdialog", { name: "Revoke Approval" }).or(page.getByRole("dialog", { name: "Revoke Approval" }))
+    .getByRole("button", { name: "Revoke Approval", exact: true })).toHaveClass(/\bdanger\b/);
+});
+
+test("Choose Another Installation… opens Machine Settings with focus and view on its installations (#2990)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("selected-installation-unavailable"));
+  await agentRow(page, "Codex App Server (v0.155.1)").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server (v0.155.1)" });
+  await expect(details.locator(".notice")).toContainText("Codex exited before it answered the check. Rediscover to check it again.");
+  await details.getByRole("button", { name: "Choose Another Installation…" }).click();
+  const settings = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  const heading = settings.getByRole("heading", { name: "Agent Harness Installations" });
+  // After the opening effects settle, focus and the view agree: the installations, not Machine Name.
+  await page.waitForTimeout(500);
+  await expect(heading).toBeFocused();
+  await expect(heading).toBeInViewport();
+  await expect(settings.getByLabel("Machine Name")).not.toBeFocused();
+  await settings.getByRole("button", { name: "Close", exact: true }).last().click();
+  // Agent Details stayed under Machine Settings.
+  await expect(details).toBeVisible();
+});
+
+test("a machine's own manager gets no Choose Another Installation…, whose installations they cannot see (#2990)", async ({ page }) => {
+  await page.goto(`/machine-management-e2e.html?role=machine-owner&${DESIGN_WORKSTATION}`);
+  await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("selected-installation-unavailable"));
+  await agentRow(page, "Codex App Server (v0.155.1)").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server (v0.155.1)" });
+  await expect(details.locator(".notice")).toContainText("Rediscover to check it again.");
+  await expect(details.getByRole("button", { name: "Choose Another Installation…" })).toHaveCount(0);
 });
 
 test("Machine settings show competing installations and switch the saved target", async ({ page }) => {
@@ -134,11 +224,10 @@ test("Machine and Connections explain pinned, suppressed, failed, and unavailabl
   await installation("Legacy Tools").scrollIntoViewIfNeeded();
   await page.screenshot({ path: "test-results/harness-states-mobile-bottom.png", fullPage: true });
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
-  await page.getByText("Agents", { exact: true }).click();
-  await page.getByRole("button", { name: "View Codex App Server Details" }).first().click();
-  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
+  await agentRow(page, "Codex App Server (v0.155.1)").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server (v0.155.1)" });
   await expect(details.getByText("PowerShell 7.3 or later on this Machine", { exact: false })).toBeVisible();
-  await expect(details.locator(".agent-details-command code")).toHaveText(
+  await expect(details.locator(".code-well code")).toHaveText(
     "& 'C:\\Program Files\\Codex Tools\\codex.exe' '--profile' 'Team''s Profile'",
   );
   await expect(details.getByText("Pinned by Machine Policy", { exact: true })).toBeVisible();
@@ -149,15 +238,14 @@ test("Machine and Connections explain pinned, suppressed, failed, and unavailabl
 
 test("Agent Details treats Windows batch wrapper arguments as reference data", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("batch-wrapper"));
-  await page.getByText("Agents", { exact: true }).click();
-  await page.getByRole("button", { name: "View Codex App Server Details" }).click();
-  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
-  await expect(details.getByText(/A copyable launch command is unavailable/)).toBeVisible();
+  await agentRow(page, "Codex App Server").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server" });
+  await expect(details.getByText(/so there is no command to copy/)).toBeVisible();
   await expect(details.locator("dt").filter({ hasText: /^Executable$/ }).locator("+ dd code"))
     .toHaveText("C:\\Program Files\\Codex Tools\\codex.cmd");
   await expect(details.locator("dt", { hasText: "Arguments" }).locator("+ dd code"))
     .toHaveText('["--profile","Team \\"Research\\"","%PATH%"]');
-  await expect(details.locator(".agent-details-command")).toHaveCount(0);
+  await expect(details.locator(".code-well")).toHaveCount(0);
   await expect(details.getByRole("button", { name: /Copy .* Launch Command/ })).toHaveCount(0);
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.screenshot({ path: "test-results/batch-wrapper-details-desktop.png", fullPage: true });
@@ -168,14 +256,13 @@ test("Agent Details treats Windows batch wrapper arguments as reference data", a
 
 test("Agent Details does not offer a copyable command for dotted Windows batch aliases", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("dotted-batch-wrapper"));
-  await page.getByText("Agents", { exact: true }).click();
-  await page.getByRole("button", { name: "View Codex App Server Details" }).click();
-  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
+  await agentRow(page, "Codex App Server").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server" });
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.screenshot({ path: "test-results/dotted-batch-wrapper-details-desktop.png", fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: "test-results/dotted-batch-wrapper-details-mobile.png", fullPage: true });
-  await expect(details.getByText(/A copyable launch command is unavailable/)).toBeVisible();
+  await expect(details.getByText(/so there is no command to copy/)).toBeVisible();
   await expect(details.locator("dt").filter({ hasText: /^Executable$/ }).locator("+ dd code"))
     .toHaveText("codex.v2");
   await expect(details.getByRole("button", { name: /Copy .* Launch Command/ })).toHaveCount(0);
@@ -183,15 +270,14 @@ test("Agent Details does not offer a copyable command for dotted Windows batch a
 
 test("Agent Details does not offer an extensionless Windows batch launch to copy", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("extensionless-batch-wrapper"));
-  await page.getByText("Agents", { exact: true }).click();
-  await page.getByRole("button", { name: "View Codex App Server Details" }).click();
-  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
+  await agentRow(page, "Codex App Server").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server" });
   await expect(details.getByText(/may resolve to a batch wrapper/)).toBeVisible();
   await expect(details.locator("dt").filter({ hasText: /^Executable$/ }).locator("+ dd code"))
     .toHaveText("codex");
   await expect(details.locator("dt", { hasText: "Arguments" }).locator("+ dd code"))
     .toHaveText('["--profile","Team \\"Research\\"","%PATH%"]');
-  await expect(details.locator(".agent-details-command")).toHaveCount(0);
+  await expect(details.locator(".code-well")).toHaveCount(0);
   await expect(details.getByRole("button", { name: /Copy .* Launch Command/ })).toHaveCount(0);
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.screenshot({ path: "test-results/extensionless-batch-wrapper-details-desktop.png", fullPage: true });
@@ -202,9 +288,8 @@ test("Agent Details does not offer an extensionless Windows batch launch to copy
 
 test("Agent Details shows explicit Windows command hosts as reference data", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("explicit-interpreter"));
-  await page.getByText("Agents", { exact: true }).click();
-  await page.getByRole("button", { name: "View Codex App Server Details" }).click();
-  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
+  await agentRow(page, "Codex App Server").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server" });
   await expect(details.getByText(/This Windows launch may resolve to a batch wrapper or use an executable with legacy PowerShell argument passing/)).toBeVisible();
   await expect(details.locator("dt").filter({ hasText: /^Executable$/ }).locator("+ dd code"))
     .toHaveText("C:\\Windows\\System32\\cmd.exe");
@@ -218,20 +303,14 @@ test("Agent Details shows explicit Windows command hosts as reference data", asy
   await page.screenshot({ path: "test-results/explicit-interpreter-details-mobile.png", fullPage: true });
 });
 
-test("older Windows runner update instructions are suppressed in Details and Machine Settings", async ({ page }) => {
+test("older Windows runner update instructions are suppressed in Agent Details and Machine Settings", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("older-interpreter-guidance"));
-  await page.getByText("Agents", { exact: true }).click();
-  await page.getByRole("button", { name: "View Codex App Server Details" }).click();
-  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
-  await expect(details.getByText(/No copyable update command is available/)).toBeVisible();
+  await agentRow(page, "Codex App Server").click();
+  const details = page.getByRole("dialog", { name: "Codex App Server" });
+  // A ready agent's details carry no update guidance at all (#2990), so never the unsafe command.
+  await expect(details.getByText("Managed Externally", { exact: true })).toBeVisible();
   await expect(details).not.toContainText("Run `& 'C:\\Windows");
-  await page.setViewportSize({ width: 1280, height: 1000 });
-  await details.getByText(/No copyable update command is available/).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: "test-results/older-runner-guidance-details-desktop.png", fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await details.getByText(/No copyable update command is available/).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: "test-results/older-runner-guidance-details-mobile.png", fullPage: true });
-  await details.getByRole("button", { name: "Close" }).last().click();
+  await details.getByRole("button", { name: "Done" }).click();
   await openSettings(page);
   const settings = page.getByRole("dialog", { name: "Manage Design Workstation" });
   await expect(settings.getByText(/No copyable update command is available/)).toBeVisible();
@@ -404,30 +483,20 @@ test("Machine owners can start both provider sign-in flow shapes", async ({ page
 
 test("Connections ask protocol v153 runners to update before trusting unverified agents", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("legacy-unverified"));
-  await expect(page.locator(".runner-agents-summary")).toHaveText("0 Available");
-  await page.getByText("Agents", { exact: true }).click();
-
-  await expect(page.locator(".atag.broken", { hasText: "Unverified" })).toHaveCount(1);
-  await expect(page.getByText(
-    "Update this runner to verify its configured agent availability.", { exact: true },
-  )).toBeVisible();
-  await expect(page.getByText("No usable agent CLIs found on this machine — install one:", { exact: true }))
-    .toHaveCount(0);
-  await expect(page.locator(".install-cmd")).toHaveCount(0);
+  const state = page.locator("article.machine-detail .state");
+  await expect(state.locator(".state-title")).toHaveText("No Agents Ready");
+  await expect(state.getByText("Update this runner to verify its configured agent availability.", { exact: true })).toBeVisible();
+  await expect(state.locator(".code-well")).toHaveCount(0);
+  await expect(agentRow(page, "Legacy Unverified ACP").locator(".status")).toHaveText("Unavailable");
 });
 
 test("Connections show installation guidance for protocol v154 verified-unavailable agents", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("verified-unavailable"));
-  await expect(page.locator(".runner-agents-summary")).toHaveText("0 Available");
-  await page.getByText("Agents", { exact: true }).click();
-
-  await expect(page.locator(".atag.broken", { hasText: "Unavailable" })).toHaveCount(1);
-  await expect(page.getByText("No usable agent CLIs found on this machine — install one:", { exact: true }))
-    .toBeVisible();
-  await expect(page.locator(".install-cmd").first()).toBeVisible();
-  await expect(page.getByText(
-    "Update this runner to verify its configured agent availability.", { exact: true },
-  )).toHaveCount(0);
+  const state = page.locator("article.machine-detail .state");
+  await expect(state.locator(".state-title")).toHaveText("No Agents Ready");
+  await expect(state.getByText("Install Claude Code or Codex on this machine, then rediscover.", { exact: true })).toBeVisible();
+  await expect(state.getByRole("button", { name: "Copy Claude Code Install Command" })).toBeVisible();
+  await expect(page.getByText("Update this runner to verify its configured agent availability.", { exact: true })).toHaveCount(0);
 });
 
 test("offline recovery stays stacked and usable in a narrow detail on a desktop viewport", async ({ page }) => {

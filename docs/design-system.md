@@ -1465,6 +1465,23 @@ variant by default and offers side by side as a user preference (§6.3).
   results are toasts. `confirmDeleteMachine()` is the one Delete Machine confirmation, here and in
   Machine Settings. Connection Details is one `.facts` list for every machine, "Not available" in
   `--text-faint` for a missing value, with Copy All beside Done.
+- **Agents (#2990).** The machine's Agents section (`MachineAgentsSection.tsx`), with its count,
+  lists each agent as a `button.row.row-2` that opens Agent Details: the `agentDisplayName()` name
+  (a name two agents share gains the version, or where it runs when the versions match) and the
+  one `agentStatus()` badge on line 1, Ready inline; §11.3 meta on line 2, the integration, where
+  it runs and the version, of which a phone keeps only the integration. No chips, dots, sentences
+  or commands sit in a row. Not-installed agents fold into a closed `.disclosure` at the end ("3
+  Agents Not Installed"). With none Ready, a compact "No Agents Ready" state gives the install
+  commands in code wells; until the runner first reports, three skeleton rows. **Agent Details**
+  is titled by the name with "On <machine>" under it, and leads with a status notice whenever the
+  agent is not Ready (warning or danger by its status, neutral for Not Installed): one sentence and
+  the fix, a command in a code well, **Approve Launch…**, or **Choose Another Installation…**,
+  which opens Machine Settings at its installations. Then one `.facts` list, the Launch Command in
+  a code well with copy (only for an installed agent whose launch can be copied; a reference-only
+  Windows launch keeps its Executable and Arguments facts), and a closed Release Details
+  disclosure. Its footer is ghost **Find Sessions…** where the agent can be scanned, ghost danger
+  **Revoke Approval…** once a Registry launch is approved, and **Done**. Approve Launch is a
+  non-destructive confirmation with the exact install preview; Revoke Approval is a danger one.
 - **Settings (#3018).** Each section is a route, and the list takes the width's shape. Desktop: a
   sticky 192px `nav.settings-nav` of `.row.settings-nav-item` links at `--control-h`, each a 16px
   icon and the section name; the current one is `aria-current="page"` with the §5.2 selected state
@@ -2322,7 +2339,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out, Status Unknown: neutral |
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
-| Agent on a machine (`agent`: Set Up This Machine's agent rows, #2993) | Ready: success · Needs Attention: warning |
+| Agent on a machine (`agent`, `agentStatus()`, #2990: the machine's agent rows, Agent Details and Set Up This Machine) | Ready: success (inline) · Not Installed: neutral (hollow dot) · Sign-In Required, Update Required, Approval Required: warning · Unavailable: danger · Ready When Last Seen: neutral (hollow dot; a ready agent on a machine that is not online). One per agent, the most limiting first; the machine's Update Required, Approval Required and Sign-In Required roll up from it. |
 | Terminal tab (`shell`, #2864) | Exited: neutral · Reconnecting: info. Rendered as the inline badge after the tab's label; a running shell has none. |
 | Transcript share link | Active: success · Expired, Revoked: neutral. Rendered as the inline badge on Share Transcript's link rows. |
 | Pull request | Open, Draft, Merged and Closed are **facts**: row meta with the Git icon, not status badges. |

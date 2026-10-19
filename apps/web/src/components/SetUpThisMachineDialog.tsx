@@ -71,7 +71,7 @@ function FoundAgents({ agents }: { agents: LocalRunnerAgent[] }) {
             <span className="row-title" title={agent.name}>{agent.name}</span>
             <span className="row-sub">{agent.context}</span>
           </span>
-          <StatusBadge meta={statusMeta("agent", agent.ready ? "ready" : "needs_attention")} />
+          <StatusBadge meta={statusMeta("agent", agent.status)} inline={agent.status === "ready"} />
         </li>
       ))}
     </ul>

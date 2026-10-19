@@ -166,7 +166,12 @@ const TABLE: readonly Row[] = [
   ["usage", "temporarily_unavailable", "Temporarily Unavailable", "danger"],
   // Agent on a machine
   ["agent", "ready", "Ready", "success"],
-  ["agent", "needs_attention", "Needs Attention", "warning"],
+  ["agent", "not_installed", "Not Installed", "neutral"],
+  ["agent", "sign_in_required", "Sign-In Required", "warning"],
+  ["agent", "update_required", "Update Required", "warning"],
+  ["agent", "approval_required", "Approval Required", "warning"],
+  ["agent", "unavailable", "Unavailable", "danger"],
+  ["agent", "ready_when_last_seen", "Ready When Last Seen", "neutral"],
 ];
 
 test("statusMeta holds every row of the §11.2 vocabulary with its label and tone", () => {
@@ -189,6 +194,9 @@ test("only actively progressing work pulses, and an unverified source draws a ho
   assert.equal(statusMeta("job", "stalled").pulse, false);
   assert.equal(statusMeta("machine", "offline").hollow, true);
   assert.equal(statusMeta("job", "unverified").hollow, true);
+  // An agent not on the machine, or one whose machine is not online, is not a current fact (#2990).
+  assert.deepEqual(statusValues("agent").filter((value) => statusMeta("agent", value).hollow),
+    ["not_installed", "ready_when_last_seen"]);
 });
 
 test("an unknown value reads Status Unavailable, never its raw enum or a prototype member", () => {

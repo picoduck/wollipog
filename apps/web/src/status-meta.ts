@@ -339,10 +339,17 @@ const VOCABULARY = {
     sign_in_required: warning("Sign-In Required"),
     not_applicable: neutral("Not Applicable"),
   },
-  /** One coding agent a machine found, as Set Up This Machine lists it (#2993). */
+  /** One coding agent on a machine, by `agentStatus()` (#2990): the machine's agent rows, Agent
+   * Details and Set Up This Machine. Ready renders as the inline badge. */
   agent: {
     ready: success("Ready"),
-    needs_attention: warning("Needs Attention"),
+    not_installed: neutral("Not Installed", { hollow: true }),
+    sign_in_required: warning("Sign-In Required"),
+    update_required: warning("Update Required"),
+    approval_required: warning("Approval Required"),
+    unavailable: danger("Unavailable"),
+    /** A ready agent on a machine that is not online: its last report, not a current one. */
+    ready_when_last_seen: neutral("Ready When Last Seen", { hollow: true }),
   },
 } as const satisfies Record<string, Record<string, Entry>>;
 

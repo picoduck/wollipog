@@ -1,7 +1,7 @@
 /** Pure helpers for the "Add a runner" onboarding flow (no DOM, unit-tested). */
 
 import { CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
-import { agentDisplayName, agentDriverLabel } from "./agent-presentation.js";
+import { agentContextLabel, agentDisplayName, agentDriverLabel, agentStatus, type AgentStatus } from "./agent-presentation.js";
 import { codexUpgradeGuidance } from "./runners.js";
 
 export interface RunnerConfigWorkspaceOption {
@@ -168,7 +168,8 @@ export interface LocalRunnerAgent {
   /** Where it runs: "Native", or the WSL distribution. */
   context: string;
   driver: NonNullable<AgentDefinition["driver"]>;
-  ready: boolean;
+  /** Its one status, as the machine's agent rows show it (#2990). */
+  status: AgentStatus;
 }
 
 export interface LocalRunnerReadiness {
@@ -179,12 +180,13 @@ export interface LocalRunnerReadiness {
 }
 
 function localRunnerAgents(runner: RunnerView): LocalRunnerAgent[] {
-  return runner.agents.filter((agent) => !isRetiredCodexExec(agent)).map((agent) => ({
+  const agents = runner.agents.filter((agent) => !isRetiredCodexExec(agent));
+  return agents.map((agent) => ({
     id: agent.id,
-    name: agentDisplayName(agent),
-    context: agent.context?.kind === "wsl" ? `WSL: ${agent.context.distro}` : "Native",
+    name: agentDisplayName(agent, agents),
+    context: agentContextLabel(agent.context),
     driver: agent.driver ?? "acp",
-    ready: agentVerifiedReady(agent, runner.os),
+    status: agentStatus(agent),
   }));
 }
 

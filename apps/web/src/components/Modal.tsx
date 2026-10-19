@@ -127,6 +127,7 @@ export function Modal({
   describedBy,
   className,
   returnFocusRef,
+  initialFocusRef,
   onKeyDown,
   headerActions,
   back,
@@ -157,6 +158,9 @@ export function Modal({
    * was focused at open — which fails when the opener was a menu item removed in the same
    * commit that opened the dialog (the menu closes as the dialog mounts). */
   returnFocusRef?: { current: HTMLElement | null };
+  /** The element that takes focus on open instead of the first field, such as the section a
+   * dialog was opened at; focusing it also brings it into view. Ignored when it is not inside. */
+  initialFocusRef?: { current: HTMLElement | null };
   /** Optional dialog-scoped keyboard contract; runs after the shared focus trap. */
   onKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   /** Controls in the header before Close, such as a dialog's ⋯ menu of secondary actions. */
@@ -347,6 +351,11 @@ export function Modal({
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel || panel.contains(document.activeElement)) return;
+    const initial = initialFocusRef?.current;
+    if (initial && panel.contains(initial)) {
+      initial.focus();
+      return;
+    }
     const field = mediaMatches(FIRST_FIELD_MEDIA)
       ? panel.querySelector<HTMLElement>(`.modal-body :is(${FIRST_FIELD})`)
       : null;
