@@ -49,7 +49,7 @@ function leaseRoot(home: string): string {
 /** Every canonical record (root journal), oldest first by chain order. */
 function chain(home: string): Array<Record<string, unknown> & { hash: string }> {
   const root = leaseRoot(home);
-  const read = (name: string) => { const raw = readFileSync(join(root, name), "utf8"); return { ...JSON.parse(raw) as Record<string, unknown>, hash: createHash("sha256").update(raw).digest("hex") }; };
+  const read = (name: string): Record<string, unknown> & { hash: string } => { const raw = readFileSync(join(root, name), "utf8"); return { ...JSON.parse(raw) as Record<string, unknown>, hash: createHash("sha256").update(raw).digest("hex") }; };
   const records = [read("mutable-home.recovery.json")];
   for (;;) {
     const name = `next-${records.at(-1)!.leaseId as string}.json`;
@@ -154,7 +154,7 @@ test("recovery needs this control plane's profile grant: unprofiled HOMEs and ma
     const { home, world } = crashedHome(t);
     const before = chain(home);
     const result = refusal(() => replacement(world).changeProfileMarkerWhileHeld(home, "claude", (read) =>
-      adoptProviderProfileMarker(read, { profileId: PROFILE_ID, provider: "claude", controlPlaneInstanceId: INSTANCE_ID, grantId: "4a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3" })));
+      adoptProviderProfileMarker(read, { provider: "claude", grant: { controlPlaneInstanceId: INSTANCE_ID, grantId: "4a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", grantedAt: "2026-10-18T00:00:00.000Z" } })));
     assert.ok(result !== "acquired" && result.kind === "foreign_owner", "adoption and revocation never recover another owner's lease");
     assert.deepEqual(chain(home), before);
   }

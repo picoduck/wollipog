@@ -94,9 +94,13 @@ function statStartTime(stat: string): string | null {
 }
 
 const MAX_ANCESTRY = 256;
+const MAX_SCAN_ROUNDS = 8;
 
 /** The Linux procfs probe for the current user. Other platforms have no probe and record no evidence. */
-export function linuxLeaseProcessProbe(root = "/proc", uid = process.getuid?.(), self = process.pid): LeaseProcessProbe | undefined {
+export function linuxLeaseProcessProbe(
+  root = "/proc", uid = process.getuid?.(), self = process.pid,
+  testHooks?: { afterListing?: (round: number) => void },
+): LeaseProcessProbe | undefined {
   if (process.platform !== "linux" || uid === undefined) return undefined;
   return {
     bootId: () => {
@@ -110,22 +114,27 @@ export function linuxLeaseProcessProbe(root = "/proc", uid = process.getuid?.(),
     },
     scan: (marker, runnerStartTime) => {
       const entry = Buffer.from(`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${marker}`);
-      const marked: number[] = [];
-      const uninspectable: number[] = [];
-      const stats = new Map<number, string[] | null>();
-      const fields = (pid: number): string[] | null => {
+      // A read either succeeds, proves the process gone (ENOENT/ESRCH), or fails; only the second
+      // ever excuses a process from inspection.
+      const read = (pid: number, file: string): Buffer | "gone" | "failed" => {
+        try { return readFileSync(join(root, String(pid), file)); }
+        catch (error) { return gone(error) ? "gone" : "failed"; }
+      };
+      const stats = new Map<number, string[] | "gone" | "failed">();
+      const fields = (pid: number): string[] | "gone" | "failed" => {
         if (!stats.has(pid)) {
-          try { stats.set(pid, statFields(readFileSync(join(root, String(pid), "stat"), "utf8"))); }
-          catch { stats.set(pid, null); }
+          const raw = read(pid, "stat");
+          stats.set(pid, typeof raw === "string" ? raw : statFields(raw.toString("utf8")));
         }
         return stats.get(pid)!;
       };
       // Non-dumpable processes (Codex, set-id programs, some sandboxes) hide their environment but
       // not their world-readable stat. Such a process cannot descend from the recorded runner when
-      // it is a zombie, started before that runner did, or descends from the scanning runner.
+      // it exited, is a zombie, started before that runner did, or descends from the scanning runner.
       const cannotDescend = (pid: number): boolean => {
         const own = fields(pid);
-        if (!own) return true; // exited
+        if (own === "gone") return true;
+        if (own === "failed") return false;
         if (own[0] === "Z" || own[0] === "X") return true;
         const started = own[19];
         if (!started || !START_TIME.test(started) || !START_TIME.test(runnerStartTime)) return false;
@@ -134,48 +143,67 @@ export function linuxLeaseProcessProbe(root = "/proc", uid = process.getuid?.(),
         for (let depth = 0; depth < MAX_ANCESTRY && parent > 1; depth++) {
           if (parent === self) return true;
           const next = fields(parent);
-          if (!next) return false;
+          if (typeof next === "string") return false;
           parent = Number(next[1]);
         }
         return false;
       };
-      for (const name of readdirSync(root)) {
-        if (!/^[1-9][0-9]*$/u.test(name)) continue;
-        const pid = Number(name);
-        // A runner started by its predecessor (a self-update restart) inherited that runner's
-        // marker in its own initial environment; the scanning process is never a survivor.
-        if (pid === self) continue;
-        let real: number;
-        let effective: number;
-        try {
-          const line = readFileSync(join(root, name, "status"), "utf8").split("\n").find((item) => item.startsWith("Uid:"));
-          const ids = line?.slice(4).trim().split(/\s+/u).map(Number);
-          if (!ids || ids.length < 2 || !ids.every(Number.isSafeInteger)) { uninspectable.push(pid); continue; }
-          [real, effective] = ids as [number, number];
-        } catch (error) {
-          if (gone(error)) continue;
-          uninspectable.push(pid); continue;
-        }
+      type Verdict = "clear" | "marked" | "uninspectable";
+      const inspect = (pid: number): Verdict => {
+        const status = read(pid, "status");
+        if (status === "gone") return "clear";
+        if (status === "failed") return "uninspectable";
+        const line = status.toString("utf8").split("\n").find((item) => item.startsWith("Uid:"));
+        const ids = line?.slice(4).trim().split(/\s+/u).map(Number);
+        if (!ids || ids.length < 2 || !ids.every(Number.isSafeInteger)) return "uninspectable";
+        const [real, effective] = ids as [number, number];
         // Another user's process cannot have been launched by this user's runner, except through a
         // set-id program: its real uid is still ours, and it is treated as uninspectable below.
-        if (real !== uid && effective !== uid) continue;
-        if (effective !== uid) { if (!cannotDescend(pid)) uninspectable.push(pid); continue; }
-        let environ: Buffer;
-        try { environ = readFileSync(join(root, name, "environ")); }
-        catch (error) {
-          if (gone(error)) continue;
-          if (!cannotDescend(pid)) uninspectable.push(pid);
-          continue;
-        }
+        if (real !== uid && effective !== uid) return "clear";
+        if (effective !== uid) return cannotDescend(pid) ? "clear" : "uninspectable";
+        const environ = read(pid, "environ");
+        if (environ === "gone") return "clear";
+        if (environ === "failed") return cannotDescend(pid) ? "clear" : "uninspectable";
         let cursor = 0;
         while (cursor < environ.length) {
           const end = environ.indexOf(0, cursor);
           const limit = end === -1 ? environ.length : end;
-          if (environ.subarray(cursor, limit).equals(entry)) { marked.push(pid); break; }
+          if (environ.subarray(cursor, limit).equals(entry)) return "marked";
           cursor = limit + 1;
         }
+        return "clear";
+      };
+      // One listing misses a process forked after it by a listed process that then exits before it
+      // is read. Repeat the listing until it shows no process identity (pid and start time) that has
+      // not been inspected: any process alive now that the recorded runner's tree created after a
+      // listing was created by a process alive at that listing, which was inspected or seen anew.
+      const verdicts = new Map<string, { pid: number; verdict: Verdict }>();
+      for (let round = 0; round < MAX_SCAN_ROUNDS; round++) {
+        stats.clear();
+        let fresh = false;
+        const names = readdirSync(root);
+        testHooks?.afterListing?.(round);
+        for (const name of names) {
+          if (!/^[1-9][0-9]*$/u.test(name)) continue;
+          const pid = Number(name);
+          // A runner started by its predecessor (a self-update restart) inherited that runner's
+          // marker in its own initial environment; the scanning process is never a survivor.
+          if (pid === self) continue;
+          const own = fields(pid);
+          if (own === "gone") continue;
+          const key = own === "failed" ? `${pid}:?` : `${pid}:${own[19] ?? "?"}`;
+          if (verdicts.has(key)) continue;
+          fresh = true;
+          verdicts.set(key, { pid, verdict: own === "failed" ? "uninspectable" : inspect(pid) });
+        }
+        if (!fresh && round > 0) {
+          const of = (verdict: Verdict) => [...verdicts.values()].filter((item) => item.verdict === verdict).map((item) => item.pid);
+          // A marked process seen at any point refuses, even if it has exited since.
+          return { marked: of("marked"), uninspectable: of("uninspectable") };
+        }
       }
-      return { marked, uninspectable };
+      // The process table never settled; nothing can be proved from a view that keeps changing.
+      return { marked: [], uninspectable: [-1] };
     },
   };
 }

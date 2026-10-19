@@ -22,13 +22,14 @@ function fakeProc(t: { after: (fn: () => void) => void }) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "sys/kernel/random"), { recursive: true });
   writeFileSync(join(root, "sys/kernel/random/boot_id"), `${BOOT}\n`);
-  const add = (pid: number, options: { uid?: [number, number]; env?: string[]; start?: string; command?: string; environ?: "directory"; state?: string; ppid?: number }) => {
+  const add = (pid: number, options: { uid?: [number, number]; env?: string[]; start?: string; command?: string; environ?: "directory"; stat?: "directory"; state?: string; ppid?: number }) => {
     const dir = join(root, String(pid));
     mkdirSync(dir);
     const [real, effective] = options.uid ?? [UID, UID];
     writeFileSync(join(dir, "status"), `Name:\tx\nUid:\t${real}\t${effective}\t${effective}\t${effective}\n`);
     const fields = [options.state ?? "S", String(options.ppid ?? 1), ...Array.from({ length: 17 }, () => "0"), options.start ?? "4242", "0"];
-    writeFileSync(join(dir, "stat"), `${pid} (${options.command ?? "node"}) ${fields.join(" ")}\n`);
+    if (options.stat === "directory") mkdirSync(join(dir, "stat"));
+    else writeFileSync(join(dir, "stat"), `${pid} (${options.command ?? "node"}) ${fields.join(" ")}\n`);
     if (options.environ === "directory") mkdirSync(join(dir, "environ"));
     else writeFileSync(join(dir, "environ"), Buffer.from((options.env ?? []).map((entry) => `${entry}\0`).join("")));
   };
@@ -62,6 +63,33 @@ test("the Linux probe reads the boot, start times with spaced command names, and
   });
   assert.deepEqual(probe.scan(MARKER, "5000"), { marked: [201], uninspectable: [] },
     "processes that started before the recorded runner cannot descend from it");
+});
+
+test("a process whose stat and environment both fail to read stays uninspectable unless it exited", { skip: process.platform !== "linux" }, (t) => {
+  const proc = fakeProc(t);
+  // An I/O or permission failure (here EISDIR) is not proof of exit: only ENOENT/ESRCH is.
+  proc.add(210, { environ: "directory", stat: "directory" });
+  const probe = linuxLeaseProcessProbe(proc.root, UID, 300)!;
+  assert.deepEqual(probe.scan(MARKER, "1"), { marked: [], uninspectable: [210] });
+  rmSync(join(proc.root, "210"), { recursive: true });
+  assert.deepEqual(probe.scan(MARKER, "1"), { marked: [], uninspectable: [] }, "an exited process is no survivor");
+});
+
+test("a marked process forked after the listing by a listed process that then exits is still found", { skip: process.platform !== "linux" }, (t) => {
+  const proc = fakeProc(t);
+  proc.add(220, { env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  const probe = linuxLeaseProcessProbe(proc.root, UID, 300, {
+    afterListing: (round) => {
+      if (round !== 0) return;
+      // The listed parent forks a marked child and exits before it is read.
+      rmSync(join(proc.root, "220"), { recursive: true });
+      proc.add(221, { env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`], ppid: 1 });
+    },
+  })!;
+  assert.deepEqual(probe.scan(MARKER, "1"), { marked: [221], uninspectable: [] });
+  let next = 400;
+  const churning = linuxLeaseProcessProbe(proc.root, UID, 300, { afterListing: () => { proc.add(next++, {}); } })!;
+  assert.deepEqual(churning.scan(MARKER, "1").uninspectable, [-1], "a process table that never settles proves nothing");
 });
 
 test("the real procfs probe finds a live marked process and stops finding it once it exits", { skip: process.platform !== "linux" }, async (t) => {
