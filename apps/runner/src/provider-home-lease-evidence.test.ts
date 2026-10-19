@@ -87,6 +87,19 @@ test("a marked process forked after the listing by a listed process that then ex
     },
   })!;
   assert.deepEqual(probe.scan(MARKER, "1"), { marked: [221], uninspectable: [] });
+  // Two generations in a row: each listed process forks and exits before its identity is read, so
+  // no listing ever reads a vanished parent; the vanished entries keep the table unsettled.
+  rmSync(join(proc.root, "221"), { recursive: true });
+  proc.add(230, { env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  const chained = linuxLeaseProcessProbe(proc.root, UID, 300, {
+    afterListing: (round) => {
+      if (round > 1) return;
+      rmSync(join(proc.root, String(230 + round)), { recursive: true });
+      proc.add(231 + round, { env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+    },
+  })!;
+  assert.deepEqual(chained.scan(MARKER, "1"), { marked: [232], uninspectable: [] });
+  rmSync(join(proc.root, "232"), { recursive: true });
   let next = 400;
   const churning = linuxLeaseProcessProbe(proc.root, UID, 300, { afterListing: () => { proc.add(next++, {}); } })!;
   assert.deepEqual(churning.scan(MARKER, "1").uninspectable, [-1], "a process table that never settles proves nothing");

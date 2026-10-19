@@ -94,7 +94,7 @@ function statStartTime(stat: string): string | null {
 }
 
 const MAX_ANCESTRY = 256;
-const MAX_SCAN_ROUNDS = 8;
+const MAX_SCAN_ROUNDS = 16;
 
 /** The Linux procfs probe for the current user. Other platforms have no probe and record no evidence. */
 export function linuxLeaseProcessProbe(
@@ -174,9 +174,10 @@ export function linuxLeaseProcessProbe(
         return "clear";
       };
       // One listing misses a process forked after it by a listed process that then exits before it
-      // is read. Repeat the listing until it shows no process identity (pid and start time) that has
-      // not been inspected: any process alive now that the recorded runner's tree created after a
-      // listing was created by a process alive at that listing, which was inspected or seen anew.
+      // is read. Repeat the listing until one shows only identities (pid and start time) already
+      // inspected, and no listed process vanished before its identity was read (it may have forked
+      // first). A process alive after that listing was then listed and inspected, or was forked by
+      // one that was.
       const verdicts = new Map<string, { pid: number; verdict: Verdict }>();
       for (let round = 0; round < MAX_SCAN_ROUNDS; round++) {
         stats.clear();
@@ -190,7 +191,7 @@ export function linuxLeaseProcessProbe(
           // marker in its own initial environment; the scanning process is never a survivor.
           if (pid === self) continue;
           const own = fields(pid);
-          if (own === "gone") continue;
+          if (own === "gone") { fresh = true; continue; }
           const key = own === "failed" ? `${pid}:?` : `${pid}:${own[19] ?? "?"}`;
           if (verdicts.has(key)) continue;
           fresh = true;
