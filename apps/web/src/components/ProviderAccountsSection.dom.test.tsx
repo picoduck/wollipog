@@ -1126,6 +1126,41 @@ test("an Owner or Admin sees a stale lease as line-2 meta, with Recover Lease…
   }
 });
 
+test("a row that is signing in and has a stale lease keeps both: the sign-in's head and steps, and the lease on line 2 (#2996, #3241)", async () => {
+  const signingIn = { providerLogins: [runningLogin("pending", "Pending Work")] };
+  const api = leaseClient();
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY, ...signingIn }) });
+  try {
+    assert.equal(ui.badge("Pending Work")?.textContent, "Signing In");
+    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Stale Lease"]);
+    assert.ok(ui.buttons(ui.row("Pending Work")).includes("Cancel"));
+    assert.ok((ui.row("Pending Work").nextElementSibling as HTMLElement).querySelector(".signin"), "the sign-in expands the row");
+    const menu = await ui.openMenu("Pending Work");
+    const items = ui.menuItems(menu);
+    assert.deepEqual(items.find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: false, reason: null });
+    assert.deepEqual(items.find((item) => item.label === "Remove Account…"),
+      { label: "Remove Account…", disabled: true, reason: "A sign-in is running. Cancel it first." });
+    await ui.closeMenu();
+  } finally {
+    await ui.unmount();
+  }
+  await withHiddenEmails(async () => {
+    const accounts = ACCOUNTS.map((account) => account.id === "pending" ? { ...account, label: "pending@example.com" } : account);
+    const hidden = await render({
+      api: leaseClient().client,
+      runner: runnerView({ protocolVersion: LEASE_RECOVERY, providerAccounts: accounts,
+        providerLogins: [runningLogin("pending", "pending@example.com")] }),
+    });
+    try {
+      assert.deepEqual(hidden.sub("Signing In to Claude"), ["Email hidden", "Stale Lease"],
+        "the provider and profile give way to Email hidden, and the lease stays");
+      assert.doesNotMatch(hidden.container.innerHTML, /pending@example\.com/);
+    } finally {
+      await hidden.unmount();
+    }
+  });
+});
+
 test("Recover Lease… confirms with the account and record time, recovers the inspected record, and inspects again", async () => {
   const api = leaseClient();
   const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
