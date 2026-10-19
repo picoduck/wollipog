@@ -40,6 +40,9 @@ test.describe("at desktop widths", () => {
   });
 
   test("scrolling the detail does not move the list, and choosing another project shows its title at the top", async ({ page }) => {
+    // A shorter desktop window, so Alpha's detail scrolls well past 300px whatever its sections hold:
+    // Memory Sharing became one row, About and the machine rows (#2963).
+    await page.setViewportSize({ width: 1440, height: 700 });
     await open(page, projectPath("alpha"), "many");
     const list = listBody(page);
     const pane = detail(page);
