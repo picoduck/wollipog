@@ -58,6 +58,11 @@ const agentRow = (page: import("@playwright/test").Page, name: string) =>
   page.locator("article.machine-detail button.row").filter({
     has: page.locator(".row-title", { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }),
   });
+/** Machine Settings (#2991), one form whose description is the machine's name. */
+const settingsDialog = (page: import("@playwright/test").Page) => page.getByRole("dialog", { name: "Machine Settings" });
+/** One of Agent Installations' radio groups (#2991), by its label. */
+const installationGroup = (page: import("@playwright/test").Page, label: string) =>
+  settingsDialog(page).getByRole("radiogroup", { name: label, exact: true });
 
 /** The open machine's one lifecycle notice (#2988). */
 const machineNotice = (page: import("@playwright/test").Page) => page.locator("article.machine-detail > .notice");
@@ -137,21 +142,21 @@ test("Agent Details leads with the fix, and Approve Launch… confirms the exact
     .getByRole("button", { name: "Revoke Approval", exact: true })).toHaveClass(/\bdanger\b/);
 });
 
-test("Choose Another Installation… opens Machine Settings with focus and view on its installations (#2990)", async ({ page }) => {
+test("Choose Another Installation… opens Machine Settings with focus and view on Agent Installations (#2990, #2991)", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("selected-installation-unavailable"));
   await agentRow(page, "Codex App Server (v0.155.1)").click();
   const details = page.getByRole("dialog", { name: "Codex App Server (v0.155.1)" });
   await expect(details.locator(".notice")).toContainText("Codex exited before it answered the check. Rediscover to check it again.");
   await details.getByRole("button", { name: "Choose Another Installation…" }).click();
-  const settings = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  const heading = settings.getByRole("heading", { name: "Agent Harness Installations" });
+  const settings = settingsDialog(page);
+  const installations = settings.getByRole("group", { name: "Agent Installations" });
   // After the opening effects settle, focus and the view agree: the installations, not Machine Name.
   await page.waitForTimeout(500);
-  await expect(heading).toBeFocused();
-  await expect(heading).toBeInViewport();
+  await expect(installations).toBeFocused();
+  await expect(installations).toBeInViewport();
   await expect(settings.getByLabel("Machine Name")).not.toBeFocused();
-  await settings.getByRole("button", { name: "Close", exact: true }).last().click();
+  await settings.getByRole("button", { name: "Cancel" }).click();
   // Agent Details stayed under Machine Settings.
   await expect(details).toBeVisible();
 });
@@ -166,64 +171,38 @@ test("a machine's own manager gets no Choose Another Installation…, whose inst
   await expect(details.getByRole("button", { name: "Choose Another Installation…" })).toHaveCount(0);
 });
 
-test("Machine settings show competing installations and switch the saved target", async ({ page }) => {
+test("Machine Settings lists competing installations as one radio group and saves the other one (#2991)", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
   await openSettings(page);
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  const system = dialog.locator(".machine-harness-installation").filter({ hasText: "/usr/bin/codex" });
-  const local = dialog.locator(".machine-harness-installation").filter({ hasText: "/home/example/.local/bin/codex" });
-  await expect(system.getByRole("button", { name: "Selected" })).toBeVisible();
-  await expect(local.getByRole("button", { name: "Use This Installation" })).toBeVisible();
-  await expect(system).toContainText("New Release Published");
-  await expect(system).toContainText("compatibility with this Machine has not been verified");
-  await expect(local).toContainText("`codex update`");
-  await expect(local.locator("p")).not.toContainText("selected Codex installation");
-  await expect(local.locator("p")).toContainText("'/home/example/.local/bin/codex' 'update'");
-  await page.screenshot({ path: "test-results/harness-installations-before-desktop.png", fullPage: true });
-  await local.getByRole("button", { name: "Use This Installation" }).click();
-  await expect(local.getByRole("button", { name: "Selected" })).toBeVisible();
-  await page.screenshot({ path: "test-results/harness-installations-after-desktop.png", fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(dialog).toBeVisible();
-  await page.screenshot({ path: "test-results/harness-installations-after-mobile.png", fullPage: true });
+  const codex = installationGroup(page, "Codex");
+  const system = codex.getByRole("radio", { name: "/usr/bin/codex" });
+  const local = codex.getByRole("radio", { name: "/home/example/.local/bin/codex" });
+  await expect(system).toBeChecked();
+  await expect(local).not.toBeChecked();
+  await expect(codex.locator(".choice-row").filter({ hasText: "/home/example/.local/bin/codex" })).toContainText("v0.210.0");
+  await expect(codex.locator(".choice-row").filter({ hasText: "/home/example/.local/bin/codex" })).toContainText("Available. Signed in.");
+  // Release facts are Agent Details' (#2990); the dialog has no per-row buttons.
+  await expect(settingsDialog(page)).not.toContainText("New Release Published");
+  await expect(settingsDialog(page).getByRole("button", { name: /Use This Installation|Selected/u })).toHaveCount(0);
+  await local.check();
+  await settingsDialog(page).getByRole("button", { name: "Save Changes" }).click();
+  await expect(settingsDialog(page)).toHaveCount(0);
+  await openSettings(page);
+  await expect(installationGroup(page, "Codex").getByRole("radio", { name: "/home/example/.local/bin/codex" })).toBeChecked();
 });
 
-test("Machine and Connections explain pinned, suppressed, failed, and unavailable harness states", async ({ page }) => {
+test("Machine Settings states each installation's availability, and Agent Details keeps its release guidance", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states"));
   await openSettings(page);
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  const installation = (path: string) => dialog.locator(".machine-harness-installation").filter({ hasText: path });
-  await expect(installation("Codex Tools")).toContainText("Pinned by Machine Policy");
-  await expect(installation("Codex Tools")).toContainText("change the pin before planning an upgrade");
-  await expect(installation("Claude\\claude.exe")).toContainText("Checks Disabled by Machine Policy");
-  await expect(installation("Claude\\claude.exe")).toContainText("whether manual upgrades are permitted");
-  await expect(installation("Pi\\pi.exe")).toContainText("Check Failed");
-  await expect(installation("Pi\\pi.exe")).toContainText("no current release status was established");
-  await installation("Pi\\pi.exe").scrollIntoViewIfNeeded();
-  await installation("Pi\\pi.exe").screenshot({ path: "test-results/failed-harness-check-desktop.png" });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await installation("Pi\\pi.exe").screenshot({ path: "test-results/failed-harness-check-mobile.png" });
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await expect(installation("Pi\\pi.exe")).toContainText(
-    "Select Rediscover for a native Machine, or Reconnect for an SSH Machine after active sessions finish",
-  );
-  await expect(installation("Legacy Tools")).toContainText("Unavailable");
-  await expect(installation("Legacy Tools")).toContainText("older than the supported version");
-  await expect(installation("Legacy Tools")).toContainText("New Release Published");
-  await expect(installation("Legacy Tools")).toContainText("Use the package or version manager that installed this exact copy");
-  await expect(installation("Legacy Tools").getByRole("button", { name: "Use This Installation" })).toBeEnabled();
-  await page.screenshot({ path: "test-results/harness-states-desktop.png", fullPage: true });
-  await installation("Legacy Tools").scrollIntoViewIfNeeded();
-  await page.screenshot({ path: "test-results/harness-states-desktop-bottom.png", fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await installation("Codex Tools").scrollIntoViewIfNeeded();
-  await expect(installation("Codex Tools")).toBeVisible();
-  await page.screenshot({ path: "test-results/harness-states-mobile.png", fullPage: true });
-  await installation("Claude\\claude.exe").scrollIntoViewIfNeeded();
-  await page.screenshot({ path: "test-results/harness-states-mobile-policy.png", fullPage: true });
-  await installation("Legacy Tools").scrollIntoViewIfNeeded();
-  await page.screenshot({ path: "test-results/harness-states-mobile-bottom.png", fullPage: true });
-  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  const codex = installationGroup(page, "Codex");
+  const row = (path: string) => codex.locator(".choice-row").filter({ hasText: path });
+  await expect(row("Codex Tools")).toContainText("Available.");
+  await expect(row("Legacy Tools")).toContainText("Unavailable. Codex 0.140.0 is older than the supported version 0.147.0.");
+  // An unavailable installation can still be chosen; it is a saved choice that is missing that cannot.
+  await expect(codex.getByRole("radio", { name: "C:\\Legacy Tools\\codex.exe" })).not.toHaveAttribute("aria-disabled", "true");
+  // Claude Code and Pi have one installation each: nothing to choose.
+  await expect(settingsDialog(page).getByRole("radiogroup")).toHaveCount(1);
+  await settingsDialog(page).getByRole("button", { name: "Cancel" }).click();
   await agentRow(page, "Codex App Server (v0.155.1)").click();
   const details = page.getByRole("dialog", { name: "Codex App Server (v0.155.1)" });
   await expect(details.getByText("PowerShell 7.3 or later on this Machine", { exact: false })).toBeVisible();
@@ -231,9 +210,6 @@ test("Machine and Connections explain pinned, suppressed, failed, and unavailabl
     "& 'C:\\Program Files\\Codex Tools\\codex.exe' '--profile' 'Team''s Profile'",
   );
   await expect(details.getByText("Pinned by Machine Policy", { exact: true })).toBeVisible();
-  await page.screenshot({ path: "test-results/harness-command-mobile.png", fullPage: true });
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await page.screenshot({ path: "test-results/harness-command-desktop.png", fullPage: true });
 });
 
 test("Agent Details treats Windows batch wrapper arguments as reference data", async ({ page }) => {
@@ -312,74 +288,72 @@ test("older Windows runner update instructions are suppressed in Agent Details a
   await expect(details).not.toContainText("Run `& 'C:\\Windows");
   await details.getByRole("button", { name: "Done" }).click();
   await openSettings(page);
-  const settings = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  await expect(settings.getByText(/No copyable update command is available/)).toBeVisible();
-  await expect(settings).not.toContainText("Run `& 'C:\\Windows");
-  await page.setViewportSize({ width: 1280, height: 1000 });
-  await settings.getByText(/No copyable update command is available/).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: "test-results/older-runner-guidance-settings-desktop.png", fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await settings.getByText(/No copyable update command is available/).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: "test-results/older-runner-guidance-settings-mobile.png", fullPage: true });
+  // Machine Settings carries no release guidance at all (#2991), so never the unsafe command.
+  await expect(settingsDialog(page)).toBeVisible();
+  await expect(settingsDialog(page)).not.toContainText("Run `& 'C:\\Windows");
 });
 
-test("offline Machines retain last-reported harness status without a fresh release notice", async ({ page }) => {
+test("an offline machine's settings say what saves now and what waits, and still list its installations (#2991)", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
   await setOffline(page);
   await expect(page.getByRole("button", { name: "New Harness Release · View Settings" })).toHaveCount(0);
   await openSettings(page);
-  await expect(page.getByRole("dialog").locator(".machine-harness-installation").first()).toContainText("Last Reported: New Release Published");
-  await page.screenshot({ path: "test-results/harness-installations-offline-desktop.png", fullPage: true });
+  await expect(settingsDialog(page).locator(".notice").first()).toHaveText(
+    "Design Workstation is offline. Changes save now; Capacity Limit and automatic switching take effect when it reconnects.",
+  );
+  await expect(installationGroup(page, "Codex").getByRole("radio")).toHaveCount(2);
+  // Nothing here needs the machine online, so every field stays enabled.
+  await expect(settingsDialog(page).getByLabel("Capacity Limit")).toBeEnabled();
+  await expect(settingsDialog(page).getByRole("switch", { name: "Switch Accounts Automatically" })).toBeEnabled();
+  await expect(settingsDialog(page).getByRole("button", { name: "Delete Machine…" })).toBeEnabled();
 });
 
-test("failed release guidance names the SSH Machine's Reconnect action", async ({ page }) => {
+test("an SSH machine's failed release check reads Check Failed in Agent Details, and its menu offers Reconnect", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states-ssh"));
   const detail = page.locator('article.machine-detail[data-kind="ssh"]');
   await detail.getByRole("button", { name: "Machine Actions" }).click();
   const actions = page.getByRole("menu", { name: "Machine Actions" });
   await expect(actions.getByRole("menuitem", { name: "Reconnect", exact: true })).toBeVisible();
-  await actions.screenshot({ path: "test-results/failed-harness-check-ssh-action.png" });
   await page.keyboard.press("Escape");
-  await openSettings(page);
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  const failedInstallation = dialog.locator(".machine-harness-installation").filter({ hasText: "Pi\\pi.exe" });
-  await expect(failedInstallation).toContainText("Reconnect for an SSH Machine after active sessions finish");
-  await failedInstallation.screenshot({ path: "test-results/failed-harness-check-ssh-guidance.png" });
+  await agentRow(page, "Failed Pi").click();
+  await expect(page.getByRole("dialog", { name: "Failed Pi" }).locator("dt", { hasText: "Updates" }).locator("+ dd"))
+    .toHaveText("Check Failed");
 });
 
-test("Machine settings keep same-name container installations scoped to their targets", async ({ page }) => {
+test("Machine Settings keeps same-name container installations scoped to their targets (#2991)", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("target-installations"));
   await openSettings(page);
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  const installationSection = dialog.locator(".machine-settings-section").filter({ hasText: "Agent Harness Installations" });
-  const alpha = dialog.locator(".machine-harness-installation").filter({ hasText: "Alpha Image" });
-  const beta = dialog.locator(".machine-harness-installation").filter({ hasText: "Beta Image" });
-  await expect(alpha).toContainText("/usr/bin/codex");
-  await expect(beta).toContainText("/usr/bin/codex");
-  await expect(alpha).toContainText("Authenticated · Capability Verified");
-  await expect(alpha).toContainText("Codex Login Status · Codex App Server Help");
-  await expect(beta).toContainText("Authentication Unknown · Capability Unknown");
-  await expect(alpha.getByRole("button", { name: "Selected" })).toBeVisible();
-  await expect(beta.getByRole("button", { name: "Use This Installation" })).toBeVisible();
-  await installationSection.screenshot({ path: "test-results/target-installations-before-desktop.png" });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await installationSection.screenshot({ path: "test-results/target-installations-before-mobile.png" });
-  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
-  await installationSection.screenshot({ path: "test-results/target-installations-before-mobile-light.png" });
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await installationSection.screenshot({ path: "test-results/target-installations-before-desktop-light.png" });
-  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
-  await beta.getByRole("button", { name: "Use This Installation" }).click();
-  await expect(beta.getByRole("button", { name: "Selected" })).toBeVisible();
-  await expect(alpha.getByRole("button", { name: "Selected" })).toBeVisible();
-  await installationSection.screenshot({ path: "test-results/target-installations-after-desktop.png" });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(beta).toBeVisible();
-  await installationSection.screenshot({ path: "test-results/target-installations-after-mobile.png" });
-  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
-  await installationSection.screenshot({ path: "test-results/target-installations-after-mobile-light.png" });
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await installationSection.screenshot({ path: "test-results/target-installations-after-desktop-light.png" });
+  const alpha = installationGroup(page, "Codex in Alpha Image");
+  const beta = installationGroup(page, "Codex in Beta Image");
+  await expect(alpha.getByRole("radio", { name: "/usr/bin/codex" })).toBeChecked();
+  await expect(beta.getByRole("radio", { name: "/usr/bin/codex" })).not.toBeChecked();
+  await expect(alpha).toContainText("Available. Signed in.");
+  await expect(beta).toContainText("Available.");
+  await beta.getByRole("radio", { name: "/usr/bin/codex" }).check();
+  await settingsDialog(page).getByRole("button", { name: "Save Changes" }).click();
+  await expect(settingsDialog(page)).toHaveCount(0);
+  await openSettings(page);
+  await expect(installationGroup(page, "Codex in Beta Image").getByRole("radio", { name: "/usr/bin/codex" })).toBeChecked();
+  await expect(installationGroup(page, "Codex in Alpha Image").getByRole("radio", { name: "/usr/bin/codex" })).toBeChecked();
+});
+
+test("an SSH machine with two installations and a missing saved choice shows the missing one as a disabled row (#2991)", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("ssh-installations"));
+  await openSettings(page);
+  await expect(installationGroup(page, "Codex").getByRole("radio")).toHaveCount(2);
+  await expect(installationGroup(page, "Codex").locator(".choice-row").filter({ hasText: "/home/misko/.local/bin/codex" }))
+    .toContainText("Unavailable. Sign in to this installation, then rediscover.");
+  const claude = installationGroup(page, "Claude Code");
+  const missing = claude.getByRole("radio", { name: "/opt/claude/bin/claude" });
+  await expect(missing).toBeChecked();
+  await expect(missing).toHaveAttribute("aria-disabled", "true");
+  await expect(claude.locator(".choice-row").filter({ hasText: "/opt/claude/bin/claude" }))
+    .toContainText("Saved choice not found. Choose another installation.");
+  // An SSH machine is deleted through its connection, so Delete Machine… is offered while it is online.
+  await expect(settingsDialog(page).getByRole("button", { name: "Delete Machine…" })).toBeEnabled();
+  await claude.getByRole("radio", { name: "/usr/local/bin/claude" }).check();
+  await settingsDialog(page).getByRole("button", { name: "Save Changes" }).click();
+  await expect(page.getByText("Machine settings saved.", { exact: true })).toBeVisible();
 });
 
 test("Machine cards show account-scoped login status", async ({ page }) => {
@@ -597,17 +571,19 @@ test("non-admin recovery guidance wraps inside a narrow mobile detail", async ({
 });
 test("Machine settings rename the Machine, and Add Workspace… registers a Workspace without creating a Project", async ({ page }) => {
   await openSettings(page);
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  await expect(dialog.getByText("Misko-T14s-G6", { exact: true })).toBeVisible();
-  // Workspaces live in the machine's detail (#2989).
+  const dialog = settingsDialog(page);
+  await expect(dialog.locator(".modal-desc")).toHaveText("Design Workstation");
+  // Workspaces live in the machine's detail (#2989), and its facts in Connection Details (#2988).
   await expect(dialog.getByRole("heading", { name: "Workspaces" })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: /Add Workspace/ })).toHaveCount(0);
+  await expect(dialog.getByText("Misko-T14s-G6", { exact: true })).toHaveCount(0);
 
   const name = dialog.getByLabel("Machine Name");
   await name.fill("Primary Development Machine");
   await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByText("Machine settings saved.", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Primary Development Machine", exact: true })).toBeVisible();
-  await page.getByRole("dialog", { name: "Manage Primary Development Machine" }).getByRole("button", { name: "Close" }).last().click();
 
   const workspaces = page.getByRole("region", { name: /^Workspaces/ });
   await workspaces.getByRole("button", { name: "Add Workspace…" }).click();
@@ -633,12 +609,14 @@ test("Capacity shows live usage in the detail, and Change Limit… applies an au
   await expect(capacity.locator(".notice.t-warning")).toHaveText("Claude is using 4 of 4 provider slots. 3 sessions waiting.");
 
   await capacity.getByRole("button", { name: "Change Limit…" }).click();
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  await expect(dialog.getByRole("heading", { name: "Runner Capacity" })).toBeVisible();
+  const dialog = settingsDialog(page);
+  // Change Limit… opens Machine Settings with focus in Capacity Limit (#2991).
+  await expect(dialog.getByLabel("Capacity Limit")).toBeFocused();
   await expect(dialog.getByLabel("Runner Capacity Usage")).toHaveCount(0);
   await expect(dialog.getByLabel("Capacity Dimensions")).toHaveCount(0);
-  await dialog.getByLabel("Runner Capacity", { exact: true }).fill("24");
-  await dialog.getByRole("button", { name: "Save Capacity" }).click();
+  await dialog.getByLabel("Capacity Limit").fill("24");
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await expect(dialog).toHaveCount(0);
   await expect(capacity.locator(".machine-capacity-figure")).toHaveText("12 of 24 units in use");
   await expect(capacity.getByRole("progressbar", { name: "Units in Use" })).not.toHaveClass(/t-warning/);
 });
@@ -668,69 +646,61 @@ for (const width of [1440, 390]) {
   });
 }
 
-test("Machine settings require the terms warning before enabling Automatic Account Switching", async ({ page }) => {
+test("turning on automatic switching confirms the provider terms first, and Cancel saves nothing (#2991)", async ({ page }) => {
   await openSettings(page);
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  await expect(dialog.getByRole("heading", { name: "Automatic Account Switching" })).toBeVisible();
-  await expect(dialog.getByText("Disabled. Provider usage limits continue to park sessions as before.", {
-    exact: true,
-  })).toBeVisible();
+  const dialog = settingsDialog(page);
+  const toggle = dialog.getByRole("switch", { name: "Switch Accounts Automatically" });
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await expect(dialog).toContainText("When an account reaches its usage limit, the next turn moves to another account from the same provider on this machine.");
+  await toggle.click();
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Turn On Automatic Switching" });
+  await expect(confirmation.locator(".notice.t-warning")).toContainText("prohibit circumventing rate limits");
+  await expect(confirmation.locator(".modal-tone-icon")).toHaveCount(0);
+  const turnOn = confirmation.getByRole("button", { name: "Turn On Automatic Switching" });
+  await expect(turnOn).toHaveClass(/\bprimary\b/);
+  await expect(turnOn).toBeFocused();
+  await confirmation.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.querySelector('[role="switch"]')?.getAttribute("aria-checked"))).toBe("true");
 
-  await dialog.getByRole("button", { name: "Enable Automatic Switching" }).click();
-  const warning = page.getByRole("dialog", { name: "Enable Automatic Switching" });
-  await expect(warning).toContainText("prohibit circumventing rate limits");
-  await expect(warning).toContainText("You are responsible");
-  await page.screenshot({
-    path: "test-results/automatic-account-switching/enable-warning.png",
-    fullPage: true,
-  });
-  await warning.getByRole("button", { name: "Enable Automatic Switching" }).click();
-
-  await expect(dialog.getByRole("button", { name: "Disable Automatic Switching" })).toBeVisible();
-  await expect(dialog.getByText(/Enabled. Exhausted, unauthenticated, and cooling-down accounts/)).toBeVisible();
-  await page.screenshot({
-    path: "test-results/automatic-account-switching/machine-setting-enabled.png",
-    fullPage: true,
-  });
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await page.getByRole("dialog", { name: "Turn On Automatic Switching" }).getByRole("button", { name: "Turn On Automatic Switching" }).click();
+  await expect(dialog).toHaveCount(0);
+  await openSettings(page);
+  await expect(settingsDialog(page).getByRole("switch", { name: "Switch Accounts Automatically" })).toHaveAttribute("aria-checked", "true");
 });
 
 test("Machine settings save independent Claude and Codex default accounts", async ({ page }) => {
   await openSettings(page);
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  await expect(dialog.getByRole("heading", { name: "Default Provider Accounts" })).toBeVisible();
-  const defaults = dialog.locator("section.machine-settings-section")
-    .filter({ hasText: "Default Provider Accounts" });
+  const dialog = settingsDialog(page);
+  await expect(dialog.getByRole("group", { name: "Default Accounts" })).toBeVisible();
   const claude = dialog.getByRole("button", { name: /Default Claude Account:/u });
   const codex = dialog.getByRole("button", { name: /Default Codex Account:/u });
-  await expect(claude).toHaveAccessibleName(/Use Existing Behavior/u);
-  await expect(codex).toHaveAccessibleName(/Use Existing Behavior/u);
-  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-before-desktop.png" });
+  await expect(claude).toHaveAccessibleName(/No Default/u);
+  await expect(codex).toHaveAccessibleName(/No Default/u);
 
   await claude.click();
+  await expect(page.getByRole("option", { name: /Work/u })).toContainText("Signed In");
+  await expect(page.getByRole("option", { name: /Personal/u })).toContainText("Sign-In Required");
+  await expect(page.getByRole("listbox")).not.toContainText(/Logged In|Login Required/u);
   await page.getByRole("option", { name: /Personal/u }).click();
-  await expect(claude).toHaveAccessibleName(/Personal/u);
   await codex.click();
   await page.getByRole("option", { name: /Codex Solo/u }).click();
-  await expect(codex).toHaveAccessibleName(/Codex Solo/u);
-  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-after-desktop.png" });
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await expect(dialog).toHaveCount(0);
 
-  await page.setViewportSize({ width: 390, height: 844 });
-  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-after-mobile.png" });
-  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
-  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-after-mobile-light.png" });
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-after-desktop-light.png" });
-
-  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  await openSettings(page);
+  await expect(settingsDialog(page).getByRole("button", { name: /Default Claude Account:/u })).toHaveAccessibleName(/Personal/u);
+  await expect(settingsDialog(page).getByRole("button", { name: /Default Codex Account:/u })).toHaveAccessibleName(/Codex Solo/u);
+  await settingsDialog(page).getByRole("button", { name: "Cancel" }).click();
   await page.getByText("Accounts", { exact: true }).click();
   const personal = page.locator("details.runner-agents .agent-row").filter({ hasText: "Personal" });
   await personal.getByRole("button", { name: "Remove" }).click();
   await page.getByRole("dialog", { name: "Remove Account" }).getByRole("button", { name: "Remove Account" }).click();
   await openSettings(page);
-  const reopened = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  const missing = reopened.locator("section.machine-settings-section").filter({ hasText: "Default Provider Accounts" });
-  await expect(missing).toContainText("The saved account is no longer on this Machine");
-  await missing.screenshot({ path: "test-results/provider-accounts/defaults-missing-desktop.png" });
+  await expect(settingsDialog(page).getByRole("button", { name: /Default Claude Account:/u }))
+    .toHaveAccessibleName(/Saved Account Not Found/u);
 });
 
 test("ordinary members can inspect Runner Capacity but cannot change it", async ({ page }) => {
@@ -746,21 +716,23 @@ test("a Machine owner can change capacity without receiving organization-wide co
   await page.goto(`/machine-management-e2e.html?role=machine-owner&${DESIGN_WORKSTATION}`);
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
   await openSettings(page);
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  await expect(dialog.getByLabel("Runner Capacity", { exact: true })).toBeEnabled();
-  await expect(dialog.getByRole("heading", { name: "Machine Details" })).toHaveCount(0);
-  await expect(dialog.getByRole("heading", { name: "Workspaces" })).toHaveCount(0);
-  await expect(dialog.getByRole("heading", { name: "Danger Zone" })).toHaveCount(0);
+  const dialog = settingsDialog(page);
+  await expect(dialog.getByLabel("Capacity Limit")).toBeEnabled();
+  await expect(dialog.getByRole("switch", { name: "Switch Accounts Automatically" })).toBeVisible();
+  await expect(dialog.getByRole("group", { name: "Default Accounts" })).toBeVisible();
+  await expect(dialog.getByLabel("Machine Name")).toHaveCount(0);
+  await expect(dialog.getByRole("group", { name: "Agent Installations" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Delete Machine…" })).toHaveCount(0);
 });
 
-test("Machine settings expose deletion with an explicit history warning", async ({ page }) => {
+test("Delete Machine… waits for an online native runner to stop, saying so, then confirms the deletion", async ({ page }) => {
   await openSettings(page);
-  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
-  const deleteMachine = dialog.getByRole("button", { name: "Delete Machine" });
+  const deleteMachine = page.getByRole("button", { name: "Delete Machine…" });
   await expect(deleteMachine).toBeDisabled();
-  await expect(deleteMachine).toHaveAttribute("title", "Stop this native runner before deleting the Machine");
+  await expect(page.getByText("Stop the runner to delete.", { exact: true })).toBeVisible();
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setRunnerStatus("offline"));
   await expect(deleteMachine).toBeEnabled();
+  await expect(page.getByText("Stop the runner to delete.", { exact: true })).toHaveCount(0);
   await deleteMachine.click();
 
   const confirmation = page.getByRole("dialog", { name: "Delete Machine" });
@@ -770,6 +742,57 @@ test("Machine settings expose deletion with an explicit history warning", async 
   // The empty tab owns the create actions, so the header no longer offers Add Machine (#2984).
   await expect(page.locator(".page-header").getByRole("button", { name: "Add Machine" })).toHaveCount(0);
   await expect(page.locator(".connections-empty .row button")).toHaveText(["Connect via SSH", "Install Manually"]);
+});
+
+test("Save Changes names what wasn't saved when one field fails, and keeps what did (#2991)", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setSettingsSaveFailure("capacity"));
+  await openSettings(page);
+  const dialog = settingsDialog(page);
+  await dialog.getByLabel("Machine Name").fill("Primary Development Machine");
+  await dialog.getByLabel("Capacity Limit").fill("24");
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  const failure = dialog.locator('.notice.t-danger[role="alert"]');
+  await expect(failure).toContainText("Capacity Limit wasn't saved.");
+  await expect(page.getByRole("heading", { name: "Primary Development Machine", exact: true })).toBeVisible();
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setSettingsSaveFailure(null));
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Capacity" }).locator(".machine-capacity-figure")).toHaveText("12 of 24 units in use");
+});
+
+test("Capacity Limit is 96px, and 300 shows its error under the helper on blur (#2991)", async ({ page }) => {
+  await openSettings(page);
+  const limit = settingsDialog(page).getByLabel("Capacity Limit");
+  // offsetWidth: the opening scale animation would shrink a bounding box.
+  expect(await limit.evaluate((element) => (element as HTMLElement).offsetWidth)).toBe(96);
+  await limit.fill("300");
+  await limit.blur();
+  await expect(limit).toHaveAttribute("aria-invalid", "true");
+  await expect(limit).toHaveAccessibleDescription(
+    "In units, from 1 to 256. Sessions beyond the limit wait in a queue. Enter a whole number from 1 to 256.",
+  );
+});
+
+test("at 390px Machine Settings is a bottom sheet: two 48px footer buttons, Delete Machine… the body's last row (#2991)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/machine-management-e2e.html?${DESIGN_WORKSTATION}`);
+  await openSettings(page);
+  const dialog = settingsDialog(page);
+  const footer = dialog.locator(".modal-foot > .btn");
+  await expect(footer).toHaveText(["Cancel", "Save Changes"]);
+  for (const height of await footer.evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().height))) {
+    expect(height).toBe(48);
+  }
+  const last = dialog.locator(".modal-body > :last-child");
+  await expect(last).toHaveClass(/modal-tertiary/);
+  await expect(last.getByRole("button", { name: "Delete Machine…" })).toBeVisible();
+  await expect(last).toContainText("Stop the runner to delete.");
+  // The confirmation replaces the sheet, with Back, rather than stacking a second one (§7.5).
+  await dialog.getByRole("switch", { name: "Switch Accounts Automatically" }).click();
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Turn On Automatic Switching" });
+  await expect(confirmation.getByRole("button", { name: "Back to Machine Settings" })).toBeVisible();
+  await expect(dialog).toBeHidden();
 });
 
 test("SSH config import keeps the selected Host and auto-populates an editable Machine Name", async ({ page }) => {

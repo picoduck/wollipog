@@ -231,6 +231,8 @@ if (sshState && runner) {
   if (sshState === "connecting") runner = null;
   else if (sshState !== "online" && sshState !== "legacy") Object.assign(runner, { status: "offline", lastSeen: Date.now() - 4 * 60_000 });
 }
+/** A Machine Settings field whose saves fail until cleared: a partial save (#2991). */
+let failingSettingsSave: "capacity" | null = null;
 /** How many lifecycle requests the busy machine refuses before it is forced (`busy` in the URL). */
 const busyMachine = fixtureParams.has("busy");
 const activeSessionsConflict = () => new ApiError("this machine has 2 active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
@@ -393,7 +395,7 @@ const client = {
     const agent = runner.agents.find((candidate) => candidate.id === agentId);
     if (!agent?.installation || agent.installation.id !== installationId) throw new Error("installation not found");
     const selection = {
-      family: "codex" as const,
+      family: agent.driver === "claude-code" ? "claude" as const : agent.driver === "pi" ? "pi" as const : "codex" as const,
       context: agent.context ?? { kind: "native" as const },
       installationId: agent.installation.id,
       path: agent.installation.path,
@@ -401,7 +403,8 @@ const client = {
       version: agent.version,
       agentId,
     };
-    runner.harnessSelections = [selection];
+    runner.harnessSelections = [...(runner.harnessSelections ?? []).filter((item) =>
+      item.family !== selection.family || JSON.stringify(item.context) !== JSON.stringify(selection.context)), selection];
     runner.agents = runner.agents.map((candidate) => ({ ...candidate,
       installation: candidate.installation ? { ...candidate.installation,
         selection: candidate.installation.id === selection.installationId ? "selected" as const : "other" as const } : undefined,
@@ -424,6 +427,7 @@ const client = {
   },
   updateMachineCapacity: async (_runnerId: string, body: { configuredUnits: number; expectedRevision: number }) => {
     if (!runner?.capacity) throw new Error("runner not found");
+    if (failingSettingsSave === "capacity") throw new Error("The control plane could not reach its database. Try again.");
     if (body.expectedRevision !== runner.capacity.revision) throw new Error("Runner Capacity changed in another client");
     runner.capacity = {
       ...runner.capacity,
@@ -613,7 +617,9 @@ declare global {
         "multiple-installations" | "harness-states" | "harness-states-ssh" |
         "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper" |
         "explicit-interpreter" | "older-interpreter-guidance" | "agent-states" |
-        "selected-installation-unavailable"): void;
+        "selected-installation-unavailable" | "ssh-installations"): void;
+      /** Fails every save of this Machine Settings field until called with null (#2991). */
+      setSettingsSaveFailure(field: "capacity" | null): void;
       setRunnerStatus(status: RunnerView["status"]): void;
       /** A host name long enough that the detail's meta line has to truncate (#2988). */
       setRunnerHostname(hostname: string): void;
@@ -792,6 +798,27 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
           authStatus: "authenticated", registry: registry("goose", "1.8.0", "approved") },
         ...missing,
       ];
+    } else if (scenario === "ssh-installations") {
+      // An SSH machine with two Codex installations and a Claude Code choice it no longer finds (#2991).
+      runner.protocolVersion = PROTOCOL_VERSION;
+      runner.os = "linux";
+      runner.agents = [
+        { id: "codex", name: "Codex", command: "/usr/local/bin/codex", args: [], env: {}, driver: "codex-app-server",
+          context: { kind: "native" }, source: "discovered", available: true, authStatus: "authenticated", version: "0.155.1",
+          installation: { id: "system", path: "/usr/local/bin/codex", via: "path", selection: "selected" } },
+        { id: "codex-local", name: "Codex", command: "/home/misko/.local/bin/codex", args: [], env: {}, driver: "codex-app-server",
+          context: { kind: "native" }, source: "discovered", available: false, authStatus: "unauthenticated", version: "0.150.0",
+          installation: { id: "local", path: "/home/misko/.local/bin/codex", via: "common-dir", selection: "other" } },
+        { id: "claude", name: "Claude Code", command: "/usr/local/bin/claude", args: [], env: {}, driver: "claude-code",
+          context: { kind: "native" }, source: "discovered", available: true, authStatus: "authenticated", version: "2.1.4",
+          installation: { id: "claude-path", path: "/usr/local/bin/claude", via: "path" } },
+      ];
+      runner.harnessSelections = [
+        { family: "codex", context: { kind: "native" }, installationId: "system", path: "/usr/local/bin/codex",
+          via: "path", version: "0.155.1", agentId: "codex" },
+        { family: "claude", context: { kind: "native" }, installationId: "old-claude", path: "/opt/claude/bin/claude",
+          via: "common-dir", version: "2.0.1", agentId: null },
+      ];
     } else if (scenario === "harness-states" || scenario === "harness-states-ssh") {
       runner.protocolVersion = PROTOCOL_VERSION;
       runner.hostname = "demo-workstation";
@@ -853,13 +880,14 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
         unavailableReason: "The configured command was not found or could not be started in this execution context.",
       }];
     }
-    if (scenario === "harness-states-ssh") {
+    if (scenario === "harness-states-ssh" || scenario === "ssh-installations") {
       box = { boxId: "demo-box", runnerId: runner.runnerId, displayName: "Design Workstation",
         sshTarget: "demo-workstation", status: "online", lastError: null, createdAt: 1 };
       socket?.push({ type: "box_upsert", box: structuredClone(box) });
     }
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
   },
+  setSettingsSaveFailure: (field) => { failingSettingsSave = field; },
   setRunnerStatus: (status) => {
     if (!runner) return;
     runner.status = status;

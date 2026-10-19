@@ -236,7 +236,7 @@ test("below 75% the meter is neutral; before a report, or offline, Capacity is w
   }
 });
 
-test("Change Limit… is for those who may change capacity, and opens Machine Settings without capacity readouts or Workspaces", async () => {
+test("Change Limit… is for those who may change capacity, and opens Machine Settings in Capacity Limit without readouts or Workspaces", async () => {
   const viewer = await mount(runner("studio", { ...busy, canManage: false }), { role: "viewer" });
   try {
     assertNoDomNode(buttonNamed(sectionNamed(viewer.detail(), "Capacity")!, "Change Limit…"), "a viewer cannot change the limit");
@@ -249,10 +249,12 @@ test("Change Limit… is for those who may change capacity, and opens Machine Se
     assert.ok(change, "Change Limit…");
     await act(async () => change.click());
     await settle();
-    const dialog = dialogNamed(view.body, "Manage Studio Mac")!;
+    const dialog = dialogNamed(view.body, "Machine Settings")!;
     assert.ok(dialog, "Machine Settings opens");
-    assert.ok(dialog.querySelector('input[type="number"]'), "the limit's field is there");
-    const headings = [...dialog.querySelectorAll("h3")].map((heading) => heading.textContent);
+    const limit = dialog.querySelector<HTMLInputElement>('input[type="number"]');
+    assert.ok(limit, "the limit's field is there");
+    assert.ok((domWindow.document.activeElement as unknown) === limit, "with focus in Capacity Limit (#2991)");
+    const headings = [...dialog.querySelectorAll("h3, legend")].map((heading) => heading.textContent);
     assert.ok(!headings.includes("Workspaces"), headings.join(", "));
     for (const label of ["Runner Capacity Usage", "Capacity Dimensions", "Current Capacity Bottlenecks", "Capacity Breakdown"]) {
       assertNoDomNode(dialog.querySelector(`[aria-label="${label}"]`), `no ${label} in Machine Settings`);
