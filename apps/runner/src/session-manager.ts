@@ -5403,6 +5403,16 @@ export class SessionManager {
     };
   }
 
+  async trimArchivedHistory(request: import("@wollipog/protocol").TrimSessionHistoryMessage) {
+    const epoch = this.store.readMeta(request.sessionId)?.logEpoch ?? 0;
+    if (this.store.projectedHistoryEpoch(epoch, this.controlPlaneProtocolVersion()) !== request.logEpoch ||
+        this.store.projectedEventSeq(request.sessionId, request.throughSeq, this.controlPlaneProtocolVersion()) !== request.throughSeq) {
+      return { trimmed: false, bytesRemoved: 0 };
+    }
+    return this.store.trimHistory(request.sessionId, { logEpoch: epoch, throughSeq: request.throughSeq },
+      `${this.lockOwner}:retention`, () => !this.isActive(request.sessionId));
+  }
+
   /** One negotiated snapshot for correlated result messages assembled by the socket layer. */
   snapshotForControlPlane(meta: SessionMeta) {
     return this.snapshot(meta);
@@ -6163,6 +6173,7 @@ export class SessionManager {
    * runner can't append events that resetEvents would then truncate. Returns the refreshed meta, or
    * null if it isn't reprocessable / is busy. */
   reprocess(sessionId: string, events: SessionEventPayload[]): SessionMeta | null {
+    if (this.store.historyRetention(sessionId)) throw new Error("Full history cannot be restored: the runner has trimmed this session’s log under archived-history retention.");
     const meta = this.store.readMeta(sessionId);
     if (!meta || !isAdoptedSession(meta)) return null;
     if (this.active.has(sessionId)) return null; // a live turn here would race the reset
@@ -8978,9 +8989,7 @@ export class SessionManager {
       ...(meta.config.maxToolCalls
         ? {
             toolCallIds: new Set(
-              this.store.readEvents(sessionId)
-                .filter((event) => event.payload.kind === "tool_call")
-                .map((event) => (event.payload as Extract<SessionEventPayload, { kind: "tool_call" }>).toolCallId),
+              this.store.toolCallIds(sessionId),
             ),
           }
         : {}),
@@ -12233,9 +12242,7 @@ export class SessionManager {
             this.patchSessionConfig(sessionId, next.config);
             if (next.config.maxToolCalls && !entry.toolCallIds) {
               entry.toolCallIds = new Set(
-                this.store.readEvents(sessionId)
-                  .filter((event) => event.payload.kind === "tool_call")
-                  .map((event) => (event.payload as Extract<SessionEventPayload, { kind: "tool_call" }>).toolCallId),
+                this.store.toolCallIds(sessionId),
               );
             }
           } catch (error) {
@@ -15633,9 +15640,7 @@ export class SessionManager {
     }
     if (maxToolCalls != null && !entry.toolCallIds) {
       entry.toolCallIds = new Set(
-        this.store.readEvents(sessionId)
-          .filter((event) => event.payload.kind === "tool_call")
-          .map((event) => (event.payload as Extract<SessionEventPayload, { kind: "tool_call" }>).toolCallId),
+        this.store.toolCallIds(sessionId),
       );
     }
     // A control-plane card holds the queue and nothing else: the live turn keeps running, no
@@ -19085,8 +19090,7 @@ export class SessionManager {
     if (entry?.governanceTripped || entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId)) return true;
     if (meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd) return true;
     if (!meta.config.maxToolCalls) return false;
-    const toolCallIds = entry?.toolCallIds ?? new Set(this.store.readEvents(meta.sessionId)
-      .flatMap((event) => event.payload.kind === "tool_call" ? [event.payload.toolCallId] : []));
+    const toolCallIds = entry?.toolCallIds ?? new Set(this.store.toolCallIds(meta.sessionId));
     return toolCallIds.size >= meta.config.maxToolCalls;
   }
 
@@ -19352,9 +19356,7 @@ export class SessionManager {
     if (payload.kind === "tool_call" && meta.config.maxToolCalls) {
       if (!entry.toolCallIds) {
         entry.toolCallIds = new Set(
-          this.store.readEvents(sessionId)
-            .filter((event) => event.payload.kind === "tool_call")
-            .map((event) => (event.payload as Extract<SessionEventPayload, { kind: "tool_call" }>).toolCallId),
+          this.store.toolCallIds(sessionId),
         );
       } else {
         entry.toolCallIds.add(payload.toolCallId);

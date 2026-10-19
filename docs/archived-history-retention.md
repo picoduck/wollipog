@@ -84,8 +84,8 @@ Kept in full, because they live outside the transcript:
 Separate policies cover the [mutation audit archive](#mutation-audit-archive-retention) and
 [workflow event retention](./workflow-event-retention.md). Workflow event retention ages terminal
 instances from completion, with its own Storage controls and environment default. These policies
-are independent. The runners' own session logs are outside this session-history policy. A pruned
-session's runner keeps its full log until the session is deleted.
+are independent. Capable runners also trim their session logs after a completed control-plane prune,
+as described [below](#runner-logs-and-upgrades).
 
 ## Mutation audit archive retention
 
@@ -199,20 +199,63 @@ with the runner and is unaffected, and new activity is numbered after the pruned
 sequence number is reused. If it is archived again, a later prune applies the same rule to the whole
 session: everything outside the kept set goes, and the newest final response is the one kept.
 
-Reprocessing a pruned session asks its runner for the full log again. If the runner still holds it,
-the whole transcript returns and the prune record is cleared; a session still past the threshold is
-pruned again on the next pass.
+Reprocessing an adopted pruned session asks its runner for the full log again. Once that runner
+has trimmed it, Reprocess explicitly reports that full history cannot be restored; it leaves the
+cached transcript and prune record unchanged. If an older runner still holds the full log, the
+whole transcript returns and the prune record is cleared; a session still past the threshold is
+pruned again on the next pass. Provider-native transcripts outside the runner store are not a
+restoration promise and are never deleted by this policy.
 
 Existing transcript shares keep their own snapshot. New exports and shares contain the kept events.
 
 ## Compatibility
 
-Pruning changes only the control plane's cache. Runners are not told, and no protocol version
-changes. The hydration cursor (`hydrated_seq`, `runner_history_tail_seq`, `runner_history_epoch`)
-never moves, and every runner version asks only for events after it: indexed-history runners,
-legacy full-history runners, and the history preview reader. A pruned event is therefore never sent
-again. A runner history-epoch change, from Reprocess or a runner that reset its log, replaces the
-history as it always has.
+Control-plane-only pruning remains compatible with older runners. A protocol-v231 runner
+advertises `runnerHistoryRetention`; only a capable runner receives `trim_session_history`.
+Older control planes send no such command, and older runners retain their complete logs.
+
+### Runner logs and upgrades
+
+There is **no separate runner switch or operator opt-in**. The same organization policy controls
+runner trimming: off by default, 7–3650 whole days after archiving (suggested 90), the same
+`CONTROL_PLANE_ARCHIVED_HISTORY_RETENTION_DAYS` default, and the same 24-hour delay on enable or
+shorten. After the control plane finishes pruning a fully hydrated, archived, settled session with
+no Stop pending, it asks its capable runner to trim through that exact runner epoch and sequence.
+There is no additional grace period. A pass also retries already-pruned sessions, so offline
+runners catch up when online.
+
+**Upgrade effect:** an organization that already enabled archived-history retention also enables
+runner trimming as soon as both components support it. An already-armed policy does not receive
+another 24-hour delay on upgrade. Previously pruned sessions can lose their runner's full log on
+the next retention pass. Back up runner data before upgrading if that full history is needed, or
+turn the organization policy off before the upgrade. Existing policies that are off remain off.
+
+The runner keeps the control-plane transcript kept set plus approval, permission and question
+decisions, review, workflow, automation and provenance events, checkpoints and other resume
+evidence. It retains unknown additive event kinds conservatively. Removed tool-call ids remain
+in a hashed accounting sidecar, without their command/output text, so resuming or adding a tool
+limit never resets its lifetime count. Session metadata, native resume ids, costs and usage are
+unchanged. Provider-native transcripts outside the runner store are out of scope.
+
+Copying reads 64 KiB slices and yields to live I/O, with bounded record buffers. Kept data is
+written into immutable segments targeting 1 MiB (a single record can exceed that target, up to
+the existing history-page record limit). An index is built during the copy. The writer lock is
+free during copying; any live provider or changed source wins and defers trimming. New files
+are flushed before an atomic manifest switch; a crash before it keeps the original readable,
+and a crash after it keeps the complete retained log readable. The next pass finishes unlinking
+superseded generations, including the original monolithic log. Open-file deletion failures are
+retried. Files are unlinked, not securely overwritten.
+
+The runner keeps its event sequence high-water and epoch. Only certified gaps in the retained
+prefix are permitted; appends after that boundary remain contiguous. Control-plane hydration
+cursors, accounting epochs and campaign proofs do not change. Resume and restart use the same
+provider-native state and allocate new events above the old boundary. Re-archiving and pruning
+again keeps all prompts and reports plus the newest final response under the same rules.
+
+Retained manifests use format 2; older runner binaries fail closed on that format. To downgrade
+a trimmed runner, stop it and restore its pre-upgrade runner-data backup with the older binaries;
+do not point an older binary at the retained data. A control-plane downgrade does not recover
+removed data. Existing exports, shares and backups retain their own snapshots.
 
 ## Guards
 

@@ -394,3 +394,14 @@ Before merging, verify that every required check applies to the pull request's c
 Configure the `main` ruleset to require those checks, resolved review conversations, and a pull
 request while blocking force pushes and branch deletion. A skipped workflow result does not prove
 that the current head was tested.
+
+## Runner History Retention Upgrade Note
+
+Releases containing protocol v229 must call out the runner-log retention change in their upgrade
+and rollback guidance. Organizations with archived-history retention already enabled automatically
+trim capable runners after completed control-plane pruning, including sessions pruned before the
+upgrade, without a new switch or another 24-hour arming delay. Off remains off. Preserve a runner
+data backup or disable the organization policy before upgrading if full logs must be retained.
+Reprocess cannot restore a trimmed full log. Manifest format 2 is intentionally refused by older
+runners; rollback requires stopping the runner and restoring pre-upgrade runner data with the old
+binaries. See [archived-history retention](./archived-history-retention.md#runner-logs-and-upgrades).
