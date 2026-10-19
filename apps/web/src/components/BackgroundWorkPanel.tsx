@@ -236,12 +236,15 @@ export function BackgroundWorkPanel({
   // in the panel's notice slot, whose own rescue runs first, in a layout effect: it asks
   // `claimRemovedFocus`, which takes the focus the removed Acknowledge (`origin`) held. Focus that
   // was already on <body> (a pointer that doesn't focus buttons) is moved by the passive effect.
+  // Under a pushed Job Detail page the list, headings included, is hidden and can't take focus, so
+  // the claim declines and the slot keeps focus by its own rescue.
   const acknowledgedFocus = useRef<{ sessionId: string; groupKey: string; origin: Element | null } | null>(null);
   const renderedGroups = useRef(groups);
   renderedGroups.current = groups;
   const turnHeading = (groupKey: string) => {
     const groupIndex = renderedGroups.current.findIndex((group) => group.key === groupKey);
-    return groupIndex < 0 ? null : document.getElementById(`${headingPrefix}-turn-${groupIndex}`);
+    const heading = groupIndex < 0 ? null : document.getElementById(`${headingPrefix}-turn-${groupIndex}`);
+    return heading?.closest("[hidden]") ? null : heading;
   };
   const claimRemovedFocus = () => {
     const target = acknowledgedFocus.current;
@@ -250,7 +253,7 @@ export function BackgroundWorkPanel({
     if (heading === null) return false;
     acknowledgedFocus.current = null;
     heading.focus();
-    return true;
+    return document.activeElement === heading;
   };
   useEffect(() => {
     const target = acknowledgedFocus.current;

@@ -1693,6 +1693,28 @@ test("after Acknowledge, focus goes to its turn's heading rather than the slot's
   }
 });
 
+test("after Acknowledge on a Job Detail page, whose list and headings are hidden, focus stays in the notice slot (#2871)", async () => {
+  const requests: Array<(value: SessionView) => void> = [];
+  const client = {
+    acknowledgeBackgroundMissingResult: () => new Promise<SessionView>((resolve) => { requests.push(resolve); }),
+  } as unknown as ApiClient;
+  const panel = await mountBackgroundWork({ session: threeResultsSession("session-focus-page"), parentTurns: threeTurns }, client);
+  try {
+    await act(async () => panel.container.querySelector<HTMLButtonElement>("button.background-job-row")!.click());
+    assert.ok(panel.container.querySelector<HTMLElement>(".background-work-panel")!.hidden, "a Job Detail page is pushed");
+    const acknowledge = acknowledgeButtons(panel.container)[0]!;
+    acknowledge.focus();
+    await act(async () => { acknowledge.click(); await Promise.resolve(); });
+    await act(async () => { requests[0]!({} as SessionView); await Promise.resolve(); await Promise.resolve(); });
+    const active = domWindow.document.activeElement as unknown as HTMLElement | null;
+    assert.ok(active !== null && active !== domWindow.document.body as unknown, "focus is not dropped to <body>");
+    assert.ok(active!.closest(".panel-notice-slot"), "the slot's own rescue keeps focus in the slot, not on a hidden heading");
+  } finally {
+    for (const request of requests) request({} as SessionView);
+    await panel.dispose();
+  }
+});
+
 test("after a blocked result's Acknowledge, its Acknowledged entry takes the slot and focus goes to the turn's heading (#2871)", async () => {
   const session = blockedSession("session-blocked-focus");
   session.backgroundDeliveries![0]!.blockedResultRevision = "snapshot-focus";
