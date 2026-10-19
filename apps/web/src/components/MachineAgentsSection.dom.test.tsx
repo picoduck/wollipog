@@ -221,6 +221,28 @@ test("a reference-only Windows launch keeps Executable and Arguments, with nothi
   } finally {
     await view.unmount();
   }
+  // A launch with no arguments says None rather than drawing an empty array.
+  const bare = await mount(runner([appServer("codex", "0.155.1", { command: "C:\\Tools\\codex.cmd", args: [] })], { os: "windows" }));
+  try {
+    await act(async () => rowNamed(bare.body, "Codex App Server")!.click());
+    const argumentsTerm = [...dialog(bare.body)!.querySelectorAll("dt")].find((term) => term.textContent === "Arguments")!;
+    assert.equal(argumentsTerm.nextElementSibling?.textContent, "None");
+  } finally {
+    await bare.unmount();
+  }
+});
+
+test("the Registry fact puts the description and the capabilities on their own lines, with no middle dot", async () => {
+  const view = await mount(runner([gemini("approved")]));
+  try {
+    await act(async () => rowNamed(view.body, "Gemini CLI")!.click());
+    const term = [...dialog(view.body)!.querySelectorAll("dt")].find((candidate) => candidate.textContent === "Registry")!;
+    const lines = [...term.nextElementSibling!.children].map((line) => line.textContent);
+    assert.deepEqual(lines, ["Google's coding agent", "Capabilities pending live ACP handshake"]);
+    assert.ok(!(term.nextElementSibling!.textContent ?? "").includes("·"));
+  } finally {
+    await view.unmount();
+  }
 });
 
 test("Approve Launch… confirms with a primary button and the exact preview; Revoke Approval… is a danger confirmation", async () => {

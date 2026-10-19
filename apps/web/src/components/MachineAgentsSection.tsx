@@ -165,7 +165,12 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
         <div><dt>Version</dt><dd>{agent.version ? `v${agent.version}` : "Unknown"}</dd></div>
         <div><dt>Sign-In</dt><dd>{agentSignInFact(agent)}</dd></div>
         {agent.update && <div><dt>Updates</dt><dd>{harnessUpdateLabel(agent.update, online)}</dd></div>}
-        {registry && <div><dt>Registry</dt><dd>{registry.description} · {acpCapabilitySummary(agent)}</dd></div>}
+        {registry && (
+          <div>
+            <dt>Registry</dt>
+            <dd><div>{registry.description}</div><div>{acpCapabilitySummary(agent)}</div></dd>
+          </div>
+        )}
         {registry && transport && <div><dt>Transport</dt><dd>{transport}</dd></div>}
       </dl>
       {status !== "not_installed" && (
@@ -176,7 +181,7 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
               <p className="section-note">This Windows launch may resolve to a batch wrapper or use an executable with legacy PowerShell argument passing, which can change quotes or expand percent signs, so there is no command to copy.</p>
               <dl className="facts">
                 <div><dt>Executable</dt><dd><code>{agent.command}</code></dd></div>
-                <div><dt>Arguments</dt><dd><code>{JSON.stringify(agent.args)}</code></dd></div>
+                <div><dt>Arguments</dt><dd>{agent.args.length > 0 ? <code>{JSON.stringify(agent.args)}</code> : "None"}</dd></div>
               </dl>
             </>
           ) : (
