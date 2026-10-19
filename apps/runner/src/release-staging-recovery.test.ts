@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  appendFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync,
+  appendFileSync, chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync,
   writeFileSync, writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -458,4 +458,161 @@ test("the default process table finds a real process whose cwd is inside staging
   await new Promise((resolve) => child.once("exit", resolve));
   assert.equal(findHolders(join(root, "upgrades"), BigInt(UID), procs).state, "none");
   assert.equal(typeof procs.name(procs.self), "string");
+});
+
+function legacyDirectory(f: ReturnType<typeof fixture>, tag = "v0.28.0") {
+  const path = join(f.data, "upgrades", tag);
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  writeFileSync(join(path, "SHA256SUMS"), "interrupted manifest", { mode: 0o600 });
+  return path;
+}
+
+test("legacy interrupted downloads are inspected read-only and preserved with a distinct exact token", linux, (t) => {
+  const f = fixture(t);
+  const path = legacyDirectory(f);
+  mkdirSync(join(path, "web"), { mode: 0o755 });
+  mkdirSync(join(path, "web", "assets"), { mode: 0o755 });
+  writeFileSync(join(path, "web", "assets", "app.js"), "inert web", { mode: 0o644 });
+  const before = snapshot(f.root);
+  const inspection = f.inspect();
+  assert.deepEqual(snapshot(f.root), before);
+  const legacy = inspection.legacy[0]!;
+  assert.equal(legacy.recovery.eligible, true, legacy.recovery.reasons.join("; "));
+  assert.match(legacy.recovery.token!, /^sl1-[0-9a-f]{32}$/u);
+  assert.deepEqual(legacy.entries!.map(({ name }) => name), ["SHA256SUMS", "web", "web/assets", "web/assets/app.js"]);
+  assert.throws(() => ReleaseStaging.create(f.data, context, "v0.33.0", f.assets), /occupied/u);
+  const result = f.recover(legacy.recovery.token!);
+  assert.equal(result.admissible, true);
+  assert.equal(readFileSync(join(result.preservedPath, "SHA256SUMS"), "utf8"), "interrupted manifest");
+  assert.equal(readFileSync(join(result.preservedPath, "web", "assets", "app.js"), "utf8"), "inert web");
+  const record = JSON.parse(readFileSync(join(result.container, "recovery.json"), "utf8"));
+  assert.equal(record.sourceKind, "legacy");
+  assert.equal(record.source, path);
+  assert.equal(record.state, "preserved");
+  assert.equal(f.inspect().preserved[0]!.state, "preserved");
+  f.admitsNext();
+});
+
+test("legacy staging alongside an occupied current slot can be preserved independently", linux, async (t) => {
+  const f = fixture(t);
+  await f.abandoned({ publish: ["SHA256SUMS"] });
+  legacyDirectory(f);
+  legacyDirectory(f, "v0.29.0-rc.1");
+  const current = snapshot(f.slot);
+  const legacy = f.inspect().legacy;
+  assert.equal(legacy.length, 2);
+  for (const entry of legacy) {
+    const result = f.recover(entry.recovery.token!);
+    assert.equal(result.admissible, false);
+    assert.deepEqual(snapshot(f.slot), current);
+  }
+  assert.equal(f.recover(f.inspect().recovery.token!).admissible, true);
+  f.admitsNext();
+});
+
+test("legacy unknown, linked, unsafe and substituted objects remain protected", linux, async (t) => {
+  const cases: Array<[string, (path: string, f: ReturnType<typeof fixture>) => void]> = [
+    ["unknown file", (path) => writeFileSync(join(path, "credentials"), "private", { mode: 0o600 })],
+    ["owner record", (path) => writeFileSync(join(path, "owner.json"), "{}", { mode: 0o600 })],
+    ["symlink", (path) => symlinkSync("SHA256SUMS", join(path, "wollipog-web.tar.gz"))],
+    ["hard link", (path) => linkSync(join(path, "SHA256SUMS"), join(path, "wollipog-web.tar.gz"))],
+    ["web symlink", (path, f) => symlinkSync(f.root, join(path, "web"))],
+    ["nested web link", (path) => { mkdirSync(join(path, "web")); symlinkSync("../SHA256SUMS", join(path, "web", "index.html")); }],
+    ["nested web hard link", (path) => { mkdirSync(join(path, "web")); linkSync(join(path, "SHA256SUMS"), join(path, "web", "index.html")); }],
+    ["unknown directory", (path) => mkdirSync(join(path, "other"))],
+    ["unsafe directory", (path) => chmodSync(path, 0o755)],
+    ["unsafe file", (path) => chmodSync(join(path, "SHA256SUMS"), 0o666)],
+  ];
+  for (const [name, change] of cases) await t.test(name, (t) => {
+    const f = fixture(t);
+    const path = legacyDirectory(f);
+    const token = f.inspect().legacy[0]!.recovery.token!;
+    change(path, f);
+    const before = readdirSync(path).sort();
+    assert.equal(f.inspect().legacy[0]!.recovery.eligible, false);
+    assert.equal(f.inspect().legacy[0]!.recovery.token, null);
+    assert.throws(() => f.recover(token), RecoveryRefusedError);
+    assert.deepEqual(readdirSync(path).sort(), before);
+  });
+  for (const change of ["size", "same-size bytes", "identity", "mode", "directory identity", "nested bytes"]) await t.test(change, (t) => {
+    const f = fixture(t);
+    const path = legacyDirectory(f);
+    mkdirSync(join(path, "web"), { mode: 0o755 });
+    writeFileSync(join(path, "web", "index.html"), "old", { mode: 0o644 });
+    const token = f.inspect().legacy[0]!.recovery.token!;
+    if (change === "size") appendFileSync(join(path, "SHA256SUMS"), "more");
+    if (change === "same-size bytes") writeFileSync(join(path, "SHA256SUMS"), "replacement manifest");
+    if (change === "identity") { renameSync(join(path, "SHA256SUMS"), join(f.root, "old")); writeFileSync(join(path, "SHA256SUMS"), "interrupted manifest", { mode: 0o600 }); }
+    if (change === "mode") chmodSync(join(path, "web", "index.html"), 0o600);
+    if (change === "directory identity") { renameSync(path, join(f.root, "old")); legacyDirectory(f); }
+    if (change === "nested bytes") writeFileSync(join(path, "web", "index.html"), "new");
+    assert.notEqual(f.inspect().legacy[0]!.recovery.token, token);
+    assert.throws(() => f.recover(token), /token does not match/u);
+    assert.ok(existsSync(path));
+  });
+  await t.test("invalid parent tag", (t) => {
+    const f = fixture(t);
+    legacyDirectory(f, "not-a-tag");
+    assert.deepEqual(f.inspect().legacy, []);
+    assert.throws(() => f.recover(`sl1-${"0".repeat(32)}`), /token does not match/u);
+  });
+});
+
+test("legacy preservation refuses holders and needs attestation for unreadable processes", linux, (t) => {
+  const f = fixture(t);
+  const path = legacyDirectory(f);
+  const token = f.inspect().legacy[0]!.recovery.token!;
+  f.holders.set(42, [path]);
+  assert.throws(() => f.recover(token, stagingFilesystem, undefined, true), RecoveryRefusedError);
+  f.holders.clear();
+  f.unreadable.add(43);
+  assert.equal(f.inspect().legacy[0]!.recovery.token, token);
+  assert.equal(f.inspect().legacy[0]!.recovery.eligible, false);
+  assert.throws(() => f.recover(token), /could not be inspected/u);
+  assert.equal(f.recover(token, stagingFilesystem, undefined, true).admissible, true);
+});
+
+test("legacy preservation revalidates concurrent updates, recovery and inventory changes before moving", linux, async (t) => {
+  for (const scenario of ["updater", "recovery", "inventory", "destination"]) await t.test(scenario, (t) => {
+    const f = fixture(t);
+    const path = legacyDirectory(f);
+    const token = f.inspect().legacy[0]!.recovery.token!;
+    const racing: StagingFilesystem = { ...stagingFilesystem, rename: (from, to) => {
+      stagingFilesystem.rename(from, to);
+      if (!String(to).endsWith("/recovery.json")) return;
+      if (scenario === "updater") f.holders.set(99, [join(f.data, "upgrades")]);
+      if (scenario === "recovery") f.holders.set(100, [path]);
+      if (scenario === "inventory") appendFileSync(join(path, "SHA256SUMS"), "new");
+      if (scenario === "destination") renameSync(join(f.data, RECOVERY_DIR), join(f.root, "displaced"));
+    } };
+    assert.throws(() => f.recover(token, racing), /nothing was moved/u);
+    assert.ok(existsSync(path));
+  });
+});
+
+test("interrupted legacy preservation retains the source or diagnoses its preserved directory", linux, async (t) => {
+  for (const afterMove of [false, true]) await t.test(afterMove ? "after move" : "before move", (t) => {
+    const f = fixture(t);
+    const path = legacyDirectory(f);
+    const token = f.inspect().legacy[0]!.recovery.token!;
+    let moved = false;
+    const crash: StagingFilesystem = { ...stagingFilesystem, rename: (from, to) => {
+      if (!afterMove && String(from).endsWith("/v0.28.0")) throw new Error("fixture interruption");
+      if (afterMove && moved && String(to).endsWith("/recovery.json")) throw new Error("fixture interruption");
+      stagingFilesystem.rename(from, to);
+      if (String(from).endsWith("/v0.28.0")) moved = true;
+    } };
+    if (afterMove) {
+      const result = f.recover(token, crash);
+      assert.match(result.warnings.join(" "), /could not be finalized/u);
+      assert.ok(existsSync(join(result.preservedPath, "SHA256SUMS")));
+      assert.equal(existsSync(path), false);
+      f.admitsNext();
+    } else {
+      assert.throws(() => f.recover(token, crash), /fixture interruption/u);
+      assert.equal(f.inspect().legacy[0]!.recovery.token, token);
+      assert.ok(existsSync(path));
+    }
+    assert.equal(f.inspect().preserved[0]!.state, "incomplete");
+  });
 });

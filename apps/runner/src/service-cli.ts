@@ -236,7 +236,7 @@ export function serviceUsage(): string {
     "  service staging inspect [--user | --system] [--json]",
     "  service staging recover --attempt <token> [--user | --system] [--accept-uninspectable-processes] [--yes] [--json]",
     "staging inspect explains a blocked upgrade slot without changing anything; staging recover moves the exact inspected,",
-    "inactive attempt into <data-dir>/upgrade-recovery/ (nothing is deleted) so the next upgrade can run.",
+    "inactive attempt or recognized legacy release directory into <data-dir>/upgrade-recovery/ (nothing is deleted) so the next upgrade can run.",
     "Linux systemd only. Without --control-plane/--runner, install sets up both (a colocated runner over loopback).",
     "Mode defaults to --system when run as root and --user otherwise; user services need lingering to survive logout.",
   ].join("\n");
@@ -1129,9 +1129,10 @@ async function staging(args: string[], words: string[], host: ServiceHost, io: S
 
   const options = { acceptUninspectable: flag(args, "--accept-uninspectable-processes") };
   const before = inspectStaging(layout.dataDir, context, fs, procs, options);
+  const source = before.legacy.find((entry) => entry.recovery.token === token)?.path ?? before.slot;
   if (!flag(args, "--yes")) {
     if (!io.stdinIsTTY) throw new CliError("refusing to recover staging without confirmation; pass --yes in non-interactive use", 2);
-    if (!(await io.confirm(`Move attempt ${token} from ${before.slot} into ${before.recovery.destination}/ (nothing is deleted)?`))) {
+    if (!(await io.confirm(`Move attempt ${token} from ${source} into ${before.recovery.destination}/ (nothing is deleted)?`))) {
       emit({ recovered: false }, "nothing was changed");
       return 1;
     }
@@ -1147,7 +1148,7 @@ async function staging(args: string[], words: string[], host: ServiceHost, io: S
   }
   const next = result.admissible ? `wollipog update ${modeFlag(mode)}` : inspect;
   emit({ recovered: true, ...result, next }, [
-    `Recovered the ${result.tag} attempt: moved ${before.slot} to ${result.preservedPath}. Nothing was deleted.`,
+    `Recovered the ${result.tag} attempt: moved ${source} to ${result.preservedPath}. Nothing was deleted.`,
     `Preserved: ${result.container} keeps the attempt and its recovery.json until you remove it; Wollipog never deletes it.`,
     result.admissible ? `Staging is clear. Next: ${next}` : `The staging parent is still not empty. Next: ${next}`,
     ...result.warnings.map((warning) => `Warning: ${warning}`),
@@ -1164,14 +1165,18 @@ async function inspectStagingCommand(host: ServiceHost, mode: ServiceMode, layou
   const token = inspection.recovery.token;
   const acknowledge = inspection.recovery.acknowledgement ? " --accept-uninspectable-processes" : "";
   const recover = token ? `wollipog service staging recover ${modeFlag(mode)} --attempt ${token}${acknowledge}` : null;
+  const legacy = inspection.legacy.map((entry) => ({
+    ...entry,
+    next: { recover: entry.recovery.token ? `wollipog service staging recover ${modeFlag(mode)} --attempt ${entry.recovery.token}${entry.recovery.acknowledgement ? " --accept-uninspectable-processes" : ""}` : null },
+  }));
   const data = {
-    ...inspection,
+    ...inspection, legacy,
     installed: { versions: Object.fromEntries(versions), units: units.map((unit) => ({ unit: unit.unit, activeState: unit.activeState, subState: unit.subState })), health },
     next: inspection.state === "clear" ? { update: `wollipog update ${modeFlag(mode)}` } : { recover },
   };
   const size = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
   const lines = [
-    `Staging:    ${inspection.state}${inspection.state === "clear" ? "" : ` (${inspection.slot})`}`,
+    `Staging:    ${inspection.state}${inspection.state === "clear" ? "" : ` (${inspection.slotEntries ? inspection.slot : inspection.parent})`}`,
     `Layout:     ${mode}, data directory ${inspection.dataDir}`,
     ...(inspection.problem ? [`Problem:    ${inspection.problem}`] : []),
   ];
@@ -1186,6 +1191,17 @@ async function inspectStagingCommand(host: ServiceHost, mode: ServiceMode, layou
       `Attempt:    ${describeAttempt(inspection)}`,
       ...(inspection.journal.events.length ? [`Phases:     ${inspection.journal.events.map((event) => `${event.phase} ${event.at}`).join(" → ")}`] : []),
       `In use:     ${inspection.holders.reason ?? "no process holds the staging directory open"}`,
+    );
+  }
+  for (const entry of legacy) {
+    lines.push(
+      `Legacy:     ${entry.path}`,
+      `Contents:   ${entry.entries?.map((item) => `${item.name} (${item.kind}, ${size(item.size)}, ${item.mode}, ${item.nlink} links)`).join(", ") || "empty or unavailable"}`,
+      `Preservation: ${entry.recovery.eligible ? "eligible" : entry.recovery.acknowledgement && entry.recovery.token ? "possible with your attestation" : "refused"}${entry.recovery.reasons.length ? `: ${entry.recovery.reasons.join("; ")}` : ""}.`,
+      ...(entry.next.recover ? [
+        `            ${entry.next.recover}`,
+        "            Confirmation is required. The token binds this directory and its complete inventory; nothing is deleted.",
+      ] : []),
     );
   }
   lines.push(
@@ -1205,6 +1221,11 @@ async function inspectStagingCommand(host: ServiceHost, mode: ServiceMode, layou
       ] : []),
       `            ${recover}`,
       "            The token is bound to the evidence shown; any change to the attempt invalidates it.",
+    );
+  } else if (legacy.some((entry) => entry.next.recover)) {
+    lines.push(
+      `Current Slot: ${inspection.slotEntries ? `recovery unavailable: ${inspection.recovery.reasons.join("; ")}` : "absent"}.`,
+      "Next:       review the legacy inventories and use their preservation commands above, then inspect again. Other entries remain protected.",
     );
   } else {
     lines.push(
