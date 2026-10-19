@@ -507,6 +507,36 @@ test("Owners adopt and revoke provider profiles, confirming active sessions; mem
   expect(await items("Work")).toEqual([]);
 });
 
+test("Owners recover a stale provider HOME lease only where the machine can prove it abandoned (#3241)", async ({ page }) => {
+  await page.goto(`/machine-management-e2e.html?leases&${DESIGN_WORKSTATION}`);
+  const sub = (label: string) => accountRow(page, label).locator(".row-sub");
+  const recoverItem = async (label: string) => {
+    const menu = await openAccountMenu(page, label);
+    return menu.getByRole("menuitem", { name: /^Recover Lease…/u });
+  };
+  await expect(sub("Personal")).toHaveText("ClaudeStale Lease");
+  await expect(sub("Codex Team")).toHaveText("CodexStale Lease");
+  await expect(accountRow(page, "Codex Team").locator(".provider-account-lease"))
+    .toHaveAttribute("title", "This lease was recorded since the machine last started and has no process evidence. Restart the machine, then recover it.");
+  await expect(sub("Work")).toHaveText("Claude");
+  await expect(await recoverItem("Codex Team")).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/stale-leases.png" });
+
+  await (await recoverItem("Personal")).click();
+  const recovery = page.getByRole("dialog", { name: "Recover Lease" });
+  await expect(recovery).toContainText("Another runner left this account's HOME leased and no longer holds it.");
+  await page.screenshot({ path: "test-results/provider-accounts/recover-lease-confirm.png", fullPage: true });
+  await recovery.getByRole("button", { name: "Recover Lease" }).click();
+  await expect(page.getByText("Lease recovered.", { exact: true })).toBeVisible();
+  await expect(sub("Personal")).toHaveText("Claude");
+  await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/lease-recovered.png" });
+
+  await page.goto(`/machine-management-e2e.html?leases&role=machine-owner&${DESIGN_WORKSTATION}`);
+  await expect(accountRow(page, "Personal")).toBeVisible();
+  await expect(providerAccounts(page).locator(".provider-account-lease")).toHaveCount(0);
+});
+
 test("Machine owners can start both provider sign-in flow shapes", async ({ page }) => {
   await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
   const claudeDialog = page.getByRole("dialog", { name: "Add Account" });

@@ -111,7 +111,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 228);
+  assert.equal(PROTOCOL_VERSION, 229);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -264,11 +264,14 @@ test("older peers never receive display-only live Claude usage, but still accoun
   assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
 });
 
-test("PROTOCOL_VERSION is 228", () => {
-  assert.equal(PROTOCOL_VERSION, 228);
+test("PROTOCOL_VERSION is 229", () => {
+  assert.equal(PROTOCOL_VERSION, 229);
   // A v227 runner launches review sessions but neither plans rounds nor validates attempts (#3369).
   assert.equal(runnerSupportsProtocol(227, "reviewRuns"), false);
   assert.equal(runnerSupportsProtocol(228, "reviewRuns"), true);
+  // A v228 runner cannot inspect or recover a stale provider-HOME lease (#3241).
+  assert.equal(runnerSupportsProtocol(228, "providerHomeLeaseRecovery"), false);
+  assert.equal(runnerSupportsProtocol(229, "providerHomeLeaseRecovery"), true);
   // A v226 runner has review sessions but cannot delete an isolated session's refs (#3316).
   assert.equal(runnerSupportsProtocol(226, "sessionWorktreeRefDeletion"), false);
   assert.equal(runnerSupportsProtocol(227, "sessionWorktreeRefDeletion"), true);

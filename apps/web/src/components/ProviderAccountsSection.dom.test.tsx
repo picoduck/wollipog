@@ -7,6 +7,7 @@ import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   type AgentDefinition,
   type ProviderAccountDefinition,
+  type ProviderHomeLeaseInspection,
   type ProviderLoginView,
   type RunnerView,
 } from "@wollipog/protocol";
@@ -910,4 +911,121 @@ test("coded adoption refusals read as sentences, and uncoded ones keep the runne
   assert.equal(adopt(409, undefined, "runner is offline"), "The Machine is offline. Adopting an account needs the Machine to be online.");
   assert.equal(providerProfileErrorMessage(new ApiError("This provider account has no profile access to revoke.", 404), "revoke"),
     "This provider account has no profile access to revoke.");
+});
+
+// Stale lease recovery (#3241).
+const LEASE_RECOVERY = RUNNER_CAPABILITY_MIN_PROTOCOL.providerHomeLeaseRecovery;
+const TIP = "c".repeat(64);
+const NO_REBOOT = "This lease was recorded since the machine last started and has no process evidence. Restart the machine, then recover it.";
+
+function leaseClient(options: { recover?: (accountId: string, tip: string) => Promise<unknown> } = {}) {
+  const inspected: string[] = [];
+  const recovered: Array<{ accountId: string; tip: string }> = [];
+  const state: Record<string, ProviderHomeLeaseInspection> = {
+    granted: { state: "released" },
+    pending: { state: "stale", tipHash: TIP, createdAt: "2026-08-19T00:00:00.000Z", sameHost: true, hasEvidence: false, refusal: null },
+    other: { state: "stale", tipHash: "d".repeat(64), createdAt: "2026-10-18T09:00:00.000Z", sameHost: true, hasEvidence: false, refusal: "NO_REBOOT_PROOF" },
+    legacy: { state: "none" },
+  };
+  const value = {
+    ...client().client,
+    inspectProviderHomeLease: async (_runnerId: string, accountId: string) => { inspected.push(accountId); return state[accountId]; },
+    recoverProviderHomeLease: async (_runnerId: string, accountId: string, tip: string) => {
+      recovered.push({ accountId, tip });
+      if (options.recover) return options.recover(accountId, tip);
+      state[accountId] = { state: "released" };
+      return { status: "recovered", authorizationId: "a" };
+    },
+  } as unknown as ApiClient;
+  return { client: value, inspected, recovered };
+}
+
+test("an Owner or Admin sees a stale lease as line-2 meta, with Recover Lease… enabled only where it can proceed", async () => {
+  const api = leaseClient();
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
+  try {
+    assert.deepEqual([...api.inspected].sort(), ["granted", "legacy", "other", "pending"]);
+    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Stale Lease"]);
+    assert.deepEqual(ui.sub("Other Work"), ["Codex", "Not Granted", "Stale Lease"]);
+    assert.equal(ui.row("Other Work").querySelector(".provider-account-lease")?.getAttribute("title"), NO_REBOOT,
+      "the reason a recovery would be refused is the label's tooltip");
+    assert.equal(ui.row("Pending Work").querySelector(".provider-account-lease")?.getAttribute("title"), null);
+    assert.deepEqual(ui.sub("Granted Work"), ["Claude", "Profile"]);
+    assert.deepEqual(ui.sub("Legacy Work"), ["Codex"]);
+
+    const pending = await ui.openMenu("Pending Work");
+    assert.deepEqual(ui.menuItems(pending).find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: false, reason: null });
+    await ui.closeMenu();
+    const other = await ui.openMenu("Other Work");
+    assert.deepEqual(ui.menuItems(other).find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: true, reason: NO_REBOOT });
+    await ui.closeMenu();
+    const granted = await ui.openMenu("Granted Work");
+    assert.ok(!ui.menuItems(granted).some((item) => item.label === "Recover Lease…"));
+    await ui.closeMenu();
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Recover Lease… confirms with the account and record time, recovers the inspected record, and inspects again", async () => {
+  const api = leaseClient();
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
+  try {
+    await ui.choose("Pending Work", "Recover Lease…");
+    const dialog = ui.dialog();
+    assert.ok(dialog);
+    const text = dialog.textContent ?? "";
+    assert.match(text, /Recover Lease/);
+    assert.match(text, /Another runner left this account's HOME leased and no longer holds it\./);
+    assert.match(text, /Pending Work/);
+    assert.match(text, /Lease recorded/);
+    await act(async () => { ui.button(dialog, "Cancel").click(); });
+    await ui.settle();
+    assert.deepEqual(api.recovered, [], "Cancel recovers nothing");
+
+    await ui.choose("Pending Work", "Recover Lease…");
+    await act(async () => { ui.button(ui.dialog()!, "Recover Lease").click(); });
+    await ui.settle();
+    assert.deepEqual(api.recovered, [{ accountId: "pending", tip: TIP }], "the exact inspected record is named");
+    assert.match(domWindow.document.body.textContent ?? "", /Lease recovered\./);
+    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending"], "the account is inspected again after recovery");
+    assert.equal(ui.error(), null);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a refused recovery is the section's notice, and nothing is inspected without the access, capability or connection", async () => {
+  const refused = leaseClient({ recover: async () => { throw new ApiError("lease changed", 409, "TIP_CHANGED"); } });
+  const ui = await render({ api: refused.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
+  try {
+    await ui.choose("Pending Work", "Recover Lease…");
+    await act(async () => { ui.button(ui.dialog()!, "Recover Lease").click(); });
+    await ui.settle();
+    assert.match(ui.notice()?.textContent ?? "", /Couldn't Recover the Lease for Pending Work/);
+    assert.equal(ui.error(), "The lease changed after it was checked. Reopen this machine to check it again.");
+  } finally {
+    await ui.unmount();
+  }
+  for (const props of [
+    { canManageProfiles: false, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) },
+    { runner: runnerView({ protocolVersion: LEASE_RECOVERY, canManage: false }) },
+    { runner: runnerView({ protocolVersion: LEASE_RECOVERY - 1 }) },
+    { online: false, runner: runnerView({ protocolVersion: LEASE_RECOVERY, status: "offline" }) },
+  ]) {
+    const api = leaseClient();
+    const view = await render({ ...props, api: api.client });
+    try {
+      assert.deepEqual(api.inspected, [], JSON.stringify(props));
+      assert.ok(!(view.sub("Pending Work").includes("Stale Lease")));
+    } finally {
+      await view.unmount();
+    }
+  }
+  const recover = (status: number, code?: string, message = "x") => providerProfileErrorMessage(new ApiError(message, status, code), "recover");
+  assert.equal(recover(504), "The machine did not confirm the recovery in time. Reopen this machine to check the lease before retrying.");
+  assert.equal(recover(409, "NO_REBOOT_PROOF"), NO_REBOOT);
+  assert.equal(recover(409, "PROVIDER_HOME_LEASE_RECOVERY_FAILED"),
+    "The machine could not confirm the recovery. Reopen this machine to check the lease before retrying.");
+  assert.equal(recover(409, undefined, "runner is offline"), "The machine is offline. Recovering a lease needs the machine to be online.");
 });

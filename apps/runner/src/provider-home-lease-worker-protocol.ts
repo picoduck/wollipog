@@ -38,12 +38,33 @@ export type LeaseWorkerOperation =
    * a successor or unproved consumer may still depend on the HOME after release (#3157).
    * `profileId`, sent for a managed profile HOME, is the identity its account recorded: a marker
    * holding any other identity, or none, keeps the HOME and is not changed. */
-  | { method: "profile_retire"; home: string; provider: "claude" | "codex"; profileId?: string };
+  | { method: "profile_retire"; home: string; provider: "claude" | "codex"; profileId?: string }
+  /** #3241 part 2: read the HOME's lease journal without creating anything; the reply carries
+   * `inspection`. */
+  | { method: "lease_inspect"; home: string; profile?: LeaseWorkerProfileAccess }
+  /** #3241 part 2: on an Owner/Admin authorization, succeed exactly the stale record hashed
+   * `staleTipHash` and release the HOME again before replying. */
+  | { method: "lease_recover"; home: string; provider: string; staleTipHash: string; authorizationId: string; profile?: LeaseWorkerProfileAccess };
 export function isLeaseWorkerAcquisition(method: LeaseWorkerOperation["method"]): method is "acquire" | "acquire_reference" {
   return method === "acquire" || method === "acquire_reference";
 }
+/** Operations that carry the dispatch-time provider-profile context. */
+export function leaseWorkerOperationTakesProfile(method: LeaseWorkerOperation["method"]): method is "acquire" | "acquire_reference" | "lease_inspect" | "lease_recover" {
+  return isLeaseWorkerAcquisition(method) || method === "lease_inspect" || method === "lease_recover";
+}
 export type LeaseWorkerError = "busy" | "unavailable" | "foreign_owner" | "foreign_host" | "refusal" | "cancelled" | "cancel_release_failed" | "expired" |
-  "profile_unsupported_control_plane" | "profile_unverifiable" | "profile_not_granted" | "profile_changed" | "profile_grant_limit";
+  "profile_unsupported_control_plane" | "profile_unverifiable" | "profile_not_granted" | "profile_changed" | "profile_grant_limit" |
+  "stale_tip_changed" | "no_reboot_proof" | "recovery_unconfirmed";
+/** #3241 part 2: a HOME's lease state, as an Owner or Admin sees it before authorizing a recovery. */
+export interface LeaseWorkerInspection {
+  state: "none" | "released" | "held" | "stale" | "unverifiable";
+  tipHash?: string;
+  createdAt?: string;
+  sameHost?: boolean;
+  hasEvidence?: boolean;
+  /** Why an authorized recovery would be refused now, or null when it would proceed. */
+  refusal?: LeaseWorkerError | null;
+}
 /** Fixed, path-free texts: only the code crosses the worker boundary, never the registry's message. */
 export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
   busy: "Provider HOME is already in use; retry after the current owner or publication finishes.",
@@ -59,6 +80,9 @@ export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
   profile_not_granted: "This provider profile is not granted to this control plane. An Owner or Admin must grant access on this Machine before it can be used.",
   profile_changed: "This provider HOME no longer holds the profile that this account or session recorded, so it was not used. Restore the original directory or adopt the replacement explicitly.",
   profile_grant_limit: "This provider profile already records the maximum number of control-plane grants. Revoke an unused grant before granting another control plane.",
+  stale_tip_changed: "This provider HOME's lease is no longer the stale lease that was authorized for recovery. Inspect it again before authorizing a recovery.",
+  no_reboot_proof: "This stale provider HOME lease was written during the current boot and records no process evidence, so it can be recovered only after the host restarts.",
+  recovery_unconfirmed: "The provider HOME lease recovery may have been recorded but could not be confirmed. Inspect the lease again before retrying.",
 };
 /** A worker refusal with its typed code, so callers can choose a recovery action without parsing text. */
 export class ProviderHomeLeaseError extends Error {
@@ -70,7 +94,7 @@ export interface LeaseWorkerExecute {
 export interface LeaseWorkerAccept { kind: "accept"; epoch: string; id: string; cancel: boolean }
 export type LeaseWorkerReply =
   | { kind: "ready"; epoch: string; pid: number; clock: typeof LEASE_WORKER_CLOCK }
-  | { kind: "receipt" | "done"; epoch: string; id: string; ok: boolean; value: boolean; error?: LeaseWorkerError; profileId?: string }
+  | { kind: "receipt" | "done"; epoch: string; id: string; ok: boolean; value: boolean; error?: LeaseWorkerError; profileId?: string; inspection?: LeaseWorkerInspection }
   | { kind: "diagnostic"; epoch: string; event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished"; leaseId: string; message: string };
 
 const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -78,6 +102,20 @@ const GRANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 /** A `profileId` crosses back only on a successful `profile_adopt` reply. */
 export function validLeaseWorkerReplyProfileId(value: unknown): value is string {
   return typeof value === "string" && PROFILE_ID.test(value);
+}
+const DIGEST = /^[a-f0-9]{64}$/u;
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
+/** An `inspection` crosses back only on a successful `lease_inspect` reply, in exactly this shape. */
+export function validLeaseWorkerInspection(value: unknown): value is LeaseWorkerInspection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  if (v.state === "none" || v.state === "released" || v.state === "held" || v.state === "unverifiable") return Object.keys(v).length === 1;
+  if (v.state !== "stale" || !leaseWorkerFrameKeys(v, ["state", "tipHash", "createdAt", "sameHost", "hasEvidence", "refusal"])) return false;
+  const dated = Object.hasOwn(v, "createdAt");
+  return Object.keys(v).length === (dated ? 6 : 5) && typeof v.tipHash === "string" && DIGEST.test(v.tipHash) &&
+    (!dated || typeof v.createdAt === "string" && TIMESTAMP.test(v.createdAt)) &&
+    typeof v.sameHost === "boolean" && typeof v.hasEvidence === "boolean" &&
+    (v.refusal === null || typeof v.refusal === "string" && Object.hasOwn(LEASE_WORKER_ERRORS, v.refusal));
 }
 export function validLeaseWorkerProfileAccess(value: unknown): value is LeaseWorkerProfileAccess {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -112,8 +150,14 @@ export function validLeaseWorkerOperation(value: unknown): value is LeaseWorkerO
     return typeof v.profileId === "string" && PROFILE_ID.test(v.profileId) && Object.keys(v).length === 5;
   }
   const profiled = Object.hasOwn(v, "profile");
-  return (v.method === "acquire" || v.method === "acquire_reference") && typeof v.provider === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(v.provider) &&
-    (!profiled || validLeaseWorkerProfileAccess(v.profile)) && Object.keys(v).length === (profiled ? 4 : 3);
+  if (profiled && !validLeaseWorkerProfileAccess(v.profile)) return false;
+  if (v.method === "lease_inspect") return Object.keys(v).length === (profiled ? 3 : 2);
+  const provider = typeof v.provider === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(v.provider);
+  if (v.method === "lease_recover") {
+    return provider && typeof v.staleTipHash === "string" && DIGEST.test(v.staleTipHash) &&
+      typeof v.authorizationId === "string" && GRANT_ID.test(v.authorizationId) && Object.keys(v).length === (profiled ? 6 : 5);
+  }
+  return (v.method === "acquire" || v.method === "acquire_reference") && provider && Object.keys(v).length === (profiled ? 4 : 3);
 }
 export function boundedLeaseWorkerFrame(value: unknown, maximum: number): boolean {
   try { return Buffer.byteLength(JSON.stringify(value)) <= maximum; } catch { return false; }

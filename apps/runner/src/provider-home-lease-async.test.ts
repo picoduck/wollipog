@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -305,4 +305,28 @@ test("removed-account HOME retirement decides under the lease in the real worker
   // The lease was released: another runner can take the HOME now.
   assert.equal(await other.acquireHome(plain, "claude"), true);
   assert.equal(await other.releaseHome(plain), true);
+});
+
+test("an Owner/Admin lease recovery crosses the worker as an exact inspection and a typed refusal (#3241)", { skip: process.platform === "win32" }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-async-lease-recover-"));
+  const registry = new AsyncProviderHomeLeaseRegistry("b".repeat(64));
+  t.after(async () => { await registry.close(); rmSync(root, { recursive: true, force: true }); });
+  const home = join(root, "home");
+  const lock = join(home, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock");
+  mkdirSync(lock, { recursive: true, mode: 0o700 });
+  // A legacy lease of another owner on this host, written long before the current boot.
+  writeFileSync(join(lock, "lease.json"), `${JSON.stringify({ version: 1, ownerHash: "a".repeat(64), leaseId: "11111111-1111-4111-8111-111111111111",
+    pid: 2_147_483_646, hostname: hostname(), provider: "claude", createdAt: "2001-01-01T00:00:00.000Z" })}\n`, { mode: 0o600 });
+  const inspection = await registry.inspectHomeLease(home);
+  assert.deepEqual({ ...inspection, tipHash: typeof inspection.tipHash },
+    { state: "stale", tipHash: "string", createdAt: "2001-01-01T00:00:00.000Z", sameHost: true, hasEvidence: false, refusal: null });
+  await assert.rejects(registry.recoverHomeLease(home, "claude", "f".repeat(64), "5a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3"),
+    (error) => error instanceof ProviderHomeLeaseError && error.code === "stale_tip_changed");
+  await assert.rejects(registry.recoverHomeLease(home, "claude", "not-a-hash", "5a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3"), /invalid or oversized/u,
+    "a malformed authorization never reaches the worker");
+  await registry.recoverHomeLease(home, "claude", inspection.tipHash!, "5a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3");
+  assert.deepEqual(await registry.inspectHomeLease(home), { state: "released" });
+  await assert.rejects(registry.recoverHomeLease(home, "claude", inspection.tipHash!, "6a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3"),
+    (error) => error instanceof ProviderHomeLeaseError && error.code === "stale_tip_changed", "a spent authorization cannot be replayed");
+  assert.deepEqual(await registry.inspectHomeLease(join(root, "missing")), { state: "none" });
 });

@@ -73,6 +73,7 @@ import type {
   PromptImageInput,
   PromptImageReference,
   ProviderLoginView,
+  ProviderHomeLeaseInspection,
   QueuedPromptDraft,
   InvokeSessionCommandRequest,
   RelayPodRequest,
@@ -1428,6 +1429,19 @@ export function createApiClient(transport: ApiTransport) {
     req<{ revoked: true; grantIds: string[]; markerUpdated: boolean; runnerNotified: boolean; forced: boolean }>(
       `/api/runners/${encodeURIComponent(runnerId)}/provider-accounts/${encodeURIComponent(accountId)}/revoke-profile-access`,
       { method: "POST", body: JSON.stringify({ force }) },
+    ),
+
+  /** Owner/Admin (#3241): the account HOME's lease state, read on a v229+ runner. */
+  inspectProviderHomeLease: (runnerId: string, accountId: string) =>
+    req<ProviderHomeLeaseInspection>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-accounts/${encodeURIComponent(accountId)}/home-lease`,
+    ),
+
+  /** Owner/Admin (#3241): recover exactly the stale lease record that was inspected. */
+  recoverProviderHomeLease: (runnerId: string, accountId: string, staleTipHash: string) =>
+    req<{ status: "recovered"; authorizationId: string }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-accounts/${encodeURIComponent(accountId)}/recover-lease`,
+      { method: "POST", body: JSON.stringify({ staleTipHash, acknowledgeLeaseRecovery: true }) },
     ),
 
   submitProviderLoginCode: (runnerId: string, operationId: string, code: string) =>

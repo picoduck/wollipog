@@ -157,9 +157,15 @@ A stale lease left by a crashed predecessor on the same host is recovered when t
 replacement's control plane and the predecessor's lifecycle evidence proves nothing it launched
 survives: the host rebooted, or a same-boot process scan finds no survivor (#3241; see
 [the lease worker](provider-home-lease-worker.md#recovering-an-abandoned-lease)). The recovery is an
-explicit journal record; the old lease is kept, never released on its behalf. A lease without
-evidence (from an older runner, or on macOS or Windows), and any lease on a HOME without a profile
-grant, still needs an Owner or Admin's one-time authorization, which a later part of #3241 adds.
+explicit journal record; the old lease is kept, never released on its behalf.
+
+A lease without evidence (from an older runner, or on macOS), or any lease on a HOME without a
+profile grant for this control plane, needs an Owner or Admin's one-time authorization. The Accounts
+list on a v229 Machine shows **Stale Lease** for such an account. **Recover Lease** is offered only
+when the runner reports that a recovery would proceed: the record has evidence that proves it
+abandoned, or the Machine has restarted since the record was written. Otherwise the badge's tooltip
+says why. The authorization names the exact record that was inspected and is used once; see
+[Owner/Admin Recovery Authorization](provider-home-lease-worker.md#owneradmin-recovery-authorization).
 
 ## Web Actions
 

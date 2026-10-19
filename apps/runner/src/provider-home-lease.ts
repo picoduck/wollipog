@@ -23,6 +23,7 @@ import { readLeaseIoSnapshot, applyLeaseIoPlan, ensureLeaseIoAvailable, withLeas
 import { LEASE_CHECKPOINT_LIMITS as LIMITS, type LeaseCheckpointProof, type LeaseRetirementEntry } from "./provider-home-lease-checkpoint.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { decideProviderProfileAccess, isProviderProfileId, ProviderProfileChangeError, readProviderProfileMarker, retireProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileAccess, type ProviderProfileChangeRefusal, type ProviderProfileDenial, type ProviderProfileMarker, type ProviderProfileRead } from "./provider-profile.js";
+import { currentBootTimeMs } from "./provider-home-lease-boot.js";
 import { currentLeaseProcessEvidence, isLeaseProcessEvidence, linuxLeaseProcessProbe, proveLeaseAbandoned, type LeaseAbandonmentProof, type LeaseProcessEvidence, type LeaseProcessProbe } from "./provider-home-lease-evidence.js";
 
 const OWNER_HASH = /^[a-f0-9]{64}$/u;
@@ -95,16 +96,36 @@ interface ProviderHomeLeaseRecordV2 {
   recovery?: LeaseRecoveryNote;
 }
 
-/** Why an authorized owner was allowed to succeed an abandoned lease of another owner. */
-interface LeaseRecoveryNote {
-  proof: LeaseAbandonmentProof;
-  /** The provider profile whose grant for this control plane authorized the recovery. */
-  profileId: string;
+/**
+ * Why a successor was allowed to take over an unreleased lease. Either another owner proved the
+ * lease abandoned and holds this control plane's profile grant (`profileId`), or an Owner or Admin
+ * authorized succeeding that exact record (`authorized`, #3241 part 2), with the proof it rests on:
+ * the record's own lifecycle evidence, or, for a record without evidence, a boot after it was written.
+ */
+type LeaseRecoveryNote =
+  | { proof: LeaseAbandonmentProof; profileId: string }
+  | { proof: "authorized"; authorizationId: string; basis: LeaseAbandonmentProof | "booted_after"; profileId?: string };
+
+/** An Owner or Admin's one-time authorization to succeed the unreleased record hashed `staleTipHash`. */
+export interface LeaseRecoveryAuthorization {
+  staleTipHash: string;
+  authorizationId: string;
 }
+
+/** A boot this long after a record was written proves no process of that boot survives; the margin
+ * absorbs small wall-clock adjustments between the old writer and this reader. */
+const BOOT_PROOF_MARGIN_MS = 60_000;
 
 function isLeaseRecoveryNote(value: unknown): value is LeaseRecoveryNote {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const note = value as Record<string, unknown>;
+  if (note.proof === "authorized") {
+    const profiled = Object.hasOwn(note, "profileId");
+    return Object.keys(note).length === (profiled ? 4 : 3) &&
+      typeof note.authorizationId === "string" && LEASE_ID.test(note.authorizationId) &&
+      (note.basis === "reboot" || note.basis === "process_scan" || note.basis === "booted_after") &&
+      (!profiled || isProviderProfileId(note.profileId));
+  }
   return Object.keys(note).length === 2 && (note.proof === "reboot" || note.proof === "process_scan") && isProviderProfileId(note.profileId);
 }
 
@@ -159,6 +180,22 @@ export interface ProviderHomeLeaseOptions {
   runnerMarker?: string;
   /** Test seam for the process view; defaults to procfs on Linux and to none elsewhere. */
   processProbe?: LeaseProcessProbe | null;
+  /** Test seam for the current boot time (epoch ms, null when unknown); see `currentBootTimeMs`. */
+  bootTimeMs?: () => number | null;
+}
+
+/** What an Owner or Admin is shown before authorizing a recovery (#3241 part 2). */
+export interface ProviderHomeLeaseInspection {
+  /** `none`: no lease journal; `released`: free; `held`: held by this runner; `stale`: an unreleased
+   * record of another runner process; `unverifiable`: the journal cannot be verified. */
+  state: "none" | "released" | "held" | "stale" | "unverifiable";
+  /** For `stale`: the exact record an authorization must name, and what it shows. */
+  tipHash?: string;
+  createdAt?: string;
+  sameHost?: boolean;
+  hasEvidence?: boolean;
+  /** For `stale`: why an authorized recovery would be refused now, or null when it would proceed. */
+  refusal?: ProviderHomeLeaseRefusalKind | null;
 }
 
 function boundedEntries(path: string): string[] {
@@ -321,11 +358,15 @@ function unexpectedEntries(lockDir: string): Error {
  * recorded process is alive; `foreign_owner` is a lease from another runner or control plane whose
  * recorded process is gone; `foreign_host` is a lease recorded on another host; `unverifiable` is
  * everything the registry cannot prove. The `profile_*` kinds are pre-acquisition provider-profile
- * refusals (#3239), decided before any lease journal I/O. */
-export type ProviderHomeLeaseRefusalKind = "busy" | "foreign_owner" | "foreign_host" | "unverifiable" | ProviderProfileDenial | ProviderProfileChangeRefusal;
+ * refusals (#3239), decided before any lease journal I/O. `stale_tip_changed` and `no_reboot_proof`
+ * refuse an authorized recovery (#3241): the lease is no longer the authorized record, or the host
+ * has not booted since that record (without lifecycle evidence) was written. `recovery_unconfirmed`
+ * is not a refusal: an authorized recovery failed after it may have been published. */
+export type ProviderHomeLeaseRefusalKind = "busy" | "foreign_owner" | "foreign_host" | "unverifiable" | "stale_tip_changed" | "no_reboot_proof" |
+  "recovery_unconfirmed" | ProviderProfileDenial | ProviderProfileChangeRefusal;
 
 class ProviderHomeLeaseRefusal extends Error {
-  constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind) { super(message); }
+  constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind, options?: ErrorOptions) { super(message, options); }
 }
 
 /** The typed refusal kind, or null when `error` is not a registry refusal. */
@@ -350,6 +391,10 @@ function refusal(
   return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and ${recovery}; do not remove individual records`, kind);
 }
 
+function staleTipChanged(lockDir: string): Error {
+  return refusal(lockDir, "is no longer the stale lease that was authorized for recovery; inspect it again", false, "stale_tip_changed");
+}
+
 function verificationRefusal(lockDir: string, error: unknown, restartAfterQuarantine = false): Error {
   // Preserve the complete remedy once, and never put malformed record contents from a parser's
   // exception into operator-visible output.
@@ -365,12 +410,17 @@ function recordsHash(records: Array<{ name: string; hash: string }>): string {
     .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)));
 }
 
-/** #3241: an active successor of another owner's active lease, published only after that lease
- * carried lifecycle evidence and was proved abandoned on the same host. */
+/** #3241: an active successor of an unreleased lease on the same host. Without an Owner/Admin
+ * authorization it succeeds another owner's active lease that carried lifecycle evidence and was
+ * proved abandoned. With one it may succeed any unreleased record of any owner: one without evidence
+ * (including a v1 lease) on a later boot, one with evidence only on that evidence. */
 function isRecoveryTransition(current: ReadLeaseRecord, next: ReadLeaseRecord): boolean {
-  return next.record.version === 2 && next.record.state === "active" && next.record.recovery !== undefined &&
-    current.record.version !== 1 && current.record.state === "active" && current.record.process !== undefined &&
-    next.record.ownerHash !== current.record.ownerHash && next.record.hostname === current.record.hostname;
+  const note = next.record.version === 2 && next.record.state === "active" ? next.record.recovery : undefined;
+  if (!note || next.record.hostname !== current.record.hostname) return false;
+  const unreleased = current.record.version === 1 || current.record.state === "active";
+  const evidence = current.record.version !== 1 && current.record.process !== undefined;
+  if (note.proof === "authorized") return unreleased && (note.basis === "booted_after" ? !evidence : evidence);
+  return unreleased && evidence && next.record.ownerHash !== current.record.ownerHash;
 }
 
 function validateTransition(current: ReadLeaseRecord, next: ReadLeaseRecord, lockDir: string): void {
@@ -740,6 +790,7 @@ export class ProviderHomeLeaseRegistry {
   private readonly controlPlaneInstanceId?: string;
   private readonly processProbe?: LeaseProcessProbe;
   private readonly processEvidence?: LeaseProcessEvidence;
+  private readonly bootTimeMs: () => number | null;
   private lastAcquisitionHome?: string;
 
   constructor(private readonly ownerHash: string, options: ProviderHomeLeaseOptions = {}) {
@@ -760,6 +811,7 @@ export class ProviderHomeLeaseRegistry {
     this.controlPlaneInstanceId = options.controlPlaneInstanceId;
     this.processProbe = options.processProbe === null ? undefined : options.processProbe ?? linuxLeaseProcessProbe();
     this.processEvidence = currentLeaseProcessEvidence(this.processProbe, this.pid, options.runnerMarker);
+    this.bootTimeMs = options.bootTimeMs ?? (() => currentBootTimeMs());
   }
 
   getDiagnostics(): readonly string[] { return this.diagnostics; }
@@ -776,13 +828,78 @@ export class ProviderHomeLeaseRegistry {
     return this.acquireHomeFor(requestedHome, provider, profile);
   }
 
-  private acquireHomeFor(requestedHome: string, provider: string, profile: ProfileContext): boolean {
+  private acquireHomeFor(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization): boolean {
     let providerHome = resolve(requestedHome);
     try { providerHome = realpathSync(requestedHome); } catch { /* A fresh HOME must not be created before probing. */ }
     return withLeaseIoOptions({ helperDataDir: this.helperDataDir, providerHome }, () => {
       ensureLeaseIoAvailable();
-      return this.acquireHomeAvailable(requestedHome, provider, profile);
+      return this.acquireHomeAvailable(requestedHome, provider, profile, authorization);
     });
+  }
+
+  /**
+   * #3241 part 2: what an Owner or Admin sees before authorizing a recovery of `requestedHome`'s
+   * lease. Reads the journal without creating anything, and reports for a stale record the exact
+   * hash an authorization must name and whether an authorized recovery would proceed now.
+   */
+  inspectHome(requestedHome: string, profile?: ProviderProfileAccess): ProviderHomeLeaseInspection {
+    let home: string;
+    try { home = realpathSync(requestedHome); } catch { return { state: "none" }; }
+    const root = join(home, ".agent-manager", "provider-home-leases-v1");
+    const lockDir = join(root, "mutable-home.lock");
+    if (!lstatExists(root)) return { state: "none" };
+    if (this.held.has(home)) return { state: "held" };
+    return withLeaseIoOptions({ helperDataDir: this.helperDataDir, providerHome: home }, () => {
+      ensureLeaseIoAvailable();
+      let chain: LeaseChain;
+      try { chain = readChain(lockDir); } catch {
+        return lstatExists(lockDir) || lstatExists(join(root, RECOVERY_MARKER)) ? { state: "unverifiable" as const } : { state: "none" as const };
+      }
+      const tip = chain.tip;
+      if (tip.record.version === 2 && tip.record.state === "released") return { state: "released" as const };
+      let refused: ProviderHomeLeaseRefusalKind | null = null;
+      try {
+        const profileId = this.assertProfileAccess(home, lockDir, profile);
+        this.assertAbandoned(tip.record, lockDir, profileId, { staleTipHash: tip.hash, authorizationId: randomUUID() });
+      } catch (error) {
+        refused = providerHomeLeaseRefusalKind(error) ?? "unverifiable";
+      }
+      return {
+        state: "stale" as const, tipHash: tip.hash, createdAt: tip.record.createdAt, sameHost: tip.record.hostname === this.hostname,
+        hasEvidence: tip.record.version !== 1 && tip.record.process !== undefined, refusal: refused,
+      };
+    });
+  }
+
+  /**
+   * #3241 part 2: on an Owner or Admin's authorization, succeed the exact unreleased record it names
+   * and release the HOME again at once, so later launches acquire it normally. The profile grant
+   * check still applies to a HOME with a marker; the record must still be proved abandoned, by its
+   * lifecycle evidence or, without evidence, by a boot after it was written. Refused as
+   * `stale_tip_changed` when the lease is no longer that record (including when it was released).
+   *
+   * Only a typed refusal while this attempt holds nothing proves nothing was published. Any other
+   * failure, or a failure once the successor is held (completion or the immediate release), may
+   * follow publication of the authorized record, so it is `recovery_unconfirmed`, never a refusal.
+   */
+  recoverStaleLease(requestedHome: string, provider: string, authorization: LeaseRecoveryAuthorization, profile?: ProviderProfileAccess): void {
+    const unconfirmed = (cause: unknown) => new ProviderHomeLeaseRefusal("recovery could not be confirmed",
+      "the provider HOME lease recovery may have been recorded but could not be confirmed; inspect the lease again before retrying", "recovery_unconfirmed", { cause });
+    let heldBefore = false;
+    try { heldBefore = this.held.has(realpathSync(requestedHome)); } catch { /* an unavailable HOME is refused below */ }
+    let receipt: { first: boolean; cancel: () => boolean };
+    try {
+      receipt = this.acquireReceiptFor(requestedHome, provider, profile, authorization);
+    } catch (error) {
+      // This attempt published its successor only if it now holds a HOME it did not hold before.
+      const home = this.lastAcquisitionHome;
+      const published = !heldBefore && home !== undefined && this.held.has(home);
+      if (error instanceof ProviderHomeLeaseRefusal && !published) throw error;
+      throw unconfirmed(error);
+    }
+    let released: boolean;
+    try { released = receipt.cancel(); } catch (error) { throw unconfirmed(error); }
+    if (!released) throw unconfirmed(new Error("the recovered provider HOME lease could not be released"));
   }
 
   /** A worker-private reference receipt. Cancellation never re-resolves a mutable HOME alias. */
@@ -790,8 +907,8 @@ export class ProviderHomeLeaseRegistry {
     return this.acquireReceiptFor(requestedHome, provider, profile);
   }
 
-  private acquireReceiptFor(requestedHome: string, provider: string, profile: ProfileContext): { first: boolean; cancel: () => boolean } {
-    const first = this.acquireHomeFor(requestedHome, provider, profile);
+  private acquireReceiptFor(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization): { first: boolean; cancel: () => boolean } {
+    const first = this.acquireHomeFor(requestedHome, provider, profile, authorization);
     const home = this.lastAcquisitionHome!;
     const held = this.held.get(home);
     if (!held) throw new Error("acquisition has no private reference proof");
@@ -878,7 +995,7 @@ export class ProviderHomeLeaseRegistry {
     return decision.profileId;
   }
 
-  private acquireHomeAvailable(requestedHome: string, provider: string, profile: ProfileContext): boolean {
+  private acquireHomeAvailable(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization): boolean {
     if (!PROVIDER_KEY.test(provider)) throw new Error("provider home lease key is invalid");
     if (!isAbsolute(requestedHome)) throw new Error("provider HOME must be absolute");
     let home: string;
@@ -886,7 +1003,8 @@ export class ProviderHomeLeaseRegistry {
       // A newly configured account is expected to be Login Required before the provider creates
       // its files. Establish the private root before canonicalizing it so the ownership boundary,
       // rather than a raw ENOENT containing the runner-local path, is the first launch result.
-      mkdirSync(requestedHome, { recursive: true, mode: 0o700 });
+      // A recovery only ever succeeds a lease that already exists, so it creates nothing.
+      if (!authorization) mkdirSync(requestedHome, { recursive: true, mode: 0o700 });
       home = realpathSync(requestedHome);
     } catch {
       throw new Error("provider credential home is unavailable");
@@ -899,6 +1017,9 @@ export class ProviderHomeLeaseRegistry {
     const key = home;
     const recoveryProfileId = this.assertProfileAccess(home, lockDir, profile);
     const borrowed = this.held.get(key);
+    // A lease this runner holds or is still initializing is no stale record of anyone's, and an
+    // authorized recovery succeeds an existing journal's exact tip: it never creates or initializes one.
+    if (authorization && (borrowed || this.failedInitializations.has(key) || !lstatExists(lockDir))) throw staleTipChanged(lockDir);
     if (borrowed) {
       const pending = this.pendingCompletions.get(key);
       if (pending) return withLeaseIoOptions({ fenceWaitMs: 10000 }, () => this.finishAcquisition(key, root, lockDir, pending));
@@ -940,6 +1061,7 @@ export class ProviderHomeLeaseRegistry {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       exists = false;
     }
+    if (authorization && !exists) throw staleTipChanged(lockDir);
     if (!exists) {
       // Publish the exclusive ownership proof BEFORE creating the directory. A crash at either
       // subsequent instruction leaves a same-host/owner/dead-PID proof, never an unowned empty lock.
@@ -973,7 +1095,7 @@ export class ProviderHomeLeaseRegistry {
         this.transitionExistingLease(key, root, lockDir, record, recoveryProfileId);
       }
     } else {
-      this.transitionExistingLease(key, root, lockDir, record, recoveryProfileId);
+      this.transitionExistingLease(key, root, lockDir, record, recoveryProfileId, authorization);
     }
     this.rememberAcquisition(key, root, lockDir, record);
     return withLeaseIoOptions({ fenceWaitMs: 10000 }, () => this.finishAcquisition(key, root, lockDir, record));
@@ -1074,7 +1196,10 @@ export class ProviderHomeLeaseRegistry {
     };
   }
 
-  private transitionExistingLease(key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2, recoveryProfileId?: string): void {
+  private transitionExistingLease(
+    key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2, recoveryProfileId?: string,
+    authorization?: LeaseRecoveryAuthorization,
+  ): void {
     let chain: LeaseChain;
     try {
       chain = readChain(lockDir);
@@ -1083,6 +1208,8 @@ export class ProviderHomeLeaseRegistry {
       // evidence must never trigger another recovery that could erase an ownership boundary.
       try { lstatSync(join(root, RECOVERY_MARKER)); } catch (markerError) {
         if ((markerError as NodeJS.ErrnoException).code === "ENOENT") {
+          // A partial in-lock journal has no single tip an authorization could have named.
+          if (authorization) throw staleTipChanged(lockDir);
           this.recoverPartialJournal(key, root, lockDir, replacement);
           return;
         }
@@ -1094,10 +1221,13 @@ export class ProviderHomeLeaseRegistry {
       throw refusal(lockDir, `has reached the ${LIMITS.hardTransitions}-transition growth cap; compaction is unavailable; preserve the last valid chain`);
     }
     delete replacement.recovery;
-    if (existing.record.version === 2 && existing.record.state === "released") {
+    const released = existing.record.version === 2 && existing.record.state === "released";
+    // The authorization names one unreleased record; any other tip, released or not, is not it.
+    if (authorization && (released || existing.hash !== authorization.staleTipHash)) throw staleTipChanged(lockDir);
+    if (released) {
       // An orderly release is an explicit handoff and may pass the HOME to a different owner.
     } else {
-      const recovery = this.assertAbandoned(existing.record, lockDir, recoveryProfileId);
+      const recovery = this.assertAbandoned(existing.record, lockDir, recoveryProfileId, authorization);
       if (recovery) replacement.recovery = recovery;
     }
 
@@ -1129,24 +1259,44 @@ export class ProviderHomeLeaseRegistry {
    * once its PID is gone, as before. A record with evidence needs proof that nothing it launched
    * survives (#3241), whoever succeeds it; another owner additionally needs `recoveryProfileId`,
    * the profile whose marker grants this control plane. Returns the note a recovery publishes.
+   *
+   * With an Owner/Admin `authorization` for this exact record (#3241 part 2), any owner's record may
+   * be succeeded without a profile grant, but never on weaker proof: a record with evidence still
+   * needs that proof, and one without evidence needs a boot at least a minute after it was written
+   * (its PID alone is never consulted, since a later boot may reuse it).
    */
-  private assertAbandoned(record: ProviderHomeLeaseRecord, lockDir: string, recoveryProfileId?: string): LeaseRecoveryNote | undefined {
+  private assertAbandoned(
+    record: ProviderHomeLeaseRecord, lockDir: string, recoveryProfileId?: string, authorization?: LeaseRecoveryAuthorization,
+  ): LeaseRecoveryNote | undefined {
     if (record.hostname !== this.hostname) throw refusal(lockDir, `is leased by host ${record.hostname}; use an isolated OS account`, false, "foreign_host");
     const evidence = record.version === 1 ? undefined : record.process;
+    if (authorization) {
+      const authorized = { proof: "authorized" as const, authorizationId: authorization.authorizationId, ...(recoveryProfileId ? { profileId: recoveryProfileId } : {}) };
+      if (evidence) return { ...authorized, basis: this.proveEvidence(evidence, record.pid, lockDir) };
+      const booted = this.bootTimeMs();
+      const written = Date.parse(record.createdAt);
+      if (booted === null || !Number.isFinite(written) || booted - written < BOOT_PROOF_MARGIN_MS) {
+        throw refusal(lockDir, "has a stale lease written during the current boot; it can be recovered only after the host restarts", false, "no_reboot_proof");
+      }
+      return { ...authorized, basis: "booted_after" };
+    }
     if (!evidence) {
       if (this.isProcessAlive(record.pid)) throw refusal(lockDir, `is already in use by process ${record.pid}; use bwrap or an isolated OS account`, false, "busy");
       if (record.ownerHash !== this.ownerHash) throw refusal(lockDir, "has a stale lease from another attested owner", false, "foreign_owner");
       return undefined;
     }
-    const result = proveLeaseAbandoned(evidence, record.pid, this.processProbe);
-    if (!result.proven) {
-      if (result.reason === "runner_alive") throw refusal(lockDir, `is already in use by process ${record.pid}; use bwrap or an isolated OS account`, false, "busy");
-      if (result.reason === "marked_process") throw refusal(lockDir, "is still used by a process the leasing runner launched; stop that process and retry", false, "busy");
-      throw refusal(lockDir, "has a stale lease whose processes cannot all be inspected");
-    }
+    const proof = this.proveEvidence(evidence, record.pid, lockDir);
     if (record.ownerHash === this.ownerHash) return undefined;
     if (!recoveryProfileId) throw refusal(lockDir, "has a stale lease from another attested owner", false, "foreign_owner");
-    return { proof: result.proof, profileId: recoveryProfileId };
+    return { proof, profileId: recoveryProfileId };
+  }
+
+  private proveEvidence(evidence: LeaseProcessEvidence, pid: number, lockDir: string): LeaseAbandonmentProof {
+    const result = proveLeaseAbandoned(evidence, pid, this.processProbe);
+    if (result.proven) return result.proof;
+    if (result.reason === "runner_alive") throw refusal(lockDir, `is already in use by process ${pid}; use bwrap or an isolated OS account`, false, "busy");
+    if (result.reason === "marked_process") throw refusal(lockDir, "is still used by a process the leasing runner launched; stop that process and retry", false, "busy");
+    throw refusal(lockDir, "has a stale lease whose processes cannot all be inspected");
   }
 
   private recoverPartialJournal(key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {

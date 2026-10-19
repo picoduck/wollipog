@@ -594,3 +594,81 @@ test("an Add Account grant is spent when the sign-in does not start, settles wit
     await f.close();
   }
 });
+
+const LEASE = "/api/runners/runner-a/provider-accounts/work/home-lease";
+const RECOVER = "/api/runners/runner-a/provider-accounts/work/recover-lease";
+const TIP = "c".repeat(64);
+const STALE = { state: "stale", tipHash: TIP, createdAt: "2026-08-19T00:00:00.000Z", sameHost: true, hasEvidence: false, refusal: null } as const;
+const leaseRunner = (recover: (message: { requestId: string; authorizationId: string }) => RunnerRequestResult): Handler => (_runnerId, message) =>
+  message.type === "inspect_provider_home_lease"
+    ? { type: "inspect_provider_home_lease_result", requestId: message.requestId, ok: true, inspection: STALE }
+    : recover(message as unknown as { requestId: string; authorizationId: string });
+
+test("lease routes need an Owner or Admin, a v229 online runner, the account, and an explicit exact recovery", async () => {
+  const f = await fixture({ protocolVersion: 229, handler: leaseRunner((m) => ({ type: "recover_provider_home_lease_result", requestId: m.requestId, ok: true })) });
+  try {
+    f.as(principal("operator"));
+    assert.equal((await f.app.inject({ method: "GET", url: LEASE })).statusCode, 403);
+    assert.equal((await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } })).statusCode, 403);
+    f.as(principal("admin"));
+    for (const payload of [{ staleTipHash: TIP }, { staleTipHash: "abc", acknowledgeLeaseRecovery: true }, []]) {
+      assert.equal((await f.app.inject({ method: "POST", url: RECOVER, payload })).statusCode, 400, JSON.stringify(payload));
+    }
+    assert.equal((await f.app.inject({ method: "GET", url: "/api/runners/runner-a/provider-accounts/missing/home-lease" })).statusCode, 404);
+    f.online.delete("runner-a");
+    assert.equal((await f.app.inject({ method: "GET", url: LEASE })).json().error, "runner is offline");
+    assert.deepEqual(f.sent, [], "no refused request reaches the runner");
+    f.online.add("runner-a");
+    assert.deepEqual((await f.app.inject({ method: "GET", url: LEASE })).json(), STALE);
+  } finally {
+    await f.close();
+  }
+  const older = await fixture({ protocolVersion: 228 });
+  try {
+    const refused = await older.app.inject({ method: "GET", url: LEASE });
+    assert.equal(refused.statusCode, 409);
+    assert.deepEqual(refused.json(), {
+      error: "This machine needs a newer runner for provider HOME lease recovery. Update and restart the runner.",
+      requiredRunnerProtocolVersion: 229, runnerProtocolVersion: 228,
+    });
+    assert.deepEqual(older.sent, []);
+  } finally {
+    await older.close();
+  }
+});
+
+test("a recovery records who authorized which exact record, once, and how the runner answered", async () => {
+  let answer: (requestId: string) => RunnerRequestResult = (requestId) => ({ type: "recover_provider_home_lease_result", requestId, ok: true });
+  const f = await fixture({ protocolVersion: 229, handler: leaseRunner((m) => answer(m.requestId)) });
+  try {
+    const recovered = await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } });
+    assert.equal(recovered.statusCode, 200);
+    const { authorizationId } = recovered.json() as { authorizationId: string };
+    assert.deepEqual(f.sent.at(-1)!.message, { type: "recover_provider_home_lease", requestId: (f.sent.at(-1)!.message as { requestId: string }).requestId,
+      accountId: "work", staleTipHash: TIP, authorizationId });
+    assert.deepEqual({ ...f.db.getProviderHomeLeaseRecovery(authorizationId)!, createdAt: 0 }, {
+      authorizationId, runnerId: "runner-a", providerAccountId: "work", staleTipHash: TIP, status: "recovered", resultCode: null,
+      authorizedBy: "user-1", authorizedRole: "owner", createdAt: 0, completedAt: 100,
+    });
+
+    answer = (requestId) => ({ type: "recover_provider_home_lease_result", requestId, ok: false, code: "NO_REBOOT_PROOF", error: "restart first" });
+    const refused = await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } });
+    assert.deepEqual([refused.statusCode, refused.json().code], [409, "NO_REBOOT_PROOF"]);
+    const refusedId = (f.sent.at(-1)!.message as { authorizationId: string }).authorizationId;
+    assert.notEqual(refusedId, authorizationId, "every attempt is its own authorization");
+    assert.deepEqual([f.db.getProviderHomeLeaseRecovery(refusedId)?.status, f.db.getProviderHomeLeaseRecovery(refusedId)?.resultCode], ["refused", "NO_REBOOT_PROOF"]);
+
+    answer = (requestId) => ({ type: "recover_provider_home_lease_result", requestId, ok: false, error: "worker unavailable" });
+    const uncertain = await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } });
+    assert.deepEqual([uncertain.statusCode, uncertain.json().code, uncertain.json().status], [409, "PROVIDER_HOME_LEASE_RECOVERY_FAILED", "unknown"]);
+    assert.equal(f.db.getProviderHomeLeaseRecovery(uncertain.json().authorizationId)?.status, "unknown");
+
+    answer = () => { throw new Error("runner request timed out"); };
+    const lost = await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } });
+    assert.deepEqual([lost.statusCode, lost.json().status], [504, "unknown"]);
+    assert.equal(f.db.getProviderHomeLeaseRecovery(lost.json().authorizationId)?.status, "unknown",
+      "a lost reply is not a refusal: the runner's journal may already record it");
+  } finally {
+    await f.close();
+  }
+});
