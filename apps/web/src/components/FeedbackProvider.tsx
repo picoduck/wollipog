@@ -25,6 +25,10 @@ export interface ConfirmationDetailRow {
   /** The affected object's name, such as a session title. One line, truncated, with the full text in
    * a tooltip. */
   label: string;
+  /** Live content drawn in place of `label`, with no tooltip, for a personal identifier that must
+   * stay masked and revealable as the preference changes (§11.8). `label` stays the plain, masked
+   * text, which identifies the request. */
+  labelContent?: ReactNode;
   /** `mono` sets the label in the monospace face, for a path or an id (§11.3). */
   labelStyle?: "mono";
   /** A short neutral fact, trailing in `--text-faint` (§11.3). */
@@ -42,6 +46,10 @@ export interface ConfirmationOptions {
   title: string;
   /** One or two sentences: what happens, to which named object, and whether it can be undone. */
   message: string;
+  /** Live content drawn in place of `message`, for a sentence that names a personal identifier
+   * which must stay masked and revealable (a provider account label, §11.8). `message` stays the
+   * plain, masked text, which also identifies the request. */
+  messageContent?: ReactNode;
   /** Content under the body that is not a list of affected objects, such as a mono preview. A list
    * uses `detailRows`. */
   details?: ReactNode;
@@ -735,14 +743,15 @@ function ConfirmationDialog({ request, onSettle }: {
         </>
       )}
     >
-      <p className="confirmation-message" id={descriptionId}>{request.message}</p>
+      <p className="confirmation-message" id={descriptionId}>{request.messageContent ?? request.message}</p>
       {request.details && <div id={detailsId}>{request.details}</div>}
       {shownRows.length > 0 && (
         <ul className="surface confirmation-rows" id={rowsId}>
           {shownRows.map((row, index) => (
             <li className="row dense" key={index}>
               <span className="row-body">
-                <span className={row.labelStyle === "mono" ? "row-title mono" : "row-title"} title={row.label}>{row.label}</span>
+                <span className={row.labelStyle === "mono" ? "row-title mono" : "row-title"}
+                  title={row.labelContent === undefined ? row.label : undefined}>{row.labelContent ?? row.label}</span>
               </span>
               {row.meta && <span className="row-trail">{row.meta}</span>}
               {row.status && <StatusBadge meta={row.status} inline />}

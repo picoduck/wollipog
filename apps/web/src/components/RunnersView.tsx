@@ -79,7 +79,7 @@ function MachineSections({
       <MachineCapacitySection runner={runner} onChangeLimit={onChangeLimit} />
       <MachineAgentsSection runner={runner} online={online} machineName={name}
         canFindSessions={canFindSessions} onChooseInstallation={onChooseInstallation} />
-      <ProviderAccountsSection runner={runner} online={online} canManageProfiles={canManageProfiles} />
+      <ProviderAccountsSection runner={runner} online={online} machineName={name} canManageProfiles={canManageProfiles} />
       <MachineWorkspacesSection runner={runner} machineName={name} online={online} canAdd={canManageMachines} />
       <MachineSkillsSection runner={runner} />
     </div>

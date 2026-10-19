@@ -125,6 +125,15 @@ let runner: RunnerView | null = {
     }],
   },
 };
+// Provider Accounts (#2995), with `?signingIn`: Codex Team's sign-in is running, so the section shows
+// Signed In, Sign-In Required and Signing In rows at once.
+if (new URLSearchParams(window.location.search).has("signingIn")) {
+  runner.providerLogins = [{
+    operationId: "login_fixture_team", accountId: "codex-team", label: "Codex Team", provider: "codex",
+    status: "waiting_for_provider", expectsCode: false, verificationUrl: "https://auth.openai.com/device",
+    userCode: "WOLL-IPOGS", startedAt: Date.now(),
+  }];
+}
 // Provider profiles (#3239): one account in each access state, and Codex Solo left a legacy HOME.
 if (new URLSearchParams(window.location.search).has("profiles") && runner.providerAccounts) {
   const access = { "claude-work": "granted", "claude-personal": "pending", "codex-team": "not_granted" } as const;
@@ -507,6 +516,8 @@ const client = {
     body: { provider: "claude" | "codex"; label: string } | { accountId: string },
   ) => {
     if (!runner) throw new Error("runner not found");
+    // Add Account's request failure (#2995): a label of "Unreachable" is refused as a timeout.
+    if ("label" in body && body.label === "Unreachable") throw new ApiError("The runner did not answer in time.", 504);
     const existing = "accountId" in body
       ? runner.providerAccounts?.find((account) => account.id === body.accountId)
       : undefined;
@@ -548,11 +559,17 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { login: cancelled };
   },
+  // Removal (#2995): Codex Solo is Custom ACP's default, so the runner refuses it; Work's credentials
+  // are kept because a session still uses them; any other account is simply removed.
   removeProviderAccount: async (_runnerId: string, accountId: string) => {
     if (!runner) throw new Error("runner not found");
+    if (accountId === "codex-solo") {
+      throw new ApiError("Agent 'custom-acp' uses this account as its default in the runner configuration. " +
+        "Change that setting before removing the account.", 409);
+    }
     runner.providerAccounts = runner.providerAccounts?.filter((account) => account.id !== accountId);
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
-    return { removed: true as const, credentialsRetained: false };
+    return { removed: true as const, credentialsRetained: accountId === "claude-work" };
   },
   // Provider profiles (#3239), with `?profiles`: adoption succeeds, and the first revocation of an
   // account with sessions is refused so the force confirmation can be exercised.

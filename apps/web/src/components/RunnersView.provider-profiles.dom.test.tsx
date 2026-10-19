@@ -104,11 +104,20 @@ async function profileActions(viewer: IdentityAdministrationView): Promise<strin
     });
   });
   await act(async () => { for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });
-  const rows = [...mountPoint.querySelectorAll<HTMLElement>(".agent-row")]
+  const rows = [...mountPoint.querySelectorAll<HTMLElement>(".provider-accounts-list > .row")]
     .filter((row) => row.textContent?.includes("Granted Work") || row.textContent?.includes("Legacy Work"));
   assert.equal(rows.length, 2, "both account rows render");
-  const labels = rows.flatMap((row) => [...row.querySelectorAll("button")].map((button) => button.textContent?.trim() ?? ""))
-    .filter((label) => label === "Adopt as Profile" || label === "Revoke Access");
+  // The profile actions are items of each row's ⋯ (#2995).
+  const labels: string[] = [];
+  for (const row of rows) {
+    const more = row.querySelector<HTMLButtonElement>('button[aria-label^="More Actions for"]');
+    if (!more) continue;
+    await act(async () => { more.click(); });
+    const menu = domWindow.document.body.querySelector('[role="menu"]');
+    labels.push(...[...(menu?.querySelectorAll(".menu-item .menu-text") ?? [])].map((item) => item.textContent ?? "")
+      .filter((label) => label === "Adopt as Profile…" || label === "Revoke Access…"));
+    await act(async () => { (domWindow.document.body.querySelector(".menu-backdrop") as unknown as HTMLElement | null)?.click(); });
+  }
   await act(async () => root.unmount());
   mountPoint.remove();
   return labels;
@@ -116,7 +125,7 @@ async function profileActions(viewer: IdentityAdministrationView): Promise<strin
 
 test("profile actions are offered to Owners and Admins of the personal organization only", async () => {
   for (const role of ["owner", "admin"] as const) {
-    assert.deepEqual(await profileActions(identity(PERSONAL_ORGANIZATION_ID, role)), ["Revoke Access", "Adopt as Profile"],
+    assert.deepEqual(await profileActions(identity(PERSONAL_ORGANIZATION_ID, role)), ["Revoke Access…", "Adopt as Profile…"],
       `a personal-organization ${role} sees both actions`);
     assert.deepEqual(await profileActions(identity("org_team", role)), [],
       `an ${role} of another organization, whom the routes refuse, sees none`);

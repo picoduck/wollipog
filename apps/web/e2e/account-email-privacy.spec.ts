@@ -148,29 +148,34 @@ test(`${width}px ${theme}: Usage and authentication recovery show emails by defa
 }
 
 for (const width of [390, 1440]) {
-  test(`${width}px: provider management hides a reopened disclosure and an already-open confirmation`, async ({ page, context }) => {
+  test(`${width}px: provider management hides a revealed account again, in its menu and in an already-open confirmation`, async ({ page, context }) => {
     await page.goto("/settings-rows-e2e.html?section=behavior");
     const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
     const management = await context.newPage();
     await management.setViewportSize({ width, height: 1000 });
     // The machine's own route, which a phone opens as its detail (#2985).
     await management.goto("/machine-management-e2e.html?emailLabels=1&machine=native-t14s");
-    await management.getByText("Accounts", { exact: true }).click();
-    const row = management.locator(".agent-row").filter({ hasText: "work@example.com" });
+    // Provider Accounts is a section of the machine (#2995), no longer a disclosure to reopen.
+    const accounts = management.getByRole("region", { name: /^Provider Accounts/ });
+    const row = accounts.locator(".surface > .row").filter({ hasText: "work@example.com" });
     await expect(row).toBeVisible();
     await expect(row.getByRole("button", { name: "Show Account Email" })).toHaveCount(0);
     await management.screenshot({ path: join(evidenceDir, `management-${width}-off.png`) });
     await privacy.click();
-    const maskedRow = management.locator(".agent-row").filter({ hasText: "Email Hidden" });
+    const maskedRow = accounts.locator(".surface > .row").filter({ hasText: "Email Hidden" });
     const show = maskedRow.getByRole("button", { name: "Show Account Email" });
     await show.focus(); await management.keyboard.press("Enter");
     await expect(row).toBeVisible();
-    await management.getByText("Accounts", { exact: true }).click();
-    await management.getByText("Accounts", { exact: true }).click();
+    // Turning the preference off and on again hides the reveal.
+    await privacy.click();
+    await privacy.click();
     await expect(show).toBeVisible();
     expect(await maskedRow.innerHTML()).not.toContain("work@example.com");
     await management.screenshot({ path: join(evidenceDir, `management-${width}-on.png`) });
-    await maskedRow.getByRole("button", { name: "Remove", exact: true }).click();
+    await maskedRow.getByRole("button", { name: "More Actions for Hidden Account" }).click();
+    const menu = management.getByRole("menu", { name: "Hidden Account" });
+    expect(await menu.innerHTML()).not.toContain("work@example.com");
+    await menu.getByRole("menuitem", { name: "Remove Account…" }).click();
     const confirm = management.getByRole("dialog", { name: "Remove Account" });
     await expect(confirm).toBeVisible();
     expect(await confirm.innerHTML()).not.toContain("work@example.com");

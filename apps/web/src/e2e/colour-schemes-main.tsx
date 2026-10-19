@@ -310,15 +310,9 @@ function Sample() {
             <article className="card"><span className="card-title">A board card</span></article>
           </div>
           {/* The families round two found still bypassed. Rendered here so "application-wide"
-              is a measurement rather than a claim about which rules I remembered to edit. */}
-          <div className="agent-list"><div className="agent-row"><span>An agent row</span></div></div>
-          {/* Status chips whose fill comes from the base class and whose ink comes from a modifier
-              (#1892), so no single rule states the pair. A machine detail keeps its agent chips in a
-              collapsed `<details>`, where nothing is measured. */}
-          <div className="agent-row-meta">
-            <span className="atag discovered">Discovered</span>
-            <span className="atag broken">Not Signed In</span>
-          </div>
+              is a measurement rather than a claim about which rules I remembered to edit. The agent
+              card and its chips are gone: machine agents and provider accounts are §5.2 rows with
+              one status badge (#2990, #2995). */}
           <div className="review-findings-list"><div className="review-finding-row"><span /><span>A finding</span><span /></div></div>
           {/* Real production machine details (#2988). Runner card headings caused #237, and copied
               markup would allow the fixture to stay green while the components regress again. */}

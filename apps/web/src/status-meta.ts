@@ -312,6 +312,8 @@ const VOCABULARY = {
   provider_account: {
     signed_in: success("Signed In"),
     sign_in_required: warning("Sign-In Required"),
+    /** A sign-in for the account is running on the machine (#2995). */
+    signing_in: info("Signing In", { pulse: true }),
     signed_out: neutral("Signed Out"),
     /** The machine could not confirm the account's sign-in; using it rechecks first (#2208). */
     status_unknown: neutral("Status Unknown"),

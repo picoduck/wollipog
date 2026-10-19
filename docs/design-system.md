@@ -2354,7 +2354,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Request decision (`requestDecision`: the outcome of every Decision Record and of the settled question row, #2204) | Allowed, Answered, Answered by Policy, Answered by Parent, Rechecked Automatically: success · Rejected, Dismissed, Dismissed by Parent, Ended Early, Replaced, Expired, Resolved by Provider, Another Account Selected, Escalated, Resolved: neutral · Blocked (by a policy, or fail-closed by Wollipog): danger · Timed Out: warning. Always past tense, never a provider's option id. |
 | Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
-| Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out, Status Unknown: neutral |
+| Provider account | Signed In: success (inline) · Sign-In Required: warning · Signing In: info (pulse) · Signed Out, Status Unknown: neutral |
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
 | Agent on a machine (`agent`, `agentStatus()`, #2990: the machine's agent rows, Agent Details and Set Up This Machine) | Ready: success (inline) · Not Installed: neutral (hollow dot) · Sign-In Required, Update Required, Approval Required: warning · Unavailable: danger · Ready When Last Seen: neutral (hollow dot; a ready agent on a machine that is not online). One per agent, the most limiting first; the machine's Update Required, Approval Required and Sign-In Required roll up from it. |
 | Terminal tab (`shell`, #2864) | Exited: neutral · Reconnecting: info. Rendered as the inline badge after the tab's label; a running shell has none. |
@@ -3571,7 +3571,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | literal radii 2/3/5/7/9px | nearest tier | 2–5→`--radius-xs`, 7→`--radius-sm`, 9→`--radius-md`. |
 | `--shadow` | `--elev-2` (popovers) / `--elev-3` (dialogs) | Removed. |
 | `--primary-to`, `--primary-hover-to`, `--primary-active-to`, `--primary-*-border`, `--primary-hover-inset` | unused | Flat primary; keep in schemes until regeneration, then drop. |
-| `--row-pad-*`, `--inbox-row-pad-*`, `--project-row-pad-*`, `--card-pad-*`, `--agent-row-pad-*`, `--finding-row-pad-*`, `--ext-row-pad-*`, `--artifact-row-pad-*`, `--run-card-pad-*`, `--runner-card-pad-*`, `--ws-row-pad-*`, `--files-entry-pad-*`, `--usage-cell-pad-*` | `--row-pad-x` + `--row-h*` | Density changes row height, not per-family padding. |
+| `--row-pad-*`, `--inbox-row-pad-*`, `--project-row-pad-*`, `--card-pad-*`, `--finding-row-pad-*`, `--ext-row-pad-*`, `--artifact-row-pad-*`, `--run-card-pad-*`, `--runner-card-pad-*`, `--ws-row-pad-*`, `--files-entry-pad-*`, `--usage-cell-pad-*` | `--row-pad-x` + `--row-h*` | Density changes row height, not per-family padding. |
 | `--bp-tablet` 900 / `--bp-desktop` 1240 | `--bp-compact` 1100 / `--bp-wide` 1440 | Documentation tokens; media queries use 760 / 1100 / 1440. |
 | where `--radius-sm/-md` live | edit the values in the `:root, :root[data-theme="dark"]` block | They are declared only there, and `:root` also matches in light, so one edit covers both themes. Do not redeclare them in the shared token block (its comment explains the specificity trap). |
 | `--mobile-session-action-gap` 7px | `--space-2` | |

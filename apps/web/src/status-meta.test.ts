@@ -151,6 +151,7 @@ const TABLE: readonly Row[] = [
   ["member", "suspended", "Suspended", "danger"],
   ["provider_account", "signed_in", "Signed In", "success"],
   ["provider_account", "sign_in_required", "Sign-In Required", "warning"],
+  ["provider_account", "signing_in", "Signing In", "info"],
   ["provider_account", "signed_out", "Signed Out", "neutral"],
   ["provider_account", "status_unknown", "Status Unknown", "neutral"],
   // Terminal tab
