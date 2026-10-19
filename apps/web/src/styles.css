@@ -10625,23 +10625,29 @@ textarea {
   color: var(--text-dim);
   font: var(--type-small);
 }
-/* The code field and Submit Code share a row; a rejected code's error is under the field. */
+/* The code field and Submit Code share a row, Submit Code level with the input under the field's
+   16px label and its 8px gap; a rejected code's error stays in the field, under the input. */
 .signin-code-form {
-  display: grid;
+  display: flex;
   flex: 1 1 auto;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas: "label ." "input submit" "error error";
+  align-items: flex-start;
   gap: var(--space-2);
+  min-width: 0;
 }
-.signin-code-form > label { grid-area: label; }
-.signin-code-form > input { grid-area: input; }
-.signin-code-form > button { grid-area: submit; }
-.signin-code-form > .field-error { grid-area: error; margin-top: calc(-1 * var(--space-1)); }
+.signin-code-form > .field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.signin-code-form > button { margin-top: calc(var(--space-4) + var(--space-2)); }
 @container signin (max-width: 559px) {
   .signin-steps > li { align-items: flex-start; }
   .signin-code-form {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "label" "input" "error" "submit";
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .signin-code-form > button {
+    max-width: none;
+    margin-top: 0;
   }
 }
 /* Choose Another Account's sign-in (#2208): a plain head over the shared steps. */

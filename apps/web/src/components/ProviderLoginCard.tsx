@@ -192,23 +192,25 @@ export function ProviderSignIn({ runnerId, login, restart }: {
         </li>
         {login.expectsCode ? (
           <li className="signin-step-field">
-            <form className="field signin-code-form" noValidate onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-              <label className="field-label" htmlFor={fieldId}>Paste the Code It Shows</label>
-              <input
-                ref={inputRef}
-                id={fieldId}
-                type="password"
-                autoComplete="off"
-                maxLength={4_096}
-                aria-invalid={codeError ? true : undefined}
-                aria-describedby={codeError ? `${fieldId}-error` : undefined}
-                onChange={(event) => { setHasCode(event.target.value.trim() !== ""); setCodeError(null); }}
-              />
+            <form className="signin-code-form" noValidate onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+              <div className="field">
+                <label className="field-label" htmlFor={fieldId}>Paste the Code It Shows</label>
+                <input
+                  ref={inputRef}
+                  id={fieldId}
+                  type="password"
+                  autoComplete="off"
+                  maxLength={4_096}
+                  aria-invalid={codeError ? true : undefined}
+                  aria-describedby={codeError ? `${fieldId}-error` : undefined}
+                  onChange={(event) => { setHasCode(event.target.value.trim() !== ""); setCodeError(null); }}
+                />
+                {codeError && <FieldError id={`${fieldId}-error`}>{codeError}</FieldError>}
+              </div>
               <BusyButton type="submit" className="btn" busy={running === "submit"} progress="Submitting the code…"
                 disabled={!hasCode}>
                 Submit Code
               </BusyButton>
-              {codeError && <FieldError id={`${fieldId}-error`}>{codeError}</FieldError>}
             </form>
           </li>
         ) : (

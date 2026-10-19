@@ -311,7 +311,7 @@ test("while Work signs in, Work appears once, expanded, with Signing In, Cancel 
     assert.ok(expansion.parentElement?.classList.contains("surface"), "inside the accounts surface");
     assert.deepEqual([...expansion.querySelectorAll("ol.steps > li")].length, 2);
     assert.equal(ui.container.querySelectorAll("article, .provider-login-card").length, 0, "no separate card");
-    assert.equal(ui.container.querySelector(".provider-accounts-list")?.nextElementSibling, null, "nothing renders below the list");
+    assertNoDomNode(ui.container.querySelector(".provider-accounts-list")?.nextElementSibling ?? null, "nothing renders below the list");
     const cancel = ui.button(ui.row("Work"), "Cancel");
     assert.match(cancel.className, /\bbtn sm ghost\b/);
     const work = await ui.openMenu("Work");
@@ -384,7 +384,7 @@ test("a timed-out sign-in for a new account offers Start Again with the same pro
   });
   try {
     const row = ui.row("Studio");
-    assert.equal(row.querySelector(".status"), null, "a new account that did not land has no status");
+    assertNoDomNode(row.querySelector(".status"), "a new account that did not land has no status");
     const expansion = row.nextElementSibling as HTMLElement;
     assert.equal(expansion.querySelector(".notice-title")?.textContent, "Sign-In Timed Out");
     assert.match(expansion.querySelector(".notice")!.className, /\bt-neutral\b/);

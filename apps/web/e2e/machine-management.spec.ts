@@ -361,6 +361,9 @@ const providerAccounts = (page: import("@playwright/test").Page) =>
   page.getByRole("region", { name: /^Provider Accounts/ });
 const accountRow = (page: import("@playwright/test").Page, label: string) =>
   providerAccounts(page).locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: label }) });
+/** A row's sign-in steps or ending, in the expansion under it (#2996). */
+const signInSteps = (page: import("@playwright/test").Page, label: string) =>
+  accountRow(page, label).locator("xpath=following-sibling::*[1][contains(concat(' ', @class, ' '), ' provider-account-expansion ')]");
 async function openAccountMenu(page: import("@playwright/test").Page, label: string) {
   await accountRow(page, label).getByRole("button", { name: `More Actions for ${label}` }).click();
   return page.getByRole("menu", { name: label });
@@ -378,7 +381,7 @@ test("Provider Accounts show one status per account: Signed In, Sign-In Required
   await expect(accountRow(page, "Personal").locator(".row-sub")).toHaveText("Claude");
   await expect(accountRow(page, "Personal").getByRole("button", { name: "Sign In", exact: true })).toBeVisible();
   await expect(section).not.toContainText(/Logged In|Login Required/);
-  await expect(section.getByRole("article", { name: "Codex Team Provider Sign-In" })).toBeVisible();
+  await expect(signInSteps(page, "Codex Team").locator("ol.steps > li")).toHaveCount(2);
   await section.scrollIntoViewIfNeeded();
   await section.screenshot({ path: "test-results/provider-accounts/section-desktop.png" });
 
@@ -544,23 +547,120 @@ test("Machine owners can start both provider sign-in flow shapes", async ({ page
   await claudeDialog.getByRole("button", { name: "Start Sign-In" }).click();
   await expect(claudeDialog).toHaveCount(0);
 
-  const claude = page.getByRole("article", { name: "Studio Claude Provider Sign-In" });
+  // A new account's sign-in is a row at the end of the list, expanded into its steps (#2996).
+  const claude = signInSteps(page, "Studio Claude");
   await expect(accountRow(page, "Studio Claude").locator(".status")).toHaveText("Signing In");
-  await expect(claude.getByRole("link", { name: "Open Provider Sign-In" })).toBeVisible();
-  await expect(claude.getByLabel("Authorization Code")).toBeVisible();
+  await expect(providerAccounts(page).locator(".surface > .row").last()).toContainText("Studio Claude");
+  await expect(claude.getByRole("link", { name: "Open Claude Sign-In" })).toBeVisible();
+  await expect(claude.getByLabel("Paste the Code It Shows")).toHaveAttribute("type", "password");
   await page.screenshot({ path: "test-results/provider-login/claude-paste-code.png", fullPage: true });
 
-  await claude.getByRole("button", { name: "Cancel" }).click();
+  await accountRow(page, "Studio Claude").getByRole("button", { name: "Cancel" }).click();
   await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
   const codexDialog = page.getByRole("dialog", { name: "Add Account" });
   await codexDialog.getByRole("radio", { name: "Codex" }).click();
   await codexDialog.getByLabel("Account Label").fill("Studio Codex");
   await codexDialog.getByRole("button", { name: "Start Sign-In" }).click();
 
-  const codex = page.getByRole("article", { name: "Studio Codex Provider Sign-In" });
+  const codex = signInSteps(page, "Studio Codex");
+  await expect(codex.getByRole("link", { name: "Open Codex Sign-In" })).toBeVisible();
   await expect(codex.getByText("WOLL-IPOGS", { exact: true })).toBeVisible();
-  await expect(codex.getByLabel("Authorization Code")).toHaveCount(0);
+  await expect(codex.getByRole("button", { name: "Copy Device Code" })).toBeVisible();
+  await expect(codex.getByText("Waiting for Codex to confirm…")).toBeVisible();
+  await expect(codex.getByLabel("Paste the Code It Shows")).toHaveCount(0);
   await page.screenshot({ path: "test-results/provider-login/codex-device-code.png", fullPage: true });
+});
+
+test("a sign-in runs inside its own row: Work is listed once with Cancel, and a rejected code is an error under the field (#2996)", async ({ page }) => {
+  await page.goto(`/machine-management-e2e.html?signIn=rejected&${DESIGN_WORKSTATION}`);
+  await expect(providerAccounts(page).locator(".surface > .row").filter({ hasText: "Work" })).toHaveCount(1);
+  await expect(accountRow(page, "Work").locator(".status")).toHaveText("Signing In");
+  await expect(accountRow(page, "Work").getByRole("button", { name: "Cancel" })).toBeVisible();
+  await expect(providerAccounts(page).locator("article")).toHaveCount(0);
+  const steps = signInSteps(page, "Work");
+  const field = steps.getByLabel("Paste the Code It Shows");
+  const [input, submit] = [await field.boundingBox(), await steps.getByRole("button", { name: "Submit Code" }).boundingBox()];
+  expect(Math.abs(submit!.y - input!.y), "Submit Code shares the field's row, level with the input").toBeLessThanOrEqual(1);
+  expect(submit!.height).toBe(input!.height);
+  expect(submit!.x).toBeGreaterThan(input!.x + input!.width);
+  await field.fill("not-the-code");
+  await steps.getByRole("button", { name: "Submit Code" }).click();
+  await expect(steps.locator(".field-error")).toHaveText(
+    "The provider rejected this code. Copy the whole code from the sign-in page and paste it again.");
+  await expect(field).toHaveAttribute("aria-invalid", "true");
+  await expect(field).toBeFocused();
+  expect(await providerAccounts(page).evaluate((section) => section.outerHTML.includes("not-the-code"))).toBe(false);
+  const menu = await openAccountMenu(page, "Work");
+  await expect(menu.getByRole("menuitem", { name: /^Remove Account…/ })).toBeDisabled();
+  await expect(menu).toContainText("A sign-in is running. Cancel it first.");
+});
+
+test("each sign-in ending is one notice in its row, and Dismiss removes it for good (#2996)", async ({ page }) => {
+  await page.goto(`/machine-management-e2e.html?signIn=failed&${DESIGN_WORKSTATION}`);
+  let steps = signInSteps(page, "Work");
+  await expect(steps.locator(".notice.t-danger .notice-title")).toHaveText("Sign-In Failed");
+  await expect(steps.getByRole("button")).toHaveText(["Try Again", "Dismiss"]);
+  await expect(accountRow(page, "Work").locator(".status")).toHaveText("Signed In");
+
+  await page.goto(`/machine-management-e2e.html?signIn=timed-out&${DESIGN_WORKSTATION}`);
+  steps = signInSteps(page, "Work");
+  await expect(steps.locator(".notice.t-neutral .notice-title")).toHaveText("Sign-In Timed Out");
+  await expect(steps.getByRole("button")).toHaveText(["Start Again", "Dismiss"]);
+  await steps.getByRole("button", { name: "Start Again" }).click();
+  await expect(accountRow(page, "Work").locator(".status")).toHaveText("Signing In");
+  await expect(signInSteps(page, "Work").getByLabel("Paste the Code It Shows")).toBeVisible();
+
+  await page.goto(`/machine-management-e2e.html?signIn=duplicate&${DESIGN_WORKSTATION}`);
+  await expect(accountRow(page, "Work 2").locator(".status")).toHaveText("Not Added");
+  steps = signInSteps(page, "Work 2");
+  await expect(steps.locator(".notice-title")).toHaveText("Already on This Machine");
+  await expect(steps).toContainText("This Claude account is already on this machine, so Wollipog discarded the duplicate sign-in.");
+  await expect(steps.getByRole("button")).toHaveText(["Dismiss"]);
+  await steps.getByRole("button", { name: "Dismiss" }).click();
+  await expect(accountRow(page, "Work 2")).toHaveCount(0);
+  await expect(providerAccounts(page).getByRole("heading", { name: "Provider Accounts 4" })).toBeVisible();
+});
+
+test("at 390px the code field and Submit Code stack at full width, and wrapped step content keeps to the step's text column (#2996)", async ({ page }) => {
+  for (const fixture of ["code", "device"] as const) {
+    await page.goto(`/machine-management-e2e.html?signIn=${fixture}&${DESIGN_WORKSTATION}`);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const label = fixture === "code" ? "Work" : "Codex Team";
+    const steps = signInSteps(page, label);
+    await steps.scrollIntoViewIfNeeded();
+    const items = steps.locator("ol.steps > li");
+    await expect(items).toHaveCount(2);
+    // The step's text column: its left padding, past the number.
+    const column = await items.evaluateAll((lis) => lis.map((li) => {
+      const box = li.getBoundingClientRect();
+      const style = getComputedStyle(li);
+      return { left: box.left + Number.parseFloat(style.paddingLeft), right: box.right, top: box.top,
+        numberTop: box.top + Number.parseFloat(getComputedStyle(li, "::before").top) };
+    }));
+    const open = await steps.getByRole("link", { name: /^Open (Claude|Codex) Sign-In$/ }).boundingBox();
+    expect(Math.abs(open!.x - column[0]!.left), `${fixture}: step 1's button starts the text column`).toBeLessThanOrEqual(1);
+    if (fixture === "code") {
+      const field = (await steps.getByLabel("Paste the Code It Shows").boundingBox())!;
+      const submit = (await steps.getByRole("button", { name: "Submit Code" }).boundingBox())!;
+      const label = (await steps.locator(".signin-code-form .field-label").boundingBox())!;
+      expect(Math.abs(field.x - column[1]!.left)).toBeLessThanOrEqual(1);
+      expect(Math.abs(submit.x - column[1]!.left), "Submit Code wraps to the text column").toBeLessThanOrEqual(1);
+      expect(submit.y, "Submit Code stacks under the field").toBeGreaterThan(field.y + field.height);
+      expect(Math.abs(submit.width - field.width), "both full width").toBeLessThanOrEqual(1);
+      expect(Math.abs(field.x + field.width - column[1]!.right)).toBeLessThanOrEqual(1);
+      // The number is centred on the field's label, its first line.
+      expect(Math.abs((column[1]!.numberTop + 12) - (label.y + label.height / 2))).toBeLessThanOrEqual(1.5);
+    } else {
+      const code = (await steps.locator(".signin-code").boundingBox())!;
+      const waiting = (await steps.getByText("Waiting for Codex to confirm…")).boundingBox();
+      expect(Math.abs(code.x - column[1]!.left)).toBeLessThanOrEqual(1);
+      expect(Math.abs((await waiting)!.x - column[1]!.left), "the waiting line wraps to the text column").toBeLessThanOrEqual(1);
+    }
+    // Step 1's number is centred on its button, its first line.
+    expect(Math.abs((column[0]!.numberTop + 12) - (open!.y + open!.height / 2))).toBeLessThanOrEqual(1.5);
+    await page.screenshot({ path: `test-results/provider-login/steps-390-${fixture}.png` });
+    await page.setViewportSize({ width: 1280, height: 720 });
+  }
 });
 
 test("Add Account refuses an empty or duplicate label under the field, and shows a request failure above the footer", async ({ page }) => {
