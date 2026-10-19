@@ -10576,6 +10576,8 @@ textarea {
   display: flex;
   gap: var(--space-3);
 }
+/* A stale HOME lease (#3241) is line-2 meta in the warning tone; its tooltip says why it cannot be recovered yet. */
+.provider-account-sub .provider-account-lease { color: var(--warning); }
 .provider-account-actions {
   display: flex;
   flex: none;
