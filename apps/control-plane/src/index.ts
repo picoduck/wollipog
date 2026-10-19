@@ -198,6 +198,7 @@ import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
+import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { logWalCheckpointerEvent } from "./wal-checkpointer.js";
@@ -3016,8 +3017,25 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   const requestId = `provider_login_${randomUUID()}`;
   // #3239: the control plane that creates an account on a v225 runner is granted its new managed
   // provider profile; adoption and revocation stay Owner/Admin only.
-  const profileGrantId = hasAccountId ? undefined
-    : authorizeCreatedProviderProfileGrant(db, runner, principal, body.provider as "claude" | "codex", Date.now());
+  let profileGrantId: string | undefined;
+  try {
+    profileGrantId = hasAccountId ? undefined
+      : authorizeCreatedProviderProfileGrant(db, runner, principal, body.provider as "claude" | "codex", Date.now(), requestId);
+  } catch (error) {
+    // Only unsupported peers/non-human/no-scope callers get the existing no-grant compatibility
+    // behavior. An expected grant's audit failure must not silently start an unmanaged sign-in.
+    if (!(error instanceof ProviderPublicationUnavailable)) throw error;
+    app.log.warn({ event: "provider_publication_admission_refused", entryPoint: "add_account", requestId }, error.message);
+    return reply.code(503).send({ error: error.message, code: error.code });
+  }
+  const observe = (observation: PublicationObservation) => {
+    if (!profileGrantId) return;
+    try { db.observeProviderProfileDispatch(requestId, observation); }
+    catch {
+      app.log.warn({ event: "provider_publication_observation_unavailable", entryPoint: "add_account", requestId },
+        "Provider publication observation could not be recorded.");
+    }
+  };
   const settleProfileGrant = (outcome: Parameters<typeof settleCreatedProviderProfileGrantStart>[2]) => {
     if (profileGrantId && principal.kind === "human") {
       settleCreatedProviderProfileGrantStart(db, profileGrantId, outcome, principal, Date.now());
@@ -3037,6 +3055,7 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
         : { provider: body.provider as "claude" | "codex", label: (body.label as string).trim(),
           ...(profileGrantId ? { profileGrantId } : {}) }),
     });
+    observe("reply");
     if (result.type !== "provider_login_result" || result.action !== "start") {
       settleProfileGrant({ started: false });
       return reply.code(502).send({ error: "unexpected runner reply" });
@@ -3048,6 +3067,7 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     settleProfileGrant({ started: true, accountId: result.login.accountId });
     return reply.code(201).send({ login: result.login });
   } catch (error) {
+    observe(isRunnerRequestNotSentError(error) ? "not_sent" : "uncertain");
     // A command that never left is spent; a lost reply leaves the grant pending (see the docs).
     if (isRunnerRequestNotSentError(error)) settleProfileGrant({ started: false });
     return reply.code(504).send({ error: (error as Error).message });
