@@ -645,7 +645,12 @@ export interface SubscriptionUsageManagerOptions {
 export class SubscriptionUsageManager {
   private readonly snapshots = new Map<string, SubscriptionUsageSnapshot>();
   private readonly lastProbeAt = new Map<string, number>();
-  private readonly lastEvent = new Map<string, { signature: string; observedAt: number }>();
+  private readonly lastEvent = new Map<string, {
+    signature: string;
+    observedAt: number;
+    /** This event put a lower same-window reading on hold, so its repeat confirms it. */
+    heldDecrease: boolean;
+  }>();
   /** Per source, the lower same-window Claude readings held until a second event confirms them. */
   private readonly pendingDecreases = new Map<string, Map<string, SubscriptionUsageBucket>>();
   /** Sources whose provider has answered at least once. Separates a source that has simply never
@@ -911,23 +916,26 @@ export class SubscriptionUsageManager {
     const { fetchedAt: _fetchedAt, ...eventShape } = normalized;
     const signature = JSON.stringify(eventShape);
     const event = this.lastEvent.get(sourceId);
-    let pendingDecreases = this.pendingDecreases.get(sourceId);
-    // A repeat of the event holding a decrease is exactly the confirmation that decrease waits for.
-    if (!pendingDecreases?.size && event?.signature === signature &&
+    // A repeat of the event that held a decrease is exactly the confirmation that decrease waits
+    // for, so only that repeat skips the dedupe.
+    if (event?.signature === signature && !event.heldDecrease &&
         normalized.fetchedAt - event.observedAt < SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS) {
       return prior ?? null;
     }
-    this.lastEvent.set(sourceId, { signature, observedAt: normalized.fetchedAt });
+    let pendingDecreases = this.pendingDecreases.get(sourceId);
     if (!pendingDecreases) {
       pendingDecreases = new Map();
       this.pendingDecreases.set(sourceId, pendingDecreases);
     }
+    const heldBefore = new Map(pendingDecreases);
     const explained = this.explainMissingUtilization(mergeSnapshot(
       prior,
       normalized,
       provider === "claude" ? "claude-notification" : "plain",
       pendingDecreases,
     ));
+    const heldDecrease = [...pendingDecreases].some(([id, bucket]) => heldBefore.get(id) !== bucket);
+    this.lastEvent.set(sourceId, { signature, observedAt: normalized.fetchedAt, heldDecrease });
     if (explained === prior) return prior;
     this.snapshots.set(sourceId, explained);
     this.options.publish(explained);

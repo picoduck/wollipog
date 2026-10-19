@@ -1040,6 +1040,46 @@ test("a quota reset inside one window applies once a second event confirms it", 
   assert.equal(weekly()?.usedPercent, 30, "usage accumulates again from the reset level");
 });
 
+test("only the repeat of an event holding a decrease skips the event dedupe", () => {
+  let now = OBSERVED_AT;
+  let publishes = 0;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => { publishes += 1; },
+    now: () => now,
+  });
+  const observe = (unifiedWindows: Record<string, unknown>) =>
+    manager.observe("claude", "claude-code", { kind: "native" }, {
+      provider: "claude",
+      kind: "sparse",
+      payload: rateLimitEvent({ status: "allowed", rateLimitType: "five_hour", unifiedWindows }),
+    });
+  observe({
+    five_hour: { utilization: 0.2, resetsAt: FIVE_HOUR_RESET },
+    seven_day: { utilization: 0.9, resetsAt: WEEK_RESET },
+  });
+  now += 1_000;
+  observe({
+    five_hour: { utilization: 0.2, resetsAt: FIVE_HOUR_RESET },
+    seven_day: { utilization: 0.5, resetsAt: WEEK_RESET },
+  });
+  // The weekly reading stays held while events that never mention that window keep arriving.
+  const fiveHourOnly = { five_hour: { utilization: 0.3, resetsAt: FIVE_HOUR_RESET } };
+  now += 1_000;
+  observe(fiveHourOnly);
+  const afterFirst = publishes;
+  now += 1_000;
+  observe(fiveHourOnly);
+  assert.equal(publishes, afterFirst, "an identical event that held nothing is still deduplicated");
+  assert.equal(
+    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "seven_day")?.usedPercent,
+    90,
+    "an event that does not report the held window neither confirms nor discards it",
+  );
+});
+
 test("the Claude bucket list stays inside the control-plane bound", () => {
   const snapshot = normalizeClaudeRateLimits(rateLimitEvent({
     status: "allowed",
