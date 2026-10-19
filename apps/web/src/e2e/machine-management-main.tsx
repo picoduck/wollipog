@@ -6,6 +6,7 @@ import {
   type AddBoxRequest,
   type BoxView,
   type ControlPlaneToUi,
+  type ProviderHomeLeaseInspection,
   type RunnerView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -141,6 +142,17 @@ if (new URLSearchParams(window.location.search).has("profiles") && runner.provid
     const state = access[account.id as keyof typeof access];
     if (state) account.profile = { id: `profile-${account.id}`, access: state };
   }
+}
+// Stale lease recovery (#3241), with `?leases`: Personal's HOME holds a stale lease that can be
+// recovered, and Codex Team's one was recorded during the current boot without process evidence.
+const leases: Record<string, ProviderHomeLeaseInspection> = new URLSearchParams(window.location.search).has("leases") ? {
+  "claude-personal": { state: "stale", tipHash: "c".repeat(64), createdAt: "2026-10-14T16:20:00.000Z", sameHost: true, hasEvidence: false, refusal: null },
+  "codex-team": { state: "stale", tipHash: "d".repeat(64), createdAt: "2026-10-18T09:05:00.000Z", sameHost: true, hasEvidence: false, refusal: "NO_REBOOT_PROOF" },
+} : {};
+// A Windows runner answers no lease inspection, so the lease scenario is a Linux Machine.
+if (Object.keys(leases).length && runner) {
+  runner.os = "linux";
+  runner.workspaces = [{ id: "home", name: "Home", path: "/home/misko" }];
 }
 const fixtureParams = new URLSearchParams(window.location.search);
 // `machines=0` opens on the empty Machines tab (#2984).
@@ -595,6 +607,12 @@ const client = {
     delete account.profile;
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { revoked: true as const, grantIds: [`grant-${accountId}`], markerUpdated: true, runnerNotified: true, forced: force };
+  },
+  inspectProviderHomeLease: async (_runnerId: string, accountId: string) => leases[accountId] ?? { state: "released" },
+  recoverProviderHomeLease: async (_runnerId: string, accountId: string, staleTipHash: string) => {
+    if (leases[accountId]?.tipHash !== staleTipHash) throw new ApiError("lease changed", 409, "TIP_CHANGED");
+    leases[accountId] = { state: "released" };
+    return { status: "recovered" as const, authorizationId: "authorization-1" };
   },
   removeRunner: async () => {
     if (!runner) throw new Error("runner not found");

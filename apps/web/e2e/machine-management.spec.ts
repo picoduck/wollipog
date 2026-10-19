@@ -507,6 +507,34 @@ test("Owners adopt and revoke provider profiles, confirming active sessions; mem
   expect(await items("Work")).toEqual([]);
 });
 
+test("Owners recover a stale provider HOME lease only where the Machine can prove it abandoned (#3241)", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?leases");
+  await page.getByText("Accounts", { exact: true }).click();
+  const accounts = page.locator("details.runner-agents").filter({ hasText: "Accounts" });
+  const row = (label: string) => accounts.locator(".agent-row").filter({ hasText: label });
+  await expect(row("Personal").locator(".atag", { hasText: "Stale Lease" })).toBeVisible();
+  await expect(row("Codex Team").locator(".atag", { hasText: "Stale Lease" }))
+    .toHaveAttribute("title", "This lease was recorded since the Machine last started and has no process evidence. Restart the Machine, then recover it.");
+  await expect(row("Codex Team").getByRole("button", { name: "Recover Lease" })).toHaveCount(0);
+  await expect(row("Work").locator(".atag", { hasText: "Stale Lease" })).toHaveCount(0);
+  await accounts.screenshot({ path: "test-results/provider-accounts/stale-leases.png" });
+
+  await row("Personal").getByRole("button", { name: "Recover Lease" }).click();
+  const recovery = page.getByRole("dialog", { name: "Recover Lease" });
+  await expect(recovery).toContainText("Another runner left this account's HOME leased and no longer holds it.");
+  await page.screenshot({ path: "test-results/provider-accounts/recover-lease-confirm.png", fullPage: true });
+  await recovery.getByRole("button", { name: "Recover Lease" }).click();
+  await expect(page.getByText("Lease recovered.", { exact: true })).toBeVisible();
+  await expect(row("Personal").locator(".atag", { hasText: "Stale Lease" })).toHaveCount(0);
+  await accounts.screenshot({ path: "test-results/provider-accounts/lease-recovered.png" });
+
+  await page.goto("/machine-management-e2e.html?leases&role=machine-owner");
+  await page.getByText("Accounts", { exact: true }).click();
+  await expect(accounts.locator(".agent-row").first()).toBeVisible();
+  await expect(accounts.getByRole("button", { name: "Recover Lease" })).toHaveCount(0);
+  await expect(accounts.locator(".atag", { hasText: "Stale Lease" })).toHaveCount(0);
+});
+
 test("Machine owners can start both provider sign-in flow shapes", async ({ page }) => {
   await providerAccounts(page).getByRole("button", { name: "Add Account…" }).click();
   const claudeDialog = page.getByRole("dialog", { name: "Add Account" });
