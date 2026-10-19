@@ -110,6 +110,9 @@ export function ProjectsView({
   /** The list when a confirmation settles, which can be well after it opened. */
   const latestProjects = useRef(allProjects);
   latestProjects.current = allProjects;
+  /** The project a running Delete Project is removing. Its removal can arrive before the request
+   * answers; the delete then chooses where to go, not the missing-route fallback below. */
+  const deletingId = useRef<string | null>(null);
   const visibleProjects = useMemo(() => filterManagedProjects(projectMap.values(), query, visibility, machineName),
     [machineName, projectMap, query, visibility]);
   const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
@@ -123,7 +126,7 @@ export function ProjectsView({
   ) : false;
 
   useEffect(() => {
-    if (!selected && selectedProjectId && snapshotLoaded) {
+    if (!selected && selectedProjectId && snapshotLoaded && deletingId.current !== selectedProjectId) {
       const fallback = visibleProjects[0] ?? allProjects[0];
       navigate(fallback ? { name: "projects", id: fallback.id } : { name: "projects" });
     }
@@ -278,6 +281,7 @@ export function ProjectsView({
     if (!selected || busy) return;
     const project = selected;
     setError(null);
+    let successor: string | null = null;
     const deleted = await confirm({
       title: "Delete Project",
       message: projectDeleteMessage(project.name, project.totalSessionCount),
@@ -292,18 +296,26 @@ export function ProjectsView({
       back: backToMenu(choice),
       // The dialog stays open with the button busy, and a failure stays in it with the typed name (§7.4).
       onConfirm: async () => {
+        // The neighbour is chosen before the request: the server broadcasts the removal before it
+        // answers, and a list read after that no longer holds the project to find it by.
+        successor = projectAfterRemoval(latestProjects.current, project.id)?.id ?? null;
+        deletingId.current = project.id;
         setBusy("delete");
         try {
           await api.deleteProject(project.id);
         } catch (cause) {
+          deletingId.current = null;
           throw new ConfirmationFailure("Couldn't delete the project. Nothing was changed.", (cause as Error).message);
         } finally {
           setBusy(null);
         }
       },
     });
+    deletingId.current = null;
     if (!deleted) return;
-    const next = projectAfterRemoval(latestProjects.current, project.id);
+    // The neighbour if it is still there; another change while the request ran may have removed it.
+    const remaining = latestProjects.current.filter((candidate) => candidate.id !== project.id);
+    const next = remaining.find((candidate) => candidate.id === successor) ?? remaining[0] ?? null;
     setDeletedIds((current) => new Set(current).add(project.id));
     // A replace: the deleted project's route cannot be shown, so its unsaved settings are not
     // asked about.

@@ -78,7 +78,16 @@ class FakeSocket implements UiSocket {
   }
 }
 
-const navigation: ViewNavigation = { current: () => ({ name: "projects" }), push() {}, listen: () => () => {} };
+/** Every route the store pushed or replaced, in order. */
+const routes: Array<{ how: "push" | "replace"; view: View }> = [];
+const navigation: ViewNavigation = {
+  current: () => ({ name: "projects" }),
+  push: (view) => { routes.push({ how: "push", view }); },
+  replace: (view) => { routes.push({ how: "replace", view }); },
+  listen: () => () => {},
+};
+/** The socket of the page mounted last, for messages the server sends while it is open. */
+let socket: FakeSocket;
 
 /** A project with one location, Storefront, and no sessions. */
 function project(id: string, name: string, options: Partial<ProjectView> = {}): ProjectView {
@@ -134,7 +143,7 @@ async function renderSelected(projects: ProjectView[], name: string, client: Api
   domWindow.document.body.append(mountPoint as never);
   const root = createRoot(mountPoint);
   mounted = root;
-  const socket = new FakeSocket();
+  socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "projects-confirm", runtimeKey: "projects-confirm:1", createSocket: () => socket, close() {},
   };
@@ -296,6 +305,39 @@ test("confirming deletes once with the button busy, then closes, moves to the ne
   assertNoDomNode(doc.querySelector('[role="dialog"]'), "it closes once the delete succeeds");
   assert.deepEqual(currentView, { name: "projects", id: "beta" });
   assert.match(text(doc.querySelector(".toast-region")), /Project deleted\. Sessions moved to No Project\./);
+});
+
+test("a removal broadcast before the delete answers still lands on the deleted project's neighbour, in place of its route", async () => {
+  const { client, release } = deletingClient();
+  const projects = [project("alpha", "Alpha"), project("beta", "Beta"), project("gamma", "Gamma")];
+  const body = await renderSelected(projects, "Beta", client);
+  const dialog = await choose(body.querySelector(".project-detail-title-row")!, "Project Actions", "Delete Project…");
+  await type(dialog.querySelector<HTMLInputElement>(".field input")!, "Beta");
+  await act(async () => { footButton(dialog, "Delete Project").click(); });
+  routes.length = 0;
+  // The server broadcasts the removal before it answers the DELETE.
+  await act(async () => { socket.push({ type: "project_removed", projectId: "beta" } as never); });
+  await settle();
+  assert.deepEqual(routes, [], "the missing route does not send the page elsewhere while the delete runs");
+  assert.ok(doc.contains(dialog), "the dialog stays open until the request answers");
+
+  await release();
+  assertNoDomNode(doc.querySelector('[role="dialog"]'));
+  assert.deepEqual(routes, [{ how: "replace", view: { name: "projects", id: "gamma" } }], "Beta's neighbour, not the first project");
+  assert.deepEqual(currentView, { name: "projects", id: "gamma" });
+});
+
+test("a delete whose neighbour went away while it ran lands on a project that is still there", async () => {
+  const { client, release } = deletingClient();
+  const projects = [project("alpha", "Alpha"), project("beta", "Beta"), project("gamma", "Gamma")];
+  const body = await renderSelected(projects, "Beta", client);
+  const dialog = await choose(body.querySelector(".project-detail-title-row")!, "Project Actions", "Delete Project…");
+  await type(dialog.querySelector<HTMLInputElement>(".field input")!, "Beta");
+  await act(async () => { footButton(dialog, "Delete Project").click(); });
+  await act(async () => { socket.push({ type: "project_removed", projectId: "gamma" } as never); });
+  await act(async () => { socket.push({ type: "project_removed", projectId: "beta" } as never); });
+  await release();
+  assert.deepEqual(currentView, { name: "projects", id: "alpha" });
 });
 
 test("a failed delete stays in the dialog as its danger notice, with the typed name and the raw message behind Show Details", async () => {
