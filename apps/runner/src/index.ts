@@ -162,6 +162,7 @@ import {
 } from "./worktree-setup-generator.js";
 import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { ProviderLoginSupervisor } from "./provider-login.js";
+import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type ProviderHomeLeaseCommandDeps } from "./provider-home-lease-commands.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
 import {
@@ -1191,6 +1192,12 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   persistAccounts: (accounts) => writeProviderAccountsConfig(parsed.configPath, accounts),
   removeAccount: (accountId, options) => providerLoginSupervisor.removeAccount(accountId, options),
   publish: () => publishProviderAccountInventory(),
+  log,
+};
+const providerHomeLeaseCommands: ProviderHomeLeaseCommandDeps = {
+  accounts: () => config.providerAccounts,
+  inspect: (home) => sessions.inspectProviderHomeLease(home),
+  recover: (home, provider, staleTipHash, authorizationId) => sessions.recoverProviderHomeLease(home, provider, staleTipHash, authorizationId),
   log,
 };
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
@@ -3138,6 +3145,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "revoke_provider_profile_grant":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")) break;
       runCommandTask("revoke_provider_profile_grant", revokeProviderProfileGrantCommand(providerProfileCommands, msg).then(sendUp));
+      break;
+    case "inspect_provider_home_lease":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeLeaseRecovery")) break;
+      runCommandTask("inspect_provider_home_lease", inspectProviderHomeLeaseCommand(providerHomeLeaseCommands, msg).then(sendUp));
+      break;
+    case "recover_provider_home_lease":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeLeaseRecovery")) break;
+      runCommandTask("recover_provider_home_lease", recoverProviderHomeLeaseCommand(providerHomeLeaseCommands, msg).then(sendUp));
       break;
     case "generate_session_title": {
       if (msg.mode === "custom_model_endpoint") {

@@ -703,7 +703,10 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `review_session_update`. The control plane sends a run's history only to a v228+ runner,
 //      which plans the round, scopes delta and rebase reviews and validates every attempt against
 //      the review contract; an older runner keeps reviewing full and unvalidated.
-export const PROTOCOL_VERSION = 228;
+// 229: Owner/Admin recovery of a stale provider-HOME lease (#3241): `inspect_provider_home_lease`
+//      and `recover_provider_home_lease` with their results. The control plane sends them only to
+//      a v229+ runner, and a runner answers them only for a v229+ control plane.
+export const PROTOCOL_VERSION = 229;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -954,6 +957,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeRefDeletion: 227,
   /** v228 runner plans review rounds and validates review attempts (#3369). */
   reviewRuns: 228,
+  /** v229 runner inspects a provider HOME's lease and recovers one exact stale lease on an Owner or
+   * Admin's authorization (#3241). */
+  providerHomeLeaseRecovery: 229,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -9212,6 +9218,8 @@ export type RunnerToControlPlane =
   | RemoveProviderAccountResultMessage
   | AdoptProviderProfileResultMessage
   | RevokeProviderProfileGrantResultMessage
+  | InspectProviderHomeLeaseResultMessage
+  | RecoverProviderHomeLeaseResultMessage
   | RunnerCapacityStatusMessage
   | SubscriptionUsageUpdatedMessage
   | SubscriptionUsageInventoryMessage
@@ -10151,6 +10159,70 @@ export interface RevokeProviderProfileGrantResultMessage {
   ok: boolean;
   /** True when this grant was found in a configured HOME's marker and taken out of it. */
   markerUpdated: boolean;
+  error?: string;
+}
+
+/**
+ * Protocol v228 (#3241): why recovering a stale provider-HOME lease is refused.
+ * - `TIP_CHANGED`: the lease is no longer the record the authorization named (released, replaced, or none).
+ * - `NO_REBOOT_PROOF`: the record carries no process evidence and was written during the current boot.
+ * - `HOME_IN_USE`: the recorded runner, or a process it launched, is still running.
+ * - `FOREIGN_HOST`: the lease was recorded on another host.
+ * - `PROFILE_REFUSED`: the HOME's provider profile does not admit this control plane.
+ * - `UNSUPPORTED_HOME`: the account's context or platform has no verified lease to recover.
+ * - `UNVERIFIABLE`: anything else the runner cannot prove; nothing was changed.
+ */
+export type ProviderHomeLeaseRecoveryCode =
+  | "TIP_CHANGED" | "NO_REBOOT_PROOF" | "HOME_IN_USE" | "FOREIGN_HOST" | "PROFILE_REFUSED" | "UNSUPPORTED_HOME" | "UNVERIFIABLE";
+
+/** Protocol v228 (#3241): one account HOME's lease state, as an Owner or Admin sees it. */
+export interface ProviderHomeLeaseInspection {
+  /** `none`: no lease journal; `released`: free; `held`: held by this runner; `stale`: an unreleased
+   * lease of another runner process; `unverifiable`: the journal cannot be verified. */
+  state: "none" | "released" | "held" | "stale" | "unverifiable";
+  /** For `stale`: the exact record a recovery authorization must name (SHA-256, hex). */
+  tipHash?: string;
+  /** For `stale`: when the stale record says it was written (the old runner's clock). */
+  createdAt?: string;
+  sameHost?: boolean;
+  /** For `stale`: whether the record carries process evidence (#3241 part 1). */
+  hasEvidence?: boolean;
+  /** For `stale`: why a recovery would be refused now, or null when it would proceed. */
+  refusal?: ProviderHomeLeaseRecoveryCode | null;
+}
+
+/** Protocol v228 (#3241): read one account HOME's lease state. Creates nothing. */
+export interface InspectProviderHomeLeaseMessage {
+  type: "inspect_provider_home_lease";
+  requestId: string;
+  accountId: string;
+}
+
+export interface InspectProviderHomeLeaseResultMessage {
+  type: "inspect_provider_home_lease_result";
+  requestId: string;
+  ok: boolean;
+  inspection?: ProviderHomeLeaseInspection;
+  code?: "UNSUPPORTED_HOME";
+  error?: string;
+}
+
+/** Protocol v228 (#3241): succeed exactly the stale lease record `staleTipHash` of one account HOME
+ * and release the HOME again. Sent only after an Owner or Admin authorized it; the authorization id
+ * is the control plane's audited authorization row and is recorded in the lease journal. */
+export interface RecoverProviderHomeLeaseMessage {
+  type: "recover_provider_home_lease";
+  requestId: string;
+  accountId: string;
+  staleTipHash: string;
+  authorizationId: string;
+}
+
+export interface RecoverProviderHomeLeaseResultMessage {
+  type: "recover_provider_home_lease_result";
+  requestId: string;
+  ok: boolean;
+  code?: ProviderHomeLeaseRecoveryCode;
   error?: string;
 }
 
@@ -11099,6 +11171,8 @@ export type ControlPlaneToRunner =
   | RemoveProviderAccountMessage
   | AdoptProviderProfileMessage
   | RevokeProviderProfileGrantMessage
+  | InspectProviderHomeLeaseMessage
+  | RecoverProviderHomeLeaseMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
   | SkillSnapshotMessage

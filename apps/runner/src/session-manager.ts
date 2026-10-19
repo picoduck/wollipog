@@ -218,7 +218,7 @@ import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type LeaseProfi
 import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
+import { LEASE_WORKER_ERRORS, type LeaseWorkerInspection } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
   ProviderStateCleanupJournal,
@@ -5070,6 +5070,19 @@ export class SessionManager {
     if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
     if (this.shuttingDown) throw new Error("provider profile creation was cancelled by shutdown");
     await this.providerHomeLeases.createProfile(home, provider, profileId, grantId);
+  }
+
+  /** #3241: one HOME's lease state for an Owner or Admin deciding on a recovery. */
+  async inspectProviderHomeLease(home: string): Promise<LeaseWorkerInspection> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    return this.providerHomeLeases.inspectHomeLease(home);
+  }
+
+  /** #3241: succeed exactly the authorized stale lease record of one HOME, then release it. */
+  async recoverProviderHomeLease(home: string, provider: string, staleTipHash: string, authorizationId: string): Promise<void> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    if (this.shuttingDown) throw new Error("provider HOME lease recovery was cancelled by shutdown");
+    await this.providerHomeLeases.recoverHomeLease(home, provider, staleTipHash, authorizationId);
   }
 
   /** Drop one exact grant of this control plane from a HOME's profile marker under its lease. */
