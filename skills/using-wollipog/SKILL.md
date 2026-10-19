@@ -266,9 +266,13 @@ settings, hooks, skills or MCP servers, takes no session slot, and returns `revi
 
 - You can follow its transcript with `get_session_events`. Poll `wollipog review session get <id>
   --json` (`get_review_session`) every minute or two until `terminal` is true.
-- A `completed` review carries the reviewer's structured output. It is not validated yet
-  (`validated: false`): check its head, coverage and vote yourself, and prove every finding before
-  changing code.
+- Reviews of one pull request form a run: the first round reviews it in full, later rounds only
+  the changes since the last valid round with its open findings (add `--full-reason <text>` for a
+  full review), and a rebased head starts a new epoch that reviews the range-diff. Each epoch allows
+  4 valid rounds and each round 2 counted attempts; an upvoted or unchanged head is refused.
+- A finished review carries its `verdict`. Only a valid report's vote and `findings` count; an
+  invalid attempt's output is not a review, so request the round again. Prove every finding before
+  changing code, and treat a `stale` review as covering an older head.
 - One review session is active per session at a time; `review session cancel` stops it. A review
   session takes no messages; request a new one for a new head.
 

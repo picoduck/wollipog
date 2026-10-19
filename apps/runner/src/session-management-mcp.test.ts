@@ -2955,6 +2955,8 @@ test("review session tools are self-scoped session tools behind their own floor 
   assert.equal(calls.at(-1)?.method, "POST");
   assert.equal(calls.at(-1)?.url, base);
   assert.deepEqual(calls.at(-1)?.body, { pullRequest: { repository: "o/r", number: 7 }, headSha: "a".repeat(40), brief: "B" });
+  await callTool(deps, "request_review_session", { repository: "o/r", number: 7, headSha: "a".repeat(40), brief: "B", fullReason: "Rebased" });
+  assert.deepEqual(calls.at(-1)?.body, { pullRequest: { repository: "o/r", number: 7 }, headSha: "a".repeat(40), brief: "B", fullReason: "Rebased" });
   assert.deepEqual(resultJson(await callTool(deps, "get_review_session", { reviewSessionId: "s_review" })), { reviewSessionId: "s_review", terminal: false });
   assert.equal(calls.at(-1)?.url, `${base}/s_review`);
   await callTool(deps, "list_review_sessions", { limit: 5, afterReviewSessionId: "s_review" });

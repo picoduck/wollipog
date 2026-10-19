@@ -9,6 +9,8 @@
  * Phase 1 returns the reviewer's final structured output unvalidated. Contract validation, rounds
  * and epochs belong to the review run (#3369).
  */
+import type { ReviewFailureClass, ReviewReportFinding } from "./review-contract.js";
+import type { ReviewRoundMode, ReviewRunHistory } from "./review-run.js";
 import type { SessionReviewHarness } from "./session-review-job.js";
 
 /** Ordinary sessions omit `kind` or report "standard"; only the control plane creates "review". */
@@ -29,6 +31,11 @@ export interface ReviewLaunchPolicy {
   pullRequest: { repository: string; number: number };
   headSha: string;
   harness: SessionReviewHarness;
+  /** v228 (#3369): the run's current epoch, from which the runner plans this attempt. Absent from
+   * older control planes, where every review is a full, unvalidated round. */
+  history?: ReviewRunHistory;
+  /** Why a full review is needed instead of a delta (at most 500 characters). */
+  fullReason?: string;
 }
 
 /** What a session sees about a review session's link (on the review session's own view). */
@@ -45,6 +52,9 @@ export interface ReviewSessionRequest {
   headSha: string;
   /** Intent, acceptance criteria and verification already run. Untrusted data to the reviewer. */
   brief: string;
+  /** Review the whole pull request instead of the changes since the last valid round (at most
+   * 500 characters of reason). */
+  fullReason?: string;
 }
 
 export type ReviewSessionState = "requested" | "running" | "completed" | "failed" | "cancelled";
@@ -60,8 +70,16 @@ export interface ReviewSessionView {
   state: ReviewSessionState;
   /** True once `state` can no longer change. */
   terminal: boolean;
-  /** Always false in this phase; the review run validates outputs (#3369). */
-  validated: false;
+  /** v228: the attempt's place in its review run, once the runner has planned it. */
+  round: ReviewAttemptRound | null;
+  /** True once the attempt was checked against the review contract (#3369). */
+  validated: boolean;
+  /** The contract verdict, once validated. Only a valid attempt's vote and findings count. */
+  verdict: ReviewAttemptVerdictView | null;
+  /** The valid report's findings; empty otherwise. */
+  findings: ReviewReportFinding[];
+  /** A newer review of the same pull request has a different head. */
+  stale: boolean;
   output: string | null;
   outputTruncated: boolean;
   reason: string | null;
@@ -71,6 +89,30 @@ export interface ReviewSessionView {
 }
 
 export interface ReviewSessionsPage { reviews: ReviewSessionView[]; nextAfterReviewSessionId: string | null }
+
+/** Where an attempt sits in its review run, as the runner planned it. */
+export interface ReviewAttemptRound {
+  epoch: number;
+  round: number;
+  attempt: number;
+  mode: ReviewRoundMode;
+  /** The pull request's base when the attempt was planned. */
+  baseSha: string;
+  /** The changed files the reviewer had to classify. */
+  scopeFiles: string[];
+  since?: string;
+  rebasedFrom?: { baseSha: string; headSha: string };
+}
+
+export interface ReviewAttemptVerdictView {
+  valid: boolean;
+  /** An unconsumed attempt does not count toward its round's attempts. */
+  consumed: boolean;
+  effectiveVote: "UPVOTE" | "DOWNVOTE" | "INVALID" | null;
+  failureClass: ReviewFailureClass | null;
+  /** At most 8, each at most 300 characters. */
+  validationErrors: string[];
+}
 
 /** Runner to control plane: the review session's outcome. Accepted only from the runner that owns
  * the review session; a terminal state is final. */
@@ -82,10 +124,16 @@ export interface ReviewSessionUpdate {
   outputTruncated?: boolean;
   /** A fixed, path-free reason when the review did not complete. */
   reason?: string;
+  /** v228: the planned attempt, sent with `running` and again with the outcome. */
+  round?: ReviewAttemptRound;
+  /** v228: the contract verdict on a reviewer that ran. */
+  verdict?: ReviewAttemptVerdictView;
 }
 
 export const REVIEW_SESSION_OUTPUT_LIMIT_BYTES = 256 * 1024;
 export const REVIEW_SESSION_BRIEF_LIMIT_BYTES = 100 * 1024;
+/** The longest reason a requester may give for a full review instead of a delta (#3369). */
+export const REVIEW_FULL_REASON_LIMIT = 500;
 
 export function reviewerHarnessFor(driver: string | null | undefined): SessionReviewHarness | null {
   if (driver === "claude-code") return "codex";
@@ -104,6 +152,11 @@ const REVIEW_SESSION_REASONS = new Set([
   "the review ended without a result",
   "the review session ended when its runner restarted",
   "the review session's runner no longer supports review sessions",
+  "this head already has an upvote",
+  "the head has not changed since the last valid round",
+  "this pull request has reached its review round limit",
+  "this review round has used its attempts",
+  "the reviewer timed out",
 ]);
 
 export function sanitizedReviewSessionReason(value: unknown): string {

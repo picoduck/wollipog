@@ -284,6 +284,8 @@ export interface Driver {
   lastTurnError?(): string | null;
   /** Review sessions: the last completed turn's final structured output, exactly as returned. */
   reviewOutput?(): string | null;
+  /** Review sessions: what the harness reported about the last turn's policy (#3369). */
+  reviewDiagnostics?(): { permissionDenials?: number; modelOk?: boolean | null };
   /** Reliable provider evidence for the exact runner turn; null preserves diagnostic fallback.
    * Optional for older drivers. It must reset before submission and ignore unrelated turns. */
   lastTurnFailureCategory?(): import("./provider-failure.js").ProviderFailureCategory | null;

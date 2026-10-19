@@ -342,8 +342,38 @@ parked. Every MCP server Codex would load, from user or project configuration, i
 The request returns `reviewSessionId` at once in state `requested`; the review session's own status
 moves it to `running`, and the runner reports exactly one outcome: `completed` with the reviewer's
 structured output (at most 256 KiB, `outputTruncated` beyond that), or `failed` or `cancelled` with
-a fixed reason. The output is not validated against the review contract in this phase
-(`validated: false`); the review run's validation, rounds and epochs are #3369. `review session get`
+a fixed reason. A reviewer has 30 minutes; past that its turn is judged as timed out.
+
+#### Review Runs
+
+A requester's review sessions of one pull request form a review run (#3369), with the policy of the
+cross-model-review skill. The control plane sends the run's current epoch with each request, and the
+runner, which can prove commit ancestry from its mirror, plans the attempt (`round`: epoch, round,
+attempt, mode, base and the files in scope):
+
+- The first round reviews the whole pull request (`full`). A later round reviews only the changes
+  since the last valid round's head (`delta`), lists the pull request's other changed files as
+  context only, and carries that round's findings for the reviewer to report again or drop. A
+  request with `fullReason` (at most 500 characters, `--full-reason`) reviews in full instead.
+- A head that does not descend from the last valid head (a rebase or force-push) starts a new
+  epoch: its first round reviews the range-diff from the earlier base and head (`rebase`), scoped
+  to the changed files the rewrite touched, with the open findings carried forward. Without the
+  earlier commits, or with `fullReason`, it reviews in full. Until the new epoch has a valid round,
+  the earlier epoch's last valid review stands: a retry reviews the same range-diff with the same
+  findings.
+- An epoch has at most 4 valid rounds and each round 2 counted attempts. An invalid attempt is
+  retried in the same round; an attempt that timed out or failed before producing a report does
+  not count. A head with an upvote, a head unchanged since the last valid round, a spent round
+  budget and a spent round are refused with fixed reasons.
+
+Each finished attempt is judged against the review contract (`verdict`: `valid`, `consumed`,
+`effectiveVote`, `failureClass`, at most 8 `validationErrors`): the report must name the reviewed
+head, classify each file in scope exactly once and cite only tracked files, the reviewer may not
+have been refused a tool, and the runner's checkout must still be exactly that head with nothing
+changed. The control plane checks a valid report again against the stored head and scope; only a
+valid report's vote and `findings` count. `validated` is true once a verdict is recorded, and
+`stale` is true once a newer review of the pull request covers another head. A runner below
+protocol 228 reviews every request in full without a verdict. `review session get`
 (`get_review_session`) reads it, `review session list` (`list_review_sessions`) pages them newest
 first, and `review session cancel` (`cancel_review_session`) stops the review session. The runner
 persists the outcome before reporting it and re-sends it at each registration; a runner restart
@@ -353,7 +383,7 @@ The routes are `/api/sessions/:id/review-sessions` (POST to request, GET to list
 `.../:reviewSessionId` and `.../:reviewSessionId/cancel` (POST), with the bridge's credential rules.
 Orchestrator sessions do not have these tools, and a session in a campaign with an allowance is
 refused as with the bridge. The feature needs protocol 226 on both the control plane and the runner,
-and a Linux runner that advertises `runtime.reviewSession`.
+and a Linux runner that advertises `runtime.reviewSession`; review runs need protocol 228.
 
 A Codex reviewer's read-only sandbox can still read files outside the checkout: Codex's read-only
 sandbox policy has no readable-roots restriction. Network access is off for its commands, but what it

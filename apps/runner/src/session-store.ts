@@ -206,6 +206,8 @@ export interface SessionMeta {
   review?: import("@wollipog/protocol").ReviewLaunchPolicy & {
     checkout: string;
     launchOwner: string;
+    /** v228 (#3369): the attempt's planned place in its review run. */
+    round?: import("@wollipog/protocol").ReviewAttemptRound;
     update?: import("@wollipog/protocol").ReviewSessionUpdate;
   };
   /** Exact provider model resolved from the selected alias for the active session. */

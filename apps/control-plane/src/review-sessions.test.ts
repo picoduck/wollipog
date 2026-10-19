@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   PROTOCOL_VERSION, REVIEW_SESSION_BRIEF_LIMIT_BYTES, REVIEW_SESSION_OUTPUT_LIMIT_BYTES,
+  type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewReportFinding, type ReviewRunHistory,
   type ReviewSessionCapability, type ReviewSessionRequest, type RunnerMetadata, type StartSessionMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
@@ -56,6 +57,25 @@ function harness(options: {
     setDeliver: (value: boolean) => { deliver = value; } };
 }
 
+const EMPTY_HISTORY: ReviewRunHistory = {
+  epoch: 0, lastValid: null, lastAttempt: null, validRounds: 0, consumedInLastRound: 0, roundBudget: 4, attemptsPerRound: 2,
+};
+const BASE = "b".repeat(40);
+const ROUND: ReviewAttemptRound = { epoch: 1, round: 1, attempt: 1, mode: "full", baseSha: BASE, scopeFiles: ["src/a.ts"] };
+const BLOCKER: ReviewReportFinding = {
+  severity: "high", blocking: true, file: "src/a.ts", line: 3, title: "Wrong", scenario: "s", evidence: "e", verify: "v",
+};
+const VALID: ReviewAttemptVerdictView = { valid: true, consumed: true, effectiveVote: "DOWNVOTE", failureClass: null, validationErrors: [] };
+
+/** A contract-conforming report of `ROUND` at `head`. */
+function report(head = HEAD, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    schema_version: 2, reviewed_head: head, vote: "DOWNVOTE", summary: "one blocker", findings: [BLOCKER],
+    examined_changed_files: ["src/a.ts"], not_examined_changed_files: [], context_files_examined: [], commands_run: [],
+    verification_requests: [], ...extra,
+  });
+}
+
 function requested(h: ReturnType<typeof harness>, sessionId = "s1") {
   const result = h.svc.requestReviewSession(sessionId, request());
   assert.ok(result.ok && result.data, result.error ?? "request refused");
@@ -84,6 +104,7 @@ test("a session requests a review session: a typed reviewer of the other family,
     assert.equal(start.spec.config?.effort, "high");
     assert.deepEqual(start.spec.review, {
       requesterSessionId: "s1", pullRequest: { repository: "picoduck/wollipog", number: 3368 }, headSha: HEAD, harness: "codex",
+      history: EMPTY_HISTORY,
     });
     const reviewSession = h.db.getSession(view.reviewSessionId)!;
     assert.equal(reviewSession.kind, "review");
@@ -132,6 +153,9 @@ test("malformed review session requests are refused before anything is created o
       request({ brief: " " }),
       { pullRequest: request().pullRequest, headSha: HEAD },
       request({ brief: "x".repeat(REVIEW_SESSION_BRIEF_LIMIT_BYTES + 1) }),
+      request({ fullReason: " " }),
+      request({ fullReason: "x".repeat(501) }),
+      { ...request(), fullReason: 5 },
     ]) {
       const result = h.svc.requestReviewSession("s1", item as ReviewSessionRequest);
       assert.equal(result.status, 400, JSON.stringify(item)?.slice(0, 120));
@@ -196,6 +220,108 @@ test("only the owning runner reports a review, a terminal state is final, and ou
     const empty = h.db.reviewSessions.view(second.reviewSessionId)!;
     assert.deepEqual({ state: empty.state, reason: empty.reason, output: empty.output },
       { state: "failed", reason: "the review ended without a result", output: null }, "a completion needs its output");
+  } finally { h.db.close(); }
+});
+
+test("a review run records each attempt's round and verdict and sends its history with the next request", () => {
+  const h = harness();
+  try {
+    const first = requested(h);
+    const update = (sessionId: string, fields: Record<string, unknown>) =>
+      h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId, ...fields } as never);
+    update(first.reviewSessionId, { state: "running", round: ROUND });
+    assert.deepEqual(h.db.reviewSessions.view(first.reviewSessionId)!.round, ROUND, "the planned round shows while it runs");
+    // A round is planned once: a later report cannot move the attempt.
+    update(first.reviewSessionId, { state: "running", round: { ...ROUND, round: 3 } });
+    update(first.reviewSessionId, { state: "completed", output: report(), round: { ...ROUND, round: 3 }, verdict: VALID });
+    const done = h.db.reviewSessions.view(first.reviewSessionId)!;
+    assert.deepEqual({ round: done.round, validated: done.validated, verdict: done.verdict, findings: done.findings, stale: done.stale },
+      { round: ROUND, validated: true, verdict: VALID, findings: [BLOCKER], stale: false });
+
+    // The next request carries the epoch, and a full review's reason.
+    const next = h.svc.requestReviewSession("s1", request({ headSha: "c".repeat(40), fullReason: " The base moved. " }));
+    assert.ok(next.ok && next.data, next.error ?? "request refused");
+    const start = h.starts().at(-1)!;
+    assert.deepEqual(start.spec.review?.history, {
+      ...EMPTY_HISTORY, epoch: 1, validRounds: 1, consumedInLastRound: 1,
+      lastValid: { headSha: HEAD, baseSha: BASE, round: 1, vote: "DOWNVOTE", findings: [BLOCKER] },
+      lastAttempt: { headSha: HEAD, round: 1, attempt: 1, valid: true },
+    });
+    assert.equal(start.spec.review?.fullReason, "The base moved.");
+    assert.equal(h.db.reviewSessions.view(first.reviewSessionId)!.stale, true, "a newer review covers another head");
+    assert.equal(next.data.stale, false);
+
+    // An attempt that ran out of time is not counted; one the runner judged invalid is.
+    update(next.data.reviewSessionId, { state: "running", round: { ...ROUND, round: 2, mode: "full" } });
+    update(next.data.reviewSessionId, { state: "failed", reason: "the reviewer timed out",
+      verdict: { valid: false, consumed: false, effectiveVote: null, failureClass: "timeout", validationErrors: ["the reviewer timed out"] } });
+    assert.equal(h.db.reviewSessions.view(next.data.reviewSessionId)!.reason, "the reviewer timed out");
+    const history = h.db.reviewSessions.history("s1", request().pullRequest);
+    assert.deepEqual([history.lastAttempt, history.consumedInLastRound, history.validRounds],
+      [{ headSha: "c".repeat(40), round: 2, attempt: 1, valid: false }, 0, 1]);
+    // Reviews of another pull request are another run.
+    assert.deepEqual(h.db.reviewSessions.history("s1", { repository: "picoduck/wollipog", number: 1 }), EMPTY_HISTORY);
+  } finally { h.db.close(); }
+});
+
+test("a new epoch without a valid round keeps the earlier epoch's last valid review in its history", () => {
+  const h = harness();
+  try {
+    const update = (sessionId: string, fields: Record<string, unknown>) =>
+      h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId, ...fields } as never);
+    const first = requested(h);
+    update(first.reviewSessionId, { state: "completed", output: report(), round: ROUND, verdict: VALID });
+    const rewritten = "c".repeat(40);
+    const second = h.svc.requestReviewSession("s1", request({ headSha: rewritten })).data!;
+    update(second.reviewSessionId, { state: "failed", reason: "the review ended without a result",
+      round: { ...ROUND, epoch: 2, mode: "rebase", rebasedFrom: { baseSha: BASE, headSha: HEAD } },
+      verdict: { valid: false, consumed: true, effectiveVote: "INVALID", failureClass: "evidence_contract", validationErrors: ["no structured report"] } });
+    assert.deepEqual(h.db.reviewSessions.history("s1", request().pullRequest), {
+      ...EMPTY_HISTORY, epoch: 2, consumedInLastRound: 1,
+      lastAttempt: { headSha: rewritten, round: 1, attempt: 1, valid: false },
+      carried: { headSha: HEAD, baseSha: BASE, findings: [BLOCKER] },
+    }, "the epoch's counters reset while the earlier findings and range-diff origin stay");
+  } finally { h.db.close(); }
+});
+
+test("a valid verdict counts only when the control plane can check the report against its head and scope", () => {
+  const cases: Array<[string, Record<string, unknown>, string]> = [
+    ["another head", { output: report("c".repeat(40)) }, "reviewed_head"],
+    ["an unclassified file", { output: report(HEAD, { examined_changed_files: [] }) }, "src/a.ts"],
+    ["a truncated report", { output: report(), outputTruncated: true }, "could not be validated"],
+    ["no planned round", { round: undefined }, "could not be validated"],
+    ["a malformed verdict", { verdict: { valid: true } }, "malformed"],
+  ];
+  for (const [label, fields, error] of cases) {
+    const h = harness();
+    try {
+      const view = requested(h);
+      h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "completed",
+        output: report(), round: ROUND, verdict: VALID, ...fields } as never);
+      const done = h.db.reviewSessions.view(view.reviewSessionId)!;
+      assert.deepEqual([done.verdict?.valid, done.verdict?.effectiveVote, done.verdict?.failureClass, done.findings],
+        [false, "INVALID", "evidence_contract", []], label);
+      assert.ok(done.verdict!.validationErrors.some((message) => message.includes(error)), `${label}: ${done.verdict!.validationErrors}`);
+      assert.equal(h.db.reviewSessions.history("s1", request().pullRequest).validRounds, 0, label);
+    } finally { h.db.close(); }
+  }
+  // A malformed round is ignored rather than recorded.
+  const h = harness();
+  try {
+    const view = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "running",
+      round: { ...ROUND, mode: "partial", baseSha: "../x" } } as never);
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.round, null);
+  } finally { h.db.close(); }
+});
+
+test("a runner below review runs gets no history and reviews without a verdict", () => {
+  const h = harness({ protocol: 226 });
+  try {
+    assert.ok(h.svc.requestReviewSession("s1", request({ fullReason: "why" })).ok);
+    assert.deepEqual(h.starts()[0]?.spec.review, {
+      requesterSessionId: "s1", pullRequest: { repository: "picoduck/wollipog", number: 3368 }, headSha: HEAD, harness: "codex",
+    });
   } finally { h.db.close(); }
 });
 

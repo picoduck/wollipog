@@ -1101,8 +1101,16 @@ export class ClaudeCodeDriver implements Driver {
     return this.lastStructuredOutput;
   }
 
+  /** Review sessions: permission denials recorded by the last root result. */
+  private lastPermissionDenials = 0;
+
+  reviewDiagnostics(): { permissionDenials: number } {
+    return { permissionDenials: this.lastPermissionDenials };
+  }
+
   prompt(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
     this.lastStructuredOutput = null;
+    this.lastPermissionDenials = 0;
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
@@ -3388,6 +3396,12 @@ export class ClaudeCodeDriver implements Driver {
           } catch {
             /* ignore */
           }
+        }
+        if (!parentId && this.opts.review) {
+          // A denial is a tool the preset refused: the attempt broke the reviewer's tool policy,
+          // whether or not the turn then ended in an error.
+          const denials = (msg as { permission_denials?: unknown }).permission_denials;
+          this.lastPermissionDenials = Array.isArray(denials) ? denials.length : denials === undefined ? 0 : 1;
         }
         if (msg.is_error || msg.subtype === "error_during_execution") {
           if (!parentId) {

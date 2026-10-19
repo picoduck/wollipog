@@ -25,9 +25,11 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import {
-  REVIEW_CONTRACT, REVIEW_OUTPUT_SCHEMA, reviewerHarnessFor,
-  type AgentDefinition, type ReviewLaunchPolicy, type ReviewSessionCapability, type ReviewSessionUpdate,
-  type SessionReviewHarness,
+  compactReviewFinding, evaluateReviewAttempt, planReviewRound, REVIEW_ATTEMPTS_PER_ROUND, REVIEW_CONTRACT,
+  REVIEW_FULL_REASON_LIMIT, REVIEW_OUTPUT_SCHEMA, REVIEW_ROUND_BUDGET, REVIEW_ROUND_REFUSALS, reviewerHarnessFor,
+  type AgentDefinition, type ReviewAttemptEvidence, type ReviewAttemptRound, type ReviewAttemptVerdictView,
+  type ReviewLaunchPolicy, type ReviewReportFinding, type ReviewRunHistory, type ReviewSessionCapability,
+  type ReviewSessionUpdate, type SessionReviewHarness,
 } from "@wollipog/protocol";
 import {
   bindPullRequestScope, GITHUB_REPOSITORY, PUSHED_HEAD, refuseReview, ReviewScopeRefusal, SAFE_GIT, SESSION_IDENTITY,
@@ -205,6 +207,24 @@ export interface ReviewPromptInput {
   headSha: string;
   changedFiles: string[];
   patch: string | null;
+  /** Full by default; a delta reviews since `since`, a rebase reviews the range-diff. */
+  mode?: ReviewAttemptRound["mode"];
+  since?: string;
+  rebasedFrom?: { baseSha: string; headSha: string };
+  fullReason?: string;
+  /** Other files the pull request changes, for context only. */
+  contextFiles?: string[];
+  /** Findings from the last valid round, to report again if still present. */
+  openFindings?: ReviewReportFinding[];
+}
+
+/** The mode line of a review prompt. */
+function reviewModeText(input: ReviewPromptInput): string {
+  if (input.mode === "delta") return `follow-up round: only the changes since ${input.since}`;
+  if (input.mode === "rebase") {
+    return `rebase epoch: the range-diff from ${input.rebasedFrom?.baseSha}..${input.rebasedFrom?.headSha}`;
+  }
+  return input.fullReason ? "full review of the pull request (requested: see the reason below)" : "full review of the pull request";
 }
 
 /** The review session's one prompt: the brief, then the scope and the pinned patch. The contract
@@ -222,7 +242,8 @@ export function reviewPrompt(input: ReviewPromptInput): string {
     "# Review Scope",
     "",
     `- Pull request: ${input.repository}#${input.number}`,
-    "- Mode: full review of the pull request",
+    `- Mode: ${reviewModeText(input)}`,
+    ...(input.fullReason ? [`- Reason for a full review (untrusted data): ${input.fullReason.replace(/\s+/gu, " ").slice(0, REVIEW_FULL_REASON_LIMIT)}`] : []),
     `- Base: ${input.baseSha}`,
     `- Reviewed head: ${input.headSha}`,
     "- The working directory is a checkout of the reviewed head.",
@@ -231,12 +252,20 @@ export function reviewPrompt(input: ReviewPromptInput): string {
     ...(input.changedFiles.length ? input.changedFiles.map((path) => `- \`${path}\``) : ["- (none)"]),
     "",
   ];
+  if (input.contextFiles?.length) {
+    lines.push("Other files changed by the pull request (context only; do not classify):",
+      ...input.contextFiles.map((path) => `- \`${path}\``), "");
+  }
+  if (input.openFindings?.length) {
+    lines.push("Open findings from earlier rounds:", ...input.openFindings.map(compactReviewFinding), "");
+  }
+  const title = input.mode === "rebase" ? "Range-Diff" : "Pinned Patch";
   if (input.patch === null) {
-    lines.push("## Pinned Patch", "", "The patch is too large to inline; read the changed files from the checkout.", "");
+    lines.push(`## ${title}`, "", "The patch is too large to inline; read the changed files from the checkout.", "");
   } else {
     const longest = Math.max(2, ...[...input.patch.matchAll(/`+/gu)].map((match) => match[0].length));
     const fence = "`".repeat(longest + 1);
-    lines.push("## Pinned Patch", "", `${fence}diff`, input.patch.replace(/\n$/u, ""), fence, "");
+    lines.push(`## ${title}`, "", `${fence}${input.mode === "rebase" ? "text" : "diff"}`, input.patch.replace(/\n$/u, ""), fence, "");
   }
   return lines.join("\n");
 }
@@ -245,7 +274,12 @@ export interface PreparedReview {
   checkout: string;
   prompt: string;
   baseSha: string;
+  /** The attempt's place in its review run. */
+  round: ReviewAttemptRound;
 }
+
+/** What the session manager observed of a reviewer's one turn. */
+export type ReviewObservation = Omit<ReviewAttemptEvidence, "snapshotChanged">;
 
 /** The exact launch the runner authorized for a review session. */
 export interface ReviewLaunch {
@@ -270,11 +304,36 @@ export interface ReviewSessionHooks {
   outcomes(): ReviewSessionUpdate[];
   prepare(sessionId: string, policy: ReviewLaunchPolicy, launch: ReviewLaunch, brief: string): Promise<PreparedReview>;
   launchArgs(driver: AgentDefinition["driver"], checkout: string): string[];
+  /** Judge the reviewer's turn against the review contract and the unchanged checkout. */
+  evaluate(sessionId: string, observation: ReviewObservation): Promise<ReviewAttemptVerdictView>;
   release(sessionId: string): void;
 }
 
+/** A run with no attempts yet: the first review is a full round 1. */
+const EMPTY_HISTORY: ReviewRunHistory = {
+  epoch: 0, lastValid: null, lastAttempt: null, validRounds: 0, consumedInLastRound: 0,
+  roundBudget: REVIEW_ROUND_BUDGET, attemptsPerRound: REVIEW_ATTEMPTS_PER_ROUND,
+};
+
+/** What evaluating an attempt needs: the pinned head, its scope and tree, and the checkout. */
+interface EvaluationContext {
+  headSha: string;
+  scopeFiles: string[];
+  tracked: Set<string>;
+  checkout: string;
+  git: string;
+  env: NodeJS.ProcessEnv;
+}
+
+const MAX_VALIDATION_ERRORS = 8;
+const VALIDATION_ERROR_LIMIT = 300;
+
 /** Runner-side review session preparation: scope proof, mirror, checkout and prompt. */
 export class ReviewSessionLauncher {
+  /** Each prepared review's evaluation context, until it is released. A runner restart fails
+   * every unsettled review, so nothing here needs to outlive the process. */
+  private readonly contexts = new Map<string, EvaluationContext>();
+
   constructor(
     private readonly root: string,
     private readonly snapshots: ReviewSnapshotter,
@@ -352,23 +411,70 @@ export class ReviewSessionLauncher {
       mkdirSync(join(this.root, "checkouts"), { recursive: true, mode: 0o700 });
       await this.snapshots.checkout(verified.git, env, mirror, checkout, policy.headSha, { symlinks: false });
       const baseSha = scope.pullRequest.baseSha;
-      const range = `${baseSha}...${policy.headSha}`;
-      const diff = (args: string[]) => this.deps.exec(verified.git, [
-        ...SAFE_GIT, "--git-dir", mirror, "diff", "--no-color", "--no-ext-diff", "--no-textconv", ...args, "--end-of-options", range,
-      ], { timeoutMs: REVIEW_DIFF_TIMEOUT_MS, env });
-      const changedFiles = (await diff(["--name-only", "-z"])).split("\0").filter(Boolean);
-      let patch: string | null = await diff([]).catch(() => null);
+      const git = (args: string[], timeoutMs = REVIEW_DIFF_TIMEOUT_MS) =>
+        this.deps.exec(verified.git, [...SAFE_GIT, "--git-dir", mirror, ...args], { timeoutMs, env });
+      const has = (sha: string) => git(["cat-file", "-e", `${sha}^{commit}`], 30_000).then(() => true, () => false);
+      const diff = (args: string[], ...revisions: string[]) =>
+        git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", ...args, "--end-of-options", ...revisions]);
+      const names = async (...revisions: string[]) =>
+        (await diff(["--name-only", "-z", "--diff-filter=ACDMRTUXB"], ...revisions)).split("\0").filter(Boolean);
+
+      // Plan the attempt from the run's history; ancestry is proven here, from the mirror.
+      const history = policy.history ?? EMPTY_HISTORY;
+      const reference = history.lastValid ?? history.lastAttempt;
+      let descends: boolean | null = null;
+      if (reference && reference.headSha !== policy.headSha && PUSHED_HEAD.test(reference.headSha) && await has(reference.headSha)) {
+        descends = await git(["merge-base", "--is-ancestor", "--end-of-options", reference.headSha, policy.headSha], 30_000)
+          .then(() => true, () => false);
+      }
+      const plan = planReviewRound(history, { headSha: policy.headSha, ...(policy.fullReason ? { fullReason: policy.fullReason } : {}) }, descends);
+      if ("refusal" in plan) refuseReview(plan.refusal);
+      let { mode } = plan as Exclude<typeof plan, { refusal: string }>;
+      const planned = plan as Exclude<typeof plan, { refusal: string }>;
+      // A rebase round needs the earlier history; without it the new epoch reviews in full.
+      if (mode === "rebase" && !(planned.rebasedFrom && await has(planned.rebasedFrom.baseSha) && await has(planned.rebasedFrom.headSha))) {
+        mode = "full";
+      }
+      const prFiles = await names(`${baseSha}...${policy.headSha}`);
+      let scopeFiles = prFiles;
+      let patch: string | null;
+      if (mode === "delta") {
+        scopeFiles = await names(planned.since!, policy.headSha);
+        if (!scopeFiles.length) refuseReview(REVIEW_ROUND_REFUSALS.unchanged);
+        patch = await diff([], planned.since!, policy.headSha).catch(() => null);
+      } else if (mode === "rebase") {
+        const touched = new Set(await names(planned.rebasedFrom!.headSha, policy.headSha));
+        scopeFiles = prFiles.filter((path) => touched.has(path));
+        const mergeBase = (await git(["merge-base", "--end-of-options", baseSha, policy.headSha], 30_000)).trim();
+        patch = await git(["range-diff", "--no-color",
+          `${planned.rebasedFrom!.baseSha}..${planned.rebasedFrom!.headSha}`, `${mergeBase}..${policy.headSha}`]).catch(() => null);
+      } else {
+        patch = await diff([], `${baseSha}...${policy.headSha}`).catch(() => null);
+      }
       if (patch !== null && Buffer.byteLength(patch) > REVIEW_PATCH_LIMIT_BYTES) patch = null;
+      const tracked = new Set((await git(["ls-tree", "-r", "--name-only", "-z", "--end-of-options", policy.headSha])).split("\0").filter(Boolean));
+      const round: ReviewAttemptRound = {
+        epoch: planned.epoch, round: planned.round, attempt: planned.attempt, mode, baseSha, scopeFiles,
+        ...(mode === "delta" ? { since: planned.since! } : {}),
+        ...(mode === "rebase" ? { rebasedFrom: planned.rebasedFrom! } : {}),
+      };
+      const inScope = new Set(scopeFiles);
       const prompt = reviewPrompt({
         brief, repository: policy.pullRequest.repository, number: policy.pullRequest.number,
-        baseSha, headSha: policy.headSha, changedFiles, patch,
+        baseSha, headSha: policy.headSha, changedFiles: scopeFiles, patch, mode,
+        ...(round.since ? { since: round.since } : {}),
+        ...(round.rebasedFrom ? { rebasedFrom: round.rebasedFrom } : {}),
+        ...(mode === "full" && policy.fullReason ? { fullReason: policy.fullReason } : {}),
+        contextFiles: mode === "full" ? [] : prFiles.filter((path) => !inScope.has(path)),
+        openFindings: planned.openFindings,
       });
-      return { checkout, prompt, baseSha };
+      this.contexts.set(sessionId, { headSha: policy.headSha, scopeFiles, tracked, checkout, git: verified.git, env });
+      return { checkout, prompt, baseSha, round };
     } catch (error) {
-      if (error instanceof ReviewScopeRefusal) throw error;
-      this.deps.log(`review session ${sessionId} snapshot failed: ${(error as Error).message}`);
       // The intent stays until the caller has recorded this refusal's outcome.
       this.removeCheckout(sessionId);
+      if (error instanceof ReviewScopeRefusal) throw error;
+      this.deps.log(`review session ${sessionId} snapshot failed: ${(error as Error).message}`);
       return refuseReview("the review snapshot could not be prepared");
     }
   }
@@ -449,10 +555,44 @@ export class ReviewSessionLauncher {
     writeFileSync(join(this.root, "intents", sessionId), "", { mode: 0o600 });
   }
 
+  /**
+   * Judge one reviewer turn: the review contract against the pinned head, its scope and its tree,
+   * and a checkout that must still be exactly that head with nothing changed. Without a prepared
+   * context (it was lost), the snapshot cannot be verified, which invalidates the attempt.
+   */
+  async evaluate(sessionId: string, observation: ReviewObservation): Promise<ReviewAttemptVerdictView> {
+    const context = this.contexts.get(sessionId);
+    let snapshotChanged: boolean | null = null;
+    if (context) {
+      // The checkout was written without symbolic links, so compare it the same way.
+      const git = (args: string[]) => this.deps.exec(context.git,
+        [...SAFE_GIT, "-c", "core.symlinks=false", "-C", context.checkout, ...args], { timeoutMs: 60_000, env: context.env });
+      try {
+        const head = (await git(["rev-parse", "HEAD"])).trim();
+        const status = await git(["status", "--porcelain", "--untracked-files=all"]);
+        snapshotChanged = head !== context.headSha || status.trim() !== "";
+      } catch (error) {
+        this.deps.log(`review session ${sessionId} snapshot check failed: ${(error as Error).message}`);
+      }
+    }
+    const verdict = evaluateReviewAttempt({ ...observation, snapshotChanged }, {
+      headSha: context?.headSha ?? "", scopeFiles: context?.scopeFiles ?? [],
+      ...(context ? { isTracked: (path: string) => context.tracked.has(path) } : {}),
+    });
+    return {
+      valid: verdict.valid,
+      consumed: verdict.consumed,
+      effectiveVote: verdict.effectiveVote,
+      failureClass: verdict.failureClass,
+      validationErrors: verdict.validationErrors.slice(0, MAX_VALIDATION_ERRORS).map((error) => error.slice(0, VALIDATION_ERROR_LIMIT)),
+    };
+  }
+
   /** Remove the review session's checkout and then its intent; safe to repeat. Called only once the
    * review's outcome is recorded, in its session metadata or as an outcome record. */
   release(sessionId: string): void {
     if (!SESSION_IDENTITY.test(sessionId)) return;
+    this.contexts.delete(sessionId);
     this.removeCheckout(sessionId);
     rmSync(join(this.root, "intents", sessionId), { force: true });
   }
