@@ -2084,6 +2084,14 @@ Agent and Custom Endpoint open their setup dialog, and the stored choice changes
 dialog saves (Cancel keeps the previous one selected and stored). Once set up, an `ActionRow` under
 it says which, in sentence case, with Edit….
 
+A Dialog whose fields save through separate endpoints still has one Save Changes. Machine Settings
+(#2991) sends only the fields that differ from the last saved snapshot, one request each with its
+revision, in the form's order. When one fails, the dialog stays open, every field that saved becomes
+the new baseline, and a danger Notice above the footer names what wasn't saved ("Capacity Limit
+wasn't saved.") with the server's words behind Show Details; Save Changes then retries only those.
+A change that needs consent (turning on automatic account switching) asks in a stacked,
+non-destructive confirmation before anything is sent.
+
 The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its region, `--bg-elev`,
 1px `--border-strong`, `--radius-md`, `--elev-2`, padding 12px 16px, gap 8px, and rendered only
 while there is something to save or a save failed. When a save fails it becomes `.save-bar.is-error`:

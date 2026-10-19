@@ -4,6 +4,7 @@ import test from "node:test";
 
 const view = readFileSync(new URL("./RunnersView.tsx", import.meta.url), "utf8");
 const machine = readFileSync(new URL("./MachineDetail.tsx", import.meta.url), "utf8");
+const settings = readFileSync(new URL("./MachineSettingsDialog.tsx", import.meta.url), "utf8");
 const discovery = readFileSync(new URL("./AgentSessionDiscoveryDialog.tsx", import.meta.url), "utf8");
 const access = readFileSync(new URL("./PeopleDevicesPanel.tsx", import.meta.url), "utf8");
 const icons = readFileSync(new URL("./Icons.tsx", import.meta.url), "utf8");
@@ -92,21 +93,21 @@ test("a machine's actions live in Settings… and ⋯, and Connection Details li
   assert.doesNotMatch(view + machine, /<dt>Deployed Binary<\/dt>|connection-details-trigger|runner-head|os-badge/);
   assert.doesNotMatch(css, /\.runner-card-actions|\.runner-connection-meta|\.connection-details-list|\.os-badge/);
   assert.match(view, /<MachineSettingsDialog/);
-  assert.match(view, /<span>Machine Name<\/span>/);
+  // Machine Settings is its own one-form dialog (#2991).
+  assert.doesNotMatch(view, /function MachineSettingsDialog|ProviderAccountDefaultsSettings|api\.updateMachine/);
+  assert.match(settings, /<label htmlFor=\{nameIds\.input\}>Machine Name<\/label>/);
   assert.match(machine, /title: "Delete Machine"/);
-  assert.match(view, /confirmDeleteMachine\(confirm, \{ name: display\.name/);
-  assert.match(view, /<h3>Runner Capacity<\/h3>/);
-  assert.match(view, /api\.updateMachineCapacity/);
+  assert.match(settings, /confirmDeleteMachine\(confirm, \{ name: display\.name/);
+  assert.match(settings, /api\.updateMachineCapacity/);
   // Workspaces and the capacity readouts live in the machine's detail now (#2989).
-  assert.doesNotMatch(view, /registerMachineWorkspace|DirectoryPicker|Add Workspace|<h3>Workspaces<\/h3>/);
-  assert.doesNotMatch(view, /Runner Capacity Usage|Capacity Dimensions|Current Capacity Bottlenecks|Units Used/);
+  assert.doesNotMatch(view + settings, /registerMachineWorkspace|DirectoryPicker|Add Workspace|<h3>Workspaces<\/h3>/);
+  assert.doesNotMatch(view + settings, /Runner Capacity Usage|Capacity Dimensions|Current Capacity Bottlenecks|Units Used/);
   assert.doesNotMatch(css, /\.group-head|\.workspace-list|\.ws-(?:name|path)|machine-capacity-blockers|\.machine-workspace-(?:create|form)/);
   assert.match(machine, /label: "Idle Processes"/);
-  assert.match(view, /does not infer it from CPU or memory/);
-  assert.match(view, /machineSettingsMutationError\(cause\)/);
-  assert.match(view, /disabled=\{onlineNativeRunner\}/);
+  assert.match(settings, /machineSettingsMutationError\(cause\)/);
+  assert.match(settings, /disabled=\{deleteBlocked \|\| saving\}/);
   // Older runner data is the machine's notice now, not Machine Settings' Danger Zone (#2988).
-  assert.doesNotMatch(view, /runnerDataLayout|adoptLegacyBoxData/);
+  assert.doesNotMatch(view + settings, /runnerDataLayout|adoptLegacyBoxData|Danger Zone/);
   assert.match(machine, /if \(box\.runnerDataLayout === "legacy"\) return "legacy_data";/);
   assert.match(machine, /box\.legacyDataAccountStatus === "adopted"/);
   assert.match(machine, /title="Older Runner Data Found"/);

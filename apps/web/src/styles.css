@@ -10990,77 +10990,63 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   gap: 8px;
   padding: 7px 10px;
 }
-.machine-settings-dialog .modal-body {
+/* Machine Settings (#2991): one form, its fields 16px apart (§8.1). Default Accounts and Agent
+   Installations are fieldsets whose 14px --type-section legend sits 24px under the field above. */
+.machine-settings-form { gap: var(--space-4); }
+.machine-settings-fieldset {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-}
-.machine-settings-section {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.machine-settings-section + .machine-settings-section {
-  padding-top: 20px;
-  border-top: 1px solid var(--border);
-}
-.machine-settings-section h3,
-.machine-settings-section p {
-  margin: 0;
-}
-.machine-harness-installation {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
+  gap: var(--space-4);
   min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  border: 0;
 }
-.machine-harness-installation code {
+.machine-settings-fieldset > legend {
+  margin-bottom: var(--space-3);
+  padding: 0;
+  color: var(--text);
+  font: var(--type-section);
+}
+.machine-settings-fieldset > .field-helper { margin-top: calc(-1 * var(--space-2)); }
+/* The switch row's text starts at the fields' left edge and takes all but the track's width. */
+.machine-settings-switch > .setting-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-inline: 0;
+}
+/* An installation is named by its path. */
+.machine-settings-installations .choice-row-title {
+  font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
-.machine-harness-installation p {
-  color: var(--text-dim);
+.machine-settings-failures {
+  margin: 0;
+  padding-left: var(--space-4);
 }
-.machine-name-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 10px;
-}
-.machine-settings-heading {
+/* Delete Machine… and, while an online native runner blocks it, why (§7.3): beside it in the
+   footer, under it as the body's last row on a phone (§7.5). */
+.machine-settings-delete {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-3);
+  min-width: 0;
 }
-.machine-settings-heading > div {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.machine-settings-heading p,
-.machine-danger-zone p {
+.machine-settings-delete-note {
   color: var(--text-dim);
+  font: var(--type-small);
 }
-.automatic-account-switch-button {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-.machine-danger-zone {
-  align-items: flex-start;
-}
-@media (max-width: 680px) {
-  .machine-name-row {
-    grid-template-columns: 1fr;
-  }
-  .machine-settings-heading {
-    align-items: flex-start;
+@media (max-width: 760px) {
+  .machine-settings-delete {
+    flex: 1 1 auto;
     flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
   }
+  .machine-settings-delete > .btn {
+    max-width: none;
+    height: 48px;
+  }
+  .machine-settings-delete-note { text-align: center; }
 }
 
 /* -------------------------------- Runs ---------------------------------- */
