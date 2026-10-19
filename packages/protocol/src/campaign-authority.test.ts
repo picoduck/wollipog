@@ -4,7 +4,7 @@ import {
   campaignAuthorityPreflight, campaignCodeOperationTargets, campaignWorkflowOwner, completeParentControlDecisions,
   resolveCampaignAuthority, validCampaignControl,
   fullControlStandingHumanRequired, humanRequiredRulesExist, FULL_CONTROL_DECLINED_CLASSES, type GovernancePolicy,
-  HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type PendingApproval, type WorkflowDecisionResourceSnapshot,
+  HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type ParentControlDecisionPolicy, type PendingApproval, type WorkflowDecisionResourceSnapshot,
 } from "./index.js";
 
 const control: CampaignControl = { mode: "full_control", boundary: {
@@ -325,7 +325,7 @@ test("extra review rounds follow only an explicit Parent Control grant, never Fu
     category: "review_round_extension", repository: "picoduck/wollipog", pullRequest: 7, epoch: 1, headSha: "a".repeat(40),
     roundsUsed: 4, blockingFindings: 2, extraRounds: 2, reason: "Two blockers left, both small.",
   };
-  const resolve = (decisions: typeof granted, root = false) => resolveCampaignAuthority({
+  const resolve = (decisions: ParentControlDecisionPolicy, root = false) => resolveCampaignAuthority({
     control: everything, parentControl: "questions_and_approvals", decisions, root, supported: true, snapshot,
     trustedSource: "workflow_route",
   }).owner;

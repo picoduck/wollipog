@@ -12,10 +12,14 @@ import "../styles.css";
  * Review's Cross-Model Reviews (#3369): a Claude Code session's three reviews of its pull request —
  * an invalid first attempt on an older head, a Downvote with two findings, and one still reviewing
  * the newest head. `?theme=light` switches the theme; `?state=settled` ends the newest one;
+ * `?state=requested` and `?state=reviewing` show the first round;
+ * `?state=delivering` and `?state=fixing` show a downvote's continuation;
  * `?state=paged` reports two more, older reviews whose page then fails to load.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
+const requested = params.get("state") === "requested";
+const firstRound = requested || params.get("state") === "reviewing";
 const settled = params.get("state") === "settled";
 // The newest review is a downvote whose findings are still on their way to the requester, or delivered.
 const downvoted = params.get("state") === "delivering" || params.get("state") === "fixing";
@@ -46,8 +50,10 @@ const common = {
 const runs: ReviewSessionView[] = [
   {
     ...common, reviewSessionId: "s_review_3", headSha: HEAD,
-    state: finished ? "completed" : "running", terminal: finished,
-    round: { epoch: 1, round: 2, attempt: 1, mode: "delta", baseSha: BASE, scopeFiles: ["src/checkout/cart.ts"], since: MIDDLE },
+    state: finished ? "completed" : requested ? "requested" : "running", terminal: finished,
+    round: firstRound
+      ? { epoch: 1, round: 1, attempt: 1, mode: "full", baseSha: BASE, scopeFiles: ["src/checkout/cart.ts"] }
+      : { epoch: 1, round: 2, attempt: 1, mode: "delta", baseSha: BASE, scopeFiles: ["src/checkout/cart.ts"], since: MIDDLE },
     validated: finished,
     verdict: finished
       ? { valid: true, consumed: true, effectiveVote: downvoted ? "DOWNVOTE" : "UPVOTE", failureClass: null, validationErrors: [] }
