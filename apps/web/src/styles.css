@@ -10465,11 +10465,33 @@ textarea {
   font: var(--type-small);
 }
 .machine-skill-meta {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 40%;
   overflow: hidden;
   color: var(--text-dim);
   font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The account (§11.8): only a shown value truncates. A mask and its reveal control are never
+   clipped, so the control stays whole and clickable on a phone. */
+.machine-skill-account {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.machine-skill-account:not(.pid) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.machine-skill-account.pid[data-revealed="false"],
+.machine-skill-account > :is(.pid-lead, .pid-toggle) { flex: none; }
+.machine-skill-account > .pid-shown { flex: 0 1 auto; overflow: hidden; }
+.machine-skill-account .pid-value {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

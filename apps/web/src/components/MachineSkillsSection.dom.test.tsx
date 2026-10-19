@@ -176,6 +176,15 @@ test("an account label that is an email is masked under Hide Account Emails, and
       if (hide) {
         assert.doesNotMatch(text, /ada@example\.com/, "the email is not in the DOM while hidden");
         assert.match(text, /AccountEmail Hidden/, "the mask follows its visible lead");
+        // A reveal lasts until the disclosure closes (review CR-1.1).
+        const reveal = view.container.querySelector<HTMLButtonElement>('button[aria-label="Show Account Email"]')!;
+        assert.ok(reveal, "the mask has its reveal control");
+        await act(async () => reveal.click());
+        assert.match(view.container.textContent ?? "", /ada@example\.com/, "revealed");
+        await view.toggle(false);
+        await view.toggle(true);
+        assert.doesNotMatch(view.container.textContent ?? "", /ada@example\.com/, "closing hides it again");
+        assert.ok(view.container.querySelector('button[aria-label="Show Account Email"]'), "masked again on reopening");
       } else {
         assert.match(text, /ada@example\.com/);
       }

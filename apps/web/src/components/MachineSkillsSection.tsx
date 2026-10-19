@@ -25,6 +25,9 @@ export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
   const ids = useId().replace(/:/g, "");
   const [state, setState] = useState<RunnerSkillsResponse | "error" | null>(null);
   const [loading, setLoading] = useState(false);
+  /** Counts openings and closings: each one starts a new reveal scope, so closing the disclosure
+   * hides every account email revealed inside it. */
+  const [revealEpoch, setRevealEpoch] = useState(0);
   /** Whether a read is running, so one opening never reads twice. */
   const reading = useRef(false);
   if (!runnerSupportsProtocol(runner.protocolVersion, "agentSkills")) return null;
@@ -50,8 +53,8 @@ export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
   const account = (providerAccountId: string, key: string) => {
     const label = runner.providerAccounts?.find((item) => item.id === providerAccountId)?.label ?? "Provider Account";
     return (
-      <AccountIdentifier identity={`${runner.runnerId}:${key}`} value={label} label="Account Email" lead="Account"
-        className="machine-skill-meta" />
+      <AccountIdentifier identity={`${runner.runnerId}:${key}:${revealEpoch}`} value={label} label="Account Email" lead="Account"
+        className="machine-skill-account" />
     );
   };
   const agentName = (agentId: string) => {
@@ -64,7 +67,10 @@ export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
 
   return (
     <section className="section" aria-label="Skills on This Machine">
-      <details className="disclosure machine-skills" onToggle={(event) => { if (event.currentTarget.open) load(); }}>
+      <details className="disclosure machine-skills" onToggle={(event) => {
+        setRevealEpoch((value) => value + 1);
+        if (event.currentTarget.open) load();
+      }}>
         <summary>
           <ChevronRightIcon className="disclosure-chevron" />
           <span>Skills on This Machine</span>
