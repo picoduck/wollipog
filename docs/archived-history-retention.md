@@ -81,8 +81,53 @@ Kept in full, because they live outside the transcript:
   preview, cost, pull-request links, parent and child links, attention and acknowledgments;
 - session attachments, which keep their own 180-day expiry.
 
-Out of scope: the mutation audit archive, workflow runs and their events, and the runners' own
-session logs. A pruned session's runner keeps its full log until the session is deleted.
+Separate policies cover the [mutation audit archive](#mutation-audit-archive-retention).
+Workflow runs and their events, and the runners' own session logs, are outside this session-history
+policy. A pruned session's runner keeps its full log until the session is deleted.
+
+## Mutation audit archive retention
+
+The host operator alone can enable this separate policy with
+`CONTROL_PLANE_MUTATION_AUDIT_ARCHIVE_RETENTION_DAYS` in `control-plane.env`, then restart the
+control plane. There is no API, agent tool, organization override or UI setting. Unset, empty or
+`0` keeps every archive row forever. Whole days from **7 to 3650** are accepted (suggested **90**);
+invalid values are logged and treated as off. Startup logs state the effective days and arming time.
+
+Enabling or shortening waits **24 hours** from the first startup that observes the new value.
+The deadline survives restarts; restarting with an unchanged value does not delay it again.
+Lengthening adds no delay (an existing pending deadline still applies). Turning it off applies
+immediately. Re-enabling after a startup that observed off arms anew. Changes made and undone
+between starts are not observed.
+
+Only `mutation_audit_archive` rows with original request `created_at` strictly older than the
+threshold are removed; the time they moved into the archive is irrelevant. Every boundary or newer
+archive row is kept. The hot `mutation_audit` table's 180-day/newest-100,000 window, its archival
+transaction, and all status-0 crash-intent rows are unchanged. A short archive threshold can therefore
+remove a row soon after the existing hot-table sweep archives it. Actor/resource deletion still
+cannot cascade into the archive.
+
+The first background pass waits 10 minutes after startup, then passes run an hour after the previous
+one ends. An age index avoids full-archive scans. Each deletion transaction removes at most 500 rows;
+the budget starts at 100 and adapts toward 4 ms, resting at least 1 ms and three times the batch's
+duration after every nonempty batch. A pass stops after 1,000 batches and resumes at the next pass.
+Stopping interrupts between batches; a restart safely resumes by finding the remaining old rows.
+
+No per-request tombstone or per-day aggregate remains. One singleton summary stores the policy and
+arming deadline, cumulative deleted count, and the latest pass's finish time, cutoff and removed
+count. Each cumulative increment commits with its deletions; the last-pass summary describes that
+pass, so an interrupted process can leave its prior last-pass summary alongside updated cumulative
+totals. Structured pass logs include run ID, counts, duration, maximum batch time and interruption or
+batch-limit status. Failures log a warning and retry next pass. Removal batches use the same NORMAL
+WAL durability as history pruning; completing a pass performs a durable summary write. `secure_delete`
+stays on; pages are reused rather than shrinking the database, and WAL/backups retain their usual
+limits described below. The initial upgrade builds the age index over existing archive rows, so
+that one-time schema step can take longer on a large archive.
+
+`mutation-audit-archive-retention.test.ts` covers default/invalid off, limits, persistent arming,
+strict age boundaries, the hot/crash-intent kept set, bounded yielding batches, interruption,
+concurrency, rollback, summary totals, indexed selection and scheduling.
+`pnpm benchmark:mutation-audit-archive-retention [--dir <path>]` measures file-backed deletion batch
+latency with representative maximum-length attribution fields and fails at p95 >= 16 ms.
 
 ## How a prune runs
 

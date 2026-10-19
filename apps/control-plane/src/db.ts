@@ -2428,7 +2428,8 @@ CREATE TABLE IF NOT EXISTS mutation_audit (
 CREATE INDEX IF NOT EXISTS idx_mutation_audit_org
   ON mutation_audit(organization_id, created_at DESC, row_id DESC);
 
--- Completed mutation rows age out of the hot attribution window into this append-only archive.
+-- Completed rows age out of the hot window; the archive is retained forever unless the host
+-- operator explicitly enables mutation-audit archive retention.
 -- The archive deliberately has no foreign keys: actor/resource deletion must not erase provenance.
 CREATE TABLE IF NOT EXISTS mutation_audit_archive (
   row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2447,6 +2448,18 @@ CREATE TABLE IF NOT EXISTS mutation_audit_archive (
 );
 CREATE INDEX IF NOT EXISTS idx_mutation_audit_archive_org
   ON mutation_audit_archive(organization_id, created_at DESC, row_id DESC);
+CREATE INDEX IF NOT EXISTS idx_mutation_audit_archive_age
+  ON mutation_audit_archive(created_at, row_id);
+CREATE TABLE IF NOT EXISTS mutation_audit_archive_retention (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  retention_days INTEGER,
+  prunes_from INTEGER,
+  removed_total INTEGER NOT NULL DEFAULT 0,
+  last_finished_at INTEGER,
+  last_cutoff INTEGER,
+  last_removed INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO mutation_audit_archive_retention(singleton) VALUES (1);
 
 -- Scope transitions need enough content-safe evidence to reconstruct the exact privacy change.
 -- No names, request bodies, credentials, paths, or confirmation tokens are retained.
@@ -10825,6 +10838,43 @@ export class ControlPlaneDb {
     if (retainedUsage) throw new Error("retained usage for this team must expire before deleting it");
     return Number(this.stmt("DELETE FROM identity_teams WHERE team_id=? AND organization_id=?")
       .run(teamId, organizationId).changes) > 0;
+  }
+
+  getMutationAuditArchiveRetention(): {
+    retentionDays: number | null; prunesFrom: number | null; removedTotal: number;
+    lastFinishedAt: number | null; lastCutoff: number | null; lastRemoved: number;
+  } {
+    return this.stmt(`SELECT retention_days AS retentionDays, prunes_from AS prunesFrom,
+      removed_total AS removedTotal, last_finished_at AS lastFinishedAt,
+      last_cutoff AS lastCutoff, last_removed AS lastRemoved
+      FROM mutation_audit_archive_retention WHERE singleton=1`).get() as ReturnType<ControlPlaneDb["getMutationAuditArchiveRetention"]>;
+  }
+
+  saveMutationAuditArchiveRetentionPolicy(retentionDays: number | null, prunesFrom: number | null): void {
+    this.stmt(`UPDATE mutation_audit_archive_retention SET retention_days=?, prunes_from=? WHERE singleton=1`)
+      .run(retentionDays, prunesFrom);
+  }
+
+  /** Only archive rows can be deleted. Delete and cumulative count commit together; a power-loss
+   * rollback is retried next pass. NORMAL avoids a disk flush per batch, like history retention. */
+  pruneMutationAuditArchiveBatch(cutoff: number, limit: number): number {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500 || !Number.isSafeInteger(cutoff)) {
+      throw new Error("invalid mutation audit archive batch bounds");
+    }
+    return this.relaxedCommit(() => this.atomic(() => {
+      const removed = Number(this.stmt(`DELETE FROM mutation_audit_archive WHERE row_id IN
+        (SELECT row_id FROM mutation_audit_archive WHERE created_at < ?
+         ORDER BY created_at, row_id LIMIT ?)`).run(cutoff, limit).changes);
+      if (removed) this.stmt(`UPDATE mutation_audit_archive_retention
+        SET removed_total=removed_total+? WHERE singleton=1`).run(removed);
+      return removed;
+    }));
+  }
+
+  /** One bounded summary, with a normal durable write after the removal batches. */
+  recordMutationAuditArchiveRetentionPass(finishedAt: number, cutoff: number, removed: number): void {
+    this.stmt(`UPDATE mutation_audit_archive_retention
+      SET last_finished_at=?, last_cutoff=?, last_removed=? WHERE singleton=1`).run(finishedAt, cutoff, removed);
   }
 
   private archiveMutationAudit(now: number): void {

@@ -217,6 +217,7 @@ import {
 } from "./session-naming-settings.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { ArchivedHistoryRetention } from "./archived-history-retention.js";
+import { MutationAuditArchiveRetention } from "./mutation-audit-archive-retention.js";
 import { registerArchivedHistoryRetentionRoutes } from "./archived-history-retention-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
@@ -1017,6 +1018,7 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log });
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
+const mutationAuditArchiveRetention = new MutationAuditArchiveRetention(db, { env: process.env, log: app.log });
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
 registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures,
@@ -6768,6 +6770,7 @@ const artifactMaintenanceTimer = setInterval(() => {
 }, 60_000);
 artifactMaintenanceTimer.unref();
 archivedHistoryRetention.start();
+mutationAuditArchiveRetention.start();
 // Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
 // rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
 // and its sessions 'running' forever, and prompts written to the dead socket are lost. The app-level
@@ -6827,6 +6830,7 @@ app.addHook("onClose", async () => {
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
   archivedHistoryRetention.stop();
+  mutationAuditArchiveRetention.stop();
   clearInterval(runnerLivenessTimer);
   try {
     await outboundEvents.close();
