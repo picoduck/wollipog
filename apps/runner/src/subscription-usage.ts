@@ -410,24 +410,39 @@ function mergeBucket(
 }
 
 /** Merge for sparse provider notifications, which can arrive out of order: concurrent sessions on
- * one source report independently, and `fetchedAt` is receipt time, not event time. Two signals
- * order them — a window's reset time only ever moves forward, and within one window (an identical
- * reset time) usage only accumulates. An update failing either test is older data, so keep the
- * newer window intact rather than letting a late event walk utilization backwards. This never
- * applies to an authoritative read, which is current whatever it says. */
+ * one source report independently, and `fetchedAt` is receipt time, not event time. A window's
+ * reset time only ever moves forward, so an update for an earlier window is older data and never
+ * applies. Within one window (an identical reset time) a lower reading is ambiguous: a late event
+ * from a concurrent session looks exactly like a provider quota reset, which lowers usage without
+ * moving the reset time (#3482). Hold the first lower reading in `pending` and keep the prior
+ * window; a second consecutive lower reading confirms the decrease, while any reading at or above
+ * the prior one discards it. This never applies to an authoritative read, which is current
+ * whatever it says. */
 function mergeObservedBucket(
   prior: SubscriptionUsageBucket | undefined,
   update: SubscriptionUsageBucket,
+  pending: Map<string, SubscriptionUsageBucket>,
 ): SubscriptionUsageBucket {
-  if (!prior) return update;
+  if (!prior) {
+    pending.delete(update.id);
+    return update;
+  }
   if (prior.resetsAt !== undefined && update.resetsAt !== undefined) {
     if (update.resetsAt < prior.resetsAt) return prior;
     if (update.resetsAt === prior.resetsAt &&
         prior.usedPercent !== undefined && update.usedPercent !== undefined &&
         update.usedPercent < prior.usedPercent) {
+      if (pending.get(update.id)?.resetsAt === update.resetsAt) {
+        pending.delete(update.id);
+        return { ...prior, ...update };
+      }
+      pending.set(update.id, update);
       return prior;
     }
   }
+  // A status- or reset-only event says nothing about the held reading, so only a reported
+  // utilization settles it.
+  if (update.usedPercent !== undefined) pending.delete(update.id);
   return { ...prior, ...update };
 }
 
@@ -454,12 +469,17 @@ function mergeSnapshot(
    * Codex probes and push updates use a plain field merge, then sort buckets deterministically
    * before truncation so sparse updates cannot change their presentation priority. */
   mergeMode: "claude-notification" | "plain",
+  /** Lower same-window readings awaiting confirmation, by bucket id. Claude notifications only. */
+  pendingDecreases = new Map<string, SubscriptionUsageBucket>(),
 ): SubscriptionUsageSnapshot {
   if (!prior || prior.provider !== update.provider) return update;
   // Sparse notifications can be delayed behind a manual read. Never let an older provider
   // observation replace fields from a newer authoritative snapshot.
   if (update.fetchedAt < prior.fetchedAt) return prior;
-  const merge = mergeMode === "claude-notification" ? mergeObservedBucket : mergeBucket;
+  const merge = mergeMode === "claude-notification"
+    ? (bucket: SubscriptionUsageBucket | undefined, next: SubscriptionUsageBucket) =>
+      mergeObservedBucket(bucket, next, pendingDecreases)
+    : mergeBucket;
   const buckets = new Map(prior.buckets.map((bucket) => [bucket.id, bucket]));
   for (const bucket of update.buckets) buckets.set(bucket.id, merge(buckets.get(bucket.id), bucket));
   const orderedBuckets = [...buckets.values()];
@@ -626,6 +646,8 @@ export class SubscriptionUsageManager {
   private readonly snapshots = new Map<string, SubscriptionUsageSnapshot>();
   private readonly lastProbeAt = new Map<string, number>();
   private readonly lastEvent = new Map<string, { signature: string; observedAt: number }>();
+  /** Per source, the lower same-window Claude readings held until a second event confirms them. */
+  private readonly pendingDecreases = new Map<string, Map<string, SubscriptionUsageBucket>>();
   /** Sources whose provider has answered at least once. Separates a source that has simply never
    * run from one whose provider reports no allowances, which read identically before. */
   private readonly responded = new Set<string>();
@@ -646,6 +668,7 @@ export class SubscriptionUsageManager {
     for (const child of this.activeProbeChildren) (this.options.killProbe ?? killTree)(child);
     this.lastProbeAt.clear();
     this.lastEvent.clear();
+    this.pendingDecreases.clear();
     this.responded.clear();
     return this.syncSources();
   }
@@ -822,7 +845,10 @@ export class SubscriptionUsageManager {
     const sources = this.sources();
     const live = new Set(sources.map((source) => source.sourceId));
     for (const sourceId of this.snapshots.keys()) {
-      if (!live.has(sourceId)) this.snapshots.delete(sourceId);
+      if (!live.has(sourceId)) {
+        this.snapshots.delete(sourceId);
+        this.pendingDecreases.delete(sourceId);
+      }
     }
     for (const source of sources) {
       const initial = this.initialSnapshot(source);
@@ -836,6 +862,7 @@ export class SubscriptionUsageManager {
         initial.state === "unauthenticated" ||
         initial.state === "not_applicable";
       if (forced) this.lastProbeAt.delete(source.sourceId);
+      if (forced || accountChanged) this.pendingDecreases.delete(source.sourceId);
       this.snapshots.set(source.sourceId, forced || !prior || accountChanged ? initial : {
         ...prior,
         agentId: source.agent.id,
@@ -884,12 +911,23 @@ export class SubscriptionUsageManager {
     const { fetchedAt: _fetchedAt, ...eventShape } = normalized;
     const signature = JSON.stringify(eventShape);
     const event = this.lastEvent.get(sourceId);
-    if (event?.signature === signature && normalized.fetchedAt - event.observedAt < SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS) {
+    let pendingDecreases = this.pendingDecreases.get(sourceId);
+    // A repeat of the event holding a decrease is exactly the confirmation that decrease waits for.
+    if (!pendingDecreases?.size && event?.signature === signature &&
+        normalized.fetchedAt - event.observedAt < SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS) {
       return prior ?? null;
     }
     this.lastEvent.set(sourceId, { signature, observedAt: normalized.fetchedAt });
-    const explained = this.explainMissingUtilization(
-      mergeSnapshot(prior, normalized, provider === "claude" ? "claude-notification" : "plain"));
+    if (!pendingDecreases) {
+      pendingDecreases = new Map();
+      this.pendingDecreases.set(sourceId, pendingDecreases);
+    }
+    const explained = this.explainMissingUtilization(mergeSnapshot(
+      prior,
+      normalized,
+      provider === "claude" ? "claude-notification" : "plain",
+      pendingDecreases,
+    ));
     if (explained === prior) return prior;
     this.snapshots.set(sourceId, explained);
     this.options.publish(explained);
