@@ -8821,7 +8821,8 @@ export class SessionsService {
     const rootId = this.db.campaignBudgets.root(sessionId);
     if (!rootId) return false;
     let view = this.db.campaignBudgets.view(rootId)!;
-    if (this.db.campaignBudgets.members(rootId).some((id) => this.db.campaignUsageHasUnpriced(id))) {
+    // Unpriced usage stops only a campaign whose cost ceiling depends on pricing (#2940).
+    if (view.authority.costUsd !== undefined && this.db.campaignBudgets.members(rootId).some((id) => this.db.campaignUsageHasUnpriced(id))) {
       this.db.campaignBudgets.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
       view = this.db.campaignBudgets.view(rootId)!;
     }

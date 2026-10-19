@@ -56,4 +56,7 @@ test("a campaign authorized without a ceiling says No limit, and a single ceilin
   assert.equal(allowance(unbounded), "No limit, 4 concurrent workers, 0 accepted follow-ups");
   assert.equal(recordedSpend(unbounded), "$4.25, 12 tool calls", "usage is still metered and shown");
   assert.equal(allowance(budget()), "$10.00");
+  const policy = (view: CampaignBudgetView) => renderToStaticMarkup(<CampaignBudgetFacts budget={view} />);
+  assert.match(policy(unbounded), /Unpriced usage is counted without a cost\./, "no cost ceiling means unpriced usage never stops the campaign");
+  assert.match(policy(budget()), /Unpriced usage stops protected admission\./);
 });

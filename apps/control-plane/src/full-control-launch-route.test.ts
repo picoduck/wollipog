@@ -191,6 +191,9 @@ test("each genuine impossibility blocks launch with a specific reason and create
   const cases: Array<{ name: string; options?: Parameters<typeof fixture>[0]; body?: FullControlLaunchRequest; id: string; reason: RegExp }> = [
     // The launch sets an explicit cost ceiling, which cannot be enforced on unpriced usage.
     { name: "unpriced model under a cost ceiling", options: { priced: false }, id: "accounting_budget", reason: /unpriced/ },
+    // Checkpoints are amounts within a cost ceiling; without one they are refused, never dropped.
+    { name: "cost checkpoints without a cost limit", body: { ...launch, overrides: { session: launch.overrides!.session, budget: { toolCalls: 400, checkpointsUsd: [5] } } },
+      id: "accounting_budget", reason: /^Cost checkpoints need a cost limit; enter one or remove the checkpoints\.$/ },
     { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract", reason: /protocol-v218/ },
     { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the workspace/ },
     { name: "unknown policy ask", body: { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } }, id: "authority_contract", reason: /missing/ },
@@ -253,6 +256,15 @@ test("infrastructure gaps never block launch: each is informational and the camp
         assert.equal(checked!.summary.budget.reviewIncluded, false, item.name);
         assert.equal(checked!.advanced.controlledReview, undefined, item.name);
         assert.equal(control.boundary.budgetAuthority!.controlledReview, undefined, `${item.name}: no unusable reviewer enters the boundary`);
+      }
+      if (item.id === "accounting_budget") {
+        // What the summary promised holds at runtime: unpriced usage counts tool calls and never stops the campaign.
+        const rootId = admitted.json().id as string;
+        f.sessions.onSessionEvent(rootId, { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "claude-opus-5-5" });
+        f.sessions.onSessionEvent(rootId, { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" });
+        const view = f.db.campaignBudgets.view(rootId)!;
+        assert.deepEqual([view.state, view.costAccounting, view.actual.toolCalls], ["active", "unavailable", 1]);
+        assert.notEqual(f.db.getSession(rootId)!.status, "stopped");
       }
       assert.equal(f.starts.length, 1, item.name);
     } finally { await server.close(); f.db.close(); }

@@ -249,7 +249,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     issueAuthority: { epics: issueNumbers, relatedFollowUps, maxIssues, closureReasons },
     budgetAuthority: { version: 1, ...(costUsd !== undefined ? { costUsd } : {}), ...(toolCalls !== undefined ? { toolCalls } : {}),
       concurrency, acceptedFollowUps,
-      ...(overrides.budget?.checkpointsUsd ? { checkpointsUsd: overrides.budget.checkpointsUsd } : {}),
+      ...(overrides.budget?.checkpointsUsd?.length ? { checkpointsUsd: overrides.budget.checkpointsUsd } : {}),
       accounting: "managed_workers_only", unpriced: "stop", ...(controlledReview ? { controlledReview } : {}) },
   }) : null;
 
@@ -290,8 +290,11 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     .filter(Boolean).join(" and ");
   const metering = priced ? "Managed workers are metered and priced"
     : "Managed workers' tool calls are counted, but this model's cost is not priced";
+  // Checkpoints are amounts within a cost ceiling, so without one they are refused, never dropped.
+  const checkpointsWithoutCost = Boolean(overrides.budget?.checkpointsUsd?.length) && costUsd === undefined;
   const accounting: [CampaignLaunchCapability["state"], string] =
-    limitsInvalid ? ["unsupported", "The derived campaign limits are invalid; adjust the budget, concurrency or issue limits."]
+    limitsInvalid && checkpointsWithoutCost ? ["unsupported", "Cost checkpoints need a cost limit; enter one or remove the checkpoints."]
+    : limitsInvalid ? ["unsupported", "The derived campaign limits are invalid; adjust the budget, concurrency or issue limits."]
     : accountingError ? ceiling ? ["unsupported", accountingError] : ["informational", `No limit. ${accountingError}`]
     : ceiling ? ["verified", `${metering}; the campaign is limited to ${limitText}.`]
     : [priced ? "verified" : "informational", `No limit. ${metering}, and Campaign Status shows the campaign's usage.`];

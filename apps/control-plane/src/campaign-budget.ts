@@ -88,7 +88,9 @@ export class CampaignBudgetLedger {
       JOIN campaign_budget_members m ON m.session_id=u.session_id WHERE m.root_id=? AND u.unpriced_records>0 LIMIT 1`).get(rootId)) ||
       Boolean(this.sql.prepare(`SELECT 1 FROM sessions s JOIN campaign_budget_members m ON m.session_id=s.id
         WHERE m.root_id=? AND s.live_settling=0 AND s.live_unpriced_records>0 LIMIT 1`).get(rootId));
-    if (header.state === "active" && unpriced) {
+    // Only a cost ceiling needs priced usage. Without one the campaign keeps running, counts tool
+    // calls and reports its cost as unavailable (#2940).
+    if (header.state === "active" && unpriced && authority.costUsd !== undefined) {
       this.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
       header.state = "accounting_unavailable"; header.reason = "Unpriced campaign usage detected; protected admission stopped without a continue prompt.";
     }
@@ -185,6 +187,12 @@ export class CampaignBudgetLedger {
           (authority.concurrency !== undefined && view.occupied > authority.concurrency) ||
           (authority.acceptedFollowUps !== undefined && view.acceptedFollowUps > authority.acceptedFollowUps)) throw new Error("allowance is below existing spend or reservations");
     });
+  }
+
+  /** Whether the Human authorized a cost ceiling, the only limit that needs priced usage. */
+  costCeiling(rootId: string): boolean {
+    const row = this.sql.prepare("SELECT authority FROM campaign_budgets WHERE root_id=?").get(rootId) as { authority: string } | undefined;
+    return row !== undefined && (JSON.parse(row.authority) as CampaignBudgetAuthority).costUsd !== undefined;
   }
 
   stop(rootId: string, state: Exclude<CampaignBudgetView["state"], "active">, reason: string): void {
@@ -345,7 +353,10 @@ export class CampaignBudgetLedger {
       const session = this.sql.prepare("SELECT status FROM sessions WHERE id=?").get(sessionId) as { status: string } | undefined;
       if (!session || !["completed","failed","stopped"].includes(session.status) || history.historyEpoch !== checkpoint.historyEpoch ||
           history.hydratedSeq < checkpoint.throughSeq) return false;
-      if (this.sql.prepare("SELECT 1 FROM usage_session_state WHERE session_id=? AND unpriced_records>0").get(sessionId)) {
+      // Unpriced final usage can settle only where no cost ceiling depends on it: the charge then keeps
+      // the recorded cost, and the view reports cost accounting as unavailable.
+      if (this.costCeiling(this.root(sessionId)!) &&
+          this.sql.prepare("SELECT 1 FROM usage_session_state WHERE session_id=? AND unpriced_records>0").get(sessionId)) {
         this.stop(this.root(sessionId)!, "accounting_unavailable", "Final campaign usage is unpriced; reservation retained."); return false;
       }
       const member = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined;

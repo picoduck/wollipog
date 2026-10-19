@@ -58,8 +58,13 @@ Publishing and admitting follow-up work still require their own authority contra
 
 Only managed Claude Code and Codex App Server workers can enter a protected campaign. Session cost
 protection requires an available rate for the exact selected model. Native TUI, adopted/unmetered
-launches, Codex Exec and unadmitted external reviewer subprocesses are unsupported. Mixed priced and unpriced
-records stop further protected admission, rather than displaying unknown cost as zero. An
+launches, Codex Exec and unadmitted external reviewer subprocesses are unsupported. Under a cost
+ceiling, mixed priced and unpriced records stop further protected admission, rather than displaying
+unknown cost as zero. Without a cost ceiling (#2940) unpriced usage, live or settled, stops nothing:
+the campaign keeps counting tool calls, any tool-call ceiling stays enforced, final usage settles at
+its recorded cost, and the projection reports `costAccounting: "unavailable"`. Controlled and media
+review jobs keep refusing unpriced settlement, because each reserves its own cost bound. Cost
+checkpoints need a cost ceiling; a launch naming checkpoints without one is refused. An
 exhausted, revoked or accounting-unavailable envelope cannot be reset by toggling mode or restart.
 
 Production reviewer adapters call `SessionsService.campaignBudgetWorkerPreflight(campaignId, worker)`.
