@@ -41,7 +41,9 @@ for (const width of [1280, 390]) {
     await expect(skill).toContainText("Email Hidden");
     await expect(skill).not.toContainText("work@example.com");
     const reveal = skill.getByRole("button", { name: "Show Account Email" });
-    // Whole and inside its row: a clipped control could not be pressed (review CR-1.2).
+    // Whole and inside its row: a clipped control could not be pressed (review CR-1.2). In view
+    // first: the sections above it (Provider Accounts, #2995) can push it below the fold.
+    await reveal.scrollIntoViewIfNeeded();
     const [control, row] = await Promise.all([reveal.boundingBox(), skill.boundingBox()]);
     expect(control!.x + control!.width).toBeLessThanOrEqual(row!.x + row!.width);
     expect(await reveal.evaluate((button) => {
