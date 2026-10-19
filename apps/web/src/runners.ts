@@ -13,6 +13,7 @@ import {
   type RunnerRuntimeInfo,
 } from "@wollipog/protocol";
 import { formatHarnessLaunchCommand } from "./harness-command.js";
+import { agentStatus, type AgentStatus } from "./agent-presentation.js";
 
 export function machineSettingsMutationError(cause: unknown): string {
   if (cause instanceof Error &&
@@ -149,21 +150,22 @@ export type MachineStatus =
 type MachineStatusRunner = Pick<RunnerView, "status" | "protocolVersion" | "agents" | "providerAccounts">;
 type MachineStatusBox = Pick<BoxView, "status" | "lastError">;
 
-/** An agent whose installed CLI is too old for the integration Wollipog drives it through. */
-export function agentTooOld(agent: AgentDefinition): boolean {
-  return agent.codexAppServer?.status === "unsupported" || agent.claudeCode?.status === "unsupported";
-}
-
-export function agentNeedsSignIn(agent: AgentDefinition): boolean {
-  return agent.authStatus === "unauthenticated" || agent.claudeCode?.status === "unauthenticated";
+/** The agents a machine's status counts, by their one status. The retired Codex exec row duplicates
+ * the App Server row's state, so it is never counted twice. */
+export function machineAgentsWithStatus(
+  agents: readonly AgentDefinition[],
+  status: AgentStatus,
+): AgentDefinition[] {
+  return agents.filter((agent) => !isRetiredCodexExec(agent) && agentStatus(agent) === status);
 }
 
 /**
  * The most urgent of a machine's states: Unreachable or Failed, then Offline, then the connection in
  * progress (Connecting, Bootstrapping, Deploying), then what the person has to do on an online
- * machine (Update Required, Approval Required, Sign-In Required), then Online. An SSH machine's
- * connection is its box's: an offline box with an error could not be reached, and an online box
- * whose runner has not registered yet is still connecting.
+ * machine (Update Required, Approval Required, Sign-In Required, rolled up from its agents'
+ * `agentStatus()`), then Online. An SSH machine's connection is its box's: an offline box with an
+ * error could not be reached, and an online box whose runner has not registered yet is still
+ * connecting.
  */
 export function machineStatus(runner: MachineStatusRunner | undefined, box: MachineStatusBox | undefined): MachineStatus {
   if (box) {
@@ -173,11 +175,10 @@ export function machineStatus(runner: MachineStatusRunner | undefined, box: Mach
     if (!runner) return "connecting";
   }
   if (!runner || runner.status !== "online") return "offline";
-  // The retired Codex exec row duplicates the App Server row's state, so it is never counted twice.
-  const agents = runner.agents.filter((agent) => !isRetiredCodexExec(agent));
-  if (runnerOutdated(runner.protocolVersion) || agents.some(agentTooOld)) return "update_required";
-  if (agents.some((agent) => agent.registry?.installStatus === "approval-required")) return "approval_required";
-  if (agents.some(agentNeedsSignIn) || runner.providerAccounts?.some((account) => account.authStatus === "unauthenticated")) {
+  const has = (status: AgentStatus) => machineAgentsWithStatus(runner.agents, status).length > 0;
+  if (runnerOutdated(runner.protocolVersion) || has("update_required")) return "update_required";
+  if (has("approval_required")) return "approval_required";
+  if (has("sign_in_required") || runner.providerAccounts?.some((account) => account.authStatus === "unauthenticated")) {
     return "sign_in_required";
   }
   return "online";

@@ -3,12 +3,9 @@ import { State, useSnapshotState } from "./State.js";
 import { TabList } from "./Tabs.js";
 import {
   agentContextKey,
-  CODEX_EXEC_RETIRED_CONFIG_REASON,
-  isRetiredCodexExec,
   PERSONAL_ORGANIZATION_ID,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
-  type AgentContext,
   type AgentDefinition,
   type BoxView,
   type IdentityAdministrationView,
@@ -21,15 +18,13 @@ import { useStore } from "../store.js";
 import { activeSessionCounts } from "../rail-attention.js";
 import { titleCaseLabel } from "../format.js";
 import {
-  agentInstallHints,
-  codexUpgradeGuidance,
   harnessUpdateGuidance,
   machineListEntries,
   machineSettingsMutationError,
   runnerDisplay,
 } from "../runners.js";
 
-import { CopyButton, DetailSkeleton, Modal } from "./common.js";
+import { DetailSkeleton, Modal } from "./common.js";
 import { confirmDeleteMachine, lifecycleConflictPresentation, MachineDetail, phoneMachineMenu, useMachineActions } from "./MachineDetail.js";
 import { MachineList } from "./MachineList.js";
 import { MachinesOverview } from "./MachinesOverview.js";
@@ -40,11 +35,10 @@ import { RepairConnectionDialog } from "./RepairConnectionDialog.js";
 import { SetUpThisMachineDialog } from "./SetUpThisMachineDialog.js";
 import { AddBoxDialog } from "./AddBoxDialog.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { agentDisplayName, agentDriverDescription, agentDriverLabel } from "../agent-presentation.js";
+import { agentContextLabel, agentDisplayName, harnessUpdateLabel } from "../agent-presentation.js";
+import { MachineAgentsSection } from "./MachineAgentsSection.js";
 import {
-  ChevronRightIcon,
   CommandLineIcon,
-  InfoIcon,
   NetworkIcon,
   ComputerIcon,
 } from "./Icons.js";
@@ -55,7 +49,6 @@ import { MachineCapacitySection } from "./MachineCapacitySection.js";
 import { MachineSkillsSection } from "./MachineSkillsSection.js";
 import { MachineWorkspacesSection } from "./MachineWorkspacesSection.js";
 import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettings.js";
-import { formatHarnessLaunchCommand } from "../harness-command.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { DetailBar, PageHeader, type PageHeaderActions } from "./PageHeader.js";
 import { useIsMobile } from "./useIsMobile.js";
@@ -68,320 +61,8 @@ import {
   type LocalRunnerStatus,
 } from "../local-runner.js";
 
-function harnessUpdateLabel(a: AgentDefinition, online: boolean): string {
-  const update = a.update!;
-  const label = update.evidenceSource === "Machine pinned-version policy" ? "Pinned by Machine Policy"
-    : update.evidenceSource === "Machine update-check policy" ? "Checks Disabled by Machine Policy"
-    : ({
-    update_available: "New Release Published",
-    up_to_date: "Up to Date",
-    check_failed: "Check Failed",
-    version_unknown: "Version Unknown",
-    preview_channel: "Preview Channel",
-    managed_externally: "Managed Externally",
-  } as const)[update.status];
-  return online ? label : `Last Reported: ${label}`;
-}
-
-function contextLabel(ctx: AgentContext | undefined): string {
-  return ctx?.kind === "wsl" ? `WSL: ${ctx.distro}` : "Native";
-}
-
-function authTitle(status: AgentDefinition["authStatus"]): string {
-  if (status === "authenticated") return "Authenticated";
-  if (status === "unauthenticated") return "Not authenticated — run the agent's login (e.g. claude setup-token / codex login)";
-  return "Auth status unknown";
-}
-
 export function agentAvailabilityLabel(agent: AgentDefinition): "Available" | "Unavailable" | "Unverified" {
   return agent.available === true ? "Available" : agent.available === false ? "Unavailable" : "Unverified";
-}
-
-export function availableAgentCount(agents: AgentDefinition[]): number {
-  return agents.filter((agent) => agent.available === true && !isRetiredCodexExec(agent)).length;
-}
-
-function acpCapabilitySummary(a: AgentDefinition): string {
-  if (!a.acp) return "Capabilities pending live ACP handshake";
-  const names: Array<[keyof NonNullable<AgentDefinition["acp"]>, string]> = [
-    ["loadSession", "load"],
-    ["sessionList", "list"],
-    ["sessionResume", "resume"],
-    ["sessionClose", "close"],
-    ["sessionDelete", "delete"],
-    ["logout", "logout"],
-  ];
-  const enabled = names.filter(([key]) => a.acp?.[key]).map(([, label]) => label);
-  return enabled.length ? `Live capabilities: ${enabled.join(", ")}` : "Live ACP handshake reported no optional stable capabilities";
-}
-
-function AgentDetailsDialog({ a, os, online, onClose }: { a: AgentDefinition; os: RunnerView["os"]; online: boolean; onClose: () => void }) {
-  const launch = formatHarnessLaunchCommand(a.command, a.args, a.context, os);
-  const displayName = agentDisplayName(a);
-  return (
-    <Modal
-      title={`${displayName} Details`}
-      onClose={onClose}
-      footer={<button type="button" className="btn" onClick={onClose}>Close</button>}
-    >
-      <p className="agent-details-summary">{agentDriverDescription(a)}</p>
-      <dl className="facts">
-        <div><dt>Integration</dt><dd>{titleCaseLabel(agentDriverLabel(a))}</dd></div>
-        <div><dt>Execution Context</dt><dd>{titleCaseLabel(contextLabel(a.context))}</dd></div>
-        <div><dt>Source</dt><dd>{titleCaseLabel(a.source ?? "configured")}</dd></div>
-        {a.installation && <div><dt>Discovery Source</dt><dd>{titleCaseLabel(a.installation.via.replace(/-/g, " "))}</dd></div>}
-        {a.installation && <div><dt>Executable Location</dt><dd><code>{a.installation.path}</code></dd></div>}
-        <div><dt>Version</dt><dd>{a.version ? `v${a.version}` : "Unknown"}</dd></div>
-        <div><dt>Availability</dt><dd>{agentAvailabilityLabel(a)}</dd></div>
-        <div><dt>Authentication</dt><dd>{titleCaseLabel(a.authStatus ?? "unknown")}</dd></div>
-        {a.update && <div><dt>Update Status</dt><dd>{harnessUpdateLabel(a, online)}</dd></div>}
-      </dl>
-      <section className="agent-details-section">
-        <h3>Launch Command</h3>
-        {launch.referenceOnly ? (
-          <>
-            <p>This Windows launch may resolve to a batch wrapper or use an executable with legacy PowerShell argument passing. Those launches can change quotes or expand percent signs. A copyable launch command is unavailable; inspect the configured executable and arguments below.</p>
-            <dl className="facts">
-              <div><dt>Executable</dt><dd><code>{a.command}</code></dd></div>
-              <div><dt>Arguments</dt><dd><code>{JSON.stringify(a.args)}</code></dd></div>
-            </dl>
-          </>
-        ) : (
-          <>
-            <p>The runner resolved this launch. Copy it into {launch.shell}; paths and arguments are quoted for that shell.</p>
-            <div className="agent-details-command">
-              <code>{launch.command}</code>
-              <CopyButton text={launch.command} iconOnly className="copy-btn icon-only-copy"
-                ariaLabel={`Copy ${displayName} Launch Command`} />
-            </div>
-          </>
-        )}
-      </section>
-      {a.update && (
-        <section className="agent-details-section">
-          <h3>Harness Updates</h3>
-          <dl className="facts">
-            <div><dt>Installed Version</dt><dd>{a.update.installedVersion ?? "Unknown"}</dd></div>
-            <div><dt>Latest Known Compatible Version</dt><dd>{a.update.latestKnownCompatibleVersion ?? "Unknown"}</dd></div>
-            <div><dt>Latest Published Version</dt><dd>{a.update.latestPublishedVersion ?? "Unknown"}</dd></div>
-            <div><dt>Release Channel</dt><dd>{titleCaseLabel(a.update.channel)}</dd></div>
-            <div><dt>Last Checked</dt><dd>{new Date(a.update.checkedAt).toLocaleString()}</dd></div>
-            <div><dt>Evidence Source</dt><dd>{a.update.evidenceSource}</dd></div>
-          </dl>
-          <p>{harnessUpdateGuidance(a, os)}</p>
-        </section>
-      )}
-      {a.codexAppServer?.failure?.message && (
-        <section className="agent-details-section">
-          <h3>App Server Status</h3>
-          <p>{a.codexAppServer.failure.message}</p>
-        </section>
-      )}
-      {a.unavailableReason && (
-        <section className="agent-details-section">
-          <h3>Availability Status</h3>
-          <p>{a.unavailableReason}</p>
-        </section>
-      )}
-      {a.registry && (
-        <section className="agent-details-section">
-          <h3>ACP Registry Details</h3>
-          <p>{a.registry.description} · {acpCapabilitySummary(a)}</p>
-        </section>
-      )}
-    </Modal>
-  );
-}
-
-function AgentRow({
-  a,
-  os,
-  runnerId,
-  online,
-  protocolVersion,
-}: {
-  a: AgentDefinition;
-  os: RunnerView["os"];
-  runnerId: string;
-  online: boolean;
-  protocolVersion: number | null | undefined;
-}) {
-  const api = useApi();
-  const { confirm } = useFeedback();
-  const [registryBusy, setRegistryBusy] = useState(false);
-  const [registryError, setRegistryError] = useState("");
-  const [showDetails, setShowDetails] = useState(false);
-  const driver = a.driver ?? "acp";
-  const claudeRemediation = a.claudeCode?.status === "unauthenticated"
-    ? "claude auth login"
-    : a.claudeCode?.status === "unsupported"
-      ? "claude update"
-      : a.claudeCode?.status === "unavailable"
-        ? agentInstallHints(a.context?.kind === "wsl" ? "linux" : os).find((hint) => /claude/i.test(hint.name))?.command
-        : undefined;
-  const codexRemediation = driver.startsWith("codex")
-    ? a.authStatus === "unauthenticated"
-      ? "codex login"
-      : undefined
-    : undefined;
-  const remediation = claudeRemediation ?? codexRemediation;
-  const displayName = agentDisplayName(a);
-  const registryAction = a.registry?.installStatus === "approval-required"
-    ? "approve" as const
-    : a.registry?.installStatus === "approved"
-      ? "revoke" as const
-      : null;
-  const registrySupported = runnerSupportsProtocol(protocolVersion, "acpRegistryApproval");
-  const changeRegistryApproval = async () => {
-    if (!a.registry || !registryAction) return;
-    const approving = registryAction === "approve";
-    const confirmed = await confirm(approving
-      ? {
-          title: "Approve Exact Launch",
-          message: `This may download and execute third-party code on ${runnerId}. The approval is invalidated if the Registry launch changes.`,
-          details: <pre className="code-block">{a.registry.installPreview}</pre>,
-          confirmLabel: "Approve Exact Launch",
-          tone: "danger",
-        }
-      : {
-          title: "Revoke Approval",
-          message: `${a.name} v${a.registry.adapterVersion} will no longer be allowed to launch from this Registry entry.`,
-          confirmLabel: "Revoke Approval",
-          tone: "danger",
-        });
-    if (!confirmed) return;
-    setRegistryBusy(true);
-    setRegistryError("");
-    try {
-      await api.setAcpRegistryApproval(runnerId, a.id, {
-        action: registryAction,
-        schemaVersion: a.registry.schemaVersion,
-        adapterVersion: a.registry.adapterVersion,
-        confirmation: "explicit",
-      });
-    } catch (error) {
-      setRegistryError((error as Error).message);
-    } finally {
-      setRegistryBusy(false);
-    }
-  };
-  return (
-    <>
-    <div className="agent-row">
-      <div className="agent-row-head">
-        {a.authStatus && <span className={`auth-dot ${a.authStatus}`} title={authTitle(a.authStatus)} />}
-        <span className="agent-name">{displayName}</span>
-        {a.version && <span className="agent-ver">v{a.version}</span>}
-        <button
-          type="button"
-          className="icon-btn sm agent-details-trigger"
-          onClick={() => setShowDetails(true)}
-          title="View Agent Details"
-          aria-label={`View ${displayName} Details`}
-        >
-          <InfoIcon />
-        </button>
-      </div>
-      <div className="agent-row-meta">
-        <span className={`atag driver-${driver}`}>{agentDriverLabel(a)}</span>
-        <span className="atag ctx">{contextLabel(a.context)}</span>
-        {a.source === "discovered" && <span className="atag discovered">Discovered</span>}
-        {a.source === "registry" && <span className="atag discovered">ACP Registry</span>}
-        {online && a.update?.status === "update_available" && <span className="atag" role="status">New Release Published</span>}
-        {a.available !== true && !isRetiredCodexExec(a) && <span className="atag broken">{agentAvailabilityLabel(a)}</span>}
-        {a.registry && <span className="atag">{a.registry.transport}</span>}
-        {!a.registry && a.acpTransport && <span className="atag">{a.acpTransport}</span>}
-        {a.registry && <span className="atag">Adapter v{a.registry.adapterVersion}</span>}
-        {/* An older runner still advertises discovery's exec row as available, with no reason. */}
-        {isRetiredCodexExec(a) && (
-          <span className="atag broken" title={CODEX_EXEC_RETIRED_CONFIG_REASON}>No Longer Supported</span>
-        )}
-        {driver === "codex-app-server" && a.codexAppServer?.status === "supported" && a.authStatus !== "unauthenticated" && (
-          <span className="atag">Interactive Ready</span>
-        )}
-        {driver === "codex-app-server" && a.authStatus === "unauthenticated" && (
-          <span className="atag broken" title="Run `codex login`, then rediscover.">Not Signed In</span>
-        )}
-        {driver === "codex-app-server" && a.codexAppServer?.status === "unsupported" && (
-          <span className="atag broken" title={a.codexAppServer.failure?.message}>Interactive Unavailable</span>
-        )}
-        {a.codexAppServer?.status === "unavailable" && (
-          <span className="atag broken" title={a.codexAppServer.failure?.message}>Not Installed</span>
-        )}
-        {a.claudeCode?.status === "ready" && <span className="atag">Claude Ready</span>}
-        {a.claudeCode && a.claudeCode.auth.billingSource !== "unknown" && (
-          <span className="atag">{a.claudeCode.auth.billingSource === "api" ? "API Billing" : `${titleCaseLabel(a.claudeCode.auth.billingSource)} Auth`}</span>
-        )}
-        {a.claudeCode?.launchSource && a.claudeCode.launchSource !== "path" && (
-          <span className="atag" title="Installed outside the runner service PATH; discovery recovered an absolute launch path">
-            PATH Recovered
-          </span>
-        )}
-        {a.claudeCode?.status === "unauthenticated" && <span className="atag broken">Not Signed In</span>}
-        {a.claudeCode?.status === "unsupported" && <span className="atag broken">Unsupported CLI Mode</span>}
-        {a.claudeCode?.status === "unavailable" && <span className="atag broken">Not Installed</span>}
-      </div>
-      {(a.codexAppServer?.status === "unsupported" || a.codexAppServer?.status === "unavailable") && a.codexAppServer.failure?.message && (
-        <div className="empty-sub">{a.codexAppServer.failure.message}</div>
-      )}
-      {a.claudeCode && a.claudeCode.status !== "ready" && a.claudeCode.failure?.message && (
-        <div className="empty-sub">{a.claudeCode.failure.message}</div>
-      )}
-      {a.unavailableReason && <div className="empty-sub">{a.unavailableReason}</div>}
-      {a.registry && (
-        <div className="empty-sub">
-          {a.registry.description} · {acpCapabilitySummary(a)} · registry requires authentication; status is verified at live initialize
-          {a.registry.license ? ` · ${a.registry.license}` : ""}
-        </div>
-      )}
-      {remediation && (
-        <pre className="code-block install-cmd" title={`${a.name} remediation`}>
-          {remediation}
-          <CopyButton text={remediation} iconOnly ariaLabel={`Copy ${displayName} Remediation Command`} className="copy-btn icon-only-copy" />
-        </pre>
-      )}
-      {(a.codexAppServer?.status === "unsupported" || a.codexAppServer?.status === "unavailable") &&
-        driver.startsWith("codex") && a.authStatus !== "unauthenticated" && (
-          <p className="empty-sub">{codexUpgradeGuidance(a, os)}</p>
-        )}
-      {a.registry && a.registry.installStatus !== "installed" && (
-        <div>
-          <div className="empty-sub">
-            {a.registry.installStatus === "approval-required"
-              ? "Registry launch is disabled until this exact version and command receive explicit confirmation."
-              : a.registry.installStatus === "approved"
-                ? a.available !== true
-                  ? "Exact launch approval is retained, but its package runner is unavailable. Install it, then Rediscover."
-                  : "Exact Registry package launch approved. A changed version or command is disabled automatically."
-                : a.registry.installStatus === "manual-only"
-                  ? "Automatic install is disabled because Registry v1 supplies no binary digest or exact package pin. Install manually, then Rediscover."
-                  : "The Registry has no compatible distribution for this runner platform."}
-          </div>
-          <pre className="code-block install-cmd" title={`${a.name} Registry install preview`}>
-            {a.registry.installPreview}
-            <CopyButton text={a.registry.installPreview} iconOnly ariaLabel={`Copy ${displayName} Registry Install Command`} className="copy-btn icon-only-copy" />
-          </pre>
-          {registryAction && (
-            <button
-              className="btn sm"
-              disabled={!online || !registrySupported || registryBusy}
-              onClick={() => void changeRegistryApproval()}
-              title={!registrySupported
-                ? runnerCapabilityRequirement(protocolVersion, "acpRegistryApproval", "registry approval")
-                : registryAction === "approve"
-                  ? "Review and explicitly approve this exact package launch"
-                  : "Disable this approved package launch"}
-            >
-              {registryBusy ? "Updating…" : registryAction === "approve" ? "Approve Exact Launch…" : "Revoke Approval"}
-            </button>
-          )}
-          {registryError && <Notice tone="danger" role="alert" compact>{registryError}</Notice>}
-        </div>
-      )}
-    </div>
-    {showDetails && <AgentDetailsDialog a={a} os={os} online={online} onClose={() => setShowDetails(false)} />}
-    </>
-  );
 }
 
 /**
@@ -389,10 +70,14 @@ function AgentRow({
  * restyle them (#2989 Capacity, Workspaces and Skills; #2990 Agents; #2995 Provider Accounts) each
  * change one. They keep their current content until then.
  */
-function MachineSections({ runner, name, online, canManageProfiles = false, canManageMachines, onChangeLimit }: {
+function MachineSections({
+  runner, name, online, canFindSessions, onChooseInstallation, canManageProfiles = false, canManageMachines, onChangeLimit,
+}: {
   runner: RunnerView;
   name: string;
   online: boolean;
+  canFindSessions: boolean;
+  onChooseInstallation?: () => void;
   /** The viewer may use the provider profile routes: see `canManageProviderProfiles`. */
   canManageProfiles?: boolean;
   /** An organization owner or admin. */
@@ -402,63 +87,8 @@ function MachineSections({ runner, name, online, canManageProfiles = false, canM
   return (
     <div className="machine-detail-sections">
       <MachineCapacitySection runner={runner} onChangeLimit={onChangeLimit} />
-      <details className="runner-agents disclosure">
-        <summary>
-          <ChevronRightIcon className="disclosure-chevron" />
-          <span className="runner-agents-label">Agents</span>
-          <span className="group-count">{runner.agents.length}</span>
-          <span className="runner-agents-summary">
-            {availableAgentCount(runner.agents)} Available
-          </span>
-        </summary>
-        <div className="runner-agents-body">
-          {runner.agents.length > 0 ? (
-            <>
-              <div className="agent-list">
-                {runner.agents.map((a) => (
-                  <AgentRow
-                    a={a}
-                    os={runner.os}
-                    runnerId={runner.runnerId}
-                    online={online}
-                    protocolVersion={runner.protocolVersion}
-                    key={a.id}
-                  />
-                ))}
-              </div>
-              {runner.agents.every((agent) => agent.available !== true) && (
-                <div className="install-hints">
-                  {runnerSupportsProtocol(runner.protocolVersion, "verifiedAgentAvailability") ? (
-                    <>
-                      <p className="hint">No usable agent CLIs found on this machine — install one:</p>
-                      {agentInstallHints(runner.os).map((h) => (
-                        <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
-                          {h.command ?? h.guidance}
-                          {h.command && <CopyButton text={h.command} />}
-                        </pre>
-                      ))}
-                    </>
-                  ) : (
-                    <p className="hint">Update this runner to verify its configured agent availability.</p>
-                  )}
-                </div>
-              )}
-            </>
-          ) : runner.agentsRefreshed ? (
-            <div className="install-hints">
-              <p className="hint">No agent CLIs found on this machine — install one:</p>
-              {agentInstallHints(runner.os).map((h) => (
-                <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
-                  {h.command ?? h.guidance}
-                  {h.command && <CopyButton text={h.command} />}
-                </pre>
-              ))}
-            </div>
-          ) : (
-            <p className="hint">Probing for agent CLIs…</p>
-          )}
-        </div>
-      </details>
+      <MachineAgentsSection runner={runner} online={online} machineName={name}
+        canFindSessions={canFindSessions} onChooseInstallation={onChooseInstallation} />
       <ProviderAccountsSection runner={runner} online={online} canManageProfiles={canManageProfiles} />
       <MachineWorkspacesSection runner={runner} machineName={name} online={online} canAdd={canManageMachines} />
       <MachineSkillsSection runner={runner} />
@@ -472,14 +102,21 @@ function MachineSettingsDialog({
   onClose,
   onDelete,
   capacityOnly = false,
+  atInstallations = false,
 }: {
   runner: RunnerView | undefined;
   box?: BoxView;
   onClose: () => void;
   onDelete: () => Promise<void>;
   capacityOnly?: boolean;
+  /** Opened from Agent Details' Choose Another Installation… (#2990): starts at the installations. */
+  atInstallations?: boolean;
 }) {
   const api = useApi();
+  const installationsRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    if (atInstallations) installationsRef.current?.scrollIntoView({ block: "start" });
+  }, [atInstallations]);
   const { confirm } = useFeedback();
   const runnerId = runner?.runnerId ?? box?.runnerId ?? "";
   const display = runnerDisplay(runner, box, runnerId);
@@ -651,7 +288,7 @@ function MachineSettingsDialog({
 
       {!capacityOnly && runner && (installations.length > 0 || harnessSelections.length > 0 ||
         targetInstallations.length > 0 || targetHarnessSelections.length > 0) && (
-        <section className="machine-settings-section">
+        <section className="machine-settings-section" ref={installationsRef}>
           <h3>Agent Harness Installations</h3>
           <p>Choose the executable this Machine uses for each harness and execution context. A missing choice stays saved until you select another installation.</p>
           {!installationSupported && <p className="hint">{runnerCapabilityRequirement(
@@ -665,7 +302,7 @@ function MachineSettingsDialog({
             const isSelected = selected?.installationId === installation.id;
             return (
               <div className="machine-harness-installation" key={`${agent.id}:${installation.id}`}>
-                <div><strong>{agentDisplayName(agent)}</strong> · {contextLabel(agent.context)} · {agent.version ? `v${agent.version}` : "Version Unknown"}</div>
+                <div><strong>{agentDisplayName(agent)}</strong> · {agentContextLabel(agent.context)} · {agent.version ? `v${agent.version}` : "Version Unknown"}</div>
                 <div><code>{installation.path}</code> · {titleCaseLabel(installation.via.replace(/-/g, " "))}</div>
                 <div>{agent.available === true ? "Available" : agentAvailabilityLabel(agent)}</div>
                 {agent.available === false && <p>{agent.unavailableReason
@@ -673,7 +310,7 @@ function MachineSettingsDialog({
                     ? "Sign in to this installation, then Rediscover before starting a session."
                     : agent.codexAppServer?.failure?.message ?? agent.claudeCode?.failure?.message
                       ?? "Check Agent Details for the availability diagnosis before starting a session.")}</p>}
-                {agent.update && <div>{harnessUpdateLabel(agent, harnessStatusCurrent)} · {agent.update.latestKnownCompatibleVersion
+                {agent.update && <div>{harnessUpdateLabel(agent.update, harnessStatusCurrent)} · {agent.update.latestKnownCompatibleVersion
                   ? `Latest Known Compatible v${agent.update.latestKnownCompatibleVersion}` : "Latest Known Compatible Version Unknown"} · {agent.update.latestPublishedVersion
                     ? `Latest Published v${agent.update.latestPublishedVersion}` : "Latest Published Version Unknown"} ·
                   Last Checked {new Date(agent.update.checkedAt).toLocaleString()} · {agent.update.evidenceSource}</div>}
@@ -688,7 +325,7 @@ function MachineSettingsDialog({
           })}
           {harnessSelections.filter((selection) => selection.agentId === null).map((selection) => (
             <div className="machine-harness-installation" key={`missing:${selection.family}:${agentContextKey(selection.context)}`}>
-              <div><strong>{titleCaseLabel(selection.family)}</strong> · {contextLabel(selection.context)} · Unavailable</div>
+              <div><strong>{titleCaseLabel(selection.family)}</strong> · {agentContextLabel(selection.context)} · Unavailable</div>
               <div><code>{selection.path}</code> · {selection.version ? `v${selection.version}` : "Version Unknown"}</div>
               <p>Select another discovered installation to restore new sessions.</p>
             </div>
@@ -964,6 +601,7 @@ export function RunnersView() {
   const [repairRunnerId, setRepairRunnerId] = useState<string | null>(null);
   const [addingBox, setAddingBox] = useState(false);
   const [settingsRunnerId, setSettingsRunnerId] = useState<string | null>(null);
+  const [settingsAtInstallations, setSettingsAtInstallations] = useState(false);
   const [identity, setIdentity] = useState<IdentityAdministrationView | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
   // Instances is a desktop-app feature with nothing to do on a phone, so a narrowed window drops the
@@ -1094,7 +732,11 @@ export function RunnersView() {
         <MachineSettingsDialog
           runner={settingsMachine.runner}
           box={settingsMachine.box}
-          onClose={() => setSettingsRunnerId(null)}
+          onClose={() => {
+            setSettingsRunnerId(null);
+            setSettingsAtInstallations(false);
+          }}
+          atInstallations={settingsAtInstallations}
           onDelete={async () => {
             if (settingsMachine.box) await api.removeBox(settingsMachine.box.boxId);
             else await api.removeRunner(settingsMachine.runnerId);
@@ -1116,10 +758,11 @@ export function RunnersView() {
     }
     setRepairRunnerId(runnerId);
   };
+  const canFindSessions = identityRole !== null && identityRole !== "viewer";
   const selectedActions = useMachineActions(selectedMachine, {
     canManage: canManageMachines,
     canOpenSettings: canManageMachines || selectedMachine?.runner?.canManage === true,
-    canFindSessions: identityRole !== null && identityRole !== "viewer",
+    canFindSessions,
   }, { onSettings: setSettingsRunnerId, onRepair: repairRunner });
   // "local" onboarding drives the desktop bridge, whose runner credential and socket work is
   // hard-coded to the loopback control plane, so on a remote instance it would set up a machine the
@@ -1176,6 +819,11 @@ export function RunnersView() {
           name={selectedMachine.name}
           // An SSH machine's harness status is current only while its connection is up too.
           online={selectedMachine.runner.status === "online" && (!selectedMachine.box || selectedMachine.box.status === "online")}
+          canFindSessions={canFindSessions}
+          onChooseInstallation={selectedActions.settings ? () => {
+            setSettingsAtInstallations(true);
+            setSettingsRunnerId(selectedMachine.runnerId);
+          } : undefined}
           canManageProfiles={canManageProfiles}
           canManageMachines={canManageMachines}
           // Machine Settings, until #2991 opens it with Capacity Limit focused.

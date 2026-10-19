@@ -2,20 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ApiError } from "../api.js";
 import { statusMeta } from "../status-meta.js";
-import {
-  agentAvailabilityLabel,
-  availableAgentCount,
-} from "./RunnersView.js";
+import { agentAvailabilityLabel } from "./RunnersView.js";
 import { lifecycleConflictPresentation } from "./MachineDetail.js";
 
-test("Connections counts only verified runnable agents and labels legacy rows unverified", () => {
+test("Machine Settings labels legacy agent rows unverified", () => {
   const base = { name: "Agent", command: "agent", args: [], env: {} };
   const agents = [
     { ...base, id: "verified", available: true },
     { ...base, id: "unavailable", available: false },
     { ...base, id: "legacy" },
   ];
-  assert.equal(availableAgentCount(agents), 1);
   assert.equal(agentAvailabilityLabel(agents[0]!), "Available");
   assert.equal(agentAvailabilityLabel(agents[1]!), "Unavailable");
   assert.equal(agentAvailabilityLabel(agents[2]!), "Unverified");

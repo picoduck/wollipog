@@ -612,7 +612,7 @@ declare global {
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
         "multiple-installations" | "harness-states" | "harness-states-ssh" |
         "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper" |
-        "explicit-interpreter" | "older-interpreter-guidance"): void;
+        "explicit-interpreter" | "older-interpreter-guidance" | "agent-states" | "no-agents-ready"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
       /** A host name long enough that the detail's meta line has to truncate (#2988). */
       setRunnerHostname(hostname: string): void;
@@ -721,6 +721,62 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
             : "This installation uses a Windows batch wrapper. Use the package or version manager that installed this exact copy." },
       }];
       runner.harnessSelections = [];
+    } else if (scenario === "agent-states" || scenario === "no-agents-ready") {
+      // One agent in each status the Agents section shows (#2990), and three that are not installed.
+      runner.protocolVersion = PROTOCOL_VERSION;
+      runner.harnessSelections = [];
+      const discovered = { args: [], env: {}, context: { kind: "native" as const }, source: "discovered" as const };
+      const claudeCode = (status: "ready" | "unavailable"): NonNullable<RunnerView["agents"][number]["claudeCode"]> => ({
+        status, effortLevels: [], permissionModes: [], streamJsonInput: status === "ready", streamJsonImages: status === "ready",
+        controlProtocol: status === "ready", forkSession: status === "ready", replayUserMessages: status === "ready",
+        auth: status === "ready" ? { status: "authenticated", billingSource: "subscription" } : { status: "unknown", billingSource: "unknown" },
+        ...(status === "unavailable"
+          ? { failure: { code: "claude_unavailable" as const, message: "Claude Code was not found in this runner context." } }
+          : {}),
+      });
+      const registry = (id: string, adapterVersion: string, installStatus: "approval-required" | "approved") => ({
+        id, schemaVersion: "1", adapterVersion, description: `${id === "gemini" ? "Google" : "Block"}'s open-source coding agent`,
+        transport: "stdio" as const, distribution: "npx" as const,
+        installPreview: id === "gemini" ? `npx --yes @google/gemini-cli@${adapterVersion} --experimental-acp` : `npx --yes goose-acp@${adapterVersion}`,
+        installStatus, authentication: "required-live-verification" as const,
+      });
+      const missing: RunnerView["agents"] = [
+        { ...discovered, id: "claude-wsl", name: "Claude Code", command: "claude", driver: "claude-code",
+          context: { kind: "wsl", distro: "Ubuntu" }, available: false, claudeCode: claudeCode("unavailable") },
+        { ...discovered, id: "codex-wsl", name: "Codex", command: "codex", driver: "codex-app-server",
+          context: { kind: "wsl", distro: "Ubuntu" }, available: false,
+          codexAppServer: { status: "unavailable", appServerAvailable: false,
+            failure: { code: "codex_unavailable", message: "Codex is not installed in this runner context.", retryable: false } } },
+        { ...discovered, id: "pi", name: "Pi", command: "pi", driver: "pi", available: false,
+          unavailableReason: "Pi is not installed. Install @earendil-works/pi-coding-agent, then rediscover." },
+      ];
+      runner.agents = scenario === "no-agents-ready" ? [
+        { ...discovered, id: "claude", name: "Claude Code", command: "claude", driver: "claude-code", available: false,
+          claudeCode: claudeCode("unavailable") },
+        ...missing.slice(1),
+      ] : [
+        { ...discovered, id: "claude", name: "Claude Code", command: "C:\\Users\\example\\.local\\bin\\claude.exe",
+          driver: "claude-code", available: true, authStatus: "authenticated", version: "2.1.4", claudeCode: claudeCode("ready"),
+          installation: { id: "claude-local", path: "C:\\Users\\example\\.local\\bin\\claude.exe", via: "common-dir" },
+          update: { status: "up_to_date", installedVersion: "2.1.4", latestKnownCompatibleVersion: "2.1.4",
+            latestPublishedVersion: "2.1.4", checkedAt: Date.now() - 2 * 3_600_000, channel: "stable",
+            evidenceSource: "npm dist-tags for @anthropic-ai/claude-code", managedExternally: true,
+            guidance: "This installation is up to date." } },
+        { ...discovered, id: "codex", name: "Codex", command: "C:\\Program Files\\Codex\\codex.exe", driver: "codex-app-server",
+          available: true, authStatus: "unauthenticated", version: "0.155.1",
+          installation: { id: "codex-current", path: "C:\\Program Files\\Codex\\codex.exe", via: "path" },
+          codexAppServer: { status: "supported", appServerAvailable: true } },
+        { ...discovered, id: "codex-old", name: "Codex", command: "C:\\Legacy Tools\\codex.exe", driver: "codex-app-server",
+          available: false, authStatus: "authenticated", version: "0.140.0",
+          installation: { id: "codex-old", path: "C:\\Legacy Tools\\codex.exe", via: "path" },
+          codexAppServer: { status: "unsupported", installedVersion: "0.140.0", appServerAvailable: true,
+            failure: { code: "version_unverified", message: "Codex 0.140.0 is older than the supported version 0.147.0.", retryable: false } } },
+        { ...discovered, id: "gemini", name: "Gemini CLI", command: "npx", source: "registry", driver: "acp", available: false,
+          registry: registry("gemini", "1.2.0", "approval-required") },
+        { ...discovered, id: "goose", name: "Goose", command: "npx", source: "registry", driver: "acp", available: true,
+          authStatus: "authenticated", registry: registry("goose", "1.8.0", "approved") },
+        ...missing,
+      ];
     } else if (scenario === "harness-states" || scenario === "harness-states-ssh") {
       runner.protocolVersion = PROTOCOL_VERSION;
       runner.hostname = "demo-workstation";

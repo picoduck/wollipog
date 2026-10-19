@@ -1,9 +1,8 @@
-import { isRetiredCodexExec } from "@wollipog/protocol";
+import { agentDisplayName } from "./agent-presentation.js";
 import { formatRecordedRelativeTime } from "./format.js";
 import { machineAttentionReason, type MachineAttentionReason } from "./rail-attention.js";
 import {
-  agentNeedsSignIn,
-  agentTooOld,
+  machineAgentsWithStatus,
   machineListOrder,
   machineNeedsAttention,
   runnerOutdated,
@@ -112,7 +111,8 @@ function machineAttentionSentence(
 ): string {
   const active = activeSessions.get(entry.runnerId) ?? 0;
   const runner = entry.runner;
-  const agents = runner?.agents.filter((agent) => !isRetiredCodexExec(agent)) ?? [];
+  const agents = runner?.agents ?? [];
+  const name = (agent: (typeof agents)[number]) => agentDisplayName(agent, agents);
   switch (entry.status) {
     case "unreachable":
       return `Wollipog couldn't reach it over SSH. ${reconnectHint(action, entry.kind, true)}`;
@@ -125,20 +125,20 @@ function machineAttentionSentence(
     }
     case "update_required": {
       if (runner && runnerOutdated(runner.protocolVersion)) return "Its runner is out of date.";
-      const old = agents.filter(agentTooOld);
-      return old.length === 1 ? `${old[0]!.name} is out of date.` : `${plural(old.length, "agent is", "agents are")} out of date.`;
+      const old = machineAgentsWithStatus(agents, "update_required");
+      return old.length === 1 ? `${name(old[0]!)} is out of date.` : `${plural(old.length, "agent is", "agents are")} out of date.`;
     }
     case "approval_required": {
-      const waiting = agents.filter((agent) => agent.registry?.installStatus === "approval-required");
+      const waiting = machineAgentsWithStatus(agents, "approval_required");
       return waiting.length === 1
-        ? `${waiting[0]!.name} from the ACP Registry is waiting for you to approve its launch.`
+        ? `${name(waiting[0]!)} from the ACP Registry is waiting for you to approve its launch.`
         : `${waiting.length} agents from the ACP Registry are waiting for you to approve their launch.`;
     }
     case "sign_in_required": {
       const accounts = runner?.providerAccounts?.filter((account) => account.authStatus === "unauthenticated").length ?? 0;
       if (accounts > 0) return `${plural(accounts, "account needs", "accounts need")} to sign in again.`;
-      const signedOut = agents.filter(agentNeedsSignIn);
-      return signedOut.length === 1 ? `${signedOut[0]!.name} needs you to sign in.` : `${signedOut.length} agents need you to sign in.`;
+      const signedOut = machineAgentsWithStatus(agents, "sign_in_required");
+      return signedOut.length === 1 ? `${name(signedOut[0]!)} needs you to sign in.` : `${signedOut.length} agents need you to sign in.`;
     }
     default:
       // Connecting, Bootstrapping or Deploying, yet counted by the rail's dot.

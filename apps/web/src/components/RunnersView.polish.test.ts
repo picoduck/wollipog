@@ -11,6 +11,8 @@ const onboarding = readFileSync(new URL("./SetUpThisMachineDialog.tsx", import.m
 const install = readFileSync(new URL("./InstallManuallyDialog.tsx", import.meta.url), "utf8");
 const repair = readFileSync(new URL("./RepairConnectionDialog.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+const agents = readFileSync(new URL("./MachineAgentsSection.tsx", import.meta.url), "utf8");
+const agentHelpers = readFileSync(new URL("../machine-agents.ts", import.meta.url), "utf8");
 
 test("Connections separates machines from people and exposes durable machine recovery", () => {
   // The shared tab row (§10.1) owns role="tablist"; it sits in the page header's tab slot.
@@ -51,7 +53,9 @@ test("People and device tasks use progressive disclosure and only Agents collaps
   assert.doesNotMatch(access, /device-pair-row/);
   // One detail for every machine (#2988): the spec sheet moved into Connection Details.
   assert.doesNotMatch(view, /runner-meta|runner-system-meta/);
-  assert.match(view, /<details className="runner-agents disclosure">/);
+  // Agents are a section of rows, not a disclosure of cards (#2990).
+  assert.match(view, /<MachineAgentsSection runner=\{runner\}/);
+  assert.doesNotMatch(view, /runner-agents disclosure|runner-agents-summary/);
   assert.doesNotMatch(view, /<details className="runner-details">/);
   assert.match(machine, /export function MachineDetail\(/);
   assert.doesNotMatch(view, /export function (BoxCard|NativeRunnerCard)\(/);
@@ -153,18 +157,22 @@ test("Find Agent Sessions sizes to its content and sets no uppercase text (#2994
 });
 
 test("a Codex exec agent reads as no longer supported, never as a fallback (#3224, #3259)", () => {
-  assert.match(view, /isRetiredCodexExec\(a\) && \(\s*<span className="atag broken"[^>]*>No Longer Supported/);
-  assert.doesNotMatch(view, /Fallback Ready|Non-Interactive Fallback|Existing Sessions Only/);
+  // Its one status is Unavailable, and Agent Details says how to fix the configuration (#2990).
+  assert.match(agentHelpers, /if \(isRetiredCodexExec\(agent\)\) return notice\(CODEX_EXEC_RETIRED_CONFIG_REASON\)/);
+  for (const source of [view, agents, agentHelpers]) {
+    assert.doesNotMatch(source, /Fallback Ready|Non-Interactive Fallback|Existing Sessions Only/);
+  }
 });
 
-test("agent cards progressively disclose launch diagnostics with icon-only copy controls", () => {
-  assert.match(view, /<AgentDetailsDialog a=\{a\}/);
-  assert.match(view, /title=\{`\$\{displayName\} Details`\}/);
-  assert.match(view, /<h3>Launch Command<\/h3>/);
-  assert.match(view, /iconOnly/);
-  assert.match(view, /<InfoIcon \/>/);
-  assert.doesNotMatch(view, /\{contextLabel\(a\.context\)\} launch:/);
-  assert.match(css, /\.agent-details-command/);
+test("agent rows open Agent Details, which keeps launch diagnostics and their icon-only copy controls (#2990)", () => {
+  assert.match(agents, /<button type="button" className="row row-2" aria-haspopup="dialog"/);
+  assert.match(agents, /title=\{name\}\s*description=\{`On \$\{machineName\}`\}/);
+  assert.match(agents, />Launch Command<\/h3>/);
+  assert.match(agents, /<CodeWell value=\{launch\.command\} name=\{`\$\{name\} Launch Command`\} \/>/);
+  // No chips, dots, info buttons or inline guidance in the rows, and no retired classes left behind.
+  assert.doesNotMatch(agents, /atag|auth-dot|install-cmd|install-hints|agent-details-|<InfoIcon/);
+  assert.doesNotMatch(view, /AgentDetailsDialog|AgentRow|install-hints|auth-dot|Probing for agent CLIs/);
+  assert.doesNotMatch(css, /\.agent-details-|\.auth-dot|\.install-hints|\.atag\.driver-/);
   assert.match(css, /\.copy-btn\.icon-only-copy/);
   assert.match(css, /\.agent-session-results-step:focus\s*\{\s*outline: none;/);
 });

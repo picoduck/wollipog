@@ -585,8 +585,9 @@ test("a colour-only rule clears AA on the fill its own element's base rule paint
   const pairs = impliedFillPairs(css);
   // Thirty-odd since #1802 folded the per-surface badge tone classes (`.st-running` and the rest)
   // into the status recipe, whose tones the paired check above measures one by one, and two fewer
-  // since Set Up This Machine (#2993) dropped the local runner's ✓ and ! marks.
-  assert.ok(pairs.length >= 20,`expected many colour-only rules over a base fill, found ${pairs.length}`);
+  // since Set Up This Machine (#2993) dropped the local runner's ✓ and ! marks, and four fewer since
+  // the agent rows (#2990) dropped their per-driver `.atag` tints.
+  assert.ok(pairs.length >= 16,`expected many colour-only rules over a base fill, found ${pairs.length}`);
   for (const chip of [".atag.broken", ".atag.discovered"]) {
     assert.ok(pairs.some(({ selector }) => selector === chip), `${chip} must be measured over .atag's fill`);
   }

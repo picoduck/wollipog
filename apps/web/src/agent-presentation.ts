@@ -1,12 +1,14 @@
 import {
   builtInAgentHarnessName,
-  CODEX_EXEC_RETIRED_CONFIG_REASON,
+  isRetiredCodexExec,
+  type AgentContext,
   type AgentDefinition,
   type AgentDriverKind,
   type AgentHarnessIdentity,
   type ModelResolutionDrift,
   type OrchestratorHarnessCapability,
 } from "@wollipog/protocol";
+import { RUNNER_REASON_PATTERNS } from "./components/agent-options.js";
 
 /** "A", "A and B", or "A, B and C". */
 function listText(items: readonly string[]): string {
@@ -76,28 +78,117 @@ export function isGeneratedCodexAppServerName(name: string): boolean {
   return /^Codex(?: —)? Interactive$/u.test(name);
 }
 
-export function agentDisplayName(agent: AgentDefinition): string {
+function baseAgentName(agent: AgentDefinition): string {
   if (agent.source === "discovered" && agent.driver === "codex") return "Codex (Non-Interactive)";
   if (agent.driver === "codex-app-server" &&
       (agent.source === "discovered" || isGeneratedCodexAppServerName(agent.name))) return "Codex App Server";
   return agent.name;
 }
 
-export function agentDriverDescription(agent: AgentDefinition): string {
-  if (agent.driver === "codex-app-server") {
-    return "Keeps a live Codex connection for resumable conversations, streaming updates, and interactive approval requests.";
+/** What tells an agent from another of the same name, in the order a name tries them: the version,
+ * then where it runs, then its executable, then its id, which is unique. */
+const NAME_QUALIFIERS: ReadonlyArray<(agent: AgentDefinition) => string | null> = [
+  (agent) => agent.version ? `v${agent.version}` : null,
+  (agent) => agentContextLabel(agent.context),
+  (agent) => agent.installation?.path ?? null,
+  (agent) => agent.id,
+];
+
+/**
+ * An agent's name. Given the machine's agents, a name two of them share gets the first qualifier
+ * no namesake has: "Codex App Server (v0.155.1)" beside "Codex App Server (v0.140.0)", or
+ * "Claude Code (WSL: Ubuntu)" when the versions match (#2990).
+ */
+export function agentDisplayName(agent: AgentDefinition, machineAgents?: readonly AgentDefinition[]): string {
+  const name = baseAgentName(agent);
+  const namesakes = machineAgents?.filter((other) => other.id !== agent.id && baseAgentName(other) === name) ?? [];
+  if (namesakes.length === 0) return name;
+  for (const qualifier of NAME_QUALIFIERS) {
+    const own = qualifier(agent);
+    if (own && namesakes.every((other) => qualifier(other) !== own)) return `${name} (${own})`;
   }
-  if (agent.driver === "codex") return CODEX_EXEC_RETIRED_CONFIG_REASON;
-  if (agent.driver === "claude-code") {
-    return "Uses the native Claude Code integration and its local session history.";
-  }
-  if (agent.driver === "pi") {
-    return "Uses Pi's persistent RPC mode for streaming, tools, steering, extension questions, and local session history.";
-  }
-  return "Uses the configured ACP adapter and its session capabilities.";
+  return `${name} (${agent.id})`;
 }
+
+/** Where an agent runs: "Native", or its WSL distribution ("WSL: Ubuntu"). */
+export function agentContextLabel(context: AgentContext | undefined): string {
+  return context?.kind === "wsl" ? `WSL: ${context.distro}` : "Native";
+}
+
 
 /** Friendly driver name for status surfaces. Raw protocol ids remain useful in logs and CSS only. */
 export function agentDriverLabel(agent: AgentDefinition): string {
   return driverKindLabel(agent.driver ?? "acp", Boolean(agent.registry));
+}
+
+/** Where an installation stands against its releases; on a machine that is not online, as it last
+ * reported. */
+export function harnessUpdateLabel(update: NonNullable<AgentDefinition["update"]>, online: boolean): string {
+  const label = update.evidenceSource === "Machine pinned-version policy" ? "Pinned by Machine Policy"
+    : update.evidenceSource === "Machine update-check policy" ? "Checks Disabled by Machine Policy"
+    : ({
+    update_available: "New Release Published",
+    up_to_date: "Up to Date",
+    check_failed: "Check Failed",
+    version_unknown: "Version Unknown",
+    preview_channel: "Preview Channel",
+    managed_externally: "Managed Externally",
+  } as const)[update.status];
+  return online ? label : `Last Reported: ${label}`;
+}
+
+/**
+ * An agent's one status on its machine (docs/design-system.md §11.2), a `statusMeta("agent", …)`
+ * key. The agent rows, Agent Details, the Machines list and the All Machines overview all read it.
+ */
+export type AgentStatus =
+  | "ready"
+  | "not_installed"
+  | "sign_in_required"
+  | "update_required"
+  | "approval_required"
+  | "unavailable"
+  | "ready_when_last_seen";
+
+/** Diagnoses of the check rather than the installation: checking again fixes them, not an update. */
+const CHECK_FAILURES: ReadonlySet<string> = new Set(["probe_timeout", "probe_failed"]);
+
+function checkFailed(failure: { code: string; retryable?: boolean } | undefined): boolean {
+  return failure?.retryable === true || CHECK_FAILURES.has(failure?.code ?? "");
+}
+
+/** The installed CLI is too old, or too new to verify, for the integration Wollipog drives it by. */
+function agentNeedsUpdate(agent: AgentDefinition): boolean {
+  const codex = agent.codexAppServer;
+  if (codex?.status === "unsupported" && !checkFailed(codex.failure)) return true;
+  const claude = agent.claudeCode;
+  // Claude Code without Git for Windows Bash is unsupported too, but no update fixes that.
+  if (claude?.status === "unsupported" && !checkFailed(claude.failure) &&
+      !RUNNER_REASON_PATTERNS.gitBash.test(claude.failure?.message ?? "")) return true;
+  return RUNNER_REASON_PATTERNS.updatePi.test(agent.unavailableReason ?? "");
+}
+
+function reportedAgentStatus(agent: AgentDefinition): Exclude<AgentStatus, "ready_when_last_seen"> {
+  // The retired Codex exec driver (#3259) never runs, whatever an older runner reports for it.
+  if (isRetiredCodexExec(agent)) return "unavailable";
+  if (agent.claudeCode?.status === "unavailable" || agent.codexAppServer?.status === "unavailable" ||
+      RUNNER_REASON_PATTERNS.notInstalled.test(agent.unavailableReason ?? "") ||
+      (agent.registry?.installStatus === "manual-only" && agent.available !== true)) return "not_installed";
+  if (agentNeedsUpdate(agent)) return "update_required";
+  if (agent.registry?.installStatus === "approval-required") return "approval_required";
+  if (agent.authStatus === "unauthenticated" || agent.claudeCode?.status === "unauthenticated") return "sign_in_required";
+  if (agent.available !== true || agent.registry?.installStatus === "unsupported-platform" ||
+      (agent.claudeCode && agent.claudeCode.status !== "ready") ||
+      (agent.codexAppServer && agent.codexAppServer.status !== "supported")) return "unavailable";
+  return "ready";
+}
+
+/**
+ * The one status an agent shows, the most limiting first: Not Installed, Update Required, Approval
+ * Required, Sign-In Required, Unavailable, then Ready. A ready agent on a machine that is not online
+ * reads Ready When Last Seen: it was ready, but nothing current says it still is.
+ */
+export function agentStatus(agent: AgentDefinition, online = true): AgentStatus {
+  const status = reportedAgentStatus(agent);
+  return status === "ready" && !online ? "ready_when_last_seen" : status;
 }

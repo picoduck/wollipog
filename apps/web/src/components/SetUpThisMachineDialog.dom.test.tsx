@@ -290,7 +290,8 @@ test("Set Up This Machine starts on open, shows its checklist with icons, then t
       row.querySelector(".status")?.textContent,
     ]), [
       ["Codex", "Native", "Ready"],
-      ["Claude Code", "WSL: Ubuntu", "Needs Attention"],
+      // The machine's own agent vocabulary (#2990): what the agent needs, not "Needs Attention".
+      ["Claude Code", "WSL: Ubuntu", "Sign-In Required"],
     ]);
     assertNoDomNode(dialog().querySelector(".onboard-local-agents"), "no chip strip");
     assertOnePrimaryInFooter("Done");
