@@ -56,6 +56,7 @@ test("retention reduces compacted disk bytes, keeps audit/resume/accounting evid
     const started = performance.now();
     const result = await f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq }, "trim");
     assert.equal(result.trimmed, true);
+    assert.equal(result.cleanupComplete, true);
     t.diagnostic(JSON.stringify({ inputBytes: before, retainedBytes: diskBytes(f.root), copyMs: performance.now() - started }));
     assert.ok(diskBytes(f.root) < before / 10, JSON.stringify(readdirSync(join(f.root, "s_test")).map(name => [name, statSync(join(f.root, "s_test", name)).size])));
     const restarted = new SessionStore(f.root);
@@ -237,9 +238,12 @@ test("failed unlinks do not claim reclaimed disk bytes and a later pass retries 
     const result = await f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq }, "trim");
     assert.equal(result.trimmed, true);
     assert.equal(result.bytesRemoved, 0);
+    assert.equal(result.cleanupComplete, false);
     fsPromises.unlink = originalUnlink;
     syncBuiltinESMExports();
-    assert.ok((await f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq }, "retry")).bytesRemoved > 0);
+    const retry = await f.store.trimHistory("s_test", { logEpoch: 0, throughSeq: f.throughSeq }, "retry");
+    assert.ok(retry.bytesRemoved > 0);
+    assert.equal(retry.cleanupComplete, true);
     assert.ok(diskBytes(f.root) < 10_000);
   } finally {
     fsPromises.unlink = originalUnlink;

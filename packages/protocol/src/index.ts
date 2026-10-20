@@ -8906,6 +8906,8 @@ export interface TrimSessionHistoryResultMessage {
   sessionId: string;
   ok: boolean;
   trimmed?: boolean;
+  /** Explicit confirmation that superseded files were removed. Missing on older runners; retry. */
+  cleanupComplete?: boolean;
   /** Bytes successfully unlinked from superseded files, excluding new-file allocations. */
   bytesRemoved?: number;
   error?: string;

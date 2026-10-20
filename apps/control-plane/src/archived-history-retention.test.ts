@@ -827,7 +827,7 @@ for (const protocol of [228, 229, 230, PROTOCOL_VERSION]) {
         isRunnerOnline: () => true,
         requestFromRunner: async (_runnerId, requestId, msg) => {
           sent.push(msg);
-          return { type: "trim_session_history_result", requestId, sessionId: "runner-pruned", ok: true, trimmed: true, bytesRemoved: 1234 };
+          return { type: "trim_session_history_result", requestId, sessionId: "runner-pruned", ok: true, trimmed: true, cleanupComplete: true, bytesRemoved: 1234 };
         },
       } });
     try {
@@ -853,12 +853,12 @@ for (const protocol of [228, 229, 230, PROTOCOL_VERSION]) {
           assert.equal(msg.throughSeq, transcript.runnerSeq);
         }
         assert.ok(db.getSession("runner-pruned")!.historyPruned);
-        // A retry/reconnect also visits prunes completed before the capable runner was online.
+        // A confirmed complete trim must not be sent again on an unchanged pass.
         await subject.runPass();
-        assert.equal(sent.length, 2);
+        assert.equal(sent.length, 1, "a completed trim is not resent");
         subject.update(ORG, null, null);
         await subject.runPass();
-        assert.equal(sent.length, 2, "turning retention off immediately stops new runner requests");
+        assert.equal(sent.length, 1, "turning retention off immediately stops new runner requests");
       }
     } finally { subject.stop(); db.close(); }
   });
@@ -892,3 +892,225 @@ test("runner trimming defers an incompletely hydrated or unarchived session", as
     assert.equal(calls, 0);
   } finally { subject.stop(); db.close(); }
 });
+
+function prepareRunnerTrim(db: ControlPlaneDb, id: string): number {
+  createSession(db, id);
+  const { runnerSeq } = appendTranscript(db, id, 2);
+  db.reconcileRunnerHistory(id, 1, runnerSeq);
+  db.setHydratedSeq(id, runnerSeq);
+  archive(db, id, T0);
+  return runnerSeq;
+}
+
+test("105 completed runner trims send no requests on later passes or after database reopen", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runner-trim-receipts-"));
+  const location = join(root, "control-plane.db");
+  let db = openDb(location, PROTOCOL_VERSION);
+  const clock = new Clock();
+  let calls = 0;
+  const makeSubject = () => new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+    now: () => clock.now, sleep: clock.sleep, hub: {
+      isRunnerOnline: () => true,
+      requestFromRunner: async (_runner, requestId, message) => {
+        assert.equal(message.type, "trim_session_history");
+        if (message.type !== "trim_session_history") throw new Error("unexpected request");
+        calls++;
+        return { type: "trim_session_history_result", requestId, sessionId: message.sessionId,
+          ok: true, trimmed: true, cleanupComplete: true };
+      },
+    } });
+  let subject = makeSubject();
+  try {
+    for (let i = 0; i < 105; i++) prepareRunnerTrim(db, `trim-${String(i).padStart(3, "0")}`);
+    clock.now = T0 + 100 * DAY;
+    subject.update(ORG, 90, null);
+    clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+    await subject.runPass();
+    assert.equal(calls, 105, "all pages are acknowledged");
+    assert.deepEqual(db.runnerHistoryTrimCandidates(ORG, clock.now - 90 * DAY, "", 200), []);
+    await subject.runPass();
+    assert.equal(calls, 105, "N unchanged sessions cause zero new requests");
+    subject.stop(); db.close();
+    db = openDb(location, PROTOCOL_VERSION);
+    subject = makeSubject();
+    await subject.runPass();
+    assert.equal(calls, 105, "receipts survive a control-plane restart");
+  } finally { subject.stop(); db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const firstResult of ["incomplete", "legacy", "failed", "throw", "wrong-session", "wrong-request", "offline"] as const) {
+  test(`runner trim retries ${firstResult} results before recording completion`, async () => {
+    const db = openDb(":memory:", PROTOCOL_VERSION);
+    const clock = new Clock();
+    let calls = 0;
+    let online = firstResult !== "offline";
+    const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+      now: () => clock.now, sleep: clock.sleep, hub: {
+        isRunnerOnline: () => online,
+        requestFromRunner: async (_runner, requestId) => {
+          calls++;
+          if (calls === 1 && firstResult === "throw") throw new Error("runner unavailable");
+          return { type: "trim_session_history_result",
+            requestId: calls === 1 && firstResult === "wrong-request" ? "other" : requestId,
+            sessionId: calls === 1 && firstResult === "wrong-session" ? "other" : "retry",
+            ok: calls !== 1 || firstResult !== "failed", trimmed: true,
+            ...(calls === 1 && firstResult === "legacy" ? {} : {
+              cleanupComplete: calls !== 1 || firstResult !== "incomplete",
+            }) };
+        },
+      } });
+    try {
+      prepareRunnerTrim(db, "retry");
+      clock.now = T0 + 100 * DAY;
+      subject.update(ORG, 90, null);
+      clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+      await subject.runPass();
+      assert.equal(db.runnerHistoryTrimCandidates(ORG, clock.now - 90 * DAY, "", 1).length, 1);
+      online = true;
+      await subject.runPass();
+      await subject.runPass();
+      assert.equal(calls, firstResult === "offline" ? 1 : 2);
+    } finally { subject.stop(); db.close(); }
+  });
+}
+
+test("runner receipts are invalidated by an advanced boundary, restored cache and replacement epoch", async () => {
+  const db = openDb(":memory:", PROTOCOL_VERSION);
+  const clock = new Clock();
+  const sent: Array<{ logEpoch: number; throughSeq: number }> = [];
+  const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+    now: () => clock.now, sleep: clock.sleep, hub: {
+      isRunnerOnline: () => true,
+      requestFromRunner: async (_runner, requestId, message) => {
+        if (message.type !== "trim_session_history") throw new Error("unexpected request");
+        sent.push(message);
+        return { type: "trim_session_history_result", requestId, sessionId: "changes", ok: true,
+          trimmed: true, cleanupComplete: true };
+      },
+    } });
+  try {
+    let tail = prepareRunnerTrim(db, "changes");
+    clock.now = T0 + 100 * DAY;
+    subject.update(ORG, 90, null);
+    clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+    await subject.runPass();
+    tail = appendTranscript(db, "changes", 1, { runnerSeq: tail, start: clock.now }).runnerSeq;
+    db.reconcileRunnerHistory("changes", 1, tail);
+    db.setHydratedSeq("changes", tail);
+    await subject.runPass();
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1]!.throughSeq, tail);
+
+    db.clearSessionEvents("changes");
+    tail = appendTranscript(db, "changes", 3).runnerSeq;
+    db.reconcileRunnerHistory("changes", 1, tail);
+    db.setHydratedSeq("changes", tail);
+    await subject.runPass();
+    assert.equal(sent.length, 3, "same runner coordinates still retry after cache restoration");
+    assert.equal(sent[2]!.throughSeq, sent[1]!.throughSeq);
+
+    db.reconcileRunnerHistory("changes", 2, 3);
+    for (const [index, payload] of ([{ kind: "user_message", text: "new" },
+      { kind: "command_output", text: "discard" }, { kind: "agent_message", text: "answer" }] as SessionEventPayload[]).entries()) {
+      db.appendEvent("changes", payload, clock.now + index, { runnerSeq: index + 1, historyEpoch: 2 });
+    }
+    db.setHydratedSeq("changes", 3);
+    await subject.runPass();
+    await subject.runPass();
+    assert.equal(sent.length, 4);
+    assert.equal(sent[3]!.logEpoch, 2);
+  } finally { subject.stop(); db.close(); }
+});
+
+test("a stale runner reply cannot acknowledge a restored history at identical coordinates", async () => {
+  const db = openDb(":memory:", PROTOCOL_VERSION);
+  const clock = new Clock();
+  let calls = 0;
+  const receipts: boolean[] = [];
+  const subject = new ArchivedHistoryRetention(db, { env: {},
+    log: { warn() {}, info(details) {
+      if ("receiptRecorded" in details) receipts.push(Boolean(details.receiptRecorded));
+    } }, now: () => clock.now, sleep: clock.sleep, hub: {
+      isRunnerOnline: () => true,
+      requestFromRunner: async (_runner, requestId) => {
+        if (++calls === 1) {
+          db.clearSessionEvents("stale");
+          const { runnerSeq } = appendTranscript(db, "stale", 2);
+          db.reconcileRunnerHistory("stale", 1, runnerSeq);
+          db.setHydratedSeq("stale", runnerSeq);
+        }
+        return { type: "trim_session_history_result", requestId, sessionId: "stale", ok: true,
+          trimmed: true, cleanupComplete: true };
+      },
+    } });
+  try {
+    prepareRunnerTrim(db, "stale");
+    clock.now = T0 + 100 * DAY;
+    subject.update(ORG, 90, null);
+    clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+    await subject.runPass();
+    await subject.runPass();
+    await subject.runPass();
+    assert.equal(calls, 2);
+    assert.deepEqual(receipts, [false, true], "structured telemetry distinguishes discarded stale receipts");
+  } finally { subject.stop(); db.close(); }
+});
+
+for (const cancel of ["none", "stop", "policy", "unarchive", "stop-intent"] as const) {
+  test(`a slow runner does not hold up another organization or runner; cancellation=${cancel}`, async () => {
+    const db = openDb(":memory:", PROTOCOL_VERSION);
+    const clock = new Clock();
+    const otherOrg = "z-other";
+    const fastRunner = "z-fast";
+    db.raw().prepare("INSERT INTO identity_organizations VALUES (?, ?, ?, ?)").run(otherOrg, "Other", T0, T0);
+    db.registerRunner({ ...runnerMeta(), runnerId: fastRunner }, T0, PROTOCOL_VERSION);
+    db.registerRunner({ ...runnerMeta(), runnerId: "offline" }, T0, PROTOCOL_VERSION);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let notifyFast!: () => void;
+    const fastSent = new Promise<void>((resolve) => { notifyFast = resolve; });
+    const sent: string[] = [];
+    let activeSlow = 0;
+    const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+      now: () => clock.now, sleep: clock.sleep, hub: {
+        isRunnerOnline: (id) => id !== "offline",
+        requestFromRunner: async (runnerId, requestId, message) => {
+          if (message.type !== "trim_session_history") throw new Error("unexpected request");
+          sent.push(message.sessionId);
+          if (runnerId === RUNNER_ID) {
+            assert.equal(activeSlow++, 0, "one request per runner across organizations");
+            await blocked;
+            activeSlow--;
+          } else notifyFast();
+          return { type: "trim_session_history_result", requestId, sessionId: message.sessionId,
+            ok: true, trimmed: true, cleanupComplete: true };
+        },
+      } });
+    let running: Promise<unknown> | undefined;
+    try {
+      for (const id of ["slow-a", "slow-b", "fast", "offline-session"]) prepareRunnerTrim(db, id);
+      db.raw().prepare("UPDATE sessions SET runner_id=? WHERE id='fast'").run(fastRunner);
+      db.raw().prepare("UPDATE sessions SET runner_id='offline' WHERE id='offline-session'").run();
+      db.raw().prepare("UPDATE session_ownership SET organization_id=? WHERE session_id IN ('slow-b','fast')").run(otherOrg);
+      clock.now = T0 + 100 * DAY;
+      subject.update(ORG, 90, null); subject.update(otherOrg, 90, null);
+      clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+      running = subject.runPass();
+      await Promise.race([fastSent, new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("fast runner blocked behind slow runner")), 5_000);
+        timer.unref();
+      })]);
+      assert.deepEqual(sent, ["slow-a", "fast"]);
+      if (cancel === "stop") subject.stop();
+      if (cancel === "policy") subject.update(otherOrg, null, null);
+      if (cancel === "unarchive") db.setSessionArchived("slow-b", false, clock.now);
+      if (cancel === "stop-intent") {
+        db.raw().prepare(`INSERT INTO session_stop_intents (session_id, runner_id, created_at, archive_after_stop, operation_id)
+          VALUES ('slow-b', ?, ?, 0, 'stop-trim')`).run(RUNNER_ID, clock.now);
+      }
+      release();
+      await running;
+      assert.deepEqual(sent, cancel === "none" ? ["slow-a", "fast", "slow-b"] : ["slow-a", "fast"]);
+    } finally { release(); await running; subject.stop(); db.close(); }
+  });
+}

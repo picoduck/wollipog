@@ -212,8 +212,24 @@ export class ArchivedHistoryRetention {
         if (armed) this.db.recordArchivedHistoryRetentionRun(organizationId, this.now(), pruned.sessions, pruned.events);
         result.sessions += pruned.sessions;
         result.events += pruned.events;
-        await this.trimRunnerHistories(organizationId);
       }
+      // One serial worker per capable online runner, across organizations. A slow runner never
+      // holds up another runner, and no runner accumulates concurrent copies or queued promises.
+      await Promise.all(this.db.listRunners().filter((runner) =>
+        this.options.hub?.isRunnerOnline(runner.runnerId) &&
+        runnerSupportsProtocol(runner.protocolVersion, "runnerHistoryRetention"))
+        .map(async (runner) => {
+          try {
+            for (const organizationId of this.db.listOrganizationIds()) {
+              if (this.stopped) break;
+              await this.trimRunnerHistories(organizationId, runner.runnerId);
+            }
+          } catch (error) {
+            // Finish the other workers before ending this pass, even if a candidate query fails.
+            this.options.log.warn({ event: "runner_history_retention_deferred", runnerId: runner.runnerId,
+              error: error instanceof Error ? error.message : String(error) }, "runner history trim worker deferred");
+          }
+        }));
     } catch (error) {
       this.options.log.warn({ error: error instanceof Error ? error.message : String(error) },
         "archived history retention pass deferred");
@@ -227,7 +243,7 @@ export class ArchivedHistoryRetention {
     return result;
   }
 
-  private async trimRunnerHistories(organizationId: string): Promise<void> {
+  private async trimRunnerHistories(organizationId: string, runnerId: string): Promise<void> {
     const hub = this.options.hub;
     if (!hub) return;
     let afterId = "";
@@ -235,7 +251,7 @@ export class ArchivedHistoryRetention {
       const policy = this.policy(organizationId);
       if (!this.armed(policy)) return;
       const candidates = this.db.runnerHistoryTrimCandidates(organizationId,
-        this.now() - policy.retentionDays * DAY_MS, afterId, CANDIDATES_PER_PAGE);
+        this.now() - policy.retentionDays * DAY_MS, afterId, CANDIDATES_PER_PAGE, null, runnerId);
       if (!candidates.length) return;
       for (const candidate of candidates) {
         afterId = candidate.id;
@@ -244,7 +260,7 @@ export class ArchivedHistoryRetention {
         // Refresh eligibility after the preceding asynchronous request: policy relaxation,
         // unarchive, Stop and delayed hydration must all cancel a not-yet-issued trim.
         const fresh = this.db.runnerHistoryTrimCandidates(organizationId,
-          this.now() - currentPolicy.retentionDays * DAY_MS, "", 1, candidate.id)[0];
+          this.now() - currentPolicy.retentionDays * DAY_MS, "", 1, candidate.id, runnerId)[0];
         if (!fresh || !hub.isRunnerOnline(fresh.runnerId) ||
             !runnerSupportsProtocol(this.db.getRunner(fresh.runnerId)?.protocolVersion, "runnerHistoryRetention")) continue;
         const requestId = `trim_${randomUUID()}`;
@@ -253,12 +269,15 @@ export class ArchivedHistoryRetention {
             type: "trim_session_history", requestId, sessionId: fresh.id,
             logEpoch: fresh.logEpoch, throughSeq: fresh.throughSeq,
           }, 15 * 60_000);
-          if (result.type !== "trim_session_history_result" || !result.ok || !result.trimmed) {
+          if (result.type !== "trim_session_history_result" || result.requestId !== requestId ||
+              result.sessionId !== fresh.id || !result.ok || !result.trimmed || result.cleanupComplete !== true) {
             this.options.log.info({ event: "runner_history_retention_deferred", sessionId: fresh.id, requestId },
               "runner history trim deferred until a later pass");
-          } else if ((result.bytesRemoved ?? 0) > 0) {
+          } else {
+            const recorded = this.db.recordRunnerHistoryTrim(fresh, this.now());
             this.options.log.info({ event: "runner_history_retention", sessionId: fresh.id, requestId,
-              bytesRemoved: result.bytesRemoved, throughSeq: fresh.throughSeq }, "runner history trimmed");
+              runnerId, logEpoch: fresh.logEpoch, throughSeq: fresh.throughSeq,
+              bytesRemoved: result.bytesRemoved ?? 0, receiptRecorded: recorded }, "runner history trim completed");
           }
         } catch {
           this.options.log.warn({ event: "runner_history_retention_deferred", sessionId: fresh.id, requestId },

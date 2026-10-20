@@ -221,8 +221,17 @@ runner trimming: off by default, 7–3650 whole days after archiving (suggested 
 `CONTROL_PLANE_ARCHIVED_HISTORY_RETENTION_DAYS` default, and the same 24-hour delay on enable or
 shorten. After the control plane finishes pruning a fully hydrated, archived, settled session with
 no Stop pending, it asks its capable runner to trim through that exact runner epoch and sequence.
-There is no additional grace period. A pass also retries already-pruned sessions, so offline
-runners catch up when online.
+There is no additional grace period. The control plane saves a durable completion receipt only
+when the runner explicitly confirms that both trimming and deletion of superseded files are
+complete. Later hourly passes skip that session while its runner log epoch, trim sequence and
+cached-history generation are unchanged, including after a control-plane restart.
+
+A failed request, offline runner, incomplete cleanup or older runner without explicit cleanup
+confirmation stays retryable. Replacing or restoring history clears the receipt; a new log epoch
+or an advanced trim boundary also requires another confirmation. Eligibility and policy are checked
+again immediately before each request, so turning retention off stops new requests. Each runner
+receives at most one trim request at a time; other runners progress independently, including across
+organizations. A pass waits for its outstanding requests before the next hourly interval begins.
 
 **Upgrade effect:** an organization that already enabled archived-history retention also enables
 runner trimming as soon as both components support it. An already-armed policy does not receive
