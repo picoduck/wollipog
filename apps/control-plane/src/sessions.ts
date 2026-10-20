@@ -9054,10 +9054,11 @@ export class SessionsService {
         return ok(previous);
       }
     }
+    // Eligibility is the same direct authority that resolution checks: the saved owner under Custom,
+    // the current campaign boundary under Full Control, where the root's saved owner plays no part (#1321).
     if (!child || !controller || !canAccess(child.id) || !canAccess(controller.session.id) ||
-        controller.policy.decisions.ui_evidence_approval !== "orchestrator" ||
-        evaluateUiEvidenceReviewClient(this.db.uiEvidenceReviewClient(
-          controller.session, controller.policy.decisions.ui_evidence_approval,
+        evaluateUiEvidenceReviewClient(this.db.uiEvidenceReviewClient(controller.session,
+          this.campaignDecisionOwner(controller.session, controller.policy, sessionId, normalized.data),
         )).effectiveOwner !== "orchestrator") {
       return this.createWorkflowDecision(sessionId, request, canAccess);
     }
@@ -10428,6 +10429,20 @@ export class SessionsService {
     return owner === "orchestrator" ? { effectiveOwner: "orchestrator", limitation: direct.fallback } : direct;
   }
 
+  /** The decision's owner by policy alone, before any evidence or review-client check: the saved
+   * owner under Custom, the current campaign boundary under Full Control. */
+  private campaignDecisionOwner(
+    controller: SessionView,
+    policy: ParentControlPolicy,
+    childSessionId: string,
+    snapshot: WorkflowDecisionResourceSnapshot,
+  ): WorkflowDecisionAuthority {
+    const requester = this.db.getSession(childSessionId);
+    return requester ? evaluateCampaignAuthority(controller, requester,
+      this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
+      this.campaignPeerContracts(controller, requester.id)).owner : "human";
+  }
+
   /** Whether the Orchestrator can inspect every evidence item itself, before Full Control routing. */
   private directWorkflowDecisionAuthority(
     controller: SessionView,
@@ -10435,10 +10450,7 @@ export class SessionsService {
     childSessionId: string,
     snapshot: WorkflowDecisionResourceSnapshot,
   ): UiEvidenceReviewEvaluation {
-    const requester = this.db.getSession(childSessionId);
-    const authority = requester ? evaluateCampaignAuthority(controller, requester,
-      this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
-      this.campaignPeerContracts(controller, requester.id)).owner : "human";
+    const authority = this.campaignDecisionOwner(controller, policy, childSessionId, snapshot);
     if (snapshot.category !== "ui_evidence_approval") {
       return { effectiveOwner: authority };
     }
