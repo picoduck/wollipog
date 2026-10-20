@@ -749,8 +749,12 @@ test("editing a pinned automation shows its rediscovered installation instead of
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
   try {
     await openPage(fixture, "Pinned Sweep");
-    await openEdit(fixture);
     const agentLabel = (id: string) => agentDisplayName(machine.agents.find((agent) => agent.id === id)!, machine.agents);
+    // The page names the agent the scheduler will start: the rediscovered installation's, not the
+    // stored id's, which now names another agent (CR-1.2).
+    assert.equal(fixture.container.querySelector(".automation-sentence")?.textContent,
+      `Starts ${agentLabel("system-new")} in runner-1-workspace on runner-1.`);
+    await openEdit(fixture);
     assert.equal(shownValue(fixture.container, "Agent"), agentLabel("system-new"));
     await setLabeledInput(fixture.container, "Name", "Pinned Sweep Renamed");
     await saveChanges(fixture);

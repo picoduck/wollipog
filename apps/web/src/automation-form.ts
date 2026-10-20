@@ -9,6 +9,7 @@ import type {
   SessionConfig,
 } from "@wollipog/protocol";
 import { agentDisplayName } from "./agent-presentation.js";
+import { resolvedInstallationAgentId } from "./automation-installations.js";
 import {
   automationProjectPlacement,
   validateAutomationAlternatePlacement,
@@ -463,31 +464,45 @@ function zonedParts(instant: number, timeZone: string): Record<string, string> {
   }).formatToParts(new Date(instant)).map((part) => [part.type, part.value]));
 }
 
-/** `timeZone`'s offset from UTC at `instant`, in milliseconds. */
+/** `timeZone`'s offset from UTC at `instant` (a whole minute), in milliseconds: its wall clock less it. */
 function zoneOffset(instant: number, timeZone: string): number {
   const parts = zonedParts(instant, timeZone);
-  const wall = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute));
-  return wall - Math.floor(instant / 60_000) * 60_000;
+  return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute)) - instant;
 }
 
-/** The instant a wall-clock minute in `timeZone` names. */
-function zonedInstant(year: number, month: number, day: number, hour: number, minute: number, timeZone: string): number {
-  const wall = Date.UTC(year, month - 1, day, hour, minute);
-  const first = wall - zoneOffset(wall, timeZone);
-  return wall - zoneOffset(first, timeZone);
+/**
+ * The instant a wall-clock minute in `timeZone` names, or null for a minute the zone skips (a
+ * spring-forward gap). The same four-step convergence the scheduler uses (`localEpoch` in the
+ * control plane's automation-schedule.ts), so a minute a fall-back repeats resolves to the one
+ * occurrence the scheduler runs, and a skipped minute is skipped here as it is there.
+ */
+function zonedInstant(year: number, month: number, day: number, hour: number, minute: number, timeZone: string): number | null {
+  const desired = Date.UTC(year, month - 1, day, hour, minute);
+  let guess = desired;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const delta = desired - (guess + zoneOffset(guess, timeZone));
+    if (delta === 0) return guess;
+    guess += delta;
+  }
+  return guess + zoneOffset(guess, timeZone) === desired ? guess : null;
 }
 
-/** The first run of `pattern` after `now`, or null when none falls within the next 400 days. */
+/**
+ * The first run of `pattern` after `now`, as the scheduler finds it: the earliest instant after
+ * `now` on the first local day that has one, or null when none falls within the next 400 days.
+ */
 function nextRun(pattern: SchedulePattern, timeZone: string, now: number): number | null {
   const today = zonedParts(now, timeZone);
   for (let offset = 0; offset <= 400; offset += 1) {
     const date = new Date(Date.UTC(Number(today.year), Number(today.month) - 1, Number(today.day) + offset));
     const [year, month, day] = [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()];
     if (!pattern.runsOn(month, day, date.getUTCDay())) continue;
+    let best: number | null = null;
     for (const hour of pattern.hours) {
       const instant = zonedInstant(year, month, day, hour, pattern.minute, timeZone);
-      if (instant > now) return instant;
+      if (instant !== null && instant > now && (best === null || instant < best)) best = instant;
     }
+    if (best !== null) return best;
   }
   return null;
 }
@@ -553,7 +568,13 @@ export function actionSentence(action: AutomationAction, names: ActionNames): st
     const workflow = names.workflowName(action.request.workflowId);
     return `Runs ${workflow ? `the ${workflow} workflow` : "a workflow that isn't available"} ${where}.`;
   }
-  const agentId = action.request.agentId;
+  // The agent the scheduler starts: a saved installation's agent wherever discovery now lists it
+  // (its id can change or be reused), else the stored agent id (resolveSavedTarget, automations.ts).
+  const saved = action.installationBindings?.agent;
+  if (saved && !resolvedInstallationAgentId(runner, saved)) {
+    return `Starts an agent whose saved installation isn't available ${where}.`;
+  }
+  const agentId = saved ? resolvedInstallationAgentId(runner, saved)! : action.request.agentId;
   const agent = runner?.agents.find((candidate) => candidate.id === agentId);
   return `Starts ${agent ? agentDisplayName(agent, runner!.agents) : "an agent that isn't on this machine"} ${where}.`;
 }

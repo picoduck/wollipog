@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   AutomationExecution,
   AutomationSchedule,
@@ -34,6 +34,7 @@ import { StatusBadge } from "./StatusBadge.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
 import { useAutomationPolling } from "./useAutomationPolling.js";
 import { useIsMobile } from "./useIsMobile.js";
+import { useRemovedFocus } from "./useRemovedFocus.js";
 
 /**
  * The automation page's notices, in one table (#2968, docs/design-system.md §13.2): one shows, the
@@ -125,6 +126,49 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
     return () => { mounted.current = false; };
   }, []);
 
+  // Focus after an action (§16.1). An action names where focus goes once it settles; it moves there
+  // only while focus is still on the control that started it, or was lost (that control left the
+  // page, or the clipboard fallback took it). Anywhere else, the person has moved on and keeps it.
+  // A commit that removes the focused control without such an action (Retry's placeholder giving way
+  // to the page) hands focus to the page title. The menu and confirmation portals count as the page.
+  const pageRef = useRef<HTMLDivElement>(null);
+  const removedFocus = useRemovedFocus(pageRef, '[role="menu"], .feedback-confirmation');
+  const pendingFocus = useRef<{ invoker: Element | null; target: () => HTMLElement | null } | null>(null);
+  /** Actions that will still settle focus: a control their own commit removes is theirs to place. */
+  const actionsInFlight = useRef(0);
+  const [, setFocusRevision] = useState(0);
+  const inPage = (selector: string) => pageRef.current?.querySelector<HTMLElement>(selector) ?? null;
+  const pageTitleElement = () => inPage("#page-title");
+  const moreTrigger = () => inPage('.detail-bar button[aria-label="More Actions"]');
+  /** Starts an action that settles focus later; answers the control that started it. */
+  const beginAction = (): Element | null => {
+    actionsInFlight.current += 1;
+    return document.activeElement;
+  };
+  const settleFocus = (invoker: Element | null, target: () => HTMLElement | null) => {
+    actionsInFlight.current = Math.max(0, actionsInFlight.current - 1);
+    if (!mounted.current) return;
+    pendingFocus.current = { invoker, target };
+    setFocusRevision((revision) => revision + 1);
+  };
+  useLayoutEffect(() => {
+    const removed = removedFocus();
+    const doc = pageRef.current?.ownerDocument ?? document;
+    const active = doc.activeElement;
+    const lost = !active || active === doc.body || !active.isConnected;
+    const pending = pendingFocus.current;
+    pendingFocus.current = null;
+    if (pending) {
+      // The page title is the rescue anchor (§16.1): a confirmation that closes while its opener is
+      // busy-disabled parks focus there. That was not the person's move, so the action still places it.
+      if (!lost && active !== pending.invoker && active !== pageTitleElement()) return;
+      const invoker = pending.invoker instanceof HTMLElement && pending.invoker.isConnected ? pending.invoker : null;
+      (pending.target() ?? invoker ?? pageTitleElement())?.focus();
+      return;
+    }
+    if (removed && actionsInFlight.current === 0) pageTitleElement()?.focus();
+  });
+
   // One complete read. The automation commits as soon as it arrives, independently of its triggers
   // and workflows, but the read stays busy until every request settles, even when one fails.
   const load = useCallback(async (current: () => boolean) => {
@@ -184,7 +228,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
         error: error?.source === "poll" ? error.message : null,
       });
     return (
-      <div className="run-detail automation-detail">
+      <div className="run-detail automation-detail" ref={pageRef}>
         <DetailBar title={viewTitle(pageView)} backLabel={backLabel("automations")} onBack={toList} />
         {placeholder.variant === "loading" ? (
           <div className="skeleton automation-glance-skeleton" role="status" aria-live="polite">
@@ -235,10 +279,22 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
     history.querySelector<HTMLElement>("summary")?.focus();
   };
 
-  const togglePause = () => void mutate(
-    () => api.updateAutomation(automationId, { ...specOf(automation), enabled: !automation.enabled }),
-    automation.enabled ? "Automation Not Paused" : "Automation Not Resumed",
-  );
+  // Where focus lands after a trigger action: the revealed secret's Copy Secret, a row's Rotate
+  // Secret, or the Triggers heading once the row it was on is gone.
+  const copySecretButton = () => inPage(".automation-trigger-secret button");
+  const rotateButtonOf = (triggerId: string) => [...pageRef.current?.querySelectorAll<HTMLElement>("[data-trigger-id]") ?? []]
+    .find((row) => row.dataset.triggerId === triggerId)?.querySelector<HTMLElement>(".automation-trigger-actions button") ?? null;
+  const triggersHeading = () => inPage("#automation-triggers");
+  /** The bar's Pause or Resume, or ⋯ where it lives on a phone. */
+  const pauseControl = () => inPage(".detail-bar .detail-bar-action:not(.primary)") ?? moreTrigger();
+
+  const togglePause = () => {
+    const invoker = beginAction();
+    void mutate(
+      () => api.updateAutomation(automationId, { ...specOf(automation), enabled: !automation.enabled }),
+      automation.enabled ? "Automation Not Paused" : "Automation Not Resumed",
+    ).finally(() => settleFocus(invoker, pauseControl));
+  };
 
   const openTriggerCreator = (kind: AutomationTriggerKind) => {
     focusDraft.current = true;
@@ -255,6 +311,8 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
 
   const createTrigger = () => {
     if (!triggerDraft) return;
+    const invoker = beginAction();
+    let created = false;
     void mutate(async () => {
       const parameterNames = [...new Set(triggerDraft.parameterNames.split(",")
         .map((name) => name.trim()).filter(Boolean))];
@@ -270,20 +328,60 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
       });
       setCredential(created);
       setTriggerDraft(null);
-    }, "Trigger Not Created");
+    }, "Trigger Not Created").then((ok) => { created = ok; })
+      // The form, and the Create Trigger that started it, are gone: focus the new secret's Copy Secret.
+      .finally(() => settleFocus(invoker, () => created ? copySecretButton() : null));
+  };
+  const cancelTriggerDraft = () => {
+    settleFocus(beginAction(), moreTrigger);
+    setTriggerDraft(null);
   };
 
-  const rotateTrigger = (triggerId: string) => void mutate(async () => {
-    const rotated = await api.rotateAutomationTrigger(automationId, triggerId);
-    setCredential(rotated);
-  }, "Secret Not Rotated");
+  /** Rotate Secret and Revoke confirm first; the confirmation hands focus back to the row's button. */
+  const rotateTrigger = async (triggerId: string) => {
+    const invoker = beginAction();
+    if (!await confirm({
+      title: "Rotate Signing Secret",
+      message: `The previous signing secret for “${automation.name}” stops working immediately. This cannot be undone.`,
+      confirmLabel: "Rotate Secret",
+      tone: "danger",
+    })) {
+      settleFocus(invoker, () => null);
+      return;
+    }
+    const rotated = await mutate(async () => {
+      setCredential(await api.rotateAutomationTrigger(automationId, triggerId));
+    }, "Secret Not Rotated");
+    settleFocus(invoker, () => rotated ? copySecretButton() : null);
+  };
 
-  const revokeTrigger = (triggerId: string) => void mutate(async () => {
-    await api.deleteAutomationTrigger(automationId, triggerId);
-    setCredential((current) => current?.trigger.triggerId === triggerId ? null : current);
-  }, "Trigger Not Revoked");
+  const revokeTrigger = async (triggerId: string) => {
+    const invoker = beginAction();
+    if (!await confirm({
+      title: "Revoke Signed Trigger",
+      message: `The signed trigger for “${automation.name}” is revoked, and its pending unclaimed deliveries are rejected.`,
+      confirmLabel: "Revoke Trigger",
+      tone: "danger",
+    })) {
+      settleFocus(invoker, () => null);
+      return;
+    }
+    const revoked = await mutate(async () => {
+      await api.deleteAutomationTrigger(automationId, triggerId);
+      setCredential((current) => current?.trigger.triggerId === triggerId ? null : current);
+    }, "Trigger Not Revoked");
+    // Its row is gone with its Revoke button.
+    settleFocus(invoker, () => revoked ? triggersHeading() : null);
+  };
+
+  const hideSecret = (triggerId: string) => {
+    settleFocus(beginAction(), () => rotateButtonOf(triggerId));
+    setCredential(null);
+  };
 
   const remove = async (back?: ConfirmationOptions["back"]) => {
+    // ⋯ has handed focus back to its trigger before calling this.
+    const invoker = beginAction();
     const count = triggers.length;
     const withTriggers = count === 0 ? "" : `, with its ${count} ${count === 1 ? "trigger" : "triggers"}`;
     const name = automation.name;
@@ -293,18 +391,36 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
       confirmLabel: "Delete Automation",
       tone: "danger",
       ...(back ? { back } : {}),
-    })) return;
+    })) {
+      // Cancel returns to ⋯; on a phone Back has reopened its sheet, and focus is there already.
+      settleFocus(invoker, moreTrigger);
+      return;
+    }
     const deleted = await mutate(() => api.deleteAutomation(automationId), "Automation Not Deleted", { refresh: false });
-    if (!deleted) return;
+    if (!deleted) {
+      settleFocus(invoker, moreTrigger);
+      return;
+    }
+    actionsInFlight.current = Math.max(0, actionsInFlight.current - 1);
     showToast(`“${name}” deleted.`, { tone: "success" });
-    // Left while the delete ran: the toast says it happened, and where they went is theirs.
+    // Left while the delete ran: the toast says it happened, and where they went is theirs. The
+    // list's route takes focus to its title.
     if (mounted.current) navigate({ name: "automations" }, { replace: true });
   };
 
   const linkUrl = publicOrigin ? absoluteViewUrl(publicOrigin, pageView) : null;
   const copyLink = async () => {
     if (!linkUrl) return;
-    const copied = await writeClipboardText(linkUrl, () => mounted.current);
+    // ⋯ has handed focus back to its trigger. A refused write falls back to a selected field only
+    // while the copy still owns the interaction: the page is mounted and focus is on that trigger or
+    // nowhere. Anything opened or focused since (another action, the trigger form) keeps focus.
+    const invoker = beginAction();
+    const doc = document;
+    const owns = () => mounted.current &&
+      (doc.activeElement === null || doc.activeElement === doc.body || doc.activeElement === invoker);
+    const copied = await writeClipboardText(linkUrl, owns);
+    // The fallback's selection dropped focus; it goes back to ⋯ unless the person moved on.
+    settleFocus(invoker, moreTrigger);
     if (copied === null) return;
     if (copied) showToast("Link copied.", { tone: "success" });
     else showToast("Couldn't copy the link.", { tone: "error" });
@@ -409,7 +525,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
     : policyCopy.offline(automation.runnerPolicy, machineLabel);
 
   return (
-    <div className="run-detail automation-detail">
+    <div className="run-detail automation-detail" ref={pageRef}>
       <DetailBar
         title={viewTitle(pageView, automation.name)}
         backLabel={backLabel("automations")}
@@ -477,7 +593,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
         </section>
 
         <section className="section" aria-labelledby="automation-triggers">
-          <div className="section-head"><h2 className="section-title" id="automation-triggers">Triggers</h2></div>
+          <div className="section-head"><h2 className="section-title" id="automation-triggers" tabIndex={-1}>Triggers</h2></div>
           <p className="section-note">Pausing blocks cron and signed triggers, but credentials can be configured while paused.</p>
           {triggerDraft && <div className="automation-trigger-editor" aria-label="New Signed Trigger">
             <h3>New Signed Trigger</h3>
@@ -501,7 +617,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
                 <p className="automation-hint automation-span">Use <code>{"{{delivery.prompt}}"}</code> to place delivered text. Allowed parameters are also included in the signed-delivery context preamble.</p>
               </>}
             </div>
-            <div className="automation-editor-actions"><button className="btn ghost sm" type="button" onClick={() => setTriggerDraft(null)}>Cancel</button><button className="btn primary sm" type="button" disabled={busy} onClick={createTrigger}>{busy ? "Creating…" : "Create Trigger"}</button></div>
+            <div className="automation-editor-actions"><button className="btn ghost sm" type="button" onClick={cancelTriggerDraft}>Cancel</button><button className="btn primary sm" type="button" disabled={busy} onClick={createTrigger}>{busy ? "Creating…" : "Create Trigger"}</button></div>
           </div>}
           {triggers.length === 0 && !triggerDraft && <p className="automation-empty">No signed triggers yet.</p>}
           {triggers.length > 0 && <div className="automation-triggers" aria-label="Signed Out-of-Band Triggers">{triggers.map((trigger) => {
@@ -510,13 +626,13 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
               : "Unavailable until This Machine has a reachable dashboard address";
             const revealed = credential?.trigger.triggerId === trigger.triggerId ? credential : null;
             const policy = trigger.deliveryPolicy;
-            return <div className="automation-trigger" key={trigger.triggerId}><div><strong>{trigger.name}</strong><span>{titleCaseLabel(trigger.kind)} · Key Generation {trigger.generation} · {trigger.invocationCount === 1 ? "1 Delivery" : `${trigger.invocationCount} Deliveries`}</span>{policy && <small>Accepts {[
+            return <div className="automation-trigger" key={trigger.triggerId} data-trigger-id={trigger.triggerId}><div><strong>{trigger.name}</strong><span>{titleCaseLabel(trigger.kind)} · Key Generation {trigger.generation} · {trigger.invocationCount === 1 ? "1 Delivery" : `${trigger.invocationCount} Deliveries`}</span>{policy && <small>Accepts {[
               ...(policy.allowPrompt ? ["Prompt"] : []),
               ...(policy.parameterNames.length ? [`Parameters ${policy.parameterNames.join(", ")}`] : []),
               ...(policy.sessionSelectors?.length ? [`Selectors ${policy.sessionSelectors.map(titleCaseLabel).join(", ")}`] : []),
-            ].join(" · ")}</small>}{trigger.lastInvokedAt && <small>Last Signed Delivery {when(trigger.lastInvokedAt, now)}</small>}</div><code>{endpoint}</code>{revealed && <div className="automation-trigger-secret" role="status"><strong>Copy this signing secret now. It will not be shown again.</strong><code>{revealed.secret}</code><button className="btn ghost sm" type="button" onClick={() => void navigator.clipboard.writeText(revealed.secret)}>Copy Secret</button><button className="btn ghost sm" type="button" onClick={() => setCredential(null)}>Hide</button></div>}<p>{policy
+            ].join(" · ")}</small>}{trigger.lastInvokedAt && <small>Last Signed Delivery {when(trigger.lastInvokedAt, now)}</small>}</div><code>{endpoint}</code>{revealed && <div className="automation-trigger-secret" role="status"><strong>Copy this signing secret now. It will not be shown again.</strong><code>{revealed.secret}</code><button className="btn ghost sm" type="button" onClick={() => void navigator.clipboard.writeText(revealed.secret)}>Copy Secret</button><button className="btn ghost sm" type="button" onClick={() => hideSecret(trigger.triggerId)}>Hide</button></div>}<p>{policy
               ? `Signed body may add: ${[policy.allowPrompt ? "prompt" : "", policy.parameterNames.length ? "parameters" : "", policy.sessionSelectors?.length ? "target" : ""].filter(Boolean).join(", ")}.`
-              : trigger.kind === "chatops" ? 'Signed body: {"eventId":"...","command":"run","sender":"opaque actor"}' : 'Signed body: {"eventId":"..."}'}</p><div className="automation-trigger-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Rotate Signing Secret", message: `The previous signing secret for “${automation.name}” stops working immediately. This cannot be undone.`, confirmLabel: "Rotate Secret", tone: "danger" })) rotateTrigger(trigger.triggerId); })()}>Rotate Secret</button><button className="btn ghost danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Revoke Signed Trigger", message: `The signed trigger for “${automation.name}” is revoked, and its pending unclaimed deliveries are rejected.`, confirmLabel: "Revoke Trigger", tone: "danger" })) revokeTrigger(trigger.triggerId); })()}>Revoke</button></div></div>;
+              : trigger.kind === "chatops" ? 'Signed body: {"eventId":"...","command":"run","sender":"opaque actor"}' : 'Signed body: {"eventId":"..."}'}</p><div className="automation-trigger-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void rotateTrigger(trigger.triggerId)}>Rotate Secret</button><button className="btn ghost danger sm" disabled={busy} onClick={() => void revokeTrigger(trigger.triggerId)}>Revoke</button></div></div>;
           })}<p className="automation-hint">Send <code>application/vnd.wollipog.automation-trigger+json</code> with X-Wollipog-Timestamp, X-Wollipog-Nonce, and X-Wollipog-Signature. Every optional field must be explicitly allowed by this fixed automation trigger; deliveries cannot change agents, runners, policies, or ceilings.</p></div>}
         </section>
 

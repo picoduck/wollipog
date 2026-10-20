@@ -17,6 +17,7 @@ import { specOf } from "../automation-form.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { EntityTitleProvider, reportedTitleFor, useEntityTitleState } from "../entity-title.js";
+import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
 import { viewPath, viewTitle, type View, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -185,12 +186,14 @@ interface Mounted {
   unmount: () => Promise<void>;
 }
 
-async function mount({ view, items, executions = {}, triggers = {}, client: overrides = {} }: {
+async function mount({ view, items, executions = {}, triggers = {}, client: overrides = {}, origin }: {
   view: View;
   items: AutomationSchedule[];
   executions?: Record<string, AutomationExecution[]>;
   triggers?: Record<string, AutomationTriggerView[]>;
   client?: Partial<ApiClient>;
+  /** A dashboard address, so Copy Link has a link to copy. */
+  origin?: string;
 }): Promise<Mounted> {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -235,15 +238,20 @@ async function mount({ view, items, executions = {}, triggers = {}, client: over
     ...overrides,
   } as unknown as ApiClient;
   const navigation: ViewNavigation = { current: () => view, push() {}, replace() {}, listen: () => () => {} };
+  const instances: InstanceManager = origin
+    ? { ...browserInstanceManager, activeProfile: { ...browserInstanceManager.activeProfile, kind: "remote", origin } as InstanceManager["activeProfile"] }
+    : browserInstanceManager;
   await act(async () => {
     root.render(
       <React.StrictMode>
         <ApiProvider client={client}>
-          <FeedbackProvider>
-            <StoreProvider connection={connection} navigation={navigation}>
-              <Routes />
-            </StoreProvider>
-          </FeedbackProvider>
+          <InstancesContextProvider value={instances}>
+            <FeedbackProvider>
+              <StoreProvider connection={connection} navigation={navigation}>
+                <Routes />
+              </StoreProvider>
+            </FeedbackProvider>
+          </InstancesContextProvider>
         </ApiProvider>
       </React.StrictMode>,
     );
@@ -262,6 +270,7 @@ const buttonNamed = (scope: Element, name: string) =>
   [...scope.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === name) ?? null;
 const windowTitle = (body: HTMLElement) => body.querySelector(".window-title")?.textContent;
 const route = (id: string): View => ({ name: "automation", id });
+const automationPath = (id: string) => viewPath(route(id));
 
 async function click(element: HTMLElement | null | undefined) {
   assert.ok(element, "the control is rendered");
@@ -607,6 +616,199 @@ test("the window title reads the automation's name on its page and Edit <Name> o
     assert.equal(windowTitle(view.body), "Nightly Sweep");
     await click(view.body.querySelector<HTMLButtonElement>('button[aria-label="Back to Automations"]'));
     assert.equal(windowTitle(view.body), "Automations", "a page that leaves takes its title with it");
+  } finally {
+    await view.unmount();
+  }
+});
+
+/* ----------------- Focus after an action (CR-1.3): it goes where the action meant ----------------- */
+
+const ORIGIN = "https://wollipog.example";
+const focused = () => domWindow.document.activeElement as unknown as HTMLElement | null;
+const moreActions = (body: HTMLElement) => body.querySelector<HTMLButtonElement>('.detail-bar button[aria-label="More Actions"]')!;
+
+/** Replaces the Clipboard API for one test (undefined: a plain-HTTP page has none), and makes the
+ * selected-field fallback move focus to that field, as a browser does. */
+function withClipboard(clipboard: { writeText: (text: string) => Promise<void> } | undefined) {
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  const execCommand = (domWindow.document as unknown as { execCommand?: unknown }).execCommand;
+  const fallbacks: string[] = [];
+  Object.defineProperty(domWindow.navigator, "clipboard", { configurable: true, value: clipboard });
+  (domWindow.document as unknown as { execCommand: (command: string) => boolean }).execCommand = (command) => {
+    const field = domWindow.document.querySelector("textarea[readonly]") as unknown as HTMLTextAreaElement | null;
+    field?.focus();
+    fallbacks.push(field?.value ?? command);
+    return true;
+  };
+  return {
+    fallbacks,
+    restore() {
+      if (navigatorDescriptor) Object.defineProperty(domWindow.navigator, "clipboard", navigatorDescriptor);
+      else Reflect.deleteProperty(domWindow.navigator, "clipboard");
+      (domWindow.document as unknown as { execCommand?: unknown }).execCommand = execCommand;
+    },
+  };
+}
+
+test("Copy Link without the Clipboard API copies through the fallback and gives focus back to ⋯", async () => {
+  const clipboard = withClipboard(undefined);
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], origin: ORIGIN });
+  try {
+    await click(menuItem(await openMore(view.body), "Copy Link"));
+    assert.deepEqual(clipboard.fallbacks, [`${ORIGIN}${automationPath("automation-a")}`]);
+    assert.equal(focused(), moreActions(view.body), "focus returns to the trigger the copy came from");
+    assert.match(view.body.textContent ?? "", /Link copied\./);
+  } finally {
+    clipboard.restore();
+    await view.unmount();
+  }
+});
+
+test("a Copy Link refused after the person moved on never takes their focus", async () => {
+  let refuse: ((error: Error) => void) | undefined;
+  const clipboard = withClipboard({ writeText: () => new Promise<void>((_resolve, reject) => { refuse = reject; }) });
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], origin: ORIGIN });
+  try {
+    await click(menuItem(await openMore(view.body), "Copy Link"));
+    const pause = buttonNamed(page(view.body)!.querySelector(".detail-bar")!, "Pause")!;
+    await act(async () => pause.focus());
+    await act(async () => { refuse?.(new Error("Clipboard denied")); });
+    await settle();
+    assert.deepEqual(clipboard.fallbacks, [], "the late refusal does not fall back over the newer control");
+    assert.equal(focused(), pause);
+  } finally {
+    refuse?.(new Error("cleanup"));
+    clipboard.restore();
+    await view.unmount();
+  }
+});
+
+test("a Copy Link that settles after the page left publishes nothing and moves no focus", async () => {
+  let refuse: ((error: Error) => void) | undefined;
+  const clipboard = withClipboard({ writeText: () => new Promise<void>((_resolve, reject) => { refuse = reject; }) });
+  const errors: unknown[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], origin: ORIGIN });
+  try {
+    await click(menuItem(await openMore(view.body), "Copy Link"));
+    await view.unmount();
+    await act(async () => { refuse?.(new Error("Clipboard denied")); });
+    await settle();
+    assert.deepEqual(clipboard.fallbacks, []);
+    assert.deepEqual(errors, []);
+  } finally {
+    console.error = originalError;
+    clipboard.restore();
+  }
+});
+
+test("Create Trigger focuses the new secret's Copy Secret; Hide returns to that trigger's Rotate Secret", async () => {
+  const triggers: Record<string, AutomationTriggerView[]> = { "automation-a": [] };
+  const view = await mount({
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], triggers,
+    client: { createAutomationTrigger: async (id: string) => {
+      const created = trigger("created");
+      triggers[id] = [created];
+      return { trigger: created, secret: `wollipogwhsec_${"A".repeat(43)}` };
+    } } as Partial<ApiClient>,
+  });
+  try {
+    await click(menuItem(await openMore(view.body), "Add Webhook Trigger…"));
+    const create = buttonNamed(page(view.body)!, "Create Trigger")!;
+    await act(async () => create.focus());
+    await click(create);
+    assertNoDomNode(page(view.body)!.querySelector('[aria-label="New Signed Trigger"]'), "the form is gone");
+    assert.equal(focused()?.textContent, "Copy Secret");
+    await click(buttonNamed(page(view.body)!, "Hide"));
+    assert.equal(focused()?.textContent, "Rotate Secret");
+    assert.equal(focused()?.closest("[data-trigger-id]")?.getAttribute("data-trigger-id"), "created");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Cancel in the trigger form returns focus to ⋯, and Revoke to the Triggers heading", async () => {
+  const triggers: Record<string, AutomationTriggerView[]> = { "automation-a": [trigger("one")] };
+  const view = await mount({
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], triggers,
+    client: { deleteAutomationTrigger: async (id: string) => { triggers[id] = []; return { deleted: true }; } } as Partial<ApiClient>,
+  });
+  try {
+    await click(menuItem(await openMore(view.body), "Add Chat-Ops Trigger…"));
+    const cancel = buttonNamed(page(view.body)!, "Cancel")!;
+    await act(async () => cancel.focus());
+    await click(cancel);
+    assert.equal(focused(), moreActions(view.body));
+
+    const revoke = buttonNamed(page(view.body)!, "Revoke")!;
+    await act(async () => revoke.focus());
+    await click(revoke);
+    await click(buttonNamed(dialogNamed(view.body, "Revoke Signed Trigger")!, "Revoke Trigger"));
+    assertNoDomNode(page(view.body)!.querySelector("[data-trigger-id]"), "the trigger is gone");
+    assert.equal(focused()?.id, "automation-triggers");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a Delete that fails returns focus to ⋯ under its notice", async () => {
+  const view = await mount({
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")],
+    client: { deleteAutomation: async () => { throw new Error("The control plane refused the delete."); } },
+  });
+  try {
+    await click(menuItem(await openMore(view.body), "Delete Automation…"));
+    await click(buttonNamed(dialogNamed(view.body, "Delete Automation")!, "Delete Automation"));
+    assert.equal(page(view.body)!.querySelector(".automation-notice-slot .notice-title")?.textContent, "Automation Not Deleted");
+    assert.equal(focused(), moreActions(view.body));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Pause and Resume keep focus on the bar's button through the write", async () => {
+  let release: (() => void) | undefined;
+  const items = [automation("automation-a", "Nightly Sweep")];
+  const view = await mount({
+    view: route("automation-a"), items,
+    client: { updateAutomation: async (id: string, spec: AutomationSpec) => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      items[0] = { ...items[0]!, ...spec };
+      return items[0]!;
+    } } as Partial<ApiClient>,
+  });
+  try {
+    const pause = buttonNamed(page(view.body)!.querySelector(".detail-bar")!, "Pause")!;
+    await act(async () => pause.focus());
+    await click(pause);
+    await act(async () => { release?.(); });
+    await settle();
+    assert.equal(focused()?.textContent?.trim(), "Resume");
+  } finally {
+    release?.();
+    await view.unmount();
+  }
+});
+
+test("Try Again after a failed load hands focus to the loaded page's title", async () => {
+  let fail = true;
+  const items = [automation("automation-a", "Nightly Sweep")];
+  const view = await mount({
+    view: route("automation-a"), items,
+    client: { automation: async () => {
+      if (fail) throw new Error("Control plane unavailable");
+      return { automation: items[0]!, executions: [], events: [] };
+    } } as Partial<ApiClient>,
+  });
+  try {
+    const retry = buttonNamed(page(view.body)!, "Try Again")!;
+    assert.ok(retry, "the load error offers Try Again");
+    await act(async () => retry.focus());
+    fail = false;
+    await click(retry);
+    assert.ok(page(view.body)!.querySelector(".glance"), "the page loaded");
+    assert.equal(focused()?.id, "page-title");
   } finally {
     await view.unmount();
   }
