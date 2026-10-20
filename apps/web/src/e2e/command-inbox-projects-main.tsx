@@ -64,6 +64,7 @@ import { NewSessionDialog, type NewSessionPreset } from "../components/NewSessio
 import { PodDetail } from "../components/PodsView.js";
 import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
+import type { WorkflowInstanceDetail } from "@wollipog/protocol";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
 import { SessionTerminalsProvider } from "../session-terminals.js";
@@ -1549,6 +1550,19 @@ function rowColumnsReminder(): SessionReminderView {
     reminderId: "reminder-snoozed", sessionId: "session-snoozed", scheduledFor: returns.getTime(),
     timeZone: "Asia/Tokyo", originalExpression: "in 2 days", wakePolicy: "regardless", state: "pending",
     revision: 1, createdAt: Date.now() - 60_000, updatedAt: Date.now() - 60_000,
+  };
+}
+
+function prunedWorkflowFixture(): WorkflowInstanceDetail {
+  return {
+    instanceId: "workflow-pruned", workflowId: "workflow", workflowVersion: 1, runId: activeRun.id,
+    status: "succeeded", transitionCount: 3, createdBy: { kind: "system" }, createdAt: 1, updatedAt: 2, completedAt: 2,
+    eventHistoryPruned: { prunedAt: Date.UTC(2026, 9, 16), eventCount: 1_284, retentionDays: 90 },
+    nodeStates: [{ nodeId: "build", status: "succeeded", attemptCount: 1, outcome: "success", completedAt: 2 }],
+    definition: { workflowId: "workflow", version: 1, source: "custom", name: "Build and Review", maxTransitions: 20,
+      edges: [], createdBy: { kind: "system" }, createdAt: 1, nodes: [{ nodeId: "build", kind: "agent", role: "Builder",
+        agentId: "codex", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }] },
+    attempts: [], events: [],
   };
 }
 
@@ -3365,6 +3379,11 @@ const client = {
       return { locationId, status: structuredClone(LOCATION_SETUP[locationId]!), path: ".wollipog.json" as const, detected: ["pnpm"] };
     },
     dismissWorktreeSetupNotice: async () => undefined,
+  } : {}),
+  // Keep this scenario's complete read responses together, independent of the default run mocks.
+  ...(FIXTURE_QUERY.get("workflowPruned") === "1" ? {
+    workflowInstances: async () => [prunedWorkflowFixture()],
+    workflowInstance: async () => prunedWorkflowFixture(),
   } : {}),
 } as ApiClient;
 

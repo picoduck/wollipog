@@ -2200,7 +2200,8 @@ test("workflow reads are bounded, mapped, and routed to the inspection API", asy
     };
     if (call.url.includes("/api/workflow-instances/i1")) return {
       status: 200,
-      body: { instanceId: "i1", workflowId: "wf", workflowVersion: 2, runId: "r1", status: "running", nodeStates: [], definition: { workflowId: "wf", version: 2, name: "Review", nodes: [], edges: [] }, attempts: [], events: [] },
+      body: { instanceId: "i1", workflowId: "wf", workflowVersion: 2, runId: "r1", status: "succeeded", nodeStates: [], definition: { workflowId: "wf", version: 2, name: "Review", nodes: [], edges: [] }, attempts: [], events: [],
+        eventHistoryPruned: { prunedAt: 100, eventCount: 1200, retentionDays: 90 } },
     };
     return { status: 404, body: { error: "unexpected" } };
   });
@@ -2216,6 +2217,7 @@ test("workflow reads are bounded, mapped, and routed to the inspection API", asy
   const detail = resultJson(await callTool(deps, "get_workflow_instance", { instanceId: "i1" }));
   assert.equal(calls[3]!.url, `${CP_URL}/api/workflow-instances/i1`);
   assert.equal(detail.instance.definition.workflowId, "wf");
+  assert.deepEqual(detail.instance.eventHistoryPruned, { prunedAt: 100, eventCount: 1200, retentionDays: 90 });
 });
 
 test("governance policy inspection and authoring tools preserve exact validated shapes", async () => {

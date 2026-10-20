@@ -59,6 +59,12 @@ It is off by default, has no API or organization override, and waits 24 hours on
 See [mutation audit archive retention](./archived-history-retention.md#mutation-audit-archive-retention)
 for the exact kept set and restart behavior.
 
+Workflow event history has a separate opt-in default:
+`CONTROL_PLANE_WORKFLOW_EVENT_RETENTION_DAYS=<days>` (7–3650, suggested 90). It ages terminal
+instances from completion, waits 24 hours after enabling or shortening, and preserves summaries,
+node outcomes, attempts, artifacts, decisions and receipts. A saved organization policy overrides
+it. See [workflow event retention](./workflow-event-retention.md).
+
 The generated units state the account and the data locations they use; read them before enabling
 in an environment with its own conventions.
 

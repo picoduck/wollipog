@@ -864,6 +864,7 @@ function mapWorkflowInstance(instance: Json, includeDetail = false): Json {
     createdAt: instance?.createdAt,
     updatedAt: instance?.updatedAt,
     completedAt: instance?.completedAt ?? null,
+    ...(instance?.eventHistoryPruned ? { eventHistoryPruned: instance.eventHistoryPruned } : {}),
     ...(includeDetail
       ? {
           definition: mapWorkflowDefinition(instance?.definition, true),

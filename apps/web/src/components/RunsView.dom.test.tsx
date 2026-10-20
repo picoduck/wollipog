@@ -478,6 +478,19 @@ describe("Runs list rows (#2974)", () => {
   });
 });
 
+test("a pruned workflow explains missing events while retaining node outcomes", async () => {
+  const workflow: WorkflowInstanceDetail = { ...workflowA, events: [],
+    eventHistoryPruned: { prunedAt: 1, eventCount: 1200, retentionDays: 90 } };
+  const fixture = await mountRunDetail({ workflowInstances: async () => [workflow], workflowInstance: async () => workflow,
+    runWorkflowArtifacts: async () => ({ artifacts: [] }) } as Partial<ApiClient>);
+  try {
+    const progress = section(fixture.container, "Workflow Progress")?.textContent ?? "";
+    assert.match(progress, /Event History Pruned[\s\S]*1,200 workflow events were removed[\s\S]*90-day/);
+    assert.match(progress, /node outcomes, attempts, artifacts, decisions and action receipts are kept/);
+    assert.equal(fixture.container.querySelectorAll(".workflow-node").length, workflow.nodeStates.length);
+  } finally { await unmount(fixture); }
+});
+
 test("a canceled workflow attempt reads Canceled, while its wire status stays cancelled", async () => {
   const workflow = {
     ...workflowA,
