@@ -44,22 +44,14 @@ const roleLabel = (role: string, number: number) => {
 };
 
 /**
- * The steps in the definition's order. An agent step's session is the one its node or latest attempt
- * ran in, else the one another step of the same agent ran in. Before any of them has run, a run's
- * members are its agents in the order their steps first appear (the control plane creates one member
- * per agent that way, then an optional orchestrator), so the member at the agent's position is used
- * only where that order is proven:
- * - one more member than agents is every agent and the orchestrator, none lost;
- * - as many members as agents is either every agent, or the orchestrator with one agent's member
- *   deleted, so the member must also carry the title the control plane gave the agent's member
- *   ("<run> · <agent>").
- * Anything else, or a member another agent already ran in, is no session yet.
+ * The steps in the definition's order. An agent step's session is only one the control plane
+ * recorded: the session its node or latest attempt ran in, else the one another step of the same
+ * agent ran in (dispatch runs every step of an agent in that agent's one member). Before any step of
+ * its agent has run, a step has no session yet. The run's member list and the members' titles can't
+ * prove which member is which agent: a deleted member shifts the order, an orchestrator may follow
+ * the agents, and a title may be cut short or renamed, so neither is read.
  */
-export function workflowSteps(
-  detail: WorkflowInstanceDetail,
-  runSessionIds: readonly string[],
-  titleOf: (sessionId: string) => string | undefined = () => undefined,
-): WorkflowStep[] {
+export function workflowSteps(detail: WorkflowInstanceDetail): WorkflowStep[] {
   const states = new Map(detail.nodeStates.map((state) => [state.nodeId, state]));
   const attemptsByNode = new Map<string, WorkflowAttemptView[]>();
   for (const attempt of [...detail.attempts].sort((left, right) => left.attempt - right.attempt || left.startedAt - right.startedAt)) {
@@ -69,23 +61,14 @@ export function workflowSteps(
   }
   const ranIn = (node: WorkflowNodeDefinition) =>
     states.get(node.nodeId)?.sessionId ?? lastOf(attemptsByNode.get(node.nodeId) ?? [], (attempt) => Boolean(attempt.sessionId))?.sessionId ?? null;
-  const agents = [...new Set(detail.definition.nodes.flatMap((node) => node.kind === "agent" && node.agentId ? [node.agentId] : []))];
   const byAgent = new Map<string, string>();
   for (const node of detail.definition.nodes) {
     const session = node.kind === "agent" && node.agentId ? ranIn(node) : null;
     if (session && !byAgent.has(node.agentId!)) byAgent.set(node.agentId!, session);
   }
-  const claimed = new Set(byAgent.values());
-  const atPosition = (agentId: string): string | null => {
-    const candidate = runSessionIds[agents.indexOf(agentId)];
-    if (!candidate || claimed.has(candidate)) return null;
-    if (runSessionIds.length === agents.length + 1) return candidate;
-    if (runSessionIds.length === agents.length && titleOf(candidate)?.endsWith(` · ${agentId}`)) return candidate;
-    return null;
-  };
   return detail.definition.nodes.map((node, index): WorkflowStep => {
     const sessionId = node.kind !== "agent" ? null
-      : ranIn(node) ?? (node.agentId ? byAgent.get(node.agentId) ?? atPosition(node.agentId) : null);
+      : ranIn(node) ?? (node.agentId ? byAgent.get(node.agentId) ?? null : null);
     return {
       nodeId: node.nodeId,
       number: index + 1,

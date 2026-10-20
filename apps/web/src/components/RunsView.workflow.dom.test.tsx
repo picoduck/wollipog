@@ -61,7 +61,7 @@ after(() => {
   clearTimestampFormatterCache();
 });
 
-// Each member carries the title the control plane gives a workflow agent's member: "<run> · <agent>".
+// Members carry the titles the control plane gives them; the page never reads them for identity.
 const member = (id: string, agentId: string, agentName: string, driver: string, role: string) => ({
   id, runnerId: "runner-1", agentId, agentName, driver, title: `Add Retry Backoff · ${role}`, status: "idle",
   pendingApproval: null, archived: false, eventEpoch: 0, messageCount: 0, workspaceName: "Alpha",
@@ -113,6 +113,13 @@ const gated = (extra: Parameters<typeof workflow>[1] = {}) => workflow({
   build: { status: "succeeded", attemptCount: 1, sessionId: claude.id, outcome: "success" },
   approve: { status: "waiting_gate" },
 }, { status: "waiting_gate", ...extra });
+
+/** Past the gate: Reviewer runs in Codex's member, as the control plane recorded. */
+const reviewing = () => workflow({
+  build: { status: "succeeded", attemptCount: 1, sessionId: claude.id, outcome: "success" },
+  approve: { status: "succeeded", outcome: "success" },
+  review: { status: "running", attemptCount: 1, sessionId: codex.id },
+});
 
 class FakeSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
@@ -248,7 +255,8 @@ describe("a workflow run's steps and decision (#2977)", () => {
       const steps = [...container.querySelectorAll(".wf-step")];
       assert.deepEqual(steps.map((step) => step.querySelector(".wf-step-marker")?.textContent), ["1", "2", "3"]);
       assert.deepEqual(steps.map((step) => step.querySelector(".wf-step-sub")?.textContent), [
-        "Claude Code produces a patch", "You approve or reject the patch", "Codex App Server produces a review report",
+        // Reviewer has never run, so its agent isn't known and isn't guessed.
+        "Claude Code produces a patch", "You approve or reject the patch", "The agent produces a review report",
       ]);
       assert.deepEqual(steps.map((step) => step.querySelectorAll(".status").length), [1, 1, 1]);
       // The gate is selected first, and amber is its alone: marker and badge.
@@ -409,11 +417,13 @@ describe("a workflow run's steps and decision (#2977)", () => {
     try {
       const { container } = fixture;
       const notice = panel(container)?.querySelector(".notice.t-info");
-      assert.match(notice?.textContent ?? "", /Builder Is Ready[\s\S]*Claude Code produces a patch once you start it\./u);
+      // Nothing has run, so the control plane has recorded no session for Builder: no agent is guessed.
+      assert.match(notice?.textContent ?? "", /Builder Is Ready[\s\S]*The agent produces a patch once you start it\./u);
       const start = buttonNamed(notice!, "Start Builder");
       assert.ok(start?.classList.contains("sm") && start.classList.contains("btn"), "a control-sized button");
       assert.equal(start?.closest(".notice-actions")?.parentElement?.classList.contains("notice-content"), true, "in the notice's action row");
-      assert.deepEqual(facts(container), { Agent: "Claude Code", Attempts: "0 of 3" });
+      assert.deepEqual(facts(container), { Agent: "Known once the step starts", Attempts: "0 of 3" });
+      assert.match(container.querySelector(".wf-main")?.textContent ?? "", /No Session Yet[\s\S]*Builder's session shows here once the step starts\./u);
       assert.doesNotMatch(container.textContent ?? "", /claude-code-agent|codex-app-server-agent|\bclaude\b|\bcodex\b|s_claude|s_codex/u);
       // A waiting step says what it waits for.
       await click(stepButton(container, "Approver"));
@@ -424,15 +434,36 @@ describe("a workflow run's steps and decision (#2977)", () => {
   });
 
   test("selecting an agent step shows its session beside the steps; a gate shows the step before it", async () => {
-    const fixture = await mount({ workflowInstance: async () => gated() } as unknown as Partial<ApiClient>);
+    const fixture = await mount({ workflowInstance: async () => reviewing() } as unknown as Partial<ApiClient>);
     try {
       const { container } = fixture;
       const shown = () => container.querySelector(".wf-main .compare-member")?.getAttribute("aria-label");
+      assert.equal(shown(), "Codex App Server", "the running step");
+      assert.deepEqual(facts(container), { Agent: "Codex App Server", Attempts: "1 of 3" }, "agents by display name");
+      await click(stepButton(container, "Builder"));
+      assert.equal(shown(), "Claude Code");
+      await click(stepButton(container, "Approver"));
       assert.equal(shown(), "Claude Code", "the gate's producer");
-      await click(stepButton(container, "Reviewer"));
-      assert.equal(shown(), "Codex App Server");
       // Its ⋯ has no Follow Up, and neither does the bar.
       assertNoDomNode(buttonNamed(container.querySelector(".detail-bar")!, "Follow Up…"));
+    } finally {
+      await unmount(fixture);
+    }
+  });
+
+  test("a step whose agent hasn't run has no session, even with a member left that could be it", async () => {
+    // Reviewer has never run. The run's other member is not proof it is Reviewer's, so nothing is guessed.
+    const fixture = await mount({ workflowInstance: async () => gated() } as unknown as Partial<ApiClient>);
+    try {
+      const { container } = fixture;
+      await click(stepButton(container, "Reviewer"));
+      assertNoDomNode(container.querySelector(".wf-main .compare-member"), "no member column");
+      assert.match(container.querySelector(".wf-main")?.textContent ?? "", /No Session Yet/u);
+      assert.equal(facts(container).Agent, "Known once the step starts");
+      await click(container.querySelector('.detail-bar [aria-haspopup="menu"]'));
+      const open = [...doc().querySelectorAll('[role="menuitem"]')].find((item) => item.textContent?.startsWith("Open Reviewer Session"));
+      assert.equal(open?.getAttribute("aria-disabled") === "true" || (open as HTMLButtonElement | undefined)?.disabled === true, true);
+      assert.match(open?.textContent ?? "", /No session until the step starts/u);
     } finally {
       await unmount(fixture);
     }
@@ -455,7 +486,7 @@ describe("a workflow run's steps and decision (#2977)", () => {
   });
 
   test("⋯ opens each agent step's session, and offers no Follow Up", async () => {
-    const fixture = await mount({ workflowInstance: async () => gated() } as unknown as Partial<ApiClient>);
+    const fixture = await mount({ workflowInstance: async () => reviewing() } as unknown as Partial<ApiClient>);
     try {
       await click(fixture.container.querySelector('.detail-bar [aria-haspopup="menu"]'));
       const items = [...doc().querySelectorAll('[role="menuitem"]')].map((item) => item.querySelector(".menu-item-label")?.textContent ?? item.textContent);
@@ -525,9 +556,13 @@ describe("a workflow run's steps and decision (#2977)", () => {
       assert.deepEqual(tabs.map((tab) => tab.textContent), ["Steps", "Builder Activity", "Reviewer Activity"]);
       assert.equal(tabs[0]!.getAttribute("aria-selected"), "true");
       assert.ok(panel(container), "Steps holds the panel");
-      await click(tabs[2]);
+      await click(tabs[1]);
       assertNoDomNode(panel(container));
-      assert.equal(container.querySelector('[role="tabpanel"] .compare-member-agent')?.textContent, "Codex App Server");
+      assert.equal(container.querySelector('[role="tabpanel"] .compare-member-agent')?.textContent, "Claude Code");
+      // Reviewer hasn't run: its tab says so rather than showing another member.
+      await click(tabs[2]);
+      assertNoDomNode(container.querySelector('[role="tabpanel"] .compare-member-agent'));
+      assert.match(container.querySelector('[role="tabpanel"]')?.textContent ?? "", /No Session Yet/u);
     } finally {
       await unmount(fixture);
       await setViewport(1440, 900);

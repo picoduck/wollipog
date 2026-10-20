@@ -504,10 +504,7 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
     return () => { current = false; };
   }, [api, run?.id, run?.updatedAt, conn, applyWorkflow]);
 
-  const steps = useMemo(
-    () => workflow ? workflowSteps(workflow, run?.sessionIds ?? EMPTY_SESSION_IDS, (sessionId) => sessions.get(sessionId)?.title) : [],
-    [workflow, run?.sessionIds, sessions],
-  );
+  const steps = useMemo(() => workflow ? workflowSteps(workflow) : [], [workflow]);
   // Until the person picks a step, the panel shows the one that needs them, and follows it.
   const [chosenStep, setChosenStep] = useState<string | null>(null);
   const selectedStep = steps.find((step) => step.nodeId === chosenStep) ?? steps.find((step) => step.nodeId === attentionStepId(steps)) ?? null;
@@ -757,9 +754,14 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
         />
       ) : (
         <div className="wf-main-empty" id={panel?.id} role={panel ? "tabpanel" : undefined} aria-labelledby={panel?.labelledBy}>
-          <State compact title="No Activity Yet">
-            {step ? "This step's session isn't known yet." : "This workflow has no agent steps."}
-          </State>
+          {/* A step's session is only the one the control plane recorded when it ran (§12). */}
+          {!step ? (
+            <State compact title="No Agent Steps">This workflow has no agent steps.</State>
+          ) : step.sessionId ? (
+            <State compact title="Session Unavailable">This step's session isn't available on this device.</State>
+          ) : (
+            <State compact title="No Session Yet">{step.role}'s session shows here once the step starts.</State>
+          )}
         </div>
       )}
     </div>
@@ -818,7 +820,7 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
   const openStepItems: PageMenuAction[] = agentSteps.map((step) => ({
     label: `Open ${step.role} Session`,
     disabled: !step.sessionId,
-    description: step.sessionId ? undefined : "Its agent isn't known yet",
+    description: step.sessionId ? undefined : "No session until the step starts",
     onClick: () => { if (step.sessionId) navigate({ name: "session", id: step.sessionId }); },
   }));
 

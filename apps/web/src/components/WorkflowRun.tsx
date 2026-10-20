@@ -199,7 +199,7 @@ export function WorkflowStepPanel({ step, steps, workflow, agent, artifacts, now
       {notice}
       {node.kind === "agent" ? (
         <dl className="facts">
-          <div><dt>Agent</dt><dd>{agent ?? "Not known yet"}</dd></div>
+          <div><dt>Agent</dt><dd>{agent ?? "Known once the step starts"}</dd></div>
           <div><dt>Attempts</dt><dd>{attemptsLabel(step)}</dd></div>
           {latest && <div><dt>Last Attempt</dt><dd>{attemptStatusLabel(latest.status)}</dd></div>}
           {outcome && <div><dt>Outcome</dt><dd>{outcome}</dd></div>}
