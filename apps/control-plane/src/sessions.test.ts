@@ -9153,6 +9153,87 @@ test("createSession resolves cloud artifact provenance and enforces the target c
   assert.deepEqual(hub.sentOfType("start_session").at(-1)!.spec.executionHandoff, spec.executionHandoff);
 });
 
+for (const durable of [false, true]) test(`createSession preserves ${durable ? "staged" : "direct"} launch fields and late dispatch`, (t) => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.providerAccounts = [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }];
+    meta.runtime = { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      admission: { agentLimits: {}, agentWeights: {} }, executionIsolation: { mode: "bwrap", network: "inherit" } };
+    meta.agents.find((agent) => agent.id === AGENT_ID)!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const dispatch = { rootSessionId: "root", generation: "generation" };
+    let staged: Extract<DurableSessionCommand, { type: "start_session" }> | undefined;
+    let stagedJson: string | undefined;
+    let dispatchCalls = 0;
+    let imageStored = false;
+    const storeImage = db.createWorkflowArtifactBytes.bind(db);
+    t.mock.method(db, "createWorkflowArtifactBytes", (...args: Parameters<ControlPlaneDb["createWorkflowArtifactBytes"]>) => {
+      const result = storeImage(...args);
+      imageStored = true;
+      return result;
+    });
+    t.mock.method(db.campaignBudgets, "dispatch", (id: string) => {
+      dispatchCalls += 1;
+      assert.ok(db.getSession(id), "dispatch follows materialization");
+      assert.ok(hub.sessionChangedCalls.some((session) => session.id === id), "dispatch follows sessionChanged");
+      if (!durable) assert.equal(imageStored, true, "dispatch follows prompt image externalization");
+      if (durable) {
+        assert.ok(staged, "dispatch follows staging");
+        assert.equal(JSON.stringify(staged), stagedJson, "late dispatch leaves the durable snapshot unchanged");
+      }
+      return dispatch;
+    });
+    const created = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workspacePath: "/repos/ad-hoc",
+      agentId: AGENT_ID, providerAccountId: "work", title: "Launch Contract", prompt: "hello",
+      ...(!durable ? { images: [{ mimeType: "image/png",
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }] } : {}),
+      config: { permissionMode: "orchestrator", maxToolCalls: 3.9 },
+      orchestrator: { execution: { strictProjectIsolation: true } },
+    }, durable ? {
+      sessionId: "s_launch_contract",
+      stage(plan) {
+        const command = plan.commands[0]!;
+        assert.equal(command.type, "start_session");
+        staged = command;
+        stagedJson = JSON.stringify(command);
+        assert.equal(dispatchCalls, 0, "staging precedes dispatch evaluation");
+      },
+      activate() {
+        assert.equal(dispatchCalls, 1);
+        assert.equal(JSON.stringify(staged), stagedJson, "the staged object gains no direct-only fields");
+      },
+    } : undefined);
+    assert.ok(created.ok && created.data, created.error);
+    assert.equal(dispatchCalls, 1);
+    const frame = durable ? staged! : hub.sentOfType("start_session").at(-1)!;
+    const fields = [
+      "sessionId", "workspaceId", "workspacePath", "agentId", "providerAccountId", "providerAccountLabel",
+      "agentVersion", "capabilities", "title", "titleSource", "command", "args", "env", "useWorktree",
+      "executionTarget", "executionHandoff", "driver", "context", "config", "orchestrator", "acpSessionContext",
+    ];
+    if (!durable) fields.splice(1, 0, "campaignBudgetDispatch");
+    assert.deepEqual(Object.keys(frame.spec), fields, "pin optional fields and their serialization order too");
+    assert.equal(frame.spec.campaignBudgetDispatch, durable ? undefined : dispatch);
+    assert.equal(frame.spec.sessionId, created.data.id);
+    assert.equal(frame.spec.workspaceId, null);
+    assert.equal(frame.spec.workspacePath, "/repos/ad-hoc");
+    assert.equal(frame.spec.providerAccountId, "work");
+    assert.equal(frame.spec.providerAccountLabel, "Work");
+    assert.equal(frame.spec.command, "claude");
+    assert.deepEqual(frame.spec.args, ["--flag"]);
+    assert.deepEqual(frame.spec.env, {}, "profiled accounts use the existing sanitized environment");
+    assert.equal(frame.spec.config.maxToolCalls, 3);
+    assert.equal(frame.spec.orchestrator?.strictProjectIsolation, true);
+    assert.equal(frame.initialPrompt, "hello");
+    assert.equal(hub.sentOfType("start_session").length, durable ? 0 : 1);
+  } finally { db.close(); }
+});
+
 test("createSession stages an exact deterministic launch before materialization and activates after it", () => {
   const { db, hub, svc } = makeHarness();
   const order: string[] = [];
