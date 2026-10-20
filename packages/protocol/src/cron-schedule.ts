@@ -1,3 +1,8 @@
+/**
+ * The automation scheduler's five-field cron parser and next-fire search (#2971). The control plane
+ * schedules with it and the web editor previews and validates with the same code, so a schedule
+ * reads as it runs. It must stay runtime-neutral: `Intl` and plain JavaScript, nothing from Node.
+ */
 const FIELD_COUNT = 5;
 const MAX_EXPRESSION_LENGTH = 128;
 const SEARCH_DAYS = 366 * 5;
