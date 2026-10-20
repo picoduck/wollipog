@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { spawnSync } from "node:child_process";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { ControlPlaneDb } from "./db.js";
