@@ -231,8 +231,8 @@ function providerCredentialRoot(state: IsolationStateOptions, inherited: NodeJS.
   return null;
 }
 
-/** Protect installer state independently of the current harness. A link at packages itself is
- * refused: binding its target would leave the link replaceable in the writable home. */
+/** Protect installer state independently of the current harness. A package alias's target is
+ * protected too; executable trust still refuses its replaceable link inside a writable home. */
 async function codexPackageDirectories(state: IsolationStateOptions, runtime: IsolationDeps): Promise<string[]> {
   const inherited = runtime.nativeEnvironment();
   const homes = new Set([
@@ -241,9 +241,12 @@ async function codexPackageDirectories(state: IsolationStateOptions, runtime: Is
   ].filter((home): home is string => Boolean(home)));
   const paths = new Set<string>();
   for (const home of homes) {
+    // These are installation hints from other agents/accounts, not writable grants. Do not fail
+    // unrelated launches on a foreign-platform or traversal-containing hint. Actual writable
+    // provider/transcript roots retain their own strict validation above.
+    if (!home.startsWith("/") || home.split("/").includes("..")) continue;
     const path = posix.join(absoluteHome(home, "Codex home"), "packages");
     if (!await runtime.existsNative(path)) continue;
-    if (!await runtime.isExposableEntryNative(path)) throw new Error(`Codex packages must be a real directory: ${path}`);
     paths.add(await runtime.realpathNative(path));
   }
   return [...paths];
@@ -509,6 +512,7 @@ function renderSeatbeltProfile(
   network: "inherit" | "deny",
   readOnlyPaths: readonly string[] = [],
   guardStateMask?: SeatbeltGuardStateMask,
+  pinnedPackageAncestors: readonly string[] = [],
 ): string {
   const writeRules = writableRoots
     .map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
@@ -588,6 +592,13 @@ function renderSeatbeltProfile(
           : []),
       ]
       : []),
+    // Denying package contents alone is insufficient if a writable ancestor can be renamed into
+    // another writable root. Pin every ancestor by pathname while retaining ordinary child writes.
+    ...(pinnedPackageAncestors.length ? [
+      "(deny file-write-unlink",
+      ...pinnedPackageAncestors.map((path) => `    (literal ${seatbeltLiteral(path)})`),
+      ")",
+    ] : []),
     ...(network === "inherit" ? ["(allow network*)"] : []),
     // With the network denied the verdict socket still has to be reachable; nothing else is.
     ...(network === "deny" && guardStateMask?.sockets.length
@@ -862,8 +873,12 @@ export async function resolveExecutionIsolation(
       runtime.isRunnerOwnedEntryNative,
       runtime.realpathNative,
     );
+    const packageAncestors = new Set<string>();
     for (const path of await codexPackageDirectories(state, runtime)) {
       if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
+      for (let ancestor = posix.dirname(path); ancestor !== "/"; ancestor = posix.dirname(ancestor)) {
+        packageAncestors.add(ancestor);
+      }
     }
     const guardStateMask = await resolveGuardStateMask(state.guardStateMask, runtime);
     return {
@@ -876,6 +891,7 @@ export async function resolveExecutionIsolation(
         policy.network,
         readOnlyPaths,
         guardStateMask ? await seatbeltGuardStateMask(guardStateMask, runtime) : undefined,
+        [...packageAncestors],
       ),
       writableRoots,
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),

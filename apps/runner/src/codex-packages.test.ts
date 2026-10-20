@@ -102,21 +102,37 @@ for (const mode of ["bwrap", "seatbelt"] as const) {
           assert.ok(isolation.profile.slice(deny).includes(`(literal "${path}")`));
           assert.ok(isolation.profile.slice(deny).includes(`(subpath "${path}")`));
         }
+        const pins = isolation.profile.slice(isolation.profile.indexOf("(deny file-write-unlink"));
+        for (const path of [f.codexHome, f.home, f.root, otherHome]) {
+          assert.ok(pins.includes(`(literal "${path}")`), "package ancestors cannot be renamed out of the deny rule");
+        }
       }
     }
   });
 }
 
-test("a replaceable packages symlink cannot serve as a read-only package overlay", posixOnly, async (t) => {
+test("a package alias protects its target without making the replaceable link trusted", posixOnly, async (t) => {
   const f = fixture(t);
   rmSync(f.packages, { recursive: true });
   mkdirSync(join(f.root, "elsewhere"));
   symlinkSync(join(f.root, "elsewhere"), f.packages);
-  await assert.rejects(resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, {
+  const isolation = await resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, {
     platform: "linux", uid: () => 1000, nativeHome: () => f.home, nativeEnvironment: () => ({}),
     resolveNative: async () => ({ path: "/bin/bwrap", via: "path", launch: { command: "/bin/bwrap", args: [] } }),
-  }, { driver: "codex-app-server", dataDir: f.root, env: { HOME: f.home }, sessionId: "s1", cwd: f.root }),
-  /packages must be a real directory/);
+  }, { driver: "claude-code", dataDir: f.root, env: { HOME: f.home }, sessionId: "s1", cwd: f.root });
+  assert.ok(isolation?.backend === "bwrap");
+  assert.deepEqual(isolation.readOnlyBinds, [join(f.root, "elsewhere")]);
+  assert.throws(() => trustedPath(f.command, [f.codexHome], process.getuid!(), statSync("/").uid, { home: f.home }),
+    /a session can write/);
+});
+
+test("foreign or traversal-containing installation hints do not fail unrelated Linux launches", posixOnly, async () => {
+  const isolation = await resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, {
+    platform: "linux", uid: () => 1000, nativeHome: () => "C:\\Users\\fixture", nativeEnvironment: () => ({}),
+    existsNative: async () => false,
+    resolveNative: async () => ({ path: "/bin/bwrap", via: "path", launch: { command: "/bin/bwrap", args: [] } }),
+  }, { driver: "acp", dataDir: "/state", env: {}, sessionId: "s1", cwd: "/work", codexHomes: ["/a/../b"] });
+  assert.equal(isolation?.backend, "bwrap");
 });
 
 test("reviewer admission names each unprotected writer and requires exact live launch proof", posixOnly, (t) => {

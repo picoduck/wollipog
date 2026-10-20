@@ -7,6 +7,9 @@
  */
 
 import { StringDecoder } from "node:string_decoder";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentContext, ShellKind, ShellOutputChunk, ShellSnapshotMessage } from "@wollipog/protocol";
 import { run } from "./discovery/resolve.js";
 import { killTree, killTreeAndWait, provenProcessTreeExit, spawnAgent, type AgentProcess } from "./spawn.js";
@@ -186,13 +189,40 @@ export class ShellManager {
   /** Agent TUIs have no runner filesystem boundary. Retain uncertain descendants even after
    * their terminal tab is forgotten; only a complete process-tree exit proof removes a writer. */
   private readonly unprotectedAgentTuis = new Map<string, string>();
+  private readonly agentTuiWriterFiles = new Map<string, string>();
   /** Set by runner shutdown; ended callbacks are not reported after it. */
   private disposed = false;
 
-  constructor(private readonly cb: ShellCallbacks) {}
+  constructor(private readonly cb: ShellCallbacks, private readonly agentTuiWriterDirectory?: string) {
+    if (!agentTuiWriterDirectory) return;
+    mkdirSync(agentTuiWriterDirectory, { recursive: true, mode: 0o700 });
+    for (const file of readdirSync(agentTuiWriterDirectory)) {
+      if (!file.endsWith(".json")) continue;
+      let sessionId = "unknown (unreadable Agent TUI writer record)";
+      try {
+        const record = JSON.parse(readFileSync(join(agentTuiWriterDirectory, file), "utf8")) as { sessionId?: unknown };
+        if (typeof record.sessionId === "string" && record.sessionId) sessionId = record.sessionId;
+      } catch { /* Retain uncertain evidence, including a partial pre-spawn write. */ }
+      this.unprotectedAgentTuis.set(`recovered:${file}`, sessionId);
+    }
+  }
 
   unprotectedAgentTuiSessions(): string[] {
     return [...new Set(this.unprotectedAgentTuis.values())];
+  }
+
+  private retireAgentTuiWriter(shellId: string, proven: boolean): void {
+    if (!proven) return;
+    const file = this.agentTuiWriterFiles.get(shellId);
+    let retired = !file;
+    if (file) {
+      try { unlinkSync(file); retired = true; }
+      catch (error) { retired = (error as NodeJS.ErrnoException).code === "ENOENT"; }
+    }
+    if (retired) {
+      this.unprotectedAgentTuis.delete(shellId);
+      this.agentTuiWriterFiles.delete(shellId);
+    }
   }
 
   count(sessionId: string): number {
@@ -247,6 +277,16 @@ export class ShellManager {
       : shellLaunchFor(context, cols, rows);
     const { command, args, pty, ttyFile } = selected;
     const launchCwd = meta?.launch?.cwd ?? cwd;
+    if (meta?.kind === "agent_tui") {
+      // Publish before spawn: a crash cannot leave an agent writer with no durable admission
+      // evidence. Recovered/uncertain markers require operator reconciliation, never age out.
+      if (this.agentTuiWriterDirectory) {
+        const file = join(this.agentTuiWriterDirectory, `${randomUUID()}.json`);
+        writeFileSync(file, JSON.stringify({ sessionId }), { flag: "wx", mode: 0o600 });
+        this.agentTuiWriterFiles.set(shellId, file);
+      }
+      this.unprotectedAgentTuis.set(shellId, sessionId);
+    }
     const child = process.platform === "win32" && context.kind === "native"
       ? openWindowsConpty({
           command: meta?.launch?.command ?? command,
@@ -290,7 +330,6 @@ export class ShellManager {
       forgetAfterExit: false,
     };
     this.shells.set(shellId, live);
-    if (live.kind === "agent_tui") this.unprotectedAgentTuis.set(shellId, sessionId);
 
     // Stream chunks split on BYTE boundaries, not character boundaries — decoding each chunk
     // independently would corrupt any multibyte character straddling two chunks. A StringDecoder
@@ -336,11 +375,11 @@ export class ShellManager {
     let endReported = false;
     const reportEnded = () => {
       const onEnded = meta?.onEnded;
-      if ((!onEnded && live.kind !== "agent_tui") || endReported || this.disposed) return;
+      if (((!onEnded || this.disposed) && live.kind !== "agent_tui") || endReported) return;
       endReported = true;
       void shellProcessTreeProof(child).then((proven) => {
+        this.retireAgentTuiWriter(shellId, proven);
         if (this.disposed) return;
-        if (proven) this.unprotectedAgentTuis.delete(shellId);
         try {
           onEnded?.(proven);
         } catch {

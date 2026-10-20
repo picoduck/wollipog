@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -256,6 +256,32 @@ test("an agent TUI reports its process-tree proof exactly once when it ends, how
   } finally {
     mgr.dispose();
   }
+});
+
+test("Agent TUI writer evidence survives reconstruction and retires only with a full tree proof", {
+  skip: !agentTuiPlatformSupported(process.platform, NATIVE) || process.platform === "win32",
+}, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-tui-writers-"));
+  const directory = join(root, "writers");
+  const { cb } = collector();
+  const mgr = new ShellManager(cb, directory);
+  t.after(() => { mgr.dispose(); rmSync(root, { recursive: true, force: true }); });
+  let proof: boolean | undefined;
+  mgr.open("writer", "s_writer", tmpdir(), NATIVE, undefined, {
+    kind: "agent_tui", launch: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
+    onEnded: (proven) => { proof = proven; },
+  });
+  assert.equal(readdirSync(directory).length, 1);
+  assert.deepEqual(new ShellManager(cb, directory).unprotectedAgentTuiSessions(), ["s_writer"]);
+  mgr.close("writer");
+  await waitFor(() => proof !== undefined);
+  assert.equal(proof, true);
+  assert.deepEqual(readdirSync(directory), []);
+  assert.deepEqual(new ShellManager(cb, directory).unprotectedAgentTuiSessions(), []);
+  writeFileSync(join(directory, "uncertain.json"), JSON.stringify({ sessionId: "s_uncertain" }));
+  writeFileSync(join(directory, "partial.json"), "{");
+  assert.deepEqual(new Set(new ShellManager(cb, directory).unprotectedAgentTuiSessions()),
+    new Set(["s_uncertain", "unknown (unreadable Agent TUI writer record)"]));
 });
 
 test("runner shutdown reports no agent TUI ending, so it settles no provider-HOME reference", {

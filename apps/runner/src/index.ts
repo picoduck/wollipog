@@ -1277,7 +1277,7 @@ const shells = new ShellManager({
     unguardedAgentTuis.exited(shellId);
     sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq });
   },
-});
+}, join(config.dataDir, "agent-tui-writers"));
 sessions.setWorktreeShellRetirement((sessionId, context, path) =>
   shells.closeForWorktree(sessionId, context, path));
 // Keep the Claude managed-worktree guard's protection set live: a worktree created, activated,
