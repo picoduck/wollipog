@@ -205,6 +205,12 @@ function snapshot(options: { sessions?: SessionView[]; projects?: ProjectView[];
   };
 }
 
+// Every state fixture supplies socket data. A real HTTP request can finish after
+// mock.timers.reset(), when clearing its stale timeout corrupts the next clock's
+// queue. Keep unrelated API work pending within the fixture instead (#3553).
+const pendingApi = Object.fromEntries(Object.keys(realApi).map((key) => [key, () => new Promise(() => {})])) as
+  unknown as ApiClient;
+
 async function mount(options: { routeSplit?: string | null; api?: ApiClient } = {}) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -224,7 +230,7 @@ async function mount(options: { routeSplit?: string | null; api?: ApiClient } = 
   const created: Array<NewSessionPreset | undefined> = [];
   await act(async () => {
     root.render(
-      <ApiProvider {...(options.api ? { client: options.api } : {})}>
+      <ApiProvider client={options.api ?? pendingApi}>
         <StoreProvider connection={connection} navigation={navigation}>
           <InboxView
             rightPanel={rightPanel}
@@ -262,6 +268,15 @@ function assertOneState(container: HTMLElement, title: string): HTMLElement {
   assert.doesNotMatch(text, /Select a Session|All Agents Unblocked|Running: \d|✓/);
   return state;
 }
+
+test("socket-backed state fixtures never make real HTTP requests", async (context) => {
+  const fetch = context.mock.method(globalThis, "fetch", () => new Promise<Response>(() => {}));
+  const { socket } = await mount({ routeSplit: durableInboxProjectKey("project-docs") });
+  await act(async () => {
+    socket.push(snapshot({ projects: [project([location("available")], 8)] }));
+  });
+  assert.equal(fetch.mock.callCount(), 0, "state fixtures use their own API client as well as their own socket");
+});
 
 test("with zero sessions the page shows one first-run state, and the header no New Session", async () => {
   const { container, socket, created } = await mount();
@@ -485,9 +500,7 @@ describe("sessions that never arrive", () => {
   /** A client that answers only the list Retry asks for. Everything else (the preview's transcript,
    * the skill list) stays pending rather than reaching for a network the test does not have. */
   function client(listSessions: () => Promise<{ sessions: SessionView[] }>): ApiClient & { calls: number } {
-    const stub = Object.fromEntries(Object.keys(realApi).map((key) => [key, () => new Promise(() => {})])) as
-      unknown as ApiClient & { calls: number };
-    stub.calls = 0;
+    const stub = { ...pendingApi, calls: 0 };
     stub.listSessions = () => { stub.calls += 1; return listSessions(); };
     return stub;
   }
