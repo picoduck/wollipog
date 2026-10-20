@@ -11793,7 +11793,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     flex: 1 1 0;
     align-items: center;
     min-width: 0;
-    min-height: 44px;
+    min-height: var(--control-h);
   }
   /* Promoted out of the heading, the description is a flex item, whose automatic minimum is its
      content's width: a nowrap description (Snooze's session title) would widen the header past the
