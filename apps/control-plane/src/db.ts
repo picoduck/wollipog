@@ -19,7 +19,7 @@ import { PROJECT_CREATION_REQUEST_WINDOW_MS } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
-import { validCampaignControl, validOrchestratorCampaignBudgetDefault, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
+import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
@@ -297,7 +297,7 @@ const OUTBOUND_EVENT_KINDS = new Set<OutboundEventKind>([
   "cost.budget_exhausted",
 ]);
 import { DEFAULT_POD_ORCHESTRATION_POLICY, type PodContextSelectionWindow } from "./pod-orchestration.js";
-import { evaluateUiEvidenceReviewClient, type UiEvidenceReviewClient } from "./ui-evidence-review.js";
+import { evaluateUiEvidenceReviewClient, type UiEvidenceReviewClient, type UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
 import {
   LOCAL_OWNER_USER_ID,
   PERSONAL_ORGANIZATION_ID,
@@ -19501,13 +19501,18 @@ export class ControlPlaneDb {
     // Orchestrator's runner, harness, or model cannot inspect evidence bytes. A supported client
     // can still see one decision fall back when that decision's own evidence is unreviewable.
     // Read the row directly: a full SessionView embeds this projection and would recurse.
-    const uiEvidenceReview = evaluateUiEvidenceReviewClient(this.uiEvidenceReviewClient({
+    const directEvidenceReview = evaluateUiEvidenceReviewClient(this.uiEvidenceReviewClient({
       runnerId: campaign.runner_id,
       agentId: campaign.agent_id,
       driver: campaign.driver,
       model: campaign.model,
       agentCapabilities: parseJson<SessionCapabilities>(campaign.agent_capabilities) ?? undefined,
     }, effectiveOwners.ui_evidence_approval));
+    // Full Control never hands evidence back to the Human (#2940): an Orchestrator that cannot view
+    // images keeps the gate and can only ask for inspectable evidence or deny.
+    const uiEvidenceReview: UiEvidenceReviewEvaluation = policy.control?.mode === "full_control" &&
+      effectiveOwners.ui_evidence_approval === "orchestrator" && directEvidenceReview.effectiveOwner === "human" && directEvidenceReview.fallback
+      ? { effectiveOwner: "orchestrator", limitation: directEvidenceReview.fallback } : directEvidenceReview;
     effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
     // Campaign Elapsed ends when the campaign first reaches verified completion and resumes if it
     // reopens. Completion is derived, never written, so the projection records what it observes.
@@ -19549,6 +19554,8 @@ export class ControlPlaneDb {
           ? this.campaignVideoReview(resolvedCampaignId, effectiveOwners.ui_evidence_approval) : null;
         return video ? { videoEvidenceReview: video } : {};
       })(),
+      ...(policy.control?.mode === "full_control"
+        ? { fullControlHumanRequired: fullControlStandingHumanRequired(humanRequiredRulesExist(this.listGovernancePolicies())) } : {}),
       limits: {
         maximumConcurrentChildren: limit,
         occupied,
@@ -19557,7 +19564,10 @@ export class ControlPlaneDb {
         maxToolCalls: campaign.max_tool_calls ?? null,
       },
       uiEvidenceReview: uiEvidenceReview.effectiveOwner === "orchestrator"
-        ? { status: "available", effectiveOwner: "orchestrator" }
+        ? uiEvidenceReview.limitation
+          ? { status: "unavailable", effectiveOwner: "orchestrator", reasonCode: uiEvidenceReview.limitation.code,
+              reason: `${uiEvidenceReview.limitation.reason} It asks for inspectable evidence or denies the claim as unproven.` }
+          : { status: "available", effectiveOwner: "orchestrator" }
         : uiEvidenceReview.fallback
           ? {
               status: "unavailable",
@@ -24521,8 +24531,10 @@ export class ControlPlaneDb {
     }, status: row.status as SessionStatus, costUsd: row.cost_usd,
       toolCallCount: rules.some((rule) => rule.enabled && (rule.conditions?.minToolCalls !== undefined || rule.conditions?.maxToolCalls !== undefined)) ? this.countToolCalls(sessionId) : 0,
       escalated: Boolean(request.context?.escalatedBy) }, rules);
+    // Only rules the person marked Human Required, and built-ins, stay theirs. An ordinary ask
+    // left out of delegatablePolicyIds becomes a one-time Orchestrator decision (#2940).
     const mandatory = withdrawn || current.effect === "deny" || current.effect === "ask" && current.policy &&
-      (current.policy.builtin || current.policy.conditions?.humanRequired || !control.boundary.delegatablePolicyIds.includes(current.policy.policyId));
+      (current.policy.builtin || current.policy.conditions?.humanRequired);
     return mandatory ? { ...request, humanRequired: true } : request;
   }
 

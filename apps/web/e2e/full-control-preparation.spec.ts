@@ -35,7 +35,7 @@ function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean,
       ? { campaignScope: { repository: "example/full-control-fixture", issueNumbers: [12], authorizedByCaller: true } }
       : { inspection: { type: "campaign_launch_inspection_result" as const, requestId: "fixture", workspaceId: launch.workspaceId, ok: true,
         repository: "example/full-control-fixture", issueNumbers, digest: "d".repeat(64) } }),
-    accountingError: () => null, dailyLimit: false, invalidPolicyIds: [], imageReview: { effectiveOwner: "orchestrator" },
+    accountingError: () => null, dailyLimit: false, invalidPolicyIds: [], imageReview: { effectiveOwner: "orchestrator" }, humanRequiredRules: false,
     pacedVideoPeer: false, disclosuresAvailable: true, savedBudget: null }).preflight;
 }
 
@@ -168,6 +168,9 @@ for (const viewport of viewports) {
       await expect(page.getByText(/^No Limit · 4 at a time$/)).toBeVisible();
       await expect(page.getByText(/Wollipog does not configure zero retention/)).toBeVisible();
       await expect(start).toBeEnabled();
+      // #2940: nothing comes to the Human, and credential requests are declined as blocked work.
+      await expect(page.locator("dt", { hasText: /^Human Required$/ }).locator("+ dd")).toHaveText("None");
+      await expect(page.getByText(/declined automatically and shown as blocked work in Campaign Status\. You are not asked\./)).toBeVisible();
       await shoot(page, ready, `${prefix}-ready.png`);
 
       // An optional ceiling lives under Advanced.

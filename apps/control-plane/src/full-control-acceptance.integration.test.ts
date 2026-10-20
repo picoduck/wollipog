@@ -94,7 +94,8 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
     title: "Inspect Fixture", context: {
       toolName: driver === "claude-code" ? "Bash" : "commandExecution", input: "cat implementation.ts",
       operation: { kind: "command", input: "cat implementation.ts", cwd: directory,
-        filesystem: { cwd: directory, targets: [{ path: "implementation.ts", resolvedPath: join(directory, "implementation.ts") }] } },
+        filesystem: { cwd: directory, targets: [{ path: "implementation.ts", resolvedPath: join(directory, "implementation.ts") }],
+          containment: { version: 1, root: directory, sessionRoot: directory } } },
     }, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
   });
   return {
@@ -204,8 +205,11 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
           input: "git status --short", operation: { kind: "command", input: "git status --short",
             cwd: "/fixture/repository", filesystem: { cwd: "/fixture/repository", targets: [] } } },
         options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
-      assert.equal(h.db.getSession("root")!.pendingRequestOwners!.human, 1,
-        "Git inspection is not delegated by a code-only standing boundary");
+      // Git is never a bounded effect, and a parked root cannot judge it: it declines its own once
+      // and nobody is asked (#2940).
+      assert.equal(h.db.getSession("root")!.pendingApproval, null);
+      const settled = h.sent.filter((m) => m.type === "resolve_permission") as Array<{ requestId: string; optionId: string | null }>;
+      assert.deepEqual(settled.filter((m) => m.requestId === "git-inspection").map((m) => m.optionId), [null]);
       assert.equal(h.svc.resolveDescendantRequest("root", "root", "git-inspection",
         { action: "approve", optionId: "once" }, () => true).ok, false);
     } finally { h.close(); }
@@ -262,7 +266,7 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
     } finally { h.close(); }
   });
 
-  test(`${driver}: one actionable credential exception remains while unrelated authorized work consumes once; restart revokes stale grants`, async () => {
+  test(`${driver}: one blocked credential decline remains while unrelated authorized work consumes once; restart revokes stale grants`, async () => {
     const h = stack(driver);
     try {
       assert.ok(h.enable().ok);
@@ -272,8 +276,14 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       for (let index = 0; index < 3; index++) h.svc.onSessionEvent("worker", event);
       const humanRequests = h.svc.descendantRequests("root", () => true, "human");
       assert.ok(humanRequests.ok);
-      assert.equal(humanRequests.data!.requests.length, 1, "replay retains one exception, not repeated override requests");
-      assert.equal(humanRequests.data!.requests[0]!.authorityEvaluation!.reason, "protected_request");
+      assert.equal(humanRequests.data!.requests.filter((r) => r.responseOwner === "human").length, 0, "Full Control asks nobody (#2940)");
+      assert.ok(!h.sent.some((m) => m.type === "answer_question" && (m as { action?: string }).action !== "dismiss"),
+        "the credential question is only ever dismissed, never answered");
+      const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
+      assert.equal(blocked.length, 1, "redelivery retains one blocked record, not repeated requests");
+      assert.equal(blocked[0]!.state, "blocked");
+      assert.deepEqual(h.db.campaignRecovery.declines("root", h.db.getSession("root")!.parentControlPolicy!.revision)
+        .map((decline) => [decline.sessionId, decline.requestClass, decline.count]), [["worker", "secrets_and_sign_in", 1]]);
       assert.equal(h.svc.resolveDescendantRequest("root", "worker", event.occurrenceId,
         { action: "answer", answers: { secret: "A" } }, () => true).ok, false);
       const unrelated = h.ask("sibling", "sibling-placement").data!;
@@ -285,12 +295,14 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       h.reopen();
       assert.equal(h.db.workflowDecisionByOccurrence(stale.occurrenceId)!.status, "revoked");
       assert.equal((await h.svc.consumeWorkflowDecision("sibling", stale.occurrenceId, { resourceSnapshot: question })).ok, false);
-      assert.equal(h.svc.descendantRequests("root", () => true, "human").data!.requests.length, 1);
+      assert.equal(h.svc.descendantRequests("root", () => true, "human").data!.requests.filter((r) => r.responseOwner === "human").length, 0);
+      assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 1,
+        "the decline stays visible as blocked work across reopen");
     } finally { h.close(); }
   });
 }
 
-for (const hostingVideo of [false, true]) test("foundation scope and attached video remain genuine human exceptions rather than a synthetic complete positive campaign" +
+for (const hostingVideo of [false, true]) test("foundation scope stays human and uncertified video can only be denied by the Orchestrator, never a synthetic complete positive campaign" +
   (hostingVideo ? " under the hosting video composition" : ""), async () => {
   const h = stack("codex-app-server", PROTOCOL_VERSION, hostingVideo);
   try {
@@ -312,13 +324,46 @@ for (const hostingVideo of [false, true]) test("foundation scope and attached vi
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: "video", artifactId: video.data!.artifactId,
         mediaType: "video/webm", sha256: video.data!.sha256 }] } });
     assert.ok(decision.ok, decision.error ?? "video request failed");
-    assert.equal(decision.data!.authority, "human");
-    assert.equal(decision.data!.humanFallback?.code, "media_video_unsupported");
-    assert.equal(h.svc.reviewDescendantUiEvidence("root", "worker", decision.data!.occurrenceId, "video", () => true).ok, false);
+    // Full Control never routes evidence to the Human (#2940). The Orchestrator owns the gate but
+    // can neither receive the raw video nor approve it without a receipt: it can only deny.
+    assert.equal(decision.data!.authority, "orchestrator");
+    assert.equal(decision.data!.humanFallback, undefined);
+    const delivery = h.svc.reviewDescendantUiEvidence("root", "worker", decision.data!.occurrenceId, "video", () => true);
+    assert.equal(delivery.ok, false);
+    assert.match(delivery.error!, /Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven\./u);
     assert.equal(h.svc.resolveDescendantRequest("root", "worker", decision.data!.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["video"] }, () => true).ok, false);
     assert.notEqual(h.db.campaignProjection("root")!.status, "verified_complete");
+    assert.ok(h.svc.resolveDescendantRequest("root", "worker", decision.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Attach screenshots as Session artifacts." }, () => true).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data!.occurrenceId)!.status, "denied");
   } finally { h.close(); }
+});
+
+test("Full Control owns evidence it cannot inspect, yet never delivers another Session's artifact; Custom still routes it to the Human", () => {
+  for (const full of [true, false]) {
+    const h = stack("codex-app-server");
+    try {
+      if (full) assert.ok(h.enable().ok);
+      else assert.ok(h.svc.setParentControlPolicy("root", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, ui_evidence_approval: "orchestrator" },
+        h.db.getSession("root")!.parentControlPolicy?.revision).ok);
+      const bytes = readFileSync(fileURLToPath(new URL("../../web/public/icons/icon-192.png", import.meta.url)));
+      const foreign = h.svc.createWorkflowArtifact({ sessionId: "sibling", kind: "screenshot", name: "sibling.png",
+        mimeType: "image/png", encoding: "base64", data: bytes.toString("base64") }, { kind: "agent", id: "sibling" });
+      assert.ok(foreign.ok, foreign.error ?? "attachment failed");
+      const decision = h.svc.createWorkflowDecision("worker", { requestId: "foreign", resourceKey: "foreign", resourceSnapshot: {
+        category: "ui_evidence_approval", evidence: [{ evidenceId: "foreign", artifactId: foreign.data!.artifactId,
+          mediaType: "image/png", sha256: foreign.data!.sha256 }] } });
+      assert.ok(decision.ok, decision.error ?? "request failed");
+      assert.equal(decision.data!.authority, full ? "orchestrator" : "human");
+      if (full) assert.equal(decision.data!.humanFallback, undefined);
+      else assert.equal(decision.data!.humanFallback?.code, "artifact_unavailable");
+      const delivered = h.svc.reviewDescendantUiEvidence("root", "worker", decision.data!.occurrenceId, "foreign", () => true);
+      assert.equal(delivered.ok, false, "another Session's bytes are never delivered");
+      assert.equal(h.svc.resolveDescendantRequest("root", "worker", decision.data!.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["foreign"] }, () => true).ok, false);
+    } finally { h.close(); }
+  }
 });
 
 test("older peers cannot admit the foundation even with fixture image capability", () => {

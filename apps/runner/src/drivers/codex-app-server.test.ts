@@ -4266,12 +4266,18 @@ test("App Server approval reasons stay display-only and command identity require
 });
 
 test("approvalContext exposes bounded Codex tool/path/network/branch selectors", () => {
-  assert.deepEqual(approvalContext("item/fileChange/requestApproval", {
+  const selected = approvalContext("item/fileChange/requestApproval", {
     changes: [{ path: "/repo/a.ts" }],
     permissions: { network: true },
     branchName: "feature/x",
     reason: "apply patch",
-  }, true), {
+  }, true);
+  // The runner-observed `dev:ino` (of the nearest existing ancestor for a file to be created) is
+  // host-specific; its shape is checked, then the rest of the context compared exactly.
+  const target = selected.operation?.filesystem?.targets[0];
+  assert.match(target?.identity ?? "", /^\d+:\d+(?::missing)?$/u);
+  delete target?.identity;
+  assert.deepEqual(selected, {
     toolName: "fileChange",
     providerPermissionExpansion: true,
     input: "apply patch",

@@ -35,6 +35,28 @@ for (const theme of ["dark", "light"] as const) {
         await page.screenshot({ path: join(directory, `request-${device}-${theme}.png`) });
       }
     });
+    test(`a Full Control decline is blocked work that asks nobody on ${device} ${theme}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&recovery=request_declined&theme=${theme}`);
+      const notice = page.locator(".campaign-status .notice", { hasText: "Request Declined" });
+      await expect(notice).toBeVisible();
+      await expect(notice).toContainText("Nobody is asked and the request is never replayed.");
+      await notice.getByRole("button", { name: "Show Details" }).click();
+      await expect(notice).toContainText("Continue Without the Request");
+      await expect(notice).toContainText("Orchestrator");
+      await expect(notice).toContainText("No override is requested.");
+      await expect(notice).toContainText("None. The request stays declined.");
+      await expect(page.locator(".campaign-status .notice", { hasText: "Human Input Required" })).toHaveCount(0);
+      await expect(notice.getByRole("button", { name: /approve|override|retry/i })).toHaveCount(0);
+      const geometry = await page.locator(".campaign-status").evaluate(element => ({ width: element.clientWidth, scroll: element.scrollWidth }));
+      expect(geometry.scroll).toBeLessThanOrEqual(geometry.width + 1);
+      const directory = process.env.CAMPAIGN_RECOVERY_EVIDENCE_DIR;
+      if (directory) {
+        mkdirSync(directory, { recursive: true });
+        await notice.evaluate(element => element.scrollIntoView({ block: "start" }));
+        await page.screenshot({ path: join(directory, `declined-${device}-${theme}.png`) });
+      }
+    });
     test(`verified children keep unfinished scoped repair active on ${device} ${theme}`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&recovery=failed_checks&completedChildren=1&theme=${theme}`);

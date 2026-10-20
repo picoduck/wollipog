@@ -23,7 +23,46 @@ CREATE TABLE IF NOT EXISTS campaign_recovery_denial_settlements (
   PRIMARY KEY (campaign_session_id, occurrence_id),
   FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS campaign_recovery_declines (
+  campaign_session_id TEXT NOT NULL,
+  subject_session_id TEXT NOT NULL,
+  request_class TEXT NOT NULL,
+  first_occurrence TEXT NOT NULL,
+  policy_revision INTEGER NOT NULL,
+  declined_count INTEGER NOT NULL,
+  first_declined_at INTEGER NOT NULL,
+  last_declined_at INTEGER NOT NULL,
+  PRIMARY KEY (campaign_session_id, subject_session_id, request_class),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS campaign_standing_responses (
+  campaign_session_id TEXT NOT NULL,
+  subject_session_id TEXT NOT NULL,
+  occurrence TEXT NOT NULL,
+  claimed_at INTEGER NOT NULL,
+  PRIMARY KEY (campaign_session_id, subject_session_id, occurrence),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS campaign_recovery_declined_occurrences (
+  campaign_session_id TEXT NOT NULL,
+  occurrence TEXT NOT NULL,
+  PRIMARY KEY (campaign_session_id, occurrence),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 `;
+
+/** One Full Control decline, kept as blocked work. Its class and hashed first occurrence are the
+ * only request facts stored: never a title, command, question text, path or answer. */
+export interface CampaignRecoveryDecline {
+  sessionId: string;
+  requestClass: string;
+  /** `recoveryCoordinate` of the first declined occurrence; later ones only raise the count. */
+  occurrenceId: string;
+  policyRevision: number;
+  count: number;
+  firstDeclinedAt: number;
+  lastDeclinedAt: number;
+}
 
 /** Server-verified exact terminal-report accounting, never a quality or media receipt. */
 export interface CampaignRecoveryVerifiedReport {
@@ -51,7 +90,8 @@ const inputFor: Partial<Record<CampaignRecoveryReason, CampaignRecoveryInput>> =
   unsupported_capability: "use_supported_capability", uncertain_outcome: "reconcile_original_outcome",
 };
 const terminal = new Set(["resolved", "cancelled"]);
-const hard = new Set<CampaignRecoveryReason>(["hard_denial", "attempts_exhausted"]);
+// A Full Control decline is final for its occurrence: blocked, never dispatched, never asked.
+const hard = new Set<CampaignRecoveryReason>(["hard_denial", "attempts_exhausted", "request_declined"]);
 const human = new Set<CampaignRecoveryReason>(["missing_human_information", "missing_access",
   "boundary_enlargement", "human_required_rule", "unsupported_capability"]);
 
@@ -84,6 +124,61 @@ export class CampaignRecoveryStore {
     this.db.prepare(`INSERT OR IGNORE INTO campaign_recovery_denial_settlements
       (campaign_session_id,occurrence_id,subject_session_id,report_json) VALUES (?,?,?,?)`)
       .run(campaignId, occurrenceId, sessionId, JSON.stringify(report));
+  }
+
+  /** Durable at-most-once fence for a standing response (#2940): claimed before the response is
+   * sent, so a restored card (a repeated snapshot, a reconnect, a restart) never answers the same
+   * occurrence twice. False means it was already claimed and must not be answered again. */
+  claimStandingResponse(campaignId: string, sessionId: string, occurrence: string, now: number): boolean {
+    return this.db.prepare(`INSERT OR IGNORE INTO campaign_standing_responses
+      (campaign_session_id,subject_session_id,occurrence,claimed_at) VALUES (?,?,?,?)`)
+      .run(campaignId, sessionId, occurrence, now).changes > 0;
+  }
+
+  /** Only for a response proven not sent (the runner socket refused it): it may be tried again. */
+  releaseStandingResponse(campaignId: string, sessionId: string, occurrence: string): void {
+    this.db.prepare(`DELETE FROM campaign_standing_responses
+      WHERE campaign_session_id=? AND subject_session_id=? AND occurrence=?`).run(campaignId, sessionId, occurrence);
+  }
+
+  /** Record one declined occurrence. A session's repeated requests of the same class collapse
+   * into its first record (#2938 AC6): the count rises, nothing else is created or re-notified. */
+  recordDecline(campaignId: string, sessionId: string, requestClass: string, occurrenceId: string,
+    policyRevision: number, now: number): { firstForClass: boolean } {
+    // A redelivered occurrence (a reconnect replaying a still-pending request) is the same decline.
+    if (!this.db.prepare(`INSERT OR IGNORE INTO campaign_recovery_declined_occurrences (campaign_session_id,occurrence)
+      VALUES (?,?)`).run(campaignId, `${policyRevision}:${sessionId}:${occurrenceId}`).changes) return { firstForClass: false };
+    const existing = this.db.prepare(`SELECT policy_revision FROM campaign_recovery_declines
+      WHERE campaign_session_id=? AND subject_session_id=? AND request_class=?`).get(campaignId, sessionId, requestClass) as
+      { policy_revision: number } | undefined;
+    this.db.prepare(`INSERT INTO campaign_recovery_declines (campaign_session_id,subject_session_id,request_class,
+      first_occurrence,policy_revision,declined_count,first_declined_at,last_declined_at) VALUES (?,?,?,?,?,1,?,?)
+      ON CONFLICT(campaign_session_id,subject_session_id,request_class) DO UPDATE SET
+        first_occurrence=CASE WHEN policy_revision=excluded.policy_revision THEN first_occurrence ELSE excluded.first_occurrence END,
+        first_declined_at=CASE WHEN policy_revision=excluded.policy_revision THEN first_declined_at ELSE excluded.first_declined_at END,
+        declined_count=CASE WHEN policy_revision=excluded.policy_revision THEN declined_count+1 ELSE 1 END,
+        policy_revision=excluded.policy_revision,last_declined_at=excluded.last_declined_at`)
+      .run(campaignId, sessionId, requestClass, occurrenceId, policyRevision, now, now);
+    return { firstForClass: existing?.policy_revision !== policyRevision };
+  }
+
+  /** Declines still shown as blocked work for the current revision. A revocation or newer
+   * revision fences older ones out, so a re-enabled boundary starts without stale blocks. */
+  declines(campaignId: string, policyRevision: number): CampaignRecoveryDecline[] {
+    return (this.db.prepare(`SELECT subject_session_id,request_class,first_occurrence,policy_revision,declined_count,
+      first_declined_at,last_declined_at FROM campaign_recovery_declines WHERE campaign_session_id=? AND policy_revision=?
+      ORDER BY first_declined_at,subject_session_id,request_class`).all(campaignId, policyRevision) as Array<{
+        subject_session_id: string; request_class: string; first_occurrence: string; policy_revision: number;
+        declined_count: number; first_declined_at: number; last_declined_at: number }>).map(row => ({
+      sessionId: row.subject_session_id, requestClass: row.request_class, occurrenceId: row.first_occurrence,
+      policyRevision: row.policy_revision, count: row.declined_count, firstDeclinedAt: row.first_declined_at,
+      lastDeclinedAt: row.last_declined_at }));
+  }
+
+  /** A verified child report settles that child's declines; the blocked record then resolves. */
+  retireDeclines(campaignId: string, sessionId: string): void {
+    this.db.prepare("DELETE FROM campaign_recovery_declines WHERE campaign_session_id=? AND subject_session_id=?")
+      .run(campaignId, sessionId);
   }
 
   campaignIds(): string[] {

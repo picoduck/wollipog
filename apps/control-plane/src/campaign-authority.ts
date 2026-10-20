@@ -1,5 +1,5 @@
 import {
-  campaignAuthorityPreflight, resolveCampaignAuthority, validCampaignControl,
+  campaignAuthorityPreflight, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
   type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl,
   type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
@@ -52,7 +52,12 @@ export function evaluateCampaignAuthority(
   const control = controller.orchestratorPolicy?.control;
   const full = control?.mode === "full_control";
   const snapshot = "category" in request ? request : undefined;
-  const pending = "requestId" in request ? request : undefined;
+  const raw = "requestId" in request ? request : undefined;
+  // Only a v230 runner attests worktree containment; an older runner's evidence is unresolved (#2940).
+  const pending = raw?.context?.operation?.filesystem?.containment && !runnerSupportsProtocol(protocol, "campaignWorktreeContainment")
+    ? { ...raw, context: { ...raw.context, operation: { ...raw.context.operation,
+      filesystem: (({ containment: _containment, ...rest }) => rest)(raw.context.operation.filesystem) } } }
+    : raw;
   const evaluated = resolveCampaignAuthority({ control, parentControl: controller.parentControl ?? "off",
     decisions: policy.decisions, root: controller.id === requester.id,
     supported: full ? campaignAuthorityPreflight(control, requester.driver, protocol, peerContracts?.requester).supported &&
@@ -65,7 +70,10 @@ export function evaluateCampaignAuthority(
     snapshot?.category === "follow_up_issue_publication" && full && control.boundary.issueAuthority;
   const issueBound = !issueOperation || !full || !control.boundary.issueAuthority || Boolean(snapshot && "issueAdmission" in snapshot &&
     snapshot.issueAdmission?.boundaryRevision === control.boundary.revision && (protocol ?? 0) >= 217 && (controllerProtocol ?? 0) >= 217);
-  return full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !issueBound)
-    ? { ...evaluated, owner: "human", basis: "human_required", reason: "outside_boundary" }
-    : evaluated;
+  if (full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !issueBound)) {
+    // A stale boundary authorizes nothing, including the server's own Full Control declines.
+    const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
+    return { ...rest, owner: "human", basis: "human_required", reason: "outside_boundary" };
+  }
+  return evaluated;
 }

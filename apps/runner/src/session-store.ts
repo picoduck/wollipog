@@ -52,6 +52,7 @@ import {
   SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
 } from "@wollipog/protocol";
 import type {
+  PermissionResolver,
   RatePricedUsageTotal,
   AgentCapabilities,
   AgentSlashCommand,
@@ -296,6 +297,10 @@ export interface SessionMeta {
   /** Content-free command tombstones for auth recovery the user explicitly dismissed before a
    * restarted runner reclaimed the corresponding durable handles. */
   providerAuthDismissedCommandIds?: string[];
+  /** An accepted Dismiss Recovery not yet completed because the provider turn had not settled
+   * (#2940). Durable so a restarted runner completes it instead of re-raising the card; it never
+   * expires. `recoveryId` matches a rebuilt card whose request id changed. */
+  pendingProviderAuthDismissal?: { requestId: string; recoveryId?: string; resolvedBy?: PermissionResolver };
   /** Durable, content-free pre-launch worktree refusal. Prompt content remains solely in the
    * control-plane durable outbox and is correlated by its command identity there. */
   worktreeRecovery?: WorktreeRecoveryView;

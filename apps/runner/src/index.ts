@@ -75,6 +75,7 @@ import {
   parseArgs,
   projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
+  resolveAgentEnvironmentValue,
   resolveRunnerLocalAgentEnvironment,
   writeProviderAccountsConfig,
   type RunnerConfig,
@@ -167,6 +168,7 @@ import { ProviderLoginSupervisor } from "./provider-login.js";
 import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type ProviderHomeLeaseCommandDeps } from "./provider-home-lease-commands.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
+import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
 import {
   adoptProviderProfileCommand,
   removeProviderAccountWithProfile,
@@ -918,6 +920,23 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
 // This process holds the data-directory lease, so it is the one store allowed to recover a writer-lock
 // guard abandoned by a process that died inside its guard section.
 const store = new SessionStore(resolve(config.dataDir, "sessions"), undefined, undefined, true);
+// Full Control screens resolved targets against the directories this runner knows hold
+// credentials (#2940). Read on each request, so accounts added at runtime are covered.
+setCampaignCredentialRoots(() => {
+  const providerHomeNames = ["HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
+  // Agent values may defer to the runner's environment (`fromEnv`); read them as launches would.
+  const agentEnv = (agent: RunnerConfig["agents"][number]) => Object.fromEntries(providerHomeNames.flatMap((name) => {
+    try { const value = resolveAgentEnvironmentValue(agent, name); return value === undefined ? [] : [[name, value]]; } catch { return []; }
+  }));
+  const sessions = store.listSessions();
+  return runnerCredentialRoots({
+    dataDir: config.dataDir, worktreeRoot: resolve(config.dataDir, "worktrees"), profileRoot: managedProviderProfileRoot(),
+    providerAccountDirectories: config.providerAccounts.map((account) => account.directory),
+    agentEnvs: [process.env, ...config.agents.map(agentEnv), ...sessions.map((meta) => meta.env)],
+    credentialHomes: sessions.flatMap((meta) => [meta.providerCredentialHome, meta.pendingProviderCredentialHome]),
+    workspacePaths: config.workspaces.map((workspace) => workspace.path), userHome: homedir(),
+  });
+});
 store.scrubLegacyAgentEnv();
 const durableCommands = new DurableCommandStore(resolve(config.dataDir, "command-receipts"));
 durableCommands.prune();
