@@ -71,6 +71,22 @@ test("attention routes retain exact opaque request identity and epoch through re
   assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/attention/~!`, "?epoch=0"), null);
 });
 
+test("a run's phone member is in its URL, so a reload and a shared link keep it (#2975)", () => {
+  const path = `/runs/~${encodeResourceId("run_abc")}`;
+  for (const member of ["s_claude", "member / ✅ &?#"]) {
+    const view: View = { name: "run", id: "run_abc", member };
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.equal(url.pathname, path);
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+  }
+  assert.equal(viewPath({ name: "run", id: "run_abc", member: "s_claude" }), `${path}?member=s_claude`);
+  assert.equal(sameView({ name: "run", id: "run_abc", member: "a" }, { name: "run", id: "run_abc", member: "b" }), false);
+  // A query that is not one member keeps the run open, without a member.
+  for (const query of ["", "?member=", "?member=%20", "?member=a&member=b", "?member=a&tab=b", "?tab=a", `?member=${"x".repeat(5000)}`]) {
+    assert.deepEqual(viewFromPath(path, query), { name: "run", id: "run_abc" }, query);
+  }
+});
+
 test("Agent Skills panes have their own routes, and a skill id wins over a pane", () => {
   // Existing links keep their meaning (#1947): the bare route and a skill deep link.
   assert.deepEqual(viewFromPath("/skills"), { name: "skills" });

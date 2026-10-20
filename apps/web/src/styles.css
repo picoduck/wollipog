@@ -11151,6 +11151,156 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   gap: 9px;
 }
 
+/* A run's task strip (#2975): the task clamped to two lines (Show Full Task in ⋯ opens the rest),
+   then its meta 12px apart. */
+.run-task {
+  flex: none;
+  display: grid;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+}
+.run-task-prompt {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  font: var(--type-body);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.run-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: var(--space-3);
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.run-task-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+/* Phones (§15.1): the strip is two lines, the task's first and one line of meta. A meta item that
+   does not fit drops whole onto the hidden next line. */
+@media (max-width: 760px) {
+  .run-task-prompt { -webkit-line-clamp: 1; }
+  .run-task-meta {
+    height: 16px;
+    overflow: hidden;
+  }
+}
+.run-task-full {
+  margin: 0;
+  font: var(--type-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* The comparison (#2975, component-local per §19.4): flush member columns separated by hairlines
+   that fill the page's height. Each column is at least 320px and they share the rest; when they do
+   not fit the row scrolls sideways and fades its right edge while columns lie beyond it. */
+.run-detail:has(> .compare, > .compare-phone) { padding-bottom: 0; }
+.compare {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-auto-columns: minmax(320px, 1fr);
+  grid-auto-flow: column;
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.run-detail > .compare,
+.run-detail > .compare-phone {
+  margin-right: 0;
+  margin-left: 0;
+}
+.compare[data-clip-end] { mask-image: linear-gradient(to left, transparent, #000 var(--space-6)); }
+/* The compact tier shows two columns at a time (§15.2), leaving the fade's width of the next column
+   showing under it, so the fade covers a column rather than the second one's padding. A fixed size:
+   the row already overflows, so a track's minmax() maximum would never be reached. */
+@container app (max-width: 1099px) {
+  .compare:has(> :nth-child(3)) { grid-auto-columns: max(320px, calc(50% - var(--space-6) / 2)); }
+}
+.compare-member {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.compare-member + .compare-member { border-left: 1px solid var(--border); }
+/* One line: the agent, ending in an ellipsis when the line is short, then its status at its full
+   width; Open Session and ⋯ keep the far end. */
+.compare-member-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) 0 var(--space-4);
+}
+.compare-member-agent {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-body-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compare-member-head > .session-status-indicators { flex: none; }
+.compare-member-head > .session-status-indicators + .icon-btn { margin-left: auto; }
+.compare-member-meta {
+  flex: none;
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-2);
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Before the history is known the line stays, empty, so every column's body starts level. */
+.compare-member-meta:empty::before { content: "\00a0"; }
+.compare-member-notice {
+  flex: none;
+  padding: var(--space-2) var(--space-4) 0;
+}
+.compare-member-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+}
+/* Phones (§15.1): one member at a time under the member tabs, its head the member bar. */
+.compare-phone {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--space-2);
+}
+.compare-tabs {
+  flex: none;
+  padding-inline: var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+}
+.compare-tab {
+  justify-content: center;
+  min-width: var(--control-h);
+}
+.compare-tab-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--radius-pill);
+  background: var(--tone);
+}
+.compare-phone > .compare-member { flex: 1; }
+.compare-phone .compare-member-head { padding-inline: var(--page-gutter) var(--space-2); }
+.compare-phone :is(.compare-member-meta, .compare-member-notice, .compare-member-body) { padding-inline: var(--page-gutter); }
+
 /* -------------------------- Collaboration pods -------------------------- */
 .pod-orchestration {
   flex: 0 0 auto;

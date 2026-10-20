@@ -4,8 +4,9 @@ import { test } from "node:test";
 
 const componentsUrl = new URL("./components/", import.meta.url);
 const expectedCallSites = new Map<string, RegExp>([
+  // A Run's member columns (#2975).
+  ["CompareColumns.tsx", /sessionActive=\{isTimelineSessionActive\(session\.status\)\}/],
   ["PodsView.tsx", /sessionActive=\{isTimelineSessionActive\(status\)\}/],
-  ["RunsView.tsx", /sessionActive=\{isTimelineSessionActive\(session\.status\)\}/],
   ["SessionDetail.tsx", /sessionActive=\{isTimelineSessionActive\(session\.status\)\s*\|\|\s*\(eventWindow\?\.openingStartSeq !== undefined && eventWindow\.laterGap !== undefined\)\}/],
   ["SideChatPanel.tsx", /sessionActive=\{isTimelineSessionActive\(child\.status\)\}/],
   ["WorkerDetail.tsx", /sessionActive=\{\["starting", "running", "waiting"\]\.includes\(lifecycle \?\? "unknown"\)\}/],

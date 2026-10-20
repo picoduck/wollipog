@@ -1,5 +1,6 @@
 import React, { useContext, useEffect, useId, useState } from "react";
 import { governanceDecisionRecord } from "../decision-record.js";
+import { localDayLabel } from "../format.js";
 import type { GovernanceDecision } from "../governance.js";
 import { viewPath } from "../navigation.js";
 import { useHasStore, useStoreActions } from "../store.js";
@@ -62,13 +63,7 @@ export function untilNextLocalDay(now: number): number {
 }
 
 export function decisionDayLabel(at: number, now: number): string {
-  const today = startOfDay(now);
-  const day = startOfDay(at);
-  if (day === today) return "Today";
-  const yesterday = new Date(today);
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (day === yesterday.getTime()) return "Yesterday";
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(at));
+  return localDayLabel(at, now);
 }
 
 /** Newest-first decisions grouped by the day they were made. */
