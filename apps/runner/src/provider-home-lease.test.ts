@@ -973,16 +973,23 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
+  const cancellationProved = (state: (typeof states)[number]) =>
+    state.ready && state.phase === "cancelled-before-start" &&
+    state.closed && state.code === 1 && state.signal === null;
+  const needsCancellationProof = (state: (typeof states)[number]) =>
+    state.phase === "cancelled-before-start" ||
+    (state.ready && !state.reported && state.closed && state.code === 1 &&
+      (state.phase === "ready" || state.phase === "acquiring"));
   async function forceCleanup(state: (typeof states)[number]): Promise<boolean> {
     const child = state.child;
-    const cancellationRequired = options.fault === "hang-before-ready" && state.name === "contender-b";
-    const cancellationProved = () => state.ready && state.phase === "cancelled-before-start" &&
-      state.closed && state.code === 1 && state.signal === null;
-    if (state.closed) return !cancellationRequired || cancellationProved();
+    const cancellationRequired = (options.fault === "hang-before-ready" && state.name === "contender-b") ||
+      needsCancellationProof(state);
+    const cancelled = () => cancellationProved(state);
+    if (state.closed) return !cancellationRequired || cancelled();
     const deadline = performance.now() + 5_000;
     // Share the existing cleanup bound; reserve its remaining time for strict tree cleanup.
-    if (cancellationRequired && await waitUntil(cancellationProved, 1_000)) return true;
-    if (state.closed) return !cancellationRequired || cancellationProved();
+    if (cancellationRequired && await waitUntil(cancelled, 1_000)) return true;
+    if (state.closed) return !cancellationRequired || cancelled();
     if (performance.now() >= deadline) return false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -993,7 +1000,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         }),
       ]);
       const closed = cleaned && await waitUntil(() => state.closed, Math.max(0, deadline - performance.now()));
-      return closed && (!cancellationRequired || cancellationProved());
+      return closed && (!cancellationRequired || cancelled());
     } finally { if (timer) clearTimeout(timer); }
   }
   try {
@@ -1012,11 +1019,13 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       let cancelledBeforeStart = false;
       const waitFor = (path, cancelBeforeStart = false) => {
         const deadline = performance.now() + 20_000;
-        while (!existsSync(path)) {
+        for (;;) {
+          // Release wins even when start was published before the reporting failure.
           if (cancelBeforeStart && existsSync(release)) {
             cancelledBeforeStart = true;
             throw new Error("synthetic cancellation before acquisition");
           }
+          if (existsSync(path)) return;
           if (performance.now() >= deadline) throw new Error("fixture barrier timed out");
           pause(5);
         }
@@ -1037,8 +1046,10 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
         pause(${options.startupDelayMs ?? 0});
         await phase("ready", { initializationMs });
-        waitFor(start, ${options.fault === "hang-before-ready"} && fault !== "hang-before-ready");
+        waitFor(start, true);
         await phase("acquiring");
+        // IPC yields to the parent: recheck release before starting synchronous native work.
+        waitFor(start, true);
         const acquisitionAt = performance.now();
         let outcome;
         try {
@@ -1158,6 +1169,12 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       const cleaned = await Promise.all(states.map((state) => forceCleanup(state)));
       cleanupProved = cleaned.every(Boolean);
       if (!cleanupProved) cleanupFailures.push("fixture-owned tree cleanup incomplete");
+    }
+    // Natural close also needs the fixed cancellation ACK and its actual expected exit.
+    // A missing ACK at pre-acquisition exit is not a substitute for ownership proof.
+    if (states.some((state) => needsCancellationProof(state) && !cancellationProved(state))) {
+      cleanupProved = false;
+      cleanupFailures.push("pre-acquisition cancellation cleanup unproved");
     }
     if (cleanupProved && states.every((state) => state.closed)) {
       try {
