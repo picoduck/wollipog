@@ -202,11 +202,10 @@ completes an accepted Dismiss Recovery itself once an interrupted provider turn 
 refusing it. The accepted intent is written durably on the runner before any wait and never
 expires: a runner that stops at any point after accepting it, including during the first wait,
 completes it on restart instead of re-raising the card. That durable dismissal is a v230 runner
-capability (`durableAuthDismissal`), and only then is the sign-in fence permanent. An older runner
-refuses Dismiss Recovery while the turn settles and keeps the same card, so the control plane
-re-sends it after a backoff (5, 15 and 45 seconds), at most four attempts, one in flight, each with
-its own durable fence so restarts cannot exceed the bound. Once they are exhausted the sign-in stays
-content-safe blocked work and nobody is prompted. Requests restored by runner registration, runtime
+capability (`durableAuthDismissal`). An older runner refuses Dismiss Recovery while the turn settles
+and keeps the card; it still gets exactly one fenced dismissal, never a re-send, and the sign-in
+stays content-safe blocked work (logged as `campaign_auth_dismissal_runner_upgrade_required`) until
+the runner is updated. Nobody is prompted. Requests restored by runner registration, runtime
 snapshots and history hydration get the same standing response as live ones; an Orchestrator's own
 explicit decline is a separate single action.
 

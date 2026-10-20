@@ -45,7 +45,9 @@ function bridge(providerAuthRecovery?: ProviderAuthRecoveryController, turnEnd: 
   hub.isRunnerOnline = () => true;
   hub.sessionChangedById = () => {};
   const toRunner: ControlPlaneToRunner[] = [];
-  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  let svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  /** The control plane restarts on the same durable database; its in-memory state is gone. */
+  const restartControlPlane = () => { svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }); };
 
   // The real runner, with a fake provider whose first turn fails authentication.
   let store = new SessionStore(directory);
@@ -106,7 +108,7 @@ function bridge(providerAuthRecovery?: ProviderAuthRecoveryController, turnEnd: 
   const authCards = () => fromRunner.filter((message) => message.type === "session_event" &&
     message.payload.kind === "permission_request" && message.payload.purpose === "authentication").length;
   const declinesSent = () => toRunner.filter((message) => message.type === "resolve_permission") as Array<Extract<ControlPlaneToRunner, { type: "resolve_permission" }>>;
-  return { db, svc, get manager() { return manager; }, get store() { return store; }, restart, delivery, enable, authCards, declinesSent, fromRunner,
+  return { db, get svc() { return svc; }, get manager() { return manager; }, get store() { return store; }, restart, restartControlPlane, delivery, enable, authCards, declinesSent, fromRunner,
     callbacks: () => callbacks,
     close: () => { manager.shutdownAll(); db.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
@@ -261,45 +263,54 @@ function legacyDismissal(h: ReturnType<typeof bridge>): { refusals: () => number
   return { refusals: () => refusals };
 }
 
-test("a v229 runner that refuses Dismiss Recovery during a long turn is re-sent the dismissal until it clears, with no human (CR-8.1)", { timeout: 40_000 }, async () => {
-  // The provider turn outlasts the old runner's 2.5 s window twice over.
-  const h = bridge(undefined, 7_000, 229);
-  try {
-    assert.ok(h.enable().ok);
-    h.svc.legacyAuthDismissalRetryMs = [3_000, 3_000, 3_000];
-    const legacy = legacyDismissal(h);
-    h.manager.prompt("child", "work");
-    await waitUntil(() => resolutions(h) > 0, 25_000);
-    assert.equal(resolutions(h), 1, "the card clears with exactly one terminal resolution");
-    assert.ok(legacy.refusals() >= 1, "the old runner refused at least once");
-    const sent = h.declinesSent();
-    assert.ok(sent.length === legacy.refusals() + 1 && sent.length <= 4, `one re-send per refusal, bounded (${sent.length} sent)`);
-    assert.ok(sent.every((message) => message.optionId === "auth:dismiss" && message.requestId === sent[0]!.requestId));
-    assert.equal(h.store.readMeta("child")?.pendingApproval, null);
-    assert.equal(h.db.getSession("child")!.pendingApproval, null);
-    assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0);
-    // Nothing more is sent once the card is gone.
-    await new Promise((resolve) => setTimeout(resolve, 3_500));
-    assert.equal(h.declinesSent().length, sent.length);
-  } finally { h.close(); }
-});
+/** The campaign's view of a v229 sign-in that the runner kept: blocked work, nothing for a person. */
+function assertBlockedNotPrompted(h: ReturnType<typeof bridge>) {
+  const recovery = h.db.campaignProjection("root")!.recovery!;
+  const blocked = recovery.records.filter((record) => record.reason === "request_declined");
+  assert.equal(blocked.length, 1, "one content-safe blocked-work record");
+  assert.equal(blocked[0]!.resource.sessionId, "child");
+  assert.equal(recovery.waitingHuman, 0, "nothing waits on a person");
+  assert.equal((h.db.raw().prepare("SELECT COUNT(*) AS n FROM workflow_decisions").get() as { n: number }).n, 0, "no decision for anyone to answer");
+}
 
-test("re-sends to a v229 runner stop at the bound and leave content-safe blocked work, never a prompt (CR-8.1)", { timeout: 40_000 }, async () => {
+test("a v229 runner that refuses Dismiss Recovery gets exactly one dismissal and the sign-in becomes blocked work (CR-9.1)", { timeout: 30_000 }, async () => {
   const turn = gate();
   const h = bridge(undefined, turn.promise, 229);
   try {
     assert.ok(h.enable().ok);
-    h.svc.legacyAuthDismissalRetryMs = [2_600, 2_600, 2_600];
     const legacy = legacyDismissal(h);
     h.manager.prompt("child", "work");
-    await waitUntil(() => legacy.refusals() >= 4, 25_000);
+    await waitUntil(() => legacy.refusals() > 0, 5_000);
+    assert.equal(legacy.refusals(), 1, "the old runner refused after its bounded wait");
+    // Long past any former retry window, nothing is re-sent and the card is not resolved.
     await new Promise((resolve) => setTimeout(resolve, 3_500));
-    assert.equal(h.declinesSent().length, 4, "four attempts in total, then none");
-    assert.equal(legacy.refusals(), 4);
+    assert.deepEqual(h.declinesSent().map((message) => message.optionId), ["auth:dismiss"], "exactly one send");
     assert.equal(resolutions(h), 0);
-    const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
-    assert.equal(blocked.length, 1, "recorded once as blocked work");
-    assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0, "nothing waits on a person");
+    assertBlockedNotPrompted(h);
+  } finally { turn.open(); h.close(); }
+});
+
+test("a control-plane restart right after the one dismissal to a v229 runner sends no second one (CR-9.1)", { timeout: 30_000 }, async () => {
+  const turn = gate();
+  const h = bridge(undefined, turn.promise, 229);
+  try {
+    assert.ok(h.enable().ok);
+    const legacy = legacyDismissal(h);
+    h.manager.prompt("child", "work");
+    await waitUntil(() => h.declinesSent().length > 0, 5_000);
+    // The control plane restarts while the old runner is still settling, then sees the card again
+    // as a reconnect replays it, with a fresh occurrence id as runner startup would give it.
+    h.restartControlPlane();
+    const card = [...h.fromRunner].reverse().find((message) => message.type === "session_event" &&
+      message.payload.kind === "permission_request" && message.payload.purpose === "authentication");
+    assert.ok(card && card.type === "session_event" && card.payload.kind === "permission_request");
+    h.svc.onSessionEvent("child", { ...card.payload, occurrenceId: "rebuilt-after-restart" });
+    await waitUntil(() => legacy.refusals() > 0, 5_000);
+    h.svc.onSessionEvent("child", { ...card.payload, occurrenceId: "rebuilt-after-refusal" });
+    for (let index = 0; index < 12; index += 1) await tick();
+    assert.equal(h.declinesSent().length, 1, "the durable fence holds across the restart");
+    assert.equal(legacy.refusals(), 1);
+    assertBlockedNotPrompted(h);
   } finally { turn.open(); h.close(); }
 });
 
