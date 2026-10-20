@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"../../.."), DIR=join(ROOT,"apps/runner/.bin-build");
 const sha=b=>createHash("sha256").update(b).digest("hex");
 assert.equal(process.platform,"win32");
@@ -35,10 +35,12 @@ if(source){
  assert.equal(fixture.sourceSha256,id.sourceSha256);
  for(const [name,pin] of [["provider-account-config-windows-fixture.dll",fixture.fixtureDll],[fixture.fixtureEngine.name,fixture.fixtureEngine]])assert.equal(sha(readFileSync(join(DIR,name))),pin.sha256);
  const files=["provider-account-config-windows-protocol.test.ts","provider-account-config-windows.test.ts","provider-account-config-windows.integration.test.ts","provider-login.test.ts"];
+ // Bind source-bundle URL expressions to the real generated CJS artifact, never undefined.
+ const entry=join(DIR,"account-config-native-test.cjs");
  const compiled=await build({stdin:{contents:files.map(f=>`import ${JSON.stringify("./apps/runner/src/"+f)};`).join("\n"),resolveDir:ROOT,sourcefile:"account-config-native-verification.ts"},bundle:true,platform:"node",format:"cjs",target:"node24",write:false,
-  define:{"import.meta.url":"undefined",__WACW_ENGINE_SHA__:JSON.stringify(id.engine.sha256),__WACW_FIXTURE_ENGINE_SHA__:JSON.stringify(fixture.fixtureEngine.sha256)},legalComments:"none"});
+  define:{"import.meta.url":JSON.stringify(pathToFileURL(entry).href),__WACW_ENGINE_SHA__:JSON.stringify(id.engine.sha256),__WACW_FIXTURE_ENGINE_SHA__:JSON.stringify(fixture.fixtureEngine.sha256)},legalComments:"none"});
  assert.equal(compiled.outputFiles.length,1);const bytes=Buffer.from(compiled.outputFiles[0].contents);assert.ok(bytes.length<=16*1024*1024);
- const entry=join(DIR,"account-config-native-test.cjs");writeFileSync(entry,bytes,{flag:"wx",mode:0o600});
+ writeFileSync(entry,bytes,{flag:"wx",mode:0o600});
  const positiveNames=["a new sign-in to a different account is recorded when the existing identities differ","removing an account forgets it while truthfully reporting its credential HOME retained"];
  const pattern="^(WACW1 |Windows publication trust scope |an unbuilt source adapter |native Windows account-config |"+positiveNames.join("$|")+"$)";
  const result=run(process.execPath,["--test","--test-reporter=tap","--test-timeout=90000","--test-name-pattern="+pattern,entry]);
