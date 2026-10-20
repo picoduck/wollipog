@@ -48,7 +48,8 @@ export function actionTarget(action: AutomationAction, names: TargetNames): { ic
   const agent = agentId === undefined ? undefined : runner?.agents.find((candidate) => candidate.id === agentId);
   return {
     icon: <BotIcon size={14} aria-hidden="true" />,
-    label: agent && runner ? agentDisplayName(agent, runner.agents) : "Agent",
+    // Namesakes are told apart by version or where they run, never by a path or an id.
+    label: agent && runner ? agentDisplayName(agent, runner.agents, { identifiers: false }) : "Agent",
   };
 }
 
@@ -279,6 +280,11 @@ export function AutomationsView() {
     </section>
   );
 
+  // One wrapper for the groups whether or not they are stale, so they keep their spacing (§12.5).
+  const groups = (stale: boolean) => (
+    <StaleContent stale={stale} className="automation-groups">{group("Scheduled", scheduled)}{group("Paused", paused)}</StaleContent>
+  );
+
   let body: ReactNode;
   if (reconnecting) {
     // The last-known rows stay, dimmed and still openable, under one line that says why (§12.5).
@@ -286,7 +292,7 @@ export function AutomationsView() {
     body = (
       <>
         <Notice compact tone="neutral" role="status">Reconnecting…</Notice>
-        {items.length > 0 && <StaleContent stale>{group("Scheduled", scheduled)}{group("Paused", paused)}</StaleContent>}
+        {items.length > 0 && groups(true)}
       </>
     );
   } else if (!listLoaded && !loadFailed) {
@@ -321,8 +327,7 @@ export function AutomationsView() {
             Retry to load the list again.
           </Notice>
         )}
-        {group("Scheduled", scheduled)}
-        {group("Paused", paused)}
+        {items.length > 0 && groups(false)}
       </>
     );
   }

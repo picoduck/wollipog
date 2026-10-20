@@ -20,6 +20,12 @@ function row(page: Page, name: string) {
   return page.locator(".automation-row").filter({ has: page.locator(".row-title", { hasText: name }) });
 }
 
+/** The space between the Scheduled group's Surface and the Paused heading. */
+async function groupGap(page: Page): Promise<number> {
+  return page.locator(".automation-group").evaluateAll((groups) =>
+    Math.round(groups[1]!.getBoundingClientRect().top - groups[0]!.getBoundingClientRect().bottom));
+}
+
 async function capture(page: Page, name: string) {
   const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
   if (!evidenceDir) return;
@@ -45,7 +51,7 @@ test.describe("at 1440×900", () => {
     expect(groups).toEqual([{ label: "Scheduled", count: "4" }, { label: "Paused", count: "2" }]);
     // The first content under the header is the list, never Outbound Events.
     const first = await page.locator(".page-header").evaluate((header) => header.nextElementSibling?.querySelector(":scope > *")?.className);
-    expect(first).toBe("automation-group");
+    expect(first).toBe("automation-groups");
     await expect(page.locator(".outbound-events")).toHaveCount(0);
     // Line 2 is three facts, 12px apart, each after a 14px icon.
     const meta = await row(page, "Morning Issue Triage").locator(".automation-row-meta > span").evaluateAll((items) =>
@@ -159,10 +165,14 @@ for (const { label, viewport } of [
     test("Reconnecting", async ({ page }) => {
       await open(page, theme, "list");
       await expect(page.locator(".automation-row")).toHaveCount(6);
+      const loadedGap = await groupGap(page);
+      expect(loadedGap).toBe(16);
       await page.evaluate(() => (window as unknown as { automationsDisconnect: () => void }).automationsDisconnect());
       await expect(page.locator('.automation-list > .notice[role="status"]')).toHaveText("Reconnecting…");
       await expect(page.locator(".automation-list .is-stale .automation-row")).toHaveCount(6);
       await expect(page.locator(".automation-list .state")).toHaveCount(0);
+      // The groups keep the loaded list's spacing while dimmed.
+      expect(await groupGap(page)).toBe(loadedGap);
       await capture(page, `automations-list-reconnecting-${label}-${theme}`);
     });
 
@@ -173,6 +183,14 @@ for (const { label, viewport } of [
       await expect(notice.getByRole("button", { name: "Retry" })).toBeVisible();
       await expect(page.getByRole("tab", { name: "Automations" })).toBeVisible();
       await capture(page, `automations-list-error-${label}-${theme}`);
+    });
+
+    if (label !== "834") test("Outbound Events", async ({ page }) => {
+      await page.goto(`/automations-e2e.html?theme=${theme}&list&route=${encodeURIComponent("/automations/outbound")}`);
+      await expect(page.getByRole("tab", { name: "Outbound Events" })).toHaveAttribute("aria-selected", "true");
+      await expect(page.locator(".outbound-event-subscription")).toBeVisible();
+      await expect(page.locator(".automation-list")).toHaveCount(0);
+      await capture(page, `automations-outbound-${label}-${theme}`);
     });
 
     test("Empty", async ({ page }) => {

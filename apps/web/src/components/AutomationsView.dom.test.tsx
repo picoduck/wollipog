@@ -1285,6 +1285,26 @@ test("each row names the automation, one badge, its schedule in words, its next 
   }
 });
 
+test("an agent sharing its name with another on its machine reads by name, never by its id or path", async () => {
+  const namesake = (id: string, path: string) => ({
+    id, name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true,
+    context: { kind: "native" as const }, installation: { id, path, via: "path" as const, selection: "selected" as const },
+  });
+  const twins = runner("runner-1", [namesake("agent-one", "/opt/one/claude"), namesake("agent-two", "/opt/two/claude")]);
+  const stored = schedule("automation-a", "Alpha");
+  stored.action = { kind: "create_session", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", agentId: "agent-one", prompt: "Sweep.", useWorktree: false,
+  } };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [twins]);
+  try {
+    const target = rowOf(fixture.container, "Alpha").querySelector(".automation-row-target")?.textContent ?? "";
+    assert.equal(target, "Claude Code");
+    for (const identifier of ["agent-one", "agent-two", "/opt/"]) assert.ok(!target.includes(identifier), target);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("an older control plane's list without latestExecution shows no Last Run Failed badge", async () => {
   const fixture = await mountFixture([schedule("automation-a", "Alpha")], {
     "automation-a": [{ executionId: "e1", automationId: "automation-a", status: "failed" } as AutomationExecution],
@@ -1423,6 +1443,7 @@ test("with the connection lost after a load, the rows stay dimmed under Reconnec
     const line = list.querySelector('.notice[role="status"]');
     assert.equal(line?.textContent, "Reconnecting…");
     const stale = list.querySelector(".is-stale");
+    assert.ok(stale?.classList.contains("automation-groups"), "the groups keep their one wrapper while stale");
     assert.ok(stale?.contains(cardToggle(fixture.container, "Alpha")), "the last-known row is inside StaleContent");
     assert.ok(!stale?.contains(line!), "the Reconnecting line is not dimmed");
     assert.ok(!cardToggle(fixture.container, "Alpha").disabled, "the stale row still opens");
@@ -1571,7 +1592,7 @@ test("the tabs are routes: Automations opens on the list, Outbound Events on its
     assert.deepEqual(tabs.map((tab) => [tab.textContent, tab.getAttribute("aria-selected")]),
       [["Automations", "true"], ["Outbound Events", "false"]]);
     const panel = fixture.container.querySelector('[role="tabpanel"]')!;
-    assert.ok(panel.firstElementChild?.classList.contains("automation-group"), "the list is the first content");
+    assert.ok(panel.firstElementChild?.classList.contains("automation-groups"), "the list is the first content");
     assertNoDomNode(fixture.container.querySelector(".outbound-events"), "Outbound Events is not on the list's tab");
     await act(async () => { tabs[1]!.click(); });
     await act(settle);

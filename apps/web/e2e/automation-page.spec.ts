@@ -42,7 +42,8 @@ for (const { label, viewport } of [
       await open(page);
       const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
       await expect(card).not.toHaveAttribute("aria-expanded");
-      await expect(card).toContainText(label === "mobile" ? "Next Tomorrow, 2:00 AM" : "Every day at 2:00 AM");
+      // The schedule is in the automation's own zone; its next run is in the browser's, from its clock.
+      await expect(card).toContainText(label === "mobile" ? /Next \w+, \d{1,2}:\d{2} [AP]M/ : "Every day at 2:00 AM");
       await expect(card).not.toContainText("agent-1");
       await expect(page.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
       await card.click();

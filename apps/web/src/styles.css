@@ -16621,6 +16621,10 @@ button.review-finding-location {
   display: grid;
   gap: var(--space-4);
 }
+.automation-groups {
+  display: grid;
+  gap: var(--space-4);
+}
 .automation-group { display: grid; }
 /* Skeleton rows at the real row's height and anatomy, a title bar over a meta bar (§12.3). */
 .automation-skeleton > .row > .row-body { gap: var(--space-2); }
