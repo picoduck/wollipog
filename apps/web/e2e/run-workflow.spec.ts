@@ -108,12 +108,20 @@ test.describe("at 1440×900", () => {
 test.describe("at 834×1112, the compact tier", () => {
   test.use({ viewport: { width: 834, height: 1112 } });
 
-  test("the side column is 340px", async ({ page }) => {
+  test("the side column is 340px, and the gate's artifact reads in full inside its notice", async ({ page }) => {
     await open(page, "gate");
     const geometry = await layout(page);
     expect(geometry.sideLeft).toBe(0);
     expect(geometry.sideWidth).toBe(340);
     expect(geometry.mainRight).toBe(0);
+    // The name and every meta word show whole: the row wraps rather than cutting a word short.
+    const parts = await page.locator(".wf-gate-artifact").evaluate((card) =>
+      [...card.querySelectorAll<HTMLElement>(".row-title, .art-row-meta > *, .art-size")].map((part) => ({
+        text: part.textContent ?? "",
+        clipped: part.scrollWidth > part.clientWidth + 1 || part.getBoundingClientRect().right > card.getBoundingClientRect().right + 1,
+      })));
+    expect(parts.map((part) => part.text)).toEqual(["webhook-backoff.patch", "Patch", "Claude Code", "2m ago", "341 B"]);
+    expect(parts.filter((part) => part.clipped)).toEqual([]);
   });
 });
 
