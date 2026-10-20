@@ -149,14 +149,30 @@ const VOCABULARY = {
     failed: danger("Failed"),
     dropped: neutral("Dropped"),
   },
-  /** One run of an automation, by its wire status: the page's Last Run fact (#2968). */
+  /** One run of an automation, by its wire status: the page's Last Run fact (#2968) and its Run
+   * History and Run Details (#2970). Expired is a warning: no machine ran it before its time ran out.
+   * A governance pause will get its own word once the control plane records one (#316); until then
+   * those runs read Failed. */
   automation_run: {
     dispatching: info("Starting", { pulse: true }),
     running: info("Running", { pulse: true }),
     succeeded: success("Succeeded"),
     failed: danger("Failed"),
     skipped: neutral("Skipped"),
-    expired: neutral("Expired"),
+    expired: warning("Expired"),
+  },
+  /** One step of an automation run, by its runner command's wire state (#2970): Run Details' Steps.
+   * `superseded` has no wire form: a command a retry replaced, whose replacement carries the result. */
+  automation_step: {
+    staged: neutral("Queued"),
+    pending: neutral("Queued"),
+    sent: info("Sent"),
+    accepted: info("Accepted"),
+    started: info("Running", { pulse: true }),
+    completed: success("Done"),
+    rejected: danger("Failed"),
+    uncertain: warning("Unconfirmed"),
+    superseded: neutral("Retried"),
   },
   tool: {
     pending: neutral("Pending"),

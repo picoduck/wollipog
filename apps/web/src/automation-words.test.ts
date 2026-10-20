@@ -143,6 +143,23 @@ test("actionSentence says what it cannot name instead of showing an id", () => {
   } }, names), "Runs a workflow that isn't available in acme-storefront on Build Server.");
 });
 
+test("actionSentence never names an agent by its id, even beside an indistinguishable namesake", () => {
+  // Two native Claude Code agents with no version and no installation path differ only by id:
+  // agentDisplayName would print "Claude Code (agent-2)", but a sentence never shows an id (#2970).
+  const namesakes = new Map<string, RunnerView>([["runner-1", {
+    ...runners.get("runner-1")!,
+    agents: [
+      { id: "agent-1", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true },
+      { id: "agent-2", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true },
+    ],
+  }]]);
+  const sentence = actionSentence({ kind: "create_session", request: {
+    runnerId: "runner-1", workspaceId: "workspace-1", agentId: "agent-2",
+  } }, { ...names, runners: namesakes });
+  assert.equal(sentence, "Starts Claude Code in acme-storefront on Build Server.");
+  assert.ok(!sentence.includes("agent-2"));
+});
+
 test("actionSentence names the agent of a saved installation, as the scheduler resolves it", () => {
   // CR-1.2: rediscovery moved the saved installation to a new agent id, and the stored id now names
   // a different agent. The scheduler runs the installation (resolveSavedTarget), so the page names it.

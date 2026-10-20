@@ -64,6 +64,14 @@ const TABLE: readonly Row[] = [
   ["automation", "last_run_failed", "Last Run Failed", "danger"],
   ["automation_run", "succeeded", "Succeeded", "success"],
   ["automation_run", "failed", "Failed", "danger"],
+  ["automation_run", "dispatching", "Starting", "info"],
+  ["automation_run", "running", "Running", "info"],
+  ["automation_run", "skipped", "Skipped", "neutral"],
+  ["automation_run", "expired", "Expired", "warning"],
+  ["automation_step", "completed", "Done", "success"],
+  ["automation_step", "rejected", "Failed", "danger"],
+  ["automation_step", "uncertain", "Unconfirmed", "warning"],
+  ["automation_step", "superseded", "Retried", "neutral"],
   // Outbound event subscription and delivery (#2973)
   ["subscription", "active", "Active", "success"],
   ["subscription", "paused", "Paused", "neutral"],
@@ -251,7 +259,7 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 });
 
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
-  for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "automation_run", "subscription", "outbound_delivery", "tool", "family",
+  for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "automation_run", "automation_step", "subscription", "outbound_delivery", "tool", "family",
     "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "workflowNode", "run", "pod", "podMerge", "member", "provider_account",
     "shell", "share", "usage", "agent"] as const) {
     for (const value of statusValues(domain)) {

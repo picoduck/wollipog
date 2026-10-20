@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
+import { afterEach, mock, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
+import { AUTOMATION_TARGET_UNAVAILABLE } from "@wollipog/protocol";
 import type {
+  AutomationCommandView,
   AutomationExecution,
   AutomationSchedule,
   AutomationSpec,
@@ -465,8 +467,12 @@ test("a failed last run and a waiting target show one danger notice, Last Run Fa
     assert.deepEqual(alerts, [notice], "the notice is the page's only alert");
 
     await click(buttonNamed(notice, "Run Details"));
-    const history = detail.querySelector<HTMLDetailsElement>("details.automation-history")!;
-    assert.equal(history.open, true, "Run Details opens the run history");
+    const details = view.body.querySelector<HTMLElement>(".automation-run-details")!;
+    assert.ok(details, "Run Details opens the dialog");
+    assert.equal(details.querySelector(".facts dd")?.textContent, "Failed", "for the failed run");
+    assert.equal(details.querySelector(".notice.t-danger .notice-body")?.textContent, "The agent exited before it finished.");
+    await click(buttonNamed(details, "Done"));
+    assertNoDomNode(view.body.querySelector(".automation-run-details"), "Done closes it");
 
     await click(buttonNamed(detail, "+1 More"));
     const more = [...view.body.querySelectorAll<HTMLElement>('[role="menu"][aria-label="Automation Notices"] [role="menuitem"]')];
@@ -813,3 +819,308 @@ test("Try Again after a failed load hands focus to the loaded page's title", asy
     await view.unmount();
   }
 });
+
+/* ------------------------- Run History and Run Details (#2970) ------------------------- */
+
+/** Run History reads times in the viewer's zone and against the clock: these tests pin both. */
+const RUN_ZONE = "America/Chicago";
+/** Tuesday, Oct 20 2026, 10:00 AM in Chicago. */
+const RUN_NOW = Date.UTC(2026, 9, 20, 15);
+/** `days` from that Tuesday at `hour:minute:second` in Chicago, on daylight time (UTC−5) all month. */
+const chicago = (days: number, hour: number, minute = 0, second = 0) => Date.UTC(2026, 9, 20 + days, hour + 5, minute, second);
+
+async function withRunClock(body: () => Promise<void>): Promise<void> {
+  const zone = process.env.TZ;
+  process.env.TZ = RUN_ZONE;
+  mock.timers.enable({ apis: ["Date"], now: RUN_NOW });
+  try {
+    await body();
+  } finally {
+    mock.timers.reset();
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+}
+
+function step(commandId: string, overrides: Partial<AutomationCommandView>): AutomationCommandView {
+  return {
+    commandId, executionId: "axe_failed", ordinal: 0, runnerId: "runner-1", sessionId: "session-failed",
+    kind: "start_session", state: "completed", revision: 1, attemptCount: 1,
+    createdAt: chicago(-1, 2), updatedAt: chicago(-1, 2), ...overrides,
+  };
+}
+
+const FAILED_KEY = "schedule:automation-a:2026-10-19T07:00:00.000Z:a-run-key-long-enough-for-the-well-to-shorten-on-screen";
+const FAILED_ERROR = "The agent exited before it finished the report. Exit status 1 from claude.\nTraceback: provider stream closed";
+
+/** One of each: a signed delivery, a scheduled success, a failure with receipts, a skip, an expiry
+ * and a workflow run. */
+function historyRuns(): AutomationExecution[] {
+  return [
+    run("failed", {
+      executionId: "axe_failed", idempotencyKey: FAILED_KEY, runnerId: "runner-1", sessionId: "session-failed",
+      deliveryMode: "receipted_v53", scheduledFor: chicago(-1, 2), createdAt: chicago(-1, 2),
+      startedAt: chicago(-1, 2, 0, 1), completedAt: chicago(-1, 2, 12, 1), error: FAILED_ERROR,
+      commands: [
+        step("cmd_c", { ordinal: 2, kind: "prompt_session", state: "rejected", attemptCount: 2,
+          lastError: "the session refused the prompt. It was busy with another turn." }),
+        step("cmd_a", { ordinal: 0, state: "rejected", supersededBy: "cmd_b", lastError: "provider exited: rate limited. Retrying." }),
+        step("cmd_b", { ordinal: 1, state: "completed", attemptCount: 2 }),
+      ],
+    }),
+    run("skipped", {
+      executionId: "axe_skipped", idempotencyKey: "automation-a:skipped", sessionId: undefined,
+      scheduledFor: chicago(-2, 2), createdAt: chicago(-2, 2), startedAt: undefined, completedAt: undefined,
+      error: "execution 'axe_failed' is still active",
+    }),
+    run("expired", {
+      executionId: "axe_expired", idempotencyKey: "automation-a:expired", sessionId: undefined,
+      scheduledFor: chicago(-3, 2), createdAt: chicago(-3, 2), startedAt: undefined, completedAt: chicago(-3, 3),
+      error: AUTOMATION_TARGET_UNAVAILABLE,
+    }),
+    run("succeeded", {
+      executionId: "axe_workflow", idempotencyKey: "automation-a:workflow", actionKind: "workflow_run",
+      sessionId: undefined, runId: "run-7", workflowInstanceId: "wfi-7",
+      scheduledFor: chicago(-4, 2), createdAt: chicago(-4, 2), startedAt: chicago(-4, 2), completedAt: chicago(-4, 3, 5),
+    }),
+    run("succeeded", {
+      executionId: "axe_scheduled", idempotencyKey: "automation-a:scheduled", sessionId: "session-scheduled",
+      scheduledFor: chicago(0, 2), createdAt: chicago(0, 2), startedAt: chicago(0, 2, 0, 7), completedAt: chicago(0, 2, 4, 9),
+    }),
+    run("succeeded", {
+      executionId: "axe_signed", idempotencyKey: "trigger:atr_issue_intake:github-1099", sessionId: "session-signed",
+      actor: { kind: "policy", id: "webhook:atr_issue_intake" },
+      scheduledFor: chicago(0, 9, 15), createdAt: chicago(0, 9, 15), startedAt: chicago(0, 9, 15, 2), completedAt: chicago(0, 9, 16, 32),
+      triggerDelivery: {
+        fields: ["prompt", "parameters"],
+        promptSha256: "95a911a82fc5ad618ed97d4b8a9daf884872ac8f0f21d98cc900dce04977749b",
+        parameterNames: ["issue", "run_id"],
+      },
+    }),
+  ];
+}
+
+const runsTable = (body: HTMLElement) => page(body)!.querySelector<HTMLTableElement>(".table-wrap > table.table.automation-runs");
+const runRow = (body: HTMLElement, executionId: string) => [...runsTable(body)!.querySelectorAll<HTMLElement>("tbody tr")]
+  .find((row) => row.dataset.executionId === executionId)!;
+
+/** Opens a run's Run Details from its row's ⋯. */
+async function openRunDetails(body: HTMLElement, executionId: string): Promise<HTMLElement> {
+  const more = runRow(body, executionId).querySelector<HTMLButtonElement>('.actions-cell button[aria-haspopup="menu"]');
+  await click(more);
+  const menu = body.querySelector<HTMLElement>(`[role="menu"][aria-label="${more!.getAttribute("aria-label")}"]`)!;
+  assert.deepEqual(menuLabels(menu), ["Run Details…"]);
+  await click(menuItem(menu, "Run Details…"));
+  const dialog = body.querySelector<HTMLElement>('[role="dialog"].automation-run-details');
+  assert.ok(dialog, "Run Details opens");
+  return dialog;
+}
+
+const factsOf = (scope: Element) => Object.fromEntries([...scope.querySelectorAll(".facts > div")]
+  .map((pair) => [pair.querySelector("dt")?.textContent, pair.querySelector("dd")?.textContent]));
+
+test("a never-run automation shows Run History's heading and names its first run, not an empty table", () => withRunClock(async () => {
+  const scheduled = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep", { nextFireAt: chicago(1, 2) })] });
+  try {
+    const section = page(scheduled.body)!.querySelector<HTMLElement>('section[aria-labelledby="automation-history"]')!;
+    assert.equal(section.querySelector(".section-title")?.textContent, "Run History");
+    assert.equal(section.querySelector(".automation-empty")?.textContent, "No runs yet. The first run is Tomorrow, 2:00 AM.");
+    assertNoDomNode(section.querySelector("table"), "no empty table");
+  } finally {
+    await scheduled.unmount();
+  }
+  const paused = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep", { enabled: false, nextFireAt: chicago(1, 2) })] });
+  try {
+    const section = page(paused.body)!.querySelector<HTMLElement>('section[aria-labelledby="automation-history"]')!;
+    assert.equal(section.querySelector(".automation-empty")?.textContent, "No runs yet.");
+  } finally {
+    await paused.unmount();
+  }
+}));
+
+test("Run History is a table of Started, Result, Started By and Took in words, newest first, with no key, digest, state or seconds", () => withRunClock(async () => {
+  const runs = historyRuns();
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": runs } });
+  try {
+    const table = runsTable(view.body)!;
+    assert.ok(table, "a .table in a .table-wrap");
+    assert.equal(table.getAttribute("aria-labelledby"), "automation-history");
+    assertNoDomNode(page(view.body)!.querySelector("details.automation-history, .automation-execution, .automation-command-list"));
+    assert.deepEqual([...table.querySelectorAll("thead th")].map((header) => header.textContent),
+      ["Started", "Result", "Started By", "Took", "Actions"]);
+    const rows = [...table.querySelectorAll<HTMLElement>("tbody tr")].map((row) => [
+      row.querySelector("th")?.textContent,
+      row.querySelector(".cell-status")?.textContent,
+      row.querySelectorAll("td")[1]?.textContent,
+      row.querySelectorAll("td")[2]?.textContent,
+      row.querySelector(".automation-run-reason")?.textContent ?? null,
+      [...row.querySelectorAll<HTMLElement>(".actions-cell button")].map((button) => button.textContent || button.getAttribute("aria-label")),
+    ]);
+    assert.deepEqual(rows, [
+      ["Today, 9:15 AM", "Succeeded", "Signed Trigger", "Took 1m 30s", null, ["Open Session", "Run Actions, Today, 9:15 AM"]],
+      ["Today, 2:00 AM", "Succeeded", "Schedule", "Took 4m 2s", null, ["Open Session", "Run Actions, Today, 2:00 AM"]],
+      ["Yesterday, 2:00 AM", "Failed", "Schedule", "Took 12m 0s", null, ["Open Session", "Run Actions, Yesterday, 2:00 AM"]],
+      ["Oct 18, 2:00 AM", "Skipped", "Schedule", "—", "Skipped because the last run was still going.", ["Run Actions, Oct 18, 2:00 AM"]],
+      ["Oct 17, 2:00 AM", "Expired", "Schedule", "—", "The machine stayed offline for 60 minutes.", ["Run Actions, Oct 17, 2:00 AM"]],
+      ["Oct 16, 2:00 AM", "Succeeded", "Schedule", "Took 1h 5m", null, ["Open Run", "Run Actions, Oct 16, 2:00 AM"]],
+    ]);
+    // On a phone a run with no duration leaves Took off line 2, where its reason goes instead.
+    assert.ok(runRow(view.body, "axe_skipped").querySelectorAll("td")[2]!.classList.contains("cell-extra"));
+    assert.ok(!runRow(view.body, "axe_failed").querySelectorAll("td")[2]!.classList.contains("cell-extra"));
+    const rowsText = table.querySelector("tbody")!.textContent ?? "";
+    for (const execution of runs) assert.ok(!rowsText.includes(execution.idempotencyKey), `no run key: ${execution.idempotencyKey}`);
+    assert.doesNotMatch(rowsText, /95a911a8|Digest/, "no prompt digest");
+    assert.doesNotMatch(rowsText, /\b(staged|pending|sent|accepted|started|completed|rejected|uncertain|dispatching|Accepted|Sent)\b/,
+      "no command state enum");
+    assert.doesNotMatch(rowsText, /\d:\d\d:\d\d/, "no time with seconds");
+    assert.doesNotMatch(rowsText, /axe_|cmd_|run-7|session-|runner-1/, "no ids");
+    await click(buttonNamed(runRow(view.body, "axe_workflow"), "Open Run"));
+    assertNoDomNode(page(view.body), "Open Run leaves for the workflow run");
+  } finally {
+    await view.unmount();
+  }
+}));
+
+test("Run History shows ten runs, Show More adds ten at a time, and the last one hands focus to the first run it revealed", () => withRunClock(async () => {
+  const runs = Array.from({ length: 23 }, (_, index) => run("succeeded", {
+    executionId: `axe_${String(index).padStart(2, "0")}`, idempotencyKey: `automation-a:${index}`,
+    scheduledFor: chicago(-index, 2), createdAt: chicago(-index, 2), startedAt: chicago(-index, 2), completedAt: chicago(-index, 2, 3),
+  }));
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": runs } });
+  try {
+    const rowCount = () => runsTable(view.body)!.querySelectorAll("tbody tr").length;
+    const showMore = () => page(view.body)!.querySelector<HTMLButtonElement>(".list-foot button");
+    assert.equal(rowCount(), 10);
+    assert.equal(showMore()?.textContent, "Show 10 More");
+    await act(async () => showMore()!.focus());
+    await click(showMore());
+    assert.equal(rowCount(), 20);
+    assert.equal(showMore()?.textContent, "Show 3 More");
+    assert.equal(focused(), showMore(), "focus stays on Show More while it stays");
+    await click(showMore());
+    assert.equal(rowCount(), 23);
+    assertNoDomNode(showMore(), "no Show More once every run shows");
+    assert.equal(focused(), runsTable(view.body)!.querySelectorAll("tbody tr")[20]!.querySelector(".actions-cell button"),
+      "focus moves to the first run it revealed");
+  } finally {
+    await view.unmount();
+  }
+}));
+
+test("Run Details lists a failed run's facts, one step per command with its attempts, and its error with the raw text behind Show Details", () => withRunClock(async () => {
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": historyRuns() } });
+  try {
+    const dialog = await openRunDetails(view.body, "axe_failed");
+    assert.equal(dialog.querySelector(".modal-title")?.textContent, "Yesterday, 2:00 AM", "titled with its start time");
+    assert.deepEqual(factsOf(dialog), {
+      Result: "Failed", "Scheduled For": "Yesterday, 2:00 AM", Started: "Yesterday, 2:00 AM", Finished: "Yesterday, 2:12 AM",
+      Took: "12m 0s", "Started By": "Schedule", Machine: "Build Server",
+    });
+    const notice = dialog.querySelector<HTMLElement>(".notice.t-danger")!;
+    assert.equal(notice.querySelector(".notice-body")?.textContent, "The agent exited before it finished the report.");
+    assertNoDomNode(notice.querySelector("pre"), "the raw text waits behind Show Details");
+    await click(buttonNamed(notice, "Show Details"));
+    assert.equal(notice.querySelector(".notice-details-body pre")?.textContent, FAILED_ERROR);
+    assert.equal(dialog.querySelector("#automation-run-steps")?.textContent, "Steps");
+    const steps = [...dialog.querySelectorAll(".automation-run-steps > li")].map((item) => [
+      item.querySelector(".automation-run-step-kind")?.textContent,
+      item.querySelector(".status")?.textContent,
+      item.querySelector(".automation-run-step-meta")?.textContent,
+      item.querySelector(".automation-run-step-error")?.textContent ?? null,
+    ]);
+    assert.deepEqual(steps, [
+      ["Start Session", "Retried", "1 attempt", "Provider exited: rate limited."],
+      ["Start Session", "Done", "2 attempts", null],
+      ["Send Prompt", "Failed", "2 attempts", "The session refused the prompt."],
+    ]);
+    assert.doesNotMatch(dialog.textContent ?? "", /cmd_|axe_|runner-1|Receipts|rejected|completed/);
+    assert.deepEqual([...dialog.querySelectorAll(".modal-foot button")].map((button) => button.textContent),
+      ["Open Session", "Done"]);
+  } finally {
+    await view.unmount();
+  }
+}));
+
+test("Run Details shows the run key only under Show Technical Details, and Copy copies all of it", () => withRunClock(async () => {
+  const copied: string[] = [];
+  const clipboard = withClipboard({ writeText: async (text) => { copied.push(text); } });
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": historyRuns() } });
+  try {
+    const dialog = await openRunDetails(view.body, "axe_failed");
+    const technical = dialog.querySelector<HTMLDetailsElement>("details.disclosure")!;
+    assert.equal(technical.querySelector("summary")?.textContent, "Show Technical Details");
+    assert.equal(technical.open, false, "closed until the person opens it");
+    const outside = [...dialog.querySelectorAll("*")].filter((element) => !technical.contains(element) && element.children.length === 0)
+      .map((element) => element.textContent).join(" ");
+    assert.ok(!outside.includes(FAILED_KEY) && !outside.includes("Run Key"), "the key is nowhere else");
+    await act(async () => { technical.open = true; });
+    const well = technical.querySelector<HTMLElement>(".field .code-well.one-line")!;
+    assert.equal(technical.querySelector(".field-label")?.textContent, "Run Key");
+    assert.equal(well.querySelector("code")?.textContent, FAILED_KEY, "the whole key is in the DOM, only its paint is clipped");
+    await click(well.querySelector<HTMLButtonElement>('button[aria-label="Copy Run Key"]'));
+    assert.deepEqual(copied, [FAILED_KEY]);
+  } finally {
+    await view.unmount();
+    clipboard.restore();
+  }
+}));
+
+test("Run Details says why a run was skipped or expired, names a signed delivery's fields, and marks a legacy run", () => withRunClock(async () => {
+  const runs = [...historyRuns(), run("succeeded", {
+    executionId: "axe_legacy", idempotencyKey: "automation-a:legacy", deliveryMode: "legacy_at_most_once",
+    scheduledFor: chicago(-5, 2), createdAt: chicago(-5, 2), startedAt: chicago(-5, 2), completedAt: chicago(-5, 2, 1),
+  })];
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": runs } });
+  try {
+    let dialog = await openRunDetails(view.body, "axe_skipped");
+    assert.deepEqual(factsOf(dialog), {
+      Result: "SkippedSkipped because the last run was still going.", "Scheduled For": "Oct 18, 2:00 AM",
+      Started: "Didn't start", Finished: "—", Took: "—", "Started By": "Schedule",
+    });
+    assertNoDomNode(dialog.querySelector(".notice"), "a skip's internal message is not shown");
+    assertNoDomNode(dialog.querySelector(".automation-run-steps-section"), "no steps without commands");
+    await click(buttonNamed(dialog, "Done"));
+
+    dialog = await openRunDetails(view.body, "axe_expired");
+    assert.equal(factsOf(dialog).Result, "ExpiredThe machine stayed offline for 60 minutes.");
+    const notice = dialog.querySelector<HTMLElement>(".notice")!;
+    assert.ok(notice.classList.contains("t-warning"));
+    assert.equal(notice.querySelector(".notice-body")?.textContent, AUTOMATION_TARGET_UNAVAILABLE, "the shared waiting sentence reads whole");
+    assertNoDomNode(buttonNamed(notice, "Show Details"), "nothing more to show");
+    assert.deepEqual([...dialog.querySelectorAll(".modal-foot button")].map((button) => button.textContent), ["Done"]);
+    await click(buttonNamed(dialog, "Done"));
+
+    dialog = await openRunDetails(view.body, "axe_signed");
+    const facts = factsOf(dialog);
+    assert.equal(facts.Received, "Today, 9:15 AM");
+    assert.equal(facts["Started By"], "Signed Trigger");
+    assert.equal(facts.Delivered, "Prompt text, Named values (issue, run_id)");
+    assert.doesNotMatch(dialog.textContent ?? "", /95a911a8|Digest/, "no prompt digest");
+    await click(buttonNamed(dialog, "Open Session"));
+    assertNoDomNode(view.body.querySelector(".automation-run-details"), "Open Session closes the dialog");
+    assertNoDomNode(page(view.body), "and leaves for the session");
+  } finally {
+    await view.unmount();
+  }
+  const legacy = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": runs } });
+  try {
+    const dialog = await openRunDetails(legacy.body, "axe_legacy");
+    assert.equal(dialog.querySelector(".automation-run-legacy")?.textContent, "Sent once, without delivery receipts.");
+  } finally {
+    await legacy.unmount();
+  }
+}));
+
+test("at 390px Run Details opens from a run's ⋯ sheet, and the run keeps its reason on its second line", () => withRunClock(async () => {
+  await setWidth(390);
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": historyRuns() } });
+  try {
+    assert.equal(runRow(view.body, "axe_expired").querySelector(".automation-run-reason")?.textContent,
+      "The machine stayed offline for 60 minutes.");
+    const dialog = await openRunDetails(view.body, "axe_failed");
+    assert.equal(dialog.querySelector(".modal-title")?.textContent, "Yesterday, 2:00 AM");
+    assertNoDomNode(view.body.querySelector('[role="menu"]'), "the ⋯ sheet closed for the dialog");
+  } finally {
+    await view.unmount();
+  }
+}));

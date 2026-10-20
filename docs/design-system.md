@@ -2342,7 +2342,8 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Skill deployment | Update Held (a Git or built-in update waits for review) | warning |
 | Skill deployment | Error | danger |
 | Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger · Last Run Failed: danger (the automation page's one badge when its latest run failed, ahead of Enabled or Paused, #2968) · Target Unavailable: warning. An Automations list row (#2969) shows at most one: Last Run Failed, else Target Unavailable, and none otherwise; its group and its Enabled switch say whether it is scheduled or paused. |
-| Automation run (the page's Last Run fact, inline) | Starting, Running: info (pulse) · Succeeded: success · Failed: danger · Skipped, Expired: neutral |
+| Automation run (`automation_run`: the page's Last Run fact, Run History's Result and Run Details, inline) | Starting, Running: info (pulse) · Succeeded: success · Failed: danger · Expired: warning · Skipped: neutral |
+| Automation run step (`automation_step`: Run Details' Steps, inline) | Running: info (pulse) · Sent, Accepted: info · Done: success · Failed: danger · Unconfirmed: warning · Queued, Retried: neutral |
 | Outbound event subscription (`subscription`, #2973) | Active: success · Paused: neutral · Delivery Failed: danger (its latest settled delivery failed, which includes a pause the failures caused). The automation words Enabled and Paused are not used here. |
 | Outbound event delivery (`outbound_delivery`, the Deliveries table's Result, inline) | Delivered: success · the failure in words ("HTTP 500", "Connection Refused", "Timed Out"): danger · Sending: info (pulse) · Pending, Dropped: neutral |
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |

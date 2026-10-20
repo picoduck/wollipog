@@ -368,6 +368,61 @@ if (params.has("list")) {
 if (params.has("failed-run")) items[0]!.latestExecution = { status: "failed", at: executions[0]!.completedAt! };
 if (params.has("list-empty")) items.length = 0;
 
+// Run History (#2970). `run-history` gives the first automation a fuller history relative to now: a
+// signed delivery, a scheduled success, a failure with runner receipts and a retry, a skip, an
+// expiry, a workflow run, a legacy run and eight older successes, so Show More has five more to add.
+// `no-runs` has none, with its next run tomorrow at 2:00 AM in this browser's zone.
+if (params.has("run-history")) {
+  /** 2:00 AM local, `days` before the last 2:00 AM that is at least an hour ago. */
+  const lastTwo = new Date(Date.now() - 3_600_000);
+  if (lastTwo.getHours() < 2) lastTwo.setDate(lastTwo.getDate() - 1);
+  lastTwo.setHours(2, 0, 0, 0);
+  const twoAm = (days: number) => lastTwo.getTime() - days * 86_400_000;
+  const minutes = 60_000;
+  const base = executions[0]!;
+  const scheduled = (executionId: string, at: number, overrides: Partial<AutomationExecution> = {}): AutomationExecution => ({
+    ...base, executionId, idempotencyKey: `schedule:automation-nightly-sweep:${new Date(at).toISOString()}`,
+    actor: { kind: "system", id: "automation:automation-nightly-sweep" }, triggerDelivery: undefined,
+    scheduledFor: at, createdAt: at, startedAt: at + 4_000, completedAt: at + 4 * minutes + 6_000,
+    sessionId: `s_${executionId}`, runnerId: "runner-1", ...overrides,
+  });
+  const signedAt = Date.now() - 40 * minutes;
+  executions.splice(0, executions.length,
+    { ...base, executionId: "axe_signed", scheduledFor: signedAt, createdAt: signedAt, startedAt: signedAt + 2_000,
+      completedAt: signedAt + 90_000, runnerId: "runner-1", actor: { kind: "policy", id: "webhook:atr_issue_intake" } },
+    scheduled("axe_scheduled", twoAm(0)),
+    scheduled("axe_failed", twoAm(1), {
+      status: "failed", completedAt: twoAm(1) + 12 * minutes,
+      error: "The agent exited before it finished the report. Exit status 1 from claude.\nTraceback: provider stream closed",
+      commands: [
+        { commandId: "cmd_start_1", executionId: "axe_failed", ordinal: 0, runnerId: "runner-1", sessionId: "s_axe_failed",
+          kind: "start_session", state: "rejected", supersededBy: "cmd_start_2", revision: 3, attemptCount: 1,
+          lastError: "provider exited: rate limited. Retrying with a new command.", createdAt: twoAm(1), updatedAt: twoAm(1) },
+        { commandId: "cmd_start_2", executionId: "axe_failed", ordinal: 1, runnerId: "runner-1", sessionId: "s_axe_failed",
+          kind: "start_session", state: "completed", revision: 4, attemptCount: 2, createdAt: twoAm(1), updatedAt: twoAm(1) },
+        { commandId: "cmd_prompt_1", executionId: "axe_failed", ordinal: 2, runnerId: "runner-1", sessionId: "s_axe_failed",
+          kind: "prompt_session", state: "rejected", revision: 2, attemptCount: 2,
+          lastError: "the session refused the prompt. It was busy with another turn.", createdAt: twoAm(1), updatedAt: twoAm(1) },
+      ],
+    }),
+    scheduled("axe_skipped", twoAm(2), { status: "skipped", startedAt: undefined, completedAt: undefined,
+      sessionId: undefined, runnerId: undefined, error: "execution 'axe_failed' is still active" }),
+    scheduled("axe_expired", twoAm(3), { status: "expired", startedAt: undefined, completedAt: twoAm(3) + 60 * minutes,
+      sessionId: undefined, runnerId: undefined, error: AUTOMATION_TARGET_UNAVAILABLE }),
+    scheduled("axe_workflow", twoAm(4), { actionKind: "workflow_run", sessionId: undefined, runId: "run_build_review",
+      completedAt: twoAm(4) + 65 * minutes }),
+    scheduled("axe_legacy", twoAm(5), { deliveryMode: "legacy_at_most_once" }),
+    ...Array.from({ length: 8 }, (_, index) => scheduled(`axe_older_${index}`, twoAm(6 + index))),
+  );
+}
+if (params.has("no-runs")) {
+  executions.length = 0;
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(2, 0, 0, 0);
+  items[0] = { ...items[0]!, nextFireAt: tomorrow.getTime() };
+}
+
 // Outbound Events (#2973): a healthy subscription for a project and a failing one for an automation,
 // paused after its bounded attempts, with deliveries relative to now so retries read in words.
 // `outbound-empty` has none; `outbound-loading` never answers.

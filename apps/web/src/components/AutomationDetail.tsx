@@ -3,7 +3,6 @@ import type {
   AutomationExecution,
   AutomationSchedule,
   AutomationTriggerCredential,
-  AutomationTriggerDeliveryMetadata,
   AutomationTriggerKind,
   AutomationTriggerSessionSelector,
   AutomationTriggerView,
@@ -18,12 +17,13 @@ import { writeClipboardText } from "../clipboard.js";
 import { detailPlaceholder } from "../detail-placeholder.js";
 import { useReportEntityTitle } from "../entity-title.js";
 import { formatCalendarTime, titleCaseLabel } from "../format.js";
-import { absoluteViewUrl, backLabel, viewTitle } from "../navigation.js";
+import { absoluteViewUrl, backLabel, viewTitle, type View } from "../navigation.js";
 import { timeZoneDisplayName } from "../reminder-schedule.js";
 import { useDashboardPublicOrigin } from "../remote-access-context.js";
 import { machineOptionLabels } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
+import { AutomationRunHistory, RunDetailsDialog } from "./AutomationRunHistory.js";
 import { useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { EditIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
@@ -66,14 +66,6 @@ type Stored =
   | { state: "loading" }
   | { state: "loaded"; automation: AutomationSchedule; executions: AutomationExecution[] }
   | { state: "missing" };
-
-function deliverySummary(delivery: AutomationTriggerDeliveryMetadata): string {
-  const parts = delivery.fields.map((field) => field === "parameters" && delivery.parameterNames.length
-    ? `Parameters ${delivery.parameterNames.join(", ")}`
-    : titleCaseLabel(field));
-  if (delivery.targetSelector) parts.push(`Target ${titleCaseLabel(delivery.targetSelector)}`);
-  return parts.join(" · ") || "No Optional Fields";
-}
 
 function toggleSelector(
   current: AutomationTriggerSessionSelector[],
@@ -119,7 +111,8 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
   const [triggerDraft, setTriggerDraft] = useState<TriggerDraft | null>(null);
   const draftNameRef = useRef<HTMLInputElement>(null);
   const focusDraft = useRef(false);
-  const historyRef = useRef<HTMLDetailsElement>(null);
+  /** The run whose Run Details is open, by id, so the dialog follows that run through each poll. */
+  const [detailsRunId, setDetailsRunId] = useState<string | null>(null);
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -203,6 +196,15 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
   const automation = stored.state === "loaded" ? stored.automation : null;
   useReportEntityTitle({ name: "automation", id: automationId }, automation?.name);
 
+  // A run that leaves the history (deleted with its automation, or past the listed fifty) closes its
+  // Run Details for good, rather than reopening should it come back.
+  useEffect(() => {
+    if (detailsRunId === null || stored.state === "loading") return;
+    if (stored.state === "missing" || !stored.executions.some((execution) => execution.executionId === detailsRunId)) {
+      setDetailsRunId(null);
+    }
+  }, [stored, detailsRunId]);
+
   useEffect(() => {
     if (!triggerDraft || !focusDraft.current) return;
     focusDraft.current = false;
@@ -271,13 +273,9 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
 
   const edit = () => navigate({ name: "automations", editor: { kind: "edit", automationId } });
   const openSession = (sessionId: string) => navigate({ name: "session", id: sessionId });
-  const openRunHistory = () => {
-    const history = historyRef.current;
-    if (!history) return;
-    history.open = true;
-    history.scrollIntoView?.({ block: "start" });
-    history.querySelector<HTMLElement>("summary")?.focus();
-  };
+  const openView = (view: View) => navigate(view);
+  const detailsRun = detailsRunId === null ? undefined
+    : executions.find((execution) => execution.executionId === detailsRunId);
 
   // Where focus lands after a trigger action: the revealed secret's Copy Secret, a row's Rotate
   // Secret, or the Triggers heading once the row it was on is gone.
@@ -466,7 +464,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
             {failedSessionId && (
               <button type="button" className="btn sm" onClick={() => openSession(failedSessionId)}>Open Session</button>
             )}
-            <button type="button" className="btn sm ghost" onClick={openRunHistory}>Run Details</button>
+            <button type="button" className="btn sm ghost" onClick={() => setDetailsRunId(latest.executionId)}>Run Details</button>
           </>}
         >
           {latest.error ?? "The last run didn't finish."}
@@ -638,11 +636,26 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
 
         <section className="section" aria-labelledby="automation-history">
           <div className="section-head"><h2 className="section-title" id="automation-history">Run History</h2></div>
-          {executions.length === 0 ? <p className="automation-empty">No runs yet.</p> : (
-            <details className="automation-history" ref={historyRef}><summary>{executions.length === 1 ? "Show 1 Run" : `Show ${executions.length} Runs`}</summary><div className="automation-history-list">{executions.map((execution) => <div className="automation-execution" key={execution.executionId}><div><strong>{titleCaseLabel(execution.status)}</strong><span>{when(execution.scheduledFor, now)}</span></div><code>{execution.idempotencyKey}</code>{execution.triggerDelivery && <small>Delivered Fields: {deliverySummary(execution.triggerDelivery)}{execution.triggerDelivery.promptSha256 ? ` · Prompt Digest ${execution.triggerDelivery.promptSha256.slice(0, 12)}…` : ""}</small>}{execution.commands?.length ? <ul className="automation-command-list" aria-label="Durable Runner Command Receipts">{execution.commands.map((command) => <li key={command.commandId}><span>{titleCaseLabel(command.kind.replace("_", " "))} · {titleCaseLabel(command.state)}</span><small>{command.attemptCount} delivery attempt{command.attemptCount === 1 ? "" : "s"}</small>{command.lastError && <em>{command.lastError}</em>}</li>)}</ul> : execution.deliveryMode === "legacy_at_most_once" ? <small className="automation-legacy-delivery">Legacy At-Most-Once Delivery</small> : null}{execution.error && <p>{execution.error}</p>}{execution.sessionId && <button className="btn sm ghost" type="button" onClick={() => openSession(execution.sessionId!)}>Open Session</button>}</div>)}</div></details>
-          )}
+          <AutomationRunHistory
+            executions={executions}
+            now={now}
+            nextRun={automation.enabled ? nextRunWords : null}
+            policy={automation.runnerPolicy}
+            onOpen={openView}
+            onDetails={setDetailsRunId}
+          />
         </section>
       </div>
+      {detailsRun && (
+        <RunDetailsDialog
+          execution={detailsRun}
+          now={now}
+          policy={automation.runnerPolicy}
+          machineLabel={machineLabel}
+          onOpen={openView}
+          onClose={() => setDetailsRunId(null)}
+        />
+      )}
     </div>
   );
 }

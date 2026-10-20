@@ -1,1 +1,0 @@
-|.automation-legacy-delivery|font-size|12
