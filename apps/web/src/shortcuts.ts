@@ -25,6 +25,7 @@ export type ShortcutId =
   | "toggle-side-panel"
   | "submit-run"
   | "relay-pod-note"
+  | "send-run-follow-up"
   | "shortcut-reference"
   | "inbox-next"
   | "inbox-previous"
@@ -73,7 +74,7 @@ export type ShortcutId =
   | "stop-turn"
   | "exit-terminal";
 
-export type ShortcutScope = "Global" | "Sessions" | "Sessions List" | "Session" | "Session Reading" | "Run dialog" | "Pod detail";
+export type ShortcutScope = "Global" | "Sessions" | "Sessions List" | "Session" | "Session Reading" | "Run dialog" | "Follow Up dialog" | "Pod detail";
 
 export type ShortcutGroup = "Navigation" | "Sessions List" | "Session Reading" | "Session" | "Actions" | "Help";
 
@@ -228,6 +229,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Actions",
     label: "Add Pod Note",
     scope: "Pod detail",
+    binding: { key: "Enter", primary: true },
+  },
+  {
+    id: "send-run-follow-up",
+    group: "Actions",
+    label: "Send Follow-Up to Agents",
+    scope: "Follow Up dialog",
     binding: { key: "Enter", primary: true },
   },
   {
@@ -707,6 +715,7 @@ const EXPERIMENT_SHORTCUT_IDS: Partial<Record<ShortcutId, ExperimentId>> = {
   "submit-run": "multiAgent",
   "navigate-pods": "pods",
   "relay-pod-note": "pods",
+  "send-run-follow-up": "multiAgent",
 };
 
 /** The rail destination a navigation shortcut advertises, or null for every other binding. */

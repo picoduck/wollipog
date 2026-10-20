@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, RunView, SessionEvent, SessionEventsResponse, SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type ControlPlaneToUi, type RunView, type SessionEvent, type SessionEventsResponse, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { viewFromPath, viewPath, type View, type ViewNavigation } from "../navigation.js";
@@ -14,13 +14,15 @@ import "../styles.css";
  * A comparison run's page (#2975) in a real browser, for its geometry spec and screenshots. The
  * page's address is the app's own run route (`/runs/~<id>?member=<sessionId>` after the fixture's
  * file name), so choosing a phone member tab rewrites it and a reload keeps it.
- * `?run=three|four|running` picks the run: three finished agents, four finished agents, or three with
- * one still working. `?theme=light|dark`. A 64px spacer stands in for the desktop rail.
+ * `?run=three|four|running|busy` picks the run: three finished agents, four finished agents, three with
+ * one still working, or three with two working. `?theme=light|dark`. `?fail=<sessionId>` makes a
+ * Follow Up send to that member fail (#2976). A 64px spacer stands in for the desktop rail.
  */
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 document.documentElement.setAttribute("data-theme", theme);
 const runKey = params.get("run") ?? "three";
+const failing = new Set(params.getAll("fail"));
 
 const NOW = Date.now();
 const MINUTE = 60_000;
@@ -32,7 +34,7 @@ function member(id: string, agentId: string, agentName: string, driver: SessionV
     title: agentName, status, column: "review", runId: `run-${runKey}`, useWorktree: true, worktreePath: null, archived: false,
     createdAt: NOW - 10 * MINUTE, updatedAt: NOW, lastEventAt: null, messageCount: 12, eventEpoch: 0, preview: null,
     pendingApproval: null, driver, model: null, effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0,
-    adopted: false,
+    adopted: false, ...(status === "running" ? { activeTurnId: `${id}-turn` } : {}),
   } as SessionView;
 }
 
@@ -58,6 +60,14 @@ const RUNS: Record<string, { title: string; members: SessionView[] }> = {
     title: "Index session search across machines",
     members: [
       member("s-claude", "claude", "Claude Code", "claude-code", "idle"),
+      member("s-codex", "codex", "Codex", "codex-app-server", "running"),
+      member("s-opencode", "opencode", "OpenCode", "acp", "idle"),
+    ],
+  },
+  busy: {
+    title: "Index session search across machines",
+    members: [
+      member("s-claude", "claude", "Claude Code", "claude-code", "running"),
       member("s-codex", "codex", "Codex", "codex-app-server", "running"),
       member("s-opencode", "opencode", "OpenCode", "acp", "idle"),
     ],
@@ -104,7 +114,7 @@ const snapshot = {
   type: "snapshot",
   capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
   runners: [{
-    runnerId: "runner-1", hostname: "studio-mac", displayName: "Studio Mac", os: "macos", version: "1", status: "online",
+    runnerId: "runner-1", hostname: "studio-mac", displayName: "Studio Mac", os: "macos", version: "1", status: "online", protocolVersion: PROTOCOL_VERSION,
     agents: [], workspaces: [{ id: "ws-wollipog", name: "Wollipog", path: "/repo" }], connectedAt: NOW, lastSeen: NOW,
   }],
   boxes: [], projects: [], sessions: chosen.members, runs: [run], pods: [],
@@ -162,6 +172,16 @@ const client = {
   getSessionEventPage: async (id: string) => {
     const events = pages.get(id) ?? [];
     return { events, eventEpoch: 0, nextAfter: events.at(-1)?.seq ?? 0, cacheComplete: true } as SessionEventsResponse;
+  },
+  // Follow Up and Stop (#2976) answer after a beat, as a real round trip does.
+  prompt: async (id: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (failing.has(id)) throw new Error("Its machine went offline before the message arrived.");
+    return chosen.members.find((session) => session.id === id);
+  },
+  cancelTurn: async (id: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return chosen.members.find((session) => session.id === id);
   },
 } as unknown as ApiClient;
 

@@ -7306,8 +7306,9 @@ body.shell-dock-dragging * {
    stage ("Commit the staged changes first."). New Session (#2952) says what nothing further down
    its form can fix: "Choose an online location to continue." Add Location (#2966) says what its one
    Add Location waits for: "Choose a location or a folder." or "Match the access levels to continue."
-   New Project (#2965) says why Create Project is off: a Viewer's refusal, or access levels loading. */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason) {
+   New Project (#2965) says why Create Project is off: a Viewer's refusal, or access levels loading.
+   A run's Follow Up (#2976) says what Send waits for: "Write a message to send." or a chosen agent. */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -7318,7 +7319,7 @@ body.shell-dock-dragging * {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason) { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -11520,6 +11521,24 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin: 0;
   padding: 0;
   list-style: none;
+}
+/* A run's Follow Up (#2976): each member's result once a send left one undelivered, as one surface
+   of rows like a confirmation's. */
+.run-follow-up-results {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* A failed member's row grows for its reason, which wraps whole: the person reads why before
+   retrying. */
+.run-follow-up-results > .row {
+  height: auto;
+  min-height: var(--row-h);
+  padding-block: var(--space-2);
+}
+.run-follow-up-results .row-sub {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 /* A path or an id among the rows (Discard's file, #2848). */
 .confirmation-rows .row-title.mono {

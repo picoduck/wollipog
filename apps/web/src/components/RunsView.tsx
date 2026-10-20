@@ -1,4 +1,4 @@
-import { BotIcon, CompareIcon, ProjectsIcon, RunsIcon } from "./Icons.js";
+import { BotIcon, CompareIcon, ProjectsIcon, ReplyIcon, RunsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { StatusBadge, statusToneClass } from "./StatusBadge.js";
@@ -21,7 +21,7 @@ import { transcriptPresentation } from "../transcript-presentation.js";
 import { ArtifactPreviewDialog, ArtifactRow } from "./ArtifactPreview.js";
 import { ListFoot } from "./ListFoot.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
+import { DetailBar, PageHeader, type ActionsMenuChoice, type PageMenuAction } from "./PageHeader.js";
 import { StaleContent } from "./StaleContent.js";
 import { indexRunWorkflows, runStatus, runType, runTypeLabel, type RunWorkflows } from "../run-status.js";
 import { absoluteViewUrl, backLabel, destination, viewTitle } from "../navigation.js";
@@ -30,7 +30,17 @@ import { memberActivity, memberActivityLine } from "../member-activity.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { TabList } from "./Tabs.js";
 import { Modal } from "./Modal.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import { ConfirmationFailure, useFeedback } from "./FeedbackProvider.js";
+import { followUpSentMessage, RunFollowUpDialog } from "./RunFollowUpDialog.js";
+import {
+  followUpAvailability,
+  followUpSelectable,
+  memberFinalAnswer,
+  namesSentence,
+  promptRunMembers,
+  runMemberLabels,
+  stopAgentUnavailableReason,
+} from "../run-members.js";
 import { useDashboardPublicOrigin } from "../remote-access-context.js";
 import { writeClipboardText } from "../clipboard.js";
 import { DEVELOPMENT_BUILD } from "../config.js";
@@ -40,23 +50,38 @@ const NO_RUN_LINK_REASON = "Open Wollipog in a browser to copy a link.";
 const DEVELOPMENT_LINK_HINT = "Development builds can set VITE_DASHBOARD_ORIGIN.";
 const sameSessionIds = (left: readonly string[], right: readonly string[]) =>
   left.length === right.length && left.every((id, index) => id === right[index]);
+const BACK_TO_MORE_ACTIONS = "Back to More Actions";
+const NO_ANSWER_REASON = "No answer yet";
 
-/** The member's ⋯ (#2975), the same in a desktop column's head and the phone's member bar. */
-function memberMenu(openSession: () => void): PageMenuAction[] {
-  return [{ label: "Open Session", onClick: openSession }];
+/** What the run page does for one member from its ⋯ (#2976). */
+interface MemberActions {
+  /** Follow Up with This Agent…: the dialog with only this member checked. */
+  followUp: () => void;
+  /** Stop Agent…: the confirmation, whose phone Back reopens the ⋯ it came from. */
+  stop: (choice: ActionsMenuChoice) => void;
 }
 
 /** One member's live column (§12.5's reading column, #2975). Its own component so each member
  * subscribes to ITS event slice and folds incrementally — a 4-agent compare no longer re-derives
  * four full timelines per streamed chunk of any one of them. */
-function MemberColumn({ sessionId, onRetry, panel }: {
+function MemberColumn({ sessionId, label, actions, onRetry, panel }: {
   sessionId: string;
+  /** The member's name on this run's page, which tells two members of one agent apart. */
+  label: string;
+  actions: MemberActions;
   /** Loads the run's member histories again after a failure. */
   onRetry: () => void;
   /** On a phone, the one column is the member tabs' panel. */
   panel?: { id: string; labelledBy: string };
 }) {
   const { navigate } = useStoreActions();
+  const { showToast } = useFeedback();
+  // Set in the effect body, so StrictMode's simulated unmount and remount leave it true.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const session = useStoreSelector((state) => selectComparisonSession(state, sessionId));
   const evs = useStoreSelector((state) => selectComparisonEvents(state, sessionId));
   const history = useStoreSelector((state) => selectComparisonHistory(state, sessionId));
@@ -64,13 +89,51 @@ function MemberColumn({ sessionId, onRetry, panel }: {
   const runnerOnline = useStoreSelector((state) => session
     ? state.runners.get(session.runnerId)?.status !== "offline"
     : true);
+  const runnerProtocol = useStoreSelector((state) => session ? state.runners.get(session.runnerId)?.protocolVersion : undefined);
   const conn = useStoreSelector((state) => state.conn);
   const items = useTimeline(sessionId, evs, session?.eventEpoch ?? 0);
   const activity = useMemo(() => memberActivity(items), [items]);
+  const answer = useMemo(() => memberFinalAnswer(items), [items]);
   if (!session) return null;
   const presentation = transcriptPresentation({ itemCount: items.length, hasOptimistic: false, working: false, history, conn });
-  const agentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
+  const agentLabel = label;
   const openSession = () => navigate({ name: "session", id: sessionId });
+  const copyAnswer = async () => {
+    if (!answer) return;
+    // As Copy Link: ⋯ has handed focus back to its trigger, and a refused write falls back to a
+    // selected field only while the column is mounted and focus is still there, or nowhere.
+    const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const unclaimed = () => document.activeElement === null || document.activeElement === document.body;
+    const copied = await writeClipboardText(answer, () => mountedRef.current && (unclaimed() || document.activeElement === invoker));
+    if (copied === null) return;
+    if (mountedRef.current && unclaimed()) invoker?.focus();
+    showToast(copied ? "Final answer copied as Markdown." : "Couldn't copy the final answer.", { tone: copied ? "success" : "error" });
+  };
+  const followUp = followUpAvailability(session);
+  const stopReason = stopAgentUnavailableReason(session, { online: runnerOnline, protocolVersion: runnerProtocol });
+  // The member's ⋯, the same in a desktop column's head and the phone's member bar.
+  const menu: PageMenuAction[] = [
+    { label: "Open Session", onClick: openSession },
+    {
+      label: "Follow Up with This Agent…",
+      disabled: !followUpSelectable(followUp),
+      description: "reason" in followUp ? followUp.reason : undefined,
+      onClick: actions.followUp,
+    },
+    {
+      label: "Copy Final Answer",
+      disabled: !answer,
+      description: answer ? undefined : NO_ANSWER_REASON,
+      onClick: () => void copyAnswer(),
+    },
+    {
+      label: "Stop Agent…",
+      danger: true,
+      disabled: stopReason !== null,
+      description: stopReason ?? undefined,
+      onClick: actions.stop,
+    },
+  ];
   // What it did, counted from its timeline once that is known.
   const known = presentation.body === "timeline" || presentation.body === "empty";
   const did = memberActivityLine(statusMeta("session", session.status).pulse, known ? activity : null);
@@ -87,7 +150,7 @@ function MemberColumn({ sessionId, onRetry, panel }: {
         session={session}
         runnerOnline={runnerOnline}
         onOpenSession={openSession}
-        menu={memberMenu(openSession)}
+        menu={menu}
       />
       <p className="compare-member-meta">{did}</p>
       <CompareMemberBody
@@ -107,8 +170,9 @@ const memberTabId = (index: number) => `run-member-tab-${index}`;
 const MEMBER_PANEL_ID = "run-member-panel";
 
 /** A phone's member tab: the agent and its status as a dot, named in words. */
-function MemberTab({ sessionId, index, selected, onSelect, onKeyDown }: {
+function MemberTab({ sessionId, label, index, selected, onSelect, onKeyDown }: {
   sessionId: string;
+  label: string;
   index: number;
   selected: boolean;
   onSelect: () => void;
@@ -119,7 +183,6 @@ function MemberTab({ sessionId, index, selected, onSelect, onKeyDown }: {
     ? state.runners.get(session.runnerId)?.status !== "offline"
     : true);
   if (!session) return null;
-  const agentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const status = sessionStatusSummary(session, { runnerOnline }).primary.meta;
   return (
     <button
@@ -134,7 +197,7 @@ function MemberTab({ sessionId, index, selected, onSelect, onKeyDown }: {
       onKeyDown={onKeyDown}
     >
       <span className={`compare-tab-dot ${statusToneClass(status.tone)}`} aria-hidden="true" />
-      {agentLabel}
+      {label}
       <span className="sr-only">, {status.label}</span>
     </button>
   );
@@ -303,9 +366,11 @@ export function RunDetail({ runId, member }: {
 function RunDetailContent({ runId, member }: { runId: string; member?: string }) {
   const api = useApi();
   const phone = useIsMobile();
-  const { showToast } = useFeedback();
+  const { showToast, confirm } = useFeedback();
   const dashboardOrigin = useDashboardPublicOrigin();
   const [taskOpen, setTaskOpen] = useState(false);
+  // Follow Up…, from the bar (the members awaiting a prompt) or a member's ⋯ (only that member).
+  const [followUp, setFollowUp] = useState<{ preselect?: string } | null>(null);
   // Set in the effect body, so StrictMode's simulated unmount and remount leave it true.
   const mountedRef = useRef(false);
   useEffect(() => {
@@ -330,6 +395,18 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
     recoverySessionIds,
     (sessionId) => state.sessions.get(sessionId)?.eventEpoch ?? 0,
   ));
+  // Each member's agent in run order, then the names the page shows: two members of one agent are
+  // numbered, the same on the tabs, the heads, Follow Up and the Stop confirmations (§10.1).
+  const memberAgents = useStoreSelector(
+    (state) => (state.runs.get(runId)?.sessionIds ?? EMPTY_SESSION_IDS).map((sessionId) => {
+      const session = state.sessions.get(sessionId);
+      return session ? sessionAgentLabel(session.agentName, session.driver, session.agentId) : "";
+    }),
+    sameSessionIds,
+  );
+  const memberLabels = useMemo(() => runMemberLabels(memberAgents), [memberAgents]);
+  const sessions = useStoreSelector((state) => state.sessions);
+  const runners = useStoreSelector((state) => state.runners);
   const [artifacts, setArtifacts] = useState<WorkflowArtifactView[]>([]);
   const [artifactCursor, setArtifactCursor] = useState<string | undefined>();
   const [artifactPageBusy, setArtifactPageBusy] = useState(false);
@@ -499,6 +576,65 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
   }
 
   const members = run.sessionIds;
+  const labelOf = (sessionId: string) => memberLabels[members.indexOf(sessionId)] || "This agent";
+  const memberStatus = (sessionId: string) => {
+    const session = sessions.get(sessionId);
+    if (!session) return null;
+    const runner = runners.get(session.runnerId);
+    return {
+      session,
+      meta: sessionStatusSummary(session, { runnerOnline: runner?.status !== "offline" }).primary.meta,
+      stopReason: stopAgentUnavailableReason(session, { online: runner?.status !== "offline", protocolVersion: runner?.protocolVersion }),
+    };
+  };
+  // The members whose current turn Stop All Agents can stop.
+  const running = members.filter((sessionId) => memberStatus(sessionId)?.stopReason === null);
+  const stopAgent = (sessionId: string, { reopen }: ActionsMenuChoice) => {
+    void confirm({
+      title: "Stop Agent",
+      message: `${labelOf(sessionId)} stops its current turn in “${run.title}”. Its work so far is kept.`,
+      confirmLabel: "Stop Agent",
+      tone: "danger",
+      // On a phone the confirmation replaces the member's ⋯ sheet, and Back brings it back (§7.5).
+      back: { label: BACK_TO_MORE_ACTIONS, run: reopen },
+      progress: "Stopping the agent…",
+      onConfirm: async () => { await api.cancelTurn(sessionId); },
+    });
+  };
+  const stopAll = ({ reopen }: ActionsMenuChoice) => {
+    // Each attempt stops only the members not stopped yet, so Try Again after a partial failure
+    // never stops a member twice.
+    let remaining = running;
+    void confirm({
+      title: "Stop All Agents",
+      message: `Each agent below stops its current turn in “${run.title}”. Their work so far is kept.`,
+      detailRows: running.map((sessionId) => ({ label: labelOf(sessionId), status: memberStatus(sessionId)?.meta })),
+      confirmLabel: "Stop All Agents",
+      tone: "danger",
+      back: { label: BACK_TO_MORE_ACTIONS, run: reopen },
+      progress: "Stopping the agents…",
+      onConfirm: async () => {
+        const targets = remaining;
+        const settled = await Promise.allSettled(targets.map((sessionId) => api.cancelTurn(sessionId)));
+        const failures = targets.flatMap((sessionId, index) => {
+          const outcome = settled[index]!;
+          if (outcome.status === "fulfilled") return [];
+          const reason = outcome.reason;
+          return [{ sessionId, error: reason instanceof Error && reason.message ? reason.message : "The stop failed." }];
+        });
+        remaining = failures.map((failure) => failure.sessionId);
+        if (!failures.length) return;
+        throw new ConfirmationFailure(
+          `Couldn't stop ${namesSentence(failures.map((failure) => labelOf(failure.sessionId)))}. Try again, or open ${failures.length === 1 ? "its session" : "their sessions"}.`,
+          failures.map((failure) => `${labelOf(failure.sessionId)}: ${failure.error}`).join("\n"),
+        );
+      },
+    });
+  };
+  const memberActions = (sessionId: string) => ({
+    followUp: () => setFollowUp({ preselect: sessionId }),
+    stop: (choice: ActionsMenuChoice) => stopAgent(sessionId, choice),
+  });
   // A phone shows one member: the one the URL names while it is still a member, else the first.
   const shownMember = member !== undefined && members.includes(member) ? member : members[0];
   const selectMember = (sessionId: string) => {
@@ -543,6 +679,8 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
         backLabel={backLabel("runs")}
         onBack={back}
         status={status && <StatusBadge meta={statusMeta("run", status)} />}
+        // In the compact tier and on a phone only its icon shows, so the run's title keeps its room.
+        primary={members.length > 0 ? { label: "Follow Up…", icon: <ReplyIcon />, iconOnPhone: true, onClick: () => setFollowUp({}) } : undefined}
         menu={[
           { label: "Show Full Task", onClick: () => setTaskOpen(true) },
           {
@@ -551,6 +689,8 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
             description: runLink ? undefined : DEVELOPMENT_BUILD ? `${NO_RUN_LINK_REASON} ${DEVELOPMENT_LINK_HINT}` : NO_RUN_LINK_REASON,
             onClick: () => void copyLink(),
           },
+          // Only while a member's turn runs; it lists those members and stops only them.
+          ...(running.length > 0 ? [{ label: "Stop All Agents…", danger: true, onClick: stopAll }] : []),
         ]}
       />
       <div className="run-task">
@@ -566,6 +706,15 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
         <Modal title="Task" onClose={() => setTaskOpen(false)} footer={<button type="button" className="btn" onClick={() => setTaskOpen(false)}>Done</button>}>
           <p className="run-task-full">{run.prompt}</p>
         </Modal>
+      )}
+      {followUp && (
+        <RunFollowUpDialog
+          members={members.map((sessionId) => ({ sessionId, label: labelOf(sessionId) }))}
+          preselect={followUp.preselect}
+          send={(sessionIds, text) => promptRunMembers((sessionId, message) => api.prompt(sessionId, message), sessionIds, text)}
+          onSent={(count) => showToast(followUpSentMessage(count), { tone: "success" })}
+          onClose={() => setFollowUp(null)}
+        />
       )}
 
       {(workflow || workflowError) && (
@@ -642,6 +791,7 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
                 <MemberTab
                   key={sessionId}
                   sessionId={sessionId}
+                  label={labelOf(sessionId)}
                   index={index}
                   selected={sessionId === shownMember}
                   onSelect={() => selectMember(sessionId)}
@@ -653,6 +803,8 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
               <MemberColumn
                 key={shownMember}
                 sessionId={shownMember}
+                label={labelOf(shownMember)}
+                actions={memberActions(shownMember)}
                 onRetry={retryHistory}
                 panel={{ id: MEMBER_PANEL_ID, labelledBy: memberTabId(members.indexOf(shownMember)) }}
               />
@@ -661,7 +813,9 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
         )
       ) : (
         <CompareRow label="Agents">
-          {members.map((sessionId) => <MemberColumn key={sessionId} sessionId={sessionId} onRetry={retryHistory} />)}
+          {members.map((sessionId) => (
+            <MemberColumn key={sessionId} sessionId={sessionId} label={labelOf(sessionId)} actions={memberActions(sessionId)} onRetry={retryHistory} />
+          ))}
         </CompareRow>
       )}
     </div>
