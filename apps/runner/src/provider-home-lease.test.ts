@@ -975,15 +975,25 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
   }
   async function forceCleanup(state: (typeof states)[number]): Promise<boolean> {
     const child = state.child;
-    if (state.closed) return true;
+    const cancellationRequired = options.fault === "hang-before-ready" && state.name === "contender-b";
+    const cancellationProved = () => state.ready && state.phase === "cancelled-before-start" &&
+      state.closed && state.code === 1 && state.signal === null;
+    if (state.closed) return !cancellationRequired || cancellationProved();
     const deadline = performance.now() + 5_000;
+    // Share the existing cleanup bound; reserve its remaining time for strict tree cleanup.
+    if (cancellationRequired && await waitUntil(cancellationProved, 1_000)) return true;
+    if (state.closed) return !cancellationRequired || cancellationProved();
+    if (performance.now() >= deadline) return false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const cleaned = await Promise.race([
         killTreeAndWait(child),
-        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 5_000); }),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), Math.max(0, deadline - performance.now()));
+        }),
       ]);
-      return cleaned && await waitUntil(() => state.closed, Math.max(0, deadline - performance.now()));
+      const closed = cleaned && await waitUntil(() => state.closed, Math.max(0, deadline - performance.now()));
+      return closed && (!cancellationRequired || cancellationProved());
     } finally { if (timer) clearTimeout(timer); }
   }
   try {
@@ -999,9 +1009,14 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       const phase = (name, timings = {}, outcome) => new Promise((resolve, reject) => {
         process.send({ phase: name, timings, outcome }, (error) => error ? reject(error) : resolve());
       });
-      const waitFor = (path) => {
+      let cancelledBeforeStart = false;
+      const waitFor = (path, cancelBeforeStart = false) => {
         const deadline = performance.now() + 20_000;
         while (!existsSync(path)) {
+          if (cancelBeforeStart && existsSync(release)) {
+            cancelledBeforeStart = true;
+            throw new Error("synthetic cancellation before acquisition");
+          }
           if (performance.now() >= deadline) throw new Error("fixture barrier timed out");
           pause(5);
         }
@@ -1022,7 +1037,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
         pause(${options.startupDelayMs ?? 0});
         await phase("ready", { initializationMs });
-        waitFor(start);
+        waitFor(start, ${options.fault === "hang-before-ready"} && fault !== "hang-before-ready");
         await phase("acquiring");
         const acquisitionAt = performance.now();
         let outcome;
@@ -1078,7 +1093,10 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         console.error(error instanceof Error ? error.message : String(error));
         process.exitCode = 1;
       } finally {
-        registry?.releaseAll();
+        const released = registry?.releaseAll();
+        // This branch precedes acquisition; synchronous initialization has already returned.
+        // A failed release emits no ACK, so the parent retains its cleanup failure and fixture.
+        if (cancelledBeforeStart && released === true) await phase("cancelled-before-start");
         process.disconnect();
       }
     `);
@@ -1134,7 +1152,8 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     failure = sanitize(error instanceof Error ? error.message : String(error));
   } finally {
     try { writeFileSync(release, "done"); } catch { cleanupFailures.push("fixture release publication failed"); }
-    if (!await waitUntil(() => states.every((state) => state.closed), options.cleanupGraceMs ?? 5_000)) {
+    if (!await waitUntil(() => states.every((state) => state.closed), options.cleanupGraceMs ?? 5_000) ||
+        options.fault === "hang-before-ready") {
       failure ??= "contenders required forced cleanup";
       const cleaned = await Promise.all(states.map((state) => forceCleanup(state)));
       cleanupProved = cleaned.every(Boolean);
