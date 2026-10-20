@@ -7308,8 +7308,9 @@ body.shell-dock-dragging * {
    Add Location waits for: "Choose a location or a folder." or "Match the access levels to continue."
    New Project (#2965) says why Create Project is off: a Viewer's refusal, or access levels loading.
    A run's Follow Up (#2976) says what Send waits for: "Write a message to send." or a chosen agent.
-   New Subscription (#2973) counts the events it will send: "2 events selected". */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count) {
+   New Subscription (#2973) counts the events it will send: "2 events selected".
+   New Pod (#2982) says what Create Pod waits for: "Choose at least 2 sessions." or "Enter a name." */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -7320,7 +7321,7 @@ body.shell-dock-dragging * {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason) { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -11269,6 +11270,20 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .pod-merge-row + .pod-merge-row { box-shadow: inset 0 1px 0 var(--border); }
 .pod-merge-paths { margin: 0; padding: 0; list-style: none; }
 .pod-merge-rule { margin-top: calc(-1 * var(--space-2)); }
+/* New Pod (#2982): the sessions list grows inside the dialog's body, its only scroller. On a phone's
+   full-height sheet the filter stays at the top while the rows scroll under it, on the sheet's
+   colour, and each row is at least 44px. */
+@media (max-width: 760px) {
+  .pod-session-filter {
+    position: sticky;
+    top: calc(-1 * var(--space-5));
+    z-index: var(--z-sticky);
+    margin-top: calc(-1 * var(--space-2));
+    padding: var(--space-2) 0;
+    background: var(--bg-elev);
+  }
+  .pod-session-list > .choice-row { min-height: max(44px, var(--row-h)); }
+}
 /* The pod page (#2981): under the bar and its banner, the objective and the members' flush columns
    (#2975's `.compare`) beside the Huddle, a 360px aside at full height (320px in the compact tier).
    The columns always get the remaining height. */
@@ -15649,12 +15664,14 @@ button.review-finding-location {
 /* No results (§12.2), inline in the list at the rows' inset: the icon beside its sentence. */
 /* The Projects list's no-match row is the same (#2957). */
 .state:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results) { padding: var(--space-3) var(--space-3) 0; }
-:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results) .state-body {
+/* New Pod's sessions list says it the same way (#2982), at the rows' inset, without the drop. */
+.state.pod-session-no-results { padding: 0 var(--space-3); }
+:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results, .pod-session-no-results) .state-body {
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
-:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results) .state-body > svg { flex: none; }
+:is(.skill-list-no-results, .project-list-no-results, .machine-list-no-results, .pod-session-no-results) .state-body > svg { flex: none; }
 /* The foot's Orphaned Copies entry is one line in the foot's --text-dim (§5.6). */
 .list-foot > .skill-list-orphans { color: inherit; }
 .skill-list-orphans > .row-title { font: var(--type-body); }

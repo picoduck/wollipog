@@ -1,52 +1,75 @@
-import { useMemo, useState } from "react";
-import { isTerminal } from "@wollipog/protocol";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
+import { POD_SESSION_RULE, newPodBlockedReason, podEligibleSessions } from "../pod-session-choices.js";
+import { PodsIcon } from "./Icons.js";
 import { Modal } from "./common.js";
+import { Notice } from "./Notice.js";
+import { PodSessionChoices } from "./PodSessionChoices.js";
+import { State } from "./State.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { ChoiceRows } from "./ui/ChoiceControls.js";
-import { sessionAgentLabel } from "./agent-options.js";
 
-export function NewPodDialog({ onClose }: { onClose: () => void }) {
+/**
+ * New Pod (#2982; docs/design-system.md §7, §8, §12): a Name, an optional Objective and the eligible
+ * sessions as one filterable list. Create Pod stays disabled with its reason in the footer until a
+ * name and two sessions are chosen; a server error is a danger notice at the body's end. With no
+ * eligible session the list's place says No Sessions Can Join and offers New Session…. On a phone
+ * it is a full-height sheet. While the pod is being created the dialog cannot be dismissed, so the
+ * person always lands on the pod it made or sees why it wasn't.
+ */
+export function NewPodDialog({ onClose, onNewSession }: {
+  onClose: () => void;
+  /** Opens New Session in this dialog's place. */
+  onNewSession?: () => void;
+}) {
   const api = useApi();
   const { sessions, pods, navigate } = useStore();
-  const occupied = useMemo(
-    () => new Set([...pods.values()].filter((pod) => pod.status === "active").flatMap((pod) => pod.members.map((member) => member.sessionId))),
-    [pods],
-  );
-  const candidates = useMemo(
-    () => [...sessions.values()]
-      .filter((session) => session.useWorktree && !isTerminal(session.status) && !occupied.has(session.id))
-      .sort((a, b) => b.updatedAt - a.updatedAt),
-    [sessions, occupied],
-  );
-  const [title, setTitle] = useState("");
+  const ids = useId();
+  const candidates = useMemo(() => podEligibleSessions(sessions.values(), pods.values()), [sessions, pods]);
+  const [name, setName] = useState("");
   const [objective, setObjective] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  // Set on every setup, not only the first: StrictMode replays setup and cleanup once, and a flag
+  // only ever cleared would drop the answer after the replay.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const creating = useRef(false);
+
+  // A chosen session that has since joined another pod or ended no longer counts.
+  const eligible = new Set(candidates.map((session) => session.id));
+  const chosen = selected.filter((sessionId) => eligible.has(sessionId));
+  const blockedReason = newPodBlockedReason(name, chosen.length);
+  const reasonId = `${ids}-reason`;
 
   const toggle = (sessionId: string) => setSelected((current) =>
     current.includes(sessionId) ? current.filter((id) => id !== sessionId) : [...current, sessionId],
   );
+  const close = () => { if (!creating.current) onClose(); };
 
   const submit = async () => {
-    if (busy) return;
-    if (!title.trim()) return setError("Enter a pod title.");
-    if (selected.length < 2) return setError("Select at least two isolated sessions.");
+    if (creating.current || blockedReason) return;
+    creating.current = true;
     setBusy(true);
-    setError(null);
+    setFailure(null);
     try {
       const { pod } = await api.createPod({
-        title: title.trim(),
+        title: name.trim(),
         objective: objective.trim() || undefined,
-        sessionIds: selected,
+        sessionIds: chosen,
       });
+      creating.current = false;
+      if (!mounted.current) return;
       navigate({ name: "pod", id: pod.id });
       onClose();
     } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
+      creating.current = false;
+      if (!mounted.current) return;
+      setFailure(cause instanceof Error && cause.message ? cause.message : String(cause));
       setBusy(false);
     }
   };
@@ -54,51 +77,51 @@ export function NewPodDialog({ onClose }: { onClose: () => void }) {
   return (
     <Modal
       title="New Pod"
-      onClose={onClose}
-      footer={
+      description="Group sessions so their agents can share notes and merge work."
+      phoneSheet="full"
+      onClose={close}
+      footer={(
         <>
-          {error && <span className="form-error">{error}</span>}
-          <button className="btn" onClick={onClose}>Cancel</button>
+          {blockedReason && <span className="new-pod-reason" id={reasonId}>{blockedReason}</span>}
+          <button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button>
           {/* "New Pod" opens the dialog; creating is its confirm, as "New Session" → "Create Session". */}
           <BusyButton className="btn primary" busy={busy} progress="Creating the pod…"
-            disabled={!title.trim() || selected.length < 2} onClick={() => void submit()}>
+            disabled={Boolean(blockedReason)} aria-describedby={blockedReason ? reasonId : undefined}
+            onClick={() => void submit()}>
             Create Pod
           </BusyButton>
         </>
-      }
+      )}
     >
       <div className="form">
-        <p className="muted">
-          Pods group two or more existing sessions across agents and runners. Only isolated worktree sessions are eligible.
-        </p>
         <label className="field">
-          <span>Title</span>
-          <input value={title} maxLength={120} autoFocus onChange={(event) => setTitle(event.target.value)} />
+          <span>Name</span>
+          <input value={name} maxLength={120} onChange={(event) => setName(event.target.value)} />
         </label>
         <label className="field">
           <span>Objective (Optional)</span>
           <textarea value={objective} rows={3} maxLength={4000} onChange={(event) => setObjective(event.target.value)} />
         </label>
-        <div className="field">
-          <span>Isolated Sessions</span>
-          {candidates.length === 0 ? (
-            <p className="muted">Start at least two worktree sessions that are not already in a pod.</p>
-          ) : (
-            <ChoiceRows<string>
-              multiple
-              label="Isolated Sessions"
-              value={selected}
-              onChange={toggle}
-              options={candidates.map((session) => ({
-                value: session.id,
-                title: session.title || "Untitled",
-                description: `${sessionAgentLabel(session.agentName, session.driver, session.agentId)} · ${session.runnerId}${
-                  session.worktreePath ? " · Worktree Ready" : " · Worktree Starting"}`,
-              }))}
-            />
-          )}
-        </div>
+        {candidates.length === 0 ? (
+          <State
+            compact
+            icon={<PodsIcon />}
+            title="No Sessions Can Join"
+            actions={onNewSession && (
+              <button type="button" className="btn" onClick={onNewSession}>New Session…</button>
+            )}
+          >
+            {POD_SESSION_RULE}
+          </State>
+        ) : (
+          <PodSessionChoices sessions={candidates} value={chosen} onToggle={toggle} />
+        )}
       </div>
+      {failure && (
+        <Notice tone="danger" role="alert" details={<code>{failure}</code>}>
+          The pod wasn't created. Try again.
+        </Notice>
+      )}
     </Modal>
   );
 }
