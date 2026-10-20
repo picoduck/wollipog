@@ -576,6 +576,37 @@ test("each sign-in state has exactly one primary, or only Cancel Sign-In while a
   }
 });
 
+test("a device-code sign-in in the Request Card shows the provider's link and its code, with nothing to paste (#2996)", async () => {
+  const request = recovery([AUTH.cancel], "Signing In — Claude Code");
+  const view = await renderWithRunner(
+    <RequestCard session={signInSession(request)} request={request} runnerOnline presentation="dock" />,
+    {
+      providerLogins: [{
+        operationId: "login_device", accountId: "claude-work", label: "Claude Work", provider: "codex",
+        status: "waiting_for_provider", verificationUrl: "https://auth.example.com/device", userCode: "WOLL-IPOGS",
+        expectsCode: false, sessionId: "session-dock", startedAt: 1,
+      }],
+    },
+  );
+  try {
+    const card = view.container.querySelector<HTMLElement>(".provider-login-card");
+    assert.ok(card, "the embedded sign-in renders in the card");
+    assert.equal(card.dataset.embedded, "true");
+    assert.equal(card.querySelector(".provider-login-head")?.outerHTML ?? null, null, "no head of its own");
+    const link = card.querySelector<HTMLAnchorElement>("a");
+    assert.equal(link?.textContent, "Open Provider Sign-In");
+    assert.equal(link?.href, "https://auth.example.com/device");
+    assert.equal(link?.target, "_blank");
+    const code = card.querySelector(".provider-login-device-code");
+    assert.equal(code?.querySelector("span")?.textContent, "Device Code");
+    assert.equal(code?.querySelector("code")?.textContent, "WOLL-IPOGS", "the whole code is in the DOM to read and select");
+    assert.equal(card.querySelector("input")?.outerHTML ?? null, null, "a device-code sign-in has nothing to paste");
+    assert.deepEqual(footer(view.container), ["Cancel Sign-In"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("without the recovery body, Retry stays a footer secondary", async () => {
   // A harness without the recovery body (an ACP agent's sign-in), or a child's sign-in whose account
   // an older server did not send (#2714): its Retry does not render.

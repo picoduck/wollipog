@@ -159,6 +159,7 @@ const TABLE: readonly Row[] = [
   ["provider_account", "signing_in", "Signing In", "info"],
   ["provider_account", "signed_out", "Signed Out", "neutral"],
   ["provider_account", "status_unknown", "Status Unknown", "neutral"],
+  ["provider_account", "not_added", "Not Added", "neutral"],
   // Terminal tab
   ["shell", "exited", "Exited", "neutral"],
   ["shell", "reconnecting", "Reconnecting", "info"],
@@ -214,6 +215,8 @@ test("only actively progressing work pulses, and an unverified source draws a ho
   // An agent not on the machine, or one whose machine is not online, is not a current fact (#2990).
   assert.deepEqual(statusValues("agent").filter((value) => statusMeta("agent", value).hollow),
     ["not_installed", "ready_when_last_seen"]);
+  // A new account that was never added, because it is already on the machine (#2996).
+  assert.deepEqual(statusValues("provider_account").filter((value) => statusMeta("provider_account", value).hollow), ["not_added"]);
 });
 
 test("an unknown value reads Status Unavailable, never its raw enum or a prototype member", () => {

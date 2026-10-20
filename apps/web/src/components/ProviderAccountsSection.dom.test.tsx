@@ -60,13 +60,15 @@ type Call =
   | { kind: "adopt" | "revoke"; accountId: string; force?: boolean }
   | { kind: "remove"; accountId: string }
   | { kind: "login"; body: unknown }
-  | { kind: "cancel"; operationId: string };
+  | { kind: "cancel"; operationId: string }
+  | { kind: "dismiss"; operationId: string };
 
 function client(handlers: {
   adopt?: (accountId: string) => Promise<unknown>;
   revoke?: (accountId: string, force: boolean) => Promise<unknown>;
   remove?: (accountId: string) => Promise<unknown>;
   login?: (body: unknown) => Promise<unknown>;
+  cancel?: (operationId: string) => Promise<unknown>;
 } = {}) {
   const calls: Call[] = [];
   const value = {
@@ -85,7 +87,11 @@ function client(handlers: {
     },
     cancelProviderLogin: async (_runnerId: string, operationId: string) => {
       calls.push({ kind: "cancel", operationId });
-      return { login: runningLogin("work", "Work") };
+      return handlers.cancel ? handlers.cancel(operationId) : { login: runningLogin("work", "Work") };
+    },
+    dismissProviderLoginNotice: async (_runnerId: string, operationId: string) => {
+      calls.push({ kind: "dismiss", operationId });
+      return { dismissed: true };
     },
     startProviderLogin: async (_runnerId: string, body: unknown) => {
       calls.push({ kind: "login", body });
@@ -220,8 +226,7 @@ test("a running sign-in reads Signing In with a pulse, and a new account's sign-
     assert.match(ui.badge("Work")!.className, /\bt-info\b.*\bpulse\b/);
     assert.equal(ui.badge("Studio")?.textContent, "Signing In");
     assert.equal(ui.container.querySelector(".section-title")?.textContent, "Provider Accounts 3", "the count is accounts");
-    const cards = [...ui.container.querySelectorAll(".provider-account-expansion article")].map((card) => card.getAttribute("aria-label"));
-    assert.deepEqual(cards, ["Work Provider Sign-In", "Studio Provider Sign-In"]);
+    assert.equal(ui.container.querySelectorAll(".provider-account-expansion .signin").length, 2, "each row expands into its own steps");
   } finally {
     await ui.unmount();
   }
@@ -242,11 +247,11 @@ test("a running retry wins over an earlier failure the control plane kept for th
   });
   try {
     assert.equal(ui.badge("Personal")?.textContent, "Signing In");
-    const cards = [...ui.container.querySelectorAll<HTMLElement>(".provider-account-expansion article")];
-    assert.equal(cards.length, 1, "the row shows one sign-in");
-    assert.match(cards[0]!.textContent ?? "", /Authorization Code/);
-    assert.doesNotMatch(cards[0]!.textContent ?? "", /The sign-in attempt failed\./);
-    await act(async () => { ui.button(cards[0]!, "Cancel").click(); });
+    const steps = [...ui.container.querySelectorAll<HTMLElement>(".provider-account-expansion .signin")];
+    assert.equal(steps.length, 1, "the row shows one sign-in");
+    assert.match(steps[0]!.textContent ?? "", /Paste the Code It Shows/);
+    assert.doesNotMatch(steps[0]!.textContent ?? "", /The sign-in attempt failed\./);
+    await act(async () => { ui.button(ui.row("Personal"), "Cancel").click(); });
     await ui.settle();
     assert.deepEqual(api.calls, [{ kind: "cancel", operationId: "login-retry" }]);
   } finally {
@@ -276,6 +281,160 @@ test("a viewer sees the statuses only, with the sentence saying who can manage a
     assert.equal(ui.buttons(ui.container).length, 0, "no Add Account…, Sign In or ⋯");
     assert.match(ui.container.textContent ?? "", /Only this machine's owner or an organization admin can add or remove its accounts\./);
     assert.equal(ui.badge("Personal")?.textContent, "Sign-In Required");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+// --- Signing in inside the row (#2996) ---
+
+const ended = (accountId: string, label: string, status: "failed" | "timed_out", error: string): ProviderLoginView => ({
+  operationId: `login-${accountId}-ended`, accountId, label, provider: "claude", status, error, startedAt: 1,
+});
+const DUPLICATE = "This Claude account is already on this Machine. The duplicate sign-in was discarded.";
+
+test("while Work signs in, Work appears once, expanded, with Signing In, Cancel and a disabled Remove Account…; no card below the list", async () => {
+  const api = client();
+  const ui = await render({
+    runner: runnerView({
+      providerAccounts: SIGN_IN_ACCOUNTS,
+      providerLogins: [{ ...runningLogin("work", "Work"), provider: "codex", userCode: "WOLL-IPOGS",
+        verificationUrl: "https://auth.openai.com/codex/device" }],
+    }),
+    api: api.client, canManageProfiles: false,
+  });
+  try {
+    assert.equal(ui.rows().filter((row) => row.querySelector(".row-title")?.textContent === "Work").length, 1, "Work is listed once");
+    assert.equal(ui.badge("Work")?.textContent, "Signing In");
+    const expansion = ui.row("Work").nextElementSibling as HTMLElement;
+    assert.ok(expansion.classList.contains("provider-account-expansion"), "the steps expand Work's own row");
+    assert.ok(expansion.parentElement?.classList.contains("surface"), "inside the accounts surface");
+    assert.deepEqual([...expansion.querySelectorAll("ol.steps > li")].length, 2);
+    assert.equal(ui.container.querySelectorAll("article, .provider-login-card").length, 0, "no separate card");
+    assertNoDomNode(ui.container.querySelector(".provider-accounts-list")?.nextElementSibling ?? null, "nothing renders below the list");
+    const cancel = ui.button(ui.row("Work"), "Cancel");
+    assert.match(cancel.className, /\bbtn sm ghost\b/);
+    const work = await ui.openMenu("Work");
+    assert.deepEqual(ui.menuItems(work).filter((item) => item.label === "Remove Account…"),
+      [{ label: "Remove Account…", disabled: true, reason: "A sign-in is running. Cancel it first." }]);
+    await ui.closeMenu();
+    await act(async () => { cancel.click(); });
+    await ui.settle();
+    assert.deepEqual(api.calls, [{ kind: "cancel", operationId: "login-work" }]);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a sign-in whose label is a hidden email reads Signing In to Codex with Email hidden as line 2", async () => {
+  await withHiddenEmails(async () => {
+    const ui = await render({
+      runner: runnerView({
+        providerAccounts: SIGN_IN_ACCOUNTS,
+        providerLogins: [{ ...runningLogin("new", "morgan@example.com"), provider: "codex", userCode: "WOLL-IPOGS",
+          verificationUrl: "https://auth.openai.com/codex/device" }],
+      }),
+    });
+    try {
+      const row = ui.rows().at(-1)!;
+      assert.equal(row.querySelector(".row-title")?.textContent, "Signing In to Codex");
+      assert.deepEqual([...row.querySelectorAll(".provider-account-sub > span")].map((part) => part.textContent), ["Email hidden"]);
+      assert.doesNotMatch(ui.container.innerHTML, /morgan@example\.com/);
+    } finally {
+      await ui.unmount();
+    }
+  });
+});
+
+test("a failed sign-in ends in the row with Sign-In Failed, Try Again and Dismiss, and the row returns to its status", async () => {
+  const api = client();
+  const ui = await render({
+    runner: runnerView({
+      providerAccounts: SIGN_IN_ACCOUNTS,
+      providerLogins: [ended("personal", "Personal", "failed", "The provider did not confirm authentication.")],
+    }),
+    api: api.client, canManageProfiles: false,
+  });
+  try {
+    assert.equal(ui.badge("Personal")?.textContent, "Sign-In Required");
+    const expansion = ui.row("Personal").nextElementSibling as HTMLElement;
+    assert.equal(expansion.querySelector(".notice-title")?.textContent, "Sign-In Failed");
+    assert.equal(expansion.querySelector(".notice-body")?.textContent, "The provider did not confirm authentication.");
+    assert.deepEqual(ui.buttons(expansion), ["Try Again", "Dismiss"]);
+    assert.ok(!ui.buttons(ui.row("Personal")).includes("Sign In"), "Try Again is the one way to sign in again here");
+    await act(async () => { ui.button(expansion, "Try Again").click(); });
+    await ui.settle();
+    assert.deepEqual(api.calls, [
+      { kind: "login", body: { accountId: "personal" } },
+      { kind: "dismiss", operationId: "login-personal-ended" },
+    ]);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a timed-out sign-in for a new account offers Start Again with the same provider and label, and Dismiss", async () => {
+  const api = client();
+  const ui = await render({
+    runner: runnerView({
+      providerAccounts: SIGN_IN_ACCOUNTS,
+      providerLogins: [ended("studio-1a2b3c4d", "Studio", "timed_out", "Sign-in timed out before the provider confirmed authentication.")],
+    }),
+    api: api.client,
+  });
+  try {
+    const row = ui.row("Studio");
+    assertNoDomNode(row.querySelector(".status"), "a new account that did not land has no status");
+    const expansion = row.nextElementSibling as HTMLElement;
+    assert.equal(expansion.querySelector(".notice-title")?.textContent, "Sign-In Timed Out");
+    assert.match(expansion.querySelector(".notice")!.className, /\bt-neutral\b/);
+    assert.deepEqual(ui.buttons(expansion), ["Start Again", "Dismiss"]);
+    await act(async () => { ui.button(expansion, "Start Again").click(); });
+    await ui.settle();
+    assert.deepEqual(api.calls[0], { kind: "login", body: { provider: "claude", label: "Studio" } });
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a new account already on this machine reads Already on This Machine and Not Added; Dismiss removes the row and adds nothing", async () => {
+  const api = client();
+  const duplicate = ended("work-2-1a2b3c4d", "Work 2", "failed", DUPLICATE);
+  const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, providerLogins: [duplicate] }), api: api.client });
+  try {
+    const badge = ui.badge("Work 2")!;
+    assert.equal(badge.textContent, "Not Added");
+    assert.match(badge.className, /\bt-neutral\b.*\bhollow\b/);
+    const expansion = ui.row("Work 2").nextElementSibling as HTMLElement;
+    assert.equal(expansion.querySelector(".notice-title")?.textContent, "Already on This Machine");
+    assert.deepEqual(ui.buttons(expansion), ["Dismiss"]);
+    assert.equal(ui.container.querySelector(".section-title")?.textContent, "Provider Accounts 3", "no account was added");
+    await act(async () => { ui.button(expansion, "Dismiss").click(); });
+    await ui.settle();
+    assert.deepEqual(api.calls, [{ kind: "dismiss", operationId: duplicate.operationId }]);
+  } finally {
+    await ui.unmount();
+  }
+  // The dismissal is per person and durable (#2487): the next snapshot no longer lists the sign-in.
+  const after = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, providerLogins: [] }) });
+  try {
+    assert.ok(!after.rows().some((row) => row.textContent?.includes("Work 2")), "the row is gone");
+    assert.equal(after.rows().length, 3);
+  } finally {
+    await after.unmount();
+  }
+});
+
+test("a Cancel the machine refuses is a compact notice naming the account", async () => {
+  const api = client({ cancel: async () => { throw new ApiError("runner is offline", 409); } });
+  const ui = await render({
+    runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, providerLogins: [runningLogin("work", "Work")] }), api: api.client,
+  });
+  try {
+    await act(async () => { ui.button(ui.row("Work"), "Cancel").click(); });
+    await ui.settle();
+    assert.equal(ui.notice()?.querySelector(".notice-title")?.textContent, "Couldn't Cancel Signing In to Work");
+    assert.equal(ui.error(), "runner is offline");
   } finally {
     await ui.unmount();
   }
@@ -965,6 +1124,41 @@ test("an Owner or Admin sees a stale lease as line-2 meta, with Recover Lease…
   } finally {
     await ui.unmount();
   }
+});
+
+test("a row that is signing in and has a stale lease keeps both: the sign-in's head and steps, and the lease on line 2 (#2996, #3241)", async () => {
+  const signingIn = { providerLogins: [runningLogin("pending", "Pending Work")] };
+  const api = leaseClient();
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY, ...signingIn }) });
+  try {
+    assert.equal(ui.badge("Pending Work")?.textContent, "Signing In");
+    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Stale Lease"]);
+    assert.ok(ui.buttons(ui.row("Pending Work")).includes("Cancel"));
+    assert.ok((ui.row("Pending Work").nextElementSibling as HTMLElement).querySelector(".signin"), "the sign-in expands the row");
+    const menu = await ui.openMenu("Pending Work");
+    const items = ui.menuItems(menu);
+    assert.deepEqual(items.find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: false, reason: null });
+    assert.deepEqual(items.find((item) => item.label === "Remove Account…"),
+      { label: "Remove Account…", disabled: true, reason: "A sign-in is running. Cancel it first." });
+    await ui.closeMenu();
+  } finally {
+    await ui.unmount();
+  }
+  await withHiddenEmails(async () => {
+    const accounts = ACCOUNTS.map((account) => account.id === "pending" ? { ...account, label: "pending@example.com" } : account);
+    const hidden = await render({
+      api: leaseClient().client,
+      runner: runnerView({ protocolVersion: LEASE_RECOVERY, providerAccounts: accounts,
+        providerLogins: [runningLogin("pending", "pending@example.com")] }),
+    });
+    try {
+      assert.deepEqual(hidden.sub("Signing In to Claude"), ["Email hidden", "Stale Lease"],
+        "the provider and profile give way to Email hidden, and the lease stays");
+      assert.doesNotMatch(hidden.container.innerHTML, /pending@example\.com/);
+    } finally {
+      await hidden.unmount();
+    }
+  });
 });
 
 test("Recover Lease… confirms with the account and record time, recovers the inspected record, and inspects again", async () => {

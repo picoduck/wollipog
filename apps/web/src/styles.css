@@ -10568,12 +10568,6 @@ textarea {
 .connection-fact-note {
   color: var(--text-faint);
 }
-.provider-login-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
 /* Provider Accounts (#2995, §5.2): line 2 is the provider and the profile access as neutral meta,
    12px apart; the row's Sign In and ⋯ trail it. */
 .provider-account-sub {
@@ -10582,58 +10576,127 @@ textarea {
 }
 /* A stale HOME lease (#3241) is line-2 meta in the warning tone; its tooltip says why it cannot be recovered yet. */
 .provider-account-sub .provider-account-lease { color: var(--warning); }
+/* A hidden email's running sign-in is named only by "Signing In to Codex" (#2996), so that title
+   never ellipsizes: where the row is too narrow for it and its badge, the badge wraps under it and
+   the row grows. Wide enough, the row keeps its 56px. */
+.row.row-2.provider-account-hidden-title {
+  height: auto;
+  min-height: var(--row-h-2);
+  padding-block: var(--space-2);
+}
+.provider-account-hidden-title .row-line {
+  flex-wrap: wrap;
+  row-gap: var(--space-1);
+}
+.provider-account-signing-title {
+  flex: none;
+  overflow: visible;
+}
 .provider-account-actions {
   display: flex;
   flex: none;
   align-items: center;
   gap: var(--space-2);
 }
-/* The row's expansion: its running sign-in, under the row it belongs to (#2996 steps it in-row). */
+/* The row's expansion: its sign-in's steps or ending, under the row it belongs to (#2996), with the
+   steps' numbers under the row's icon column. */
 .provider-account-expansion {
   padding: 0 var(--space-3) var(--space-3);
 }
-.provider-account-expansion > .provider-login-card { margin-top: 0; }
 .provider-accounts-list > .provider-account-expansion + .row { box-shadow: inset 0 1px 0 var(--border); }
-.provider-login-card {
-  margin-top: 10px;
-  padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--border));
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--amber) 8%, var(--bg-elev));
-  color: var(--text);
+/* A provider sign-in's two numbered steps and its endings (#2996, §8.7, §13.2): a local block of the
+   shared ProviderSignIn part. Each step's first line is a 28px control (36px or 44px on touch), and
+   its number is centred on it; the code field's step centres it on the field's label instead. Under
+   a 560px container the code field and Submit Code stack at full width, and whatever wraps stays in
+   the step's text column. */
+.signin {
+  container: signin / inline-size;
+  min-width: 0;
 }
-.provider-login-card[data-provider-login-status="failed"],
-.provider-login-card[data-provider-login-status="timed_out"] {
-  border-color: color-mix(in srgb, var(--red) 42%, var(--border));
-  background: color-mix(in srgb, var(--red) 8%, var(--bg-elev));
+.signin-steps > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-height: var(--control-h-sm);
 }
-.provider-login-head > div {
-  display: grid;
-  gap: 3px;
+.signin-steps > li::before { top: calc((var(--control-h-sm) - var(--space-6)) / 2); }
+.signin-steps > li.signin-step-field::before { top: calc(-1 * var(--space-1)); }
+.signin-steps > li > :is(p, form) { margin: 0; }
+.signin-code {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
 }
-.provider-login-head span,
-.provider-login-device-code span {
+.signin-code > code {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.08em;
+  overflow-wrap: anywhere;
+}
+.signin-waiting {
+  display: flex;
+  flex-basis: 100%;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
   color: var(--text-dim);
-  font-size: var(--text-sm);
+  font: var(--type-small);
 }
-.provider-login-card p {
-  margin: 9px 0 0;
+/* The code field and Submit Code share a row, Submit Code level with the input under the field's
+   16px label and its 8px gap; a rejected code's error stays in the field, under the input. */
+.signin-code-form {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
 }
-.provider-login-card a {
-  font-weight: 600;
+.signin-code-form > .field {
+  flex: 1 1 auto;
+  min-width: 0;
 }
-.provider-login-device-code {
+.signin-code-form > button { margin-top: calc(var(--space-4) + var(--space-2)); }
+@container signin (max-width: 559px) {
+  .signin-steps > li { align-items: flex-start; }
+  .signin-code-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .signin-code-form > button {
+    max-width: none;
+    margin-top: 0;
+  }
+  /* An ending wraps here, so its icon stays on the title's line. */
+  .signin > .notice.compact {
+    align-items: start;
+    padding-block: var(--space-2);
+  }
+}
+/* Choose Another Account's sign-in (#2208): a plain head over the shared steps. */
+.signin-card {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.signin-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 10px;
+  gap: var(--space-2);
 }
-.provider-login-device-code code {
-  padding: 5px 8px;
-  border-radius: var(--radius-xs);
-  background: var(--bg-elev-3);
-  font-size: var(--text-md);
-  letter-spacing: .08em;
+.signin-head-text {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.signin-head-title { font: var(--type-body-strong); }
+.signin-head-sub { color: var(--text-dim); font: var(--type-small); }
+/* The sign-in Request Card's body and the recovery panel's (#2198): unchanged but for its device
+   code, now in tokens. */
+.provider-login-card a {
+  font-weight: 600;
 }
 .provider-login-card form {
   display: flex;
@@ -10689,12 +10752,24 @@ textarea {
 .provider-login-card[data-embedded] {
   display: grid;
   gap: var(--space-2);
-  margin-top: 0;
-  padding: 0;
-  border: 0;
-  background: none;
 }
-.provider-login-card[data-embedded] :is(p, form, .provider-login-device-code) { margin: 0; }
+.provider-login-card[data-embedded] :is(p, form) { margin: 0; }
+.provider-login-card[data-embedded] .provider-login-device-code {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.provider-login-card[data-embedded] .provider-login-device-code > span {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.provider-login-card[data-embedded] .provider-login-device-code > code {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elev-3);
+  font-size: var(--text-md);
+  letter-spacing: 0.08em;
+}
 /* Meta chips (§11.3): a fact you can click or remove, never coloured. Neighbours sit 8px apart so a
    chip's touch hit area (the coarse-pointer block) never overlaps the next one. A pressed chip is
    the one chosen, in the selected-row fill. */
