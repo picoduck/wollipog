@@ -60,7 +60,9 @@ function invoke(request: NativeRequest): NativeCapture | undefined {
     { input, env: fixedWindowsEnvironment(platform.systemRoot), shell: false, windowsHide: true, timeout: 10_000, killSignal: "SIGTERM", maxBuffer: WACW_LIMITS.frame });
   if (result.error || result.status !== 0 || result.signal || result.stderr.length !== 0) throw new WindowsAccountConfigError(request.operation === 2 ? "unknown" : "not_published", "IO");
   try { return decodeWindowsReply(result.stdout, request.operation); }
-  catch (error) { if (error instanceof WindowsAccountConfigError && error.verifiedTerminal) throw error;
+  catch (error) {
+    // Only a strict, verified failure frame may expose its finite native diagnostic tag.
+    if (error instanceof WindowsAccountConfigError && error.verifiedTerminal) throw error;
     // A malformed terminal result after a possible publication is not definitely unpublished.
     throw new WindowsAccountConfigError(request.operation === 2 ? "unknown" : "not_published", "STORE_UNVERIFIABLE"); }
 }

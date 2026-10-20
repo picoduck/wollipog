@@ -2,8 +2,11 @@
 export const WACW_LIMITS = Object.freeze({ frame: 8 * 1024 * 1024, config: 2 * 1024 * 1024, assembly: 1024 * 1024 });
 export type WindowsPublication = "not_published" | "unknown" | "committed";
 export type WindowsCode = "SOURCE_BUSY" | "SOURCE_CHANGED" | "STORE_UNVERIFIABLE" | "CAPACITY" | "IO";
+export const WACW_DIAGNOSTIC_TAGS = Object.freeze(["Alive","Part","Blob","ExactHash","Stat","Id","Identity","Canonical","Security","Check","Open","Streams","New","Write","Read","Rename","ReleaseGuard","ContextFor","Entries","Unseal","TipFor","ReadCount","Observe","Bootstrap","LastRecordDigest","Record","Append","Fault","Run","RecordAbsent","ReadStream","Fixture"] as const);
+export type WindowsDiagnosticTag = (typeof WACW_DIAGNOSTIC_TAGS)[number];
+const DIAGNOSTIC_TAGS = new Set<string>(WACW_DIAGNOSTIC_TAGS);
 export class WindowsAccountConfigError extends Error {
-  constructor(readonly publication: WindowsPublication, readonly code: WindowsCode, readonly verifiedTerminal = false) { super(`Windows account-config ${publication} (${code})`); }
+  constructor(readonly publication: WindowsPublication, readonly code: WindowsCode, readonly verifiedTerminal = false, readonly diagnostic?: WindowsDiagnosticTag) { super(`Windows account-config ${publication} (${code})${diagnostic ? ` [native:${diagnostic}]` : ""}`); }
 }
 export interface NativeCapture {
   path: string; configIdentity: string; configDigest: string; parentIdentity: string;
@@ -33,7 +36,11 @@ export function decodeWindowsReply(raw: Buffer, operation: 1 | 2): NativeCapture
   function string(max: number): string { const b = blob(max), s = b.toString("utf8"); if (!Buffer.from(s).equals(b) || s.includes("\0")) return fail(); return s; }
   const code = string(64), fields = Array.from({ length: 10 }, () => string(65536)), config = blob(WACW_LIMITS.config);
   if (offset !== raw.length || state > 2) return fail();
-  if (kind === 0) { if (!CODES.has(code as WindowsCode) || fields.some(Boolean) || config.length) return fail(); throw new WindowsAccountConfigError((["not_published", "unknown", "committed"] as const)[state]!, code as WindowsCode, true); }
+  if (kind === 0) {
+    const [base, tag, ...extra] = code.split(":");
+    if (!CODES.has(base as WindowsCode) || extra.length || (tag !== undefined && !DIAGNOSTIC_TAGS.has(tag)) || fields.some(Boolean) || config.length) return fail();
+    throw new WindowsAccountConfigError((["not_published", "unknown", "committed"] as const)[state]!, base as WindowsCode, true, tag as WindowsDiagnosticTag | undefined);
+  }
   if (kind !== operation || state !== 0 || code !== "") return fail();
   if (operation === 2) { if (fields.some(Boolean) || config.length) return fail(); return; }
   const [path, configIdentity, configDigest, parentIdentity, storeEpoch, storeIdentity, revision, journalDigest, stamp, parentBirth] = fields as [string,string,string,string,string,string,string,string,string,string];

@@ -17,7 +17,9 @@ public static class WollipogAccountConfigWindowsV1 {
  const uint ReadShare=1, WriteShare=2, DeleteShare=4, Reparse=0x200000, Backup=0x2000000, Through=0x80000000;
  static readonly Encoding Utf=new UTF8Encoding(false,true);
  static readonly string[] Slots={"anchor","header","journal","guard","anchor.pending","header.pending","journal.pending","config.pending"};
- sealed class Refusal:Exception { internal string Code; internal Refusal(string code){Code=code;} }
+ // Diagnostics are fixed member literals only; never paths, SIDs, expressions or OS error text.
+ static readonly string[] DiagnosticTags={"Alive","Part","Blob","ExactHash","Stat","Id","Identity","Canonical","Security","Check","Open","Streams","New","Write","Read","Rename","ReleaseGuard","ContextFor","Entries","Unseal","TipFor","ReadCount","Observe","Bootstrap","LastRecordDigest","Record","Append","Fault","Run","RecordAbsent","ReadStream","Fixture"};
+ sealed class Refusal:Exception { internal string Code,Phase; internal Refusal(string code,string phase){Code=code;Phase=Array.IndexOf(DiagnosticTags,phase)>=0?phase:"";} }
  sealed class Request { internal byte Op,Fault; internal int Pid; internal string Path,Stamp,Birth,Before,After,Bindings; internal byte[] Next; }
  sealed class Tip { internal string Epoch="",Identity="",Digest="",Config=""; internal int Revision,Records; internal long Bytes; }
  sealed class Observation { internal string Path,Parent,ConfigId,Digest,Stamp,Birth; internal byte[] Raw; internal Tip Tip; }
@@ -62,7 +64,7 @@ public static class WollipogAccountConfigWindowsV1 {
  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h,int cls,out PBI info,int size,out int returned);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(SafeFileHandle h,out long creation,out long exit,out long kernel,out long user);
  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(SafeFileHandle h,uint timeout);
- static void Need(bool yes,string code="STORE_UNVERIFIABLE"){if(!yes)throw new Refusal(code);}
+ static void Need(bool yes,string code="STORE_UNVERIFIABLE",[System.Runtime.CompilerServices.CallerMemberName] string phase=""){if(!yes)throw new Refusal(code,phase);}
  static byte[] Hash(byte[] raw){using(var h=SHA256.Create())return h.ComputeHash(raw);}
  static string Hex(byte[] raw){return BitConverter.ToString(raw).Replace("-","").ToLowerInvariant();}
  static string Digest(byte[] raw){return Hex(Hash(raw));}
@@ -93,7 +95,7 @@ public static class WollipogAccountConfigWindowsV1 {
  }
  static void Check(SafeFileHandle h,string user,bool dir,bool privateFile,bool parent=false){var s=Stat(h);Need((s.Attributes&0x400)==0);Need(((s.Attributes&0x10)!=0)==dir);if(!dir)Need(s.Links==1);Security(h,user,dir,privateFile,parent);}
  static SafeFileHandle Open(string path,string user,bool dir,bool priv,uint access=R,uint share=ReadShare|WriteShare|DeleteShare,bool parent=false){
-  var h=CreateFileW(path,access|RC,share,IntPtr.Zero,3,Reparse|(dir?Backup:0)|((access&W)!=0?Through:0),IntPtr.Zero);if(h.IsInvalid){h.Dispose();throw new Refusal("STORE_UNVERIFIABLE");}
+  var h=CreateFileW(path,access|RC,share,IntPtr.Zero,3,Reparse|(dir?Backup:0)|((access&W)!=0?Through:0),IntPtr.Zero);if(h.IsInvalid){h.Dispose();throw new Refusal("STORE_UNVERIFIABLE","Open");}
   try{Check(h,user,dir,priv,parent);Need(String.Equals(Canonical(h),System.IO.Path.GetFullPath(path),StringComparison.OrdinalIgnoreCase));if(!dir)Streams(path);return h;}catch{h.Dispose();throw;}
  }
  static void Streams(string path){StreamData d;var h=FindFirstStreamW(path,0,out d,0);Need(h!=new IntPtr(-1));try{Need(d.Name=="::$DATA");bool more=FindNextStreamW(h,out d);Need(!more&&Marshal.GetLastWin32Error()==38);}finally{FindClose(h);}}
@@ -101,7 +103,7 @@ public static class WollipogAccountConfigWindowsV1 {
   c.Alive();IntPtr sd;uint n;string text=descriptor??("O:"+c.Sid+"G:"+c.Sid+"D:P(A;;FA;;;"+c.Sid+")(A;;FA;;;SY)(A;;FA;;;BA)");
   Need(ConvertStringSecurityDescriptorToSecurityDescriptorW(text,1,out sd,out n));var sa=new SA{Length=Marshal.SizeOf(typeof(SA)),Descriptor=sd,Inherit=false};SafeFileHandle h;
   try{h=CreateFileW(path,R|W|Del|RC,ReadShare,ref sa,1,Reparse|Through,IntPtr.Zero);}finally{LocalFree(sd);}
-  if(h.IsInvalid){int e=Marshal.GetLastWin32Error();h.Dispose();throw new Refusal(e==80||e==183?"SOURCE_BUSY":"IO");}
+  if(h.IsInvalid){int e=Marshal.GetLastWin32Error();h.Dispose();throw new Refusal(e==80||e==183?"SOURCE_BUSY":"IO","New");}
   try{if(descriptor==null)Check(h,c.Sid,false,true);Write(h,data);Need(FlushFileBuffers(h),"IO");return h;}catch{h.Dispose();throw;}
  }
  static void Write(SafeFileHandle h,byte[] b){int at=0;while(at<b.Length){int count=Math.Min(65536,b.Length-at);byte[] part=new byte[count];Buffer.BlockCopy(b,at,part,0,count);int done;Need(WriteFile(h,part,count,out done,IntPtr.Zero)&&done>0,"IO");at+=done;}}
@@ -174,13 +176,13 @@ public static class WollipogAccountConfigWindowsV1 {
  }}
  static void Fault(Request r,int phase){
 #if WACW_FIXTURE
-  if(r.Fault==phase)throw new Refusal("IO");
+  if(r.Fault==phase)throw new Refusal("IO","Fault");
 #else
   Need(r.Fault==0);
 #endif
  }
  public static void Run(Stream input,Stream output){
-  bool attempted=false,committed=false;Request req=null;Observation obs=null;string code="IO";byte state=0;bool ok=false;
+  bool attempted=false,committed=false;Request req=null;Observation obs=null;string code="IO",diagnostic="";byte state=0;bool ok=false;
   try{
    byte[] l=new byte[4];ReadStream(input,l);int size=BitConverter.ToInt32(l,0);Need(size>0&&size<=FrameMax,"CAPACITY");byte[] raw=new byte[size];ReadStream(input,raw);Need(input.ReadByte()==-1);
    using(var m=new MemoryStream(raw))using(var r=new BinaryReader(m,Utf)){Need(Encoding.ASCII.GetString(r.ReadBytes(5))=="WACW1");req=new Request{Op=r.ReadByte(),Fault=r.ReadByte(),Pid=r.ReadInt32(),Path=Part(r,65536),Stamp=Part(r,64),Birth=Part(r,32),Before=Part(r,64),After=Part(r,64),Bindings=Part(r,65536),Next=Blob(r,ConfigMax)};Need(m.Position==m.Length&&req.Pid>0&&(req.Op==1||req.Op==2)&&req.Fault<=6);}
@@ -208,9 +210,9 @@ public static class WollipogAccountConfigWindowsV1 {
      }
     }
    }
-  }catch(Refusal e){code=e.Code;}catch{code="IO";}
+  }catch(Refusal e){code=e.Code;diagnostic=e.Phase;}catch{code="IO";diagnostic="Run";}
   if(!ok)state=(byte)(committed?2:attempted?1:0);
-  using(var payload=new MemoryStream()){using(var w=new BinaryWriter(payload,Utf,true)){w.Write(Encoding.ASCII.GetBytes("WACW1"));w.Write((byte)(ok?req.Op:0));w.Write(state);Part(w,ok?"":code);
+  using(var payload=new MemoryStream()){using(var w=new BinaryWriter(payload,Utf,true)){w.Write(Encoding.ASCII.GetBytes("WACW1"));w.Write((byte)(ok?req.Op:0));w.Write(state);Part(w,ok?"":code+(diagnostic==""?"":":"+diagnostic));
    string[] fields=ok&&req.Op==1?new string[]{obs.Path,obs.ConfigId,obs.Digest,obs.Parent,obs.Tip.Epoch,obs.Tip.Identity,obs.Tip.Revision.ToString(),obs.Tip.Digest,obs.Stamp,obs.Birth}:new string[10];foreach(var f in fields)Part(w,f??"");Blob(w,ok&&req.Op==1?obs.Raw:new byte[0]);}
    byte[] raw=payload.ToArray();Need(raw.Length<=FrameMax);output.Write(BitConverter.GetBytes(raw.Length),0,4);output.Write(raw,0,raw.Length);output.Flush();}
  }
