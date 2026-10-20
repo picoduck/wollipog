@@ -5379,7 +5379,8 @@ const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN COALESCE(message_count,0)=0
 const CLEAR_HISTORY_PRUNE_SQL = `history_pruned_at=NULL, history_pruned_retention_days=NULL,
   history_pruned_events=0, history_pruned_tool_calls=0, history_prune_through_seq=NULL, history_prune_removed_seq=NULL,
   history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL,
-  history_prune_run_response_seq=NULL`;
+  history_prune_run_response_seq=NULL, runner_trim_epoch=NULL, runner_trim_through_seq=NULL,
+  runner_trim_event_epoch=NULL, runner_trimmed_at=NULL`;
 
 function sessionHistoryRetentionView(
   row: Pick<SessionRow, "archived" | "archived_at" | "history_pruned_at" | "history_pruned_retention_days" | "history_pruned_events">,
@@ -7131,6 +7132,11 @@ export class ControlPlaneDb {
       "history_prune_run_days INTEGER",
       "history_prune_run_seq INTEGER",
       "history_prune_run_response_seq INTEGER",
+      // Complete runner cleanup receipts (#3534), invalidated by a log/cache replacement.
+      "runner_trim_epoch INTEGER",
+      "runner_trim_through_seq INTEGER",
+      "runner_trim_event_epoch INTEGER",
+      "runner_trimmed_at INTEGER",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -17495,21 +17501,37 @@ export class ControlPlaneDb {
 
   /** Completed, still-eligible prunes with a fully cached runner boundary. Keyset paging also
    * revisits old prunes after an upgrade or an offline runner reconnects. */
-  runnerHistoryTrimCandidates(organizationId: string, cutoff: number, afterId: string, limit: number, sessionId: string | null = null): Array<{
-    id: string; runnerId: string; logEpoch: number; throughSeq: number;
+  runnerHistoryTrimCandidates(organizationId: string, cutoff: number, afterId: string, limit: number, sessionId: string | null = null, runnerId: string | null = null): Array<{
+    id: string; runnerId: string; logEpoch: number; throughSeq: number; eventEpoch: number;
   }> {
     return this.stmt(`SELECT s.id, s.runner_id AS runnerId, s.runner_history_epoch AS logEpoch,
-        s.runner_history_tail_seq AS throughSeq
+        s.runner_history_tail_seq AS throughSeq, s.event_epoch AS eventEpoch
       FROM sessions s JOIN session_ownership ownership ON ownership.session_id=s.id
       WHERE ownership.organization_id=? AND s.id>? AND s.archived=1 AND s.archived_at<=?
-        AND (? IS NULL OR s.id=?) AND s.status IN ('completed','failed','stopped') AND s.history_pruned_at IS NOT NULL
+        AND (? IS NULL OR s.id=?) AND (? IS NULL OR s.runner_id=?)
+        AND s.status IN ('completed','failed','stopped') AND s.history_pruned_at IS NOT NULL
         AND s.history_prune_run_events IS NULL AND s.runner_history_epoch IS NOT NULL
         AND s.runner_history_tail_seq>0 AND s.hydrated_seq>=s.runner_history_tail_seq
+        AND NOT (s.runner_trim_epoch IS s.runner_history_epoch
+          AND s.runner_trim_through_seq IS s.runner_history_tail_seq
+          AND s.runner_trim_event_epoch IS s.event_epoch)
         AND NOT EXISTS (SELECT 1 FROM session_stop_intents intent WHERE intent.session_id=s.id)
         AND NOT EXISTS (SELECT 1 FROM session_events e WHERE e.session_id=s.id AND e.seq>s.history_prune_through_seq)
-      ORDER BY s.id LIMIT ?`).all(organizationId, afterId, cutoff, sessionId, sessionId, limit) as unknown as Array<{
-        id: string; runnerId: string; logEpoch: number; throughSeq: number;
+      ORDER BY s.id LIMIT ?`).all(organizationId, afterId, cutoff, sessionId, sessionId, runnerId, runnerId, limit) as unknown as Array<{
+        id: string; runnerId: string; logEpoch: number; throughSeq: number; eventEpoch: number;
       }>;
+  }
+
+  /** A late reply must never acknowledge replacement history, even at identical runner coordinates. */
+  recordRunnerHistoryTrim(candidate: {
+    id: string; runnerId: string; logEpoch: number; throughSeq: number; eventEpoch: number;
+  }, now: number): boolean {
+    return this.stmt(`UPDATE sessions SET runner_trim_epoch=?, runner_trim_through_seq=?,
+        runner_trim_event_epoch=?, runner_trimmed_at=?
+      WHERE id=? AND runner_id=? AND runner_history_epoch=? AND runner_history_tail_seq=?
+        AND event_epoch=? AND history_pruned_at IS NOT NULL AND history_prune_run_events IS NULL`)
+      .run(candidate.logEpoch, candidate.throughSeq, candidate.eventEpoch, now,
+        candidate.id, candidate.runnerId, candidate.logEpoch, candidate.throughSeq, candidate.eventEpoch).changes > 0;
   }
 
   /** Whether search rows without their event's row id remain to be mapped before any prune. */

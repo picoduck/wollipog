@@ -2422,10 +2422,10 @@ export class SessionStore {
   /** One asynchronous copy pass. Atomic manifest publication is the sole commit point: before it
    * the complete old generation is readable; after it the complete retained generation is readable.
    * A writer may acquire the free lock throughout copying and always wins over maintenance. */
-  private readonly historyTrimJobs = new Map<string, Promise<{ trimmed: boolean; bytesRemoved: number }>>();
+  private readonly historyTrimJobs = new Map<string, Promise<{ trimmed: boolean; bytesRemoved: number; cleanupComplete?: boolean }>>();
 
   trimHistory(id: string, request: { logEpoch: number; throughSeq: number }, owner: string,
-    inactive: () => boolean = () => true): Promise<{ trimmed: boolean; bytesRemoved: number }> {
+    inactive: () => boolean = () => true): Promise<{ trimmed: boolean; bytesRemoved: number; cleanupComplete?: boolean }> {
     const key = JSON.stringify([id, request.logEpoch, request.throughSeq]);
     const running = this.historyTrimJobs.get(key);
     if (running) return running;
@@ -2437,7 +2437,7 @@ export class SessionStore {
   }
 
   private async trimHistoryPass(id: string, request: { logEpoch: number; throughSeq: number }, owner: string,
-    inactive: () => boolean = () => true): Promise<{ trimmed: boolean; bytesRemoved: number }> {
+    inactive: () => boolean = () => true): Promise<{ trimmed: boolean; bytesRemoved: number; cleanupComplete?: boolean }> {
     const deferred = { trimmed: false, bytesRemoved: 0 };
     if (!inactive() || !this.acquireFreeLock(id, owner)) return deferred;
     let sourceLayout: HistoryLayout;
@@ -2454,8 +2454,8 @@ export class SessionStore {
       manifestKey = this.historyManifestKey(id);
       if ((sourceLayout.manifest?.retention?.throughSeq ?? 0) >= request.throughSeq) {
         this.releaseLock(id, owner);
-        const bytesRemoved = await this.cleanupRetainedHistory(id);
-        return { trimmed: true, bytesRemoved };
+        const cleanup = await this.cleanupRetainedHistory(id);
+        return { trimmed: true, ...cleanup };
       }
     } finally { this.releaseLock(id, owner); }
     const layout = sourceLayout!;
@@ -2581,8 +2581,8 @@ export class SessionStore {
       } finally { this.releaseLock(id, owner); }
       this.recoverLegacyFence(id, manifest);
       this.compactionsInFlight.delete(token);
-      const deletedBytes = await this.cleanupRetainedHistory(id);
-      return { trimmed: true, bytesRemoved: deletedBytes };
+      const cleanup = await this.cleanupRetainedHistory(id);
+      return { trimmed: true, ...cleanup };
     } finally {
       this.compactionsInFlight.delete(token);
       if (publicationStarted) {
@@ -2599,9 +2599,10 @@ export class SessionStore {
 
   /** Superseded generations are no longer authoritative. Unlink asynchronously and in bounded
    * directory pages; an interrupted cleanup is retried by the next control-plane pass. */
-  private async cleanupRetainedHistory(id: string): Promise<number> {
+  private async cleanupRetainedHistory(id: string): Promise<{ bytesRemoved: number; cleanupComplete: boolean }> {
     const layout = this.historyLayout(id);
-    if (!layout.manifest?.retention) return 0;
+    if (!layout.manifest?.retention) return { bytesRemoved: 0, cleanupComplete: false };
+    let cleanupComplete = true;
     let deletedBytes = 0;
     let manifestKey = this.historyManifestKey(id);
     let kept = new Set([layout.active.file, ...layout.sources.map((source) => source.file), layout.manifest.retention.toolFile, layout.manifest.indexFile!]);
@@ -2610,7 +2611,8 @@ export class SessionStore {
       const currentKey = this.historyManifestKey(id);
       if (currentKey !== manifestKey) {
         const current = this.historyLayout(id);
-        if (!current.manifest?.retention) return deletedBytes;
+        if (!current.manifest?.retention) return { bytesRemoved: deletedBytes, cleanupComplete: false };
+        cleanupComplete = false;
         kept = new Set([current.active.file, ...current.sources.map((source) => source.file), current.manifest.retention.toolFile, current.manifest.indexFile!]);
         manifestKey = currentKey;
       }
@@ -2618,16 +2620,29 @@ export class SessionStore {
       if (!/^events\.(segment|active|retired|retention-tools)\..+\.ndjson$/.test(entry.name) &&
           !/^events\.(manifest|legacy-fence)\.json\..+\.tmp$/.test(entry.name) &&
           !/^events\.(?:idx|index\..+\.idx)(?:\..+\.tmp)?$/.test(entry.name)) continue;
-      if ([...this.compactionsInFlight].some((token) => entry.name.includes(token))) continue;
+      if ([...this.compactionsInFlight].some((token) => entry.name.includes(token))) {
+        cleanupComplete = false;
+        continue;
+      }
       const path = join(this.dir(id), entry.name);
       try {
         const bytes = lstatSync(path).size;
         await unlink(path);
         deletedBytes += bytes;
-      } catch { /* An open file can refuse unlinking; the next pass retries without claiming space. */ }
+      } catch (error) {
+        // A concurrently removed file is already clean; an open-file refusal needs another pass.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupComplete = false;
+      }
       await yieldToEventLoop();
     }
-    return deletedBytes;
+    // The legacy path/fence intent are deliberately excluded from unlinking: recoverLegacyFence
+    // owns their safe rename. A blocked rename still needs another trim, even if all matched
+    // superseded files were deleted. Do not run recovery here and create a new retired file
+    // after the directory scan has finished.
+    const legacy = this.eventsPath(id);
+    if (this.historyManifestKey(id) !== manifestKey || existsSync(this.historyLegacyFencePath(id)) ||
+        (existsSync(legacy) && !lstatSync(legacy).isDirectory())) cleanupComplete = false;
+    return { bytesRemoved: deletedBytes, cleanupComplete };
   }
 
   /** Move one bounded, newline-aligned prefix of the mutable active log into a content-addressed,
