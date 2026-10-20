@@ -55,10 +55,10 @@ function fixture() {
       assert.equal(program, "git"); assert.equal(args[0], "show");
       const path = args[1].slice(41);
       if (path === notesPath("0.35.0")) return notes;
-      const original = readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
       const originals = Object.fromEntries(["package.json", "apps/desktop/package.json", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock", "apps/runner/src/version.ts", "apps/control-plane/src/release-version.ts"].map((file) => [file, readFileSync(new URL(`../${file}`, import.meta.url), "utf8")]));
       const files = bumpVersions(originals, JSON.parse(originals["package.json"]).version, "0.35.0");
-      return controls.changedPreparation && path === "package.json" ? original : files[path];
+      return controls.changedPreparation && path === "package.json"
+        ? JSON.stringify({ ...JSON.parse(files[path]), version: "0.0.0-drift" }) : files[path];
     },
     notes() { return notes; },
     gates() { verifyReleaseJobs({ runId: 100, runAttempt: run.run_attempt, mergeSha: merge }, releaseJobs()); },
