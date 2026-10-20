@@ -112,11 +112,14 @@ mock-inference turns; a separate bwrap test verifies the mount when user namespa
 Reviewer admission can accept the conventional `~/.codex/packages/standalone` install only with
 package protection proven for every live agent writer. Each structured launch supplies an immutable
 denial snapshot; an unprotected session or Agent TUI is named in the refusal. Human-operated
-terminals remain the operator boundary. Uncertain TUI writer markers survive runner restarts and
-require operator reconciliation when no complete process-tree exit proof retired them.
-The native-Linux marker directory is `agent-tui-writers` beneath runner data. A failed or interrupted
-spawn can retain conservative evidence too. Before retiring a retained record, the operator must
-prove that session's TUI process tree gone; restarting the runner or aging the file is not that proof.
+terminals remain the operator boundary. Unprotected structured-provider and TUI writer markers
+survive runner restarts, session removal, and a root process's disposal. Only a complete tree proof
+retires them; asynchronous or failed retirement proofs continue to refuse reviewer admission.
+The native-Linux marker directory is `unprotected-agent-writers` beneath runner data. A failed or
+interrupted constructor/spawn can retain conservative evidence too. Before retiring a retained
+record, the operator must prove that session's agent process tree gone; restarting the runner or
+aging the file is not that proof. Structured launches already proving package containment need
+no marker, and the read-only review preset remains outside the agent-writer inventory.
 This is an admission-time check: it does not block future
 unisolated agent launches during a review. Those agents already have host-user write access,
 including to the runner itself. All other writable-root and executable-ownership checks still apply.

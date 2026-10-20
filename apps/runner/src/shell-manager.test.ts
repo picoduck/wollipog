@@ -281,7 +281,7 @@ test("Agent TUI writer evidence survives reconstruction and retires only with a 
   writeFileSync(join(directory, "uncertain.json"), JSON.stringify({ sessionId: "s_uncertain" }));
   writeFileSync(join(directory, "partial.json"), "{");
   assert.deepEqual(new Set(new ShellManager(cb, directory).unprotectedAgentTuiSessions()),
-    new Set(["s_uncertain", "unknown (unreadable Agent TUI writer record)"]));
+    new Set(["s_uncertain", "unknown (unreadable agent writer record)"]));
 });
 
 test("runner shutdown reports no agent TUI ending, so it settles no provider-HOME reference", {

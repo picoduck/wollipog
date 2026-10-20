@@ -7,9 +7,7 @@
  */
 
 import { StringDecoder } from "node:string_decoder";
-import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { ReviewWriterRegistry } from "./review-writers.js";
 import type { AgentContext, ShellKind, ShellOutputChunk, ShellSnapshotMessage } from "@wollipog/protocol";
 import { run } from "./discovery/resolve.js";
 import { killTree, killTreeAndWait, provenProcessTreeExit, spawnAgent, type AgentProcess } from "./spawn.js";
@@ -188,41 +186,22 @@ export class ShellManager {
   private readonly shells = new Map<string, LiveShell>();
   /** Agent TUIs have no runner filesystem boundary. Retain uncertain descendants even after
    * their terminal tab is forgotten; only a complete process-tree exit proof removes a writer. */
-  private readonly unprotectedAgentTuis = new Map<string, string>();
-  private readonly agentTuiWriterFiles = new Map<string, string>();
+  private readonly agentTuiWriterTokens = new Map<string, string>();
+  private readonly reviewWriters: ReviewWriterRegistry;
   /** Set by runner shutdown; ended callbacks are not reported after it. */
   private disposed = false;
 
-  constructor(private readonly cb: ShellCallbacks, private readonly agentTuiWriterDirectory?: string) {
-    if (!agentTuiWriterDirectory) return;
-    mkdirSync(agentTuiWriterDirectory, { recursive: true, mode: 0o700 });
-    for (const file of readdirSync(agentTuiWriterDirectory)) {
-      if (!file.endsWith(".json")) continue;
-      let sessionId = "unknown (unreadable Agent TUI writer record)";
-      try {
-        const record = JSON.parse(readFileSync(join(agentTuiWriterDirectory, file), "utf8")) as { sessionId?: unknown };
-        if (typeof record.sessionId === "string" && record.sessionId) sessionId = record.sessionId;
-      } catch { /* Retain uncertain evidence, including a partial pre-spawn write. */ }
-      this.unprotectedAgentTuis.set(`recovered:${file}`, sessionId);
-    }
+  constructor(private readonly cb: ShellCallbacks, directory?: string, registry?: ReviewWriterRegistry) {
+    this.reviewWriters = registry ?? new ReviewWriterRegistry(directory);
   }
 
   unprotectedAgentTuiSessions(): string[] {
-    return [...new Set(this.unprotectedAgentTuis.values())];
+    return this.reviewWriters.sessions("agent_tui");
   }
 
   private retireAgentTuiWriter(shellId: string, proven: boolean): void {
-    if (!proven) return;
-    const file = this.agentTuiWriterFiles.get(shellId);
-    let retired = !file;
-    if (file) {
-      try { unlinkSync(file); retired = true; }
-      catch (error) { retired = (error as NodeJS.ErrnoException).code === "ENOENT"; }
-    }
-    if (retired) {
-      this.unprotectedAgentTuis.delete(shellId);
-      this.agentTuiWriterFiles.delete(shellId);
-    }
+    const token = this.agentTuiWriterTokens.get(shellId);
+    if (token && this.reviewWriters.retire(token, proven)) this.agentTuiWriterTokens.delete(shellId);
   }
 
   count(sessionId: string): number {
@@ -280,12 +259,7 @@ export class ShellManager {
     if (meta?.kind === "agent_tui") {
       // Publish before spawn: a crash cannot leave an agent writer with no durable admission
       // evidence. Recovered/uncertain markers require operator reconciliation, never age out.
-      if (this.agentTuiWriterDirectory) {
-        const file = join(this.agentTuiWriterDirectory, `${randomUUID()}.json`);
-        writeFileSync(file, JSON.stringify({ sessionId }), { flag: "wx", mode: 0o600 });
-        this.agentTuiWriterFiles.set(shellId, file);
-      }
-      this.unprotectedAgentTuis.set(shellId, sessionId);
+      this.agentTuiWriterTokens.set(shellId, this.reviewWriters.acquire(sessionId, "agent_tui"));
     }
     const child = process.platform === "win32" && context.kind === "native"
       ? openWindowsConpty({

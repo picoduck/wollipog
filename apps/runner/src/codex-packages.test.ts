@@ -8,7 +8,8 @@ import { configuredCodexHomes, sessionWritableRoots, trustedPath } from "./revie
 import { verifySpawnedCommand } from "./review-sessions.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
-import { buildBwrapArgs } from "./spawn.js";
+import { buildBwrapArgs, type SpawnIsolation } from "./spawn.js";
+import { ReviewWriterRegistry } from "./review-writers.js";
 
 const posixOnly = { skip: process.platform === "win32" };
 
@@ -186,4 +187,47 @@ test("reviewer admission names each unprotected writer and requires exact live l
   t.after(() => providerManager.shutdownAll());
   assert.equal(providerManager.codexReviewerProtection(f.home).refusal, undefined,
     "future unisolated launches do not block admission when there is no live unprotected writer");
+});
+
+test("a stopped structured writer remains refused until its asynchronous full-tree proof succeeds", posixOnly, async (t) => {
+  const f = fixture(t);
+  const store = new SessionStore(join(f.root, "sessions"));
+  const directory = join(f.root, "writers");
+  const registry = new ReviewWriterRegistry(directory);
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, f.root);
+  manager.setReviewWriterRegistry(registry);
+  t.after(() => manager.shutdownAll());
+  const meta = { sessionId: "s_retiring", context: { kind: "native" }, driver: "codex-app-server" } as SessionMeta;
+  const internal = manager as unknown as {
+    beginProviderReviewWriter(meta: SessionMeta, isolation: SpawnIsolation | undefined, home: string): string | undefined;
+    driverReviewWriterTokens: Map<unknown, string>;
+    disposeDriver(client: unknown): void;
+  };
+  assert.equal(internal.beginProviderReviewWriter(meta, {
+    backend: "bwrap", command: "/bin/bwrap", args: [], network: "inherit", codexPackageReadOnlyPaths: [f.packages],
+  }, f.home), undefined);
+  let resolveProof!: (proven: boolean) => void;
+  const proof = new Promise<boolean>((resolve) => { resolveProof = resolve; });
+  const client = { dispose: () => {}, proveProcessTreeExit: () => proof };
+  const token = internal.beginProviderReviewWriter(meta, undefined, f.home)!;
+  internal.driverReviewWriterTokens.set(client, token);
+  internal.disposeDriver(client);
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_retiring/,
+    "the root is disposed and no active session/lease remains, but the tree proof is pending");
+  assert.deepEqual(new ReviewWriterRegistry(directory).sessions(), ["s_retiring"]);
+  resolveProof(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined);
+
+  const failed = { dispose: () => {}, proveProcessTreeExit: async () => false };
+  internal.driverReviewWriterTokens.set(failed, internal.beginProviderReviewWriter(meta, undefined, f.home)!);
+  internal.disposeDriver(failed);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_retiring/);
+  const afterRestart = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "empty-store")), "runner2",
+    undefined, undefined, f.root);
+  afterRestart.setReviewWriterRegistry(new ReviewWriterRegistry(directory));
+  t.after(() => afterRestart.shutdownAll());
+  assert.match(afterRestart.codexReviewerProtection(f.home).refusal!, /session s_retiring/,
+    "uncertain retired writers survive both session removal and runner reconstruction");
 });

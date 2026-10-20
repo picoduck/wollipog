@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { SpawnSyncOptionsWithStringEncoding } from "node:child_process";
+import { type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
