@@ -2635,6 +2635,13 @@ export class SessionStore {
       }
       await yieldToEventLoop();
     }
+    // The legacy path/fence intent are deliberately excluded from unlinking: recoverLegacyFence
+    // owns their safe rename. A blocked rename still needs another trim, even if all matched
+    // superseded files were deleted. Do not run recovery here and create a new retired file
+    // after the directory scan has finished.
+    const legacy = this.eventsPath(id);
+    if (this.historyManifestKey(id) !== manifestKey || existsSync(this.historyLegacyFencePath(id)) ||
+        (existsSync(legacy) && !lstatSync(legacy).isDirectory())) cleanupComplete = false;
     return { bytesRemoved: deletedBytes, cleanupComplete };
   }
 
