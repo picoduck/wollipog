@@ -14,6 +14,16 @@ import { RunDetail } from "./RunsView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
+
+/** A dashboard connected to a remote Wollipog: a reachable run address, so Copy Link is offered. */
+const remoteInstances: InstanceManager = {
+  ...browserInstanceManager,
+  activeProfile: {
+    id: "remote", serverInstanceId: "remote", kind: "remote", label: "Team",
+    origin: "https://wollipog.example.test", createdAt: "",
+  },
+};
 
 /**
  * A comparison run's page (#2975): one detail bar with the run's badge and ⋯, the task strip, and
@@ -122,11 +132,13 @@ async function mount(client: Partial<ApiClient>, opening: View = { name: "run", 
   await act(async () => root.render(
     <StrictMode>
       <ApiProvider client={apiClient}>
-        <StoreProvider connection={connection} navigation={navigation}>
-          <FeedbackProvider>
-            <RunRoute />
-          </FeedbackProvider>
-        </StoreProvider>
+        <InstancesContextProvider value={remoteInstances}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <FeedbackProvider>
+              <RunRoute />
+            </FeedbackProvider>
+          </StoreProvider>
+        </InstancesContextProvider>
       </ApiProvider>
     </StrictMode>,
   ));
@@ -260,6 +272,100 @@ describe("a comparison run's page (#2975)", () => {
       assertNoDomNode(column(fixture.container, "Gemini CLI")?.querySelector(".transcript-history-notice"), "the notice clears once it loads");
     } finally {
       await unmount(fixture);
+    }
+  });
+});
+
+describe("Copy Link's clipboard fallback (#2975)", () => {
+  const toasts = () => [...domWindow.document.querySelectorAll(".toast")].map((toast) => toast.textContent ?? "");
+  const moreActions = (container: Element) => container.querySelector('.detail-bar button[aria-label="More Actions"]');
+
+  /** A Clipboard API whose writes stay pending until refused, and an execCommand that records fallbacks. */
+  function stubClipboard(mode: "pending" | "refuse") {
+    const refusals: Array<(error: Error) => void> = [];
+    const fallbacks: string[] = [];
+    const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+    Object.defineProperty(domWindow.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: () => mode === "refuse"
+          ? Promise.reject(new Error("no clipboard on plain HTTP"))
+          : new Promise<void>((_resolve, reject) => { refusals.push(reject); }),
+      },
+    });
+    const doc = domWindow.document as unknown as { execCommand?: (command: string) => boolean };
+    const originalExec = doc.execCommand;
+    doc.execCommand = (command: string) => {
+      fallbacks.push(command);
+      // In a browser the selected field holds focus, and removing it leaves focus on <body>.
+      (domWindow.document.activeElement as unknown as { blur?: () => void } | null)?.blur?.();
+      return true;
+    };
+    return {
+      fallbacks,
+      refuse: async () => {
+        await act(async () => { refusals.at(-1)!(new Error("denied")); });
+        await settle();
+      },
+      restore: () => {
+        if (originalExec) doc.execCommand = originalExec; else delete doc.execCommand;
+        if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+        else delete (domWindow.navigator as unknown as { clipboard?: unknown }).clipboard;
+      },
+    };
+  }
+
+  async function startCopy(container: Element) {
+    await click(moreActions(container));
+    await click(menuItem("Copy Link"));
+  }
+
+  test("a late refusal after focus moved on runs no fallback and leaves focus where it is", async () => {
+    await setViewport(1440, 900);
+    const clipboard = stubClipboard("pending");
+    const fixture = await mount({});
+    const field = domWindow.document.createElement("input");
+    domWindow.document.body.append(field);
+    try {
+      await startCopy(fixture.container);
+      await act(async () => { field.focus(); });
+      await clipboard.refuse();
+      assert.deepEqual(clipboard.fallbacks, [], "no fallback copy");
+      assert.ok(domWindow.document.activeElement === field, "focus stays in the field the person moved to");
+      assert.deepEqual(toasts(), [], "nothing is reported");
+    } finally {
+      field.remove();
+      await unmount(fixture);
+      clipboard.restore();
+    }
+  });
+
+  test("a late refusal after the run unmounted runs no fallback", async () => {
+    await setViewport(1440, 900);
+    const clipboard = stubClipboard("pending");
+    const fixture = await mount({});
+    try {
+      await startCopy(fixture.container);
+      await unmount(fixture);
+      await clipboard.refuse();
+      assert.deepEqual(clipboard.fallbacks, [], "no fallback copy");
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  test("an immediate refusal while the run is current falls back, reports the copy and returns focus to ⋯", async () => {
+    await setViewport(1440, 900);
+    const clipboard = stubClipboard("refuse");
+    const fixture = await mount({});
+    try {
+      await startCopy(fixture.container);
+      assert.deepEqual(clipboard.fallbacks, ["copy"], "the fallback copies");
+      assert.ok((domWindow.document.activeElement as unknown) === moreActions(fixture.container), "focus returns to More Actions");
+      assert.deepEqual(toasts(), ["Link copied."]);
+    } finally {
+      await unmount(fixture);
+      clipboard.restore();
     }
   });
 });

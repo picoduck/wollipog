@@ -306,6 +306,12 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
   const { showToast } = useFeedback();
   const dashboardOrigin = useDashboardPublicOrigin();
   const [taskOpen, setTaskOpen] = useState(false);
+  // Set in the effect body, so StrictMode's simulated unmount and remount leave it true.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   // Retry on a member's failed history loads every member's history again.
   const [historyRetry, setHistoryRetry] = useState(0);
   const retryHistory = useCallback(() => setHistoryRetry((value) => value + 1), []);
@@ -515,8 +521,16 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
   const runLink = dashboardOrigin ? absoluteViewUrl(dashboardOrigin, { name: "run", id: runId, ...(member ? { member } : {}) }) : null;
   const copyLink = async () => {
     if (!runLink) return;
-    const copied = await writeClipboardText(runLink, () => true);
+    // ⋯ has closed and handed focus back to its trigger. A refused write falls back to a selected
+    // field only while the copy still owns the interaction: the run is mounted and focus is still
+    // on that trigger, or nowhere. A refusal can be synchronous (no Clipboard API on plain HTTP).
+    const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const unclaimed = () => document.activeElement === null || document.activeElement === document.body;
+    const copyStillCurrent = () => mountedRef.current && (unclaimed() || document.activeElement === invoker);
+    const copied = await writeClipboardText(runLink, copyStillCurrent);
     if (copied === null) return;
+    // The fallback's selection dropped focus; hand it back to ⋯.
+    if (mountedRef.current && unclaimed()) invoker?.focus();
     showToast(copied ? "Link copied." : "Couldn't copy the link.", { tone: copied ? "success" : "error" });
   };
   const typeLabel = workflow ? workflow.definition.name : workflowKnown ? "Comparison" : null;
