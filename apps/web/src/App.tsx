@@ -1060,7 +1060,9 @@ export function Shell() {
         />
       )}
       {dialog?.kind === "run" && <NewRunDialog onClose={() => setDialog(null)} />}
-      {dialog?.kind === "pod" && <NewPodDialog onClose={() => setDialog(null)} />}
+      {dialog?.kind === "pod" && (
+        <NewPodDialog onClose={() => setDialog(null)} onNewSession={() => setDialog({ kind: "session", preset: { worktree: true } })} />
+      )}
       {palette !== null && (
         <CommandPalette initialQuery={palette} onClose={() => setPalette(null)} onOpenShortcuts={openShortcutReference} />
       )}
