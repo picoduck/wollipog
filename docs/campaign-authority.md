@@ -201,9 +201,14 @@ recovery request id, because runner startup rebuilds it with a fresh occurrence 
 completes an accepted Dismiss Recovery itself once an interrupted provider turn settles, rather than
 refusing it. The accepted intent is written durably on the runner before any wait and never
 expires: a runner that stops at any point after accepting it, including during the first wait,
-completes it on restart instead of re-raising the card. Requests restored by runner registration, runtime snapshots and history hydration get
-the same standing response as live ones; an Orchestrator's own explicit decline is a separate single
-action.
+completes it on restart instead of re-raising the card. That durable dismissal is a v230 runner
+capability (`durableAuthDismissal`), and only then is the sign-in fence permanent. An older runner
+refuses Dismiss Recovery while the turn settles and keeps the same card, so the control plane
+re-sends it after a backoff (5, 15 and 45 seconds), at most four attempts, one in flight, each with
+its own durable fence so restarts cannot exceed the bound. Once they are exhausted the sign-in stays
+content-safe blocked work and nobody is prompted. Requests restored by runner registration, runtime
+snapshots and history hydration get the same standing response as live ones; an Orchestrator's own
+explicit decline is a separate single action.
 
 The credential, access and lasting-grant declines become content-safe blocked work in Campaign
 Status (reason `request_declined`, action `continue_without_request`), so unrelated work continues
@@ -216,8 +221,13 @@ every UI evidence decision, including video without a certified media reviewer, 
 an Orchestrator whose client cannot view images. It is delivered only the child's own inspectable
 screenshots, and approval still needs a receipt for every item, so it asks the child for screenshots
 attached as Session artifacts or denies the claim as unproven. Certified delegated video review
-still applies when available. An authorization that leaves UI Evidence Approval out keeps evidence
-with the Human.
+still applies when available. Ownership the Orchestrator holds only because Full Control kept a
+decision from the Human can deny, never approve: an approval needs every evidence route (screenshot
+review, operator-enabled frame review, the certified media-only reviewer) directly available to the
+Orchestrator when it resolves, and an approved decision stays consumable only while they still are,
+so frame review switched off or moved to another controller, or a media reviewer whose disclosures
+changed, revokes it. An authorization that leaves UI Evidence Approval out keeps evidence with the
+Human.
 
 Operators can inspect `authorityEvaluation` to answer why a request has its owner. The structured
 `campaign_authority_evaluated` event identifies the occurrence, entry point, operation and reason;

@@ -23,7 +23,7 @@ import { SessionsService } from "./sessions.js";
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** `turnEnd` delays the end of the interrupted provider turn: a delay in ms, or a gate the test opens. */
-function bridge(providerAuthRecovery?: ProviderAuthRecoveryController, turnEnd: number | Promise<unknown> = 0) {
+function bridge(providerAuthRecovery?: ProviderAuthRecoveryController, turnEnd: number | Promise<unknown> = 0, runnerProtocol = PROTOCOL_VERSION) {
   const directory = mkdtempSync(join(tmpdir(), "full-control-standing-"));
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
@@ -31,7 +31,7 @@ function bridge(providerAuthRecovery?: ProviderAuthRecoveryController, turnEnd: 
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "test", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Repo", path: directory }],
     agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" }, available: true }] };
-  db.registerRunner(metadata, 1, PROTOCOL_VERSION);
+  db.registerRunner(metadata, 1, runnerProtocol);
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
   policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [2940], revision: 1, authorizedByUserId: principal.userId, authorizedAt: 1 };
   policy.issueNumbers = [2940];
@@ -230,6 +230,77 @@ test("an accepted dismissal survives a runner crash inside its first settlement 
     assert.equal(h.store.readMeta("child")?.pendingProviderAuthDismissal, undefined);
     assert.equal(h.db.getSession("child")!.pendingApproval, null);
   } finally { h.close(); }
+});
+
+/** A v229 runner's Dismiss Recovery, as on main before durable dismissal: it waits at most 100 ×
+ * 25 ms for the provider turn, and otherwise asks for the action again and keeps the same card,
+ * persisting nothing. A settled turn is dismissed exactly as the current runner does. */
+function legacyDismissal(h: ReturnType<typeof bridge>): { refusals: () => number } {
+  type Internal = {
+    active: Map<string, { running?: boolean }>; launchGenerations: Map<string, number>;
+    resolveProviderAuthentication(sessionId: string, requestId: string, optionId: string | null, decidedBy?: unknown): Promise<void>;
+    emitEvent(sessionId: string, payload: { kind: "stderr"; text: string }): void;
+    emitStatus(sessionId: string, status: string, detail: string): void;
+  };
+  const internal = h.manager as unknown as Internal;
+  const current = internal.resolveProviderAuthentication.bind(h.manager);
+  let refusals = 0;
+  internal.resolveProviderAuthentication = async (sessionId, requestId, optionId, decidedBy) => {
+    if (optionId === "auth:dismiss") {
+      const settled = () => !internal.active.get(sessionId)?.running && !internal.launchGenerations.has(sessionId);
+      for (let attempt = 0; attempt < 100 && !settled(); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+      if (!settled()) {
+        refusals += 1;
+        internal.emitEvent(sessionId, { kind: "stderr", text: "The provider turn is still settling. Dismiss Recovery again in a moment." });
+        internal.emitStatus(sessionId, "input_required", "Provider authentication recovery is still settling");
+        return;
+      }
+    }
+    return current(sessionId, requestId, optionId, decidedBy);
+  };
+  return { refusals: () => refusals };
+}
+
+test("a v229 runner that refuses Dismiss Recovery during a long turn is re-sent the dismissal until it clears, with no human (CR-8.1)", { timeout: 40_000 }, async () => {
+  // The provider turn outlasts the old runner's 2.5 s window twice over.
+  const h = bridge(undefined, 7_000, 229);
+  try {
+    assert.ok(h.enable().ok);
+    h.svc.legacyAuthDismissalRetryMs = [3_000, 3_000, 3_000];
+    const legacy = legacyDismissal(h);
+    h.manager.prompt("child", "work");
+    await waitUntil(() => resolutions(h) > 0, 25_000);
+    assert.equal(resolutions(h), 1, "the card clears with exactly one terminal resolution");
+    assert.ok(legacy.refusals() >= 1, "the old runner refused at least once");
+    const sent = h.declinesSent();
+    assert.ok(sent.length === legacy.refusals() + 1 && sent.length <= 4, `one re-send per refusal, bounded (${sent.length} sent)`);
+    assert.ok(sent.every((message) => message.optionId === "auth:dismiss" && message.requestId === sent[0]!.requestId));
+    assert.equal(h.store.readMeta("child")?.pendingApproval, null);
+    assert.equal(h.db.getSession("child")!.pendingApproval, null);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0);
+    // Nothing more is sent once the card is gone.
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    assert.equal(h.declinesSent().length, sent.length);
+  } finally { h.close(); }
+});
+
+test("re-sends to a v229 runner stop at the bound and leave content-safe blocked work, never a prompt (CR-8.1)", { timeout: 40_000 }, async () => {
+  const turn = gate();
+  const h = bridge(undefined, turn.promise, 229);
+  try {
+    assert.ok(h.enable().ok);
+    h.svc.legacyAuthDismissalRetryMs = [2_600, 2_600, 2_600];
+    const legacy = legacyDismissal(h);
+    h.manager.prompt("child", "work");
+    await waitUntil(() => legacy.refusals() >= 4, 25_000);
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    assert.equal(h.declinesSent().length, 4, "four attempts in total, then none");
+    assert.equal(legacy.refusals(), 4);
+    assert.equal(resolutions(h), 0);
+    const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
+    assert.equal(blocked.length, 1, "recorded once as blocked work");
+    assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0, "nothing waits on a person");
+  } finally { turn.open(); h.close(); }
 });
 
 test("an async credential question is dismissed at once and recorded as blocked work, with no Orchestrator request", () => {

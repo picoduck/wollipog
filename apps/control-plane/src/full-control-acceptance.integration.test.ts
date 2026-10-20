@@ -19,6 +19,7 @@ import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { SessionsService } from "./sessions.js";
+import { shortVideoDecoderAvailable } from "./video-frame-decode.js";
 
 const REPOSITORY = "fixture-owner/full-control-acceptance";
 const question: WorkflowDecisionResourceSnapshot = {
@@ -59,6 +60,8 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
   create("root"); create("worker", "root"); create("sibling", "root");
   const sent: ControlPlaneToRunner[] = [];
   let observeLaunch: ((message: ControlPlaneToRunner) => void) | undefined;
+  /** Operator-enabled frame review, optionally confined to one controlling Session. */
+  let frameReview: { enabled: boolean; controller?: string } = { enabled: false };
   const service = () => {
     const hub = new Hub(db);
     hub.isRunnerOnline = () => true;
@@ -70,7 +73,8 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
         sessionId: message.sessionId, ok: true, repository: REPOSITORY, candidates: [] };
       throw new Error("Unexpected synthetic runner request");
     };
-    if (!hostingVideo) return new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+    if (!hostingVideo) return new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined,
+      undefined, undefined, undefined, undefined, frameReview.enabled, frameReview.controller);
     const video = composeHostingVideoEvidence(db);
     const disclosures = hostingEvidenceAuthorityDisclosures({
       organizationExists: (organizationId) => db.listOrganizationIds().includes(organizationId), listRunners: () => db.listRunners() });
@@ -78,13 +82,13 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
       undefined, false, undefined, undefined, video.workflowVideoApprovals, disclosures, undefined, video.preparedMediaActiveStops);
   };
   let svc = service();
-  const enable = (budgetAuthority?: CampaignBudgetAuthority) => svc.setCampaignControl("root", {
+  const enable = (budgetAuthority?: CampaignBudgetAuthority, expectedRevision = 1) => svc.setCampaignControl("root", {
     mode: "full_control", objective: "Implement the fixture button interaction for issue 1",
     operations: ["implementation_question", "question", "tool_approval", "pr_merge", "merged_branch_deletion",
       "ui_evidence_approval", "follow_up_issue_publication", "campaign_issue_scope", "issue_closure"],
     delegatablePolicyIds: [],
     ...(budgetAuthority ? { budgetAuthority } : {}),
-  }, 1, human);
+  }, expectedRevision, human);
   const ask = (sessionId: string, requestId: string) => svc.createWorkflowDecision(sessionId,
     { requestId, resourceKey: requestId, resourceSnapshot: question });
   const approve = (sessionId: string, occurrenceId: string) => svc.resolveDescendantRequest("root", sessionId,
@@ -107,6 +111,8 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
       undefined, undefined, false, false, false, { parentSessionId: "root" });
     },
     reopen() { db.close(); db = ControlPlaneDb.open(path); svc = service(); },
+    /** Rebuild the service on the same database with frame review switched on or off. */
+    setFrameReview(enabled: boolean, controller?: string) { frameReview = { enabled, controller }; svc = service(); },
     close() { db.close(); rmSync(directory, { recursive: true, force: true }); },
   };
 }
@@ -337,6 +343,85 @@ for (const hostingVideo of [false, true]) test("foundation scope stays human and
     assert.ok(h.svc.resolveDescendantRequest("root", "worker", decision.data!.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Attach screenshots as Session artifacts." }, () => true).ok);
     assert.equal(h.db.workflowDecisionByOccurrence(decision.data!.occurrenceId)!.status, "denied");
+  } finally { h.close(); }
+});
+
+test("a Full Control frame-review approval needs the frame route at resolution and at consumption (#2940 CR-8.2)", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = stack("claude-code");
+  try {
+    h.setFrameReview(true);
+    // Frame derivation reads the root's own UI evidence owner, which the boundary does not change.
+    const delegated = h.svc.setParentControlPolicy("root", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, ui_evidence_approval: "orchestrator" },
+      h.db.getSession("root")!.parentControlPolicy?.revision);
+    assert.ok(delegated.ok, delegated.error ?? "delegation refused");
+    const enabled = h.enable(undefined, h.db.getSession("root")!.parentControlPolicy!.revision); assert.ok(enabled.ok, enabled.error ?? "admission failed");
+    const bytes = readFileSync(fileURLToPath(new URL("../test-fixtures/video-review-one-frame-transient.webm", import.meta.url)));
+    const video = h.svc.attachSessionVideo("worker", { name: "motion.webm",
+      mimeType: "video/webm", data: bytes.toString("base64") }, { kind: "agent", id: "worker" });
+    assert.ok(video.ok && video.data, video.error ?? "video attachment failed");
+    const item = { evidenceId: "motion", artifactId: video.data.artifactId, mediaType: "video/webm", sha256: video.data.sha256 };
+    const request = async (id: string) => {
+      const decision = await h.svc.createWorkflowDecisionWithVideo("worker", { requestId: id, resourceKey: id,
+        resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] } });
+      assert.ok(decision.ok && decision.data, decision.error ?? "video request failed");
+      assert.equal(decision.data.authority, "orchestrator");
+      return decision.data;
+    };
+    /** Every derived frame delivered in order and acknowledged, as the paced reviewer does. */
+    const reviewAll = (decision: Awaited<ReturnType<typeof request>>) => {
+      const snapshot = decision.resourceSnapshot;
+      assert.ok(snapshot.category === "ui_evidence_approval" && snapshot.videoReview, "frame review derived the manifest");
+      for (const frame of snapshot.videoReview.frames) {
+        const delivered = h.svc.reviewDescendantUiEvidence("root", "worker", decision.occurrenceId, frame.evidenceId, () => true);
+        assert.ok(delivered.ok && delivered.data, delivered.error ?? "frame delivery refused");
+        assert.ok(h.svc.acknowledgeDescendantUiEvidence("root", delivered.data.receipt.receiptId, delivered.data.receipt.sha256).ok);
+      }
+      return snapshot.videoReview.frames.map((frame) => frame.evidenceId);
+    };
+    const approve = (decision: Awaited<ReturnType<typeof request>>, evidenceReviewed: string[]) =>
+      h.svc.resolveDescendantRequest("root", "worker", decision.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed }, () => true);
+    const consume = (decision: Awaited<ReturnType<typeof request>>) =>
+      h.svc.consumeWorkflowDecision("worker", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot });
+    const status = (decision: Awaited<ReturnType<typeof request>>) => h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status;
+
+    // Control: with the route current, a complete frame review approves and is consumed.
+    const control = await request("frames-control");
+    assert.ok(approve(control, reviewAll(control)).ok);
+    assert.equal((await consume(control)).data?.status, "consumed");
+
+    // Frame review is switched off after approval: the approval can no longer be consumed.
+    const disabled = await request("frames-disabled-before-consume");
+    assert.ok(approve(disabled, reviewAll(disabled)).ok);
+    h.setFrameReview(false);
+    assert.equal((await consume(disabled)).ok, false);
+    assert.equal(status(disabled), "revoked");
+
+    // Frame review moves to another controlling Session: the same.
+    h.setFrameReview(true);
+    const moved = await request("frames-moved-before-consume");
+    assert.ok(approve(moved, reviewAll(moved)).ok);
+    h.setFrameReview(true, "s_000000000000");
+    assert.equal((await consume(moved)).ok, false);
+    assert.equal(status(moved), "revoked");
+
+    // Switched off after every receipt is acknowledged but before resolution: approval is refused,
+    // while the Orchestrator still owns the decision and can deny it, so nobody is prompted.
+    h.setFrameReview(true);
+    const pending = await request("frames-disabled-before-resolve");
+    const reviewed = reviewAll(pending);
+    h.setFrameReview(false);
+    const late = approve(pending, reviewed);
+    assert.equal(late.ok, false);
+    assert.match(late.error ?? "", /Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven\./u);
+    assert.equal(status(pending), "pending");
+    assert.ok(h.svc.resolveDescendantRequest("root", "worker", pending.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Attach screenshots as Session artifacts." }, () => true).ok);
+    assert.equal(status(pending), "denied");
   } finally { h.close(); }
 });
 

@@ -709,7 +709,9 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 // 230: Full Control worktree containment (#2940): runner filesystem evidence carries
 //      `filesystem.containment` (version 1) only after canonicalizing every target, the cwd and the
 //      session's worktree root. The control plane makes a tool request approvable only with it, so
-//      evidence from an older runner is unresolved and gets the standing decline.
+//      evidence from an older runner is unresolved and gets the standing decline. A v230 runner also
+//      keeps an accepted Dismiss Recovery durable until the provider turn settles, so only then does
+//      the control plane fence its standing sign-in dismissal permanently.
 export const PROTOCOL_VERSION = 230;
 
 export * from "./campaign-authority.js";
@@ -1011,6 +1013,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   fullControlIssueAuthority: 217,
   /** Runner evidence attests that every resolved target lies inside the session's worktree (#2940). */
   campaignWorktreeContainment: 230,
+  /** An accepted Dismiss Recovery is durable on the runner and waits for the provider turn instead
+   * of being refused, so the control plane may fence its standing dismissal permanently (#2940). */
+  durableAuthDismissal: 230,
   campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,

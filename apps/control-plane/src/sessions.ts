@@ -1622,6 +1622,11 @@ export class SessionsService {
     result: Promise<ServiceResult<WorkflowDecisionView>>;
   }>();
   private readonly automaticQuestions = new Map<string, Set<string>>();
+  /** Backoff before each re-send of a standing sign-in dismissal to a runner older than v230, which
+   * refuses one while the provider turn settles (#2940). One more attempt than delays in total. */
+  legacyAuthDismissalRetryMs: readonly number[] = [5_000, 15_000, 45_000];
+  private readonly legacyAuthDismissalRetries = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly legacyAuthDismissalExhausted = new Set<string>();
   /** Sessions with an in-flight lazy history fetch, so a burst of gapped live events fans into one. */
   private readonly hydrating = new Map<string, Promise<void>>();
   /** Sessions that saw another gap WHILE a fetch was in flight — forces one more pass afterward so a
@@ -8210,13 +8215,53 @@ export class SessionsService {
   /** Claim the durable at-most-once fence for one exact occurrence's standing response. A failed
    * call proved nothing was sent (the runner socket refused it or validation stopped it first), so
    * only then is the claim released for a later attempt. */
-  private standingResponseFence(controller: SessionView, session: SessionView, request: PendingApproval): { claimed: boolean; release: () => void } {
+  private standingResponseFence(controller: SessionView, session: SessionView, request: PendingApproval):
+    { claimed: boolean; release: () => void; sent?: () => void } {
+    const claim = (occurrence: string) => {
+      const claimed = this.db.campaignRecovery.claimStandingResponse(controller.id, session.id, occurrence, Date.now());
+      return { claimed, release: () => { if (claimed) this.db.campaignRecovery.releaseStandingResponse(controller.id, session.id, occurrence); } };
+    };
+    if (request.kind !== "authentication") return claim(request.occurrenceId ?? `request:${request.requestId}`);
     // A sign-in card is rebuilt at runner startup with a fresh occurrence id; its request id carries
     // the stable recovery identity (credential scope and recovery), so it fences across restarts.
-    const occurrence = request.kind === "authentication" ? `authentication:${request.requestId}`
-      : request.occurrenceId ?? `request:${request.requestId}`;
-    const claimed = this.db.campaignRecovery.claimStandingResponse(controller.id, session.id, occurrence, Date.now());
-    return { claimed, release: () => { if (claimed) this.db.campaignRecovery.releaseStandingResponse(controller.id, session.id, occurrence); } };
+    // A v230 runner keeps an accepted dismissal until the provider turn settles: one send is final.
+    if (runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "durableAuthDismissal")) {
+      return claim(`authentication:${request.requestId}`);
+    }
+    // An older runner explicitly refuses a dismissal while the turn settles and keeps the same card,
+    // so a re-send is safe. Each attempt has its own durable fence, so restarts cannot exceed the
+    // bound, and at most one is in flight: the next waits for its backoff timer.
+    const key = `${session.id}\u0000${request.requestId}`;
+    if (this.legacyAuthDismissalRetries.has(key)) return { claimed: false, release: () => {} };
+    const attempts = this.legacyAuthDismissalRetryMs.length + 1;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const fence = claim(`authentication:${request.requestId}:attempt:${attempt}`);
+      if (fence.claimed) return { ...fence, sent: () => this.scheduleLegacyAuthDismissalRetry(key, session.id, attempt) };
+    }
+    if (!this.legacyAuthDismissalExhausted.has(key)) {
+      // Exhausted: the sign-in stays recorded as content-safe blocked work (recorded with the first
+      // dismissal) and the card is left to the runner; nobody is prompted and nothing is replayed.
+      this.legacyAuthDismissalExhausted.add(key);
+      this.log.warn(JSON.stringify({ event: "campaign_legacy_auth_dismissal_exhausted", sessionId: session.id,
+        controllingSessionId: controller.id, requestId: request.requestId, attempts }));
+    }
+    return { claimed: false, release: () => {} };
+  }
+
+  /** After attempt `attempt` to an older runner, look again once its backoff passes: if the same
+   * card is still there (the runner refused it), the standing response path sends the next one. */
+  private scheduleLegacyAuthDismissalRetry(key: string, sessionId: string, attempt: number): void {
+    const delays = this.legacyAuthDismissalRetryMs;
+    const timer = setTimeout(() => {
+      this.legacyAuthDismissalRetries.delete(key);
+      try {
+        this.applyStandingCampaignResponses(sessionId);
+      } catch (error) {
+        this.log.warn(`legacy sign-in dismissal retry failed for ${sessionId}: ${(error as Error).message}`);
+      }
+    }, delays[Math.min(attempt - 1, delays.length - 1)]);
+    timer.unref?.();
+    this.legacyAuthDismissalRetries.set(key, timer);
   }
 
   private declineStandingRequest(controller: SessionView, session: SessionView, request: PendingApproval,
@@ -8234,6 +8279,7 @@ export class SessionsService {
       ? this.answerQuestion(session.id, request.requestId, {}, actor, "dismiss", controller.id, request.occurrenceId)
       : this.approve(session.id, request.requestId, reject, actor, controller.id);
     if (!result.ok) { fence.release(); return false; }
+    if ("sent" in fence) fence.sent?.();
     const now = Date.now();
     const revision = controller.parentControlPolicy?.revision ?? 0;
     const occurrence = recoveryCoordinate(request.occurrenceId ?? `request:${session.id}:${request.requestId}`);
@@ -9723,15 +9769,16 @@ export class SessionsService {
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && authority === "human" && actor.kind !== "human") {
       return fail("issue closure always requires an authenticated human response", 403);
     }
-    // A Full Control decision the Orchestrator owns only with a limitation (#2940) cannot rest on a
-    // media reviewer's verdict: delegated video needs the direct, current managed-media route.
-    if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals ||
-        this.directWorkflowDecisionAuthority(currentParent, currentPolicy, childSessionId, decision.resourceSnapshot).effectiveOwner !== "orchestrator")) {
+    if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
       return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
     }
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
     if (!checked.ok || !checked.data) return failAs(checked);
     const normalizedResolution = checked.data;
+    if (this.uiEvidenceApprovalNeedsDirectRoute(decision, normalizedResolution.outcome) &&
+        !this.uiEvidenceDirectRouteCurrent(currentParent, currentPolicy, decision)) {
+      return fail("Approving UI evidence needs every evidence route to be directly available to the Orchestrator now. Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven.", 403);
+    }
     const now = Date.now();
     // Repeating evidence identifiers proves nothing. An Orchestrator approval is backed only by
     // receipts the server itself recorded when it delivered each exact artifact to this reviewer.
@@ -10547,12 +10594,27 @@ export class SessionsService {
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
-    // An approval resting on a media reviewer's verdict stays current only while that route does.
-    if (decision.delegatedVideoEvidence?.length && this.directWorkflowDecisionAuthority(
-      controller, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner !== "orchestrator") return false;
+    if (decision.status === "approved" && this.uiEvidenceApprovalNeedsDirectRoute(decision, "approve") &&
+        !this.uiEvidenceDirectRouteCurrent(controller, policy, decision)) return false;
     return this.evaluateWorkflowDecisionAuthority(
       controller, policy, decision.sessionId, decision.resourceSnapshot,
     ).effectiveOwner === decision.authority;
+  }
+
+  /** Under Full Control a UI evidence decision the Orchestrator cannot fully inspect stays its own,
+   * with a limitation, so nobody is prompted (#2940). That keeps it deniable, never approvable: an
+   * approval rests on a receipt or a media reviewer's verdict for every item, and each comes only
+   * through a route that needs direct Orchestrator authority (screenshot review, operator-enabled
+   * frame review, the certified media-only reviewer). So an Orchestrator approval is made, and
+   * stays consumable, only while that direct authority holds; losing any route revokes it. */
+  private uiEvidenceApprovalNeedsDirectRoute(decision: WorkflowDecisionView, outcome: string): boolean {
+    return decision.resourceSnapshot.category === "ui_evidence_approval" && decision.authority === "orchestrator" &&
+      outcome === "approve";
+  }
+
+  private uiEvidenceDirectRouteCurrent(controller: SessionView, policy: ParentControlPolicy, decision: WorkflowDecisionView): boolean {
+    return this.directWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot)
+      .effectiveOwner === "orchestrator";
   }
 
   /** Deliver one exact evidence artifact of a pending descendant decision to the Orchestrator that

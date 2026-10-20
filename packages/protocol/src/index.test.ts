@@ -269,6 +269,9 @@ test("PROTOCOL_VERSION is 230", () => {
   // A v229 runner cannot attest Full Control worktree containment (#2940).
   assert.equal(runnerSupportsProtocol(229, "campaignWorktreeContainment"), false);
   assert.equal(runnerSupportsProtocol(230, "campaignWorktreeContainment"), true);
+  // A v229 runner refuses a Dismiss Recovery while the provider turn settles (#2940 CR-8.1).
+  assert.equal(runnerSupportsProtocol(229, "durableAuthDismissal"), false);
+  assert.equal(runnerSupportsProtocol(230, "durableAuthDismissal"), true);
   // A v227 runner launches review sessions but neither plans rounds nor validates attempts (#3369).
   assert.equal(runnerSupportsProtocol(227, "reviewRuns"), false);
   assert.equal(runnerSupportsProtocol(228, "reviewRuns"), true);
