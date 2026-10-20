@@ -712,7 +712,8 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      evidence from an older runner is unresolved and gets the standing decline. A v230 runner also
 //      keeps an accepted Dismiss Recovery durable until the provider turn settles, so only then does
 //      the control plane fence its standing sign-in dismissal permanently.
-export const PROTOCOL_VERSION = 230;
+// 231: runner archived-history retention: bounded trim request/result, gated by capability.
+export const PROTOCOL_VERSION = 231;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -937,6 +938,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * current runners revalidate native Codex/Claude descriptors as well as ACP descriptors. */
   authoritativeExternalAdoption: 35,
   sessionReprocess: 8,
+  runnerHistoryRetention: 231,
   directoryListing: 10,
   richDiff: 12,
   hunkStaging: 13,
@@ -8876,6 +8878,26 @@ export interface SessionHistoryResultMessage {
   events?: { seq: number; ts: number; payload: SessionEventPayload }[];
 }
 
+/** Sent only after a completed, armed organization prune and complete hydration. Coordinates are
+ * the runner’s negotiated epoch/sequence, never control-plane event ids. */
+export interface TrimSessionHistoryMessage {
+  type: "trim_session_history";
+  requestId: string;
+  sessionId: string;
+  logEpoch: number;
+  throughSeq: number;
+}
+export interface TrimSessionHistoryResultMessage {
+  type: "trim_session_history_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  trimmed?: boolean;
+  /** Bytes successfully unlinked from superseded files, excluding new-file allocations. */
+  bytesRemoved?: number;
+  error?: string;
+}
+
 export type SessionHistoryPageErrorCode =
   | "history_epoch_changed"
   | "history_cursor_invalid"
@@ -9241,6 +9263,7 @@ export type RunnerToControlPlane =
   | SessionEventMessage
   | SessionHistoryResultMessage
   | SessionHistoryPageResultMessage
+  | TrimSessionHistoryResultMessage
   | ReprocessSessionResultMessage
   | ListExternalSessionsResultMessage
   | AdoptSessionResultMessage
@@ -11232,6 +11255,7 @@ export type ControlPlaneToRunner =
   | DeleteSessionMessage
   | ListExternalSessionsRequestMessage
   | AdoptSessionMessage
+  | TrimSessionHistoryMessage
   | ReprocessSessionMessage
   | ListDirectoryRequestMessage
   | ListSessionFilesRequestMessage

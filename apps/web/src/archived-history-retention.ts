@@ -119,7 +119,7 @@ export function retentionConfirmation(
     title: turningOn ? "Prune Archived History" : "Shorten History Retention",
     message: `History of sessions archived more than ${retentionDaysLabel(preview.retentionDays)} ago is permanently `
       + `removed from this control plane, starting ${formatRetentionDateTime(preview.prunesFrom, locale, timeZone)}. `
-      + `${KEPT_CONTENT} This cannot be undone here.`,
+      + `${KEPT_CONTENT} Capable machines also trim their session logs; Reprocess cannot restore full history afterward. This cannot be undone here.`,
     confirmLabel: turningOn ? "Prune History" : "Shorten Retention",
     detailRows: [
       { label: "Sessions to Prune", meta: preview.eligible.sessions.toLocaleString("en-US") },

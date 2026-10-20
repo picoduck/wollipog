@@ -17492,6 +17492,25 @@ export class ControlPlaneDb {
     ).all(organizationId, cutoff, limit) as unknown as Array<{ id: string }>).map((row) => row.id);
   }
 
+  /** Completed, still-eligible prunes with a fully cached runner boundary. Keyset paging also
+   * revisits old prunes after an upgrade or an offline runner reconnects. */
+  runnerHistoryTrimCandidates(organizationId: string, cutoff: number, afterId: string, limit: number, sessionId: string | null = null): Array<{
+    id: string; runnerId: string; logEpoch: number; throughSeq: number;
+  }> {
+    return this.stmt(`SELECT s.id, s.runner_id AS runnerId, s.runner_history_epoch AS logEpoch,
+        s.runner_history_tail_seq AS throughSeq
+      FROM sessions s JOIN session_ownership ownership ON ownership.session_id=s.id
+      WHERE ownership.organization_id=? AND s.id>? AND s.archived=1 AND s.archived_at<=?
+        AND (? IS NULL OR s.id=?) AND s.status IN ('completed','failed','stopped') AND s.history_pruned_at IS NOT NULL
+        AND s.history_prune_run_events IS NULL AND s.runner_history_epoch IS NOT NULL
+        AND s.runner_history_tail_seq>0 AND s.hydrated_seq>=s.runner_history_tail_seq
+        AND NOT EXISTS (SELECT 1 FROM session_stop_intents intent WHERE intent.session_id=s.id)
+        AND NOT EXISTS (SELECT 1 FROM session_events e WHERE e.session_id=s.id AND e.seq>s.history_prune_through_seq)
+      ORDER BY s.id LIMIT ?`).all(organizationId, afterId, cutoff, sessionId, sessionId, limit) as unknown as Array<{
+        id: string; runnerId: string; logEpoch: number; throughSeq: number;
+      }>;
+  }
+
   /** Whether search rows without their event's row id remain to be mapped before any prune. */
   legacySearchRowsPending(): boolean {
     const scan = readLegacySearchScan((sql) => this.stmt(sql));

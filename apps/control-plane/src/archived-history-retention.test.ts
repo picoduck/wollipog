@@ -816,3 +816,79 @@ for (const protocolVersion of [53, PROTOCOL_VERSION]) {
     }
   });
 }
+
+for (const protocol of [228, 229, 230, PROTOCOL_VERSION]) {
+  test(`runner trimming follows armed org policy and completed hydration (runner protocol ${protocol})`, async () => {
+    const db = openDb(":memory:", protocol);
+    const clock = new Clock();
+    const sent: ControlPlaneToRunner[] = [];
+    const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+      now: () => clock.now, sleep: clock.sleep, hub: {
+        isRunnerOnline: () => true,
+        requestFromRunner: async (_runnerId, requestId, msg) => {
+          sent.push(msg);
+          return { type: "trim_session_history_result", requestId, sessionId: "runner-pruned", ok: true, trimmed: true, bytesRemoved: 1234 };
+        },
+      } });
+    try {
+      createSession(db, "runner-pruned");
+      const transcript = appendTranscript(db, "runner-pruned", 2);
+      db.reconcileRunnerHistory("runner-pruned", 1, transcript.runnerSeq);
+      db.setHydratedSeq("runner-pruned", transcript.runnerSeq);
+      archive(db, "runner-pruned", T0);
+      clock.now = T0 + 100 * DAY;
+      await subject.runPass();
+      assert.equal(sent.length, 0, "off by default");
+      subject.update(ORG, 90, null);
+      await subject.runPass();
+      assert.equal(sent.length, 0, "24-hour arming delay");
+      clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+      await subject.runPass();
+      assert.equal(sent.length, protocol >= 231 ? 1 : 0);
+      if (protocol >= 231) {
+        const msg = sent[0]!;
+        assert.equal(msg.type, "trim_session_history");
+        if (msg.type === "trim_session_history") {
+          assert.equal(msg.logEpoch, 1);
+          assert.equal(msg.throughSeq, transcript.runnerSeq);
+        }
+        assert.ok(db.getSession("runner-pruned")!.historyPruned);
+        // A retry/reconnect also visits prunes completed before the capable runner was online.
+        await subject.runPass();
+        assert.equal(sent.length, 2);
+        subject.update(ORG, null, null);
+        await subject.runPass();
+        assert.equal(sent.length, 2, "turning retention off immediately stops new runner requests");
+      }
+    } finally { subject.stop(); db.close(); }
+  });
+}
+
+test("runner trimming defers an incompletely hydrated or unarchived session", async () => {
+  const db = openDb(":memory:", PROTOCOL_VERSION);
+  const clock = new Clock();
+  let calls = 0;
+  const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+    now: () => clock.now, sleep: clock.sleep, hub: {
+      isRunnerOnline: () => true,
+      requestFromRunner: async (_runner, requestId) => {
+        calls++;
+        return { type: "trim_session_history_result", requestId, sessionId: "deferred", ok: true, trimmed: true };
+      },
+    } });
+  try {
+    createSession(db, "deferred");
+    const transcript = appendTranscript(db, "deferred", 2);
+    db.reconcileRunnerHistory("deferred", 1, transcript.runnerSeq + 1);
+    archive(db, "deferred", T0);
+    clock.now = T0 + 100 * DAY;
+    subject.update(ORG, 90, null);
+    clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+    await subject.runPass();
+    assert.equal(calls, 0);
+    db.setHydratedSeq("deferred", transcript.runnerSeq + 1);
+    db.setSessionArchived("deferred", false, clock.now);
+    await subject.runPass();
+    assert.equal(calls, 0);
+  } finally { subject.stop(); db.close(); }
+});

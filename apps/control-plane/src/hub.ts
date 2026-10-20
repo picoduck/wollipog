@@ -350,6 +350,7 @@ export type RunnerRequestResult =
   | ForkResultMessage
   | SessionHistoryResultMessage
   | SessionHistoryPageResultMessage
+  | import("@wollipog/protocol").TrimSessionHistoryResultMessage
   | ReprocessSessionResultMessage
   | ListExternalSessionsResultMessage
   | ListDirectoryResultMessage

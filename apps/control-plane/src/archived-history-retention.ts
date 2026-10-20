@@ -2,7 +2,10 @@ import {
   ARCHIVED_HISTORY_RETENTION_DELAY_MS,
   ARCHIVED_HISTORY_RETENTION_LIMITS,
   type ArchivedHistoryRetentionView,
+  runnerSupportsProtocol,
 } from "@wollipog/protocol";
+import { randomUUID } from "node:crypto";
+import type { Hub } from "./hub.js";
 import type { ControlPlaneDb } from "./db.js";
 
 /**
@@ -85,6 +88,7 @@ export class ArchivedHistoryRetention {
       log: ArchivedHistoryRetentionLog;
       now?: () => number;
       sleep?: (ms: number) => Promise<void>;
+      hub?: Pick<Hub, "isRunnerOnline" | "requestFromRunner">;
     },
   ) {
     this.now = options.now ?? Date.now;
@@ -208,6 +212,7 @@ export class ArchivedHistoryRetention {
         if (armed) this.db.recordArchivedHistoryRetentionRun(organizationId, this.now(), pruned.sessions, pruned.events);
         result.sessions += pruned.sessions;
         result.events += pruned.events;
+        await this.trimRunnerHistories(organizationId);
       }
     } catch (error) {
       this.options.log.warn({ error: error instanceof Error ? error.message : String(error) },
@@ -220,6 +225,47 @@ export class ArchivedHistoryRetention {
       }, "archived history pruned");
     }
     return result;
+  }
+
+  private async trimRunnerHistories(organizationId: string): Promise<void> {
+    const hub = this.options.hub;
+    if (!hub) return;
+    let afterId = "";
+    while (!this.stopped) {
+      const policy = this.policy(organizationId);
+      if (!this.armed(policy)) return;
+      const candidates = this.db.runnerHistoryTrimCandidates(organizationId,
+        this.now() - policy.retentionDays * DAY_MS, afterId, CANDIDATES_PER_PAGE);
+      if (!candidates.length) return;
+      for (const candidate of candidates) {
+        afterId = candidate.id;
+        const currentPolicy = this.policy(organizationId);
+        if (this.stopped || !this.armed(currentPolicy)) return;
+        // Refresh eligibility after the preceding asynchronous request: policy relaxation,
+        // unarchive, Stop and delayed hydration must all cancel a not-yet-issued trim.
+        const fresh = this.db.runnerHistoryTrimCandidates(organizationId,
+          this.now() - currentPolicy.retentionDays * DAY_MS, "", 1, candidate.id)[0];
+        if (!fresh || !hub.isRunnerOnline(fresh.runnerId) ||
+            !runnerSupportsProtocol(this.db.getRunner(fresh.runnerId)?.protocolVersion, "runnerHistoryRetention")) continue;
+        const requestId = `trim_${randomUUID()}`;
+        try {
+          const result = await hub.requestFromRunner(fresh.runnerId, requestId, {
+            type: "trim_session_history", requestId, sessionId: fresh.id,
+            logEpoch: fresh.logEpoch, throughSeq: fresh.throughSeq,
+          }, 15 * 60_000);
+          if (result.type !== "trim_session_history_result" || !result.ok || !result.trimmed) {
+            this.options.log.info({ event: "runner_history_retention_deferred", sessionId: fresh.id, requestId },
+              "runner history trim deferred until a later pass");
+          } else if ((result.bytesRemoved ?? 0) > 0) {
+            this.options.log.info({ event: "runner_history_retention", sessionId: fresh.id, requestId,
+              bytesRemoved: result.bytesRemoved, throughSeq: fresh.throughSeq }, "runner history trimmed");
+          }
+        } catch {
+          this.options.log.warn({ event: "runner_history_retention_deferred", sessionId: fresh.id, requestId },
+            "runner history trim unavailable; the next pass retries");
+        }
+      }
+    }
   }
 
   private armed(policy: ArchivedHistoryRetentionPolicy): policy is ArchivedHistoryRetentionPolicy & { retentionDays: number } {

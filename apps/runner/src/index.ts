@@ -3473,6 +3473,18 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "adopt_session":
       runCommandTask("adopt_session", handleAdopt(msg));
       break;
+    case "trim_session_history":
+      runCommandTask("trim_session_history", (async () => {
+        try {
+          const result = await sessions.trimArchivedHistory(msg);
+          log(JSON.stringify({ event: "runner_history_retention", sessionId: msg.sessionId, requestId: msg.requestId, ...result }));
+          sendUp({ type: "trim_session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true, ...result });
+        } catch (error) {
+          log(JSON.stringify({ event: "runner_history_retention_deferred", sessionId: msg.sessionId, requestId: msg.requestId }));
+          sendUp({ type: "trim_session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: false, error: errText(error) });
+        }
+      })());
+      break;
     case "reprocess_session":
       runCommandTask("reprocess_session", handleReprocess(msg));
       break;
@@ -3799,6 +3811,9 @@ async function handleReprocess(msg: ReprocessSessionMessage): Promise<void> {
   const replyFail = (error: string) =>
     sendUp({ type: "reprocess_session_result", requestId, sessionId, ok: false, error });
 
+  if (store.historyRetention(sessionId)) {
+    return replyFail("Full history cannot be restored: the runner has trimmed this session’s log under archived-history retention.");
+  }
   const meta = store.readMeta(sessionId);
   if (!meta || !meta.agentSessionId || !isAdoptedSession(meta)) {
     return replyFail("only adopted sessions can be re-imported");

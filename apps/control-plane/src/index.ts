@@ -1019,7 +1019,7 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 }
 
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
-const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log });
+const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log, hub });
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 const mutationAuditArchiveRetention = new MutationAuditArchiveRetention(db, { env: process.env, log: app.log });
 const workflowEventRetention = new WorkflowEventRetention(db, { env: process.env, log: app.log });
@@ -1779,6 +1779,7 @@ app.register(async (instance) => {
       case "git_result":
       case "session_history_result":
       case "session_history_page_result":
+      case "trim_session_history_result":
       case "reprocess_session_result":
       case "list_external_sessions_result":
       case "adopt_session_result":

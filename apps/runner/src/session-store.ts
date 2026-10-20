@@ -34,7 +34,7 @@ import {
   utimesSync,
   writeSync,
 } from "node:fs";
-import { open, rename, type FileHandle } from "node:fs/promises";
+import { open, rename, opendir, unlink, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -84,6 +84,7 @@ import type {
   SessionWorktreeView,
   WorktreeRecoveryView,
 } from "@wollipog/protocol";
+import { RetentionResponse, scanRetentionSources } from "./history-retention.js";
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
 import { SESSION_COMMAND_AUTHORITY_PROTOCOL_VERSION } from "./session-command-authority.js";
 
@@ -568,7 +569,22 @@ interface HistorySegment {
   sha256: string;
 }
 
+export interface RunnerHistoryRetention {
+  throughSeq: number;
+  prunedAt: number;
+  toolFile: string;
+  toolBytes: number;
+  toolSha256: string;
+}
+
+function historySequenceFollows(expected: number, actual: number, prunedThrough: number): boolean {
+  return actual === expected || (actual > expected && expected <= prunedThrough && actual <= prunedThrough + 1);
+}
+
 interface HistoryManifest {
+  /** Retention publishes its data and derived index as one atomic cohort. */
+  indexFile?: string;
+  retention?: RunnerHistoryRetention;
   version: number;
   logEpoch: number;
   activeFile: string;
@@ -778,6 +794,7 @@ export class SessionStore {
   /** Tokens of compactions this process is preparing. Their files are unreferenced until publication,
    * so orphan collection must leave them alone even with a zero grace period. */
   private readonly compactionsInFlight = new Set<string>();
+  private readonly historyIndexFiles = new Map<string, { manifestKey: string; file: string }>();
   constructor(
     private readonly root: string = join(homedir(), ".agent-manager", "sessions"),
     private readonly historyScanObserver?: (startOffset: number, endOffset: number) => void,
@@ -829,7 +846,18 @@ export class SessionStore {
     return join(this.dir(id), "events.legacy-fence.json");
   }
   private historyIndexPath(id: string): string {
-    return join(this.dir(id), "events.idx");
+    // Index seeks and appends must not validate every cold segment merely to locate the index.
+    // Atomic manifest replacement invalidates this derived name with one bounded metadata read.
+    const manifestKey = this.historyManifestKey(id);
+    if (manifestKey === null) {
+      this.historyIndexFiles.delete(id);
+      return join(this.dir(id), "events.idx");
+    }
+    const cached = this.historyIndexFiles.get(id);
+    if (cached?.manifestKey === manifestKey) return join(this.dir(id), cached.file);
+    const file = this.readHistoryManifest(id)?.indexFile ?? "events.idx";
+    if (this.historyManifestKey(id) === manifestKey) this.historyIndexFiles.set(id, { manifestKey, file });
+    return join(this.dir(id), file);
   }
   private historyResetPath(id: string): string {
     return join(this.dir(id), "events.reset.json");
@@ -877,7 +905,7 @@ export class SessionStore {
       throw new HistoryStoreError("history_corrupt", "session history manifest is malformed");
     }
     if (
-      manifest.version !== HISTORY_MANIFEST_VERSION ||
+      (manifest.version !== HISTORY_MANIFEST_VERSION && manifest.version !== 2) ||
       !Number.isSafeInteger(manifest.logEpoch) || manifest.logEpoch < 0 ||
       (epoch !== undefined && manifest.logEpoch !== epoch) ||
       !this.isHistoryFileName(manifest.activeFile) ||
@@ -886,13 +914,22 @@ export class SessionStore {
     ) {
       throw new HistoryStoreError("history_corrupt", "session history manifest is invalid");
     }
+    if (manifest.version === 2 && (!/^events\.index\.retention\.[a-zA-Z0-9.-]+\.idx$/.test(manifest.indexFile ?? "") || !manifest.retention ||
+        !Number.isSafeInteger(manifest.retention.throughSeq) || manifest.retention.throughSeq < 1 ||
+        !Number.isFinite(manifest.retention.prunedAt) ||
+        !/^events\.retention-tools\.[a-zA-Z0-9.-]+\.ndjson$/.test(manifest.retention.toolFile) ||
+        !Number.isSafeInteger(manifest.retention.toolBytes) || manifest.retention.toolBytes < 0 ||
+        !/^[a-f0-9]{64}$/.test(manifest.retention.toolSha256))) {
+      throw new HistoryStoreError("history_corrupt", "session retention manifest is invalid");
+    }
+    const prunedThrough = manifest.retention?.throughSeq ?? 0;
     let expectedSeq = 1;
     const files = new Set<string>([manifest.activeFile]);
     for (const segment of manifest.segments) {
       if (
         !this.isHistoryFileName(segment.file) ||
         !segment.file.startsWith("events.segment.") ||
-        !Number.isSafeInteger(segment.firstSeq) || segment.firstSeq !== expectedSeq ||
+        !Number.isSafeInteger(segment.firstSeq) || !historySequenceFollows(expectedSeq, segment.firstSeq, prunedThrough) ||
         !Number.isSafeInteger(segment.lastSeq) || segment.lastSeq < segment.firstSeq ||
         !Number.isSafeInteger(segment.bytes) || segment.bytes <= 0 ||
         !/^[a-f0-9]{64}$/.test(segment.sha256) || files.has(segment.file)
@@ -1228,7 +1265,9 @@ export class SessionStore {
           if (
             entry.name.startsWith("events.active.") ||
             entry.name.startsWith("events.segment.") ||
-            entry.name.startsWith("events.retired.")
+            entry.name.startsWith("events.retired.") ||
+            entry.name.startsWith("events.retention-tools.") ||
+            entry.name.startsWith("events.index.")
           ) {
             try { rmSync(join(this.dir(id), entry.name), { force: true }); } catch { /* retryable orphan */ }
           }
@@ -1562,11 +1601,12 @@ export class SessionStore {
     fileBytes: number,
     visit: (event: StoredEvent, offset: number, lineBytes: number) => void,
   ): { tailSeq: number; tailOffset: number; completeBytes: number } {
+    const prunedThrough = this.historyRetention(id)?.throughSeq ?? 0;
     let expectedSeq = 1;
     let tailOffset = 0;
     const scanned = this.scanHistoryLines(id, 0, fileBytes, (line, offset) => {
       const event = this.parseStoredEvent(line);
-      if (event.seq !== expectedSeq) {
+      if (!historySequenceFollows(expectedSeq, event.seq, prunedThrough)) {
         throw new HistoryStoreError(
           "history_corrupt",
           `session history sequence is not contiguous at ${event.seq} (expected ${expectedSeq})`,
@@ -1574,32 +1614,40 @@ export class SessionStore {
       }
       tailOffset = offset;
       visit(event, offset, line.length);
-      expectedSeq += 1;
+      expectedSeq = event.seq + 1;
     });
-    return { tailSeq: expectedSeq - 1, tailOffset, completeBytes: scanned.completeBytes };
+    return { tailSeq: Math.max(prunedThrough, expectedSeq - 1), tailOffset, completeBytes: scanned.completeBytes };
   }
 
   /** Find a frozen high-water's byte boundary without consulting any later record. Used when the
    * derived index is unavailable or invalid; authoritative corruption inside the prefix still
    * fails closed, while an append beyond `throughSeq` cannot poison an existing page chain. */
   private scanHistoryThrough(id: string, fileBytes: number, throughSeq: number): number {
+    const prunedThrough = this.historyRetention(id)?.throughSeq ?? 0;
     if (throughSeq === 0) return 0;
     let expectedSeq = 1;
     let reachedThrough = false;
-    const scanned = this.scanHistoryLines(id, 0, fileBytes, (line) => {
+    let gapBoundary: number | undefined;
+    const scanned = this.scanHistoryLines(id, 0, fileBytes, (line, offset) => {
       const event = this.parseStoredEvent(line);
-      if (event.seq !== expectedSeq || event.seq > throughSeq) {
+      if (event.seq > throughSeq && expectedSeq <= throughSeq && throughSeq <= prunedThrough) {
+        gapBoundary = offset;
+        return false;
+      }
+      if (!historySequenceFollows(expectedSeq, event.seq, prunedThrough) || event.seq > throughSeq) {
         throw new HistoryStoreError(
           "history_corrupt",
           `session history sequence is not contiguous at ${event.seq} (expected ${expectedSeq})`,
         );
       }
-      expectedSeq += 1;
+      expectedSeq = event.seq + 1;
       if (event.seq === throughSeq) {
         reachedThrough = true;
         return false;
       }
     });
+    if (gapBoundary !== undefined) return gapBoundary;
+    if (!reachedThrough && !scanned.stopped && throughSeq <= prunedThrough && expectedSeq <= throughSeq) return scanned.completeBytes;
     if (!reachedThrough) {
       throw new HistoryStoreError("history_cursor_invalid", "history cursor is beyond the durable tail");
     }
@@ -1659,7 +1707,7 @@ export class SessionStore {
   private historyTail(id: string, allowOversizedTornRepair = false): HistoryTail {
     const layout = this.historyLayout(id);
     const fileBytes = layout.totalBytes;
-    if (fileBytes === 0) return { seq: 0, completeBytes: 0, fileBytes: 0, lineOffset: 0 };
+    if (fileBytes === 0) return { seq: layout.manifest?.retention?.throughSeq ?? 0, completeBytes: 0, fileBytes: 0, lineOffset: 0 };
     const activeFd = openSync(layout.active.path, "r");
     let activeCompleteBytes = layout.active.bytes;
     try {
@@ -1699,7 +1747,7 @@ export class SessionStore {
       tailCompleteLocal = lastSegment.bytes;
     }
     if (tailCompleteLocal === 0) {
-      return { seq: 0, completeBytes: 0, fileBytes, lineOffset: 0 };
+      return { seq: layout.manifest?.retention?.throughSeq ?? 0, completeBytes: 0, fileBytes, lineOffset: 0 };
     }
 
     const fd = openSync(tailSource.path, "r");
@@ -1732,7 +1780,7 @@ export class SessionStore {
         throw new HistoryStoreError("history_corrupt", "session history segment sequence metadata is invalid");
       }
       return {
-        seq: event.seq,
+        seq: Math.max(event.seq, layout.manifest?.retention?.throughSeq ?? 0),
         completeBytes: layout.coldBytes + activeCompleteBytes,
         fileBytes,
         lineOffset: tailSource.virtualStart + lineStart,
@@ -1749,12 +1797,12 @@ export class SessionStore {
     // Reader requests explicitly bypass this maintenance path and return unavailable until ready.
     const anchor = this.readMeta(id)?.historyTurnAnchor;
     const stale = !info || (deriveTurnAnchor && (!anchor || anchor.logEpoch !== epoch)) ||
-      (tail.seq === 0 ? info.count !== 0 : info.count === 0) ||
+      (tail.completeBytes === 0 ? info.count !== 0 : info.count === 0) ||
       Boolean(info?.last && (
         info.last.seq > tail.seq ||
         info.last.offset >= tail.completeBytes ||
         (tail.seq > info.last.seq && (
-          tail.seq - info.last.seq >= HISTORY_INDEX_EVENT_STRIDE ||
+          (info.last.seq > (this.historyRetention(id)?.throughSeq ?? 0) && tail.seq - info.last.seq >= HISTORY_INDEX_EVENT_STRIDE) ||
           tail.lineOffset - info.last.offset >= HISTORY_INDEX_BYTE_STRIDE
         ))
       ));
@@ -1815,14 +1863,15 @@ export class SessionStore {
 
   /** Validate only the checkpoint interval selected by a binary seek. */
   private validateHistoryCheckpoint(id: string, index: number, fileBytes: number): boolean {
+    const prunedThrough = this.historyRetention(id)?.throughSeq ?? 0;
     const checkpoint = this.readCheckpoint(id, index);
     if (!checkpoint) return false;
     if (index === 0) {
-      if (checkpoint.seq !== 1 || checkpoint.offset !== 0) return false;
+      if (!historySequenceFollows(1, checkpoint.seq, prunedThrough) || checkpoint.offset !== 0) return false;
       try {
         let matched = false;
         this.scanHistoryLines(id, 0, fileBytes, (line, offset) => {
-          matched = offset === 0 && this.parseStoredEvent(line).seq === 1;
+          matched = offset === 0 && this.parseStoredEvent(line).seq === checkpoint.seq;
           return false;
         });
         return matched;
@@ -1832,7 +1881,7 @@ export class SessionStore {
     }
     const prior = this.readCheckpoint(id, index - 1);
     if (!prior || checkpoint.seq <= prior.seq || checkpoint.offset <= prior.offset) return false;
-    if (checkpoint.seq - prior.seq > HISTORY_INDEX_EVENT_STRIDE) return false;
+    if (prior.seq > prunedThrough && checkpoint.seq - prior.seq > HISTORY_INDEX_EVENT_STRIDE) return false;
     if (checkpoint.offset - prior.offset < HISTORY_INDEX_BYTE_STRIDE) {
       try {
         let matched = false;
@@ -1850,7 +1899,7 @@ export class SessionStore {
       let matched = false;
       this.scanHistoryLines(id, prior.offset, fileBytes, (line, offset) => {
         const event = this.parseStoredEvent(line);
-        if (event.seq !== expectedSeq) return false;
+        if (!historySequenceFollows(expectedSeq, event.seq, prunedThrough)) return false;
         if (event.seq === prior.seq && offset !== prior.offset) return false;
         if (event.seq === checkpoint.seq) {
           matched = offset === checkpoint.offset;
@@ -1858,10 +1907,10 @@ export class SessionStore {
         }
         if (
           event.seq > checkpoint.seq ||
-          event.seq - prior.seq >= HISTORY_INDEX_EVENT_STRIDE ||
+          (prior.seq > prunedThrough && event.seq - prior.seq >= HISTORY_INDEX_EVENT_STRIDE) ||
           offset - prior.offset >= HISTORY_INDEX_BYTE_STRIDE
         ) return false;
-        expectedSeq += 1;
+        expectedSeq = event.seq + 1;
       });
       return matched;
     } catch {
@@ -1876,12 +1925,18 @@ export class SessionStore {
     throughSeq: number,
     fileBytes: number,
   ): { ok: true; completeBytes: number } | { ok: false; endedEarly: boolean } {
+    const prunedThrough = this.historyRetention(id)?.throughSeq ?? 0;
     let expectedSeq = checkpoint.seq;
     let reached = false;
     let invalidIndex = false;
+    let gapBoundary: number | undefined;
     const scanned = this.scanHistoryLines(id, checkpoint.offset, fileBytes, (line, offset) => {
       const event = this.parseStoredEvent(line);
-      if (event.seq !== expectedSeq) {
+      if (event.seq > throughSeq && expectedSeq <= throughSeq && throughSeq <= prunedThrough) {
+        gapBoundary = offset;
+        return false;
+      }
+      if (!historySequenceFollows(expectedSeq, event.seq, prunedThrough)) {
         throw new HistoryStoreError(
           "history_corrupt",
           `session history sequence is not contiguous at ${event.seq} (expected ${expectedSeq})`,
@@ -1893,18 +1948,22 @@ export class SessionStore {
       }
       if (
         event.seq > checkpoint.seq &&
-        (event.seq - checkpoint.seq >= HISTORY_INDEX_EVENT_STRIDE ||
+        ((checkpoint.seq > prunedThrough && event.seq - checkpoint.seq >= HISTORY_INDEX_EVENT_STRIDE) ||
           offset - checkpoint.offset >= HISTORY_INDEX_BYTE_STRIDE)
       ) {
         invalidIndex = true;
         return false;
       }
-      expectedSeq += 1;
+      expectedSeq = event.seq + 1;
       if (event.seq === throughSeq) {
         reached = true;
         return false;
       }
     });
+    if (gapBoundary !== undefined) return { ok: true, completeBytes: gapBoundary };
+    if (!reached && !scanned.stopped && throughSeq <= prunedThrough && expectedSeq <= throughSeq) {
+      return { ok: true, completeBytes: scanned.completeBytes };
+    }
     if (invalidIndex) return { ok: false, endedEarly: false };
     if (!reached) return { ok: false, endedEarly: true };
     return { ok: true, completeBytes: scanned.completeBytes };
@@ -2331,6 +2390,246 @@ export class SessionStore {
     }
   }
 
+  /** Durable marker is part of the atomic manifest, never inferred from a partial temp file. */
+  historyRetention(id: string): RunnerHistoryRetention | undefined {
+    return this.readHistoryManifest(id)?.retention;
+  }
+
+  private retainedToolPath(id: string, retention: RunnerHistoryRetention): string {
+    const path = join(this.dir(id), retention.toolFile);
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== retention.toolBytes) {
+      throw new HistoryStoreError("history_corrupt", "retained tool-call evidence is damaged");
+    }
+    return path;
+  }
+
+  /** Removed call ids remain accounting evidence without retaining their command/output text. */
+  toolCallIds(id: string): string[] {
+    const ids = new Set<string>();
+    const retention = this.historyRetention(id);
+    if (retention) {
+      const bytes = readFileSync(this.retainedToolPath(id, retention));
+      if (bytes.length !== retention.toolBytes || createHash("sha256").update(bytes).digest("hex") !== retention.toolSha256) {
+        throw new HistoryStoreError("history_corrupt", "retained tool-call evidence is damaged");
+      }
+      for (const line of bytes.toString("utf8").split("\n")) if (line) ids.add(JSON.parse(line) as string);
+    }
+    for (const event of this.readEvents(id)) if (event.payload.kind === "tool_call") ids.add(event.payload.toolCallId);
+    return [...ids];
+  }
+
+  /** One asynchronous copy pass. Atomic manifest publication is the sole commit point: before it
+   * the complete old generation is readable; after it the complete retained generation is readable.
+   * A writer may acquire the free lock throughout copying and always wins over maintenance. */
+  private readonly historyTrimJobs = new Map<string, Promise<{ trimmed: boolean; bytesRemoved: number }>>();
+
+  trimHistory(id: string, request: { logEpoch: number; throughSeq: number }, owner: string,
+    inactive: () => boolean = () => true): Promise<{ trimmed: boolean; bytesRemoved: number }> {
+    const key = JSON.stringify([id, request.logEpoch, request.throughSeq]);
+    const running = this.historyTrimJobs.get(key);
+    if (running) return running;
+    // A timed-out CP request can leave its copy running. Never accumulate concurrent copies.
+    if (this.historyTrimJobs.size > 0) return Promise.resolve({ trimmed: false, bytesRemoved: 0 });
+    const job = this.trimHistoryPass(id, request, owner, inactive).finally(() => this.historyTrimJobs.delete(key));
+    this.historyTrimJobs.set(key, job);
+    return job;
+  }
+
+  private async trimHistoryPass(id: string, request: { logEpoch: number; throughSeq: number }, owner: string,
+    inactive: () => boolean = () => true): Promise<{ trimmed: boolean; bytesRemoved: number }> {
+    const deferred = { trimmed: false, bytesRemoved: 0 };
+    if (!inactive() || !this.acquireFreeLock(id, owner)) return deferred;
+    let sourceLayout: HistoryLayout;
+    let original: SessionMeta;
+    let manifestKey: string | null;
+    try {
+      // Copying the visible complete records into fsynced new files supplies durability. A bulk
+      // synchronous flush of the old file here would stall every live session on this runner.
+      const meta = this.readMeta(id);
+      if (!meta || !["completed", "failed", "stopped"].includes(meta.status) ||
+          (meta.logEpoch ?? 0) !== request.logEpoch || meta.seq !== request.throughSeq || request.throughSeq < 1) return deferred;
+      sourceLayout = this.historyLayout(id, request.logEpoch);
+      original = meta;
+      manifestKey = this.historyManifestKey(id);
+      if ((sourceLayout.manifest?.retention?.throughSeq ?? 0) >= request.throughSeq) {
+        this.releaseLock(id, owner);
+        const bytesRemoved = await this.cleanupRetainedHistory(id);
+        return { trimmed: true, bytesRemoved };
+      }
+    } finally { this.releaseLock(id, owner); }
+    const layout = sourceLayout!;
+    const sourceKeys = new Map(layout.sources.map((source) => [source.path, this.statKey(source.path)]));
+    const priorRetention = layout.manifest?.retention;
+    const sources = layout.sources.map((source) => ({ path: source.path, bytes: source.bytes,
+      ...(source.segment ? { sha256: source.segment.sha256 } : {}) }));
+    const token = `retention.${randomUUID()}`;
+    const segmentFile = `events.segment.${token}.ndjson`;
+    const activeFile = `events.active.${token}.ndjson`;
+    const toolFile = `events.retention-tools.${randomUUID()}.ndjson`;
+    let outputPath = join(this.dir(id), segmentFile);
+    const outputFiles = [segmentFile];
+    const segments: HistorySegment[] = [];
+    const toolPath = join(this.dir(id), toolFile);
+    const staged: StagedHistoryFile[] = [];
+    let committed = false;
+    let publicationStarted = false;
+    this.compactionsInFlight.add(token);
+    let output: FileHandle | undefined;
+    let tools: FileHandle | undefined;
+    let indexOut: FileHandle | undefined;
+    const indexFile = `events.index.${token}.idx`;
+    const indexTmp = join(this.dir(id), indexFile);
+    try {
+      const response = new RetentionResponse();
+      let lastSeq = 0;
+      await scanRetentionSources(sources, HISTORY_PAGE_EVENT_BUDGET, (event) => {
+        response.observe(event); lastSeq = event.seq;
+      }, priorRetention?.throughSeq);
+      if (Math.max(lastSeq, priorRetention?.throughSeq ?? 0) !== request.throughSeq) throw new Error("retention boundary differs from durable history");
+      output = await open(outputPath, "wx");
+      tools = await open(toolPath, "wx");
+      indexOut = await open(indexTmp, "wx");
+      await indexOut.writeFile(this.historyIndexHeader(request.logEpoch));
+      let checkpoint: HistoryCheckpoint | null = null;
+      let turnStartSeq = 0;
+      let hash = createHash("sha256");
+      const toolHash = createHash("sha256");
+      let bytes = 0, toolBytes = 0, firstSeq = 0, keptLastSeq = 0, segmentBytes = 0;
+      const finishSegment = async () => {
+        await output!.sync(); await output!.close(); output = undefined;
+        if (segmentBytes) segments.push({ file: outputFiles.at(-1)!, firstSeq, lastSeq: keptLastSeq,
+          bytes: segmentBytes, sha256: hash.digest("hex") });
+      };
+      if (priorRetention) {
+        const prior = await open(this.retainedToolPath(id, priorRetention), "r");
+        const priorHash = createHash("sha256");
+        try {
+          for (let offset = 0; offset < priorRetention.toolBytes;) {
+            const buffer = Buffer.alloc(Math.min(64 * 1024, priorRetention.toolBytes - offset));
+            const { bytesRead } = await prior.read(buffer, 0, buffer.length, offset);
+            if (!bytesRead) throw new Error("retained tool-call evidence was truncated");
+            const part = buffer.subarray(0, bytesRead);
+            await tools.writeFile(part); priorHash.update(part); toolHash.update(part);
+            offset += bytesRead; toolBytes += bytesRead;
+            await yieldToEventLoop();
+          }
+          if (priorHash.digest("hex") !== priorRetention.toolSha256) throw new Error("retained tool-call evidence failed integrity verification");
+        } finally { await prior.close(); }
+      }
+      await scanRetentionSources(sources, HISTORY_PAGE_EVENT_BUDGET, async (event, line) => {
+        if (response.keep(event)) {
+          if (segmentBytes && segmentBytes + line.length > 1024 * 1024) {
+            await finishSegment();
+            const file = `events.segment.${token}.${outputFiles.length}.ndjson`;
+            outputFiles.push(file); outputPath = join(this.dir(id), file);
+            output = await open(outputPath, "wx"); hash = createHash("sha256");
+            segmentBytes = 0; firstSeq = 0;
+          }
+          if (!checkpoint || event.seq - checkpoint.seq >= HISTORY_INDEX_EVENT_STRIDE || bytes - checkpoint.offset >= HISTORY_INDEX_BYTE_STRIDE) {
+            checkpoint = { seq: event.seq, offset: bytes };
+            await indexOut!.writeFile(this.historyIndexRecord(checkpoint));
+          }
+          if (event.payload.kind === "user_message" && event.payload.deliveryIntent !== "steer" && event.payload.commandInvocation === undefined) turnStartSeq = event.seq;
+          await output!.writeFile(line); hash.update(line); bytes += line.length; segmentBytes += line.length;
+          firstSeq ||= event.seq; keptLastSeq = event.seq;
+        } else if (event.payload.kind === "tool_call") {
+          const line = Buffer.from(JSON.stringify(event.payload.toolCallId) + "\n");
+          await tools!.writeFile(line); toolHash.update(line); toolBytes += line.length;
+        }
+      }, priorRetention?.throughSeq);
+      await finishSegment();
+      await Promise.all([tools.sync(), indexOut.sync()]);
+      await Promise.all([tools.close(), indexOut.close()]); tools = indexOut = undefined;
+      const active = await open(join(this.dir(id), activeFile), "wx");
+      await active.sync(); await active.close();
+      const manifest: HistoryManifest = { version: 2, logEpoch: request.logEpoch, activeFile, indexFile,
+        segments,
+        retention: { throughSeq: request.throughSeq, prunedAt: Date.now(), toolFile, toolBytes, toolSha256: toolHash.digest("hex") } };
+      // Preserve the legacy-writer fence when replacing a monolithic generation.
+      if (!layout.manifest) staged.push(await this.stageHistoryFile(this.historyLegacyFencePath(id), token,
+        JSON.stringify({ version: HISTORY_LEGACY_FENCE_VERSION, activeFile, retiredFile: `events.retired.${token}.ndjson` })));
+      const published = await this.stageHistoryFile(this.historyManifestPath(id), token, JSON.stringify(manifest));
+      staged.push(published);
+      await this.fsyncDirectoryAsync(this.dir(id));
+      const preparedKeys = new Map([...outputFiles, activeFile, toolFile, indexFile].map((file) => [file, this.statKey(join(this.dir(id), file))]));
+      if (!inactive() || !this.acquireFreeLock(id, owner)) return deferred;
+      try {
+        const current = this.readMeta(id);
+        if (!current || current.seq !== original!.seq || current.updatedAt !== original!.updatedAt ||
+            current.status !== original!.status || (current.logEpoch ?? 0) !== request.logEpoch ||
+            this.historyManifestKey(id) !== manifestKey!) return deferred;
+        // The source identity and byte count must still match, including an unflushed append.
+        if (layout.sources.some((source) => this.statKey(source.path) !== sourceKeys.get(source.path)) ||
+            [...preparedKeys].some(([file, key]) => key === null || this.statKey(join(this.dir(id), file)) !== key) ||
+            staged.some((file) => !existsSync(file.tmp))) return deferred;
+        publicationStarted = true;
+        for (const file of staged) this.publishHistoryFile(id, file);
+        committed = true;
+        this.historyLayoutCache.delete(id);
+        this.historyBoundaryCache.delete(id);
+        this.eventProjectionIndexes.delete(id);
+        this.checkpointCache.delete(id);
+        this.historyIndexInfoCache.delete(id);
+        this.seqReconciled.delete(id);
+        this.patchMeta(id, { historyTurnAnchor: { logEpoch: request.logEpoch, seq: turnStartSeq, throughSeq: request.throughSeq } });
+        // The immutable retained segment was just hashed and fsynced by this copy.
+        for (const segment of segments) {
+          const path = join(this.dir(id), segment.file);
+          this.verifiedHistorySegments.set(path, this.statKey(path)!);
+        }
+      } finally { this.releaseLock(id, owner); }
+      this.recoverLegacyFence(id, manifest);
+      this.compactionsInFlight.delete(token);
+      const deletedBytes = await this.cleanupRetainedHistory(id);
+      return { trimmed: true, bytesRemoved: deletedBytes };
+    } finally {
+      this.compactionsInFlight.delete(token);
+      if (publicationStarted) {
+        this.historyLayoutCache.delete(id); this.historyBoundaryCache.delete(id);
+        this.eventProjectionIndexes.delete(id); this.checkpointCache.delete(id);
+        this.historyIndexInfoCache.delete(id); this.seqReconciled.delete(id);
+      }
+      await Promise.all([output?.close(), tools?.close(), indexOut?.close()]);
+      if (!committed && !publicationStarted) rmSync(indexTmp, { force: true });
+      for (const file of staged) rmSync(file.tmp, { force: true });
+      if (!committed && !publicationStarted) for (const file of [...outputFiles, activeFile, toolFile]) rmSync(join(this.dir(id), file), { force: true });
+    }
+  }
+
+  /** Superseded generations are no longer authoritative. Unlink asynchronously and in bounded
+   * directory pages; an interrupted cleanup is retried by the next control-plane pass. */
+  private async cleanupRetainedHistory(id: string): Promise<number> {
+    const layout = this.historyLayout(id);
+    if (!layout.manifest?.retention) return 0;
+    let deletedBytes = 0;
+    let manifestKey = this.historyManifestKey(id);
+    let kept = new Set([layout.active.file, ...layout.sources.map((source) => source.file), layout.manifest.retention.toolFile, layout.manifest.indexFile!]);
+    const directory = await opendir(this.dir(id));
+    for await (const entry of directory) {
+      const currentKey = this.historyManifestKey(id);
+      if (currentKey !== manifestKey) {
+        const current = this.historyLayout(id);
+        if (!current.manifest?.retention) return deletedBytes;
+        kept = new Set([current.active.file, ...current.sources.map((source) => source.file), current.manifest.retention.toolFile, current.manifest.indexFile!]);
+        manifestKey = currentKey;
+      }
+      if (!entry.isFile() || kept.has(entry.name)) continue;
+      if (!/^events\.(segment|active|retired|retention-tools)\..+\.ndjson$/.test(entry.name) &&
+          !/^events\.(manifest|legacy-fence)\.json\..+\.tmp$/.test(entry.name) &&
+          !/^events\.(?:idx|index\..+\.idx)(?:\..+\.tmp)?$/.test(entry.name)) continue;
+      if ([...this.compactionsInFlight].some((token) => entry.name.includes(token))) continue;
+      const path = join(this.dir(id), entry.name);
+      try {
+        const bytes = lstatSync(path).size;
+        await unlink(path);
+        deletedBytes += bytes;
+      } catch { /* An open file can refuse unlinking; the next pass retries without claiming space. */ }
+      await yieldToEventLoop();
+    }
+    return deletedBytes;
+  }
+
   /** Move one bounded, newline-aligned prefix of the mutable active log into a content-addressed,
    * immutable segment. Logical bytes and seqs do not change, so sparse-index offsets and frozen
    * pagination chains remain valid across the atomic manifest switch. The caller must own the
@@ -2391,7 +2690,7 @@ export class SessionStore {
         throw new HistoryStoreError("history_epoch_changed", "session history changed during compaction");
       }
     }
-    const expectedFirstSeq = (layout.manifest?.segments.at(-1)?.lastSeq ?? 0) + 1;
+    const expectedFirstSeq = Math.max(layout.manifest?.segments.at(-1)?.lastSeq ?? 0, layout.manifest?.retention?.throughSeq ?? 0) + 1;
     if (cutBytes <= 0 || firstSeq !== expectedFirstSeq || lastSeq >= plan.tailSeq) return notCompacted;
 
     const token = `${epoch}.${firstSeq}-${lastSeq}.${randomUUID()}`;
@@ -2421,7 +2720,8 @@ export class SessionStore {
       }
       // Stage the control files too, so publication is only renames plus one directory fsync.
       const manifest: HistoryManifest = {
-        version: HISTORY_MANIFEST_VERSION,
+        ...(layout.manifest?.retention ? { retention: layout.manifest.retention, indexFile: layout.manifest.indexFile } : {}),
+        version: layout.manifest?.retention ? 2 : HISTORY_MANIFEST_VERSION,
         logEpoch: epoch,
         activeFile,
         segments: [
@@ -3134,6 +3434,7 @@ export class SessionStore {
   ): HistoryPageResult {
     let observedEpoch: number | undefined;
     try {
+      const prunedThrough = this.historyRetention(id)?.throughSeq ?? 0;
       if (!Number.isSafeInteger(request.afterSeq) || request.afterSeq < 0) {
         throw new HistoryStoreError("history_cursor_invalid", "afterSeq must be a non-negative safe integer");
       }
@@ -3183,8 +3484,8 @@ export class SessionStore {
         tail = this.historyTail(id);
         if (indexedOnly) {
           const ready = this.readHistoryIndexInfo(id, currentEpoch);
-          if (!ready || (tail.seq > 0 && (!ready.last || ready.last.seq > tail.seq ||
-              tail.seq - ready.last.seq >= HISTORY_INDEX_EVENT_STRIDE ||
+          if (!ready || (tail.completeBytes > 0 && (!ready.last || ready.last.seq > tail.seq ||
+              (ready.last.seq > prunedThrough && tail.seq - ready.last.seq >= HISTORY_INDEX_EVENT_STRIDE) ||
               tail.lineOffset - ready.last.offset >= HISTORY_INDEX_BYTE_STRIDE))) {
             throw new HistoryStoreError("history_cursor_invalid", "session history index is not ready for bounded reading");
           }
@@ -3277,7 +3578,7 @@ export class SessionStore {
           checkpointEntry = null;
         }
       }
-      if (indexedOnly && !checkpointEntry && request.afterSeq >= HISTORY_INDEX_EVENT_STRIDE) {
+      if (indexedOnly && !checkpointEntry && request.afterSeq > prunedThrough && request.afterSeq >= HISTORY_INDEX_EVENT_STRIDE) {
         throw new HistoryStoreError("history_corrupt", "bounded history seek requires a checkpoint");
       }
       const checkpoint = checkpointEntry?.checkpoint;
@@ -3289,13 +3590,13 @@ export class SessionStore {
       const events: StoredEvent[] = [];
       this.scanHistoryLines(id, offset, tail.completeBytes, (line) => {
         const event = this.parseStoredEvent(line);
-        if (event.seq !== expectedSeq) {
+        if (!historySequenceFollows(expectedSeq, event.seq, prunedThrough)) {
           throw new HistoryStoreError(
             "history_corrupt",
             `session history sequence is not contiguous at ${event.seq} (expected ${expectedSeq})`,
           );
         }
-        expectedSeq += 1;
+        expectedSeq = event.seq + 1;
         lastParsedSeq = event.seq;
         if (event.seq > frozenThrough) {
           stoppedAtBound = true;
@@ -3323,10 +3624,10 @@ export class SessionStore {
       if (!afterRead || (afterRead.logEpoch ?? 0) !== currentEpoch) {
         throw new HistoryStoreError("history_epoch_changed", "session history was reset during pagination");
       }
-      if (!stoppedAtBound && lastParsedSeq < frozenThrough) {
+      if (!stoppedAtBound && Math.max(lastParsedSeq, prunedThrough) < frozenThrough) {
         throw new HistoryStoreError("history_corrupt", "session history ended before its frozen durable tail");
       }
-      const nextAfterSeq = events.at(-1)?.seq ?? request.afterSeq;
+      const nextAfterSeq = !stoppedAtBound ? frozenThrough : events.at(-1)?.seq ?? request.afterSeq;
       return {
         ok: true,
         events,
@@ -3445,6 +3746,7 @@ export class SessionStore {
     this.checkpointCache.delete(id);
     this.historyLayoutCache.delete(id);
     this.historyIndexInfoCache.delete(id);
+    this.historyIndexFiles.delete(id);
     this.historyBoundaryCache.delete(id);
     this.eventProjectionIndexes.delete(id);
     for (const path of [...this.verifiedHistorySegments.keys()]) {
