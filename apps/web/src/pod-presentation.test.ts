@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { PodMemberRole, PodView, SessionView } from "@wollipog/protocol";
-import { podMemberNames, podMemberShortName, podTurnsStopNotice, type PodMemberNameStart } from "./pod-presentation.js";
+import type { PodContextEntry, PodMemberRole, PodView, SessionView } from "@wollipog/protocol";
+import { podBadgeStatus, podEntrySourceName, podMemberNames, podMemberShortName, podTurnsStopNotice, type PodMemberNameStart } from "./pod-presentation.js";
 
 function session(id: string, title: string, agentName = "Codex"): SessionView {
   return { id, title, agentName, agentId: agentName.toLowerCase(), driver: "claude-code" } as SessionView;
@@ -110,4 +110,35 @@ test("turns that stop for a reason say why; a person's own Stop says nothing", (
   assert.equal(podTurnsStopNotice(state("pod_closed")), null);
   assert.deepEqual(podTurnsStopNotice(state("runner went away")), { sentence: "Automatic turns stopped.", details: "runner went away" });
   assert.equal(podTurnsStopNotice({ status: "running", turnsUsed: 1, updatedAt: 1 }), null);
+});
+
+test("a pod's one badge reads Closed, Running while any turn runs, or Active (#2981)", () => {
+  const pod = podOf([["lead", "lead"], ["worker", "worker"]]);
+  const idle = sessionMap([session("lead", "Lead"), session("worker", "Worker")].map((entry) => ({ ...entry, status: "idle" as const })));
+  assert.equal(podBadgeStatus(pod, idle), "active");
+  for (const status of ["running", "starting"] as const) {
+    const busy = new Map(idle);
+    busy.set("worker", { ...idle.get("worker")!, status });
+    assert.equal(podBadgeStatus(pod, busy), "running", status);
+  }
+  const turns: PodView = { ...pod, orchestration: {
+    policy: { mode: "round_robin", contextTokenBudget: 1, summaryTokenBudget: 1, maxTurns: 2, maxRepeatedOutputs: 1 },
+    state: { status: "running", turnsUsed: 1, updatedAt: 1 },
+  } };
+  assert.equal(podBadgeStatus(turns, idle), "running");
+  assert.equal(podBadgeStatus({ ...turns, status: "closed" }, idle), "closed");
+});
+
+test("a huddle entry names its member by role and agent, a former member by agent, and a person as given (#2981)", () => {
+  const pod = podOf([["lead", "lead"], ["w1", "worker"], ["w2", "worker"]]);
+  const sessions = sessionMap([session("lead", "Lead: plan"), session("w1", "Worker: a"), session("w2", "Worker: b", "Claude Code")]);
+  const entry = (source: PodContextEntry["source"]): PodContextEntry => ({ id: "e", podId: "pod", seq: 1, ts: 1, source, content: "x" });
+  const fromSession = (sessionId: string, agentLabel = "Codex") =>
+    entry({ kind: "session", sessionId, sessionTitle: "Worker: gone", agentLabel, fromSeq: 1, toSeq: 2 });
+  assert.equal(podEntrySourceName(fromSession("lead"), pod, sessions, "You"), "Lead · Codex");
+  assert.equal(podEntrySourceName(fromSession("w1"), pod, sessions, "You"), "Worker · Codex");
+  assert.equal(podEntrySourceName(fromSession("w2"), pod, sessions, "You"), "Worker · Claude Code");
+  assert.equal(podEntrySourceName(fromSession("gone", "OpenCode"), pod, sessions, "You"), "OpenCode");
+  assert.equal(podEntrySourceName(fromSession("gone", " "), pod, sessions, "You"), "Worker: gone");
+  assert.equal(podEntrySourceName(entry({ kind: "human", actorId: "local" }), pod, sessions, "You"), "You");
 });

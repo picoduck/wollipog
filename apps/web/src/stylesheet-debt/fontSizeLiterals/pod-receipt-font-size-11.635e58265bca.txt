@@ -1,1 +1,0 @@
-|.pod-receipt|font-size|11

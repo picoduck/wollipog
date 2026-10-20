@@ -129,6 +129,50 @@ function MergeRow({ receipt, names }: {
   );
 }
 
+/** The pod's merges, newest first, each in words with its heads behind Show Details (#2980). */
+function RecentMerges({ receipts, names, titled = true }: {
+  receipts: readonly PodReconciliation[];
+  names: ReadonlyMap<string, string>;
+  /** Off where the dialog's own title already says "Recent Merges". */
+  titled?: boolean;
+}) {
+  const id = useId();
+  return (
+    <section className="pod-merges" aria-labelledby={titled ? id : undefined} aria-label={titled ? undefined : "Recent Merges"}>
+      {titled && <h3 className="section-title" id={id}>Recent Merges</h3>}
+      <ul className="surface pod-merge-list">
+        {receipts.map((receipt) => <MergeRow key={receipt.reconciliationId} receipt={receipt} names={names} />)}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * Recent Merges… on a closed pod (#2981): Merge Work is unavailable once the pod closes, so its
+ * merges stay readable here, in words and with Show Details, and nothing can merge.
+ */
+export function PodRecentMergesDialog({ pod, sessions, onClose }: {
+  pod: PodView;
+  sessions: ReadonlyMap<string, SessionView>;
+  onClose: () => void;
+}) {
+  const receipts = pod.reconciliations ?? [];
+  const names = podMemberNames(pod, sessions, [
+    ...pod.members.map((member) => member.sessionId),
+    ...receipts.flatMap((receipt) => [receipt.sourceSessionId, receipt.targetSessionId]),
+  ]);
+  return (
+    <Modal
+      title="Recent Merges"
+      description="This pod is closed, so no more work can be merged."
+      onClose={onClose}
+      footer={<button type="button" className="btn" onClick={onClose}>Done</button>}
+    >
+      <RecentMerges receipts={receipts} names={names} titled={false} />
+    </Modal>
+  );
+}
+
 /**
  * Merge Work… (#2980): merge one member's committed work into another's, opened from the pod's ⋯,
  * with the pod's Recent Merges below. Merge stays disabled with the rule that fails, including a
@@ -270,14 +314,7 @@ export function PodMergeWorkDialog({ pod, sessions, runners, onClose }: {
           </div>
         </div>
         <p className="field-helper pod-merge-rule" id={ruleId}>{MERGE_RULE}</p>
-        {receipts.length > 0 && (
-          <section className="pod-merges" aria-labelledby={`${ids}-recent`}>
-            <h3 className="section-title" id={`${ids}-recent`}>Recent Merges</h3>
-            <ul className="surface pod-merge-list">
-              {receipts.map((receipt) => <MergeRow key={receipt.reconciliationId} receipt={receipt} names={names} />)}
-            </ul>
-          </section>
-        )}
+        {receipts.length > 0 && <RecentMerges receipts={receipts} names={names} />}
         {failure && (
           <Notice tone="danger" role="alert" details={<code>{failure}</code>}>
             The merge didn't run.

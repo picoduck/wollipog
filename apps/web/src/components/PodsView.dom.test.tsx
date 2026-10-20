@@ -101,17 +101,12 @@ function buttonNamed(container: ParentNode, pattern: RegExp): HTMLButtonElement 
   return button as HTMLButtonElement;
 }
 
-function choose(select: HTMLSelectElement, value: string): void {
-  Object.getOwnPropertyDescriptor(domWindow.HTMLSelectElement.prototype, "value")?.set?.call(select, value);
-  select.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
-}
-
 function type(textarea: HTMLTextAreaElement, value: string): void {
   Object.getOwnPropertyDescriptor(domWindow.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, value);
   fireDomEvent.change(textarea, { target: textarea });
 }
 
-test("a direct pod-to-pod route change starts from the new pod's own draft, errors and receipts", async () => {
+test("a direct pod-to-pod route change starts from the new pod's own draft, errors and relay results", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -123,7 +118,10 @@ test("a direct pod-to-pod route change starts from the new pod's own draft, erro
     ...api,
     getSessionEventPage: pending,
     podContext: async (id: string) => ({ entries: id === podA.id ? [contextA] : [] }),
-    relayPod: async () => ({ pod: podA, sessions: [], receipts: [{ sessionId: "a1", status: "delivered" }] }),
+    relayPod: async () => ({
+      pod: podA, sessions: [],
+      receipts: [{ sessionId: "a1", status: "delivered" }, { sessionId: "a2", status: "failed", error: "runner went offline" }],
+    }),
     appendPodContext: async () => { throw new Error("Pod A note failed"); },
   } as unknown as ApiClient;
   const navigation = historyNavigation();
@@ -145,36 +143,34 @@ test("a direct pod-to-pod route change starts from the new pod's own draft, erro
     }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
-    const relaySection = () => section(container, "Manual Pod Relay");
-    const contextSection = () => section(container, "Shared Huddle Context");
-    const relayField = () => relaySection().querySelector("textarea") as HTMLTextAreaElement;
-    const contextBox = () => contextSection().querySelector('input[type="checkbox"]') as HTMLInputElement;
+    const huddle = () => section(container, "Huddle");
+    const relayField = () => huddle().querySelector("textarea") as HTMLTextAreaElement;
+    const contextBox = () => huddle().querySelector('.pod-huddle-entry input[type="checkbox"]') as HTMLInputElement;
+    const failureNotice = () => [...huddle().querySelectorAll('[role="alert"]')]
+      .find((notice) => notice.textContent?.includes("Couldn't Relay to Every Member"));
 
-    // Relay once so pod A has delivery receipts, then leave a failed note, a selected context
-    // entry and an add-member choice behind. Automatic turns keep their draft in their own dialog.
+    // Relay once so pod A has a member that missed it, then leave a failed note and a selected
+    // entry behind. Automatic turns keep their draft in their own dialog.
     await act(async () => contextBox().click());
     await act(async () => type(relayField(), "Relayed from pod A"));
-    await act(async () => buttonNamed(relaySection(), /^Relay to Selected$/u).click());
-    assert.ok(relaySection().querySelector('[aria-label="Relay Delivery Receipts"]'), "pod A shows its receipts");
+    await act(async () => buttonNamed(huddle(), /^Relay to 2$/u).click());
+    assert.ok(failureNotice(), "pod A shows each member's result");
     await act(async () => contextBox().click());
     await act(async () => type(relayField(), "Pod A draft"));
-    await act(async () => buttonNamed(relaySection(), /^Save Note$/u).click());
-    await act(async () => choose(relaySection().querySelector(".pod-add-member select") as HTMLSelectElement, "spare"));
+    await act(async () => buttonNamed(huddle(), /^Save Note$/u).click());
 
     assert.equal(relayField().value, "Pod A draft");
-    assert.match(relaySection().textContent ?? "", /Pod A note failed/u);
-    assert.match(contextSection().textContent ?? "", /1 Selected/u);
-    assert.equal((relaySection().querySelector(".pod-add-member select") as HTMLSelectElement).value, "spare");
+    assert.match(huddle().textContent ?? "", /The note wasn't saved\./u);
+    assert.equal(huddle().querySelectorAll(".pod-huddle-entry.is-selected").length, 1);
 
     await act(async () => navigation.jumpTo(podB.id));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
     assert.equal(container.querySelector(".detail-bar-title")?.textContent, "Pod B");
     assert.equal(relayField().value, "");
-    assert.doesNotMatch(relaySection().textContent ?? "", /Pod A note failed/u);
-    assert.equal(Boolean(relaySection().querySelector('[aria-label="Relay Delivery Receipts"]')), false, "no receipts carry over");
-    assert.match(contextSection().textContent ?? "", /0 Selected/u);
-    assert.equal((relaySection().querySelector(".pod-add-member select") as HTMLSelectElement).value, "");
+    assert.doesNotMatch(huddle().textContent ?? "", /The note wasn't saved/u);
+    assert.equal(failureNotice(), undefined, "no results carry over");
+    assert.equal(huddle().querySelectorAll(".pod-huddle-entry.is-selected").length, 0);
   } finally {
     await act(async () => root.unmount());
     container.remove();
