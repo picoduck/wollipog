@@ -2,6 +2,7 @@ import { useId } from "react";
 import type { WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
 import { statusMeta } from "../status-meta.js";
 import { formatFuture } from "../format.js";
+import { useTimelineClock } from "../timeline-clock.js";
 import {
   artifactNoun,
   attemptFailureSentence,
@@ -102,6 +103,9 @@ export function WorkflowStepPanel({ step, steps, workflow, agent, artifacts, now
 }) {
   const reasonId = `wf-retry-reason-${useId().replace(/:/g, "")}`;
   const { node, state } = step;
+  const gateWaiting = node.kind !== "agent" && state.status === "waiting_gate";
+  // The artifact row's "2m ago" reads the shared clock; the retry clock ticks only while a retry waits.
+  const artifactNow = useTimelineClock(gateWaiting);
   const edges = workflow.definition.edges;
   const anyBusy = busy !== null;
   const mine = busy === step.nodeId;
@@ -111,7 +115,7 @@ export function WorkflowStepPanel({ step, steps, workflow, agent, artifacts, now
   const details = error ? <p className="wf-panel-error">{error}</p> : undefined;
 
   let notice = null;
-  if (node.kind !== "agent" && state.status === "waiting_gate") {
+  if (gateWaiting) {
     const input = gateInput(node);
     const noun = input ? artifactNoun(input.kind) : null;
     const artifact = gateArtifact(step, steps, artifacts);
@@ -135,7 +139,7 @@ export function WorkflowStepPanel({ step, steps, workflow, agent, artifacts, now
         </p>
         {artifact ? (
           <div className="surface wf-gate-artifact">
-            <ArtifactRow artifact={artifact} now={now} showAuthor onOpen={() => actions.openArtifact(artifact)} />
+            <ArtifactRow artifact={artifact} now={artifactNow} showAuthor onOpen={() => actions.openArtifact(artifact)} />
           </div>
         ) : noun && <p className="wf-panel-line">The {noun} isn't among this run's artifacts yet.</p>}
       </Notice>
