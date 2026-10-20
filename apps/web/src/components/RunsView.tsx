@@ -105,8 +105,10 @@ function MemberColumn({ sessionId, label, actions, onRetry, panel }: {
     const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const unclaimed = () => document.activeElement === null || document.activeElement === document.body;
     const copied = await writeClipboardText(answer, () => mountedRef.current && (unclaimed() || document.activeElement === invoker));
-    if (copied === null) return;
-    if (mountedRef.current && unclaimed()) invoker?.focus();
+    // A write that settles after the column has gone (the run left the page, or a phone moved to
+    // another member's tab) reports nothing: a successful write never consults the currency check.
+    if (copied === null || !mountedRef.current) return;
+    if (unclaimed()) invoker?.focus();
     showToast(copied ? "Final answer copied as Markdown." : "Couldn't copy the final answer.", { tone: copied ? "success" : "error" });
   };
   const followUp = followUpAvailability(session);
@@ -664,9 +666,10 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
     const unclaimed = () => document.activeElement === null || document.activeElement === document.body;
     const copyStillCurrent = () => mountedRef.current && (unclaimed() || document.activeElement === invoker);
     const copied = await writeClipboardText(runLink, copyStillCurrent);
-    if (copied === null) return;
+    // Nothing is reported once the run has left the page, including a write that succeeded late.
+    if (copied === null || !mountedRef.current) return;
     // The fallback's selection dropped focus; hand it back to ⋯.
-    if (mountedRef.current && unclaimed()) invoker?.focus();
+    if (unclaimed()) invoker?.focus();
     showToast(copied ? "Link copied." : "Couldn't copy the link.", { tone: copied ? "success" : "error" });
   };
   const typeLabel = workflow ? workflow.definition.name : workflowKnown ? "Comparison" : null;

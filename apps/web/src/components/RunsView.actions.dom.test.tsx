@@ -14,6 +14,16 @@ import { RunDetail } from "./RunsView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
+
+/** A dashboard connected to a remote Wollipog: a reachable run address, so Copy Link is offered. */
+const remoteInstances: InstanceManager = {
+  ...browserInstanceManager,
+  activeProfile: {
+    id: "remote", serverInstanceId: "remote", kind: "remote", label: "Team",
+    origin: "https://wollipog.example.test", createdAt: "",
+  },
+};
 
 /**
  * What a person does to a comparison run from its page (#2976): Follow Up… with some or all of its
@@ -61,9 +71,20 @@ class FakeSocket implements UiSocket {
   push(message: UiSnapshotMessage) { this.onmessage?.({ data: JSON.stringify(message) }); }
 }
 
+/** Takes the run page away while the FeedbackProvider, its toasts and confirmations stay, as
+ * navigating elsewhere does. */
+let showRunPage: (shown: boolean) => void = () => {};
+
 function RunRoute() {
   const view = useStoreSelector((state) => state.view);
-  return view.name === "run" ? <RunDetail runId={view.id} member={view.member} /> : null;
+  const [shown, setShown] = React.useState(true);
+  React.useEffect(() => { showRunPage = setShown; }, []);
+  return shown && view.name === "run" ? <RunDetail runId={view.id} member={view.member} /> : null;
+}
+
+async function leaveRunPage() {
+  await act(async () => showRunPage(false));
+  await settle();
 }
 
 interface Fixture {
@@ -106,11 +127,13 @@ async function mount(client: Partial<ApiClient>, sessions: SessionView[] = [clau
   await act(async () => root.render(
     <StrictMode>
       <ApiProvider client={apiClient}>
-        <StoreProvider connection={connection} navigation={navigation}>
-          <FeedbackProvider>
-            <RunRoute />
-          </FeedbackProvider>
-        </StoreProvider>
+        <InstancesContextProvider value={remoteInstances}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <FeedbackProvider>
+              <RunRoute />
+            </FeedbackProvider>
+          </StoreProvider>
+        </InstancesContextProvider>
       </ApiProvider>
     </StrictMode>,
   ));
@@ -571,6 +594,230 @@ describe("two members running the same agent (#2976)", () => {
     } finally {
       await unmount(fixture);
       await setViewport(1440, 900);
+    }
+  });
+});
+
+describe("completions that settle after the person has moved on (#2976)", () => {
+  /** A Clipboard API whose writes stay pending until the test settles them. */
+  function deferredClipboard() {
+    const writes: Array<{ text: string; resolve: () => void }> = [];
+    const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+    Object.defineProperty(domWindow.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: (text: string) => new Promise<void>((resolve) => { writes.push({ text, resolve }); }) },
+    });
+    return {
+      writes,
+      succeed: async () => {
+        await act(async () => { writes.at(-1)!.resolve(); });
+        await settle();
+      },
+      restore: () => {
+        if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+        else delete (domWindow.navigator as unknown as { clipboard?: unknown }).clipboard;
+      },
+    };
+  }
+
+  function answerTimeline(sessionId: string): SessionEvent[] {
+    seq = 0;
+    return [
+      event(sessionId, { kind: "user_message", text: "Refactor the scheduler" }),
+      event(sessionId, { kind: "agent_message", text: FINAL_ANSWER, final: true }),
+    ] as SessionEvent[];
+  }
+
+  /** Console errors raised while `run` runs, such as an update React refuses. */
+  async function consoleErrors(run: () => Promise<void>): Promise<unknown[]> {
+    const errors: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args); };
+    try {
+      await run();
+    } finally {
+      console.error = original;
+    }
+    return errors;
+  }
+
+  test("a Copy Final Answer write that succeeds after the run left the page reports nothing and moves no focus", async () => {
+    await setViewport(1440, 900);
+    const clipboard = deferredClipboard();
+    const fixture = await mount({
+      getSessionEventPage: (async (id: string) => page(id === claude.id ? answerTimeline(claude.id) : [])) as ApiClient["getSessionEventPage"],
+    });
+    const elsewhere = doc().createElement("button");
+    doc().body.append(elsewhere);
+    try {
+      await click(column(fixture.container, "Claude Code")?.querySelector('button[aria-label="Claude Code Actions"]'));
+      await click(menuItem("Copy Final Answer"));
+      assert.deepEqual(clipboard.writes.map((write) => write.text), [FINAL_ANSWER], "the copy started");
+      await leaveRunPage();
+      await act(async () => { elsewhere.focus(); });
+      await clipboard.succeed();
+      assert.deepEqual(toasts(), [], "no toast for a column that has gone");
+      assert.ok(doc().activeElement === elsewhere, "focus stays where the person put it");
+    } finally {
+      elsewhere.remove();
+      await unmount(fixture);
+      clipboard.restore();
+    }
+  });
+
+  test("on a phone, a Copy Final Answer write that succeeds after another member's tab was chosen reports nothing", async () => {
+    await setViewport(390, 844);
+    const clipboard = deferredClipboard();
+    const fixture = await mount({
+      getSessionEventPage: (async (id: string) => page(id === claude.id ? answerTimeline(claude.id) : [])) as ApiClient["getSessionEventPage"],
+    });
+    try {
+      await click(fixture.container.querySelector('.compare-member-head button[aria-label="Claude Code Actions"]'));
+      await click(menuItem("Copy Final Answer"));
+      await click(fixture.container.querySelectorAll('[role="tab"]')[2]);
+      assert.equal(fixture.container.querySelector(".compare-member .compare-member-agent")?.textContent, "Gemini CLI", "the copying column is gone");
+      await clipboard.succeed();
+      assert.deepEqual(toasts(), []);
+    } finally {
+      await unmount(fixture);
+      clipboard.restore();
+      await setViewport(1440, 900);
+    }
+  });
+
+  test("a Copy Link write that succeeds after the run left the page reports nothing", async () => {
+    await setViewport(1440, 900);
+    const clipboard = deferredClipboard();
+    const fixture = await mount({});
+    try {
+      await click(fixture.container.querySelector('.detail-bar button[aria-label="More Actions"]'));
+      await click(menuItem("Copy Link"));
+      assert.equal(clipboard.writes.length, 1, "the copy started");
+      await leaveRunPage();
+      await clipboard.succeed();
+      assert.deepEqual(toasts(), []);
+    } finally {
+      await unmount(fixture);
+      clipboard.restore();
+    }
+  });
+
+  test("Follow Up sends that settle after the run left the page show no toast, no results and no error", async () => {
+    await setViewport(1440, 900);
+    for (const failOne of [false, true]) {
+      const releases: Array<() => void> = [];
+      const prompt = ((id: string) => new Promise<SessionView>((resolve, reject) => {
+        releases.push(() => (failOne && id === gemini.id ? reject(new Error("offline")) : resolve({} as SessionView)));
+      })) as unknown as ApiClient["prompt"];
+      const fixture = await mount({ prompt });
+      try {
+        const errors = await consoleErrors(async () => {
+          const dialog = await openFollowUp(fixture.container);
+          await type(dialog, "Keep going.");
+          await click(buttonNamed(dialog, "Send to 2 Agents"));
+          assert.equal(releases.length, 2, "both sends are in flight");
+          await leaveRunPage();
+          assertNoDomNode(dialogTitled("Follow Up"), "the dialog left with its run");
+          await act(async () => { for (const release of releases) release(); });
+          await settle();
+        });
+        assert.deepEqual(toasts(), [], failOne ? "no partial-failure report" : "no Sent toast");
+        assertNoDomNode(doc().querySelector(".run-follow-up-results"));
+        assert.deepEqual(errors, []);
+      } finally {
+        await unmount(fixture);
+      }
+    }
+  });
+
+  test("closing Follow Up hands focus back to what opened it: the bar's Follow Up… or the member's ⋯", async () => {
+    await setViewport(1440, 900);
+    const { prompt } = recordingPrompt();
+    const fixture = await mount({ prompt });
+    try {
+      const opener = buttonNamed(fixture.container.querySelector(".detail-bar")!, "Follow Up…")!;
+      // A pointer press focuses the button in a browser; happy-dom's click does not.
+      await act(async () => { opener.focus(); });
+      let dialog = await openFollowUp(fixture.container);
+      await click(buttonNamed(dialog, "Cancel"));
+      assert.ok(doc().activeElement === opener, "Cancel returns focus to Follow Up…");
+
+      await act(async () => { opener.focus(); });
+      dialog = await openFollowUp(fixture.container);
+      await type(dialog, "Ship it.");
+      await click(buttonNamed(dialog, "Send to 2 Agents"));
+      assertNoDomNode(dialogTitled("Follow Up"));
+      assert.ok(doc().activeElement === opener, "a send that closes the dialog returns focus to Follow Up…");
+
+      const trigger = column(fixture.container, "Gemini CLI")?.querySelector('button[aria-label="Gemini CLI Actions"]');
+      await click(trigger);
+      await click(menuItem("Follow Up with This Agent…"));
+      await click(buttonNamed(dialogTitled("Follow Up")!, "Cancel"));
+      assert.ok(doc().activeElement === trigger, "the member's Follow Up returns focus to its ⋯");
+    } finally {
+      await unmount(fixture);
+    }
+  });
+
+  test("a Stop Agent that settles after the run left the page closes its confirmation and moves no focus", async () => {
+    await setViewport(1440, 900);
+    let release: () => void = () => {};
+    const cancelTurn = (() => new Promise<SessionView>((resolve) => { release = () => resolve({} as SessionView); })) as unknown as ApiClient["cancelTurn"];
+    const fixture = await mount({ cancelTurn });
+    const elsewhere = doc().createElement("button");
+    doc().body.append(elsewhere);
+    try {
+      const errors = await consoleErrors(async () => {
+        await click(column(fixture.container, "Codex App Server")?.querySelector('button[aria-label="Codex App Server Actions"]'));
+        await click(menuItem("Stop Agent…"));
+        await click(buttonNamed(dialogTitled("Stop Agent")!, "Stop Agent"));
+        await leaveRunPage();
+        await act(async () => { elsewhere.focus(); });
+        await act(async () => { release(); });
+        await settle();
+        await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+      });
+      assertNoDomNode(dialogTitled("Stop Agent"), "the confirmation closes once its stop is done");
+      assert.ok(doc().activeElement === elsewhere, "focus is not sent to the run page's removed ⋯");
+      assert.deepEqual(toasts(), []);
+      assert.deepEqual(errors, []);
+    } finally {
+      elsewhere.remove();
+      await unmount(fixture);
+    }
+  });
+
+  test("a Stop All Agents failure that settles after the run left the page stays in its open confirmation, and Cancel moves no focus to the removed page", async () => {
+    await setViewport(1440, 900);
+    const second = member("s_opencode", "OpenCode", "acp", "running", { activeTurnId: "turn-opencode" });
+    const releases: Array<() => void> = [];
+    const cancelTurn = ((id: string) => new Promise<SessionView>((resolve, reject) => {
+      releases.push(() => (id === second.id ? reject(new Error("runner unreachable")) : resolve({} as SessionView)));
+    })) as unknown as ApiClient["cancelTurn"];
+    const fixture = await mount({ cancelTurn }, [claude, codex, second]);
+    try {
+      const errors = await consoleErrors(async () => {
+        await click(fixture.container.querySelector('.detail-bar button[aria-label="More Actions"]'));
+        await click(menuItem("Stop All Agents…"));
+        await click(buttonNamed(dialogTitled("Stop All Agents")!, "Stop All Agents"));
+        await leaveRunPage();
+        await act(async () => { for (const release of releases) release(); });
+        await settle();
+      });
+      // The confirmation belongs to the app, not the page: it is still what the person sees, so the
+      // failure is reported there, never as a stray toast.
+      const dialog = dialogTitled("Stop All Agents");
+      assert.ok(dialog, "the confirmation is still open");
+      assert.match(dialog.querySelector('.notice[role="alert"]')?.textContent ?? "", /Couldn't stop OpenCode\./u);
+      assert.deepEqual(toasts(), []);
+      assert.deepEqual(errors, []);
+      await click(buttonNamed(dialog, "Cancel"));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+      assertNoDomNode(dialogTitled("Stop All Agents"));
+      assert.ok(!doc().activeElement || doc().activeElement === doc().body || doc().activeElement!.isConnected,
+        "focus never lands on a removed element");
+    } finally {
+      await unmount(fixture);
     }
   });
 });
