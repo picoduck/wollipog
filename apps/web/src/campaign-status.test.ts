@@ -243,10 +243,14 @@ test("GitLab refs link to their own host and read as GitLab writes them (#3539)"
   // A bare nested path names no host, so it is never guessed to be gitlab.com.
   assert.equal(issueRefHref({ repository: "group/subgroup/project", number: 4 }), null);
   assert.equal(issueRefHref({ repository: "github.com/picoduck/wollipog", number: 4 }), null);
-  // Unobserved GitLab merge requests say so instead of blaming the repository.
-  const unsupported = forgePullRequestView({ availability: "unavailable", reason: "forge_unsupported" }, NOW, { repository: project, number: 9 });
-  assert.equal(unsupported.kind, "unavailable");
-  assert.match(unsupported.kind === "unavailable" ? unsupported.reason : "", /^GitLab merge request status isn't observed yet\./u);
+  // Unobserved GitLab merge requests say so instead of blaming the repository or naming GitHub,
+  // including before the runner's first read.
+  for (const reason of ["forge_unsupported", "not_observed", "runner_disconnected"] as const) {
+    const view = forgePullRequestView({ availability: "unavailable", reason }, NOW, { repository: project, number: 9 });
+    assert.match(view.kind === "unavailable" ? view.reason : "", /^GitLab merge request status isn't observed yet\./u, reason);
+  }
+  const github = forgePullRequestView({ availability: "unavailable", reason: "not_observed" }, NOW, { repository: "picoduck/wollipog", number: 9 });
+  assert.equal(github.kind === "unavailable" ? github.reason : "", observationUnavailableText("not_observed"));
 });
 
 test("The list defaults to unfinished work in queue order, and every filter and sort is honored", () => {

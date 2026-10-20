@@ -411,7 +411,9 @@ export function forgePullRequestView(
   ref?: CampaignPullRequestRef,
 ): ForgePullRequestView {
   if (fact.availability === "unavailable") {
-    const reason = fact.reason === "forge_unsupported" && ref && isGitLabRef(ref)
+    // Nothing reads GitLab yet, so every reason (including GitHub-worded ones such as not_observed)
+    // would misexplain a merge request.
+    const reason = ref && isGitLabRef(ref)
       ? "GitLab merge request status isn't observed yet. Open the merge request on GitLab to see its pipeline."
       : observationUnavailableText(fact.reason);
     return { kind: "unavailable", reason, lastObservedAt: fact.lastObservedAt ?? null };
