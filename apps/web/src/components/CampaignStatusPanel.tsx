@@ -354,7 +354,9 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
 }
 
 export function CampaignBudgetFacts({ budget }: { budget: import("@wollipog/protocol").CampaignBudgetView }) {
-  const limits = [budget.authority.costUsd === undefined ? null : `$${budget.authority.costUsd.toFixed(2)}`,
+  // A campaign authorized without a ceiling says so: it runs unbounded while usage is still metered.
+  const limits = [budget.authority.costUsd === undefined && budget.authority.toolCalls === undefined ? "No limit" : null,
+    budget.authority.costUsd === undefined ? null : `$${budget.authority.costUsd.toFixed(2)}`,
     budget.authority.toolCalls === undefined ? null : `${budget.authority.toolCalls} tool calls`,
     budget.authority.concurrency === undefined ? null : `${budget.authority.concurrency} concurrent workers`,
     budget.authority.acceptedFollowUps === undefined ? null : `${budget.authority.acceptedFollowUps} accepted follow-ups`].filter(Boolean).join(", ");
@@ -366,7 +368,7 @@ export function CampaignBudgetFacts({ budget }: { budget: import("@wollipog/prot
       <span className="campaign-status-meta">Includes an estimate for running turns.</span>}</dd></div>
     <div><dt>Outstanding Allocations</dt><dd>${budget.outstanding.costUsd.toFixed(2)}, {budget.outstanding.toolCalls} tool calls</dd></div>
     <div><dt>Unallocated Allowance</dt><dd>{budget.remaining.costUsd === null ? "No campaign cost ceiling" : `$${budget.remaining.costUsd.toFixed(2)}`}, {budget.remaining.toolCalls === null ? "no campaign tool ceiling" : `${budget.remaining.toolCalls} tool calls`}</dd></div>
-    <div><dt>Accounting Policy</dt><dd>Managed Sessions and approved native review jobs. Unpriced usage stops protected admission. Unmanaged reviewer invocations are unsupported.<span className="campaign-status-meta">Cancellation is asynchronous; in-flight work can overshoot the allowance. This is not a hard billing cap.</span></dd></div>
+    <div><dt>Accounting Policy</dt><dd>Managed Sessions and approved native review jobs. {budget.authority.costUsd === undefined ? "Unpriced usage is counted without a cost." : "Unpriced usage stops protected admission."} Unmanaged reviewer invocations are unsupported.<span className="campaign-status-meta">Cancellation is asynchronous; in-flight work can overshoot the allowance. This is not a hard billing cap.</span></dd></div>
   </>;
 }
 

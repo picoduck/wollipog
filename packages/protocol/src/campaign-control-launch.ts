@@ -109,12 +109,14 @@ export type CampaignLaunchCapabilityId =
   | "repository_scope" | "authority_contract" | "accounting_budget" | "native_review"
   | "execution_isolation" | "image_evidence" | "video_evidence" | "external_evidence";
 
-/** `unsupported` blocks launch. `human_required` is an allowed, disclosed exception that routes
- * that class of decision to the Human for this campaign. */
+/** `unsupported` blocks launch, and only a mandatory capability can be unsupported. `human_required`
+ * is an allowed, disclosed exception that routes that class of decision to the Human for this
+ * campaign. `informational` states an infrastructure gap the campaign works around with the best
+ * available path, such as the regular cross-model review workflow; it never blocks launch. */
 export interface CampaignLaunchCapability {
   id: CampaignLaunchCapabilityId;
   capability: string;
-  state: "verified" | "unsupported" | "human_required";
+  state: "verified" | "unsupported" | "human_required" | "informational";
   reason: string;
   mandatory: boolean;
 }
@@ -126,8 +128,13 @@ export interface CampaignLaunchSummary {
   root: { agentId: string; driver: string; model: string | null; effort: string | null;
     isolation: { mode: string; network: string } | null; strictProjectIsolation: boolean; integrationIsolation: boolean;
     completion: OrchestratorCampaignPolicy["behavior"]["completion"] };
+  /** A null amount has no ceiling. `unset`: neither amount has one, so the campaign runs with no
+   * limit while usage is still metered, priced and shown. */
   budget: { costUsd: number | null; toolCalls: number | null; concurrency: number; acceptedFollowUps: number;
     source: "override" | "saved_defaults" | "unset"; reviewIncluded: boolean };
+  /** Which cross-model review the campaign uses: the controlled reviewer charged to the campaign,
+   * or, when that is unavailable, the regular cross-model review workflow. */
+  review: { controlled: boolean; statement: string };
   followUps: { policy: OrchestratorCampaignPolicy["behavior"]["followUps"]; relatedFollowUps: boolean;
     maxIssues: number; closureReasons: Array<"completed" | "not_planned"> };
   evidence: {
@@ -146,7 +153,8 @@ export interface CampaignLaunchSummary {
 }
 
 export interface CampaignLaunchPreflight {
-  /** Every mandatory capability is verified. Only then does the admission route launch. */
+  /** Every mandatory capability (repository scope, the authority contract and any explicit budget
+   * ceiling) is verified. Only then does the admission route launch. */
   ready: boolean;
   digest: string;
   summary: CampaignLaunchSummary;

@@ -13370,6 +13370,7 @@ export class ControlPlaneDb {
         for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
+      this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(row.runner_id); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(row.runner_id); // cascades members
       this.stmt("DELETE FROM boxes WHERE box_id=?").run(boxId);
@@ -13428,6 +13429,7 @@ export class ControlPlaneDb {
         for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
+      this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(runnerId); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(runnerId); // cascades members
       this.stmt("DELETE FROM boxes WHERE runner_id=?").run(runnerId); // if it was a box
@@ -15676,7 +15678,6 @@ export class ControlPlaneDb {
         !boundary.issueAuthority || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
         scope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(scope.issueNumbers).size !== scope.issueNumbers.length ||
         JSON.stringify(policy?.issueNumbers) !== JSON.stringify(scope.issueNumbers) ||
-        boundary.budgetAuthority.costUsd === undefined || boundary.budgetAuthority.toolCalls === undefined ||
         boundary.budgetAuthority.concurrency === undefined || boundary.budgetAuthority.acceptedFollowUps === undefined ||
         !input.parentControlPolicy || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) || !/^[a-f0-9]{64}$/.test(digest)) {
       throw new Error("Human campaign launch admission is invalid");
@@ -19526,6 +19527,7 @@ export class ControlPlaneDb {
         scope?.owner.kind==="user" && this.getUsageDailyBudget(scope.organizationId).perUserUsd===null;
       budget.requiredNativeReview={supported,reason:supported?
         "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
+        !profile?"Controlled review is not part of this campaign; it uses the regular cross-model review workflow.":
         "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
     }
     const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;
@@ -21950,6 +21952,9 @@ export class ControlPlaneDb {
     // session id as provenance and live until their durable workflow run is deleted.
     this.stmt("DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL").run(id);
     this.deleteSessionSearchRows(id);
+    // A campaign member's unpriced usage stays known after its usage rows cascade away (#2940).
+    const campaignRoot = this.campaignBudgets.root(id);
+    if (campaignRoot) this.campaignBudgets.noteUnpriced(campaignRoot);
     this.stmt("DELETE FROM sessions WHERE id=?").run(id);
   }
 

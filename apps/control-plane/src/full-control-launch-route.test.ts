@@ -125,6 +125,7 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     assert.deepEqual(summary.issueNumbers, [7, 12]);
     assert.equal(summary.objective, "Deliver the launch issues");
     assert.deepEqual(summary.budget, { costUsd: 40, toolCalls: 400, concurrency: 4, acceptedFollowUps: 2, source: "override", reviewIncluded: true });
+    assert.deepEqual(summary.review, { controlled: true, statement: "Controlled cross-model review, charged to this campaign." });
     assert.deepEqual(summary.followUps, { policy: "execute_approved", relatedFollowUps: true, maxIssues: 4, closureReasons: ["completed"] });
     assert.equal(summary.root.completion, "stop_and_archive");
     assert.deepEqual(summary.root.isolation, { mode: "provider", network: "inherit" });
@@ -186,15 +187,13 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
   } finally { await server.close(); f.db.close(); }
 });
 
-test("each missing mandatory capability blocks launch with a specific reason and creates nothing", async () => {
+test("each genuine impossibility blocks launch with a specific reason and creates nothing", async () => {
   const cases: Array<{ name: string; options?: Parameters<typeof fixture>[0]; body?: FullControlLaunchRequest; id: string; reason: RegExp }> = [
-    { name: "no controlled reviewer", options: { runtime: { ...runtime, campaignReview: undefined } }, id: "native_review", reason: /executionIsolation\.mode "provider".*2\.1\.296/ },
-    { name: "no isolation report", options: { runtime: { ...runtime, executionIsolation: undefined } }, id: "execution_isolation", reason: /does not report the execution isolation/ },
-    { name: "unpriced model", options: { priced: false }, id: "accounting_budget", reason: /unpriced/ },
-    { name: "no budget", body: { ...launch, overrides: { ...launch.overrides, budget: undefined } }, id: "accounting_budget", reason: /No campaign budget yet/ },
-    { name: "root session ceiling", body: { ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session,
-      config: { model: "claude-opus-5-5", permissionMode: "orchestrator", costBudgetUsd: 50, maxToolCalls: 500 } } } },
-      id: "native_review", reason: /root session's own cost or tool-call limit/ },
+    // The launch sets an explicit cost ceiling, which cannot be enforced on unpriced usage.
+    { name: "unpriced model under a cost ceiling", options: { priced: false }, id: "accounting_budget", reason: /unpriced/ },
+    // Checkpoints are amounts within a cost ceiling; without one they are refused, never dropped.
+    { name: "cost checkpoints without a cost limit", body: { ...launch, overrides: { session: launch.overrides!.session, budget: { toolCalls: 400, checkpointsUsd: [5] } } },
+      id: "accounting_budget", reason: /^Cost checkpoints need a cost limit; enter one or remove the checkpoints\.$/ },
     { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract", reason: /protocol-v218/ },
     { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the workspace/ },
     { name: "unknown policy ask", body: { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } }, id: "authority_contract", reason: /missing/ },
@@ -218,14 +217,119 @@ test("each missing mandatory capability blocks launch with a specific reason and
       assert.deepEqual(f.starts, [], item.name);
     } finally { await server.close(); f.db.close(); }
   }
-  const limited = fixture();
-  limited.db.setUsageDailyBudget(limited.human.organizationId, 5, Date.now());
-  const { server } = await app(limited);
+});
+
+test("infrastructure gaps never block launch: each is informational and the campaign uses the regular review workflow", async () => {
+  const unbudgeted: FullControlLaunchRequest = { ...launch, overrides: { session: launch.overrides!.session } };
+  const cases: Array<{ name: string; options?: Parameters<typeof fixture>[0]; body?: FullControlLaunchRequest; daily?: boolean; id: string; reason: RegExp }> = [
+    { name: "no controlled reviewer", options: { runtime: { ...runtime, campaignReview: undefined } }, id: "native_review",
+      reason: /does not offer the controlled reviewer, which needs provider isolation \(current: provider\).*2\.1\.296.*regular cross-model review workflow\.$/ },
+    { name: "no isolation report", options: { runtime: { ...runtime, executionIsolation: undefined } }, id: "execution_isolation", reason: /does not report the execution isolation/ },
+    { name: "root session ceiling", body: { ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session,
+      config: { model: "claude-opus-5-5", permissionMode: "orchestrator", costBudgetUsd: 50, maxToolCalls: 500 } } } },
+      id: "native_review", reason: /root session's own cost or tool-call limit; the campaign uses the regular cross-model review workflow\./ },
+    { name: "organization daily limit", daily: true, id: "native_review", reason: /per-user daily limit; the campaign uses the regular/ },
+    { name: "unpriced model with no ceiling", options: { priced: false }, body: unbudgeted, id: "accounting_budget", reason: /^No limit\. Managed workers' tool calls are counted, but this model's cost is not priced/ },
+  ];
+  for (const item of cases) {
+    const f = fixture(item.options);
+    if (item.daily) f.db.setUsageDailyBudget(f.human.organizationId, 5, Date.now());
+    const { server } = await app(f);
+    try {
+      const body = item.body ?? launch;
+      const { response, preflight: checked } = await preflight(server, body);
+      assert.equal(response.statusCode, 200, `${item.name}: ${response.body}`);
+      assert.equal(checked!.ready, true, `${item.name}: ${JSON.stringify(checked!.summary.blockers)}`);
+      assert.deepEqual(checked!.summary.blockers, [], item.name);
+      const capability = checked!.capabilities.find((entry) => entry.id === item.id)!;
+      assert.equal(capability.state, "informational", item.name);
+      assert.equal(capability.mandatory, false, item.name);
+      assert.match(capability.reason, item.reason, item.name);
+      const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+        payload: { ...body, requestId: "launch-1", preflightDigest: checked!.digest } });
+      assert.equal(admitted.statusCode, 201, `${item.name}: ${admitted.body}`);
+      const control = f.db.getSession(admitted.json().id)!.orchestratorPolicy!.control!;
+      if (control.mode !== "full_control") throw new Error("Full Control expected");
+      if (item.id === "native_review") {
+        assert.equal(checked!.summary.review.controlled, false, item.name);
+        assert.equal(checked!.summary.review.statement, "The regular cross-model review workflow, because controlled review is unavailable.");
+        assert.equal(checked!.summary.budget.reviewIncluded, false, item.name);
+        assert.equal(checked!.advanced.controlledReview, undefined, item.name);
+        assert.equal(control.boundary.budgetAuthority!.controlledReview, undefined, `${item.name}: no unusable reviewer enters the boundary`);
+      }
+      if (item.id === "accounting_budget") {
+        // What the summary promised holds at runtime: unpriced usage counts tool calls and never stops the campaign.
+        const rootId = admitted.json().id as string;
+        f.sessions.onSessionEvent(rootId, { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "claude-opus-5-5" });
+        f.sessions.onSessionEvent(rootId, { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" });
+        const view = f.db.campaignBudgets.view(rootId)!;
+        assert.deepEqual([view.state, view.costAccounting, view.actual.toolCalls], ["active", "unavailable", 1]);
+        assert.notEqual(f.db.getSession(rootId)!.status, "stopped");
+      }
+      assert.equal(f.starts.length, 1, item.name);
+    } finally { await server.close(); f.db.close(); }
+  }
+});
+
+test("with no budget the campaign launches unbounded, metered, and still charges controlled review per job", async () => {
+  const f = fixture();
+  const { server } = await app(f);
   try {
-    const { preflight: checked } = await preflight(server, launch);
-    assert.match(checked!.capabilities.find((entry) => entry.id === "native_review")!.reason, /per-user daily limit/);
-    assert.equal(checked!.ready, false);
-  } finally { await server.close(); limited.db.close(); }
+    const body: FullControlLaunchRequest = { ...launch, overrides: { session: launch.overrides!.session } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    assert.deepEqual(checked!.summary.budget, { costUsd: null, toolCalls: null, concurrency: 4, acceptedFollowUps: 2, source: "unset", reviewIncluded: true });
+    const accounting = checked!.capabilities.find((item) => item.id === "accounting_budget")!;
+    assert.deepEqual([accounting.state, accounting.mandatory], ["verified", false]);
+    assert.equal(accounting.reason, "No limit. Managed workers are metered and priced, and Campaign Status shows the campaign's usage.");
+    assert.deepEqual(checked!.summary.blockers, []);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "unbounded", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const root = f.db.getSession(admitted.json().id)!;
+    const control = root.orchestratorPolicy!.control!;
+    if (control.mode !== "full_control") throw new Error("Full Control expected");
+    // No ceiling is absent, never a fake large amount.
+    assert.equal("costUsd" in control.boundary.budgetAuthority!, false);
+    assert.equal("toolCalls" in control.boundary.budgetAuthority!, false);
+    assert.deepEqual(control.boundary.budgetAuthority!.controlledReview, review);
+    const view = f.db.campaignBudgets.view(root.id)!;
+    assert.equal(view.state, "active");
+    assert.deepEqual(view.remaining, { costUsd: null, toolCalls: null });
+    assert.deepEqual(f.db.campaignBudgets.allocation(root.id), { sessionId: root.id }, "the root holds no allocation ceiling");
+    assert.equal(root.costBudgetUsd ?? null, null);
+    assert.equal(root.maxToolCalls ?? null, null);
+    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, true);
+    assert.equal(f.starts.length, 1);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an explicit ceiling, even on one amount, is the enforced campaign envelope", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const body: FullControlLaunchRequest = { ...launch, overrides: { session: launch.overrides!.session, budget: { costUsd: 15 } } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    assert.deepEqual([checked!.summary.budget.costUsd, checked!.summary.budget.toolCalls, checked!.summary.budget.source], [15, null, "override"]);
+    const accounting = checked!.capabilities.find((item) => item.id === "accounting_budget")!;
+    assert.deepEqual([accounting.state, accounting.mandatory], ["verified", true]);
+    assert.equal(accounting.reason, "Managed workers are metered and priced; the campaign is limited to $15.");
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "cost-only", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const root = f.db.getSession(admitted.json().id)!;
+    const control = root.orchestratorPolicy!.control!;
+    if (control.mode !== "full_control") throw new Error("Full Control expected");
+    assert.equal(control.boundary.budgetAuthority!.costUsd, 15);
+    assert.equal("toolCalls" in control.boundary.budgetAuthority!, false);
+    const view = f.db.campaignBudgets.view(root.id)!;
+    assert.equal(view.remaining.toolCalls, null);
+    assert.ok(view.remaining.costUsd !== null && view.remaining.costUsd <= 15);
+    const allocation = f.db.campaignBudgets.allocation(root.id)!;
+    assert.ok(allocation.costUsd !== undefined && allocation.costUsd <= 15, "the root's allocation is bounded by the ceiling");
+    assert.equal(root.costBudgetUsd, allocation.costUsd);
+  } finally { await server.close(); f.db.close(); }
 });
 
 test("a non-Human caller, a changed digest and a stale runner generation are refused before any write", async () => {
@@ -375,7 +479,9 @@ test("a current live proof makes launch video review delegable only when the env
     assert.equal(videoRow((await preflight(hostedApp.server, humanEvidence)).preflight!).reason,
       "Video evidence needs your review because UI evidence approval is not delegated to the Orchestrator.");
     const unbudgeted = { ...launch, overrides: { ...launch.overrides, budget: undefined } };
-    assert.equal(videoRow((await preflight(hostedApp.server, unbudgeted)).preflight!).reason,
+    assert.equal(videoRow((await preflight(hostedApp.server, unbudgeted)).preflight!).state, "verified", "no limit never blocks the envelope");
+    const blocked = { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } };
+    assert.equal(videoRow((await preflight(hostedApp.server, blocked)).preflight!).reason,
       "Video evidence needs your review because the launch is blocked, so no evidence envelope is minted.");
   } finally {
     await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
@@ -414,7 +520,7 @@ test("a revoked proof or a changed attestation returns launch video review to th
   }
 });
 
-test("Project child-session ceilings block controlled review, and a task alone launches with an empty issue scope", async () => {
+test("Project child-session ceilings route review to the regular workflow, and a task alone launches with an empty issue scope", async () => {
   const f = fixture();
   const organizationScope = { organizationId: f.human.organizationId, owner: { kind: "organization" as const, organizationId: f.human.organizationId } };
   const project = f.db.createProject({ name: "Fixture", scope: organizationScope });
@@ -424,11 +530,14 @@ test("Project child-session ceilings block controlled review, and a task alone l
   try {
     const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", projectId: project.id, task: "Investigate flaky tests",
       overrides: { session: { config: { model: "claude-opus-5-5", permissionMode: "orchestrator" } }, budget: { costUsd: 10, toolCalls: 100 } } };
-    const blocked = await preflight(server, body);
-    assert.equal(blocked.response.statusCode, 200, blocked.response.body);
-    assert.equal(blocked.preflight!.ready, false);
-    assert.match(blocked.preflight!.capabilities.find((item) => item.id === "native_review")!.reason, /child-session defaults/);
-    assert.equal(blocked.preflight!.summary.budget.source, "override", "saved per-session limits never become the campaign envelope");
+    const regular = await preflight(server, body);
+    assert.equal(regular.response.statusCode, 200, regular.response.body);
+    assert.equal(regular.preflight!.ready, true, "Project defaults only change which review the campaign uses");
+    const native = regular.preflight!.capabilities.find((item) => item.id === "native_review")!;
+    assert.equal(native.state, "informational");
+    assert.match(native.reason, /child-session defaults/);
+    assert.equal(regular.preflight!.summary.budget.reviewIncluded, false);
+    assert.equal(regular.preflight!.summary.budget.source, "override", "saved per-session limits never become the campaign envelope");
 
     f.db.updateProject(project.id, { childSessionDefaults: null });
     const { response, preflight: checked } = await preflight(server, body);
@@ -727,8 +836,8 @@ test("the saved Full Control budget becomes the launch envelope, an override rep
     const plain: FullControlLaunchRequest = { ...launch, overrides: { session: launch.overrides!.session } };
     const unset = await preflight(server, plain);
     assert.equal(unset.preflight!.summary.budget.source, "unset");
-    assert.equal(unset.preflight!.capabilities.find((item) => item.id === "accounting_budget")!.reason,
-      "No campaign budget yet: enter a cost limit and a tool-call limit.");
+    assert.equal(unset.preflight!.ready, true, "no budget means no limit, never a launch blocker");
+    assert.match(unset.preflight!.capabilities.find((item) => item.id === "accounting_budget")!.reason, /^No limit\./);
     saveBudget(f, savedBudget);
     const saved = await preflight(server, plain);
     assert.equal(saved.preflight!.ready, true, JSON.stringify(saved.preflight!.summary.blockers));
@@ -819,18 +928,20 @@ test("an existing campaign enables Full Control through one exact reviewed autho
   } finally { await server.close(); f.db.close(); }
 });
 
-test("enabling an existing campaign is blocked by another person's scope, participant ceilings and a missing budget", async () => {
+test("enabling an existing campaign is blocked only by another person's scope; participant ceilings and no budget are informational", async () => {
   const f = fixture();
   const { server } = await app(f);
   const check = async (id: string, payload: object = {}) => (await server.inject({ method: "POST",
     url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload })).json().preflight as CampaignLaunchPreflight;
   try {
     const foreign = customCampaign(f, "foreign-root", "someone-else");
-    assert.equal((await check(foreign, { overrides: { budget: savedBudget } })).capabilities.find((item) => item.id === "repository_scope")!.reason,
+    const refused = await check(foreign, { overrides: { budget: savedBudget } });
+    assert.equal(refused.ready, false);
+    assert.equal(refused.capabilities.find((item) => item.id === "repository_scope")!.reason,
       "Only the person who established this campaign's issue scope can enable Full Control for it.");
     const rootId = customCampaign(f);
     const unbudgeted = await check(rootId);
-    assert.equal(unbudgeted.ready, false);
+    assert.equal(unbudgeted.ready, true, JSON.stringify(unbudgeted.summary.blockers));
     assert.equal(unbudgeted.summary.budget.source, "unset");
     assert.equal(unbudgeted.capabilities.find((item) => item.id === "native_review")!.state, "verified");
     f.db.createSession({ id: "limited-child", parentSessionId: rootId, runnerId: "r", workspaceId: "w", agentId: "claude", title: "child",
@@ -838,10 +949,25 @@ test("enabling an existing campaign is blocked by another person's scope, partic
     f.db.updateSessionStatus("limited-child", "running", 4);
     f.db.updateSessionCostBudget("limited-child", 5, 4);
     const limited = await check(rootId, { overrides: { budget: savedBudget } });
-    assert.equal(limited.ready, false);
+    assert.equal(limited.ready, true, "a participant's own limit only routes review to the regular workflow");
+    assert.equal(limited.capabilities.find((item) => item.id === "native_review")!.state, "informational");
     assert.match(limited.capabilities.find((item) => item.id === "native_review")!.reason, /limits some of this campaign's sessions already hold/);
+    assert.equal(limited.summary.review.controlled, false);
     f.db.updateSessionStatus("limited-child", "completed", 5);
-    assert.equal((await check(rootId, { overrides: { budget: savedBudget } })).ready, true, "a finished participant no longer blocks");
+    assert.equal((await check(rootId, { overrides: { budget: savedBudget } })).summary.review.controlled, true,
+      "a finished participant no longer holds the campaign to the regular workflow");
+    // Enabling with no budget and a participant ceiling admits Full Control with no controlled reviewer.
+    f.db.updateSessionStatus("limited-child", "running", 6);
+    const { preflight: plain, expectedRevision } = (await server.inject({ method: "POST",
+      url: `/api/sessions/${rootId}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload: {} })).json() as
+      { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: plain.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const control = f.db.getSession(rootId)!.orchestratorPolicy!.control!;
+    if (control.mode !== "full_control") throw new Error("Full Control expected");
+    assert.equal(control.boundary.budgetAuthority!.controlledReview, undefined);
+    assert.equal("costUsd" in control.boundary.budgetAuthority!, false);
     assert.equal((await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control/preflight`,
       headers: { authorization: "Bearer human" }, payload: { overrides: { session: { agentId: "claude" } } } })).statusCode, 400,
       "an existing root's harness cannot be overridden");

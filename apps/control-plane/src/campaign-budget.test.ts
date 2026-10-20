@@ -437,6 +437,103 @@ test("mixed priced and unpriced usage is unavailable rather than zero, even afte
   } finally { h.db.close(); }
 });
 
+test("with no cost ceiling, unpriced usage leaves the campaign running, counting tool calls and admitting work (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable({ version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 2, acceptedFollowUps: 0 }).ok);
+    h.make("worker", "root");
+    // Settled and live unpriced records, through the real event path.
+    h.svc.onSessionEvent("root", { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "unpriced-model" });
+    h.svc.onSessionEvent("worker", liveRequest(100, "unrated-model"));
+    h.svc.onSessionEvent("worker", { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "unpriced-model" });
+    for (const id of ["a", "b", "c"]) h.svc.onSessionEvent("worker", { kind: "tool_call", toolCallId: id, title: "Read", status: "completed" });
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.deepEqual([view.state, view.costAccounting], ["active", "unavailable"], "cost is reported unavailable, never as zero");
+    assert.equal(view.actual.toolCalls, 3, "tool calls keep counting");
+    assert.deepEqual(view.remaining, { costUsd: null, toolCalls: null });
+    assert.equal(h.db.getSession("root")!.status, "running");
+    assert.equal(h.db.getSession("worker")!.status, "running");
+    assert.ok(h.svc.campaignBudgetWorkerPreflight("root", { kind: "managed", sessionId: "worker" }).ok);
+    const child = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5" }, prompt: "Implement authorized #2936" },
+      undefined, undefined, false, false, false, { parentSessionId: "root" });
+    assert.ok(child.ok, child.error ?? "child admission continues without a cost ceiling");
+    // Unpriced final usage settles where no cost ceiling depends on it.
+    h.db.updateSessionStatus("worker", "completed", 7);
+    h.db.campaignBudgets.recordCheckpoint("worker", { generation: h.db.campaignBudgets.dispatch("worker")!.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 0 }));
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active");
+  } finally { h.db.close(); }
+});
+
+test("a deleted unpriced worker leaves the campaign's cost unavailable, its tool calls recorded and the campaign running (#2940)", () => {
+  const unbounded: CampaignBudgetAuthority = { version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 2, acceptedFollowUps: 0 };
+  for (const path of ["service", "storage"] as const) {
+    const h = harness();
+    try {
+      assert.ok(h.enable(unbounded).ok);
+      h.make("worker", "root");
+      h.usage("root", 1);
+      const unpriced: SessionEventPayload = { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "unpriced-model" };
+      if (path === "service") {
+        h.svc.onSessionEvent("worker", unpriced);
+        for (const id of ["a", "b"]) h.svc.onSessionEvent("worker", { kind: "tool_call", toolCallId: id, title: "Read", status: "completed" });
+        assert.equal(h.db.campaignBudgets.view("root")!.costAccounting, "unavailable");
+      } else {
+        // Written straight to storage, so no view runs before the deletion: the marker alone must hold it.
+        h.db.appendEvent("worker", unpriced, 5, { accrueUsage: true });
+        h.tool("worker", "a"); h.tool("worker", "b");
+      }
+      h.db.updateSessionStatus("worker", "completed", 7);
+      h.db.deleteSession("worker");
+      assert.equal(h.db.getSession("worker"), null);
+      const view = h.db.campaignBudgets.view("root")!;
+      assert.deepEqual([view.state, view.costAccounting], ["active", "unavailable"], `${path}: deletion never makes unknown cost read as priced`);
+      assert.equal(view.actual.toolCalls, 2, `${path}: the deleted worker's tool calls stay recorded`);
+    } finally { h.db.close(); }
+  }
+});
+
+test("under a cost ceiling, unpriced usage of a worker deleted before any read still stops protected admission", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 100 })).ok);
+    h.make("worker", "root");
+    h.db.appendEvent("worker", { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "unpriced-model" }, 5, { accrueUsage: true });
+    h.db.updateSessionStatus("worker", "completed", 7);
+    h.db.deleteSession("worker");
+    assert.deepEqual([h.db.campaignBudgets.view("root")!.state, h.db.campaignBudgets.view("root")!.costAccounting], ["accounting_unavailable", "unavailable"]);
+  } finally { h.db.close(); }
+});
+
+test("with only a tool-call ceiling, unpriced usage keeps the campaign running until that ceiling is reached (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable({ version: 1, accounting: "managed_workers_only", unpriced: "stop", toolCalls: 3, concurrency: 2, acceptedFollowUps: 0 }).ok);
+    h.svc.onSessionEvent("root", { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "unpriced-model" });
+    h.svc.onSessionEvent("root", { kind: "tool_call", toolCallId: "a", title: "Read", status: "completed" });
+    assert.deepEqual([h.db.campaignBudgets.view("root")!.state, h.db.campaignBudgets.view("root")!.costAccounting], ["active", "unavailable"]);
+    for (const id of ["b", "c"]) h.svc.onSessionEvent("root", { kind: "tool_call", toolCallId: id, title: "Read", status: "completed" });
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "exhausted", "the tool-call ceiling is still enforced");
+    assert.equal(h.svc.campaignBudgetWorkerPreflight("root", { kind: "managed", sessionId: "root" }).ok, false);
+    const child = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5" }, prompt: "Implement authorized #2936" },
+      undefined, undefined, false, false, false, { parentSessionId: "root" });
+    assert.equal(child.ok, false, "an exhausted ceiling refuses admission");
+  } finally { h.db.close(); }
+});
+
+test("with a cost ceiling, unpriced final usage still stops protected admission and retains the reservation", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 100 })).ok);
+    h.make("worker", "root");
+    h.db.updateSessionStatus("worker", "completed", 7);
+    h.db.appendEvent("worker", { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "unpriced-model" }, 6, { accrueUsage: true });
+    h.db.campaignBudgets.recordCheckpoint("worker", { generation: h.db.campaignBudgets.dispatch("worker")!.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    assert.equal(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 0 }), false);
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "accounting_unavailable");
+  } finally { h.db.close(); }
+});
+
 /** A running Claude turn's completed request, priced live at the fixture's $0.000001 per token. */
 const liveRequest = (inputTokens: number, model = "claude-opus-5-5"): SessionEventPayload =>
   ({ kind: "token_usage", model, inputTokens, outputTokens: 0, pricingContext: { requestInputTokens: inputTokens }, liveUsage: "provisional" });
@@ -717,6 +814,35 @@ test("native service binds authority, assigned scope, canonical PR and server-on
     assert.equal(h.db.userCostTodayUsd(ownerScope.organizationId,h.principal.userId),2,"receipt replay never charges a second time");
     const attemptCost=h.db.campaignWorkLedger.accounting.attemptUsage("root").get(command.lineage!.workItemAttemptId)!;
     assert.equal(attemptCost.costMicrousd,2_000_000);
+  } finally {h.db.close();}
+});
+
+test("with no campaign ceiling, controlled review still reserves each job's own bound and meters its usage",()=>{
+  const h=harness();
+  try {
+    const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
+    const grant:CampaignBudgetAuthority={version:1,accounting:"managed_workers_only",unpriced:"stop",concurrency:2,acceptedFollowUps:0,controlledReview:profile};
+    assert.ok(validCampaignBudgetAuthority(grant),"no cost or tool-call ceiling is a valid controlled-review envelope");
+    assert.equal(validCampaignBudgetAuthority({...grant,concurrency:undefined}),false,"controlled review still needs a concurrency limit");
+    h.metadata.runtime={dataDir:"/runner",worktreeRoot:"/runner/worktrees",maxConcurrentSessions:4,campaignReview:profile};
+    h.db.registerRunner(h.metadata,10,PROTOCOL_VERSION);
+    assert.ok(h.enable(grant).ok);
+    h.make("worker","root");h.db.setWorktreePath("worker","/runner/worktrees/worker");
+    const plan=h.svc.recordCampaignPlan("root",{planComplete:true,items:[{key:"picoduck/wollipog#2936",issue:{repository:"picoduck/wollipog",number:2936}}]});
+    assert.ok(plan.ok,plan.error??"plan refused");
+    const workItemId=plan.data!.items[0]!.workItemId;
+    assert.ok(h.svc.assignCampaignWorkItem("root",{workItemId,childSessionId:"worker"}).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
+    const result=h.svc.requestCampaignReviewJob("root",{requestId:"unbounded",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},
+      baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."});
+    assert.ok(result.ok,result.error??"review refused");
+    assert.deepEqual(h.db.campaignBudgets.allocation(result.data!.jobId),{sessionId:result.data!.jobId,costUsd:5,toolCalls:20},"the job's own bound is reserved");
+    const command=h.db.campaignReviewJobs.command(result.data!.jobId)!;
+    h.svc.onCampaignReviewJobUpdate("r",{type:"campaign_review_job_update",jobId:command.jobId,nonce:command.nonce,state:"completed",costUsd:2,toolCalls:3,attemptValid:true,attemptConsumed:true,vote:"UPVOTE",receiptSha256:"c".repeat(64),report:"UPVOTE"});
+    const view=h.db.campaignBudgets.view("root")!;
+    assert.equal(view.state,"active");
+    assert.deepEqual(view.remaining,{costUsd:null,toolCalls:null});
+    assert.ok(view.actual.costUsd>=2,"the review's usage is metered against the unbounded campaign");
   } finally {h.db.close();}
 });
 

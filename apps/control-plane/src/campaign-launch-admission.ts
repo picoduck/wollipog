@@ -30,8 +30,7 @@ export function parseCampaignLaunchProposal(value: unknown): CampaignLaunchPropo
       typeof p.repository !== "string" || p.repository !== p.repository.trim() ||
       !p.issueAuthority || p.issueAuthority.maxIssues < p.issueNumbers.length ||
       !Array.isArray(p.issueAuthority.epics) || !p.issueAuthority.epics.every((n) => p.issueNumbers.includes(n)) ||
-      !p.budgetAuthority || p.budgetAuthority.costUsd === undefined || p.budgetAuthority.toolCalls === undefined ||
-      p.budgetAuthority.concurrency === undefined || p.budgetAuthority.acceptedFollowUps === undefined ||
+      !p.budgetAuthority || p.budgetAuthority.concurrency === undefined || p.budgetAuthority.acceptedFollowUps === undefined ||
       p.budgetAuthority.concurrency > 64) return null;
   // Reuse the foundation's exact schema validation. This temporary validation value is never
   // persisted, returned as authority, or used as a principal or a consumable grant.
@@ -134,8 +133,9 @@ export interface CampaignLaunchFacts {
   inspection?: CampaignLaunchInspectionResult;
   organizationId: string;
   projectDefaults: ChildSessionDefaults | null;
-  /** `campaignBudgetAccountingError` for the root's driver and model. */
-  accountingError: string | null;
+  /** `campaignBudgetAccountingError` for the root's driver and model; `costProtected` when the
+   * launch has a cost ceiling, which needs priced usage. */
+  accountingError: (costProtected: boolean) => string | null;
   /** The owner's organization enforces a per-user daily limit native review cannot honor. */
   dailyLimit: boolean;
   /** Named policy asks that are unknown, disabled, built in or Human Required. */
@@ -168,9 +168,12 @@ export function campaignLaunchDigest(value: unknown): string {
   return createHash("sha256").update(canonical(value)).digest("hex");
 }
 
-/** Readiness comes from current server and runner facts. `unsupported` blocks the launch with an
- * actionable reason; `human_required` is a disclosed exception that routes that decision class to
- * the Human. No caller field, preset, protocol number alone or fixture can mark a capability verified. */
+/** Readiness comes from current server and runner facts. Only genuine impossibilities are mandatory:
+ * no verifiable repository scope, a provider path that cannot enforce the authority contract, and an
+ * explicit budget ceiling that cannot be enforced. `unsupported` blocks the launch with an actionable
+ * reason; `human_required` is a disclosed exception that routes that decision class to the Human;
+ * `informational` states an infrastructure gap the campaign works around with the best available
+ * path. No caller field, preset, protocol number alone or fixture can mark a capability verified. */
 const blockersBeforeVideo = (capabilities: CampaignLaunchCapability[]) =>
   capabilities.some((item) => item.mandatory && item.state !== "verified");
 
@@ -214,25 +217,39 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   // The envelope is a Human amount: this request's override or the Human's saved Full Control
   // default. Saved per-session limits (root ceilings, Project child-session defaults) are tighter
   // ceilings, never the envelope, and controlled review refuses to run under them.
+  // No ceiling is a first-class state, never a fake large amount: each amount is either the Human's
+  // ceiling or absent, and an absent amount is metered without a limit.
   const overridden = overrides.budget?.costUsd !== undefined || overrides.budget?.toolCalls !== undefined;
   const costUsd = overrides.budget?.costUsd ?? facts.savedBudget?.costUsd;
   const toolCalls = overrides.budget?.toolCalls ?? facts.savedBudget?.toolCalls;
-  const budgetSource = costUsd === undefined || toolCalls === undefined ? "unset" as const
-    : overridden ? "override" as const : "saved_defaults" as const;
+  const ceiling = costUsd !== undefined || toolCalls !== undefined;
+  const budgetSource = !ceiling ? "unset" as const : overridden ? "override" as const : "saved_defaults" as const;
   const relatedFollowUps = overrides.issues?.relatedFollowUps ?? behavior.followUps === "execute_approved";
   const maxIssues = overrides.issues?.maxIssues ?? Math.min(100, Math.max(1, issueNumbers.length + acceptedFollowUps));
   const closureReasons = overrides.issues?.closureReasons ?? ["completed" as const];
   const objective = overrides.objective ?? request.task?.trim() ??
     `Deliver ${repository ?? "the selected repository"} ${issueNumbers.map((n) => `#${n}`).join(", ")}.`;
-  const controlledReview = runner.runtime?.campaignReview;
+  const advertisedReview = runner.runtime?.campaignReview;
+  const reviewOwnerScope = plan.scope.owner.kind === "user";
+  // Review admission refuses any root or worker holding an original per-session ceiling; workers
+  // inherit the Project's child-session defaults as such ceilings.
+  const rootCeiling = (plan.config.costBudgetUsd ?? 0) > 0 || (plan.config.maxToolCalls ?? 0) > 0;
+  const workerCeiling = facts.projectDefaults !== null;
+  const participantCeiling = facts.participantCeiling === true;
+  const reviewPeer = runnerSupportsProtocol(runner.protocolVersion, "campaignBudgetAdmission");
+  // The controlled reviewer enters the boundary only when it can actually run. Otherwise the campaign
+  // uses the regular cross-model review workflow and admits children with their own limits as before.
+  const controlledReview = advertisedReview && reviewPeer && reviewOwnerScope && !facts.dailyLimit &&
+    !rootCeiling && !workerCeiling && !participantCeiling ? advertisedReview : undefined;
   const operations = overrides.operations ?? [...FULL_CONTROL_LAUNCH_OPERATIONS];
   const delegatablePolicyIds = overrides.delegatablePolicyIds ?? [];
 
-  const proposal = repository && costUsd !== undefined && toolCalls !== undefined ? parseCampaignLaunchProposal({
+  const proposal = repository ? parseCampaignLaunchProposal({
     repository, issueNumbers, objective, operations, delegatablePolicyIds,
     issueAuthority: { epics: issueNumbers, relatedFollowUps, maxIssues, closureReasons },
-    budgetAuthority: { version: 1, costUsd, toolCalls, concurrency, acceptedFollowUps,
-      ...(overrides.budget?.checkpointsUsd ? { checkpointsUsd: overrides.budget.checkpointsUsd } : {}),
+    budgetAuthority: { version: 1, ...(costUsd !== undefined ? { costUsd } : {}), ...(toolCalls !== undefined ? { toolCalls } : {}),
+      concurrency, acceptedFollowUps,
+      ...(overrides.budget?.checkpointsUsd?.length ? { checkpointsUsd: overrides.budget.checkpointsUsd } : {}),
       accounting: "managed_workers_only", unpriced: "stop", ...(controlledReview ? { controlledReview } : {}) },
   }) : null;
 
@@ -262,35 +279,42 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
       : facts.invalidPolicyIds.length ? `Named policy asks are unknown, disabled, built in or Human Required: ${facts.invalidPolicyIds.join(", ")}.`
       : `The ${plan.driver} root on runner protocol v${runner.protocolVersion} enforces the Full Control authority contract.`);
 
-  const budgetValid = budgetSource !== "unset" && Boolean(proposal || !repository);
-  add("accounting_budget", "Campaign Accounting and Budget", !facts.accountingError && budgetValid ? "verified" : "unsupported",
-    facts.accountingError ? facts.accountingError
-      : budgetSource === "unset" ? "No campaign budget yet: enter a cost limit and a tool-call limit."
-      : !budgetValid ? "The derived campaign limits are invalid; adjust the budget, concurrency or issue limits."
-      : `Managed workers are metered and priced; the campaign is limited to $${costUsd} and ${toolCalls} tool calls.`);
-
-  const reviewOwnerScope = plan.scope.owner.kind === "user";
-  // Review admission refuses any root or worker holding an original per-session ceiling; workers
-  // inherit the Project's child-session defaults as such ceilings.
-  const rootCeiling = (plan.config.costBudgetUsd ?? 0) > 0 || (plan.config.maxToolCalls ?? 0) > 0;
-  const workerCeiling = facts.projectDefaults !== null;
-  const participantCeiling = facts.participantCeiling === true;
-  add("native_review", "Controlled Cross-Model Review",
-    controlledReview && runnerSupportsProtocol(runner.protocolVersion, "campaignBudgetAdmission") && reviewOwnerScope && !facts.dailyLimit &&
-      !rootCeiling && !workerCeiling && !participantCeiling ? "verified" : "unsupported",
-    !controlledReview ? `This runner does not advertise the controlled native reviewer. It needs executionIsolation.mode "provider" (current: ${runner.runtime?.executionIsolation?.mode ?? "unreported"}), a native claude-code agent whose command is "claude", Claude Code CLI 2.1.296 and python3 on a Linux host; restart the runner after configuring it.`
-      : !runnerSupportsProtocol(runner.protocolVersion, "campaignBudgetAdmission") ? "Controlled review admission needs a protocol-v218 runner; update the runner."
-      : !reviewOwnerScope ? "Controlled review accounting needs a user-owned campaign."
-      : facts.dailyLimit ? "Controlled review cannot honor this organization's per-user daily limit; remove the limit or launch in Custom."
-      : rootCeiling ? "Controlled review cannot run under the root session's own cost or tool-call limit; clear the root limits and rely on the campaign budget."
-      : workerCeiling ? "Controlled review cannot run under the Project's child-session defaults, which every worker inherits as a tighter limit; clear them for this Project and rely on the campaign budget."
-      : participantCeiling ? "Controlled review cannot run under the cost or tool-call limits some of this campaign's sessions already hold; finish those sessions or launch a new campaign."
-      : `Reviews run as ${controlledReview.profile} through agent ${controlledReview.agentId}, charged to this campaign's budget.`);
+  // Only limits the Human set must be enforceable, so only then is this row mandatory: an explicit
+  // ceiling, or derived limits the schema refuses, such as a paused campaign's zero concurrency. With
+  // no ceiling the campaign runs unbounded and this row only says how its usage is metered.
+  const accountingError = facts.accountingError(costUsd !== undefined);
+  // Without a cost ceiling an unpriced model can still launch: tool calls are counted, cost is not.
+  const priced = costUsd !== undefined || !facts.accountingError(true);
+  const limitsInvalid = Boolean(repository) && !proposal;
+  const limitText = [costUsd !== undefined ? `$${costUsd}` : null, toolCalls !== undefined ? `${toolCalls} tool calls` : null]
+    .filter(Boolean).join(" and ");
+  const metering = priced ? "Managed workers are metered and priced"
+    : "Managed workers' tool calls are counted, but this model's cost is not priced";
+  // Checkpoints are amounts within a cost ceiling, so without one they are refused, never dropped.
+  const checkpointsWithoutCost = Boolean(overrides.budget?.checkpointsUsd?.length) && costUsd === undefined;
+  const accounting: [CampaignLaunchCapability["state"], string] =
+    limitsInvalid && checkpointsWithoutCost ? ["unsupported", "Cost checkpoints need a cost limit; enter one or remove the checkpoints."]
+    : limitsInvalid ? ["unsupported", "The derived campaign limits are invalid; adjust the budget, concurrency or issue limits."]
+    : accountingError ? ceiling ? ["unsupported", accountingError] : ["informational", `No limit. ${accountingError}`]
+    : ceiling ? ["verified", `${metering}; the campaign is limited to ${limitText}.`]
+    : [priced ? "verified" : "informational", `No limit. ${metering}, and Campaign Status shows the campaign's usage.`];
+  add("accounting_budget", "Campaign Accounting and Budget", ...accounting, ceiling || limitsInvalid);
 
   const isolation = runner.runtime?.executionIsolation;
-  add("execution_isolation", "Execution Isolation", isolation ? "verified" : "unsupported", isolation
+  const regular = "; the campaign uses the regular cross-model review workflow.";
+  add("native_review", "Controlled Cross-Model Review", controlledReview ? "verified" : "informational",
+    controlledReview ? `Reviews run as ${controlledReview.profile} through agent ${controlledReview.agentId}, charged to this campaign.`
+      : !advertisedReview ? `This runner does not offer the controlled reviewer, which needs provider isolation (current: ${isolation?.mode ?? "unreported"}), Claude Code CLI 2.1.296 and python3 on Linux${regular}`
+      : !reviewPeer ? `Controlled review needs a protocol-v218 runner${regular}`
+      : !reviewOwnerScope ? `Controlled review accounting needs a user-owned campaign${regular}`
+      : facts.dailyLimit ? `Controlled review cannot honor this organization's per-user daily limit${regular}`
+      : rootCeiling ? `Controlled review cannot run under the root session's own cost or tool-call limit${regular}`
+      : workerCeiling ? `Controlled review cannot run under the Project's child-session defaults, which every worker inherits${regular}`
+      : `Controlled review cannot run under the limits some of this campaign's sessions already hold${regular}`, false);
+
+  add("execution_isolation", "Execution Isolation", isolation ? "verified" : "informational", isolation
     ? `The runner enforces ${isolation.mode} isolation with network ${isolation.network}${plan.policy.execution.strictProjectIsolation ? "; Strict Project Isolation is on" : ""}.`
-    : "The runner does not report the execution isolation it enforces; update the runner.");
+    : "The runner does not report the execution isolation it enforces.", false);
 
   const imageReviewer = { driver: plan.driver, model: plan.config.model ?? null };
   const imageDelegated = operations.includes("ui_evidence_approval") && facts.imageReview.effectiveOwner === "orchestrator";
@@ -318,6 +342,9 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
       completion: behavior.completion },
     budget: { costUsd: costUsd ?? null, toolCalls: toolCalls ?? null, concurrency, acceptedFollowUps, source: budgetSource,
       reviewIncluded: Boolean(controlledReview) },
+    review: { controlled: Boolean(controlledReview), statement: controlledReview
+      ? "Controlled cross-model review, charged to this campaign."
+      : "The regular cross-model review workflow, because controlled review is unavailable." },
     followUps: { policy: behavior.followUps, relatedFollowUps, maxIssues, closureReasons },
     evidence: {
       statement: video.state === "verified"

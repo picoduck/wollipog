@@ -253,23 +253,28 @@ test("a descendant displays the current root mode after revoke and does not trea
   assert.match(legacy.dialog().textContent ?? "", /Effective Mode: Current Root State Not Reported/);
 });
 
-/** A server preflight in the shape the enable route returns; only readiness differs between states. */
-function enablePreflight(ready: boolean): CampaignLaunchPreflight {
+/** A server preflight in the shape the enable route returns. Not ready means a true blocker; `budget`
+ * is the ceiling the server derived, none by default. */
+function enablePreflight(ready: boolean, budget: { costUsd: number; toolCalls: number } | null = ready ? { costUsd: 30, toolCalls: 300 } : null): CampaignLaunchPreflight {
   const verified = (id: CampaignLaunchPreflight["capabilities"][number]["id"], capability: string) => ({ id, capability, state: "verified" as const, mandatory: true, reason: `${capability} is verified.` });
   return { ready, digest: (ready ? "b" : "a").repeat(64), inspectionCancellation: "supported",
     summary: { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
       root: { agentId: "claude", driver: "claude-code", model: "claude-opus-5-5", effort: null, isolation: { mode: "provider", network: "inherit" },
         strictProjectIsolation: false, integrationIsolation: false, completion: "retain" },
-      budget: { costUsd: ready ? 30 : null, toolCalls: ready ? 300 : null, concurrency: 4, acceptedFollowUps: 0, source: ready ? "override" : "unset", reviewIncluded: true },
+      budget: { costUsd: budget?.costUsd ?? null, toolCalls: budget?.toolCalls ?? null, concurrency: 4, acceptedFollowUps: 0, source: budget ? "override" : "unset", reviewIncluded: false },
+      review: { controlled: false, statement: "The regular cross-model review workflow, because controlled review is unavailable." },
       followUps: { policy: "recommend_only", relatedFollowUps: false, maxIssues: 1, closureReasons: ["completed"] },
       evidence: { statement: "The Orchestrator reviews screenshots. Video and external evidence need your review.",
         destination: { kind: "private_session_artifacts", configurationId: "session_artifacts:org", disclosureRevision: 1 }, provider: null, envelope: false },
       humanRequired: [{ exception: "Secrets and Sign-In", reason: "Always decided by the Human under Full Control." }],
-      blockers: ready ? [] : [{ capability: "Campaign Accounting and Budget", reason: "No campaign budget yet: enter a cost limit and a tool-call limit." }] },
-    capabilities: [verified("repository_scope", "Repository and Issue Scope"), verified("authority_contract", "Full Control Authority"),
-      ready ? verified("accounting_budget", "Campaign Accounting and Budget")
-        : { id: "accounting_budget", capability: "Campaign Accounting and Budget", state: "unsupported", mandatory: true, reason: "No campaign budget yet: enter a cost limit and a tool-call limit." },
-      verified("native_review", "Controlled Cross-Model Review"), verified("execution_isolation", "Execution Isolation")],
+      blockers: ready ? [] : [{ capability: "Full Control Authority", reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." }] },
+    capabilities: [verified("repository_scope", "Repository and Issue Scope"),
+      ready ? verified("authority_contract", "Full Control Authority")
+        : { id: "authority_contract", capability: "Full Control Authority", state: "unsupported", mandatory: true, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." },
+      { ...verified("accounting_budget", "Campaign Accounting and Budget"), mandatory: budget !== null },
+      { id: "native_review", capability: "Controlled Cross-Model Review", state: "informational", mandatory: false,
+        reason: "This runner does not offer the controlled reviewer; the campaign uses the regular cross-model review workflow." },
+      { ...verified("execution_isolation", "Execution Isolation"), mandatory: false }],
     advanced: { proposal: null, plan: {} as never, humanRequiredRequests: [] } };
 }
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
@@ -278,23 +283,44 @@ const settings = (campaignBudget?: { costUsd: number; toolCalls: number }) => as
   defaults: { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), ...(campaignBudget ? { campaignBudget } : {}) },
   source: "user_default" as const, capabilities: {} as never, controlModeSupported: true });
 
-test("choosing Full Control on a live campaign checks readiness at once and asks only for a missing budget", async () => {
+test("choosing Full Control on a live campaign enables in one action with no limit; gaps are rows, not warnings", async () => {
   const preflights: unknown[] = [];
   const enables: unknown[] = [];
   const harness = await open(orchestrator(), {
     orchestratorSettings: settings(),
-    fullControlEnablePreflight: async (id, body) => { preflights.push([id, body]); return { preflight: enablePreflight(false), expectedRevision: 2 }; },
+    fullControlEnablePreflight: async (id, body) => { preflights.push([id, body]); return { preflight: enablePreflight(true, null), expectedRevision: 2 }; },
     enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
   });
   const dialog = harness.dialog();
   await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
   await settle();
   assert.deepEqual(preflights, [["orch", {}]], "readiness is checked as soon as Full Control is chosen");
+  assert.match(dialog.textContent ?? "", /Ready to Enable/);
+  assert.match(dialog.textContent ?? "", /BudgetNo Limit · 4 at a time/);
+  assert.match(dialog.textContent ?? "", /ReviewThe regular cross-model review workflow, because controlled review is unavailable\./);
+  assertNoDomNode(dialog.querySelector('section[aria-label="Enable Full Control"] .notice.t-warning'),
+    "an unavailable reviewer is never a warning");
+  assert.equal([...dialog.querySelectorAll("label span")].some((node) => node.textContent === "Cost Limit (USD)" && !node.closest("details")), false,
+    "no limit is asked for outside Advanced");
+  assert.doesNotMatch(dialog.textContent ?? "", /Save Limits as Default/, "no default is offered until both limits are entered");
+  const enable = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Enable Full Control")!;
+  assert.equal(enable.disabled, false);
+  await act(async () => enable.click());
+  assert.deepEqual(enables, [["orch", { expectedRevision: 2, preflightDigest: "b".repeat(64) }]]);
+});
+
+test("a true blocker on a live campaign keeps Enable disabled and says why", async () => {
+  const enables: unknown[] = [];
+  const harness = await open(orchestrator(), {
+    orchestratorSettings: settings(),
+    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(false), expectedRevision: 2 }),
+    enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
+  });
+  const dialog = harness.dialog();
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  await settle();
   assert.match(dialog.textContent ?? "", /Can't Enable Yet/);
-  assert.match(dialog.textContent ?? "", /No campaign budget yet: enter a cost limit and a tool-call limit\./);
-  const labels = [...dialog.querySelectorAll("label span")].map((node) => node.textContent);
-  assert.ok(labels.includes("Cost Limit (USD)") && labels.includes("Tool Call Limit"), "the missing budget is entered right in the summary");
-  assert.match(dialog.textContent ?? "", /Save as Default/);
+  assert.match(dialog.textContent ?? "", /cannot enforce the Full Control authority contract/);
   const enable = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Enable Full Control")!;
   assert.equal(enable.disabled, true);
   await act(async () => enable.click());

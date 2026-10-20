@@ -35,7 +35,7 @@ function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean,
       ? { campaignScope: { repository: "example/full-control-fixture", issueNumbers: [12], authorizedByCaller: true } }
       : { inspection: { type: "campaign_launch_inspection_result" as const, requestId: "fixture", workspaceId: launch.workspaceId, ok: true,
         repository: "example/full-control-fixture", issueNumbers, digest: "d".repeat(64) } }),
-    accountingError: null, dailyLimit: false, invalidPolicyIds: [], imageReview: { effectiveOwner: "orchestrator" },
+    accountingError: () => null, dailyLimit: false, invalidPolicyIds: [], imageReview: { effectiveOwner: "orchestrator" },
     pacedVideoPeer: false, disclosuresAvailable: true, savedBudget: null }).preflight;
 }
 
@@ -144,31 +144,44 @@ for (const viewport of viewports) {
         policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click());
       await expect(page.locator(".orchestrator-policy-summary")).toContainText("Full Control");
       const control = page.locator(".orchestrator-policy-summary");
-      await expect(page.getByText("Can't Start Yet", { exact: true })).toBeVisible();
-      await expect(page.getByText(/This runner does not advertise the controlled native reviewer\. It needs executionIsolation\.mode "provider" \(current: bwrap\)/).first()).toBeVisible();
-      await expect(page.getByText("No campaign budget yet: enter a cost limit and a tool-call limit.").first()).toBeVisible();
+      // Without the controlled reviewer and with no budget, nothing blocks or warns: the summary says
+      // which review the campaign uses and that it has no limit, and only the task is still needed.
+      const ready = page.getByText("Ready to Authorize and Start", { exact: true });
+      await expect(page.getByText("Describe the task or enter issue numbers to start.", { exact: true })).toBeVisible();
+      await expect(page.getByText("Can't Start Yet", { exact: true })).toHaveCount(0);
+      await expect(page.locator("section[aria-label='Full Control Launch'] .notice.t-warning")).toHaveCount(0);
+      await expect(page.getByText("The regular cross-model review workflow, because controlled review is unavailable.", { exact: true })).toBeVisible();
+      await expect(page.getByText(/^No Limit · 4 at a time$/)).toBeVisible();
+      await expect(page.getByText("The runner enforces bwrap isolation with network deny.", { exact: true })).toBeVisible();
       const start = page.getByRole("button", { name: "Authorize and Start", exact: true });
       await expect(start).toBeDisabled();
       await expect(page.getByRole("button", { name: "Create Session", exact: true })).toHaveCount(0);
-      await shoot(page, control, `${prefix}-blocked.png`);
+      await shoot(page, control, `${prefix}-regular-review.png`);
 
-      // The operator configures provider isolation and the reviewer; the person adds a task and budget.
+      // The operator configures provider isolation and the reviewer; the person adds only a task.
       runnerReady = true;
       await page.getByLabel("Task", { exact: true }).fill("Review the source fixture");
       await page.getByLabel("Issue Numbers", { exact: true }).fill("12");
-      await page.getByLabel("Cost Limit (USD)", { exact: true }).first().fill("20");
-      await page.getByLabel("Tool Call Limit", { exact: true }).first().fill("200");
-      const ready = page.getByText("Ready to Authorize and Start", { exact: true });
       await expect(ready).toBeVisible();
+      await expect(page.getByText("Controlled cross-model review, charged to this campaign.", { exact: true })).toBeVisible();
       await expect(page.getByText("example/full-control-fixture · #12", { exact: true })).toBeVisible();
+      await expect(page.getByText(/^No Limit · 4 at a time$/)).toBeVisible();
       await expect(page.getByText(/Wollipog does not configure zero retention/)).toBeVisible();
       await expect(start).toBeEnabled();
       await shoot(page, ready, `${prefix}-ready.png`);
 
+      // An optional ceiling lives under Advanced.
       const advanced = page.locator("summary").filter({ hasText: "Advanced" });
       await advanced.click();
       await expect(page.getByText("Campaign Limits", { exact: true })).toBeVisible();
       await expect(page.getByText(/Controlled Cross-Model Review \(Verified\)/)).toBeVisible();
+      await expect(page.getByLabel("Cost Limit (USD)", { exact: true })).toHaveAttribute("placeholder", "No Limit");
+      await page.getByLabel("Cost Limit (USD)", { exact: true }).fill("20");
+      await page.getByLabel("Tool Call Limit", { exact: true }).fill("200");
+      const saveDefault = page.getByRole("switch", { name: "Save Limits as Default", exact: true });
+      await expect(saveDefault).toHaveAttribute("aria-checked", "false");
+      await saveDefault.click();
+      await expect(page.getByText(/^\$20 · 200 tool calls · 4 at a time$/)).toBeVisible();
       await shoot(page, advanced, `${prefix}-advanced.png`);
       await expectUnreadableLimitsBlock(page, start, LIMITS);
       // One concurrency control: Behavior's Maximum Concurrent Children is the campaign's concurrency,
@@ -255,24 +268,24 @@ for (const viewport of viewports) {
       const heading = page.getByRole("heading", { name: "Orchestrator Control", exact: true });
       await expect(page.getByText(/Effective Mode: Custom/)).toBeVisible();
       await page.getByRole("radio", { name: "Full Control", exact: true }).click();
-      await expect(page.getByText("Can't Enable Yet", { exact: true })).toBeVisible();
+      // No budget is needed: the campaign is ready at once with no limit.
+      const ready = page.getByText("Ready to Enable", { exact: true });
+      await expect(ready).toBeVisible();
+      await expect(page.getByText("Can't Enable Yet", { exact: true })).toHaveCount(0);
       const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
-      await expect(enable).toBeDisabled();
       // The action sits in the footer beside Done, in view without scrolling past the summary.
       const footer = page.locator(".modal-foot");
       await expect(footer.getByRole("button")).toHaveText(["Done", "Enable Full Control"]);
-      await expect(enable).toBeInViewport();
-      await shoot(page, heading, `${prefix}-enable-blocked.png`);
-      await page.getByLabel("Cost Limit (USD)", { exact: true }).first().fill("30");
-      await page.getByLabel("Tool Call Limit", { exact: true }).first().fill("300");
-      const ready = page.getByText("Ready to Enable", { exact: true });
-      await expect(ready).toBeVisible();
       await expect(page.getByText("example/full-control-fixture · #12", { exact: true })).toBeVisible();
+      await expect(page.getByText(/^No Limit · 3 at a time$/)).toBeVisible();
       await expect(enable).toBeEnabled();
       await expect(enable).toBeInViewport();
       await shoot(page, ready, `${prefix}-enable-ready.png`);
       const advanced = page.locator("summary").filter({ hasText: "Advanced" });
       await advanced.click();
+      await page.getByLabel("Cost Limit (USD)", { exact: true }).fill("30");
+      await page.getByLabel("Tool Call Limit", { exact: true }).fill("300");
+      await expect(page.getByText(/^\$30 · 300 tool calls · 3 at a time$/)).toBeVisible();
       await expectUnreadableLimitsBlock(page, enable, LIMITS);
       await expect(enable).toBeInViewport();
       // One concurrency: the campaign's Maximum Concurrent Children, stated read-only, never a second entry.
@@ -306,8 +319,6 @@ for (const viewport of viewports) {
       await page.getByRole("button", { name: "Attach and Settings" }).click();
       await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
       await page.getByRole("radio", { name: "Full Control", exact: true }).click();
-      await page.getByLabel("Cost Limit (USD)", { exact: true }).first().fill("30");
-      await page.getByLabel("Tool Call Limit", { exact: true }).first().fill("300");
       await expect(page.getByText("Can't Enable Yet", { exact: true })).toBeVisible();
       const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
       await expect(enable).toBeDisabled();
@@ -412,8 +423,6 @@ test.describe("limit entry lifecycle", () => {
     // L1: empty entries are the derived values.
     await expect(children).toHaveValue("");
     await page.getByLabel("Task", { exact: true }).fill("Review the source fixture");
-    await page.getByLabel("Cost Limit (USD)", { exact: true }).first().fill("20");
-    await page.getByLabel("Tool Call Limit", { exact: true }).first().fill("200");
     await expect(start).toBeEnabled();
     const advanced = page.locator("summary").filter({ hasText: "Advanced" });
     await advanced.click();
@@ -472,12 +481,12 @@ test.describe("limit entry lifecycle", () => {
     await open();
     const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
     // L1 and L3: amounts typed before the saved default arrives stay this campaign's override.
-    await page.getByLabel("Cost Limit (USD)", { exact: true }).first().fill("30");
-    await page.getByLabel("Tool Call Limit", { exact: true }).first().fill("300");
-    await expect(enable).toBeEnabled();
-    answerSettings();
     const advanced = page.locator("summary").filter({ hasText: "Advanced" });
     await advanced.click();
+    await page.getByLabel("Cost Limit (USD)", { exact: true }).fill("30");
+    await page.getByLabel("Tool Call Limit", { exact: true }).fill("300");
+    await expect(enable).toBeEnabled();
+    answerSettings();
     await expect(page.locator("details").getByLabel("Cost Limit (USD)", { exact: true })).toHaveValue("30");
     await expect(page.getByText(/\$30 · 300 tool calls/)).toBeVisible();
     await expect(page.getByText(/Saved Default/)).toHaveCount(0);
