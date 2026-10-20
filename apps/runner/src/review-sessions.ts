@@ -36,7 +36,7 @@ import {
   type PullRequestFacts, type ReviewExec, type ReviewSnapshotter,
 } from "./review-snapshot.js";
 import {
-  discoverReviewTools, reviewerInterpreter, sessionWritableRoots, trustedPath, type ReviewTools,
+  discoverReviewTools, reviewerInterpreter, sessionWritableRoots, trustedPath, type ReviewTools, type CodexReviewerProtection,
 } from "./review-trust.js";
 import type { SessionStore } from "./session-store.js";
 
@@ -82,6 +82,7 @@ export function defaultReviewSessionDependencies(
   sessionWritablePaths: () => readonly string[] = () => [],
   agents: () => readonly AgentDefinition[] = () => [],
   agentPath: ReviewSessionDependencies["agentPath"] = () => process.env.PATH,
+  codexProtection: () => CodexReviewerProtection | undefined = () => undefined,
 ): ReviewSessionDependencies {
   const uid = process.getuid?.() ?? -1;
   const extraRoots = () => [
@@ -115,7 +116,7 @@ export function defaultReviewSessionDependencies(
     },
     tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots() }),
     verifyCommand: (command, pathEnv = process.env.PATH) =>
-      void verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid),
+      void verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid, undefined, codexProtection()),
     agents,
     agentPath,
     log,
@@ -127,7 +128,8 @@ export function defaultReviewSessionDependencies(
  * `trustedPath`, and so must the interpreter its script names. An untrusted earlier PATH entry is
  * a refusal, not something to skip: it is exactly what would run.
  */
-export function verifySpawnedCommand(command: string, pathEnv: string | undefined, roots: readonly string[], uid: number, rootUid?: number): string {
+export function verifySpawnedCommand(command: string, pathEnv: string | undefined, roots: readonly string[], uid: number,
+  rootUid?: number, codex?: CodexReviewerProtection): string {
   let candidate: string | undefined;
   if (isAbsolute(command)) {
     candidate = command;
@@ -144,7 +146,7 @@ export function verifySpawnedCommand(command: string, pathEnv: string | undefine
     }
   }
   if (!candidate) throw new Error(`${command} is not installed`);
-  const resolved = trustedPath(candidate, roots, uid, rootUid);
+  const resolved = trustedPath(candidate, roots, uid, rootUid, codex);
   const interpreter = reviewerInterpreter(resolved, pathEnv, roots, uid, rootUid);
   // An `env <program>` interpreter is found on PATH at spawn too: its first match must be trusted.
   if (interpreter) verifySpawnedCommand(interpreter.name, pathEnv, roots, uid, rootUid);

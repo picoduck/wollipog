@@ -164,6 +164,8 @@ export interface IsolationStateOptions {
    * must stay read-only to the provider. Sandbox modes that can express a per-path rule apply it;
    * the modes that cannot are documented as unenforcing rather than silently assumed safe. */
   readOnlyPaths?: string[];
+  /** All configured Codex homes, including homes used by other harnesses. */
+  codexHomes?: readonly string[];
   /** The runner's hook state directory, hidden from the provider and everything it spawns, and
    * the few entries inside it the provider must still read (#1336). Native bwrap and Seatbelt
    * express it; every other mode is documented as not enforcing it. */
@@ -227,6 +229,24 @@ function providerCredentialRoot(state: IsolationStateOptions, inherited: NodeJS.
   }
   if (state.driver === "pi") return posix.join(home, ".pi", "agent");
   return null;
+}
+
+/** Protect installer state independently of the current harness. A link at packages itself is
+ * refused: binding its target would leave the link replaceable in the writable home. */
+async function codexPackageDirectories(state: IsolationStateOptions, runtime: IsolationDeps): Promise<string[]> {
+  const inherited = runtime.nativeEnvironment();
+  const homes = new Set([
+    posix.join(state.env.HOME ?? runtime.nativeHome(), ".codex"),
+    state.env.CODEX_HOME, inherited.CODEX_HOME, ...(state.codexHomes ?? []),
+  ].filter((home): home is string => Boolean(home)));
+  const paths = new Set<string>();
+  for (const home of homes) {
+    const path = posix.join(absoluteHome(home, "Codex home"), "packages");
+    if (!await runtime.existsNative(path)) continue;
+    if (!await runtime.isExposableEntryNative(path)) throw new Error(`Codex packages must be a real directory: ${path}`);
+    paths.add(await runtime.realpathNative(path));
+  }
+  return [...paths];
 }
 
 /** Common build caches whose writes previously worked in provider mode. Each is a directory below
@@ -842,6 +862,9 @@ export async function resolveExecutionIsolation(
       runtime.isRunnerOwnedEntryNative,
       runtime.realpathNative,
     );
+    for (const path of await codexPackageDirectories(state, runtime)) {
+      if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
+    }
     const guardStateMask = await resolveGuardStateMask(state.guardStateMask, runtime);
     return {
       backend: "seatbelt",
@@ -969,6 +992,9 @@ export async function resolveExecutionIsolation(
   // Resolved after the writable binds are materialized: the entries live inside those roots, and
   // the launcher renders them last so the narrower read-only rule wins over the containing mount.
   const readOnlyBinds = await bwrapReadOnlyBinds(state?.readOnlyPaths, runtime.isRunnerOwnedEntryNative);
+  if (state) for (const path of await codexPackageDirectories(state, runtime)) {
+    if (!readOnlyBinds.includes(path)) readOnlyBinds.push(path);
+  }
   if (state?.protectedWorktree?.requiredReadOnlyPaths.some((path) => !readOnlyBinds.includes(path))) {
     throw new Error("managed worktree Git registration changed before bubblewrap isolation");
   }

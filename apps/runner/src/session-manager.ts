@@ -685,6 +685,8 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
+  /** Immutable package-denial snapshot from this exact native provider launch. */
+  codexPackageReadOnlyPaths?: readonly string[];
   orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control">;
   projectMemoryKey?: string;
   projectMemoryFailureKey?: string;
@@ -1687,7 +1689,7 @@ export class SessionManager {
     private readonly resolveAcpContext?: AcpContextResolver,
     private readonly admissionPolicy: RunnerAdmissionPolicy = { agentLimits: {}, agentWeights: {} },
     private readonly executionIsolation: RunnerExecutionIsolation = { mode: "provider", network: "inherit" },
-    private readonly resolveIsolation: typeof resolveExecutionIsolation = resolveExecutionIsolation,
+    private readonly resolveIsolationBoundary: typeof resolveExecutionIsolation = resolveExecutionIsolation,
     private readonly cloneIsolationState: typeof cloneExecutionIsolationState = cloneExecutionIsolationState,
     private readonly removeIsolationState: typeof removeExecutionIsolationState = removeExecutionIsolationState,
     private readonly migrateIsolationState: typeof migrateExecutionIsolationState = migrateExecutionIsolationState,
@@ -1984,6 +1986,40 @@ export class SessionManager {
 
   setReviewSessions(hooks: ReviewSessionHooks): void {
     this.reviewSessions = hooks;
+  }
+
+  private codexHomes: () => readonly string[] = () => [];
+
+  setCodexHomes(read: () => readonly string[]): void {
+    this.codexHomes = read;
+  }
+
+  private resolveIsolation(...[policy, context, deps, state]: Parameters<typeof resolveExecutionIsolation>) {
+    const homes = this.codexHomes();
+    return this.resolveIsolationBoundary(policy, context, deps, state && homes.length
+      ? { ...state, codexHomes: homes } : state);
+  }
+
+  /** A configuration promise is insufficient for an already-running provider. Check its exact
+   * launch snapshot, including every harness, and refuse while a launch/retirement is uncertain.
+   * This is admission-time evidence, not a lock on future launches. An unisolated agent already
+   * has host-user write access, including to the runner itself; starting one mid-review adds no
+   * capability. Agent TUIs are checked separately; human terminals are the operator boundary. */
+  codexReviewerProtection(home = homedir()): import("./review-trust.js").CodexReviewerProtection {
+    const packages = join(home, ".codex", "packages");
+    let canonical: string;
+    try { canonical = realpathSync(packages); } catch { return { home, refusal: "Codex packages cannot be resolved" }; }
+    for (const meta of this.store.listSessions()) {
+      if (meta.context.kind !== "native" || meta.review) continue;
+      const live = this.active.get(meta.sessionId);
+      if (this.closing.has(meta.sessionId) ||
+          (live && !live.codexPackageReadOnlyPaths?.includes(canonical)) ||
+          (!live && (["starting", "running", "input_required"].includes(meta.status) ||
+            this.store.readWorktreeLease(meta.sessionId) !== null))) {
+        return { home, refusal: `Codex packages are unprotected from session ${meta.sessionId}` };
+      }
+    }
+    return { home };
   }
 
   private isReviewSession(sessionId: string): boolean {
@@ -8966,6 +9002,8 @@ export class SessionManager {
       worktreeLeaseOwner,
       context: meta.context,
       ...(isolation?.backend === "seatbelt" ? { seatbeltWritableRoots: [...isolation.writableRoots] } : {}),
+      ...(isolation?.backend === "bwrap" ? { codexPackageReadOnlyPaths: [...(isolation.readOnlyBinds ?? [])] } :
+        isolation?.backend === "seatbelt" ? { codexPackageReadOnlyPaths: [...(isolation.readOnlyPaths ?? [])] } : {}),
       ...(boundOwnedWorktrees.length ? { boundOwnedWorktrees } : {}),
       status: "starting",
       providerReady: false,

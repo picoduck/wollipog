@@ -109,6 +109,20 @@ test("discovery reports an unsupported controller contract instead of using it",
   assert.match(install?.capability.unavailable?.controller ?? "", /unsupported contract/);
 });
 
+test("bridge discovery admits a protected standalone Codex reviewer and names an unprotected session", posixOnly, (t) => {
+  const f = fakeHome(t);
+  const bin = join(f.home, ".codex", "packages", "standalone", "version", "bin");
+  mkdirSync(bin, { recursive: true });
+  const binary = executable(join(bin, "codex"));
+  const env = { home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv: `${f.bin}:${bin}`, temporaryRoots };
+  assert.equal(discoverSessionReviewInstallation(env)?.reviewers.codex, undefined);
+  assert.equal(discoverSessionReviewInstallation({ ...env, codexProtection: { home: f.home } })?.reviewers.codex, binary);
+  const refused = discoverSessionReviewInstallation({ ...env,
+    codexProtection: { home: f.home, refusal: "Codex packages are unprotected from session s_tui (Agent TUI)" } });
+  assert.equal(refused?.reviewers.codex, undefined);
+  assert.match(refused?.capability.unavailable?.codex ?? "", /session s_tui/);
+});
+
 test("discovery never finds the controller through a provider home's skills directory", posixOnly, (t) => {
   const f = fakeHome(t);
   mkdirSync(f.dataDir);
@@ -441,7 +455,7 @@ test("the runner advertises session review on Linux only and wires its commands 
   assert.match(index, /new SessionReviewJobs\(resolve\(config\.dataDir, "session-review-jobs"\), store, sendUp,\s+sessionReviewDependencies, undefined, reviewSnapshots\);/u);
   assert.match(index, /const sessionWritablePaths = \(\) => configuredSessionWritablePaths\(\{\s+workspaces: config\.workspaces, providerAccounts: config\.providerAccounts, agents: config\.agents,\s+sessions: store\.listSessions\(\), hostEnv: process\.env,/u,
     "discovery treats every configured and persisted provider home as session-writable");
-  assert.match(index, /defaultSessionReviewDependencies\(config\.dataDir, log, sessionWritablePaths\)/u);
+  assert.match(index, /defaultSessionReviewDependencies\(config\.dataDir, log, sessionWritablePaths, codexProtection\)/u);
   assert.match(index, /defaultReviewSessionDependencies\(config\.dataDir, log, sessionWritablePaths, agentsForControlPlane,/u,
     "review sessions trust their reviewer CLI against the same session-writable roots");
   assert.match(index, /case "session_review_job":\s+runCommandTask\("session_review_job", sessionReviewJobs\.dispatch\(msg\)\);/u);

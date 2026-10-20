@@ -183,10 +183,17 @@ export function shellProcessTreeProof(child: AgentProcess | WindowsConptyProcess
 
 export class ShellManager {
   private readonly shells = new Map<string, LiveShell>();
+  /** Agent TUIs have no runner filesystem boundary. Retain uncertain descendants even after
+   * their terminal tab is forgotten; only a complete process-tree exit proof removes a writer. */
+  private readonly unprotectedAgentTuis = new Map<string, string>();
   /** Set by runner shutdown; ended callbacks are not reported after it. */
   private disposed = false;
 
   constructor(private readonly cb: ShellCallbacks) {}
+
+  unprotectedAgentTuiSessions(): string[] {
+    return [...new Set(this.unprotectedAgentTuis.values())];
+  }
 
   count(sessionId: string): number {
     let n = 0;
@@ -283,6 +290,7 @@ export class ShellManager {
       forgetAfterExit: false,
     };
     this.shells.set(shellId, live);
+    if (live.kind === "agent_tui") this.unprotectedAgentTuis.set(shellId, sessionId);
 
     // Stream chunks split on BYTE boundaries, not character boundaries — decoding each chunk
     // independently would corrupt any multibyte character straddling two chunks. A StringDecoder
@@ -328,12 +336,13 @@ export class ShellManager {
     let endReported = false;
     const reportEnded = () => {
       const onEnded = meta?.onEnded;
-      if (!onEnded || endReported || this.disposed) return;
+      if ((!onEnded && live.kind !== "agent_tui") || endReported || this.disposed) return;
       endReported = true;
       void shellProcessTreeProof(child).then((proven) => {
         if (this.disposed) return;
+        if (proven) this.unprotectedAgentTuis.delete(shellId);
         try {
-          onEnded(proven);
+          onEnded?.(proven);
         } catch {
           /* the observer owns its own failures; a shell exit must never crash the runner */
         }

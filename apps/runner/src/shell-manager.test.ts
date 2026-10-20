@@ -153,6 +153,7 @@ test("close kills the shell and the map entry; per-session cap enforced", async 
   assert.throws(() => mgr.open("over", "sess", tmpdir(), NATIVE), /already has/);
   assert.throws(() => mgr.open("c0", "other", tmpdir(), NATIVE), /already exists/);
   mgr.open("other1", "other-session", tmpdir(), NATIVE); // cap is per session
+  assert.deepEqual(mgr.unprotectedAgentTuiSessions(), [], "human-operated terminals are the operator boundary");
 
   mgr.close("c0");
   await waitFor(() => exits.some((e) => e.shellId === "c0"));
@@ -239,6 +240,8 @@ test("an agent TUI reports its process-tree proof exactly once when it ends, how
     open("natural", "process.exit(0)");
     open("closed", "setInterval(() => {}, 1000)");
     open("session", "setInterval(() => {}, 1000)");
+    assert.deepEqual(new Set(mgr.unprotectedAgentTuiSessions()),
+      new Set(["session-natural", "session-closed", "session-session"]));
     await waitFor(() => ended.get("natural")!.length === 1);
     mgr.close("closed");
     mgr.closeForSession("session-session", "agent_tui");
@@ -249,6 +252,7 @@ test("an agent TUI reports its process-tree proof exactly once when it ends, how
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.deepEqual(Object.fromEntries(ended), { natural: [true], closed: [true], session: [true] },
       "a spawned TUI's ownerless boundary proves its tree gone, and each ending is reported once");
+    assert.deepEqual(mgr.unprotectedAgentTuiSessions(), []);
   } finally {
     mgr.dispose();
   }

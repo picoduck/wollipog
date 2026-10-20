@@ -99,6 +99,20 @@ CLI tolerating read-only auxiliary files such as Claude's root project index/tod
 deterministic mount tests do not claim that live parity. Provider-mode history is not copied into the
 isolated store, so switching an existing session may be non-resumable.
 
+Native bwrap and Seatbelt launches also protect `packages/` beneath configured Codex homes,
+including a writable credential home preserved by a managed worktree. Linux overlays the directory
+read-only after writable mounts; macOS denies writes after its writable-root rules. Credentials
+and transcripts keep their existing write permissions. Package updates must run outside these agent
+boundaries. A real Codex App smoke test exercises a failed installer write followed by two local
+mock-inference turns; a separate bwrap test verifies the mount when user namespaces are available.
+
+Reviewer admission can accept the conventional `~/.codex/packages/standalone` install only with
+package protection proven for every live agent writer. Each structured launch supplies an immutable
+denial snapshot; an unprotected session or Agent TUI is named in the refusal. Human-operated
+terminals remain the operator boundary. This is an admission-time check: it does not block future
+unisolated agent launches during a review. Those agents already have host-user write access,
+including to the runner itself. All other writable-root and executable-ownership checks still apply.
+
 Repository checkpoints use the same stable owner identity under
 `refs/{wollipog,mam}/owners/<ownerHash>/<sessionId>`. A durable layout discriminator and cleanup-ledger
 owner hash keep restarts, rollback, and deletion on the exact namespace originally selected. Legacy

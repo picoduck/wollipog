@@ -1,6 +1,7 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
 import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
 import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
+import { configuredCodexHomes } from "./review-trust.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, ReviewSessionLauncher } from "./review-sessions.js";
 import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
@@ -1614,7 +1615,17 @@ const sessionWritablePaths = () => configuredSessionWritablePaths({
   workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
   sessions: store.listSessions(), hostEnv: process.env,
 });
-const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths);
+sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
+  providerAccounts: config.providerAccounts, agents: config.agents,
+  sessions: store.listSessions(), hostEnv: process.env,
+}));
+const codexProtection = () => {
+  const tuiSession = shells.unprotectedAgentTuiSessions()[0];
+  return tuiSession
+    ? { home: homedir(), refusal: `Codex packages are unprotected from session ${tuiSession} (Agent TUI)` }
+    : sessions.codexReviewerProtection();
+};
+const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths, codexProtection);
 // One owner of every review mirror, so the bridge's fetches and review sessions' never race.
 const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), sessionReviewDependencies.exec, log);
 const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session-review-jobs"), store, sendUp,
@@ -1622,7 +1633,8 @@ const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session
 // Review sessions (#3368): a typed reviewer session launched outside the requester's sandbox.
 const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store,
   defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
-    (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
+    (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH,
+    codexProtection));
 // Startup reconciliation has already settled every review session: no checkout is in use.
 reviewSessionLauncher.releaseAll();
 sessions.setReviewSessions({
