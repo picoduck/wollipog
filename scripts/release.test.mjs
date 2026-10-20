@@ -293,6 +293,27 @@ test("preparation recovers accepted commits and PR creation without repeating ei
         return execFileSync(program, args, { cwd: worktree, env: environment, encoding: "utf8" });
       },
     };
+    const initialHead = git(["rev-parse", "HEAD"]);
+    writeFileSync(join(worktree, "unrelated.txt"), "staged user work");
+    git(["add", "unrelated.txt"]); rmSync(join(worktree, "unrelated.txt"));
+    assert.equal(git(["diff", "--name-only", "HEAD"]), "");
+    assert.throws(() => prepare(targetVersion, checkpoint, io), /Unrelated working-tree changes/);
+    assert.equal(git(["rev-parse", "HEAD"]), initialHead);
+    assert.equal(git(["show", ":unrelated.txt"]), "staged user work");
+    assert.deepEqual(checks, []);
+    git(["reset", "--", "unrelated.txt"]);
+
+    const initialPackage = readFileSync(join(worktree, "package.json"), "utf8");
+    const stagedPackage = JSON.parse(initialPackage); stagedPackage.scripts.unrelated = "staged user work";
+    writeFileSync(join(worktree, "package.json"), JSON.stringify(stagedPackage, null, 2) + "\n");
+    git(["add", "package.json"]); writeFileSync(join(worktree, "package.json"), initialPackage);
+    assert.equal(git(["diff", "--name-only", "HEAD"]), "");
+    assert.throws(() => prepare(targetVersion, checkpoint, io), /Unrelated staged edits within package.json/);
+    assert.equal(git(["rev-parse", "HEAD"]), initialHead);
+    assert.equal(JSON.parse(git(["show", ":package.json"])).scripts.unrelated, "staged user work");
+    assert.deepEqual(checks, []);
+    git(["reset", "--", "package.json"]);
+
     assert.throws(() => prepare(targetVersion, checkpoint, io), /interrupted/);
     const committedHead = git(["rev-parse", "HEAD"]);
     const resumed = prepare(targetVersion, checkpoint, io);

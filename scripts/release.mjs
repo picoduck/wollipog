@@ -136,14 +136,21 @@ export function prepare(version, checkpoint, io = services()) {
   check(state.repository === repo.nameWithOwner && state.branch === branch && state.version === version && state.notesSha256 === digest(notesBytes), "Preparation differs from checkpoint intent");
   const allowed = new Set([...VERSION_FILES, notes]);
   const tracked = io.git(["diff", "--name-only", "HEAD"]).split("\n").filter(Boolean);
+  const staged = io.git(["diff", "--cached", "--name-only"]).split("\n").filter(Boolean);
   const untracked = io.git(["ls-files", "--others", "--exclude-standard"]).split("\n").filter(Boolean);
-  check([...tracked, ...untracked].every((file) => allowed.has(file)), "Unrelated working-tree changes prevent release preparation");
+  check([...tracked, ...staged, ...untracked].every((file) => allowed.has(file)), "Unrelated working-tree changes prevent release preparation");
   const baseline = Object.fromEntries(VERSION_FILES.map((file) => [file, io.run("git", ["show", `${state.baseSha}:${file}`])]));
   check(JSON.parse(baseline["package.json"]).version === state.oldVersion, "Preparation base version differs from checkpoint");
   const intended = bumpVersions(baseline, state.oldVersion, version);
   for (const file of VERSION_FILES) {
     const current = readFileSync(join(io.cwd, file), "utf8");
     check(current === baseline[file] || current === intended[file], `Unrelated edits within ${file} prevent release preparation`);
+    if (staged.includes(file)) {
+      let indexed;
+      try { indexed = io.run("git", ["show", `:${file}`]); }
+      catch { throw new Error(`Cannot read staged ${file}; restore or unstage it before preparation`); }
+      check(indexed === baseline[file] || indexed === intended[file], `Unrelated staged edits within ${file} prevent release preparation`);
+    }
   }
   saveCheckpoint(checkpoint, state);
   const head = io.git(["rev-parse", "HEAD"]);
@@ -154,7 +161,7 @@ export function prepare(version, checkpoint, io = services()) {
     io.run("pnpm", ["typecheck"], { timeout: 20 * 60_000, stdio: "inherit" });
     io.run("pnpm", ["test"], { timeout: 20 * 60_000, stdio: "inherit" });
     io.git(["add", "--", ...allowed]);
-    io.git(["commit", "-m", `Prepare Wollipog v${version}`]);
+    io.git(["commit", "-m", `Prepare Wollipog v${version}`, "--only", "--", ...allowed]);
   }
   const preparedHead = io.git(["rev-parse", "HEAD"]);
   check(preparedHead !== state.baseSha && (!state.headSha || state.headSha === preparedHead), "Prepared head changed unexpectedly");
