@@ -34,7 +34,7 @@ function compile(file, fixture) {
     stdout: result.stdout?.toString(), stderr: result.stderr?.toString(), compilerMode: fixture ? "fixture" : "production", sourceSha256: SHA(readFileSync(sourcePath)) }));
   save(join(DIR, fixture ? "account-config-compile-fixture.json" : "account-config-compile-prod.json"), receipt, 5 * 1024 * 1024);
   process.stdout.write(result.stdout ?? ""); process.stderr.write(result.stderr ?? "");
-  need(!result.error && result.status === 0 && !result.signal, "native compiler failed; preserve outputs; no replay");
+  need(!result.error && result.status === 0 && !result.signal, "native compiler failed; preserve outputs; no replay; " + JSON.stringify({ actualOSExit: result.status, signal: result.signal, error: result.error?.message, errorCode: result.error?.code, errorErrno: result.error?.errno, errorSyscall: result.error?.syscall, compilerMode: fixture ? "fixture" : "production" }));
   need(readdirSync(temp).length === 0, "unexpected compiler temporary producer; preserve and stop");
   const bytes = readFileSync(file); need(bytes.length > 0 && bytes.length <= 1024 * 1024, "native DLL capacity");
   const compiler = result.stdout.toString().split(/\r?\n/u).find(x => x.startsWith("WACW_COMPILER=")); need(compiler, "missing compiler identity");
