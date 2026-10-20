@@ -722,6 +722,7 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      so clients offer a recovery action per code. Older peers omit it and show only the text.
 // 235: extend v233 providerHomeRefusal with specific recovery causes and authorized, path-free
 //      lease-inspection process observations (#3585). Older peers retain the original shapes.
+// 236: human-approved automation creation proposals, exact execution and durable creation receipts.
 export const PROTOCOL_VERSION = 236;
 
 export * from "./campaign-authority.js";

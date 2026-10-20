@@ -93,6 +93,12 @@ Creation does not reserve runner capacity, bypass governance or grant blanket
 approval for actions taken by scheduled sessions. Runtime admission and finite
 limits remain unchanged.
 
+An approved but unexecuted proposal currently remains in decision history after
+its execution deadline. It cannot create an automation, but can block session
+role conversion until a fresh proposal with the same resource key supersedes it
+or the session ends. Parent Control or campaign policy changes also conservatively
+revoke unconsumed proposals; request fresh human approval after those changes.
+
 Requires updated runner and control-plane components advertising
 `agentAutomationCreation`. Older or unverified peers refuse without sending a
 creation request; update them outside any session hosted by that stack.
