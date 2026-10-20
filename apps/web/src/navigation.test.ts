@@ -88,6 +88,27 @@ test("a run's phone member is in its URL, so a reload and a shared link keep it 
   }
 });
 
+test("a pod's phone tab is in its URL, so a reload and a shared link keep it (#2981)", () => {
+  const path = `/pods/~${encodeResourceId("pod_abc")}`;
+  for (const view of [
+    { name: "pod", id: "pod_abc", tab: "huddle" },
+    { name: "pod", id: "pod_abc", member: "s_codex" },
+    { name: "pod", id: "pod_abc", member: "member / ✅ &?#" },
+  ] satisfies View[]) {
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.equal(url.pathname, path);
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+  }
+  assert.equal(viewPath({ name: "pod", id: "pod_abc", tab: "huddle" }), `${path}?tab=huddle`);
+  assert.equal(viewPath({ name: "pod", id: "pod_abc", member: "s_codex" }), `${path}?member=s_codex`);
+  assert.equal(viewPath({ name: "pod", id: "pod_abc" }), path);
+  assert.equal(sameView({ name: "pod", id: "pod_abc", member: "a" }, { name: "pod", id: "pod_abc", tab: "huddle" }), false);
+  // A query that names no tab keeps the pod open on its default tab.
+  for (const query of ["", "?tab=", "?tab=members", "?tab=huddle&member=a", "?member=", "?member=a&member=b", `?member=${"x".repeat(5000)}`]) {
+    assert.deepEqual(viewFromPath(path, query), { name: "pod", id: "pod_abc" }, query);
+  }
+});
+
 test("Agent Skills panes have their own routes, and a skill id wins over a pane", () => {
   // Existing links keep their meaning (#1947): the bare route and a skill deep link.
   assert.deepEqual(viewFromPath("/skills"), { name: "skills" });

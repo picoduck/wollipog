@@ -25,7 +25,9 @@ export type View =
   /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
   | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
-  | { name: "pod"; id: string };
+  /** The tab a phone shows (#2981): the Huddle (`tab: "huddle"`, also the default) or one
+   * `member`; wider layouts show the huddle beside every member. */
+  | { name: "pod"; id: string; tab?: "huddle"; member?: string };
 
 /**
  * Settings sections, as ROUTES rather than dialog tabs.
@@ -433,7 +435,7 @@ export function viewPath(view: View): string {
     case "settings": return view.section === "approvals" && view.policyId !== undefined
       ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
       : view.section ? `/settings/${view.section}` : "/settings";
-    case "pod": return `/pods/~${encodeResourceId(view.id)}`;
+    case "pod": return `/pods/~${encodeResourceId(view.id)}${podTabSearch(view)}`;
   }
 }
 
@@ -475,6 +477,25 @@ function runMemberFromSearch(search: string): string | undefined {
   return !member.trim() || member.length > MAX_RESOURCE_ID_LENGTH ? undefined : member;
 }
 
+const POD_TAB_PARAM = "tab";
+const POD_TAB_HUDDLE = "huddle";
+
+function podTabSearch(view: { tab?: "huddle"; member?: string }): string {
+  if (view.member !== undefined) return runMemberSearch(view.member);
+  return view.tab === POD_TAB_HUDDLE ? `?${new URLSearchParams({ [POD_TAB_PARAM]: POD_TAB_HUDDLE }).toString()}` : "";
+}
+
+/** The tab a pod URL names: the Huddle, one member, or neither when its query is anything else. */
+function podTabFromSearch(search: string): { tab: "huddle" } | { member: string } | Record<string, never> {
+  const member = runMemberFromSearch(search);
+  if (member !== undefined) return { member };
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const keys = [...params.keys()];
+  return keys.length === 1 && keys[0] === POD_TAB_PARAM && params.get(POD_TAB_PARAM) === POD_TAB_HUDDLE
+    ? { tab: POD_TAB_HUDDLE }
+    : {};
+}
+
 function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string, search: string): View | null {
   const id = decodeResourceId(encodedId);
   if (id === null) return null;
@@ -484,7 +505,8 @@ function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string, sea
     const member = runMemberFromSearch(search);
     return member === undefined ? { name: "run", id } : { name: "run", id, member };
   }
-  return { name: "pod", id };
+  // As for a run, a query that names no tab keeps the pod open on its default tab.
+  return { name: "pod", id, ...podTabFromSearch(search) };
 }
 
 /** Parse only the dashboard's explicit route vocabulary. Unknown and malformed paths are not

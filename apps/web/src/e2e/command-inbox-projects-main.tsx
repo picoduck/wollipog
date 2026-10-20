@@ -1481,7 +1481,7 @@ const podNow = Date.now();
 const activePod: PodView = {
   id: "pod-active",
   title: "Active Collaboration Pod",
-  objective: "Manual collaboration pod",
+  objective: "Migrate the API client's call sites to the shared retry helper.",
   status: "active",
   members: podMemberSessions.map((member, index) => ({
     sessionId: member.id,

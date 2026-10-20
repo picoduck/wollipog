@@ -1,4 +1,4 @@
-import type { PodMemberRole, PodMemberView, PodOrchestrationState, PodView, SessionView } from "@wollipog/protocol";
+import type { PodContextEntry, PodMemberRole, PodMemberView, PodOrchestrationState, PodView, SessionView } from "@wollipog/protocol";
 import { sessionAgentLabel } from "./components/agent-options.js";
 import { titleCaseLabel } from "./format.js";
 
@@ -82,6 +82,38 @@ export function podMemberShortName(
   start: PodMemberNameStart = "role",
 ): string {
   return podMemberNames(pod, sessions, [...pod.members.map((member) => member.sessionId), sessionId], start).get(sessionId)!;
+}
+
+/**
+ * The pod's one badge in its bar (#2981): Closed once it is closed, Running while automatic turns
+ * run or any member's turn does, and Active otherwise.
+ */
+export function podBadgeStatus(pod: PodView, sessions: ReadonlyMap<string, SessionView>): "active" | "running" | "closed" {
+  if (pod.status === "closed") return "closed";
+  if (pod.orchestration?.state.status === "running") return "running";
+  return pod.members.some((member) => {
+    const status = sessions.get(member.sessionId)?.status;
+    return status === "running" || status === "starting";
+  }) ? "running" : "active";
+}
+
+/**
+ * Who wrote a huddle entry, by name (#2981): a member by role and agent ("Worker · Codex"), told
+ * apart from the other members as `podMemberNames` does; a session that has left the pod by the
+ * agent its entry recorded; and a person as `person` names them ("You").
+ */
+export function podEntrySourceName(
+  entry: PodContextEntry,
+  pod: PodView,
+  sessions: ReadonlyMap<string, SessionView>,
+  person: string,
+): string {
+  const source = entry.source;
+  if (source.kind === "human") return person;
+  if (pod.members.some((member) => member.sessionId === source.sessionId)) {
+    return podMemberShortName(pod, sessions, source.sessionId, "agent");
+  }
+  return source.agentLabel.trim() || source.sessionTitle.trim() || "A former member";
 }
 
 /** Stop reasons a person caused or already sees elsewhere, which need no banner. */

@@ -11106,51 +11106,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font: var(--type-section);
 }
 .run-artifact-list { overflow: hidden; }
-.compare-grid {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  gap: 12px;
-  overflow: auto;
-  margin-top: 14px;
-}
-.compare-col {
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  min-height: 0;
-}
-.compare-head {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 11px 13px;
-  border-bottom: 1px solid var(--border);
-  border-top: 0;
-  border-left: 0;
-  border-right: 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.compare-agent {
-  font-weight: 600;
-  font-size: 13px;
-}
-.compare-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px;
-}
-.compare-body .timeline {
-  gap: 9px;
-}
-
 /* A run's task strip (#2975): the task clamped to two lines (Show Full Task in ⋯ opens the rest),
    then its meta 12px apart. */
 .run-task {
@@ -11312,84 +11267,219 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .pod-merge-row + .pod-merge-row { box-shadow: inset 0 1px 0 var(--border); }
 .pod-merge-paths { margin: 0; padding: 0; list-style: none; }
 .pod-merge-rule { margin-top: calc(-1 * var(--space-2)); }
-.pod-relay {
-  flex: 0 0 auto;
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
+/* The pod page (#2981): under the bar and its banner, the objective and the members' flush columns
+   (#2975's `.compare`) beside the Huddle, a 360px aside at full height (320px in the compact tier).
+   The columns always get the remaining height. */
+.pod-detail:has(> .pod-layout, > .pod-phone) { padding-bottom: 0; }
+.run-detail > .pod-layout,
+.run-detail > .pod-phone {
+  margin-right: 0;
+  margin-left: 0;
 }
-.pod-relay-head, .pod-relay-actions, .pod-add-member {
+.pod-layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+}
+@container app (max-width: 1099px) {
+  .pod-layout { grid-template-columns: minmax(0, 1fr) 320px; }
+}
+.pod-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+/* The objective strip: two lines, "No objective" in faint text when the pod has none. */
+.pod-objective {
+  flex: none;
+  display: -webkit-box;
+  margin: var(--space-3) var(--page-gutter) 0;
+  overflow: hidden;
+  font: var(--type-body);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.pod-objective.is-empty { color: var(--text-faint); }
+/* The member's settings and actions, until its menu replaces them (#2983). */
+.pod-member-tools {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-4);
+}
+.pod-member-setting { display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); font-size: 10px; }
+.pod-member-setting select { min-width: 72px; max-width: 96px; padding: 4px 6px; font-size: 11px; }
+/* The Huddle: its head, the log newest last, and the composer at the bottom. */
+.pod-huddle {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+}
+.pod-huddle-head {
+  flex: none;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-2);
+  min-height: var(--control-h-lg);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-4);
+  border-bottom: 1px solid var(--border);
 }
-.pod-relay-head p { margin: 3px 0 0; }
-.pod-relay textarea { width: 100%; resize: vertical; }
-.pod-context {
-  flex: 0 0 auto;
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--bg-elev) 92%, var(--accent));
+.pod-huddle-title {
+  margin: 0;
+  font: var(--type-section);
 }
-.pod-context-list, .pod-receipts { display: grid; gap: 8px; }
-.pod-context-entry {
+.pod-huddle-head > .btn { margin-left: auto; }
+/* Newest last, against the composer: a short log sits at the end, so the entries in view stay put
+   when Load Earlier adds older ones above them. */
+.pod-huddle-log {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.pod-huddle-log > .pod-huddle-entries { margin-top: auto; }
+.pod-huddle-notice { margin: var(--space-3) var(--space-4) 0; }
+.pod-huddle-empty {
+  margin: 0;
+  padding: var(--space-4);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.pod-huddle-entries {
+  margin: 0;
+  padding: var(--space-1) 0;
+  list-style: none;
+}
+/* Each entry is a selectable row: its box, then who and when, then its text. */
+.pod-huddle-entry {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
   cursor: pointer;
 }
-.pod-context-entry.on { border-color: var(--accent); }
-.pod-context-entry > span { min-width: 0; display: grid; gap: 5px; }
-.pod-context-meta { color: var(--text-dim); font-size: 11px; }
-.pod-context-content { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; line-height: 1.5; }
-.pod-receipt {
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  background: var(--bg);
+@media (hover: hover) { .pod-huddle-entry:hover { background: var(--bg-elev-2); } }
+.pod-huddle-entry.is-selected { background: var(--surface-selected); }
+.pod-huddle-entry > .checkbox-mark { flex: none; }
+.pod-huddle-entry-body {
+  min-width: 0;
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+}
+.pod-huddle-entry-meta {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: var(--space-2);
+  margin: 0;
   color: var(--text-dim);
-  font-size: 11px;
+  font: var(--type-small);
+}
+.pod-huddle-entry-source {
+  color: var(--text);
+  font: var(--type-label);
+}
+.pod-huddle-text {
+  margin: 0;
+  font: var(--type-body);
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.pod-receipt-delivered { color: var(--green); }
-.pod-receipt-failed { color: var(--red); }
-.pod-add-member { min-width: 0; justify-content: flex-start; }
-.pod-add-member select { min-width: 220px; max-width: 420px; }
-.pod-member-head { cursor: default; justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
-.pod-member-open {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  min-height: var(--control-h);
-  margin-right: auto;
+.pod-huddle-text.is-clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.pod-huddle-more {
   padding: 0;
   border: 0;
   background: transparent;
-  color: inherit;
-  text-align: left;
+  font: var(--type-small);
   cursor: pointer;
 }
-.pod-member-open > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pod-member-setting { display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); font-size: 10px; }
-.pod-member-setting select { min-width: 72px; max-width: 96px; padding: 4px 6px; font-size: 11px; }
-
-@media (max-width: 760px) {
-  .pod-relay-actions, .pod-relay-head { align-items: stretch; flex-direction: column; }
-  .pod-add-member { width: 100%; flex-direction: column; align-items: stretch; }
-  .pod-add-member select { min-width: 0; max-width: none; width: 100%; }
+.pod-composer {
+  flex: none;
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
 }
+.pod-composer-note {
+  width: 100%;
+  resize: vertical;
+}
+/* Relay To: its label, then one row of member checkboxes that wraps when it must. */
+.pod-recipients {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+}
+.pod-recipients-label {
+  flex-basis: 100%;
+  color: var(--text-dim);
+  font: var(--type-label);
+}
+.pod-composer-reason {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.pod-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+/* A relay that missed a member: each member's result on its own line. */
+.pod-results {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pod-results > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-2);
+}
+.pod-result-name { font: var(--type-body-strong); }
+.pod-result-reason {
+  color: var(--text-dim);
+  font: var(--type-small);
+  overflow-wrap: anywhere;
+}
+/* Phones (§15.1): the objective's first line, then the Huddle and member tabs, one at a time. The
+   composer sits above the safe area on the Huddle tab. */
+.pod-phone {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pod-phone > .pod-objective {
+  margin-right: var(--page-gutter);
+  margin-left: var(--page-gutter);
+  -webkit-line-clamp: 1;
+}
+.pod-phone > .pod-tabs { margin-top: var(--space-2); }
+.pod-phone > .pod-huddle,
+.pod-phone > .compare-member { flex: 1; }
+.pod-phone > .pod-huddle { border-left: 0; }
+.pod-phone :is(.pod-huddle-head, .pod-huddle-entry, .pod-composer, .pod-huddle-empty) { padding-inline: var(--page-gutter); }
+.pod-phone .pod-composer { padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
+.pod-phone .compare-member-head { padding-inline: var(--page-gutter) var(--space-2); }
+.pod-phone :is(.pod-member-tools, .compare-member-meta, .compare-member-notice, .compare-member-body) { padding-inline: var(--page-gutter); }
 
 /* ------------------------------- Dialog ---------------------------------- */
 /* One dialog anatomy (docs/design-system.md §7). Every dialog is portalled to <body>: the backdrop
