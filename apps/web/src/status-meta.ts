@@ -314,6 +314,11 @@ const VOCABULARY = {
     running: info("Running", { pulse: true }),
     failed: danger("Failed"),
   },
+  /** One member's answer to a run's Follow Up send (#2976), inline beside its name. */
+  followUp: {
+    delivered: success("Delivered"),
+    failed: danger("Failed"),
+  },
   pod: {
     active: info("Active"),
     paused: neutral("Paused"),
