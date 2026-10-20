@@ -175,6 +175,7 @@ const memberTabId = (index: number) => `run-member-tab-${index}`;
 const MEMBER_PANEL_ID = "run-member-panel";
 // A workflow run's phone tabs (#2977): Steps, then one per agent step.
 const STEPS_TAB = "steps";
+const activityTabKey = (nodeId: string) => `activity:${nodeId}`;
 const workflowTabId = (index: number) => `run-workflow-tab-${index}`;
 const WORKFLOW_PANEL_ID = "run-workflow-panel";
 
@@ -503,7 +504,10 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
     return () => { current = false; };
   }, [api, run?.id, run?.updatedAt, conn, applyWorkflow]);
 
-  const steps = useMemo(() => workflow ? workflowSteps(workflow, run?.sessionIds ?? EMPTY_SESSION_IDS) : [], [workflow, run?.sessionIds]);
+  const steps = useMemo(
+    () => workflow ? workflowSteps(workflow, run?.sessionIds ?? EMPTY_SESSION_IDS, (sessionId) => sessions.get(sessionId)?.title) : [],
+    [workflow, run?.sessionIds, sessions],
+  );
   // Until the person picks a step, the panel shows the one that needs them, and follows it.
   const [chosenStep, setChosenStep] = useState<string | null>(null);
   const selectedStep = steps.find((step) => step.nodeId === chosenStep) ?? steps.find((step) => step.nodeId === attentionStepId(steps)) ?? null;
@@ -790,11 +794,14 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
       {runArtifacts}
     </>
   );
-  const phoneTabs = [
-    { id: STEPS_TAB, label: "Steps" },
-    ...agentSteps.map((step) => ({ id: step.nodeId, label: `${step.role} Activity` })),
+  // Steps, then one tab per agent step. An activity tab's key is prefixed, so no node id (even
+  // "steps") can share a key with the Steps tab.
+  const phoneTabs: Array<{ id: string; label: string; step: WorkflowStep | null }> = [
+    { id: STEPS_TAB, label: "Steps", step: null },
+    ...agentSteps.map((step) => ({ id: activityTabKey(step.nodeId), label: `${step.role} Activity`, step })),
   ];
-  const shownPhoneTab = phoneTabs.some((tab) => tab.id === phoneTab) ? phoneTab : STEPS_TAB;
+  const shownTab = phoneTabs.find((tab) => tab.id === phoneTab) ?? phoneTabs[0]!;
+  const shownPhoneTab = shownTab.id;
   const onWorkflowTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const last = phoneTabs.length - 1;
     const next = event.key === "ArrowRight" ? (index === last ? 0 : index + 1)
@@ -887,11 +894,11 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
               </button>
             ))}
           </TabList>
-          {shownPhoneTab === STEPS_TAB ? (
+          {shownTab.step === null ? (
             <div className="wf-side" id={WORKFLOW_PANEL_ID} role="tabpanel" aria-labelledby={workflowTabId(0)}>{workflowSide}</div>
           ) : workflowActivity(
-            steps.find((step) => step.nodeId === shownPhoneTab) ?? null,
-            { id: WORKFLOW_PANEL_ID, labelledBy: workflowTabId(phoneTabs.findIndex((tab) => tab.id === shownPhoneTab)) },
+            shownTab.step,
+            { id: WORKFLOW_PANEL_ID, labelledBy: workflowTabId(phoneTabs.indexOf(shownTab)) },
           )}
         </div>
       ) : (

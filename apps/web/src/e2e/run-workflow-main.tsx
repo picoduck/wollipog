@@ -40,7 +40,8 @@ const PROMPT = "Add exponential backoff to webhook retries, cap it at five minut
 function member(id: string, agentId: string, agentName: string, driver: SessionView["driver"], status: SessionView["status"]): SessionView {
   return {
     id, runnerId: "runner-1", workspaceId: "ws-wollipog", workspaceName: "Wollipog", projectId: null, agentId, agentName,
-    title: agentName, status, column: "review", runId: "run-workflow", useWorktree: true, worktreePath: null, archived: false,
+    // The title the control plane gives a workflow agent's member: "<run> · <agent>".
+    title: `Add backoff to webhook retries · ${agentId}`, status, column: "review", runId: "run-workflow", useWorktree: true, worktreePath: null, archived: false,
     createdAt: NOW - 10 * MINUTE, updatedAt: NOW, lastEventAt: null, messageCount: 8, eventEpoch: 0, preview: null,
     pendingApproval: null, driver, model: null, effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0,
     adopted: false, ...(status === "running" ? { activeTurnId: `${id}-turn` } : {}),

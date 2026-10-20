@@ -15,6 +15,7 @@ import {
   attemptStatusLabel,
   attentionStepId,
   gateArtifact,
+  isRetry,
   stepOutcomeLabel,
   stepsAfter,
   stepSubline,
@@ -74,7 +75,8 @@ test("every WorkflowNodeStatus maps to a workflowNode entry, and only Awaiting D
 });
 
 test("steps follow the definition's order with Title Case roles and their members' sessions", () => {
-  const steps = workflowSteps(detail({ review: { status: "running", attemptCount: 1, sessionId: "s-codex" } }), ["s-claude", "s-codex"]);
+  const steps = workflowSteps(detail({ review: { status: "running", attemptCount: 1, sessionId: "s-codex" } }), ["s-claude", "s-codex"],
+    (id) => new Map([["s-claude", "Run · claude"], ["s-codex", "Run · codex"]]).get(id));
   assert.deepEqual(steps.map((step) => [step.number, step.role, step.sessionId]), [
     [1, "Builder", "s-claude"],
     [2, "Approver", null],
@@ -83,11 +85,30 @@ test("steps follow the definition's order with Title Case roles and their member
   ]);
 });
 
-test("before any step has run, members map to agents by position only while the count proves the order", () => {
-  // One member per agent, then an orchestrator: positions hold.
-  assert.equal(workflowSteps(detail({}), ["s-claude", "s-codex", "s-orchestrator"])[2]!.sessionId, "s-codex");
-  // A member is missing (its session was deleted): positions no longer prove anything.
-  assert.equal(workflowSteps(detail({}), ["s-codex"])[0]!.sessionId, null);
+test("before any step has run, members map to agents by position only where the order is proven", () => {
+  // The control plane titles each agent's member "<run> · <agent>", and the orchestrator's "· orchestrator".
+  const titles = new Map([
+    ["s-claude", "Add Retry Backoff · claude"],
+    ["s-codex", "Add Retry Backoff · codex"],
+    ["s-orchestrator", "Add Retry Backoff · orchestrator"],
+    ["s-renamed", "Webhook work"],
+  ]);
+  const titleOf = (id: string) => titles.get(id);
+  const sessionsOf = (ids: string[]) => workflowSteps(detail({}), ids, titleOf).map((step) => step.sessionId);
+  // One member per agent, then an orchestrator: every member is there, so positions hold.
+  assert.deepEqual(sessionsOf(["s-claude", "s-codex", "s-orchestrator"]), ["s-claude", null, "s-codex", "s-claude"]);
+  // As many members as agents, each carrying its agent's title: no orchestrator, positions hold.
+  assert.deepEqual(sessionsOf(["s-claude", "s-codex"]), ["s-claude", null, "s-codex", "s-claude"]);
+  // Builder's member was deleted from a run with an orchestrator: Reviewer never resolves to it.
+  assert.deepEqual(sessionsOf(["s-codex", "s-orchestrator"]), [null, null, null, null]);
+  // A renamed member proves nothing; the other member still does.
+  assert.deepEqual(sessionsOf(["s-renamed", "s-codex"]), [null, null, "s-codex", null]);
+  // A member is missing: positions no longer prove anything.
+  assert.deepEqual(sessionsOf(["s-codex"]), [null, null, null, null]);
+  // A member another agent already ran in is never taken by position.
+  const ran = workflowSteps(detail({ build: { status: "running", attemptCount: 1, sessionId: "s-codex" } }), ["s-claude", "s-codex", "s-orchestrator"], titleOf);
+  assert.equal(ran[0]!.sessionId, "s-codex");
+  assert.equal(ran[2]!.sessionId, null, "Reviewer's position holds the session Builder ran in");
   // A step's own attempt, then another step of the same agent, outrank the position.
   const steps = workflowSteps(detail({}, [attempt("build", 1, "failed", "s-other")]), ["s-claude", "s-codex"]);
   assert.equal(steps[0]!.sessionId, "s-other");
@@ -147,6 +168,18 @@ test("a failed attempt never reads Succeeded, and an outcome that contradicts th
   assert.equal(attemptStatusLabel("cancelled"), "Canceled");
   const retried = workflowSteps(detail({ build: { status: "ready", attemptCount: 1 } }, [attempt("build", 1, "timed_out")]), [])[0]!;
   assert.equal(attemptFailureSentence(retried), "Attempt 1 of 3 timed out.");
+});
+
+test("a step a loop made ready again is ready, not a failed retry", () => {
+  const review = (state: Partial<WorkflowNodeState>, attempts: WorkflowAttemptView[]) => workflowSteps(detail({ review: state }, attempts), [])[2]!;
+  // Remediator succeeded and the loop made Reviewer ready again: its count stays, its last attempt succeeded.
+  assert.equal(isRetry(review({ status: "ready", attemptCount: 1 }, [attempt("review", 1, "succeeded")])), false);
+  assert.equal(isRetry(review({ status: "ready", attemptCount: 1, readyAt: 5, error: "boom" }, [attempt("review", 1, "failed")])), true);
+  assert.equal(isRetry(review({ status: "ready", attemptCount: 2 }, [attempt("review", 1, "succeeded"), attempt("review", 2, "timed_out")])), true);
+  // Without the attempts, the retry's own marks decide.
+  assert.equal(isRetry(review({ status: "ready", attemptCount: 1, readyAt: 5 }, [])), true);
+  assert.equal(isRetry(review({ status: "ready", attemptCount: 1 }, [])), false);
+  assert.equal(isRetry(review({ status: "ready", attemptCount: 0 }, [])), false);
 });
 
 test("formatFuture names the time and the wait in the clock's minutes, in a fixed zone", () => {

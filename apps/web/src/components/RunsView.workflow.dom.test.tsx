@@ -61,12 +61,13 @@ after(() => {
   clearTimestampFormatterCache();
 });
 
-const member = (id: string, agentId: string, agentName: string, driver: string) => ({
-  id, runnerId: "runner-1", agentId, agentName, driver, title: agentName, status: "idle",
+// Each member carries the title the control plane gives a workflow agent's member: "<run> · <agent>".
+const member = (id: string, agentId: string, agentName: string, driver: string, role: string) => ({
+  id, runnerId: "runner-1", agentId, agentName, driver, title: `Add Retry Backoff · ${role}`, status: "idle",
   pendingApproval: null, archived: false, eventEpoch: 0, messageCount: 0, workspaceName: "Alpha",
 }) as unknown as SessionView;
-const claude = member("s_claude", "claude-code-agent", "Claude Code", "claude-code");
-const codex = member("s_codex", "codex-app-server-agent", "Codex", "codex-app-server");
+const claude = member("s_claude", "claude-code-agent", "Claude Code", "claude-code", "claude");
+const codex = member("s_codex", "codex-app-server-agent", "Codex", "codex-app-server", "codex");
 
 const agentNode = (nodeId: string, role: string, agentId: string, extra: Partial<WorkflowNodeDefinition> = {}): WorkflowNodeDefinition => ({
   nodeId, kind: "agent", role, agentId, inputs: [], outputs: [], retry: { maxAttempts: 3, backoffMs: 300_000 }, timeoutMs: 1_000, ...extra,
@@ -465,6 +466,53 @@ describe("a workflow run's steps and decision (#2977)", () => {
       assert.deepEqual(fixture.opened.at(-1), { name: "session", id: codex.id });
     } finally {
       await unmount(fixture);
+    }
+  });
+
+  test("a step a loop made ready again offers Start, not a failed retry", async () => {
+    // Build and Review's loop: Reviewer asked for changes, Remediator succeeded, Reviewer is ready again.
+    const fixture = await mount({
+      workflowInstance: async () => workflow({
+        build: { status: "succeeded", attemptCount: 1, sessionId: claude.id, outcome: "success" },
+        approve: { status: "succeeded", outcome: "success" },
+        review: { status: "ready", attemptCount: 1, sessionId: codex.id },
+      }, {
+        attempts: [{ attemptId: "r1", instanceId: "wfi", nodeId: "review", attempt: 1, status: "succeeded", dispatchKey: "rk1", sessionId: codex.id, startedAt: NOW - 120_000, deadlineAt: NOW, completedAt: NOW - 60_000 }],
+      }),
+    } as unknown as Partial<ApiClient>);
+    try {
+      const { container } = fixture;
+      assert.equal(stepButton(container, "Reviewer")?.getAttribute("aria-current"), "true");
+      assertNoDomNode(panel(container)?.querySelector(".notice.t-danger") ?? null, "no failure notice");
+      assert.doesNotMatch(panel(container)?.textContent ?? "", /Last Attempt Failed|failed\./u);
+      assert.match(panel(container)?.querySelector(".notice.t-info")?.textContent ?? "", /Reviewer Is Ready/u);
+      assert.ok(buttonNamed(panel(container)!, "Start Reviewer"));
+      assert.equal(facts(container)["Last Attempt"], "Succeeded");
+    } finally {
+      await unmount(fixture);
+    }
+  });
+
+  test("at 390px an agent step whose node id is \"steps\" has its own Activity tab", async () => {
+    await setViewport(390, 844);
+    const steps = { ...BUILD, nodeId: "steps" };
+    const fixture = await mount({
+      workflowInstance: async () => workflow({ steps: { status: "running", attemptCount: 1, sessionId: claude.id } }, { nodes: [steps] }),
+    } as unknown as Partial<ApiClient>, [claude]);
+    try {
+      const { container } = fixture;
+      const tabs = () => [...container.querySelectorAll('[role="tab"]')];
+      assert.deepEqual(tabs().map((tab) => tab.textContent), ["Steps", "Builder Activity"]);
+      assert.deepEqual(tabs().map((tab) => tab.getAttribute("aria-selected")), ["true", "false"]);
+      await click(tabs()[1]);
+      assert.deepEqual(tabs().map((tab) => tab.getAttribute("aria-selected")), ["false", "true"], "the Activity tab selects alone");
+      assertNoDomNode(panel(container), "the Steps panel is not shown");
+      assert.equal(container.querySelector('[role="tabpanel"] .compare-member-agent')?.textContent, "Claude Code");
+      await click(tabs()[0]);
+      assert.ok(panel(container), "Steps shows the panel again");
+    } finally {
+      await unmount(fixture);
+      await setViewport(1440, 900);
     }
   });
 
