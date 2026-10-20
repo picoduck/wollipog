@@ -76,20 +76,31 @@ The preflight returns `ready`, a digest, a concise `summary` (scope, budget, fol
 review, evidence destination/provider with the verbatim retention disclosure, Human Required
 exceptions, blockers), per-capability readiness and an `advanced` block with the derived proposal
 and plan. Each capability is `verified`, `unsupported` (blocks launch, with an actionable reason),
-`human_required` (a disclosed exception routing that decision class to the Human) or
-`informational` (an infrastructure gap the campaign works around with the best available path).
+`human_required` (a disclosed exception routing that decision class to the Human),
+`informational` (an infrastructure gap the campaign works around with the best available path) or
+`orchestrator_decides` (the Orchestrator owns that class without being able to inspect it, so it
+asks for inspectable evidence or denies the claim as unproven).
 Only genuine impossibilities are mandatory: repository scope that can be verified, and a provider
 path that enforces the authority contract. Accounting is mandatory only when the Human set a
 ceiling (an unpriced model cannot enforce a cost ceiling) or the derived limits are invalid, such
 as a paused campaign's zero concurrency; with no ceiling, an unpriced model only means tool calls
 are counted without a cost. Controlled review and an unreported execution isolation are
-informational. Screenshot review is delegated when the Orchestrator can review
-images. External evidence is always Human Required. Video is Human Required exactly as before
-unless a current Human-recorded live proof certifies an attested media-only reviewer on the root's
-runner (#1321). With one, video is `verified` only when the launch also mints the evidence envelope
-for that exact reviewer: UI Evidence Approval is delegated, the root is an attested Claude Code agent
-that declares the paced video contract, at the certified model, with provider disclosures and the
-video review adapters attached and no blocker. Otherwise the row names the first missing condition.
+informational. Full Control never routes evidence to the Human (#2940): with UI Evidence Approval
+in the authorization, screenshot review is `verified` when the Orchestrator can view images and
+`orchestrator_decides` otherwise, and external evidence is `orchestrator_decides`. Video is
+`orchestrator_decides` unless a current Human-recorded live proof certifies an attested media-only
+reviewer on the root's runner (#1321). With one, video is `verified` only when the launch also mints
+the evidence envelope for that exact reviewer: UI Evidence Approval is delegated, the root is an
+attested Claude Code agent that declares the paced video contract, at the certified model, with
+provider disclosures and the video review adapters attached and no blocker. Otherwise the row names
+the first missing condition. Only an authorization that leaves UI Evidence Approval out makes the
+three evidence rows `human_required`.
+
+The summary's Human Required list holds only what still reaches the Human: those evidence rows, and
+"Human Required Governance Rules" while an enabled ask rule is marked Human Required. Its
+`declinedNote` states that credential, sign-in, provider-access and lasting-grant requests are
+declined automatically and shown as blocked work. See
+[Full Control Without Prompts](campaign-authority.md#full-control-without-prompts).
 
 Admission requires request identity and the exact reviewed digest. The preflight is computed
 from facts re-read after the runner inspection, and admission creates the root synchronously from

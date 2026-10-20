@@ -112,11 +112,13 @@ export type CampaignLaunchCapabilityId =
 /** `unsupported` blocks launch, and only a mandatory capability can be unsupported. `human_required`
  * is an allowed, disclosed exception that routes that class of decision to the Human for this
  * campaign. `informational` states an infrastructure gap the campaign works around with the best
- * available path, such as the regular cross-model review workflow; it never blocks launch. */
+ * available path, such as the regular cross-model review workflow; it never blocks launch.
+ * `orchestrator_decides` discloses a class the Orchestrator owns without being able to inspect it:
+ * it asks for inspectable evidence or denies, and never hands it to the Human (#2940). */
 export interface CampaignLaunchCapability {
   id: CampaignLaunchCapabilityId;
   capability: string;
-  state: "verified" | "unsupported" | "human_required" | "informational";
+  state: "verified" | "unsupported" | "human_required" | "informational" | "orchestrator_decides";
   reason: string;
   mandatory: boolean;
 }
@@ -149,6 +151,8 @@ export interface CampaignLaunchSummary {
     envelope: boolean;
   };
   humanRequired: Array<{ exception: string; reason: string }>;
+  /** What happens to the requests the campaign can never supply, instead of asking the Human. */
+  declinedNote?: string;
   blockers: Array<{ capability: string; reason: string }>;
 }
 

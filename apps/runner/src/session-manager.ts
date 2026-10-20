@@ -1634,6 +1634,8 @@ export class SessionManager {
   /** Agent TUI reference handles not yet settled; they share the driver handle budget. */
   private agentTuiProviderHomeHandles = 0;
   private readonly providerAuthOperations = new Set<string>();
+  /** Poll interval while an accepted Dismiss Recovery waits for its provider turn to settle. */
+  authDismissalPollMs = 100;
   private readonly providerAuthPreparations = new Map<string, {
     sessionId: string; requestId: string; controller: AbortController;
   }>();
@@ -5849,6 +5851,7 @@ export class SessionManager {
     this.reconcileReviewSessions();
     this.store.reapDeletedMarkers();
     void this.reconcileWorktreePullRequests();
+    this.resumeProviderAuthDismissals();
     // Keep archive/index work out of synchronous startup and provider command paths. One bounded
     // pass shortly after startup plus the periodic timer gradually drains legacy oversized logs.
     if (!this.historyMaintenanceKickoff) {
@@ -20159,13 +20162,36 @@ export class SessionManager {
     }
   }
 
-  private async waitForAuthenticationTurnSettlement(sessionId: string): Promise<boolean> {
+  private async waitForAuthenticationTurnSettlement(sessionId: string, attempts = 100, intervalMs = 25,
+    stillWanted: () => boolean = () => true): Promise<boolean> {
     const settled = () => !this.active.get(sessionId)?.running && !this.launchGenerations.has(sessionId);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    for (let attempt = 0; attempt < attempts && stillWanted(); attempt += 1) {
       if (settled()) return true;
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
     return settled();
+  }
+
+  /** Complete every Dismiss Recovery a previous runner process accepted but could not finish
+   * (#2940). Startup rebuilt the card from durable block metadata; the persisted intent dismisses
+   * that card (matched by request id, or by recovery id when the rebuild changed it) instead of
+   * leaving it for a caller whose single response was already sent. */
+  private resumeProviderAuthDismissals(): void {
+    for (const meta of this.store.listSessions()) {
+      const intent = meta.pendingProviderAuthDismissal;
+      if (!intent) continue;
+      const card = pendingRequests(meta.pendingApproval).find((request) => request.kind === "authentication" &&
+        (request.requestId === intent.requestId ||
+          (intent.recoveryId !== undefined && meta.providerAuthBlock?.recoveryId === intent.recoveryId)));
+      if (!card) {
+        this.store.patchMeta(meta.sessionId, { pendingProviderAuthDismissal: undefined });
+        continue;
+      }
+      setImmediate(() => {
+        void this.resolveProviderAuthentication(meta.sessionId, card.requestId, "auth:dismiss", intent.resolvedBy)
+          .catch((error) => this.log(`resuming an accepted Dismiss Recovery for ${meta.sessionId} failed: ${errText(error)}`));
+      });
+    }
   }
 
   /** `decidedBy` is the person who chose this action (#2742); it names only this session's outcome. */
@@ -20180,13 +20206,32 @@ export class SessionManager {
     if (!meta || meta.pendingApproval?.requestId !== requestId ||
         meta.pendingApproval.kind !== "authentication") return;
     if (optionId === "auth:dismiss") {
-      if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
+      // An accepted dismissal is completed once the turn settles, never refused and never expired:
+      // a caller that answers at most once (Full Control, #2940) must not be left with a parked
+      // card. The intent is durable before any wait, so a runner that dies at any point after
+      // accepting it completes it on its next start.
+      this.store.patchMeta(sessionId, { pendingProviderAuthDismissal: {
+        requestId, ...(block ? { recoveryId: block.recoveryId } : {}), ...(decidedBy ? { resolvedBy: decidedBy } : {}) } });
+      this.store.flush(sessionId);
+      if (!await this.waitForAuthenticationTurnSettlement(sessionId, 100, 25, () => !this.shuttingDown)) {
+        if (this.shuttingDown) return;
         this.emitEvent(sessionId, {
           kind: "stderr",
-          text: "The provider turn is still settling. Dismiss Recovery again in a moment.",
+          text: "Dismiss Recovery was accepted and completes once the provider turn settles.",
         });
-        this.emitStatus(sessionId, "input_required", "Provider authentication recovery is still settling");
-        return;
+        const stillCurrent = () => this.store.readMeta(sessionId)?.pendingApproval?.requestId === requestId;
+        const waiting = () => !this.shuttingDown && stillCurrent();
+        while (!await this.waitForAuthenticationTurnSettlement(sessionId, 100, this.authDismissalPollMs, waiting)) {
+          if (!waiting() || !this.store.readMeta(sessionId)) break;
+        }
+        // A runner shutting down leaves the durable intent for the next process to complete.
+        if (this.shuttingDown) return;
+        if (!stillCurrent()) {
+          this.store.patchMeta(sessionId, { pendingProviderAuthDismissal: undefined });
+          return;
+        }
+        meta = this.store.readMeta(sessionId);
+        block = meta?.providerAuthBlock;
       }
       const preparing = block && this.providerAuthPreparations.get(block.credentialScopeId);
       if (preparing && preparing.sessionId === sessionId && preparing.requestId === requestId) {
@@ -20205,6 +20250,7 @@ export class SessionManager {
       this.store.patchMeta(sessionId, {
         providerAuthBlock: undefined,
         providerAuthDismissedCommandIds: dismissedCommandIds,
+        pendingProviderAuthDismissal: undefined,
         pendingApproval: null,
         ...(current.status === "stopped" ? {} : { status: "idle" as const }),
       });
@@ -20744,6 +20790,7 @@ function boundedProviderAccountSwitchFailureReason(reason: string): string {
 function isProviderAuthenticationBlock(pending: SessionMeta["pendingApproval"] | undefined): boolean {
   return pending?.kind === "authentication" && pending.requestId.startsWith("provider-auth:");
 }
+
 
 function providerAuthenticationRequestId(block: NonNullable<SessionMeta["providerAuthBlock"]>): string {
   return `provider-auth:${block.recoveryId}${block.loginOperationId ? `:${block.loginOperationId}` : ""}`;

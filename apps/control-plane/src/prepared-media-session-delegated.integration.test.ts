@@ -1041,7 +1041,7 @@ test("the campaign projection reports delegated video review from the same serve
   assert.match(video()!.reason, /certified media-only reviewer/u);
   h.revokeProof();
   assert.deepEqual(video(), { status: "unavailable",
-    reason: "Video evidence comes to you because no current live proof certifies the media-only reviewer on the Orchestrator's machine." });
+    reason: "The Orchestrator can't watch video because no current live proof certifies the media-only reviewer on the Orchestrator's machine. It asks for screenshots or denies the claim as unproven." });
   assert.equal(h.sessions.campaignVideoReview(h.db.getSession("root")!, "human")?.reason,
     "Video evidence comes to you because UI evidence approval is not delegated to the Orchestrator.");
   assert.equal(h.sessions.campaignVideoReview(h.db.getSession("child")!, "orchestrator"), null, "only a Full Control campaign root has the fact");
@@ -1050,8 +1050,8 @@ test("the campaign projection reports delegated video review from the same serve
   assert.throws(() => h.db.campaignProjection("root"), /derived from inside its own campaign projection/u);
 });
 
-test("a campaign without a live proof reports video as the Human's with the missing proof named", async (t) => {
+test("a campaign without a live proof reports video as an Orchestrator ask-or-deny with the missing proof named, never the Human's", async (t) => {
   const h = await harness(t, { proof: false });
   assert.deepEqual(h.sessions.campaignVideoReview(h.db.getSession("root")!, "orchestrator"), { status: "unavailable",
-    reason: "Video evidence comes to you because no current live proof certifies the media-only reviewer on the Orchestrator's machine." });
+    reason: "The Orchestrator can't watch video because no current live proof certifies the media-only reviewer on the Orchestrator's machine. It asks for screenshots or denies the claim as unproven." });
 });

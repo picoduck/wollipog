@@ -706,7 +706,13 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 // 229: Owner/Admin recovery of a stale provider-HOME lease (#3241): `inspect_provider_home_lease`
 //      and `recover_provider_home_lease` with their results. The control plane sends them only to
 //      a v229+ runner, and a runner answers them only for a v229+ control plane.
-export const PROTOCOL_VERSION = 229;
+// 230: Full Control worktree containment (#2940): runner filesystem evidence carries
+//      `filesystem.containment` (version 1) only after canonicalizing every target, the cwd and the
+//      session's worktree root. The control plane makes a tool request approvable only with it, so
+//      evidence from an older runner is unresolved and gets the standing decline. A v230 runner also
+//      keeps an accepted Dismiss Recovery durable until the provider turn settles, so only then does
+//      the control plane fence its standing sign-in dismissal permanently.
+export const PROTOCOL_VERSION = 230;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -1005,6 +1011,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   fullControlAuthority: 215,
   /** Bounded Full Control issue lineage, publication admission and verified closure. */
   fullControlIssueAuthority: 217,
+  /** Runner evidence attests that every resolved target lies inside the session's worktree (#2940). */
+  campaignWorktreeContainment: 230,
+  /** An accepted Dismiss Recovery is durable on the runner and waits for the provider turn instead
+   * of being refused, so the control plane may fence its standing dismissal permanently (#2940). */
+  durableAuthDismissal: 230,
   campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
@@ -2720,6 +2731,9 @@ export interface OrchestratorCampaignProjection {
    * cannot. Absent from servers without video review and from Custom campaigns; each gate still
    * rechecks its own child, source and audience. */
   videoEvidenceReview?: { status: "available" | "unavailable"; reason: string };
+  /** Full Control only: the request classes that still come to the Human for this campaign
+   * (#2940), today at most `human_required_rules` while such a rule exists. */
+  fullControlHumanRequired?: import("./campaign-authority.js").FullControlRequestClass[];
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;
@@ -3944,7 +3958,16 @@ export interface ApprovalContext {
   operation?: ({ kind: "command"; input: string; cwd?: string } | { kind: "file"; path: string } |
     { kind: "permission_grant"; lifetime: "session" }) & {
       /** Runner-derived physical targets. Provider-authored claims never populate this evidence. */
-      filesystem?: { cwd?: string; targets: Array<{ path: string; resolvedPath: string }> };
+      filesystem?: { cwd?: string; targets: Array<{ path: string; resolvedPath: string;
+        /** Runner-attested: the real path is inside a directory the runner knows holds credentials. */
+        credentialStore?: true;
+        /** v230: the runner-observed `dev:ino` (of the parent for a file to be created), so a recheck
+         * rejects a swapped inode. Opaque to the control plane. */
+        identity?: string }>;
+        /** v230 (#2940): present only when the runner canonicalized the session's worktree root and
+         * every target and the cwd resolved inside it. `sessionRoot` is the root as the session was
+         * launched with it; `root` is its real path. Absence makes the effect unresolved. */
+        containment?: { version: 1; root: string; sessionRoot: string } };
     };
   toolName?: string;
   /** Human-readable input rendering (command text, file path + content excerpt, JSON), bounded

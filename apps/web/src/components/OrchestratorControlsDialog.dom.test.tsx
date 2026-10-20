@@ -461,16 +461,32 @@ test("under Full Control the dialog shows the server's effective owners read-onl
   assert.equal(fact("One-Time Approvals"), "Human");
   assert.match(text, /Your Custom choice, Questions and Approvals, applies again only after you revoke Full Control\./);
   assert.match(text, /Your per-gate choices apply again only after you revoke to Custom\./);
-  assert.match(text, /Video Evidence Review: Video evidence needs your review until production video review is available\./);
-  assert.match(text, /External Evidence Review: Evidence stored outside private Session artifacts \(links only\) needs your review\./);
-  assert.match(text, /Secrets and Sign-In: Always decided by the Human under Full Control\./);
-  assert.match(text, /Relative Shell Commands Without a Verified Directory/, "a Claude Code root keeps its driver's protection");
+  // Only what truly remains comes to the Human (#2940): evidence this authorization keeps human,
+  // and the person's own Human Required rules. An older server's absent list still discloses those.
+  assert.match(text, /UI Evidence Review: No image reader\./);
+  assert.match(text, /Human Required Governance Rules: Asks from rules you marked Human Required still come to you under Full Control\./);
+  assert.doesNotMatch(text, /Secrets and Sign-In|Relative Shell Commands|Git Commands|Persistent Permission Grants/);
+  assert.match(text, /Requests for credentials, sign-in, wider provider access or a lasting permission grant are declined automatically and shown as blocked work in Campaign Status\. You are not asked\./);
+  assert.match(text, /credentials, sign-in or wider access are declined as blocked work/);
   assert.ok([...dialog.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"));
 });
 
-test("under Full Control the video exception follows the server's campaign fact, and external evidence always stays", async () => {
-  const humanRequired = (dialog: Element) => [...dialog.querySelectorAll("section")]
-    .find((section) => section.querySelector(".section-title")?.textContent === "Human Required")?.textContent ?? "";
+test("under Full Control with no Human Required rule and delegated evidence, nothing comes to the Human", async () => {
+  const view = fullControlProjection();
+  const harness = await open({ ...view, orchestratorCampaign: { ...view.orchestratorCampaign!, fullControlHumanRequired: [],
+    decisionOwners: { ...view.orchestratorCampaign!.decisionOwners, ui_evidence_approval: "orchestrator" as const },
+    uiEvidenceReview: { status: "available" as const, effectiveOwner: "orchestrator" as const } } } as SessionView, {});
+  const section = [...harness.dialog().querySelectorAll("section")]
+    .find((candidate) => candidate.querySelector(".section-title")?.textContent === "Human Required")!;
+  assert.match(section.textContent ?? "", /^Human RequiredNothing comes to you under Full Control\.Requests for credentials/);
+  assertNoDomNode(section.querySelector("ul"));
+});
+
+test("under Full Control the video line follows the server's campaign fact, and neither video nor external evidence reaches the Human", async () => {
+  const section = (dialog: Element, title: string) => [...dialog.querySelectorAll("section")]
+    .find((candidate) => candidate.querySelector(".section-title")?.textContent === title)?.textContent ?? "";
+  const humanRequired = (dialog: Element) => section(dialog, "Human Required");
+  const uninspectable = (dialog: Element) => section(dialog, "Evidence the Orchestrator Can't Inspect");
   const withVideo = (videoEvidenceReview?: { status: "available" | "unavailable"; reason: string }) => {
     const view = fullControlProjection();
     return { ...view, orchestratorCampaign: { ...view.orchestratorCampaign!,
@@ -485,35 +501,38 @@ test("under Full Control the video exception follows the server's campaign fact,
   // So does Campaign Behavior's evidence notice.
   const behaviorNotice = (dialog: Element) => [...dialog.querySelectorAll(".notice")]
     .find((node) => node.textContent?.includes("reviews image evidence attached as Session artifacts"))?.textContent ?? "";
+  const external = /External Evidence Review: The Orchestrator can't open evidence stored outside private Session artifacts \(links only\), so it asks for screenshots or denies the claim as unproven\./;
   let harness = await open(withVideo({ status: "available", reason: certified }), {});
   let dialog = harness.dialog();
   assert.match(disclosure(dialog), /In this campaign, video evidence attached as a Session artifact goes to the certified media-only reviewer instead/);
   assert.doesNotMatch(disclosure(dialog), /requires human review/, "a certified campaign's disclosure does not send video to a person");
   assert.match(behaviorNotice(dialog), /Video goes to this campaign's certified media-only reviewer\./);
-  assert.doesNotMatch(behaviorNotice(dialog), /normally goes to a person/);
-  assert.doesNotMatch(humanRequired(dialog), /Video Evidence Review/, "a certified campaign does not list video as Human Required");
-  assert.match(humanRequired(dialog), /External Evidence Review: Evidence stored outside private Session artifacts \(links only\) needs your review\./);
+  assert.match(behaviorNotice(dialog), /Under Full Control, externally stored evidence never goes to a person either\./);
+  assert.doesNotMatch(humanRequired(dialog), /Video Evidence Review|External Evidence Review/);
+  assert.doesNotMatch(uninspectable(dialog), /Video Evidence Review/, "certified video is inspectable");
+  assert.match(uninspectable(dialog), external);
   assert.ok([...dialog.querySelectorAll(".orchestrator-gate-helper")].some((node) =>
     node.textContent === `Video Evidence Review: ${certified}`), "the delegation is stated where the gates are");
   await harness.unmount();
 
-  const uncertified = "Video evidence comes to you because no current live proof certifies the media-only reviewer on the Orchestrator's machine.";
+  const uncertified = "The Orchestrator can't watch video because no current live proof certifies the media-only reviewer on the Orchestrator's machine. It asks for screenshots or denies the claim as unproven.";
   harness = await open(withVideo({ status: "unavailable", reason: uncertified }), {});
   dialog = harness.dialog();
-  assert.ok(humanRequired(dialog).includes(`Video Evidence Review: ${uncertified}`), "the server's reason is shown");
-  assert.match(disclosure(dialog), /In this campaign, video evidence requires human review, including video attached as a Session artifact\./);
-  assert.doesNotMatch(disclosure(dialog), /certified media-only reviewer/);
-  assert.match(behaviorNotice(dialog), /Video normally goes to a person; one operator-enabled short-frame validation campaign may delegate it\./);
-  assert.match(humanRequired(dialog), /External Evidence Review:/);
+  assert.ok(uninspectable(dialog).includes(`Video Evidence Review: ${uncertified}`), "the server's reason is shown");
+  assert.doesNotMatch(humanRequired(dialog), /Video Evidence Review|External Evidence Review/);
+  assert.match(disclosure(dialog), /In this campaign, video evidence is never sent to a person: the Orchestrator asks for screenshots instead or denies the claim as unproven\./);
+  assert.doesNotMatch(disclosure(dialog), /certified media-only reviewer|requires human review/);
+  assert.match(behaviorNotice(dialog), /It asks for screenshots instead of video it can't watch, or denies the claim as unproven\./);
+  assert.doesNotMatch(behaviorNotice(dialog), /normally goes to a person|Externally stored evidence goes to a person/);
   assert.ok(![...dialog.querySelectorAll(".orchestrator-gate-helper")].some((node) => node.textContent?.startsWith("Video Evidence Review")));
   await harness.unmount();
 
   harness = await open(withVideo(), {});
   dialog = harness.dialog();
-  assert.match(humanRequired(dialog), /Video Evidence Review: Video evidence needs your review until production video review is available\./,
-    "an older server without the fact keeps video with the Human");
-  assert.match(disclosure(dialog), /In this campaign, video evidence requires human review/, "and so does its disclosure");
-  assert.match(humanRequired(dialog), /External Evidence Review:/);
+  assert.match(uninspectable(dialog), /Video Evidence Review: The Orchestrator can't watch video yet, so it asks for screenshots or denies the claim as unproven\./,
+    "an older server without the fact still never routes video to the Human under Full Control");
+  assert.match(disclosure(dialog), /video evidence is never sent to a person/, "and neither does its disclosure");
+  assert.match(uninspectable(dialog), external);
 });
 
 test("under Full Control without a reported projection, owners are Not Reported rather than guessed", async () => {

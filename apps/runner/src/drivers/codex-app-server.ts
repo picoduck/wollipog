@@ -1960,6 +1960,7 @@ export class CodexAppServerDriver implements Driver {
             !ownership.ownerToolUseId && this.promptBusy && this.turnResolve && this.threadId && this.turnId
               ? { threadId: this.threadId, turnId: this.turnId }
               : undefined,
+            this.cwd,
           ),
         });
       });
@@ -2849,6 +2850,8 @@ export function approvalContext(
   params: Json,
   escalated: boolean,
   activeRoot?: { threadId: string; turnId: string },
+  /** The session worktree (its launch cwd): the containment root for Full Control evidence. */
+  sessionRoot?: string,
 ) {
   const toolName = method === PERMISSIONS_METHOD
     ? "permissions"
@@ -2894,8 +2897,8 @@ export function approvalContext(
       .some((key) => params?.[key] != null) ? { providerPermissionExpansion: true } : {}),
     ...(method === PERMISSIONS_METHOD ? { operation: { kind: "permission_grant" as const, lifetime: "session" as const } } :
       commandInput && commandInput.length <= 2000 ? { operation: campaignOperationEvidence(toolName, { kind: "command", input: commandInput,
-      ...(typeof params?.cwd === "string" && params.cwd.length <= 1024 ? { cwd: params.cwd } : {}) }) } :
-      toolName === "fileChange" && verifiedFilePath && verifiedFilePath.length <= 1024 ? { operation: campaignOperationEvidence(toolName, { kind: "file", path: verifiedFilePath }) } : {}),
+      ...(typeof params?.cwd === "string" && params.cwd.length <= 1024 ? { cwd: params.cwd } : {}) }, sessionRoot) } :
+      toolName === "fileChange" && verifiedFilePath && verifiedFilePath.length <= 1024 ? { operation: campaignOperationEvidence(toolName, { kind: "file", path: verifiedFilePath }, sessionRoot) } : {}),
     ...(typeof input === "string" && input ? { input: truncate(input, 2000) } : {}),
     ...(commandIdentity ? { commandIdentity } : {}),
     ...(typeof path === "string" && path ? { path: truncate(path, 1024) } : {}),

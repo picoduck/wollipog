@@ -111,7 +111,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 229);
+  assert.equal(PROTOCOL_VERSION, 230);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -264,8 +264,14 @@ test("older peers never receive display-only live Claude usage, but still accoun
   assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
 });
 
-test("PROTOCOL_VERSION is 229", () => {
-  assert.equal(PROTOCOL_VERSION, 229);
+test("PROTOCOL_VERSION is 230", () => {
+  assert.equal(PROTOCOL_VERSION, 230);
+  // A v229 runner cannot attest Full Control worktree containment (#2940).
+  assert.equal(runnerSupportsProtocol(229, "campaignWorktreeContainment"), false);
+  assert.equal(runnerSupportsProtocol(230, "campaignWorktreeContainment"), true);
+  // A v229 runner refuses a Dismiss Recovery while the provider turn settles (#2940 CR-8.1).
+  assert.equal(runnerSupportsProtocol(229, "durableAuthDismissal"), false);
+  assert.equal(runnerSupportsProtocol(230, "durableAuthDismissal"), true);
   // A v227 runner launches review sessions but neither plans rounds nor validates attempts (#3369).
   assert.equal(runnerSupportsProtocol(227, "reviewRuns"), false);
   assert.equal(runnerSupportsProtocol(228, "reviewRuns"), true);

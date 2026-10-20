@@ -11,9 +11,11 @@ export const DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE =
 /** The same disclosure for one campaign. Its video sentence follows the server's
  * `videoEvidenceReview` fact (#1321), the fact the campaign's Video Evidence Review line states, so
  * the two never contradict each other. Without the fact (a Custom campaign or an older server) video
- * stays with a person. */
-export function uiEvidenceRetentionDisclosure(video: OrchestratorCampaignProjection["videoEvidenceReview"]): string {
+ * stays with a person, except under Full Control, which never routes evidence to a person (#2940). */
+export function uiEvidenceRetentionDisclosure(video: OrchestratorCampaignProjection["videoEvidenceReview"], fullControl = false): string {
   return video?.status === "available"
     ? `${IMAGE_RETENTION_DISCLOSURE} In this campaign, video evidence attached as a Session artifact goes to the certified media-only reviewer instead, and its provider may retain the frames it receives in the same way.`
+    : fullControl
+    ? `${IMAGE_RETENTION_DISCLOSURE} In this campaign, video evidence is never sent to a person: the Orchestrator asks for screenshots instead or denies the claim as unproven.`
     : `${IMAGE_RETENTION_DISCLOSURE} In this campaign, video evidence requires human review, including video attached as a Session artifact.`;
 }

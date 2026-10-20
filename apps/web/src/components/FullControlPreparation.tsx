@@ -47,7 +47,7 @@ export function OrchestratorControlChoice({ mode, onChange, disabled = false, su
 }
 
 const STATE_LABELS: Record<CampaignLaunchPreflight["capabilities"][number]["state"], string> = {
-  verified: "Verified", unsupported: "Blocks Launch", human_required: "Human Required", informational: "Information",
+  verified: "Verified", unsupported: "Blocks Launch", human_required: "Human Required", informational: "Information", orchestrator_decides: "Orchestrator Decides",
 };
 const DEBOUNCE_MS = 400;
 
@@ -144,12 +144,10 @@ function mergeOverrides(budget: BudgetDraft, limits: LimitDrafts): Pick<FullCont
   return { ...(Object.keys(merged).length ? { budget: merged } : {}), ...(limit.issues ? { issues: limit.issues } : {}) };
 }
 
-/** The capability exceptions by name; the standing protections every campaign has are counted. */
+/** Everything that still comes to the Human by name, which under Full Control is at most their own
+ * Human Required rules and any evidence they kept out of the authorization (#2940). */
 function humanRequiredSummary(preflight: CampaignLaunchPreflight): string {
-  const exceptions = preflight.capabilities.filter((item) => item.state === "human_required").map((item) => item.capability);
-  const standing = preflight.summary.humanRequired.length - exceptions.length;
-  const protections = standing > 0 ? `${standing} standing ${standing === 1 ? "protection" : "protections"}, such as secrets and sign-in` : "";
-  return [exceptions.join(", "), protections].filter(Boolean).join(" · ") || "None";
+  return preflight.summary.humanRequired.map((item) => item.exception).join(", ") || "None";
 }
 
 function money(value: number): string {
@@ -194,6 +192,7 @@ export function FullControlSummary({ preflight, loading, error, scopeLabel, adva
       <div><dt>Evidence</dt><dd>{preflight.summary.evidence.statement}</dd></div>
       <div><dt>Human Required</dt><dd>{humanRequiredSummary(preflight)}</dd></div>
     </dl>}
+    {preflight?.summary.declinedNote && <p className="section-note">{preflight.summary.declinedNote}</p>}
     {preflight?.summary.evidence.provider && <p className="section-note">{preflight.summary.evidence.provider.retentionDisclosure}</p>}
     <details className="disclosure">
       <summary><ChevronRightIcon size={14} className="disclosure-chevron" />Advanced</summary>
@@ -201,7 +200,9 @@ export function FullControlSummary({ preflight, loading, error, scopeLabel, adva
         {advanced}
         {preflight && <>
           <h4 className="section-title">Human Required</h4>
-          <ul>{preflight.summary.humanRequired.map((item) => <li key={item.exception}>{item.exception}</li>)}</ul>
+          {preflight.summary.humanRequired.length
+            ? <ul>{preflight.summary.humanRequired.map((item) => <li key={item.exception}>{item.exception}</li>)}</ul>
+            : <p className="section-note">Nothing comes to you under Full Control.</p>}
           <h4 className="section-title">Capabilities</h4>
           <ul>{preflight.capabilities.map((item) => <li key={item.id}>{item.capability} ({STATE_LABELS[item.state]}): {item.reason}</li>)}</ul>
         </>}

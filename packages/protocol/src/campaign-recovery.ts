@@ -1,10 +1,12 @@
 /** Content-safe recovery metadata. These records describe work; none is an authorization or
  * a receipt proving an external effect. Resource identities never contain commands, media or URLs. */
 export type CampaignRecoveryAction = "answer_request" | "review_evidence" | "recover_hold" |
-  "replace_worker" | "reformulate_request" | "repair_checks" | "rereview" | "reconcile_outcome" | "continue_campaign";
+  "replace_worker" | "reformulate_request" | "repair_checks" | "rereview" | "reconcile_outcome" | "continue_campaign" |
+  "continue_without_request";
 export type CampaignRecoveryReason = "authorized_action" | "transient_failure" | "failed_checks" | "reviewer_objection" |
   "uncertain_outcome" | "missing_human_information" | "missing_access" | "boundary_enlargement" |
-  "human_required_rule" | "unsupported_capability" | "hard_denial" | "attempts_exhausted" | "authority_changed";
+  "human_required_rule" | "unsupported_capability" | "hard_denial" | "attempts_exhausted" | "authority_changed" |
+  "request_declined";
 export type CampaignRecoveryState = "ready" | "backoff" | "dispatched" | "waiting_human" |
   "blocked" | "resolved" | "cancelled";
 export interface CampaignRecoveryResource {
@@ -68,4 +70,5 @@ export const CAMPAIGN_RECOVERY_EXPLANATIONS: Record<CampaignRecoveryReason, stri
   hard_denial: "The operation was denied. It remains blocked and recovery will not request repeated overrides.",
   attempts_exhausted: "The recovery ceiling was exhausted. It remains blocked and recovery will not reset the ceiling or request repeated overrides.",
   authority_changed: "The original recovery reservation was cancelled. This live resource remains blocked until a fresh exact occurrence is available; no override is requested.",
+  request_declined: "Full Control declined a request for credentials, sign-in, wider provider access or a lasting permission grant. The campaign cannot supply these, so the work that needed it stays blocked while unrelated work continues. Nobody is asked and the request is never replayed.",
 };

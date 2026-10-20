@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol,
+import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol, FULL_CONTROL_DECLINED_CLASSES, type FullControlRequestClass,
   type CampaignAuthorityEvaluation, type CampaignRecoveryReason, type SessionView } from "@wollipog/protocol";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
 import type { ControlPlaneDb } from "./db.js";
@@ -77,7 +77,8 @@ export class CampaignRecoveryService {
         decision?.resourceSnapshot ?? this.db.campaignPolicyRequest(session.id, root.orchestratorPolicy?.control, request),
         root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion);
         const owner = decision?.authority === "human" ? "human" : evaluated.owner;
-        const reason = request.kind === "authentication"
+        // Under Full Control the server declines sign-in itself; it never waits for the Human.
+        const reason = request.kind === "authentication" && owner === "human"
           ? "missing_access" : request.kind === "question" && owner === "human" && !request.humanRequired &&
             evaluated.reason === "unverified_intent" ? "missing_human_information"
           : decision?.humanFallback ? "unsupported_capability"
@@ -115,6 +116,20 @@ export class CampaignRecoveryService {
         resource: { kind: "request", sessionId: decision.sessionId, occurrenceId: recoveryCoordinate(decision.occurrenceId) },
         reason: decision.status === "denied" ? "hard_denial" : "uncertain_outcome",
         owner: decision.status === "denied" ? "orchestrator" : "human", signal: decision.status });
+    }
+    // Full Control declines (#2940) are informational blocked work. One record per session and
+    // class: it is never dispatched or offered for override, and a verified report settles it.
+    for (const decline of this.db.campaignRecovery.declines(root.id, revision)) {
+      if (decline.sessionId !== root.id && this.db.campaignRecoveryVerifiedReport(root.id, decline.sessionId)) {
+        this.db.campaignRecovery.retireDeclines(root.id, decline.sessionId);
+        continue;
+      }
+      // An unresolved-effect decline is a plain decline: the child was told how to retry, and
+      // nothing it could not supply is blocked. Its row only keeps that message to once per child.
+      if (!FULL_CONTROL_DECLINED_CLASSES.has(decline.requestClass as FullControlRequestClass)) continue;
+      observations.push({ action: "continue_without_request",
+        resource: { kind: "request", sessionId: decline.sessionId, occurrenceId: decline.occurrenceId },
+        reason: "request_declined", owner: "orchestrator", signal: `declined:${decline.requestClass}` });
     }
     for (const job of this.db.campaignReviewJobs.recoveryJobs(root.id)) {
       const unknown = job.usageSettlement === "unavailable" || job.usageSettlement === "pending" && previous.some(item =>

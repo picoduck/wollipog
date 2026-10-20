@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
-  supportsPacedVideoReviewPeer,
+  supportsPacedVideoReviewPeer, humanRequiredRulesExist,
   type CampaignLaunchInspectionResult, type CampaignIssueScope, type PreparedCampaignLaunch, type RunnerView,
 } from "@wollipog/protocol";
 import { randomUUID } from "node:crypto";
@@ -156,6 +156,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
         rule.policyId === id && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),
       imageReview: evaluateUiEvidenceReviewClient(db.uiEvidenceReviewClient({ runnerId: plan.runnerId, agentId: plan.agentId,
         driver: plan.driver, model: plan.config.model ?? null }, "orchestrator")),
+      humanRequiredRules: humanRequiredRulesExist(sessions.governancePolicies()),
       pacedVideoPeer: supportsPacedVideoReviewPeer(runnerNow.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
       disclosuresAvailable: dependencies.evidenceDisclosures !== undefined,
       videoCertification: dependencies.videoCertification?.(runnerNow.runnerId) ?? null,
@@ -256,6 +257,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),
       imageReview: evaluateUiEvidenceReviewClient(db.uiEvidenceReviewClient({ runnerId: session.runnerId, agentId: session.agentId,
         driver: session.driver, model: plan.config.model ?? null }, "orchestrator")),
+      humanRequiredRules: humanRequiredRulesExist(sessions.governancePolicies()),
       pacedVideoPeer: supportsPacedVideoReviewPeer(runner.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
       disclosuresAvailable: dependencies.evidenceDisclosures !== undefined,
       videoCertification: dependencies.videoCertification?.(runner.runnerId) ?? null,

@@ -119,7 +119,8 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     for (const id of ["repository_scope", "authority_contract", "accounting_budget", "native_review", "execution_isolation", "image_evidence"]) {
       assert.equal(checked!.capabilities.find((item) => item.id === id)!.state, "verified", id);
     }
-    assert.deepEqual(checked!.capabilities.filter((item) => item.state === "human_required").map((item) => item.id), ["video_evidence", "external_evidence"]);
+    assert.deepEqual(checked!.capabilities.filter((item) => item.state === "orchestrator_decides").map((item) => item.id), ["video_evidence", "external_evidence"]);
+    assert.deepEqual(checked!.capabilities.filter((item) => item.state === "human_required"), [], "Full Control routes no evidence to the Human (#2940)");
     const summary = checked!.summary;
     assert.equal(summary.repository, "owner/repo");
     assert.deepEqual(summary.issueNumbers, [7, 12]);
@@ -129,11 +130,12 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     assert.deepEqual(summary.followUps, { policy: "execute_approved", relatedFollowUps: true, maxIssues: 4, closureReasons: ["completed"] });
     assert.equal(summary.root.completion, "stop_and_archive");
     assert.deepEqual(summary.root.isolation, { mode: "provider", network: "inherit" });
-    assert.equal(summary.evidence.statement, "The Orchestrator reviews screenshots. Video and external evidence need your review.");
+    assert.equal(summary.evidence.statement, "The Orchestrator reviews screenshots. For video and external evidence it asks for screenshots or denies the claim as unproven.");
     assert.equal(summary.evidence.provider!.retentionDisclosure, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE);
     assert.equal(summary.evidence.destination.configurationId, `session_artifacts:${f.human.organizationId}`);
     assert.equal(summary.evidence.envelope, false, "no peer declares the private media contract");
-    assert.ok(summary.humanRequired.some((item) => item.exception === "Secrets and Sign-In"));
+    assert.deepEqual(summary.humanRequired, [], "no rule is marked Human Required, so nothing comes to the Human");
+    assert.match(summary.declinedNote!, /declined automatically and shown as blocked work/u);
     assert.deepEqual(summary.blockers, []);
     assert.deepEqual(checked!.advanced.controlledReview, review);
     assert.deepEqual(f.starts, []);
@@ -365,18 +367,49 @@ test("a non-Human caller, a changed digest and a stale runner generation are ref
   } finally { await server.close(); f.db.close(); }
 });
 
-test("screenshots route to the Human when the Orchestrator model cannot review images, and the launch stays allowed", async () => {
+test("screenshots stay with the Orchestrator when its model cannot review images, which then asks or denies, and the launch stays allowed", async () => {
   const f = fixture({ images: false });
   const { server } = await app(f);
   try {
     const { preflight: checked } = await preflight(server, launch);
     assert.equal(checked!.ready, true);
     const image = checked!.capabilities.find((item) => item.id === "image_evidence")!;
-    assert.equal(image.state, "human_required");
+    assert.equal(image.state, "orchestrator_decides");
+    assert.match(image.reason, /It asks for inspectable evidence or denies the claim as unproven\.$/u);
     assert.equal(image.mandatory, false);
-    assert.equal(checked!.summary.evidence.provider, null);
+    assert.equal(checked!.summary.evidence.provider, null, "no image bytes are disclosed to a provider that cannot view them");
+    assert.equal(checked!.summary.evidence.statement,
+      "The Orchestrator decides UI evidence but can't view images, so it asks for inspectable evidence or denies the claim as unproven.");
+    assert.deepEqual(checked!.summary.humanRequired, []);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an authorization that leaves UI Evidence Approval out keeps all evidence with the Human", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, { ...launch, overrides: { ...launch.overrides, operations: ["implementation_question", "pr_merge"] } });
+    assert.deepEqual(checked!.capabilities.filter((item) => item.state === "human_required").map((item) => item.id),
+      ["image_evidence", "video_evidence", "external_evidence"]);
     assert.equal(checked!.summary.evidence.statement, "Screenshots, video and external evidence need your review.");
-    assert.ok(checked!.summary.humanRequired.some((item) => item.exception === "Screenshot Evidence Review"));
+    assert.deepEqual(checked!.summary.humanRequired.map((item) => item.exception),
+      ["Screenshot Evidence Review", "Video Evidence Review", "External Evidence Review"]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("only a rule a person marked Human Required is listed, and only while one is enabled", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    assert.deepEqual((await preflight(server, launch)).preflight!.summary.humanRequired, []);
+    const rule = { policyId: "mine", name: "Mine", effect: "ask" as const, priority: 1, enabled: true, scope: { toolName: "Bash" },
+      conditions: { humanRequired: true } };
+    f.db.upsertGovernancePolicy(rule, Date.now());
+    assert.deepEqual((await preflight(server, launch)).preflight!.summary.humanRequired.map((item) => item.exception), ["Human Required Governance Rules"]);
+    f.db.upsertGovernancePolicy({ ...rule, enabled: false }, Date.now());
+    assert.deepEqual((await preflight(server, launch)).preflight!.summary.humanRequired, []);
+    f.db.upsertGovernancePolicy({ ...rule, conditions: undefined }, Date.now());
+    assert.deepEqual((await preflight(server, launch)).preflight!.summary.humanRequired, [], "an ordinary ask is the Orchestrator's");
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -402,7 +435,7 @@ test("a peer declaring the private media contract gets the evidence envelope fro
   } finally { await server.close(); f.db.close(); }
 });
 
-test("the hosting video composition flips no launch capability: video stays with the Human even with a paced peer and a live proof", async () => {
+test("the hosting video composition flips no launch capability: uncertified video stays an Orchestrator ask-or-deny even with a paced peer and a live proof", async () => {
   const plain = fixture({ pacedVideo: true });
   const hosted = fixture({ pacedVideo: true, hostingVideo: true });
   const video = hosted.video!;
@@ -419,9 +452,9 @@ test("the hosting video composition flips no launch capability: video stays with
     const [expected, checked] = [(await preflight(plainApp.server, launch)).preflight!, (await preflight(hostedApp.server, launch)).preflight!];
     assert.deepEqual(checked.capabilities.map((item) => [item.id, item.state]), expected.capabilities.map((item) => [item.id, item.state]));
     const videoCapability = checked.capabilities.find((item) => item.id === "video_evidence")!;
-    assert.equal(videoCapability.state, "human_required");
-    assert.equal(videoCapability.reason, "Video evidence needs your review until production video review is available.");
-    assert.ok(checked.summary.humanRequired.some((item) => item.exception === "Video Evidence Review" && item.reason === videoCapability.reason));
+    assert.equal(videoCapability.state, "orchestrator_decides");
+    assert.equal(videoCapability.reason, "The Orchestrator can't watch video yet, so it asks for screenshots or denies the claim as unproven.");
+    assert.ok(!checked.summary.humanRequired.some((item) => item.exception === "Video Evidence Review"));
     assert.equal(checked.summary.evidence.statement, expected.summary.evidence.statement);
   } finally {
     await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
@@ -453,9 +486,9 @@ test("a current live proof makes launch video review delegable only when the env
     assert.ok(proof);
 
     const detached = (await preflight(hostedApp.server, launch)).preflight!;
-    assert.equal(videoRow(detached).state, "human_required");
-    assert.equal(videoRow(detached).reason, "Video evidence needs your review because Wollipog's video review service is not attached yet.");
-    assert.ok(detached.summary.humanRequired.some((item) => item.exception === "Video Evidence Review" && item.reason === videoRow(detached).reason));
+    assert.equal(videoRow(detached).state, "orchestrator_decides");
+    assert.equal(videoRow(detached).reason, "The Orchestrator can't watch video because Wollipog's video review service is not attached yet. It asks for screenshots or denies the claim as unproven.");
+    assert.ok(!detached.summary.humanRequired.some((item) => item.exception === "Video Evidence Review"));
 
     video.attach(hosted.sessions, hosted.hub);
     const ready = (await preflight(hostedApp.server, launch)).preflight!;
@@ -464,7 +497,7 @@ test("a current live proof makes launch video review delegable only when the env
     assert.ok(videoRow(ready).reason.includes(new Date(proof.expiresAt).toISOString()));
     assert.ok(!ready.summary.humanRequired.some((item) => item.exception === "Video Evidence Review"));
     assert.equal(ready.summary.evidence.statement,
-      "The Orchestrator reviews screenshots, and video through the certified media-only reviewer. External evidence needs your review.");
+      "The Orchestrator reviews screenshots, and video through the certified media-only reviewer. For external evidence it asks for screenshots or denies the claim as unproven.");
     assert.equal(ready.summary.evidence.envelope, true);
     assert.equal(ready.ready, true);
     // Delegable video changes no other capability.
@@ -474,21 +507,21 @@ test("a current live proof makes launch video review delegable only when the env
     const sonnet = { ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session,
       config: { model: "claude-sonnet-5-5", permissionMode: "orchestrator" as const } } } };
     assert.equal(videoRow((await preflight(hostedApp.server, sonnet)).preflight!).reason,
-      "Video evidence needs your review because the evidence envelope would name claude-code claude-sonnet-5-5, not the certified claude-code claude-opus-5-5 reviewer.");
+      "The Orchestrator can't watch video because the evidence envelope would name claude-code claude-sonnet-5-5, not the certified claude-code claude-opus-5-5 reviewer. It asks for screenshots or denies the claim as unproven.");
     const humanEvidence = { ...launch, overrides: { ...launch.overrides, operations: ["implementation_question" as const, "pr_merge" as const] } };
     assert.equal(videoRow((await preflight(hostedApp.server, humanEvidence)).preflight!).reason,
-      "Video evidence needs your review because UI evidence approval is not delegated to the Orchestrator.");
+      "Video evidence needs your review because UI evidence approval is not part of this campaign's authorization.");
     const unbudgeted = { ...launch, overrides: { ...launch.overrides, budget: undefined } };
     assert.equal(videoRow((await preflight(hostedApp.server, unbudgeted)).preflight!).state, "verified", "no limit never blocks the envelope");
     const blocked = { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } };
     assert.equal(videoRow((await preflight(hostedApp.server, blocked)).preflight!).reason,
-      "Video evidence needs your review because the launch is blocked, so no evidence envelope is minted.");
+      "The Orchestrator can't watch video because the launch is blocked, so no evidence envelope is minted. It asks for screenshots or denies the claim as unproven.");
   } finally {
     await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
   }
 });
 
-test("a revoked proof or a changed attestation returns launch video review to the Human exactly as before", async () => {
+test("a revoked proof or a changed attestation returns launch video review to the uncertified Orchestrator path, never the Human", async () => {
   const plain = fixture({ pacedVideo: true });
   const hosted = fixture({ pacedVideo: true, hostingVideo: true, videoPort: true });
   const video = hosted.video!;
@@ -514,7 +547,7 @@ test("a revoked proof or a changed attestation returns launch video review to th
       agents: runner.agents.map((agent) => ({ ...agent, capabilities: { ...agent.capabilities!,
         mediaReviewerAttestation: syntheticMediaReviewerAttestation("claude", "changed") } })), runtime: runner.runtime } as never,
     Date.now(), PROTOCOL_VERSION);
-    assert.equal(await videoState(), "human_required");
+    assert.equal(await videoState(), "orchestrator_decides");
   } finally {
     await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
   }
