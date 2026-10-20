@@ -70,6 +70,17 @@ test.describe("at 1440×900", () => {
     await history(page).getByRole("button", { name: "Show 5 More" }).click();
     await expect(table.locator("tbody tr")).toHaveCount(15);
 
+    // A skip is stamped legacy by the control plane but was never sent: no steps, no delivery line.
+    const skipped = await openRunDetails(page, "axe_skipped");
+    await expect(skipped.locator(".automation-run-steps-section")).toHaveCount(0);
+    await expect(skipped).not.toContainText("Sent once");
+    await skipped.getByRole("button", { name: "Done" }).click();
+    await expect(skipped).toHaveCount(0);
+    // The legacy run that was delivered still says so.
+    const legacy = await openRunDetails(page, "axe_legacy");
+    await expect(legacy.locator(".automation-run-legacy")).toHaveText("Sent once, without delivery receipts.");
+    await legacy.getByRole("button", { name: "Done" }).click();
+
     const dialog = await openRunDetails(page, "axe_failed");
     await expect(dialog.locator(".notice.t-danger .notice-body")).toHaveText("The agent exited before it finished the report.");
     await expect(dialog.locator(".automation-run-steps > li")).toHaveCount(3);

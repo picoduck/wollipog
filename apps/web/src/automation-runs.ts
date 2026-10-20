@@ -93,6 +93,18 @@ export function deliveredLabel(delivery: AutomationTriggerDeliveryMetadata): str
   return parts.join(", ") || "Nothing beyond the signed request";
 }
 
+/**
+ * Whether a legacy run was sent once without delivery receipts. The control plane stamps every run
+ * it claims without a delivery mode as legacy, including skips and expiries it never sent (#2970,
+ * CR-1.1), so only a run with evidence of delivery (it started, or has a session or a workflow run)
+ * counts.
+ */
+export function sentWithoutReceipts(execution: AutomationExecution): boolean {
+  if (execution.deliveryMode !== "legacy_at_most_once" || execution.commands?.length) return false;
+  if (execution.status === "skipped" || execution.status === "expired") return false;
+  return execution.startedAt !== undefined || Boolean(execution.sessionId || execution.runId || execution.workflowInstanceId);
+}
+
 /** A step's kind in words. */
 export function runStepLabel(kind: AutomationCommandView["kind"]): string {
   return kind === "start_session" ? "Start Session" : "Send Prompt";

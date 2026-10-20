@@ -13,6 +13,7 @@ import {
   runStartedBy,
   runStepLabel,
   runStepStatus,
+  sentWithoutReceipts,
   startedBySignedTrigger,
 } from "../automation-runs.js";
 import { formatCalendarTime } from "../format.js";
@@ -154,7 +155,7 @@ export function RunDetailsDialog({ execution, now, policy, machineLabel, onOpen,
   const open = runOpenTarget(execution);
   const signed = startedBySignedTrigger(execution);
   const steps = [...execution.commands ?? []].sort((a, b) => a.ordinal - b.ordinal);
-  const legacy = steps.length === 0 && execution.deliveryMode === "legacy_at_most_once";
+  const legacy = sentWithoutReceipts(execution);
   const finished = execution.completedAt !== undefined ? when(execution.completedAt, now)
     : execution.status === "dispatching" || execution.status === "running" ? "Not yet" : "—";
   // Only a failure or an expiry has an error worth reading; a skip's is an internal message whose

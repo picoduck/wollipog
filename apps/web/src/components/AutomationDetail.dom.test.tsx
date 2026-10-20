@@ -868,13 +868,15 @@ function historyRuns(): AutomationExecution[] {
         step("cmd_b", { ordinal: 1, state: "completed", attemptCount: 2 }),
       ],
     }),
+    // A skip and an expiry are claimed without a delivery mode, which the control plane stores as
+    // legacy (CR-1.1), though nothing was sent.
     run("skipped", {
-      executionId: "axe_skipped", idempotencyKey: "automation-a:skipped", sessionId: undefined,
+      executionId: "axe_skipped", idempotencyKey: "automation-a:skipped", sessionId: undefined, deliveryMode: "legacy_at_most_once",
       scheduledFor: chicago(-2, 2), createdAt: chicago(-2, 2), startedAt: undefined, completedAt: undefined,
       error: "execution 'axe_failed' is still active",
     }),
     run("expired", {
-      executionId: "axe_expired", idempotencyKey: "automation-a:expired", sessionId: undefined,
+      executionId: "axe_expired", idempotencyKey: "automation-a:expired", sessionId: undefined, deliveryMode: "legacy_at_most_once",
       scheduledFor: chicago(-3, 2), createdAt: chicago(-3, 2), startedAt: undefined, completedAt: chicago(-3, 3),
       error: AUTOMATION_TARGET_UNAVAILABLE,
     }),
@@ -1078,7 +1080,8 @@ test("Run Details says why a run was skipped or expired, names a signed delivery
       Started: "Didn't start", Finished: "—", Took: "—", "Started By": "Schedule",
     });
     assertNoDomNode(dialog.querySelector(".notice"), "a skip's internal message is not shown");
-    assertNoDomNode(dialog.querySelector(".automation-run-steps-section"), "no steps without commands");
+    assertNoDomNode(dialog.querySelector(".automation-run-steps-section"), "no steps: nothing was sent");
+    assert.doesNotMatch(dialog.textContent ?? "", /Sent once|delivery receipts/, "a legacy-stamped skip was never sent (CR-1.1)");
     await click(buttonNamed(dialog, "Done"));
 
     dialog = await openRunDetails(view.body, "axe_expired");
@@ -1087,6 +1090,8 @@ test("Run Details says why a run was skipped or expired, names a signed delivery
     assert.ok(notice.classList.contains("t-warning"));
     assert.equal(notice.querySelector(".notice-body")?.textContent, AUTOMATION_TARGET_UNAVAILABLE, "the shared waiting sentence reads whole");
     assertNoDomNode(buttonNamed(notice, "Show Details"), "nothing more to show");
+    assertNoDomNode(dialog.querySelector(".automation-run-steps-section"), "no steps: nothing was sent");
+    assert.doesNotMatch(dialog.textContent ?? "", /Sent once|delivery receipts/, "a legacy-stamped expiry was never sent (CR-1.1)");
     assert.deepEqual([...dialog.querySelectorAll(".modal-foot button")].map((button) => button.textContent), ["Done"]);
     await click(buttonNamed(dialog, "Done"));
 

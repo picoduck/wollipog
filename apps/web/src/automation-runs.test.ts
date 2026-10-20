@@ -20,6 +20,7 @@ import {
   runStartedBy,
   runStepLabel,
   runStepStatus,
+  sentWithoutReceipts,
 } from "./automation-runs.js";
 import { statusMeta } from "./status-meta.js";
 
@@ -138,6 +139,20 @@ test("a skipped or expired run says why in one sentence, never the internal mess
   for (const status of ["dispatching", "running", "succeeded", "failed"] as const) {
     assert.equal(runReason(run({ status, error: "x" }), expire), null);
   }
+});
+
+test("only a legacy run that was delivered reads as sent without receipts, never a skip or an expiry (CR-1.1)", () => {
+  const legacy = { deliveryMode: "legacy_at_most_once" } as const;
+  assert.equal(sentWithoutReceipts(run({ ...legacy, startedAt: AT, sessionId: "s-1" })), true);
+  assert.equal(sentWithoutReceipts(run({ ...legacy, status: "failed", sessionId: "s-1" })), true);
+  assert.equal(sentWithoutReceipts(run({ ...legacy, runId: "run-1" })), true);
+  // The control plane claims skips and expiries without a delivery mode, so they read as legacy.
+  for (const status of ["skipped", "expired"] as const) {
+    assert.equal(sentWithoutReceipts(run({ ...legacy, status, startedAt: AT, sessionId: "s-1" })), false, status);
+  }
+  assert.equal(sentWithoutReceipts(run({ ...legacy, status: "failed" })), false, "nothing says it was sent");
+  assert.equal(sentWithoutReceipts(run({ ...legacy, startedAt: AT, commands: [command()] })), false, "receipts are its steps");
+  assert.equal(sentWithoutReceipts(run({ deliveryMode: "receipted_v53", startedAt: AT, sessionId: "s-1" })), false);
 });
 
 test("a run opens its workflow run, else its session, else nothing", () => {
