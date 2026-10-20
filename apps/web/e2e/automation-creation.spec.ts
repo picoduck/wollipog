@@ -20,3 +20,22 @@ for (const width of [1440, 390]) {
     });
   }
 }
+
+for (const width of [1440, 390]) for (const action of ["prompt", "workflow"]) {
+  test(`automation ${action} identity and inheritance remain visible at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`/request-surfaces-e2e.html?scenario=automation-creation&action=${action}`);
+    const details = page.getByRole("region", { name: "Create Automation Details" });
+    await expect(details).toContainText("Inherit at Run Time");
+    await expect(details).toContainText("does not override future session settings");
+    if (action === "prompt") {
+      await expect(details).toContainText("/inspect-ci");
+      await expect(details).toContainText("example-target-session");
+      await expect(details).toContainText("read-only");
+    } else {
+      await expect(details).toContainText("example-health-workflow");
+      await expect(details.locator("div").filter({ has: page.locator("dt", { hasText: /^Workflow Version$/ }) })).toContainText("3");
+    }
+    await expect(details.locator("details")).not.toHaveAttribute("open");
+  });
+}

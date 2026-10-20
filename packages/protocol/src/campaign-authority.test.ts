@@ -17,6 +17,7 @@ test("automation creation always stays human-owned even under Full Control or an
   for (const root of [true, false]) for (const supported of [true, false]) {
     const result = resolveCampaignAuthority({ ...base, root, supported, snapshot: {
       category: "automation_creation", spec: {} as never, targetDigest: "a".repeat(64), requestedSpecDigest: "b".repeat(64),
+      effectiveTargets: [],
       nextFireAt: 1, expiresAt: 2,
     }, trustedSource: "workflow_route" });
     assert.equal(result.owner, "human");
