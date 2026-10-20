@@ -39,6 +39,7 @@ import {
   forgePullRequestView,
   issueRefLabel,
   observationUnavailableText,
+  pullRequestShortLabel,
   stateCauseText,
   timeAgo,
   workItemOriginLabel,
@@ -584,7 +585,7 @@ function RecordedTime({ at, now, prefix }: { at: number | null; now: number; pre
 
 function IssueLink({ issue, kind }: { issue: CampaignIssueRef; kind: "issues" | "pull" }) {
   const href = issueRefHref(issue, kind);
-  const label = issueRefLabel(issue);
+  const label = issueRefLabel(issue, kind);
   return href ? <a href={href} target="_blank" rel="noreferrer">{label}</a> : <>{label}</>;
 }
 
@@ -626,8 +627,8 @@ function ForgePullRequestFacts({
   entry: { ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgePullRequestObservation> };
   now: number;
 }) {
-  const view = forgePullRequestView(entry.fact, now);
-  const label = `PR #${entry.ref.number}`;
+  const view = forgePullRequestView(entry.fact, now, entry.ref);
+  const label = pullRequestShortLabel(entry.ref);
   if (view.kind === "unavailable") {
     return (
       <div className="campaign-forge-pr">

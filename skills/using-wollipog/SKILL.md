@@ -154,6 +154,10 @@ CLI). Every record lands in the root campaign, including from a nested Orchestra
   dispatch again. A reported stage is a claim: `merged` does not mark the item delivered. Name the
   item's pull requests in the stage (`pullRequests`); Wollipog observes their GitHub review,
   checks, and merge-queue state separately, through the runner's `gh` login, beside your claim.
+- Issue and pull request refs are `{repository, number}`. A GitHub repository is `owner/repo`. A
+  GitLab project names its host and full namespace (`gitlab.example.com/group/subgroup/project`),
+  never a bare path; `number` is the issue or merge request IID. GitLab refs are recorded and
+  linked, but their pipelines are not observed yet, and older control planes refuse them.
 - `adjudicate_campaign_recommendation` records accepted, rejected, deferred, or duplicate for a
   recorded follow-up; pass `originWorkItemIds` when recording it.
 - `get_campaign_work_items` reads the summary and a page or one item. Restart from the first page

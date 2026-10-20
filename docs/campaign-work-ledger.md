@@ -35,7 +35,7 @@ One unit of committed or proposed campaign work, with or without an issue or a s
 | Field | Meaning |
 | --- | --- |
 | `key` | Stable Orchestrator-chosen identity, unique per campaign, used for idempotent upsert (`picoduck/wollipog#2417`, `plan:read-api`). |
-| `issue` | Optional repository-qualified issue `{repository, number}`. |
+| `issue` | Optional repository-qualified issue `{repository, number}`. `repository` is a GitHub `owner/repo`, or a GitLab project with its host and full namespace, `<gitlab-host>/group[/subgroup…]/project` (#3539). A bare nested path is refused rather than guessed to be gitlab.com, and a GitHub repository is never host-qualified. Pull request refs use the same form; a GitLab merge request's `number` is its IID. |
 | `title` | Optional display title. |
 | `origin` | `original` (initial scope, issue or not) or `follow_up` (accepted from a recommendation). |
 | `generation` | `0` for original scope; for a follow-up, one more than the highest generation among its origin items, or `1` when the recommendation names no origin item (for example, one recorded before the ledger existed). |
@@ -484,7 +484,9 @@ name. The implementation is `apps/control-plane/src/campaign-forge-observations.
 derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
 
 - **Supported forge:** GitHub (github.com) only. A repository that is not a GitHub `owner/name`
-  is `unavailable{forge_unsupported}` and is never put in a query.
+  is `unavailable{forge_unsupported}` and is never put in a query. A GitLab merge request ref is
+  recorded, linked, and labelled `!N`, but reads as not observed yet until a GitLab observer exists
+  (#3539).
 - **Credentials:** the control plane stores no forge credential and never sees a token. It asks the
   runner hosting the **root campaign session** to read, and that runner runs `gh api graphql
   --hostname github.com` in the root Orchestrator's own repository context: its agent context,

@@ -26536,6 +26536,43 @@ test("campaign work ledger operations are Orchestrator-only, root-keyed, and bou
   }
 });
 
+test("campaign work ledger accepts host-qualified GitLab issue and merge request refs in nested namespaces (#3539)", () => {
+  const { db, svc, parent } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const project = "gitlab.example.com/group/subgroup/project";
+    const plan = svc.recordCampaignPlan(parent.id, {
+      items: [{ key: `${project}#4`, issue: { repository: project, number: 4 } }], planComplete: true,
+    });
+    assert.ok(plan.ok && plan.data, plan.error);
+    const workItemId = plan.data.items[0]!.workItemId;
+    const merged = svc.updateCampaignWorkItem(parent.id, {
+      workItemId,
+      stage: { stage: "merge_queued", pullRequests: [{ repository: project, number: 9 }, { repository: "picoduck/wollipog", number: 3 }] },
+    });
+    assert.ok(merged.ok, merged.error);
+    const item = ledgerItem(svc, parent.id, `${project}#4`);
+    assert.deepEqual(item.issue, { repository: project, number: 4 });
+    assert.deepEqual(item.stage?.pullRequests, [{ repository: project, number: 9 }, { repository: "picoduck/wollipog", number: 3 }]);
+
+    // A bare nested path is refused with the accepted shape, not a misleading count.
+    const bare = svc.updateCampaignWorkItem(parent.id, {
+      workItemId, stage: { stage: "merge_queued", pullRequests: [{ repository: "group/subgroup/project", number: 9 }] },
+    });
+    assert.equal(bare.status, 400);
+    assert.match(bare.error ?? "", /each \{repository: "owner\/repo" or "<gitlab-host>\/group\/project", number\}/u);
+    const bareIssue = svc.recordCampaignPlan(parent.id, {
+      items: [{ key: "bare", issue: { repository: "group/subgroup/project", number: 4 } }], planComplete: true,
+    });
+    assert.equal(bareIssue.status, 400);
+    assert.match(bareIssue.error ?? "", /items\[0\]\.issue must be \{repository: "owner\/repo" or "<gitlab-host>\/group\/project"/u);
+    assert.equal(svc.updateCampaignWorkItem(parent.id, {
+      workItemId, issue: { repository: "github.com/picoduck/wollipog", number: 4 },
+    }).status, 400, "a GitHub ref is never host-qualified");
+  } finally {
+    db.close();
+  }
+});
+
 test("campaign work ledger review regressions: no-op detection, linkage, dependency batches, cursors, and sorting (#2417)", () => {
   const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
   try {
