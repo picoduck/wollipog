@@ -1451,12 +1451,67 @@ if (SCENARIO === "conversation-handoff") runner.agents.push({
     supportsImages: true, supportsApprovals: true, slashCommands: [] },
 });
 
+/**
+ * `?pod=members` (#2980): the pod has a lead, a worker and a reviewer on one machine and folder, and
+ * Recent Merges holding a conflict and a merge. `&podTurns=running` runs automatic turns at turn 3 of
+ * 12 with the worker up; `&podTurns=stopped` stopped them at the turn limit. Off by default, so the
+ * other cases see the empty pod they always have.
+ */
+const POD_FIXTURE = FIXTURE_QUERY.get("pod") === "members";
+const POD_TURNS = FIXTURE_QUERY.get("podTurns");
+
+function podMemberSession(id: string, title: string, agentName: string, driver: SessionView["driver"]): SessionView {
+  return {
+    ...session(id, title, "alpha", "alpha-workspace"),
+    agentId: agentName.toLowerCase().replaceAll(" ", "-"),
+    agentName,
+    driver,
+    useWorktree: true,
+    worktreePath: `/worktrees/${id}`,
+  };
+}
+
+const podMemberSessions: SessionView[] = POD_FIXTURE ? [
+  podMemberSession("pod-lead", "Lead: plan the call-site migration", "Claude Code", "claude-code"),
+  podMemberSession("pod-worker", "Worker: migrate call sites", "Codex", "codex-app-server"),
+  podMemberSession("pod-reviewer", "Reviewer: check the migrated sites", "Claude Code", "claude-code"),
+] : [];
+
+const podNow = Date.now();
 const activePod: PodView = {
   id: "pod-active",
   title: "Active Collaboration Pod",
   objective: "Manual collaboration pod",
   status: "active",
-  members: [],
+  members: podMemberSessions.map((member, index) => ({
+    sessionId: member.id,
+    joinedAt: 1,
+    role: (["lead", "worker", "reviewer"] as const)[index]!,
+    contextTokenBudget: null,
+    lastContextSeq: 0,
+  })),
+  ...(POD_FIXTURE ? {
+    orchestration: {
+      policy: { mode: POD_TURNS ? "round_robin" : "manual", contextTokenBudget: 8_192, summaryTokenBudget: 512, maxTurns: 12, maxRepeatedOutputs: 2 },
+      state: POD_TURNS === "running"
+        ? { status: "running", runId: "pod-run-1", turnsUsed: 3, currentSessionId: "pod-worker", startedAt: podNow - 300_000, updatedAt: podNow - 20_000 }
+        : POD_TURNS === "stopped"
+          ? { status: "stopped", runId: "pod-run-1", turnsUsed: 12, stopReason: "max_turns", updatedAt: podNow - 60_000 }
+          : { status: "idle", turnsUsed: 0, updatedAt: 1 },
+    },
+    reconciliations: [
+      {
+        reconciliationId: "merge-2", podId: "pod-active", sourceSessionId: "pod-worker", targetSessionId: "pod-lead", actorId: "local",
+        status: "conflicted", sourceHead: "4f9c2a7e1b3d5c6a", targetHead: "9b81d0c4e2f7a3b5", mergeBase: "1a2b3c4d5e6f7a8b",
+        conflictPaths: ["src/api/client.ts", "src/api/retry.ts"], createdAt: podNow - 180_000, completedAt: podNow - 175_000,
+      },
+      {
+        reconciliationId: "merge-1", podId: "pod-active", sourceSessionId: "pod-reviewer", targetSessionId: "pod-lead", actorId: "local",
+        status: "applied", sourceHead: "c0ffee1234567890", targetHead: "deadbeef12345678", mergeBase: "1a2b3c4d5e6f7a8b",
+        resultHead: "5eed5eed5eed5eed", createdAt: podNow - 3_600_000, completedAt: podNow - 3_590_000,
+      },
+    ],
+  } : {}),
   createdAt: 1,
   updatedAt: 1,
 };
@@ -1594,7 +1649,7 @@ function snapshot(): UiSnapshotMessage {
       lastError: null, createdAt: 1,
     }] : [],
     ...(LEGACY_WORKSPACES || SHELL_PROJECTS_MODE === "unsupported" ? {} : { projects: structuredClone(model.projects) }),
-    sessions: structuredClone(model.sessions.filter((candidate) => !candidate.archived)),
+    sessions: structuredClone([...model.sessions.filter((candidate) => !candidate.archived), ...podMemberSessions]),
     ...(ROW_COLUMNS ? { reminders: [rowColumnsReminder()] } : {}),
     runs: [structuredClone(activeRun)],
     pods: [structuredClone(activePod)],

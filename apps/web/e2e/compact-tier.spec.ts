@@ -193,8 +193,8 @@ async function checkArchivedTable(page: Page, where: string, { folded, minSessio
 }
 
 /**
- * Page content the tier's audit found overflowing (#2106): the Archived Sessions table, the Usage
- * API card's controls and the Pod Orchestration Controls fields.
+ * Page content the tier's audit found overflowing (#2106): the Archived Sessions table and the Usage
+ * API card's controls.
  */
 async function checkPageContent(page: Page, where: string) {
   await open(page, "path=%2Farchived", "Archived Sessions");
@@ -226,48 +226,10 @@ async function checkPageContent(page: Page, where: string) {
   expect(usage.overlapping, `${where}: the Usage controls overlap`).toEqual([]);
   expectGeometry(usage.escape, `${where}: the Usage controls stay inside their card`).toBeLessThanOrEqual(0.51);
   expect(usage.charactersPerLine, `${where}: the Usage description keeps a readable measure`).toBeGreaterThanOrEqual(30);
-
-  await open(page, "view=pod", "Active Collaboration Pod");
-  const pod = await page.evaluate(() => {
-    const box = (element: Element) => element.getBoundingClientRect();
-    const card = document.querySelector(".pod-orchestration")!;
-    const style = getComputedStyle(card);
-    const inner = { left: box(card).left + parseFloat(style.paddingLeft), right: box(card).right - parseFloat(style.paddingRight) };
-    return [...card.querySelectorAll(".pod-orchestration-grid > .field")].map((field) => {
-      const label = field.querySelector("span")!;
-      const control = field.querySelector("select, input") as HTMLSelectElement | HTMLInputElement;
-      // A select is as wide as its longest option when nothing constrains it.
-      const natural = control.cloneNode(true) as HTMLElement;
-      natural.style.cssText = "position: absolute; width: auto; min-width: 0";
-      field.append(natural);
-      const needed = control instanceof HTMLSelectElement ? box(natural).width : 0;
-      natural.remove();
-      return {
-        name: label.textContent,
-        outside: Math.max(inner.left - box(field).left, box(field).right - inner.right),
-        // The label's text on one line, and no wider than its field.
-        labelClipped: (() => {
-          const range = document.createRange();
-          range.selectNodeContents(label);
-          const lines = new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size;
-          return lines !== 1 || range.getBoundingClientRect().right > box(field).right + 0.5;
-        })(),
-        valueClipped: box(control).width < needed - 0.5,
-      };
-    });
-  });
-  expect(pod.map((field) => field.name)).toEqual(["Arbitration", "Default Context Tokens", "Summary Tokens", "Turn Cap", "Repeated-Output Cap"]);
-  for (const field of pod) {
-    expectGeometry(field.outside, `${where}: ${field.name} reaches past the Orchestration Controls card`).toBeLessThanOrEqual(0.51);
-  }
-  for (const field of pod) {
-    expect(field.labelClipped, `${where}: ${field.name} keeps its label on one line`).toBe(false);
-    expect(field.valueClipped, `${where}: ${field.name} shows its longest option`).toBe(false);
-  }
 }
 
 for (const width of [761, 834, 940, 1099]) {
-  test(`at ${width}px, the Archived Sessions table, the Usage controls and the Pod Orchestration fields fit`, async ({ page }) => {
+  test(`at ${width}px, the Archived Sessions table and the Usage controls fit`, async ({ page }) => {
     await page.setViewportSize({ width, height: 860 });
     await checkPageContent(page, `at ${width}px`);
   });
@@ -276,7 +238,7 @@ for (const width of [761, 834, 940, 1099]) {
 test.describe("page content on an 834×1112 coarse-pointer tablet", () => {
   test.use({ viewport: { width: 834, height: 1112 }, hasTouch: true, isMobile: true });
 
-  test("the same three surfaces fit with touch-sized controls", async ({ page }) => {
+  test("the same two surfaces fit with touch-sized controls", async ({ page }) => {
     await checkPageContent(page, "at 834px on touch");
   });
 });

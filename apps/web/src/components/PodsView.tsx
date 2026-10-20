@@ -6,14 +6,9 @@ import { statusMeta } from "../status-meta.js";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   isTerminal,
-  runnerCapabilityRequirement,
-  runnerSupportsProtocol,
-  type PodArbitrationMode,
   type PodContextEntry,
   type PodMemberRole,
   type PodMemberView,
-  type PodOrchestrationPolicy,
-  type PodReconciliation,
   type PodRelayReceipt,
   type SessionView,
 } from "@wollipog/protocol";
@@ -34,25 +29,29 @@ import { matchesShortcut } from "../shortcuts.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { confirmWhileAllowed } from "../confirmation-fence.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
-import { backLabel, destination, viewTitle } from "../navigation.js";
+import { absoluteViewUrl, backLabel, destination, viewTitle } from "../navigation.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
+import { useDashboardPublicOrigin } from "../remote-access-context.js";
+import { writeClipboardText } from "../clipboard.js";
+import { podMemberShortName, podTurnsStopNotice } from "../pod-presentation.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { DEFAULT_POD_ORCHESTRATION_POLICY, PodAutomaticTurnsDialog } from "./PodAutomaticTurnsDialog.js";
+import { PodMergeWorkDialog } from "./PodMergeWorkDialog.js";
 
 const EMPTY_MEMBER_IDS: string[] = [];
 const sameMemberIds = (left: readonly string[], right: readonly string[]) =>
   left.length === right.length && left.every((id, index) => id === right[index]);
 
 const EMPTY_POD_CONTEXT: PodContextEntry[] = [];
-const DEFAULT_ORCHESTRATION_POLICY: PodOrchestrationPolicy = {
-  mode: "manual",
-  contextTokenBudget: 4_096,
-  summaryTokenBudget: 512,
-  maxTurns: 12,
-  maxRepeatedOutputs: 2,
-};
 
-function shortHead(head: string | undefined): string {
-  return head ? head.slice(0, 10) : "pending";
-}
+const POD_CLOSED = "This pod is closed.";
+const MERGE_RUNNING = "Available when the merge finishes.";
+const BUSY_REASON = "Available when the current action finishes.";
+const NO_POD_LINK_REASON = "Open Wollipog in a browser to copy a link.";
+const BACK_TO_MORE_ACTIONS = "Back to More Actions";
+
+/** Stop banners already dismissed in this window, by pod, run and stop, so each says why once. */
+const dismissedStopBanners = new Set<string>();
 
 const PodMemberTimeline = memo(function PodMemberTimeline({
   sessionId,
@@ -91,35 +90,6 @@ const PodMemberTimeline = memo(function PodMemberTimeline({
     </div>
   );
 });
-
-function ReconciliationReceipt({
-  receipt,
-  sessions,
-}: {
-  receipt: PodReconciliation;
-  sessions: ReadonlyMap<string, SessionView>;
-}) {
-  const source = sessions.get(receipt.sourceSessionId)?.title ?? receipt.sourceSessionId;
-  const target = sessions.get(receipt.targetSessionId)?.title ?? receipt.targetSessionId;
-  return (
-    <article className={`pod-reconcile-receipt pod-reconcile-receipt-${receipt.status}`}>
-      <div className="pod-reconcile-receipt-head">
-        <strong>{source} → {target}</strong>
-        <span>{titleCaseLabel(receipt.status.replaceAll("_", " "))} · {relativeTime(receipt.completedAt ?? receipt.createdAt)}</span>
-      </div>
-      <div className="pod-reconcile-heads">
-        <span>Source {shortHead(receipt.sourceHead)}</span>
-        <span>Target {shortHead(receipt.targetHead)}</span>
-        {receipt.resultHead && <span>Result {shortHead(receipt.resultHead)}</span>}
-        {receipt.mergeBase && <span>Base {shortHead(receipt.mergeBase)}</span>}
-      </div>
-      {receipt.conflictPaths?.length ? (
-        <div className="pod-reconcile-conflicts">Conflicts: {receipt.conflictPaths.join(", ")}</div>
-      ) : null}
-      {receipt.error && <div className="pod-reconcile-error">{receipt.error}</div>}
-    </article>
-  );
-}
 
 function PodMemberColumn({
   session,
@@ -276,7 +246,7 @@ export function PodDetail({ podId }: { podId: string }) {
 
 function PodDetailContent({ podId }: { podId: string }) {
   const api = useApi();
-  const { confirm } = useFeedback();
+  const { confirm, showToast } = useFeedback();
   const { eventEpoch, loadEvents, loadPodContext, navigate, recoveryAfter, beginEventHistoryLoad, failEventHistoryLoad } = useStoreActions();
   const pod = useStoreSelector((state) => state.pods.get(podId));
   const sessions = useStoreSelector((state) => state.sessions);
@@ -307,15 +277,15 @@ function PodDetailContent({ podId }: { podId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<PodRelayReceipt[]>([]);
   const [beforeSeq, setBeforeSeq] = useState<number | undefined>();
-  const [orchestrationMode, setOrchestrationMode] = useState<PodArbitrationMode>("manual");
-  const [contextTokenBudget, setContextTokenBudget] = useState(4_096);
-  const [summaryTokenBudget, setSummaryTokenBudget] = useState(512);
-  const [maxTurns, setMaxTurns] = useState(12);
-  const [maxRepeatedOutputs, setMaxRepeatedOutputs] = useState(2);
-  const [orchestrationSeed, setOrchestrationSeed] = useState("");
-  const [firstSessionId, setFirstSessionId] = useState("");
-  const [reconcileSourceId, setReconcileSourceId] = useState("");
-  const [reconcileTargetId, setReconcileTargetId] = useState("");
+  // The dialogs own their drafts, so reopening one shows what is saved (#2980).
+  const [dialog, setDialog] = useState<"turns" | "merge" | null>(null);
+  const [, setDismissals] = useState(0);
+  const dashboardOrigin = useDashboardPublicOrigin();
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const members = useMemo(
     () => memberIds.map((id) => sessions.get(id)).filter((session): session is SessionView => Boolean(session)),
@@ -379,38 +349,12 @@ function PodDetailContent({ podId }: { podId: string }) {
     setSelectedContext((current) => current.filter((id) => contextEntries.some((entry) => entry.id === id)));
   }, [contextEntries]);
 
-  const policy = pod?.orchestration?.policy ?? DEFAULT_ORCHESTRATION_POLICY;
+  const policy = pod?.orchestration?.policy ?? DEFAULT_POD_ORCHESTRATION_POLICY;
   const orchestrationState = pod?.orchestration?.state;
   const orchestrationRunning = orchestrationState?.status === "running";
   const reconciliationRunning = Boolean(pod?.reconciliations?.some((receipt) => receipt.status === "running"));
   const closeBlocked = useRef(false);
   closeBlocked.current = Boolean(busy) || reconciliationRunning;
-
-  useEffect(() => {
-    setOrchestrationMode(policy.mode);
-    setContextTokenBudget(policy.contextTokenBudget);
-    setSummaryTokenBudget(policy.summaryTokenBudget);
-    setMaxTurns(policy.maxTurns);
-    setMaxRepeatedOutputs(policy.maxRepeatedOutputs);
-  }, [policy.mode, policy.contextTokenBudget, policy.summaryTokenBudget, policy.maxTurns, policy.maxRepeatedOutputs]);
-
-  useEffect(() => {
-    if (!pod) return;
-    const eligible = pod.members.filter((member) => member.role !== "lead");
-    setFirstSessionId((current) => pod.members.some((member) => member.sessionId === current)
-      ? current
-      : (eligible[0]?.sessionId ?? pod.members[0]?.sessionId ?? ""));
-  }, [pod?.members]);
-
-  useEffect(() => {
-    if (!pod) return;
-    const targetDefault = pod.members.find((member) => member.role === "lead")?.sessionId ?? pod.members[0]?.sessionId ?? "";
-    const sourceDefault = pod.members.find((member) => member.sessionId !== targetDefault)?.sessionId ?? "";
-    setReconcileTargetId((current) => pod.members.some((member) => member.sessionId === current) ? current : targetDefault);
-    setReconcileSourceId((current) => pod.members.some((member) => member.sessionId === current) && current !== targetDefault
-      ? current
-      : sourceDefault);
-  }, [pod?.members]);
 
   if (!pod) {
     const placeholder = detailPlaceholder("Pod", { authoritative: snapshotLoaded, conn });
@@ -430,37 +374,21 @@ function PodDetailContent({ podId }: { podId: string }) {
     );
   }
   const active = pod.status === "active";
-  const policyDirty = orchestrationMode !== policy.mode || contextTokenBudget !== policy.contextTokenBudget ||
-    summaryTokenBudget !== policy.summaryTokenBudget || maxTurns !== policy.maxTurns ||
-    maxRepeatedOutputs !== policy.maxRepeatedOutputs;
-  const lastStep = pod.orchestration?.lastStep;
-  const reconcileSource = sessions.get(reconcileSourceId);
-  const reconcileTarget = sessions.get(reconcileTargetId);
-  const reconcileRunner = reconcileTarget ? runners.get(reconcileTarget.runnerId) : undefined;
-  const reconcileCapabilityCopy = runnerCapabilityRequirement(
-    reconcileRunner?.protocolVersion,
-    "podReconciliation",
-    "pod worktree reconciliation",
-  );
-  const reconcileIssue = (() => {
-    if (!active) return "This pod is closed.";
-    if (orchestrationRunning) return "Stop the automatic cycle before reconciling worktrees.";
-    if (reconciliationRunning) return "A reconciliation is already running for this pod.";
-    if (!reconcileSource || !reconcileTarget) return "Choose a source and integration target.";
-    if (reconcileSource.id === reconcileTarget.id) return "Source and integration target must be different sessions.";
-    if (!reconcileSource.useWorktree || !reconcileTarget.useWorktree || !reconcileSource.worktreePath || !reconcileTarget.worktreePath) {
-      return "Both sessions must use isolated worktrees.";
-    }
-    if (reconcileSource.runnerId !== reconcileTarget.runnerId) return "Cross-runner reconciliation is not supported.";
-    if (!reconcileSource.workspaceId || reconcileSource.workspaceId !== reconcileTarget.workspaceId) {
-      return "Both sessions must belong to the same configured workspace.";
-    }
-    if (reconcileSource.status !== "idle" || reconcileTarget.status !== "idle") return "Both sessions must be idle.";
-    if (reconcileSource.pendingApproval || reconcileTarget.pendingApproval) return "Resolve pending approvals before reconciling.";
-    if (reconcileRunner?.status !== "online") return "The shared runner is offline.";
-    if (!runnerSupportsProtocol(reconcileRunner.protocolVersion, "podReconciliation")) return reconcileCapabilityCopy;
-    return null;
-  })();
+  // Every disabled ⋯ item says why on its second line (§9.1).
+  const turnsReason = !active ? POD_CLOSED : reconciliationRunning ? MERGE_RUNNING
+    : orchestrationRunning ? "Stop automatic turns to change them." : null;
+  const mergeReason = !active ? POD_CLOSED : reconciliationRunning ? MERGE_RUNNING : null;
+  const closeReason = reconciliationRunning ? MERGE_RUNNING : busy ? BUSY_REASON : null;
+  const runningSentence = [
+    "Automatic turns are running",
+    `Turn ${orchestrationState?.turnsUsed ?? 0} of ${policy.maxTurns}`,
+    ...(orchestrationState?.currentSessionId
+      ? [`${podMemberShortName(pod, sessions, orchestrationState.currentSessionId)} is up`]
+      : []),
+  ].join(" · ");
+  const stopNotice = podTurnsStopNotice(orchestrationState);
+  const stopKey = `${pod.id}:${orchestrationState?.runId ?? ""}:${orchestrationState?.updatedAt ?? 0}`;
+  const showStopNotice = Boolean(stopNotice) && !dismissedStopBanners.has(stopKey);
 
   const relay = async () => {
     if (busy || orchestrationRunning || reconciliationRunning || (!text.trim() && selectedContext.length === 0) || targets.length === 0) return;
@@ -572,80 +500,37 @@ function PodDetailContent({ podId }: { podId: string }) {
     }
   };
 
-  const saveOrchestration = async () => {
-    if (busy || orchestrationRunning || reconciliationRunning) return;
-    setBusy("orchestration-policy");
-    setError(null);
-    try {
-      await api.updatePodOrchestration(pod.id, {
-        mode: orchestrationMode,
-        contextTokenBudget,
-        summaryTokenBudget,
-        maxTurns,
-        maxRepeatedOutputs,
-      });
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const startOrchestration = async () => {
-    if (busy || orchestrationRunning || reconciliationRunning || orchestrationMode === "manual") return;
-    setBusy("orchestration-start");
-    setError(null);
-    try {
-      const result = await api.startPodOrchestration(pod.id, {
-        ...(orchestrationSeed.trim() ? { instruction: orchestrationSeed.trim() } : {}),
-        ...((orchestrationMode === "event_triggered" || orchestrationMode === "round_robin") && firstSessionId
-          ? { firstSessionId }
-          : {}),
-      });
-      if (result.appendedEntry) loadPodContext(pod.id, [result.appendedEntry]);
-      setOrchestrationSeed("");
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const stopOrchestration = async () => {
     if (busy || !orchestrationRunning) return;
     setBusy("orchestration-stop");
-    setError(null);
     try {
       await api.stopPodOrchestration(pod.id);
     } catch (cause) {
-      setError((cause as Error).message);
+      showToast(`Automatic turns didn't stop: ${(cause as Error).message}`, { tone: "error" });
     } finally {
       setBusy(null);
     }
   };
 
-  const reconcile = async () => {
-    if (busy || reconcileIssue) return;
-    setBusy("reconcile");
-    setError(null);
-    try {
-      await api.reconcilePod(pod.id, {
-        sourceSessionId: reconcileSourceId,
-        targetSessionId: reconcileTargetId,
-      });
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
+  const copyLink = async () => {
+    if (!dashboardOrigin) return;
+    const invoker = document.activeElement;
+    const current = () => mountedRef.current && (document.activeElement === null ||
+      document.activeElement === document.body || document.activeElement === invoker);
+    const copied = await writeClipboardText(absoluteViewUrl(dashboardOrigin, { name: "pod", id: pod.id }), current);
+    if (copied === null) return;
+    if (invoker instanceof HTMLElement && (document.activeElement === document.body || document.activeElement === null)) invoker.focus();
+    if (copied) showToast("Link copied.", { tone: "success" });
+    else showToast("Couldn't copy the link.", { tone: "error" });
   };
 
-  const close = async () => {
+  const close = async (reopen: () => void) => {
     if (!await confirmWhileAllowed(confirm, () => closeBlocked.current, {
       title: "Close Pod",
       message: "Relays and membership changes stop for this pod. Its membership stays readable.",
       confirmLabel: "Close Pod",
       tone: "danger",
+      back: { label: BACK_TO_MORE_ACTIONS, run: reopen },
     })) return;
     setBusy("close");
     setError(null);
@@ -665,156 +550,66 @@ function PodDetailContent({ podId }: { podId: string }) {
         backLabel={backLabel("pods")}
         onBack={() => navigate({ name: "pods" })}
         status={<StatusBadge meta={statusMeta("pod", pod.status)} />}
-        // Closing is destructive, so it lives only in ⋯ (§3.3).
-        menu={active ? [{
-          label: "Close Pod",
-          danger: true,
-          disabled: Boolean(busy) || reconciliationRunning,
-          onClick: () => void close(),
-        }] : []}
+        // Automatic turns and merging are occasional, so they are dialogs from ⋯; closing is
+        // destructive, so it comes last after a separator (§3.3, #2980).
+        menu={[
+          {
+            label: "Automatic Turns…",
+            disabled: Boolean(turnsReason),
+            description: turnsReason ?? undefined,
+            onClick: () => setDialog("turns"),
+          },
+          {
+            label: "Merge Work…",
+            disabled: Boolean(mergeReason),
+            description: mergeReason ?? undefined,
+            onClick: () => setDialog("merge"),
+          },
+          {
+            label: "Copy Link",
+            disabled: !dashboardOrigin,
+            description: dashboardOrigin ? undefined : NO_POD_LINK_REASON,
+            onClick: () => void copyLink(),
+          },
+          ...(active ? [{
+            label: "Close Pod…",
+            danger: true,
+            disabled: Boolean(closeReason),
+            description: closeReason ?? undefined,
+            onClick: ({ reopen }: { reopen: () => void }) => void close(reopen),
+          }] : []),
+        ]}
       />
+      {orchestrationRunning && (
+        <Notice
+          tone="info"
+          className="pod-turns-banner"
+          role="status"
+          actions={(
+            <BusyButton className="btn sm" busy={busy === "orchestration-stop"} progress="Stopping automatic turns…"
+              disabled={Boolean(busy) && busy !== "orchestration-stop"} onClick={() => void stopOrchestration()}>
+              Stop Automatic Turns
+            </BusyButton>
+          )}
+        >
+          {runningSentence}
+        </Notice>
+      )}
+      {!orchestrationRunning && showStopNotice && stopNotice && (
+        <Notice
+          tone="neutral"
+          className="pod-turns-banner"
+          role="status"
+          details={stopNotice.details ? <code>{stopNotice.details}</code> : undefined}
+          onDismiss={() => {
+            dismissedStopBanners.add(stopKey);
+            setDismissals((count) => count + 1);
+          }}
+        >
+          {stopNotice.sentence}
+        </Notice>
+      )}
       <p className="detail-summary">{pod.objective || "Manual collaboration pod"}</p>
-
-      <section className="pod-orchestration" aria-label="Pod Orchestration Policy">
-        <div className="pod-relay-head">
-          <div>
-            <strong>Orchestration Controls</strong>
-            <p className="muted sm">Durable role arbitration with per-member context cursors, bounded summaries, loop detection, and hard turn caps.</p>
-          </div>
-          <StatusBadge meta={statusMeta("pod", orchestrationState?.status ?? "idle")} />
-        </div>
-        <div className="pod-orchestration-grid">
-          <label className="field compact">
-            <span>Arbitration</span>
-            <select value={orchestrationMode} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setOrchestrationMode(event.target.value as PodArbitrationMode)}>
-              <option value="manual">Manual Only</option>
-              <option value="round_robin">Round Robin</option>
-              <option value="lead_driven">Lead Driven</option>
-              <option value="event_triggered">Event Triggered</option>
-            </select>
-          </label>
-          <label className="field compact">
-            <span>Default Context Tokens</span>
-            <select value={contextTokenBudget} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setContextTokenBudget(Number(event.target.value))}>
-              <option value={4096}>4,096</option>
-              <option value={8192}>8,192</option>
-              <option value={16384}>16,384</option>
-              <option value={32768}>32,768</option>
-            </select>
-          </label>
-          <label className="field compact">
-            <span>Summary Tokens</span>
-            <input type="number" min={128} max={Math.min(4096, Math.floor(contextTokenBudget / 2))} step={128} value={summaryTokenBudget} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setSummaryTokenBudget(Number(event.target.value))} />
-          </label>
-          <label className="field compact">
-            <span>Turn Cap</span>
-            <input type="number" min={1} max={100} value={maxTurns} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setMaxTurns(Number(event.target.value))} />
-          </label>
-          <label className="field compact">
-            <span>Repeated-Output Cap</span>
-            <input type="number" min={2} max={5} value={maxRepeatedOutputs} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setMaxRepeatedOutputs(Number(event.target.value))} />
-          </label>
-        </div>
-        <div className="pod-orchestration-runner">
-          <textarea
-            rows={2}
-            value={orchestrationSeed}
-            disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)}
-            placeholder="Optional attributed instruction for the next automatic cycle…"
-            onChange={(event) => setOrchestrationSeed(event.target.value)}
-          />
-          {(orchestrationMode === "event_triggered" || orchestrationMode === "round_robin") && (
-            <label className="field compact">
-              <span>{orchestrationMode === "event_triggered" ? "Trigger Member" : "First Member"}</span>
-              <select value={firstSessionId} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setFirstSessionId(event.target.value)}>
-                {pod.members
-                  .filter((member) => orchestrationMode !== "event_triggered" || member.role !== "lead")
-                  .map((member) => (
-                    <option key={member.sessionId} value={member.sessionId}>
-                      {sessions.get(member.sessionId)?.title || member.sessionId} · {titleCaseLabel(member.role)}
-                    </option>
-                  ))}
-              </select>
-            </label>
-          )}
-        </div>
-        <div className="pod-orchestration-summary">
-          <span>
-            Turns {orchestrationState?.turnsUsed ?? 0}/{policy.maxTurns}
-            {orchestrationState?.currentSessionId ? ` · active: ${sessions.get(orchestrationState.currentSessionId)?.title || orchestrationState.currentSessionId}` : ""}
-            {orchestrationState?.stopReason ? ` · ${orchestrationState.stopReason}` : ""}
-          </span>
-          {lastStep && (
-            <span>
-              Last Turn #{lastStep.turn} · {sessions.get(lastStep.targetSessionId)?.title || lastStep.targetSessionId}
-              {` · ${lastStep.estimatedTokens} est. tokens · ${titleCaseLabel(lastStep.status)}`}
-            </span>
-          )}
-        </div>
-        <div className="pod-relay-actions">
-          <button className="btn ghost" disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy) || !policyDirty} onClick={() => void saveOrchestration()}>
-            {busy === "orchestration-policy" ? "Saving…" : policyDirty ? "Save Policy" : "Policy Saved"}
-          </button>
-          {orchestrationRunning ? (
-            <button className="btn ghost danger" disabled={Boolean(busy)} onClick={() => void stopOrchestration()}>
-              {busy === "orchestration-stop" ? "Stopping…" : "Stop Auto-Advance"}
-            </button>
-          ) : (
-            <button
-              className="btn primary"
-              disabled={!active || reconciliationRunning || Boolean(busy) || policyDirty || orchestrationMode === "manual" ||
-                (orchestrationMode === "event_triggered" && !firstSessionId)}
-              onClick={() => void startOrchestration()}
-            >
-              {busy === "orchestration-start" ? "Starting…" : "Start Automatic Cycle"}
-            </button>
-          )}
-        </div>
-      </section>
-
-      <section className="pod-reconcile" aria-label="Pod Worktree Reconciliation">
-        <div className="pod-relay-head">
-          <div>
-            <strong>Reconcile Committed Work</strong>
-            <p className="muted sm">Merge one clean, idle member worktree into another on the same runner and workspace. Conflicts roll the target back unchanged.</p>
-          </div>
-          <StatusBadge meta={statusMeta("pod", reconciliationRunning ? "running" : "ready")} />
-        </div>
-        <div className="pod-reconcile-grid">
-          <label className="field compact">
-            <span>Committed Source</span>
-            <select value={reconcileSourceId} disabled={!active || reconciliationRunning || Boolean(busy)} onChange={(event) => setReconcileSourceId(event.target.value)}>
-              {pod.members.map((member) => (
-                <option key={member.sessionId} value={member.sessionId}>
-                  {sessions.get(member.sessionId)?.title || member.sessionId} · {titleCaseLabel(member.role)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <span className="pod-reconcile-arrow" aria-hidden="true">→</span>
-          <label className="field compact">
-            <span>Integration Target</span>
-            <select value={reconcileTargetId} disabled={!active || reconciliationRunning || Boolean(busy)} onChange={(event) => setReconcileTargetId(event.target.value)}>
-              {pod.members.map((member) => (
-                <option key={member.sessionId} value={member.sessionId}>
-                  {sessions.get(member.sessionId)?.title || member.sessionId} · {titleCaseLabel(member.role)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button className="btn primary" disabled={Boolean(busy) || Boolean(reconcileIssue)} title={reconcileIssue ?? undefined} onClick={() => void reconcile()}>
-            {busy === "reconcile" ? "Reconciling…" : "Merge Committed Work"}
-          </button>
-        </div>
-        {reconcileIssue && <p className="pod-reconcile-issue muted sm">{reconcileIssue}</p>}
-        {(pod.reconciliations?.length ?? 0) > 0 && (
-          <div className="pod-reconcile-receipts" aria-label="Worktree Reconciliation Receipts">
-            {pod.reconciliations!.map((receipt) => (
-              <ReconciliationReceipt key={receipt.reconciliationId} receipt={receipt} sessions={sessions} />
-            ))}
-          </div>
-        )}
-      </section>
 
       <section className="pod-relay" aria-label="Manual Pod Relay">
         <div className="pod-relay-head">
@@ -930,6 +725,8 @@ function PodDetailContent({ podId }: { podId: string }) {
           );
         })}
       </div>
+      {dialog === "turns" && <PodAutomaticTurnsDialog pod={pod} sessions={sessions} onClose={() => setDialog(null)} />}
+      {dialog === "merge" && <PodMergeWorkDialog pod={pod} sessions={sessions} runners={runners} onClose={() => setDialog(null)} />}
     </div>
   );
 }

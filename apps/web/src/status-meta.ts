@@ -326,6 +326,14 @@ const VOCABULARY = {
     running: info("Running", { pulse: true }),
     stopped: neutral("Stopped"),
   },
+  /** One merge of a member's committed work into another's, in a pod's Recent Merges (#2980). */
+  podMerge: {
+    running: info("Running", { pulse: true }),
+    applied: success("Merged"),
+    already_applied: neutral("Already Up to Date"),
+    conflicted: warning("Conflicted"),
+    failed: danger("Failed"),
+  },
   /** One work item in an issue campaign's ledger (Campaign Status, #2417). */
   campaignWork: {
     planned: neutral("Planned"),
