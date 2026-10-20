@@ -76,6 +76,7 @@ import {
   projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
   resolveRunnerLocalAgentEnvironment,
+  captureProviderAccountsConfigPreimage,
   writeProviderAccountsConfig,
   type RunnerConfig,
 } from "./config.js";
@@ -892,10 +893,10 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
       providerProfileGrants.recordCreated(profileId, grantId);
     },
     settle: async ({ home, provider, profileId, grantId, recorded, homeRemoved }) => {
-      providerProfileGrants.settleCreated(profileId, grantId, recorded);
+      providerProfileGrants.settleCreated(profileId, grantId, recorded === true);
       // Absence is not proof that cleanup removed the HOME. Keep the old missing-path guard
       // separately so grant settlement does not recreate a HOME that moved or disappeared.
-      if (recorded || homeRemoved || !existsSync(home)) return;
+      if (recorded === "unknown" || recorded || homeRemoved || !existsSync(home)) return;
       // Physical cleanup has no proved retirement authority yet; retain the HOME without this grant.
       await sessions.revokeProviderProfileGrant(home, provider, profileId, grantId)
         .catch((error) => log(`a discarded provider profile's grant could not be removed from its marker: ${errText(error)}`));
@@ -1225,7 +1226,8 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   revoke: (home, provider, profileId, grantId) => sessions.revokeProviderProfileGrant(home, provider, profileId, grantId),
   retire: (home, provider, expectedProfileId) => sessions.retireProviderAccountHome(home, provider, expectedProfileId),
   profileRoot: managedProviderProfileRoot(),
-  persistAccounts: (accounts) => writeProviderAccountsConfig(parsed.configPath, accounts),
+  captureAccountsPreimage: () => captureProviderAccountsConfigPreimage(parsed.configPath, config.providerAccounts),
+  persistAccounts: (accounts, preimage) => writeProviderAccountsConfig(parsed.configPath, accounts, preimage),
   removeAccount: (accountId, options) => providerLoginSupervisor.removeAccount(accountId, options),
   publish: () => publishProviderAccountInventory(),
   log,

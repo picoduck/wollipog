@@ -1,22 +1,16 @@
 /** Runner configuration loading + CLI argument parsing. */
 
 import {
-  closeSync,
   existsSync,
-  fsyncSync,
-  openSync,
   readFileSync,
   realpathSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { dirname, posix, resolve, win32 } from "node:path";
+import { posix, resolve, win32 } from "node:path";
 import { homedir } from "node:os";
 import type { AcpEnvironmentReference, AcpMcpServerConfig, AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
 import { isProviderProfileId } from "./provider-profile.js";
+import { captureAccountConfigPreimage, publishAccountConfig, type AccountConfigPreimage } from "./provider-account-config-publication.js";
 
 export interface RunnerConfigAgent {
   id: string;
@@ -884,40 +878,16 @@ export function loadConfig(
   return resolveConfig(readConfigFile(configPath, overrides, explicitConfig), overrides);
 }
 
-/** Atomically replace only providerAccounts in the operator's existing JSON configuration. */
-export function writeProviderAccountsConfig(configPath: string, accounts: RunnerProviderAccount[]): void {
+/** Capture before an asynchronous adoption, not after its marker side effect. */
+export function captureProviderAccountsConfigPreimage(configPath: string, accounts: readonly RunnerProviderAccount[]): AccountConfigPreimage {
+  return captureAccountConfigPreimage(configPath, accounts, validateProviderAccounts);
+}
+
+/** Publish only providerAccounts against an immutable source revision; retain ambiguous evidence. */
+export function writeProviderAccountsConfig(configPath: string, accounts: RunnerProviderAccount[], preimage: AccountConfigPreimage): void {
   const validated = validateProviderAccounts(accounts);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(configPath, "utf8"));
-  } catch {
-    throw new Error("runner configuration could not be read for the account update");
+  if (resolve(configPath) !== preimage.path && resolve(realpathSync(resolve(configPath))) !== preimage.path) {
+    throw new Error("runner configuration preimage belongs to another path");
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("runner configuration must be a JSON object");
-  }
-  const next = { ...(parsed as Record<string, unknown>), providerAccounts: validated };
-  const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
-  let fd: number | undefined;
-  try {
-    fd = openSync(temporary, "wx", 0o600);
-    writeFileSync(fd, `${JSON.stringify(next, null, 2)}\n`);
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = undefined;
-    renameSync(temporary, configPath);
-    try {
-      const directory = openSync(dirname(configPath), "r");
-      try { fsyncSync(directory); } finally { closeSync(directory); }
-    } catch {
-      // The atomic replacement already committed. Directory fsync is a best-effort durability
-      // barrier; reporting failure now would make callers remove a credential home that the
-      // committed configuration already references.
-    }
-  } catch {
-    throw new Error("runner configuration account update failed");
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-    rmSync(temporary, { force: true });
-  }
+  publishAccountConfig(preimage, validated, validateProviderAccounts);
 }

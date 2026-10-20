@@ -5,6 +5,7 @@ import type {
   RevokeProviderProfileGrantResultMessage,
 } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
+import { accountConfigPublicationMayHaveOccurred, type AccountConfigPreimage } from "./provider-account-config-publication.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import type { ProviderAccountRemovalOptions } from "./provider-login.js";
 import type { ProviderProfileGrants, StaleProviderProfileGrant } from "./provider-profile-grants.js";
@@ -36,8 +37,10 @@ export interface ProviderProfileCommandDeps {
   /** The managed profile root (`~/.agent-manager/profiles`); accounts at `<root>/<profileId>` are
    * managed profile HOMEs whose removal requires the marker to still hold that identity. */
   profileRoot?: string;
-  /** Atomically replace the configured accounts (writeProviderAccountsConfig). */
-  persistAccounts(accounts: RunnerProviderAccount[]): void;
+  /** Capture the source revision before awaiting a marker adoption. */
+  captureAccountsPreimage(): AccountConfigPreimage;
+  /** Publish the configured accounts against that exact source revision. */
+  persistAccounts(accounts: RunnerProviderAccount[], preimage: AccountConfigPreimage): void;
   removeAccount(accountId: string, options: ProviderAccountRemovalOptions): Promise<{ credentialsRetained: boolean }>;
   readMarker?: (account: RunnerProviderAccount) => ProviderProfileRead;
   /** Re-send the account inventory so the control plane sees the new profile state. */
@@ -76,6 +79,9 @@ export async function adoptProviderProfileCommand(
     return fail("This control plane did not negotiate provider profiles.");
   }
   let profileId: string;
+  let preimage: AccountConfigPreimage;
+  try { preimage = deps.captureAccountsPreimage(); }
+  catch { return fail("The runner configuration account source could not be verified."); }
   try {
     ({ profileId } = await deps.adopt(account.directory, account.provider, msg.grantId));
   } catch (error) {
@@ -83,20 +89,22 @@ export async function adoptProviderProfileCommand(
     if (error instanceof ProviderHomeLeaseError && PROFILE_EXISTS.has(error.code)) return fail(error.message, "PROFILE_EXISTS");
     return fail(error instanceof Error ? error.message : "The provider profile could not be adopted.");
   }
-  // The marker now grants this control plane, but the grant becomes usable only once the whole
-  // adoption has succeeded. An uncoded failure leaves the control plane's row pending (or revoked by
-  // an Owner or Admin meanwhile, which it could not tell this runner), so anything failing after the
-  // marker write takes this grant back out of the marker and never records it.
-  if (account.profileId !== profileId) {
-    try {
-      deps.persistAccounts(deps.accounts().map((candidate) => candidate === account ? { ...candidate, profileId } : candidate));
-    } catch {
+  // The marker alone never makes a grant usable. Publish against the pre-await revision even
+  // when its profile id was already present; stale decisions must not complete an adoption.
+  try {
+    deps.persistAccounts(preimage.accounts.map((candidate) => candidate.id === account.id ? { ...candidate, profileId } : { ...candidate }), preimage);
+  } catch (error) {
+    if (accountConfigPublicationMayHaveOccurred(error)) {
+      // A committed or uncertain config may reference the marker. Retain it without granting
+      // local access or claiming definitely-unpublished rollback; CP revocation still wins.
+      deps.grants.recordRevoked(undefined, msg.grantId);
+    } else {
       await rollBackAdoption(deps, account, profileId, msg.grantId);
-      deps.publish();
-      return fail("The runner configuration could not be updated.");
     }
-    account.profileId = profileId;
+    deps.publish();
+    return fail(accountConfigPublicationMayHaveOccurred(error) && error instanceof Error ? error.message : "The runner configuration could not be updated.");
   }
+  account.profileId = profileId;
   deps.grants.recordAdopted(profileId, msg.grantId);
   deps.publish();
   return { type: "adopt_provider_profile_result", requestId: msg.requestId, ok: true, profileId };

@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
-import { writeProviderAccountsConfig } from "./config.js";
+import { captureProviderAccountsConfigPreimage, writeProviderAccountsConfig } from "./config.js";
+import { publishAccountConfig } from "./provider-account-config-publication.js";
+import { validateProviderAccounts } from "./config.js";
 import { providerAccountDefinition, skillReconciliationProviderAccountPlan } from "./provider-accounts.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
@@ -51,7 +53,7 @@ function fixture(t: TestContext) {
   ];
   for (const account of accounts) mkdirSync(account.directory);
   const configPath = join(root, "runner.json");
-  writeFileSync(configPath, `${JSON.stringify({ runnerId: "runner-1", providerAccounts: accounts })}\n`);
+  writeFileSync(configPath, `${JSON.stringify({ runnerId: "runner-1", providerAccounts: accounts })}\n`, { mode: 0o600 });
   const grants = new ProviderProfileGrants({ controlPlaneInstanceId: INSTANCE, accounts: () => accounts });
   // The worker's own logic, run in-process against the real lease registry.
   const registry = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: process.pid, hostname: "host-a", controlPlaneInstanceId: INSTANCE });
@@ -69,7 +71,8 @@ function fixture(t: TestContext) {
     revoke: async (home, provider, profileId, grantId) => registry.changeProfileMarkerWhileHeld(home, provider, (read) =>
       revokeProviderProfileMarkerGrant(read, { profileId, controlPlaneInstanceId: INSTANCE, grantId })).changed,
     retire: async (home, provider) => registry.retireProfileHomeWhileHeld(home, provider, INSTANCE),
-    persistAccounts: (next) => writeProviderAccountsConfig(configPath, next),
+    captureAccountsPreimage: () => captureProviderAccountsConfigPreimage(configPath, accounts),
+    persistAccounts: (next, preimage) => writeProviderAccountsConfig(configPath, next, preimage),
     removeAccount: async (accountId, options) => {
       const account = accounts.find((candidate) => candidate.id === accountId)!;
       removals.push({ accountId, ...(options.retainCredentialHome ? { retainCredentialHome: true } : {}),
@@ -88,6 +91,55 @@ function fixture(t: TestContext) {
 function definition(account: RunnerProviderAccount) {
   return providerAccountDefinition(account);
 }
+
+test("an adoption keeps ambiguous publication evidence without activating or restoring a grant", posixOnly, async t => {
+  for (const phase of ["before_rename", "renamed"] as const) {
+    const f = fixture(t); f.grants.synchronize(225, []);
+    const work = f.accounts[0]!;
+    const deps: ProviderProfileCommandDeps = { ...f.deps, persistAccounts: (accounts, preimage) => {
+      // A CP revocation received while adoption was pending remains effective even if the config
+      // may have published. The uncertain branch must never recordAdopted or revoke the marker.
+      f.grants.recordRevoked(undefined, GRANT);
+      publishAccountConfig(preimage, accounts, validateProviderAccounts, {
+        boundary: reached => { if (reached === phase) throw new Error("synthetic boundary failure"); },
+      });
+    } };
+    const result = await adoptProviderProfileCommand(deps, { type: "adopt_provider_profile", requestId: "uncertain", accountId: "work", grantId: GRANT });
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /publication is unknown|was published/u);
+    const read = readProviderProfileMarker(work.directory);
+    assert.equal(read.state, "present");
+    assert.deepEqual(read.state === "present" && read.marker.grants.map(grant => grant.grantId), [GRANT]);
+    assert.equal(work.profileId, undefined);
+    assert.equal(f.grants.usable(work), false);
+    assert.deepEqual(f.grants.access().activeProfileIds, []);
+    assert.equal(existsSync(join(f.root, ".runner.json.account-publications-v1", "guard.json")), true);
+    const persisted = JSON.parse(readFileSync(f.configPath, "utf8")).providerAccounts;
+    assert.equal(persisted[0].profileId !== undefined, phase === "renamed");
+  }
+});
+
+test("an adoption resumed after another config writer cannot overwrite the new account decision", posixOnly, async t => {
+  const f = fixture(t); f.grants.synchronize(225, []);
+  let markerWritten!: () => void, resume!: () => void;
+  const ready = new Promise<void>(resolve => { markerWritten = resolve; });
+  const waiting = new Promise<void>(resolve => { resume = resolve; });
+  const adoption = adoptProviderProfileCommand({ ...f.deps, adopt: async (...args) => {
+    const result = await f.deps.adopt(...args); markerWritten(); await waiting; return result;
+  } }, { type: "adopt_provider_profile", requestId: "stale", accountId: "work", grantId: GRANT });
+  let published!: Buffer;
+  try {
+    await Promise.race([ready, adoption.then((result) => { assert.fail(result.error ?? "Adoption ended before the marker-written barrier"); })]);
+    const next = f.accounts.map(account => ({ ...account, label: "New Decision" }));
+    writeProviderAccountsConfig(f.configPath, next, captureProviderAccountsConfigPreimage(f.configPath, f.accounts));
+    published = readFileSync(f.configPath);
+  } finally { resume(); }
+  assert.equal((await adoption).ok, false);
+  assert.deepEqual(readFileSync(f.configPath), published);
+  const read = readProviderProfileMarker(f.accounts[0]!.directory);
+  assert.deepEqual(read.state === "present" && read.marker.grants, [], "definitely-unpublished stale decisions still roll back their own grant");
+  assert.deepEqual(f.grants.access().activeProfileIds, []);
+});
 
 test("adoption writes this control plane's grant, persists the profile id, and makes the account usable", posixOnly, async (t) => {
   const f = fixture(t);
@@ -368,7 +420,7 @@ test("account removal retains unshared HOMEs and a grant recorded by another con
   ];
   for (const account of accounts) mkdirSync(account.directory);
   const configPath = join(root, "runner.json");
-  writeFileSync(configPath, `${JSON.stringify({ runnerId: "runner-1", providerAccounts: accounts })}\n`);
+  writeFileSync(configPath, `${JSON.stringify({ runnerId: "runner-1", providerAccounts: accounts })}\n`, { mode: 0o600 });
   const grants = new ProviderProfileGrants({ controlPlaneInstanceId: INSTANCE, accounts: () => accounts });
   const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), { controlPlaneInstanceId: INSTANCE,
     profileAccess: () => grants.access(), expectedProfileIdForHome: (home) => grants.expectedProfileIdForHome(home) });
@@ -380,6 +432,7 @@ test("account removal retains unshared HOMEs and a grant recorded by another con
   const work = (await registry.adoptProfile(accounts[0]!.directory, "claude", GRANT)).profileId;
   const solo = (await registry.adoptProfile(accounts[1]!.directory, "claude", STALE_GRANT)).profileId;
   accounts[0]!.profileId = work; accounts[1]!.profileId = solo;
+  writeFileSync(configPath, `${JSON.stringify({ runnerId: "runner-1", providerAccounts: accounts })}\n`, { mode: 0o600 });
   grants.synchronize(225, [{ grantId: GRANT, profileId: work, status: "active" }, { grantId: STALE_GRANT, profileId: solo, status: "active" }]);
 
   let releaseRetirement!: () => void;
@@ -401,7 +454,8 @@ test("account removal retains unshared HOMEs and a grant recorded by another con
     adopt: (home, provider, grantId) => registry.adoptProfile(home, provider, grantId),
     revoke: (home, provider, profileId, grantId) => registry.revokeProfileGrant(home, provider, profileId, grantId),
     retire: (home, provider) => registry.retireProfileHome(home, provider),
-    persistAccounts: (next) => writeProviderAccountsConfig(configPath, next),
+    captureAccountsPreimage: () => captureProviderAccountsConfigPreimage(configPath, accounts),
+    persistAccounts: (next, preimage) => writeProviderAccountsConfig(configPath, next, preimage),
     removeAccount: (accountId, options) => supervisor.removeAccount(accountId, options),
     publish: () => {}, log: () => {},
   };

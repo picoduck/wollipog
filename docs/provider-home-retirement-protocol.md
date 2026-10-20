@@ -257,6 +257,52 @@ An old process already paused after release does not consult a new fence. Theref
 
 ## Publication and Consumer Races
 
+### Bounded Account-Config Publication
+
+The account-config writer captures an immutable config identity, full-config digest, normalized
+account preimage and evidence-store epoch/revision. Adoption captures this ticket before awaiting
+the HOME marker write. Add/remove capture immediately before synchronous config publication.
+Updated writers serialize on an exclusive, identity-checked config-sibling guard and recheck the
+ticket before rename. A later cooperating writer invalidates an earlier ticket, including an
+accounts A→B→A sequence. This is not a barrier against old runners or operator edits; their history
+remains unknown. It attests neither complete producers, exhaustive process containment, a frozen
+owner store nor eligibility for physical retirement.
+
+`.<config-name>.account-publications-v1` contains a private versioned header and append-only JSONL
+intent/outcome log. A separate private `.<config-name>.account-publications-anchor-v1` binds the
+epoch to that directory identity. Missing or substituted evidence refuses mutation instead of
+resetting an epoch. Erasing/restoring every artifact is outside this cooperative guarantee: every
+record retains `historyIncomplete: true`. Records contain structural binding fingerprints and
+before/after digests, never credential contents, labels, raw config or HOME paths.
+
+Before any producer grows, the writer reserves a 64 KiB control/metadata allowance, the complete
+temporary config size and two maximum-sized records against a 256 MiB per-config logical budget.
+The limits are 4,096 intents, 8,192 records and 32,768 bytes per record, with at most 64 old/new
+binding fingerprints per intent. Directory size and control/anchor bytes must fit the fixed allowance.
+Unknown entries, oversized controls, malformed/partial history, pending intents and abandoned
+guards refuse further mutations. Intent fsync precedes config temporary creation/fsync and atomic
+replacement. Published-outcome fsync follows config-parent fsync. The guard spans synchronous
+local I/O only, never provider or network waits. There is no PID-based steal, expiry, repair, retry,
+compaction, pruning or supported reset.
+
+**Availability risk:** exhaustion or ambiguous I/O can permanently disable NEW account-config
+mutations for this config, including add, remove and adoption. Existing inventory/sessions and CP
+revocation continue; no evidence or credentials are deleted to restore availability. Unsupported
+ownership/filesystem proof, including platforms without the required POSIX checks, refuses mutation.
+These limits and indefinite refusal require disclosure in later review, PR and human merge decisions.
+Boundary fault tests use synthetic failures; they do not prove power-loss durability or optional
+platform support.
+
+Callers distinguish definitely-unpublished, known-renamed and unknown publication. A successful
+rename stays published when subsequent observation or directory fsync fails. Unknown and
+known-renamed failures retain intent, temporary/guard and any referenced HOME marker. They must
+not infer successful admission from today's config, activate a grant, report account removal or run
+grant retirement. Login's local settlement uses `recorded: "unknown"`: the existing grant manager
+drops temporary local access, while the callback retains the marker rather than falsely applying
+unrecorded rollback. Existing true/false settlement and CP revocation remain effective. No path in
+this slice deletes a credential HOME, edits its native lease evidence or authorizes physical cleanup.
+All other #3157 producer, lifecycle, process and detach proofs remain undelivered.
+
 The earlier private-only proposal used `preparing -> private -> published` or `private -> retired`;
 it was never implemented. The complete contract instead needs durable enrollment **before** each
 config/binding/grant publication, followed by irreversible freeze, exact owner-store barriers and
