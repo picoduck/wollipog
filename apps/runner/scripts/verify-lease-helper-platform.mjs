@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { helperDigest, validateHelperTuple } from "../../../scripts/lease-helper-distribution.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const tests = ["provider-home-lease", "provider-home-lease-portable", "provider-home-lease-io",
+const tests = ["provider-home-lease", "provider-home-lease-handoffs", "provider-home-lease-portable", "provider-home-lease-io",
   "provider-home-lease-async", "provider-home-lease-worker-protocol", "provider-home-lease-heartbeat",
   "provider-home-lease-clock", "provider-home-lease-deadline", "provider-home-lease-worker-deadline"];
 let product = repo;
