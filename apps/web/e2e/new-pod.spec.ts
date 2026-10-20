@@ -128,6 +128,26 @@ test.describe("at 390×844", () => {
     await sheet.evaluate((element) => Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished)));
     const sheetBox = (await sheet.boundingBox())!;
     expect(sheetBox.height, "full height").toBe(844);
+    // The header keeps Back and the title on one row, where they sit without a description, and
+    // the wrapped description on its own row below at the header's width (§7.2, §7.5).
+    const head = await dialog(page).locator(".modal-head").evaluate((element) => {
+      const rect = (node: Element) => node.getBoundingClientRect();
+      const box = rect(element);
+      const back = rect(element.querySelector(".modal-back")!);
+      const title = rect(element.querySelector(".modal-title")!);
+      const description = rect(element.querySelector(".modal-desc")!);
+      return {
+        backCentre: back.top + back.height / 2 - box.top,
+        titleCentre: title.top + title.height / 2 - box.top,
+        titleBottom: title.bottom, descriptionTop: description.top,
+        descriptionLeft: description.left - box.left, descriptionWidth: description.width, headWidth: box.width,
+      };
+    });
+    expect(Math.abs(head.backCentre - head.titleCentre), "Back and the title share one row").toBeLessThan(2);
+    expect(head.titleCentre, "the title row is the header's usual 48px row").toBeLessThanOrEqual(25);
+    expect(head.descriptionTop).toBeGreaterThanOrEqual(head.titleBottom - 1);
+    expect(head.descriptionLeft, "the description starts at the header's inset").toBeLessThanOrEqual(17);
+    expect(head.descriptionWidth).toBeGreaterThan(head.headWidth - 40);
     await expect(rowTitles(page)).toHaveCount(12);
     for (const height of await dialog(page).locator(".pod-session-list > .choice-row").evaluateAll((rows) =>
       rows.map((row) => row.getBoundingClientRect().height))) {

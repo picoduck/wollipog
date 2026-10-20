@@ -11778,6 +11778,27 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     padding-left: max(var(--space-4), env(safe-area-inset-left));
     padding-right: max(var(--space-2), env(safe-area-inset-right));
   }
+  /* A header with a description (§7.2) keeps the title on the close or back button's row, at the
+     height and place it has without one, and puts the description on its own row below at the
+     header's full width. Centred as one block, a wrapped description pushed the title to the top
+     edge and left the button floating beside the description (#2982). */
+  .modal-head:has(> .modal-heading > .modal-desc) {
+    flex-wrap: wrap;
+    row-gap: 0;
+    padding-bottom: var(--space-3);
+  }
+  .modal-head:has(> .modal-heading > .modal-desc) > .modal-heading { display: contents; }
+  .modal-head:has(> .modal-heading > .modal-desc) .modal-title {
+    display: flex;
+    flex: 1 1 0;
+    align-items: center;
+    min-width: 0;
+    min-height: 44px;
+  }
+  .modal-head:has(> .modal-heading > .modal-desc) .modal-desc {
+    flex-basis: 100%;
+    order: 1;
+  }
   /* The close and back buttons keep a 44px hit area whatever their drawn size. */
   .modal-close,
   .modal-back { position: relative; }
