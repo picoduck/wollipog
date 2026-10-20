@@ -15522,73 +15522,195 @@ button.review-finding-location {
   font-size: 12px;
 }
 
-.workflow-inspector {
-  margin: 12px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-elev);
-}
-
-.workflow-inspector-head,
-.workflow-node-head,
-.workflow-gate-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.workflow-inspector-head > div > span {
-  margin-left: 6px;
-  color: var(--text-dim);
-  font-size: 12px;
-}
-
-.workflow-node-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.workflow-node {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-elev-2);
-}
-
-.workflow-node-head span {
-  color: var(--text-dim);
-  font-size: 11px;
-  text-transform: capitalize;
-}
-
-.workflow-node-ready,
-.workflow-node-waiting_gate { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
-.workflow-node-failed,
-.workflow-node-stopped { border-color: color-mix(in srgb, var(--red) 50%, var(--border)); }
-.workflow-node-succeeded { border-color: color-mix(in srgb, var(--green) 50%, var(--border)); }
-
-.workflow-node-outcome {
-  font-size: 12px;
-  text-transform: capitalize;
-}
-
-.workflow-gate-actions {
-  justify-content: flex-start;
-  margin-top: auto;
-}
-
 @media (max-width: 640px) {
   .workflow-role-bindings label { grid-template-columns: 1fr; gap: 4px; }
-  .workflow-inspector { margin: 8px; padding: 10px; }
-  .workflow-node-grid { grid-template-columns: 1fr; }
+}
+
+/* A workflow run (#2977): a side column with the steps, the selected step's panel and the artifacts
+   (400px; 340px in the compact tier) beside the selected agent step's activity. It sits flush under
+   the task strip, starts at the page's gutter like the strip, and a hairline divides the two. */
+.run-detail:has(> .wf-run, > .wf-phone) { padding-bottom: 0; }
+.run-detail > .wf-run,
+.run-detail > .wf-phone {
+  margin-right: 0;
+  margin-left: 0;
+}
+.run-detail > .run-workflow-error { margin-top: var(--space-3); }
+.wf-run {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 400px minmax(0, 1fr);
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+@container app (max-width: 1099px) {
+  .wf-run { grid-template-columns: 340px minmax(0, 1fr); }
+}
+.wf-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-4) var(--space-6) var(--page-gutter);
+}
+.wf-run > .wf-side { border-right: 1px solid var(--border); }
+.wf-side > .run-artifacts { margin-top: 0; }
+.wf-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.wf-main > .compare-member,
+.wf-main-empty { flex: 1; }
+.wf-main-empty {
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+}
+
+/* The steps: numbered markers on a rail, each step its role, a sub-line and one badge. The marker
+   takes the badge's tone, so amber marks only a step awaiting a decision. */
+.wf-steps {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.wf-step { position: relative; }
+.wf-step:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--space-2) + 24px);
+  bottom: calc(var(--space-2) * -1);
+  left: calc(var(--space-2) + 12px);
+  width: 1px;
+  background: var(--border-strong);
+}
+.wf-step-button {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .wf-step-button:hover { background: var(--bg-elev-2); }
+}
+.wf-step-button[aria-current="true"] { background: var(--surface-selected); }
+.wf-step-marker {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid color-mix(in srgb, var(--tone) 60%, var(--border));
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--tone) 16%, var(--bg));
+  color: var(--text);
+  font: var(--type-label);
+  font-variant-numeric: tabular-nums;
+}
+.wf-step-body {
+  display: grid;
+  min-width: 0;
+}
+.wf-step-role { font: var(--type-body-strong); }
+.wf-step-sub {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.wf-step-status { margin-top: var(--space-0-5); }
+.wf-summary {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+
+/* The selected step's panel: its notice, then its facts. Its buttons are control-sized. */
+.wf-panel {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.wf-panel-head {
+  margin: 0;
+  font: var(--type-section);
+}
+.wf-panel-line {
+  margin: 0;
+  color: var(--text-dim);
+}
+.wf-panel-reason {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.wf-panel-error {
+  margin: 0;
+  font: var(--type-small);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wf-gate-artifact {
+  margin-top: var(--space-2);
+  overflow: hidden;
+}
+/* Inside a notice in the compact tier's 340px column the row is too narrow for one line, so it
+   grows: the name wraps and the meta wraps whole words onto a second line, never an ellipsis per
+   word. Where it fits, it is the list's 56px row. */
+.wf-gate-artifact .row.row-2 {
+  height: auto;
+  min-height: var(--row-h-2);
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+.wf-gate-artifact .row-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.wf-gate-artifact .art-row-meta {
+  flex-wrap: wrap;
+  row-gap: 0;
+  white-space: normal;
+}
+.wf-gate-artifact .art-row-meta > span {
+  flex: none;
+  overflow: visible;
+}
+
+/* Phones (§15.1): Steps and one <Role> Activity tab per agent step; the panel's buttons are 44px
+   even under a mouse, from the tokens, and still sized by their labels. */
+.wf-phone {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--space-2);
+}
+.wf-phone > .wf-side {
+  flex: 1;
+  padding-inline: var(--page-gutter);
+}
+.wf-phone > .wf-main { flex: 1; }
+.wf-phone .compare-member-head { padding-inline: var(--page-gutter) var(--space-2); }
+.wf-phone :is(.compare-member-meta, .compare-member-notice, .compare-member-body) { padding-inline: var(--page-gutter); }
+@media (max-width: 760px) {
+  .wf-panel .notice-actions {
+    --control-h: 44px;
+    --control-h-sm: 44px;
+    --control-h-lg: 44px;
+  }
 }
 /* The diff answers to the side panel's width, not the window's (§2.10; #2843): a 400px panel on a
    desktop gets the narrow layout. Finding rows are single-column at every width (#2850); the

@@ -322,6 +322,18 @@ const VOCABULARY = {
     failed: danger("Failed"),
     stopped: neutral("Stopped"),
   },
+  /** One step of a workflow run (`WorkflowNodeStatus`, #2977): its badge and its marker's tone on
+   * the run page's step list. Amber is Awaiting Decision's alone. */
+  workflowNode: {
+    pending: neutral("Waiting"),
+    ready: info("Ready"),
+    running: info("Running", { pulse: true }),
+    waiting_gate: warning("Awaiting Decision"),
+    succeeded: success("Succeeded"),
+    failed: danger("Failed"),
+    skipped: neutral("Skipped"),
+    stopped: neutral("Stopped"),
+  },
   /** A Multi-Agent Run's one row badge (`runStatus()`, #2974). A run whose members are all idle has
    * none. */
   run: {

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, 
 import { flushSync } from "react-dom";
 import type { RunView, SessionView, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { formatClock, formatRecordedRelativeTime, localDayLabel, relativeTime, titleCaseLabel } from "../format.js";
+import { formatClock, formatRecordedRelativeTime, localDayLabel, titleCaseLabel } from "../format.js";
 import { useApi } from "../api-context.js";
 import { CompareMemberBody, CompareMemberHead, CompareRow } from "./CompareColumns.js";
 import { useTimeline } from "./useTimeline.js";
@@ -44,6 +44,8 @@ import {
 import { useDashboardPublicOrigin } from "../remote-access-context.js";
 import { writeClipboardText } from "../clipboard.js";
 import { DEVELOPMENT_BUILD } from "../config.js";
+import { artifactNoun, attentionStepId, gateInput, rolesSentence, stepsAfter, workflowSteps, type WorkflowStep } from "../workflow-steps.js";
+import { WorkflowStepPanel, WorkflowSteps, workflowSummary } from "./WorkflowRun.js";
 
 const EMPTY_SESSION_IDS: string[] = [];
 const NO_RUN_LINK_REASON = "Open Wollipog in a browser to copy a link.";
@@ -55,8 +57,9 @@ const NO_ANSWER_REASON = "No answer yet";
 
 /** What the run page does for one member from its ⋯ (#2976). */
 interface MemberActions {
-  /** Follow Up with This Agent…: the dialog with only this member checked. */
-  followUp: () => void;
+  /** Follow Up with This Agent…: the dialog with only this member checked. A workflow run has none,
+   * since its steps prompt its agents (#2977). */
+  followUp?: () => void;
   /** Stop Agent…: the confirmation, whose phone Back reopens the ⋯ it came from. */
   stop: (choice: ActionsMenuChoice) => void;
 }
@@ -116,12 +119,12 @@ function MemberColumn({ sessionId, label, actions, onRetry, panel }: {
   // The member's ⋯, the same in a desktop column's head and the phone's member bar.
   const menu: PageMenuAction[] = [
     { label: "Open Session", onClick: openSession },
-    {
+    ...(actions.followUp ? [{
       label: "Follow Up with This Agent…",
       disabled: !followUpSelectable(followUp),
       description: "reason" in followUp ? followUp.reason : undefined,
       onClick: actions.followUp,
-    },
+    }] : []),
     {
       label: "Copy Final Answer",
       disabled: !answer,
@@ -170,6 +173,11 @@ function MemberColumn({ sessionId, label, actions, onRetry, panel }: {
 
 const memberTabId = (index: number) => `run-member-tab-${index}`;
 const MEMBER_PANEL_ID = "run-member-panel";
+// A workflow run's phone tabs (#2977): Steps, then one per agent step.
+const STEPS_TAB = "steps";
+const activityTabKey = (nodeId: string) => `activity:${nodeId}`;
+const workflowTabId = (index: number) => `run-workflow-tab-${index}`;
+const WORKFLOW_PANEL_ID = "run-workflow-panel";
 
 /** A phone's member tab: the agent and its status as a dot, named in words. */
 function MemberTab({ sessionId, label, index, selected, onSelect, onKeyDown }: {
@@ -438,15 +446,21 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
     return () => window.clearTimeout(timer);
   }, [nextRetryAt, retryClock]);
 
+  // A detail older than the one shown never replaces it: a load or a decision that answers after a
+  // newer one has landed (the run's own refresh after a socket update) would bring a resolved gate back.
+  const applyWorkflow = useCallback((detail: WorkflowInstanceDetail | null) => {
+    setWorkflow((shown) => detail && shown && detail.instanceId === shown.instanceId && detail.updatedAt < shown.updatedAt ? shown : detail);
+  }, []);
+
   const refreshWorkflow = async (targetRunId: string) => {
     const instances = await api.workflowInstances(targetRunId);
     if (!instances.length) {
-      setWorkflow(null);
+      applyWorkflow(null);
       setWorkflowError(null);
       return;
     }
     const detail = await api.workflowInstance(instances[0]!.instanceId);
-    setWorkflow(detail);
+    applyWorkflow(detail);
     setWorkflowError(null);
   };
 
@@ -482,19 +496,27 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
       .then((instances) => instances[0] ? api.workflowInstance(instances[0].instanceId) : null)
       .then((detail) => {
         if (!current) return;
-        setWorkflow(detail);
+        applyWorkflow(detail);
         setWorkflowKnown(true);
         setWorkflowError(null);
       })
       .catch((error: unknown) => { if (current) setWorkflowError((error as Error).message); });
     return () => { current = false; };
-  }, [api, run?.id, run?.updatedAt, conn]);
+  }, [api, run?.id, run?.updatedAt, conn, applyWorkflow]);
 
-  const dispatchNode = async (nodeId: string, attemptCount: number) => {
+  const steps = useMemo(() => workflow ? workflowSteps(workflow) : [], [workflow]);
+  // Until the person picks a step, the panel shows the one that needs them, and follows it.
+  const [chosenStep, setChosenStep] = useState<string | null>(null);
+  const selectedStep = steps.find((step) => step.nodeId === chosenStep) ?? steps.find((step) => step.nodeId === attentionStepId(steps)) ?? null;
+  // A phone shows the steps or one agent step's activity under its tabs.
+  const [phoneTab, setPhoneTab] = useState<string>(STEPS_TAB);
+
+  // Start <Role> and Retry <Role>: one attempt per press, keyed so a repeated request is the same one.
+  const dispatchNode = async (step: WorkflowStep) => {
     if (!workflow || workflowBusy) return;
-    setWorkflowBusy(nodeId);
+    setWorkflowBusy(step.nodeId);
     try {
-      await api.dispatchWorkflowNode(workflow.instanceId, nodeId, `ui:${workflow.instanceId}:${nodeId}:${attemptCount + 1}`);
+      await api.dispatchWorkflowNode(workflow.instanceId, step.nodeId, `ui:${workflow.instanceId}:${step.nodeId}:${step.state.attemptCount + 1}`);
       await refreshWorkflow(workflow.runId);
     } catch (error) {
       setWorkflowError((error as Error).message);
@@ -503,17 +525,40 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
     }
   };
 
-  const resolveGate = async (nodeId: string, outcome: "success" | "failure") => {
+  const approveGate = async (step: WorkflowStep) => {
     if (!workflow || workflowBusy) return;
-    setWorkflowBusy(nodeId);
+    setWorkflowBusy(step.nodeId);
     try {
-      setWorkflow(await api.resolveWorkflowGate(workflow.instanceId, nodeId, outcome));
+      applyWorkflow(await api.resolveWorkflowGate(workflow.instanceId, step.nodeId, "success"));
       setWorkflowError(null);
     } catch (error) {
       setWorkflowError((error as Error).message);
     } finally {
       setWorkflowBusy(null);
     }
+  };
+
+  // Reject… asks first (§7.4). The confirmation waits on the decision and keeps a refusal in itself.
+  const rejectGate = (step: WorkflowStep, artifact: WorkflowArtifactView | null) => {
+    if (!workflow || workflowBusy) return;
+    const instanceId = workflow.instanceId;
+    const input = gateInput(step.node);
+    const noun = input ? artifactNoun(input.kind) : null;
+    const after = stepsAfter(step, steps, workflow.definition.edges, "failure");
+    const what = artifact ? `“${artifact.name}”` : `The ${noun ?? "step"}`;
+    void confirm({
+      title: noun ? `Reject ${titleCaseLabel(noun)}` : `Reject ${step.role}`,
+      message: after.length
+        ? `${what} goes back to ${rolesSentence(after)}. This can't be undone.`
+        : "The run ends here and later steps don't start. This can't be undone.",
+      confirmLabel: "Reject",
+      tone: "danger",
+      progress: `Rejecting the ${noun ?? "step"}…`,
+      onConfirm: async () => {
+        applyWorkflow(await api.resolveWorkflowGate(instanceId, step.nodeId, "failure"));
+        setWorkflowError(null);
+      },
+    });
   };
 
   useEffect(() => {
@@ -633,8 +678,9 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
       },
     });
   };
-  const memberActions = (sessionId: string) => ({
-    followUp: () => setFollowUp({ preselect: sessionId }),
+  const memberActions = (sessionId: string): MemberActions => ({
+    // A workflow's steps prompt its agents, so its page offers no Follow Up (#2977).
+    ...(workflow ? {} : { followUp: () => setFollowUp({ preselect: sessionId }) }),
     stop: (choice: ActionsMenuChoice) => stopAgent(sessionId, choice),
   });
   // A phone shows one member: the one the URL names while it is still a member, else the first.
@@ -675,6 +721,109 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
   const typeLabel = workflow ? workflow.definition.name : workflowKnown ? "Comparison" : null;
   const started = `Started ${localDayLabel(run.createdAt, Date.now())}, ${formatClock(run.createdAt)}`;
 
+  const runArtifacts = (artifacts.length > 0 || artifactError) && (
+    <RunArtifacts
+      artifacts={artifacts}
+      more={Boolean(artifactCursor)}
+      error={artifactError}
+      pageBusy={artifactPageBusy}
+      onLoadMore={() => void loadMoreArtifacts()}
+      onOpen={setSelectedArtifact}
+    />
+  );
+
+  // A workflow run (#2977): its agent steps, each with its member's name on this page when known.
+  const agentSteps = steps.filter((step) => step.node.kind === "agent");
+  const agentOf = (step: WorkflowStep) => step.sessionId && members.includes(step.sessionId)
+    ? memberLabels[members.indexOf(step.sessionId)] || null
+    : null;
+  // The main column shows the selected agent step's activity; with a gate selected, the agent step
+  // before it, whose work the gate decides on.
+  const activityStep = selectedStep?.node.kind === "agent" ? selectedStep
+    : (selectedStep ? [...agentSteps].reverse().find((step) => step.number < selectedStep.number) : undefined) ?? agentSteps[0] ?? null;
+  const workflowActivity = (step: WorkflowStep | null, panel?: { id: string; labelledBy: string }) => (
+    <div className="wf-main">
+      {step?.sessionId && sessions.has(step.sessionId) ? (
+        <MemberColumn
+          key={step.sessionId}
+          sessionId={step.sessionId}
+          label={labelOf(step.sessionId)}
+          actions={memberActions(step.sessionId)}
+          onRetry={retryHistory}
+          panel={panel}
+        />
+      ) : (
+        <div className="wf-main-empty" id={panel?.id} role={panel ? "tabpanel" : undefined} aria-labelledby={panel?.labelledBy}>
+          {/* A step's session is only the one the control plane recorded when it ran (§12). */}
+          {!step ? (
+            <State compact title="No Agent Steps">This workflow has no agent steps.</State>
+          ) : step.sessionId ? (
+            <State compact title="Session Unavailable">This step's session isn't available on this device.</State>
+          ) : (
+            <State compact title="No Session Yet">{step.role}'s session shows here once the step starts.</State>
+          )}
+        </div>
+      )}
+    </div>
+  );
+  const workflowSide = workflow && (
+    <>
+      {workflowError && <Notice tone="danger" compact>{workflowError}</Notice>}
+      {workflow.eventHistoryPruned && (
+        <Notice tone="neutral" compact title="Event History Pruned">
+          {workflow.eventHistoryPruned.eventCount.toLocaleString()} workflow events were removed by the {workflow.eventHistoryPruned.retentionDays}-day retention policy. Instance summaries, node outcomes, attempts, artifacts, decisions and action receipts are kept.
+        </Notice>
+      )}
+      <WorkflowSteps steps={steps} selectedId={selectedStep?.nodeId ?? null} agentOf={agentOf} onSelect={setChosenStep} />
+      <p className="wf-summary">{workflowSummary(workflow)}</p>
+      {selectedStep && (
+        <WorkflowStepPanel
+          step={selectedStep}
+          steps={steps}
+          workflow={workflow}
+          agent={agentOf(selectedStep)}
+          artifacts={artifacts}
+          now={retryClock}
+          busy={workflowBusy}
+          actions={{
+            dispatch: (step) => void dispatchNode(step),
+            approve: (step) => void approveGate(step),
+            reject: rejectGate,
+            openArtifact: setSelectedArtifact,
+          }}
+        />
+      )}
+      {runArtifacts}
+    </>
+  );
+  // Steps, then one tab per agent step. An activity tab's key is prefixed, so no node id (even
+  // "steps") can share a key with the Steps tab.
+  const phoneTabs: Array<{ id: string; label: string; step: WorkflowStep | null }> = [
+    { id: STEPS_TAB, label: "Steps", step: null },
+    ...agentSteps.map((step) => ({ id: activityTabKey(step.nodeId), label: `${step.role} Activity`, step })),
+  ];
+  const shownTab = phoneTabs.find((tab) => tab.id === phoneTab) ?? phoneTabs[0]!;
+  const shownPhoneTab = shownTab.id;
+  const onWorkflowTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const last = phoneTabs.length - 1;
+    const next = event.key === "ArrowRight" ? (index === last ? 0 : index + 1)
+      : event.key === "ArrowLeft" ? (index === 0 ? last : index - 1)
+        : event.key === "Home" ? 0
+          : event.key === "End" ? last
+            : null;
+    if (next === null) return;
+    event.preventDefault();
+    flushSync(() => setPhoneTab(phoneTabs[next]!.id));
+    document.getElementById(workflowTabId(next))?.focus();
+  };
+  // Open <Role> Session for each agent step, in step order.
+  const openStepItems: PageMenuAction[] = agentSteps.map((step) => ({
+    label: `Open ${step.role} Session`,
+    disabled: !step.sessionId,
+    description: step.sessionId ? undefined : "No session until the step starts",
+    onClick: () => { if (step.sessionId) navigate({ name: "session", id: step.sessionId }); },
+  }));
+
   return (
     <div className="run-detail">
       <DetailBar
@@ -683,9 +832,11 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
         onBack={back}
         status={status && <StatusBadge meta={statusMeta("run", status)} />}
         // In the compact tier and on a phone only its icon shows, so the run's title keeps its room.
-        primary={members.length > 0 ? { label: "Follow Up…", icon: <ReplyIcon />, iconOnPhone: true, onClick: () => setFollowUp({}) } : undefined}
+        // A workflow's steps prompt its agents, so it has no Follow Up (#2977).
+        primary={members.length > 0 && !workflow ? { label: "Follow Up…", icon: <ReplyIcon />, iconOnPhone: true, onClick: () => setFollowUp({}) } : undefined}
         menu={[
           { label: "Show Full Task", onClick: () => setTaskOpen(true) },
+          ...openStepItems,
           {
             label: "Copy Link",
             disabled: !runLink,
@@ -720,72 +871,45 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
         />
       )}
 
-      {(workflow || workflowError) && (
-        <section className="workflow-inspector" aria-label="Workflow Progress">
-          <div className="workflow-inspector-head">
-            <div>
-              <strong>{workflow?.definition.name ?? "Workflow"}</strong>
-              {workflow && <span> v{workflow.workflowVersion} · {workflow.transitionCount}/{workflow.definition.maxTransitions} Transitions</span>}
-            </div>
-            {workflow && <StatusBadge meta={statusMeta("workflow", workflow.status)} />}
-          </div>
-          {workflowError && <Notice tone="danger" compact>{workflowError}</Notice>}
-          {workflow?.eventHistoryPruned && (
-            <Notice tone="neutral" compact title="Event History Pruned">
-              {workflow.eventHistoryPruned.eventCount.toLocaleString()} workflow events were removed by the {workflow.eventHistoryPruned.retentionDays}-day retention policy. Instance summaries, node outcomes, attempts, artifacts, decisions and action receipts are kept.
-            </Notice>
-          )}
-          {workflow && (
-            <div className="workflow-node-grid">
-              {workflow.nodeStates.map((state) => {
-                const node = workflow.definition.nodes.find((candidate) => candidate.nodeId === state.nodeId)!;
-                const attempts = workflow.attempts.filter((attempt) => attempt.nodeId === state.nodeId);
-                const latest = attempts.at(-1);
-                const retryDelayed = Boolean(state.readyAt && state.readyAt > retryClock);
-                return (
-                  <article key={state.nodeId} className={`workflow-node workflow-node-${state.status}`}>
-                    <div className="workflow-node-head">
-                      <strong>{node.role}</strong>
-                      <span>{titleCaseLabel(state.status.replace("_", " "))}</span>
-                    </div>
-                    <div className="muted sm">
-                      {node.kind === "agent" ? `${node.agentId} · ${state.attemptCount}/${node.retry.maxAttempts} Attempts` : titleCaseLabel(node.kind.replace("_", " "))}
-                    </div>
-                    {state.outcome && <div className="workflow-node-outcome">Outcome: {titleCaseLabel(state.outcome.replace("_", " "))}</div>}
-                    {latest && <div className="muted sm">Latest Attempt: {latest.status === "cancelled" ? "Canceled" : titleCaseLabel(latest.status.replace("_", " "))}</div>}
-                    {state.error && <Notice tone="danger" compact>{state.error}</Notice>}
-                    {node.kind === "agent" && state.status === "ready" && (
-                      <button className="btn primary sm" disabled={Boolean(workflowBusy) || retryDelayed} onClick={() => void dispatchNode(node.nodeId, state.attemptCount)}>
-                        {workflowBusy === node.nodeId ? "Dispatching…" : retryDelayed ? `Retry ${relativeTime(state.readyAt!)}` : "Dispatch Step"}
-                      </button>
-                    )}
-                    {node.kind !== "agent" && state.status === "waiting_gate" && (
-                      <div className="workflow-gate-actions">
-                        <button className="btn primary sm" disabled={Boolean(workflowBusy)} onClick={() => void resolveGate(node.nodeId, "success")}>Continue</button>
-                        <button className="btn ghost sm" disabled={Boolean(workflowBusy)} onClick={() => void resolveGate(node.nodeId, "failure")}>Stop Branch</button>
-                      </div>
-                    )}
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
-      )}
-
-      {(artifacts.length > 0 || artifactError) && (
-        <RunArtifacts
-          artifacts={artifacts}
-          more={Boolean(artifactCursor)}
-          error={artifactError}
-          pageBusy={artifactPageBusy}
-          onLoadMore={() => void loadMoreArtifacts()}
-          onOpen={setSelectedArtifact}
-        />
-      )}
+      {!workflow && workflowError && <Notice tone="danger" compact className="run-workflow-error">{workflowError}</Notice>}
+      {!workflow && runArtifacts}
       {selectedArtifact && <ArtifactPreviewDialog artifact={selectedArtifact} onClose={() => setSelectedArtifact(null)} />}
 
-      {phone ? (
+      {workflow ? (phone ? (
+        // The steps, or one agent step's activity, under the tabs (§15.1).
+        <div className="wf-phone">
+          <TabList label="Workflow" className="compare-tabs">
+            {phoneTabs.map((tab, index) => (
+              <button
+                key={tab.id}
+                id={workflowTabId(index)}
+                type="button"
+                role="tab"
+                aria-selected={tab.id === shownPhoneTab}
+                aria-controls={WORKFLOW_PANEL_ID}
+                tabIndex={tab.id === shownPhoneTab ? 0 : -1}
+                className="tab compare-tab"
+                onClick={() => setPhoneTab(tab.id)}
+                onKeyDown={(event) => onWorkflowTabKeyDown(event, index)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </TabList>
+          {shownTab.step === null ? (
+            <div className="wf-side" id={WORKFLOW_PANEL_ID} role="tabpanel" aria-labelledby={workflowTabId(0)}>{workflowSide}</div>
+          ) : workflowActivity(
+            shownTab.step,
+            { id: WORKFLOW_PANEL_ID, labelledBy: workflowTabId(phoneTabs.indexOf(shownTab)) },
+          )}
+        </div>
+      ) : (
+        // The steps beside the agent step's activity, flush with the page's left edge.
+        <div className="wf-run">
+          <section className="wf-side" aria-label="Workflow Progress">{workflowSide}</section>
+          {workflowActivity(activityStep)}
+        </div>
+      )) : phone ? (
         // One member at a time under its tabs (§15.1); the column's head is the member bar.
         members.length > 0 && (
           <div className="compare-phone">
