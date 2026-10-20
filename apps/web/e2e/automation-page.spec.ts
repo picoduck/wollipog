@@ -2,110 +2,159 @@ import { expect, test, type Page } from "@playwright/test";
 import { join } from "node:path";
 
 /**
- * The automation card disclosure (#793), across the two widths the acceptance criteria call out.
- * `AutomationsView.dom.test.tsx` covers the component logic (default state, independent expansion,
- * polling, deletion, keyboard) against a fake DOM; this is the one thing that cannot be automated
- * there — real layout, real CSS, real touch-target geometry.
+ * The automation page (#2968), opened from the list's cards or directly by its route, at the
+ * widths and themes its acceptance criteria name. `AutomationDetail.dom.test.tsx` and
+ * `AutomationsView.dom.test.tsx` cover the component logic against a fake DOM; this is what cannot
+ * be automated there: real layout, real CSS, real touch-target geometry. With
+ * `WOLLIPOG_EVIDENCE_DIR` set, each state is also captured as UI evidence.
  */
+
+const NIGHTLY = "Nightly Dependency Sweep and Long-Running Audit Report";
+
+/** `/automations/~<id>`: the id as UTF-16LE base64url, as `encodeResourceId` writes it. */
+function automationRoute(id: string): string {
+  return `/automations/~${Buffer.from(id, "utf16le").toString("base64url")}`;
+}
 
 async function open(page: Page) {
   await page.goto("/automations-e2e.html?theme=dark");
   await expect(page.getByRole("button", { name: /Nightly Dependency Sweep/ })).toBeVisible();
 }
 
+async function openPage(page: Page, id: string, theme: string, scenario = "") {
+  await page.goto(`/automations-e2e.html?theme=${theme}&route=${encodeURIComponent(automationRoute(id))}${scenario}`);
+  await expect(page.locator(".automation-detail .glance")).toBeVisible();
+}
+
+async function capture(page: Page, name: string) {
+  const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+  if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `${name}.png`), fullPage: true });
+}
+
 for (const { label, viewport } of [
   { label: "desktop", viewport: { width: 1280, height: 900 } },
   { label: "mobile", viewport: { width: 375, height: 812 } },
 ]) {
-  test.describe(`${label} width`, () => {
+  test.describe(`${label} width list`, () => {
     test.use({ viewport });
 
-    test("cards start collapsed, showing only name, summary, state, and the toggle", async ({ page }) => {
+    test("a card shows its name, summary and state, and its heading opens the automation's page", async ({ page }) => {
       await open(page);
-      const toggle = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
-      await expect(toggle).toHaveAttribute("aria-expanded", "false");
-      await expect(toggle).toContainText("Enabled");
-      // The header carries the action summary, not the automation's prompt.
-      await expect(toggle).toContainText("Create agent-1 session on runner-1");
-      await expect(page.getByText("Schedule", { exact: true })).toHaveCount(0);
-      // Exact names throughout: the toggle's own accessible name ends in "Enabled" or "Paused",
-      // which a substring match on "Enable"/"Pause" would pick up instead of the action button.
+      const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
+      await expect(card).not.toHaveAttribute("aria-expanded");
+      await expect(card).toContainText("Enabled");
+      await expect(card).toContainText("Create agent-1 session on runner-1");
       await expect(page.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
-      await expect(page.getByRole("button", { name: "Pause", exact: true })).toHaveCount(0);
+      await card.click();
+      await expect(page.getByRole("heading", { level: 1, name: NIGHTLY })).toBeVisible();
+      await page.getByRole("button", { name: "Back to Automations", exact: true }).click();
+      await expect(page.getByRole("button", { name: /Weekly Digest/ })).toBeVisible();
     });
 
-    test("activating the toggle expands the card and reveals its details and actions", async ({ page }) => {
+    test("the card's heading meets its minimum target size and stays inside the viewport", async ({ page }) => {
       await open(page);
-      const toggle = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
-      const bodyId = await toggle.getAttribute("aria-controls");
-      await toggle.click();
-      await expect(toggle).toHaveAttribute("aria-expanded", "true");
-      const body = page.locator(`#${bodyId}`);
-      await expect(body).toBeVisible();
-      await expect(body.getByText("Schedule", { exact: true })).toBeVisible();
-      await expect(body.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
-      await expect(body.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
-
-      await toggle.click();
-      await expect(toggle).toHaveAttribute("aria-expanded", "false");
-      await expect(page.locator(`#${bodyId}`)).toHaveCount(0);
-    });
-
-    test("multiple cards expand independently", async ({ page }) => {
-      await open(page);
-      const first = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
-      const second = page.getByRole("button", { name: /Weekly Digest/ });
-      await first.click();
-      await second.click();
-      await expect(first).toHaveAttribute("aria-expanded", "true");
-      await expect(second).toHaveAttribute("aria-expanded", "true");
-      // Both bodies visible at once, and each shows its own management actions (Pause vs. Enable).
-      await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
-      await expect(page.getByRole("button", { name: "Enable", exact: true })).toBeVisible();
-
-      await first.click();
-      await expect(first).toHaveAttribute("aria-expanded", "false");
-      await expect(second).toHaveAttribute("aria-expanded", "true");
-    });
-
-    test("Enter and Space both activate the disclosure from the keyboard", async ({ page }) => {
-      await open(page);
-      const toggle = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
-      await toggle.focus();
-      await page.keyboard.press("Enter");
-      await expect(toggle).toHaveAttribute("aria-expanded", "true");
-      await page.keyboard.press("Space");
-      await expect(toggle).toHaveAttribute("aria-expanded", "false");
-    });
-
-    test("toggling keeps focus on the control and does not scroll the page", async ({ page }) => {
-      await open(page);
-      const toggle = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
-      await toggle.focus();
-      const scrollBefore = await page.evaluate(() => window.scrollY);
-
-      // Collapsing unmounts the body; the control itself is never unmounted, so focus must stay on
-      // it rather than falling back to <body> and stranding a keyboard user at the top of the page.
-      await page.keyboard.press("Enter");
-      await expect(toggle).toHaveAttribute("aria-expanded", "true");
-      await expect(toggle).toBeFocused();
-      await page.keyboard.press("Enter");
-      await expect(toggle).toHaveAttribute("aria-expanded", "false");
-      await expect(toggle).toBeFocused();
-      expect(await page.evaluate(() => window.scrollY)).toBe(scrollBefore);
-    });
-
-    test("the toggle meets its minimum target size and stays inside the viewport", async ({ page }) => {
-      await open(page);
-      const toggle = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
-      const box = await toggle.boundingBox();
+      const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
+      const box = await card.boundingBox();
       expect(box).not.toBeNull();
-      // 44px is the comfortable touch target the mobile stylesheet guarantees; on desktop the
-      // pointer target only has to clear the WCAG 2.2 minimum.
       expect(box!.height).toBeGreaterThanOrEqual(label === "mobile" ? 44 : 24);
-      // A long automation name must wrap rather than push the header out of the viewport.
       expect(box!.x).toBeGreaterThanOrEqual(0);
       expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width + 0.5);
+    });
+  });
+}
+
+for (const { label, viewport } of [
+  { label: "1440", viewport: { width: 1440, height: 900 } },
+  { label: "834", viewport: { width: 834, height: 1112 } },
+  { label: "390", viewport: { width: 390, height: 844 } },
+]) for (const theme of ["dark", "light"] as const) {
+  const phone = label === "390";
+  test.describe(`${label}px ${theme} automation page`, () => {
+    test.use({ viewport });
+
+    test("an enabled automation that has run: one badge, the glance, its sentence and its rules", async ({ page }) => {
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await openPage(page, "automation-nightly-sweep", theme);
+      const bar = page.locator(".automation-detail .detail-bar");
+      await expect(bar.getByRole("heading", { level: 1 })).toHaveText(NIGHTLY);
+      if (phone) {
+        await expect(bar.locator(".status")).toHaveCount(0);
+        await expect(page.locator(".automation-status .status")).toHaveText("Enabled");
+        await expect(bar.getByRole("button", { name: "Pause", exact: true })).toHaveCount(0);
+        await expect(bar.locator(".detail-bar-action.icon-only")).toHaveAccessibleName("Edit");
+      } else {
+        await expect(bar.locator(".status")).toHaveText("Enabled");
+        await expect(bar.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+        await expect(bar.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+      }
+      const glance = page.locator(".glance");
+      await expect(glance.locator("dt")).toHaveText(["Next Run", "Last Run", "Schedule"]);
+      await expect(glance).toContainText("Every day at 2:00 AM");
+      await expect(page.locator(".automation-sentence")).toHaveText("Starts Agent in Home on runner-1.");
+      const labels = page.locator(".automation-detail dl.facts dt");
+      await expect(labels).toHaveCount(6);
+      expect(await labels.first().evaluate((element) => getComputedStyle(element).textTransform)).toBe("none");
+      // Under 760px the glance stacks as three lines, each label beside its value.
+      const rows = await glance.locator("dt").evaluateAll((terms) => terms.map((term) => {
+        const value = term.nextElementSibling!.getBoundingClientRect();
+        const box = term.getBoundingClientRect();
+        return { top: box.top, valueTop: value.top, left: box.left, valueLeft: value.left };
+      }));
+      if (phone) {
+        expect(rows[1]!.top).toBeGreaterThan(rows[0]!.top);
+        expect(rows[2]!.top).toBeGreaterThan(rows[1]!.top);
+        for (const row of rows) expect(row.valueLeft).toBeGreaterThan(row.left);
+      } else {
+        expect(Math.abs(rows[1]!.top - rows[0]!.top)).toBeLessThan(2);
+      }
+      const width = await page.evaluate(() => document.documentElement.scrollWidth);
+      expect(width).toBeLessThanOrEqual(viewport.width);
+      await capture(page, `automation-page-ran-${label}-${theme}`);
+      expect(errors).toEqual([]);
+    });
+
+    test("a paused automation that never ran", async ({ page }) => {
+      await openPage(page, "automation-weekly-digest", theme);
+      await expect(page.locator(phone ? ".automation-status .status" : ".detail-bar .status")).toHaveText("Paused");
+      await expect(page.locator(".glance dd").nth(0)).toHaveText("Paused");
+      await expect(page.locator(".glance dd").nth(1)).toHaveText("Not yet");
+      await expect(page.getByText("No runs yet.", { exact: true })).toBeVisible();
+      await capture(page, `automation-page-never-ran-${label}-${theme}`);
+    });
+
+    test("needs attention: a failed run and a waiting target are one danger notice with +1 More", async ({ page }) => {
+      await openPage(page, "automation-nightly-sweep", theme, "&failed-run&waiting-target");
+      const notices = page.locator(".automation-notice-slot .notice");
+      await expect(notices).toHaveCount(1);
+      await expect(notices.locator(".notice-title")).toHaveText("Last Run Failed");
+      await expect(notices).toHaveClass(/t-danger/);
+      await expect(notices.getByRole("button", { name: "+1 More" })).toBeVisible();
+      await expect(page.locator('.automation-detail [role="alert"]')).toHaveCount(1);
+      await expect(page.locator(phone ? ".automation-status .status" : ".detail-bar .status")).toHaveText("Last Run Failed");
+      await capture(page, `automation-page-needs-attention-${label}-${theme}`);
+      await notices.getByRole("button", { name: "+1 More" }).click();
+      await page.getByRole("menuitem", { name: "Waiting for runner-1" }).click();
+      await expect(page.locator(".automation-notice-slot .notice")).toHaveClass(/t-warning/);
+    });
+
+    test("Delete Automation… is last in ⋯ and confirms by name; a phone's confirmation replaces the sheet", async ({ page }) => {
+      await openPage(page, "automation-nightly-sweep", theme);
+      await page.locator(".detail-bar").getByRole("button", { name: "More Actions" }).click();
+      const items = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem");
+      await expect(items.last()).toHaveText("Delete Automation…");
+      await items.last().click();
+      const dialog = page.getByRole("alertdialog").or(page.getByRole("dialog")).filter({ hasText: "Delete Automation" });
+      await expect(dialog).toContainText(`“${NIGHTLY}” stops running and is removed, with its 1 trigger. Its run history is kept.`);
+      if (phone) {
+        await expect(page.getByRole("menu", { name: "More Actions" })).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: "Back to More Actions" })).toBeVisible();
+      }
+      await capture(page, `automation-delete-${label}-${theme}`);
+      if (phone) {
+        await dialog.getByRole("button", { name: "Back to More Actions" }).click();
+        await expect(page.getByRole("menu", { name: "More Actions" })).toBeVisible();
+      }
     });
   });
 }
@@ -116,14 +165,7 @@ for (const { label, viewport } of [
 ]) for (const theme of ["dark", "light"] as const) {
   test.describe(`${label} ${theme} target health`, () => {
     test.use({ viewport });
-    test("shows an unresolved target in the list and its error in the card", async ({ page }) => {
-      const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
-      await page.goto(`/automations-e2e.html?theme=${theme}`);
-      const toggle = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
-      await expect(toggle).toBeVisible();
-      if (evidenceDir) await page.screenshot({
-        path: join(evidenceDir, `automation-target-before-${label}-${theme}.png`), fullPage: true,
-      });
+    test("shows an unresolved target in the list and its error as the page's notice", async ({ page }) => {
       await page.goto(`/automations-e2e.html?theme=${theme}&waiting-target`);
       const unhealthy = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
       await expect(unhealthy).toContainText("Target Unavailable");
@@ -142,10 +184,10 @@ for (const { label, viewport } of [
         await checkRows(page.getByRole("button", { name: /Weekly Digest/ }));
       }
       await unhealthy.click();
-      await expect(page.getByRole("alert").filter({ hasText: /Waiting for target:/ })).toBeVisible();
-      if (evidenceDir) await page.screenshot({
-        path: join(evidenceDir, `automation-target-after-${label}-${theme}.png`), fullPage: true,
-      });
+      const notice = page.locator(".automation-notice-slot .notice");
+      await expect(notice.locator(".notice-title")).toHaveText("Waiting for runner-1");
+      await expect(notice).toContainText("None of this automation's machines can run it now.");
+      await capture(page, `automation-target-${label}-${theme}`);
     });
   });
 }
@@ -255,11 +297,13 @@ test("configured trigger controls and content-free delivery provenance are visib
   await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
 
   await expect(page.getByText("Accepts Prompt · Parameters issue, priority", { exact: true })).toBeVisible();
-  await page.getByText("Execution History (1)", { exact: true }).click();
+  await page.getByText("Show 1 Run", { exact: true }).click();
   await expect(page.getByText(/Delivered Fields: Prompt · Parameters issue, priority/)).toBeVisible();
   await expect(page.getByText(/Prompt Digest 95a911a82fc5…/)).toBeVisible();
 
-  await page.getByRole("button", { name: "Add Webhook", exact: true }).click();
+  await page.locator(".detail-bar").getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menuitem", { name: "Add Webhook Trigger…" }).click();
+  await expect(page.getByRole("textbox", { name: "Name" })).toBeFocused();
   await page.getByRole("checkbox", { name: "Accept Delivery Fields" }).check();
   await expect(page.getByRole("checkbox", { name: "Delivered Prompt" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Missing References" })).toBeVisible();
@@ -331,7 +375,7 @@ for (const { label, viewport } of [
       const card = (page: Page) => page.getByRole("button", { name: /Nightly Dependency Sweep/ });
       const saveError = (page: Page, text: string) => page.locator(".field-error").filter({ hasText: text });
 
-      test("names both waiting reasons in the card and the expired run", async ({ page }) => {
+      test("names both waiting reasons in the page's notice and the expired run", async ({ page }) => {
         for (const [variant, reason] of [
           ["", "None of this automation's machines can run it now. " +
             "Check that the machine is online and up to date and still has the workspace and project."],
@@ -340,8 +384,8 @@ for (const { label, viewport } of [
         ] as const) {
           await page.goto(`/automations-e2e.html?theme=${theme}&waiting-target${variant}&expired-run`);
           await card(page).click();
-          await expect(page.getByRole("alert").filter({ hasText: `Waiting for target: ${reason}` })).toBeVisible();
-          await page.getByText(/Execution History/).click();
+          await expect(page.locator(".automation-notice-slot .notice-body")).toHaveText(reason);
+          await page.locator("details.automation-history > summary").click();
           await expect(page.locator(".automation-history").getByText(reason, { exact: true })).toBeVisible();
           await capture(page, `automation-wording-waiting${variant ? "-installation" : ""}`);
         }

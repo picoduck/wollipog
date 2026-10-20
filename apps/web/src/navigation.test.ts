@@ -21,6 +21,7 @@ import {
   viewFromPath,
   viewFromNotificationMessage,
   viewPath,
+  viewSubjectName,
   type View,
   GLOBAL_VIEW_ITEMS,
   SETTINGS_SECTIONS,
@@ -217,7 +218,25 @@ test("an entity page is titled by its entity once it has loaded", () => {
   assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }, "Nightly"), "Edit Nightly");
   assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }), "Edit Automation");
   assert.equal(viewFromPath("/automations/~!/edit"), null);
-  assert.equal(viewFromPath(`/automations/~${encodeResourceId("a")}`), null, "the automation page itself is #2968's");
+  // The automation page (#2968) is titled by its automation, "Automation" while it loads.
+  assert.equal(viewTitle({ name: "automation", id: "a" }, "Nightly"), "Nightly");
+  assert.equal(viewTitle({ name: "automation", id: "a" }), "Automation");
+});
+
+test("an automation's page has its own address, which survives a reload (#2968)", () => {
+  for (const id of ["automation-1", "a/b?c#d", "名前"]) {
+    const view = { name: "automation" as const, id };
+    const path = viewPath(view);
+    assert.equal(path, `/automations/~${encodeResourceId(id)}`);
+    assert.deepEqual(viewFromPath(path), view);
+    assert.deepEqual(viewFromPath(`${path}/`), view);
+  }
+  assert.equal(viewFromPath("/automations/~!"), null, "a malformed id is not a route");
+  assert.equal(viewFromPath("/automations/~"), null);
+  // The editor's route is not mistaken for the page, nor the page for the editor.
+  assert.deepEqual(viewFromPath(`/automations/~${encodeResourceId("a")}/edit`),
+    { name: "automations", editor: { kind: "edit", automationId: "a" } });
+  assert.equal(viewSubjectName({ name: "automation", id: "a" }), "This Automation");
 });
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");

@@ -41,15 +41,15 @@ export function shouldHydrateRoutedSession(
   return !session || session.projection === "summary" || ((Boolean(session.archived) || summarySnapshot) && snapshotRevision > 0);
 }
 
-const RESOURCE_NOUN = { Session: "session", Run: "run", Pod: "pod" } as const;
+const RESOURCE_NOUN = { Session: "session", Run: "run", Pod: "pod", Automation: "automation" } as const;
 
 /**
- * The state a Session, Run or Pod page shows while its entity is not loaded (docs/design-system.md
+ * The state a Session, Run, Pod or Automation page shows while its entity is not loaded (docs/design-system.md
  * §12). The copy names what the person can do, never Wollipog's internals: the shell's offline
  * banner already offers Retry Now, and the pairing banner holds the pairing form (#2202).
  */
 export function detailPlaceholder(
-  resource: "Session" | "Run" | "Pod",
+  resource: keyof typeof RESOURCE_NOUN,
   state: { authoritative: boolean; conn: ConnState; error?: string | null },
 ): DetailPlaceholder {
   const noun = RESOURCE_NOUN[resource];

@@ -2341,7 +2341,8 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Skill deployment | Edited (a machine copy differs from the library) | warning |
 | Skill deployment | Update Held (a Git or built-in update waits for review) | warning |
 | Skill deployment | Error | danger |
-| Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger |
+| Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger · Last Run Failed: danger (the automation page's one badge when its latest run failed, ahead of Enabled or Paused, #2968) |
+| Automation run (the page's Last Run fact, inline) | Starting, Running: info (pulse) · Succeeded: success · Failed: danger · Skipped, Expired: neutral |
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
 | Session family rollup chip | Needs Your Input (or "N Awaiting Input") when a child waits on the user: warning. Ready for Review: review (purple). Otherwise neutral. Input takes priority over review. |
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
@@ -3758,13 +3759,14 @@ local name so the two do not collide.
 - **Settings:** `.setting-row` details, `.set-sublabel`, `.update-block`, `.modal-body.allow-overflow`
   (unneeded once #1800 portals menus out of dialogs).
 
-**Remaining `<dl>` recipes.** Eight other label and value lists still carry their own rules and
+**Remaining `<dl>` recipes.** Seven other label and value lists still carry their own rules and
 move onto `.facts` with their area: `.context-popover-facts`, `.session-usage-facts`,
-`.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts`,
-`.approval-selector-context` and `.automation-facts`.
+`.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts` and
+`.approval-selector-context`.
 (`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177,
-`.campaign-held-child-hold` with Held Children, #2157, and `.runner-meta` and
-`.connection-details-list` with the machine detail's Connection Details, #2988.)
+`.campaign-held-child-hold` with Held Children, #2157, `.runner-meta` and
+`.connection-details-list` with the machine detail's Connection Details, #2988, and
+`.automation-facts` with the automation page's Rules and Limits, #2968.)
 
 ---
 

@@ -23,7 +23,8 @@ import { buildSpec, defaults, formFrom, specOf, withAgent, withModel, type FormS
 import { agentDisplayName } from "../agent-presentation.js";
 import { titleCaseLabel } from "../format.js";
 import { useLeaveGuard } from "../leave-guard.js";
-import { backLabel, type AutomationEditorRoute } from "../navigation.js";
+import { useReportEntityTitle } from "../entity-title.js";
+import { backLabel, ENTITY_FALLBACK_TITLES, type AutomationEditorRoute } from "../navigation.js";
 import { machineOptionLabels } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -199,11 +200,15 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
     return () => { active = false; };
   }, [api, workflowsAttempt]);
 
-  const back = () => navigate({ name: "automations" });
+  // An edit returns to the automation's page (#2968); a new automation, and one that is gone, to
+  // the list.
+  const toList = () => navigate({ name: "automations" });
+  const back = automationId === null ? toList : () => navigate({ name: "automation", id: automationId });
   const fallbackTitle = automationId === null ? "New Automation" : "Edit Automation";
-  const frame = (title: string, body: ReactNode) => (
+  const fallbackBack = automationId === null ? backLabel("automations") : `Back to ${ENTITY_FALLBACK_TITLES.automation}`;
+  const frame = (title: string, body: ReactNode, onBack = back, label = fallbackBack) => (
     <div className="automation-editor">
-      <DetailBar title={title} backLabel={backLabel("automations")} onBack={back} />
+      <DetailBar title={title} backLabel={label} onBack={onBack} />
       <div className="page form">{body}</div>
     </div>
   );
@@ -213,11 +218,11 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
       <State
         icon={<AutomationsIcon />}
         title="Automation Not Found"
-        actions={<button type="button" className="btn primary" onClick={back}>{backLabel("automations")}</button>}
+        actions={<button type="button" className="btn primary" onClick={toList}>{backLabel("automations")}</button>}
       >
         It may have been deleted.
       </State>
-    ));
+    ), toList, backLabel("automations"));
   }
   if (automationId !== null && stored.state === "failed") {
     return frame(fallbackTitle, (
@@ -285,6 +290,11 @@ function AutomationEditorForm({
   // builder needs it to carry across every field this form does not render.
   const [editingSpec, setEditingSpec] = useState<AutomationSpec | null>(() => automation ? specOf(automation) : null);
   const [savedName, setSavedName] = useState(automation?.name ?? "");
+  // The window title reads "Edit <Name>" as the bar does (#2968).
+  useReportEntityTitle(
+    automation ? { name: "automations", editor: { kind: "edit", automationId: automation.automationId } } : { name: "automations", editor: { kind: "new" } },
+    automation ? savedName : null,
+  );
   const [baseline, setBaseline] = useState<Draft>(() => automation
     ? editDraft(specOf(automation), runners)
     : draftOf(withMachine(defaults(), firstMachine(runners))));
@@ -821,6 +831,8 @@ function AutomationEditorForm({
 
   const pushEvents = ["started", "succeeded", "failed", "expired"] as const;
   const editorTitle = isNew ? "New Automation" : `Edit ${savedName}`;
+  // An edit's Back returns to the automation's page, by its name (#2968).
+  const editorBack = isNew ? backLabel("automations") : `Back to ${savedName}`;
   const workflowHelperId = fieldId("workflow-off");
   const workflowOptions: SelectOption<string>[] = [
     ...(form.workflowId && !workflows.some((workflow) => workflow.workflowId === form.workflowId)
@@ -833,7 +845,7 @@ function AutomationEditorForm({
 
   return (
     <div className="automation-editor" ref={rootRef}>
-      <DetailBar title={editorTitle} backLabel={backLabel("automations")} onBack={onBack} />
+      <DetailBar title={editorTitle} backLabel={editorBack} onBack={onBack} />
       <div className="page form">
         <form className="automation-editor-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <section className="section" aria-labelledby={fieldId("what")}>

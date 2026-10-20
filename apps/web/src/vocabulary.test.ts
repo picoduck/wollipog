@@ -112,7 +112,8 @@ test("tooltips stay in sentence case", () => {
 });
 
 test("signed-trigger instructions publish only the Wollipog wire generation", () => {
-  const source = read("./components/AutomationsView.tsx");
+  // The triggers live on each automation's page (#2968).
+  const source = read("./components/AutomationDetail.tsx");
   assert.match(source, /application\/vnd\.wollipog\.automation-trigger\+json/);
   for (const header of ["X-Wollipog-Timestamp", "X-Wollipog-Nonce", "X-Wollipog-Signature"]) {
     assert.ok(source.includes(header), `Automations should publish ${header}`);

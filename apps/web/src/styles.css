@@ -16595,8 +16595,8 @@ button.review-finding-location {
 .automation-card {
   border: 1px solid var(--border); background: var(--bg-elev); border-radius: var(--radius-lg); box-shadow: var(--shadow);
 }
-.automation-editor-actions, .automation-card-actions {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+.automation-editor-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3);
 }
 .automation-card-heading { margin: 0; }
 .automation-card-toggle {
@@ -16608,9 +16608,6 @@ button.review-finding-location {
 .automation-card-name { font-size: 15px; font-weight: 600; }
 .automation-card-action { font-size: 13px; font-weight: 400; color: var(--text-dim); overflow-wrap: anywhere; }
 .automation-card-meta { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.automation-card-chevron { font-size: 11px; color: var(--text-dim); transition: transform var(--dur-fast) var(--ease-out); }
-.automation-card-toggle[aria-expanded="true"] .automation-card-chevron { transform: rotate(90deg); }
-.automation-card-body { margin-top: 14px; }
 .automation-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
 /* A grid label's text is the §8.1 label (shared rule, with the other field labels); its helper sits
    4px under the control, as a field's does. */
@@ -16626,7 +16623,6 @@ button.review-finding-location {
 .automation-checks { display: flex; flex-wrap: wrap; column-gap: var(--space-5); }
 .automation-form-grid fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .automation-hint { color: var(--text-dim); font-size: 12px; line-height: 1.5; }
-.automation-editor-actions { justify-content: flex-end; }
 .automation-list { display: grid; gap: 14px; }
 /* The Automation editor's route (#2967; docs/design-system.md §4.3, §4.5, §8.1, §8.6): the detail bar,
    then one form column of four sections, 32px apart, whose fields stack 16px apart. The save bar
@@ -16645,12 +16641,72 @@ button.review-finding-location {
 }
 .automation-editor-form textarea { resize: vertical; }
 .automation-card { padding: 16px; min-width: 0; }
-.automation-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; margin: 14px 0; }
-.automation-facts div { min-width: 0; }
-.automation-facts dt { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
-.automation-facts dd { margin: 3px 0 0; overflow-wrap: anywhere; }
-.automation-card-actions { justify-content: flex-start; flex-wrap: wrap; }
-.automation-history { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
+/* The automation page (#2968; docs/design-system.md §4.3, §4.5, §5.4, §13.2): the detail bar, the
+   one notice, the glance, then sections 32px apart. Content sits in the gutter (`.run-detail`) and
+   keeps the list pages' measure. */
+.automation-detail > :not(.detail-bar) { max-width: var(--page-max); }
+.automation-detail > .automation-status { margin-top: var(--space-3); }
+.automation-detail > .automation-notice-slot { margin-top: var(--space-4); }
+.automation-sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding-top: var(--space-6);
+}
+/* The glance (§19.4, component-local): three facts on one line under the bar, each a label over its
+   value, between two hairlines. On a phone it stacks as three lines, label beside value. */
+.glance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-8);
+  margin-top: var(--space-4);
+  margin-bottom: 0;
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.glance > div { display: grid; gap: var(--space-1); min-width: 0; }
+.glance dt { color: var(--text-dim); font: var(--type-label); }
+.glance dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  margin: 0;
+  color: var(--text);
+  font: var(--type-body);
+  overflow-wrap: anywhere;
+}
+.glance-zone { color: var(--text-dim); font: var(--type-small); }
+.skeleton.automation-glance-skeleton {
+  flex-direction: row;
+  gap: var(--space-8);
+  min-height: 0;
+  margin-top: var(--space-4);
+  padding: var(--space-4) 0;
+}
+.automation-sentence, .automation-empty { margin: 0; font: var(--type-body); }
+.automation-empty { color: var(--text-dim); }
+/* The prompt or task, quiet under the sentence that names what runs it. */
+.automation-prompt {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font: var(--type-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.automation-triggers { display: grid; gap: var(--space-2); min-width: 0; }
+@media (max-width: 760px) {
+  .glance {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--space-2) var(--space-4);
+  }
+  .glance > div { display: contents; }
+}
 .automation-history summary { cursor: pointer; color: var(--text-dim); }
 .automation-history-list { display: grid; gap: 8px; margin-top: 10px; }
 .automation-execution { min-width: 0; padding: 10px; border-radius: 8px; background: var(--bg-elev-2); }
@@ -16663,17 +16719,13 @@ button.review-finding-location {
 .automation-command-list small, .automation-legacy-delivery { color: var(--text-dim); }
 .automation-command-list em { color: var(--red); font-style: normal; grid-column: 1 / -1; overflow-wrap: anywhere; }
 .automation-legacy-delivery { display: block; margin-top: 7px; font-size: 12px; }
-.automation-trigger-create { margin: 10px 0; }
-.automation-trigger-create small { color: var(--text-dim); }
 .automation-trigger-editor {
-  margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--bg-elev-2);
 }
-.automation-trigger-editor h4 { margin: 0; }
+.automation-trigger-editor h3 { margin: 0; font: var(--type-body-strong); }
 .automation-trigger-editor .automation-form-grid { margin-top: 10px; }
 .automation-trigger-editor .automation-editor-actions { margin-top: 12px; }
-.automation-triggers { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
-.automation-triggers h4 { margin: 0 0 8px; }
 .automation-trigger { display: grid; gap: 8px; padding: 10px; border-radius: 8px; background: var(--bg-elev-2); margin-top: 8px; min-width: 0; }
 .automation-trigger > div:first-child { display: grid; gap: 2px; }
 .automation-trigger span, .automation-trigger small, .automation-trigger p { color: var(--text-dim); font-size: 12px; }
@@ -16992,12 +17044,11 @@ button.review-finding-location {
 .usage-privacy { margin: 14px 0 0; font-size: 11px; }
 
 @media (max-width: 700px) {
-  .automation-form-grid, .automation-facts { grid-template-columns: minmax(0, 1fr); }
+  .automation-form-grid { grid-template-columns: minmax(0, 1fr); }
   .automation-span { grid-column: auto; }
   .automation-card { padding: var(--space-4); }
   .automation-card-toggle { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .automation-card-meta { flex-wrap: wrap; }
-  .automation-card-actions .btn { flex: 1 1 90px; }
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }

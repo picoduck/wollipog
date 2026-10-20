@@ -16,6 +16,7 @@ export type View =
   | { name: "runs" }
   | { name: "pods" }
   | { name: "automations"; editor?: AutomationEditorRoute }
+  | { name: "automation"; id: string }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage" }
   | { name: "archived" }
@@ -242,6 +243,7 @@ export const ENTITY_FALLBACK_TITLES = {
   session: "Session",
   run: "Multi-Agent Run",
   pod: "Pod",
+  automation: "Automation",
 } as const;
 
 /**
@@ -279,6 +281,7 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
     case "session":
     case "run":
     case "pod":
+    case "automation":
       return entityTitle || ENTITY_FALLBACK_TITLES[view.name];
     // The section is the <h2> inside the page; repeating it here would say it twice.
     case "settings": return "Settings";
@@ -294,7 +297,9 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
  * names a type rather than the thing on screen.
  */
 export function viewSubjectName(view: View): string {
-  if (view.name === "session" || view.name === "run" || view.name === "pod") return `This ${viewTitle(view)}`;
+  if (view.name === "session" || view.name === "run" || view.name === "pod" || view.name === "automation") {
+    return `This ${viewTitle(view)}`;
+  }
   return viewTitle(view);
 }
 
@@ -414,6 +419,7 @@ export function viewPath(view: View): string {
     case "automations": return view.editor?.kind === "new" ? "/automations/new"
       : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
         : "/automations";
+    case "automation": return `/automations/~${encodeResourceId(view.id)}`;
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return "/usage";
     case "archived": return "/archived";
@@ -507,6 +513,11 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (automationEditMatch) {
     const automationId = decodeResourceId(automationEditMatch[1]!);
     return automationId === null ? null : { name: "automations", editor: { kind: "edit", automationId } };
+  }
+  const automationMatch = /^\/automations\/~([^/]+)$/.exec(path);
+  if (automationMatch) {
+    const id = decodeResourceId(automationMatch[1]!);
+    return id === null ? null : { name: "automation", id };
   }
   if (path === "/skills") return { name: "skills" };
   const skillsPaneMatch = /^\/skills\/(orphans|overview)$/.exec(path);

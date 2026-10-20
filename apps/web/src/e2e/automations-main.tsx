@@ -16,6 +16,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { AutomationsView } from "../components/AutomationsView.js";
 import { AutomationEditor } from "../components/AutomationEditor.js";
+import { AutomationDetail } from "../components/AutomationDetail.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { setExperimentFlag } from "../experiments.js";
 import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
@@ -24,8 +25,8 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import "../styles.css";
 
 /**
- * Two automation cards — collapsed by default, one enabled and one paused — for the responsive
- * disclosure spec. `mobile-viewport.spec.ts` and friends are the model: a real browser, a real
+ * Two automations — one enabled that has run, one paused that never ran — on the list, their
+ * pages (`?route=/automations/~<id>`, #2968) and the editor. `mobile-viewport.spec.ts` and friends are the model: a real browser, a real
  * stylesheet, a fixture only where the control plane cannot be automated.
  */
 const params = new URLSearchParams(window.location.search);
@@ -288,6 +289,17 @@ if (params.has("expired-run")) executions.unshift({
   sessionId: undefined, triggerDelivery: undefined, startedAt: undefined,
   createdAt: Date.UTC(2026, 8, 15, 2), completedAt: Date.UTC(2026, 8, 15, 2, 30),
 });
+// `failed-run`: the latest run failed (#2968's Needs Attention, with `waiting-target`).
+if (params.has("failed-run")) {
+  const failedAt = new Date();
+  failedAt.setHours(2, 0, 0, 0);
+  executions.unshift({
+    ...executions[0]!, executionId: "axe_failed", idempotencyKey: "schedule:automation-nightly-sweep:failed",
+    scheduledFor: failedAt.getTime(), status: "failed", error: "The agent exited before it finished the report.",
+    sessionId: "s_failed_run", triggerDelivery: undefined,
+    createdAt: failedAt.getTime(), startedAt: failedAt.getTime(), completedAt: failedAt.getTime() + 4 * 60_000,
+  });
+}
 
 const outboundSubscriptions: OutboundEventSubscriptionView[] = [{
   subscriptionId: "oes_release_events",
@@ -385,9 +397,10 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
-/** The list, or the editor New Automation and Edit open, as App routes them. */
+/** The list, an automation's page, or the editor, as App routes them. */
 function AutomationsRoute() {
   const view = useStoreSelector((state) => state.view);
+  if (view.name === "automation") return <AutomationDetail key={view.id} automationId={view.id} />;
   return view.name === "automations" && view.editor
     ? <AutomationEditor key={viewPath(view)} route={view.editor} />
     : <AutomationsView />;
@@ -403,13 +416,14 @@ if (params.has("rediscover")) Object.assign(window, { automationsRediscover: () 
 
 // Opt-in fault injection for recovery tests; ordinary fixture scenarios keep their API behavior.
 const pollingFixture = params.has("polling-recovery") ? {
-  failure: null as "list" | "trigger" | "workflow" | null,
+  failure: null as "list" | "detail" | "trigger" | "workflow" | null,
   failRefreshAfterMutation: false,
   mutationCalls: 0,
   mutationFailure: false,
   holdTriggers: false,
   pendingTriggers: [] as Array<() => void>,
   listCalls: 0,
+  detailCalls: 0,
   release() { this.pendingTriggers.splice(0).forEach((resolve) => resolve()); },
 } : null;
 if (pollingFixture) Object.assign(window, { automationPollingFixture: pollingFixture });
@@ -421,11 +435,17 @@ const client = {
     if (pollingFixture?.failure === "list") throw new Error("Synthetic polling failure");
     return { automations: items };
   },
-  automation: async (id: string) => ({
-    automation: items.find((item) => item.automationId === id)!,
-    executions: id === "automation-nightly-sweep" ? executions : [],
-    events: [],
-  }),
+  automation: async (id: string) => {
+    if (pollingFixture) pollingFixture.detailCalls++;
+    if (pollingFixture?.failure === "detail") throw new Error("Synthetic polling failure");
+    const automation = items.find((item) => item.automationId === id);
+    if (!automation) throw new ApiError("automation not found", 404);
+    return { automation, executions: id === "automation-nightly-sweep" ? executions : [], events: [] };
+  },
+  deleteAutomation: async (id: string) => {
+    items.splice(items.findIndex((item) => item.automationId === id), 1);
+    return { deleted: true };
+  },
   automationTriggers: async (id: string) => {
     if (pollingFixture?.holdTriggers) {
       await new Promise<void>((resolve) => { pollingFixture.pendingTriggers.push(resolve); });
@@ -438,7 +458,7 @@ const client = {
     if (pollingFixture.mutationFailure) throw new Error("Synthetic Pause failure");
     const index = items.findIndex((item) => item.automationId === id);
     items[index] = { ...items[index]!, ...spec };
-    if (pollingFixture.failRefreshAfterMutation) pollingFixture.failure = "workflow";
+    if (pollingFixture.failRefreshAfterMutation) pollingFixture.failure = "detail";
     return items[index]!;
   } } : {}),
   // `save-error`: the control plane refuses every save, with a reason no field owns.
