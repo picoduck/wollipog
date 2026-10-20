@@ -7,9 +7,12 @@ import { runFocusedValidation } from "./successor-load-lifecycle.mjs";
 // Exercise the real fixture with exactly one change. An unrelated failure, skipped
 // test, outer timeout, or incomplete cleanup must not count as killing the mutant.
 const repo = fileURLToPath(new URL("../../..", import.meta.url));
-const original = new URL("../src/provider-home-lease.test.ts", import.meta.url);
+// Windows uses the already prepared source product with its closed embedded helper contract.
+const sourceRoot = new URL(process.platform === "win32" ? "../.bin-build/lease-test-source/apps/runner/src/" : "../src/", import.meta.url);
+const original = new URL("provider-home-lease.test.ts", sourceRoot);
+assert.equal(readFileSync(original, "utf8"), readFileSync(new URL("../src/provider-home-lease.test.ts", import.meta.url), "utf8"));
 // Explicitly named to Node; excluded from the regular test glob if interrupted.
-const mutated = new URL(`../src/provider-home-lease.readiness-${randomUUID()}.mutation.ts`, import.meta.url);
+const mutated = new URL(`provider-home-lease.readiness-${randomUUID()}.mutation.ts`, sourceRoot);
 const source = readFileSync(original, "utf8");
 const gate = /^    assert\.ok\(await waitUntil\(\(\) => states\.every\(\(state\) => state\.ready\), options\.readinessMs \?\? 10_000, true\), "contender readiness timed out"\);$/gm;
 assert.equal([...source.matchAll(gate)].length, 1, "locate exactly one parent readiness wait");

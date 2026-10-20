@@ -68,7 +68,7 @@ export interface LeaseWorkerInspection {
 /** Fixed, path-free texts: only the code crosses the worker boundary, never the registry's message. */
 export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
   busy: "Provider HOME is already in use; retry after the current owner or publication finishes.",
-  unavailable: "Provider-HOME lease helper unavailable; preserve all evidence and restore the fixed helper and executable staging directory before retrying.",
+  unavailable: "Provider-HOME lease helper unavailable; install the matching POSIX companion or explicitly build the Windows source runner bundle, and preserve occupied positions and HOME evidence before retrying.",
   foreign_owner: "Provider HOME has a stale lease from another runner or control plane whose recorded process has exited; Wollipog does not take over another owner's lease automatically. Use a separate provider account HOME for this runner, or quarantine the entire provider-home-leases-v1 directory only after proving no provider process or runner uses this HOME, and do not remove individual records.",
   foreign_host: "Provider HOME is leased by a runner on another host; use a separate provider account HOME or an isolated OS account for this runner, and preserve all lease evidence.",
   refusal: "Provider-HOME lease could not be proved; preserve all evidence and retry only with the exact private registry; quarantine the entire lease directory only after proving this HOME unused, and do not remove individual records.",

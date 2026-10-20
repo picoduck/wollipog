@@ -74,7 +74,7 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         run: cargo audit --file apps/desktop/src-tauri/Cargo.lock
 
-      # tauri-build requires the configured sidecars and frontend directory to exist.
+      # tauri-build requires the configured sidecars, resources and frontend directory to exist.
       # Rust tests do not execute or package them, so tiny placeholders avoid the much
       # more expensive Node SEA and frontend production builds in routine native CI.
       - name: Stub Tauri Build Inputs
@@ -82,7 +82,10 @@ jobs:
         run: |
           $binaryDirectory = "apps/desktop/src-tauri/binaries"
           $frontendDirectory = "apps/web/dist"
-          New-Item -ItemType Directory -Force -Path $binaryDirectory, $frontendDirectory
+          $leaseHelperDirectory = "apps/desktop/.sidecar-build/lease-helper"
+          New-Item -ItemType Directory -Force -Path $binaryDirectory, $frontendDirectory, $leaseHelperDirectory
+          # Inert resource fixture only; real helper packaging is verified by release jobs.
+          New-Item -ItemType File -Force -Path "$leaseHelperDirectory/fixture-only.txt"
           New-Item -ItemType File -Force -Path `
             "$binaryDirectory/control-plane-${{ matrix.target }}${{ matrix.executable_suffix }}", `
             "$binaryDirectory/runner-${{ matrix.target }}${{ matrix.executable_suffix }}"

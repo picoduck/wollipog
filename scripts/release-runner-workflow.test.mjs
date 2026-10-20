@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { RUNNER_TARGET_TRIPLES } from "../apps/runner/scripts/runner-artifacts.mjs";
+import { leaseHelperArtifactNames, RUNNER_TARGET_TRIPLES } from "../apps/runner/scripts/runner-artifacts.mjs";
 import {
   EXPECTED_DESKTOP_RELEASE_ASSET_COUNT,
   EXPECTED_RELEASE_ASSET_COUNT,
@@ -20,7 +20,7 @@ test("release workflow natively verifies dual runner assets and gates the final 
     documentedRows.reduce((total, match) => total + (match[2].match(/`[^`]+`/gu)?.length ?? 0), 0),
     EXPECTED_DESKTOP_RELEASE_ASSET_COUNT,
   );
-  assert.equal(EXPECTED_RELEASE_ASSET_COUNT, EXPECTED_DESKTOP_RELEASE_ASSET_COUNT + RUNNER_TARGET_TRIPLES.length * 2 + RUNNER_TARGET_TRIPLES.length + 1 + 1);
+  assert.equal(EXPECTED_RELEASE_ASSET_COUNT, EXPECTED_DESKTOP_RELEASE_ASSET_COUNT + RUNNER_TARGET_TRIPLES.length * 2 + RUNNER_TARGET_TRIPLES.length + 1 + 1 + leaseHelperArtifactNames().length);
   assert.equal(workflow.match(/^\s+target: /gmu)?.length, RUNNER_TARGET_TRIPLES.length);
   for (const triple of RUNNER_TARGET_TRIPLES) {
     assert.equal(workflow.match(new RegExp(`target: ${triple}`, "gu"))?.length, 1, `${triple} must have one native job`);
@@ -37,7 +37,7 @@ test("release workflow natively verifies dual runner assets and gates the final 
   assert.match(versionGate, /sed[\s\S]*version_source[\s\S]*tr -d '\\r'/u);
   assert.match(versionGate, /raw=\$\("\$runner_binary" --version\)[\s\S]*tr -d '\\r'/u);
   assert.match(workflow, /cmp -s "\$canonical" "\$legacy"/u);
-  assert.match(workflow, /gh release upload "\$RELEASE_TAG" "\$canonical" "\$legacy"/u);
+  assert.match(workflow, /gh release upload "\$RELEASE_TAG" "\$@"/u);
   assert.match(workflow, /verify-runner-release:[\s\S]*needs: \[preflight, build\]/u);
   assert.match(workflow, /--pattern 'wollipog-runner-\*'[\s\S]*--pattern 'agent-manager-runner-\*'[\s\S]*--pattern 'wollipog-control-plane-\*'[\s\S]*--pattern 'wollipog-web\.tar\.gz'/u);
   // Headless assets: the control-plane executable is the sidecar's exact bytes, version-verified
@@ -108,5 +108,6 @@ test("release workflow signs update packages, writes latest.json once, and gates
 
   assert.match(releaseDocs, /TAURI_UPDATER_PUBLIC_KEY/u);
   assert.match(releaseDocs, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD/u);
-  assert.match(releaseDocs, /exactly 47 release assets/u);
+  assert.match(releaseDocs, /exactly 57 release assets/u);
+  assert.match(releaseDocs, /exact 57-asset inventory/u);
 });

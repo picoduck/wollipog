@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import type { RunnerCredentialSecret } from "@wollipog/protocol";
 import {
   BoxOrchestrator,
+  contentAddressedRunnerPath,
+  validateBoxLeaseHelper,
+  type ResolvedBoxLeaseHelper,
   MAX_TUNNEL_PORT_ATTEMPTS,
   REMOTE_TUNNEL_PORT_MAX,
   REMOTE_TUNNEL_PORT_MIN,
@@ -14,6 +17,7 @@ import {
 } from "./box-orchestrator.js";
 import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
+import { helperAssociationBytes, helperDigest } from "../../../scripts/lease-helper-distribution.mjs";
 
 const BOX_ID = "box-0123abcd";
 const RUNNER_ID = "box-runner";
@@ -60,12 +64,26 @@ function boxDb(autoReconnect = true): ControlPlaneDb {
 
 /** A control plane whose ssh tunnels bind ports on `host` the way OpenSSH with
  * ExitOnForwardFailure does: an occupied port fails before the remote command runs. */
-function controlPlane(host: FakeRemoteHost, label: string, db = boxDb()): SimulatedControlPlane {
+function controlPlane(t: TestContext, host: FakeRemoteHost, label: string, db = boxDb()): SimulatedControlPlane {
   const attempts: number[] = [];
   const live = new Map<number, FakeTunnel>();
   let credentials = 0;
+  const triple = "x86_64-unknown-linux-gnu", runnerSha256 = "e".repeat(64);
+  // Synthetic bytes model the already-verified companion at this fake SSH boundary;
+  // native helper execution is covered by the platform acceptance fixtures.
+  const image = Buffer.from("fixed tunnel fixture helper");
+  const association = { schema: "WPLR1" as const, helper: {
+    schema: "WPLI1" as const, target: triple, protocol: "WPLL4" as const,
+    sourceSha256: "28492e116000c648cd5ddc19f8db5ebe6d775c66f1fa57103235051e837af3d7",
+    imageSha256: helperDigest(image), imageBytes: image.length, abi: "posix64" as const },
+    canonical: "wollipog-runner-" + triple, legacy: "agent-manager-runner-" + triple,
+    runnerSha256, storage: "external" as const, installerMode: "--lease-helper-install" as const };
+  const helper = validateBoxLeaseHelper({ association,
+    associationSha256: helperDigest(helperAssociationBytes(association)), image }, triple, runnerSha256);
+  let helperAdmitted = false;
   let orchestrator: BoxOrchestrator;
   const spawnTunnel = (args: string[]): ChildProcess => {
+    assert.equal(helperAdmitted, true, "the matching helper is admitted before a tunnel can launch");
     const forward = args[args.indexOf("-R") + 1] ?? "";
     assert.match(forward, /^\d+:127\.0\.0\.1:4317$/, "the remote listener stays loopback-only");
     const port = Number(forward.split(":")[0]);
@@ -113,18 +131,27 @@ function controlPlane(host: FakeRemoteHost, label: string, db = boxDb()): Simula
       credential: { credentialId: `rcred_${(credentials++).toString(16).padStart(32, "0")}` },
       token: "runner-token",
     }) as unknown as RunnerCredentialSecret,
-    resolveBinary: async () => ({ path: "/local/runner", sha256: "e".repeat(64), source: "staged" }),
+    resolveBinary: async () => ({ path: "/local/runner", sha256: runnerSha256, source: "staged", leaseHelper: helper }),
     spawnTunnel,
     // Every control plane starts from the same first port, the worst case the old fixed
     // allocator always produced.
     randomIndex: () => 0,
   });
+  // Register cleanup before add/rehydrate so failed waits cannot leave reconnect timers alive.
+  t.after(() => orchestrator.shutdown());
   const harness = orchestrator as unknown as {
+    admitRemoteHelper(cfg: { boxId: string }, runnerPath: string, value: ResolvedBoxLeaseHelper): Promise<void>;
     detectTriple(): Promise<string>;
     remoteRunnerMatches(): Promise<boolean>;
     deployTokenFile(): Promise<void>;
   };
-  harness.detectTriple = async () => "x86_64-unknown-linux-gnu";
+  harness.admitRemoteHelper = async (cfg, runnerPath, value) => {
+    assert.equal(cfg.boxId, BOX_ID);
+    assert.equal(runnerPath, contentAddressedRunnerPath(runnerSha256));
+    assert.deepEqual(value, helper, "the fake remote receives the exact validated runner/helper pair");
+    helperAdmitted = true;
+  };
+  harness.detectTriple = async () => triple;
   harness.remoteRunnerMatches = async () => true;
   harness.deployTokenFile = async () => {};
   return { db, orchestrator, attempts, live };
@@ -165,16 +192,16 @@ test("bootstrap failures name the SSH, installation, or credential stage", () =>
   assert.match(bootstrapFailureMessage("credential", "ssh exited 1"), /^Runner credential deployment failed:/);
 });
 
-test("a second control plane on the same SSH account moves to a free port without touching the first tunnel", async () => {
+test("a second control plane on the same SSH account moves to a free port without touching the first tunnel", async (t) => {
   const host = new FakeRemoteHost();
-  const a = controlPlane(host, "A");
+  const a = controlPlane(t, host, "A");
   a.orchestrator.add(BOX_ID);
   await waitFor(() => status(a) === "online", "control plane A online");
   const firstTunnel = a.live.get(REMOTE_TUNNEL_PORT_MIN);
   assert.ok(firstTunnel);
 
   // B has automatic reconnect off: port recovery is part of connecting, not of reconnecting.
-  const b = controlPlane(host, "B", boxDb(false));
+  const b = controlPlane(t, host, "B", boxDb(false));
   b.orchestrator.add(BOX_ID);
   await waitFor(() => status(b) === "online", "control plane B online");
 
@@ -189,9 +216,9 @@ test("a second control plane on the same SSH account moves to a free port withou
   b.orchestrator.shutdown();
 });
 
-test("control planes racing for the same port both end up connected on distinct ports", async () => {
+test("control planes racing for the same port both end up connected on distinct ports", async (t) => {
   const host = new FakeRemoteHost();
-  const planes = [controlPlane(host, "A"), controlPlane(host, "B"), controlPlane(host, "C")];
+  const planes = [controlPlane(t, host, "A"), controlPlane(t, host, "B"), controlPlane(t, host, "C")];
   for (const cp of planes) cp.orchestrator.add(BOX_ID);
   await waitFor(() => planes.every((cp) => status(cp) === "online"), "every control plane online");
   const ports = planes.map((cp) => [...cp.live.keys()]);
@@ -200,9 +227,9 @@ test("control planes racing for the same port both end up connected on distinct 
   for (const cp of planes) cp.orchestrator.shutdown();
 });
 
-test("a reconnect whose old port is still held recovers on the same Machine entry", async () => {
+test("a reconnect whose old port is still held recovers on the same Machine entry", async (t) => {
   const host = new FakeRemoteHost();
-  const a = controlPlane(host, "A");
+  const a = controlPlane(t, host, "A");
   a.orchestrator.add(BOX_ID);
   await waitFor(() => status(a) === "online", "first connection");
 
@@ -216,11 +243,11 @@ test("a reconnect whose old port is still held recovers on the same Machine entr
   a.orchestrator.shutdown();
 });
 
-test("a restarted control plane recovers when another control plane took its previous port", async () => {
+test("a restarted control plane recovers when another control plane took its previous port", async (t) => {
   const host = new FakeRemoteHost();
   const db = boxDb();
   host.listeners.set(REMOTE_TUNNEL_PORT_MIN, "another control plane");
-  const restarted = controlPlane(host, "A", db);
+  const restarted = controlPlane(t, host, "A", db);
   restarted.orchestrator.rehydrate();
   await waitFor(() => status(restarted) === "online", "rehydrated box online");
   assert.deepEqual([...restarted.live.keys()], [REMOTE_TUNNEL_PORT_MIN + 1]);
@@ -228,10 +255,10 @@ test("a restarted control plane recovers when another control plane took its pre
   restarted.orchestrator.shutdown();
 });
 
-test("exhausted port recovery reports a tunnel failure distinct from installation and SSH, then keeps retrying", async () => {
+test("exhausted port recovery reports a tunnel failure distinct from installation and SSH, then keeps retrying", async (t) => {
   const host = new FakeRemoteHost();
   for (let i = 0; i < MAX_TUNNEL_PORT_ATTEMPTS; i++) host.listeners.set(REMOTE_TUNNEL_PORT_MIN + i, "foreign");
-  const a = controlPlane(host, "A");
+  const a = controlPlane(t, host, "A");
   a.orchestrator.add(BOX_ID);
   await waitFor(() => status(a) === "failed", "failed status");
 

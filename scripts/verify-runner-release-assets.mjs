@@ -4,9 +4,11 @@ import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   headlessArtifactNames,
+  leaseHelperArtifactNames,
   runnerArtifactNames,
   RUNNER_TARGET_TRIPLES,
 } from "../apps/runner/scripts/runner-artifacts.mjs";
+import { helperAssociationName, helperReleaseAssetName, LEASE_HELPER_LIMITS, parseHelperAssociation, readHelperFile } from "./lease-helper-distribution.mjs";
 import {
   desktopUpdaterArtifacts,
   UPDATE_MANIFEST_NAME,
@@ -14,9 +16,9 @@ import {
 } from "./desktop-update-manifest.mjs";
 
 export const EXPECTED_DESKTOP_RELEASE_ASSET_COUNT = 14;
-/** Desktop bundles + 12 runner names + 6 headless control planes + the web bundle + SHA256SUMS. */
+/** Desktop bundles + 12 runner names + 10 helper assets + 6 control planes + web + SHA256SUMS. */
 export const EXPECTED_RELEASE_ASSET_COUNT =
-  EXPECTED_DESKTOP_RELEASE_ASSET_COUNT + RUNNER_TARGET_TRIPLES.length * 2 + headlessArtifactNames().length + 1;
+  EXPECTED_DESKTOP_RELEASE_ASSET_COUNT + RUNNER_TARGET_TRIPLES.length * 2 + headlessArtifactNames().length + leaseHelperArtifactNames().length + 1;
 /** A release signed for in-place updates adds one `.sig` per update package plus `latest.json`. */
 export const EXPECTED_UPDATER_ASSET_COUNT = updaterReleaseAssetNames("0.0.0").length;
 export const EXPECTED_SIGNED_RELEASE_ASSET_COUNT = EXPECTED_RELEASE_ASSET_COUNT + EXPECTED_UPDATER_ASSET_COUNT;
@@ -27,7 +29,7 @@ export function expectedRunnerAssetNames() {
 
 /** Every asset the checksum manifest covers: runner pairs plus the headless assets. */
 export function expectedManifestAssetNames() {
-  return [...expectedRunnerAssetNames(), ...headlessArtifactNames()].sort();
+  return [...expectedRunnerAssetNames(), ...headlessArtifactNames(), ...leaseHelperArtifactNames()].sort();
 }
 
 export async function sha256File(path) {
@@ -67,6 +69,18 @@ export async function verifyLocalRunnerAssets(assetsDir) {
     const { canonical, legacy } = runnerArtifactNames(triple);
     if (digests.get(canonical) !== digests.get(legacy)) {
       throw new Error(`runner aliases differ for ${triple}`);
+    }
+  }
+  for (const triple of RUNNER_TARGET_TRIPLES) {
+    const path = join(assetsDir, helperAssociationName(triple));
+    const association = parseHelperAssociation(readHelperFile(path, LEASE_HELPER_LIMITS.contractBytes, undefined, false).bytes);
+    const names = runnerArtifactNames(triple);
+    const source = new URL(triple.endsWith("-pc-windows-msvc") ? "../apps/runner/native/provider-home-lease-io.cs" : "../apps/runner/native/provider-home-lease-io.c", import.meta.url);
+    const sourceSha = createHash("sha256").update(readFileSync(source)).digest("hex");
+    if (association.helper.sourceSha256 !== sourceSha || association.helper.target !== triple || association.canonical !== names.canonical || association.legacy !== names.legacy || association.runnerSha256 !== digests.get(names.canonical)) throw new Error(`runner/helper association mismatch for ${triple}`);
+    if (association.storage === "external") {
+      const imageName = helperReleaseAssetName(triple), image = readHelperFile(join(assetsDir, imageName), LEASE_HELPER_LIMITS.imageBytes, undefined, false);
+      if (image.bytes.length !== association.helper.imageBytes || digests.get(imageName) !== association.helper.imageSha256 || !(image.stat.mode & 0o100n)) throw new Error(`helper companion mismatch for ${triple}`);
     }
   }
   return digests;
@@ -143,6 +157,9 @@ export function verifyHostedRelease(assetPages, manifestText, expectedTotal = EX
       name,
     );
     if (manifest.get(name) !== remoteDigest) throw new Error(`release digest does not match SHA256SUMS: ${name}`);
+    const size = assets.find(candidate => candidate.name === name).size;
+    if ((name.startsWith("wollipog-provider-home-lease-io-") && size > LEASE_HELPER_LIMITS.imageBytes) ||
+        (name.startsWith("wollipog-runner-lease-contract-") && size > LEASE_HELPER_LIMITS.contractBytes)) throw new Error(`helper release asset exceeds its admission cap: ${name}`);
     remoteDigests.set(name, remoteDigest);
   }
   for (const triple of RUNNER_TARGET_TRIPLES) {

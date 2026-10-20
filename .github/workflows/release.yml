@@ -595,9 +595,15 @@ jobs:
             "$canonical" \
             "$legacy"
           cmp -s "$canonical" "$legacy"
+          association="apps/runner/dist-bin/wollipog-runner-lease-contract-${TARGET_TRIPLE}.json"
+          set -- "$canonical" "$legacy" "$association"
+          case "$TARGET_TRIPLE" in
+            *-pc-windows-msvc) ;;
+            *) set -- "$@" "apps/runner/dist-bin/wollipog-provider-home-lease-io-${TARGET_TRIPLE}" ;;
+          esac
           echo "uploading $canonical and $legacy -> $RELEASE_TAG"
-          gh release upload "$RELEASE_TAG" "$canonical" "$legacy" --repo "$GITHUB_REPOSITORY" --clobber
-          for bin in "$canonical" "$legacy"; do
+          gh release upload "$RELEASE_TAG" "$@" --repo "$GITHUB_REPOSITORY" --clobber
+          for bin in "$@"; do
             asset_name=$(basename "$bin")
             local_sha=$(node -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");console.log(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"))' "$bin")
             remote_digest=$(sh scripts/resolve-draft-release-asset-digest.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$asset_name")
@@ -723,6 +729,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --pattern 'wollipog-runner-*' \
             --pattern 'agent-manager-runner-*' \
+            --pattern 'wollipog-provider-home-lease-io-*' \
             --pattern 'wollipog-control-plane-*' \
             --pattern 'wollipog-web.tar.gz' \
             --dir runner-assets

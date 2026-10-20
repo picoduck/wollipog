@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { leaseHelperRoot } from "./provider-home-lease-assets.js";
 import { leaseWorkerDeadline, leaseWorkerDelay, leaseWorkerNow } from "./provider-home-lease-clock.js";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, leaseWorkerOperationTakesProfile, LEASE_WORKER_ASSET, LEASE_WORKER_CLOCK, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerInspection, validLeaseWorkerOperation, validLeaseWorkerProfileAccess, validLeaseWorkerReplyProfileId, type LeaseWorkerInspection, type LeaseWorkerOperation, type LeaseWorkerProfileAccess, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
@@ -17,6 +18,9 @@ export interface ProviderHomeReference {
   release(): Promise<boolean>;
   retain(): Promise<void>;
 }
+
+/** Offline-built source runner only. This cannot be selected by workerData or an RPC. */
+declare const __WOLLIPOG_LEASE_SOURCE_WORKER__: string | undefined;
 
 type Diagnostic = Parameters<NonNullable<ProviderHomeLeaseOptions["onDiagnostic"]>>[0];
 type WorkerDiagnostic = Diagnostic |
@@ -244,7 +248,8 @@ export class AsyncProviderHomeLeaseRegistry {
 
   private startWorker(): void {
     if (this.worker) return;
-    const data = { epoch: this.epoch, ownerHash: this.ownerHash, clock: LEASE_WORKER_CLOCK, helperDataDir: this.options.helperDataDir, tests: this.options.engineOptionsForTest,
+    // Locator arithmetic only. Inventory, hashing and native work stay in the private worker.
+    const data = { epoch: this.epoch, ownerHash: this.ownerHash, clock: LEASE_WORKER_CLOCK, helperDataDir: this.options.helperDataDir, helperRoot: leaseHelperRoot(), tests: this.options.engineOptionsForTest,
       ...(this.options.controlPlaneInstanceId === undefined ? {} : { controlPlaneInstanceId: this.options.controlPlaneInstanceId }),
       ...(this.options.runnerMarker === undefined ? {} : { runnerMarker: this.options.runnerMarker }) };
     if (this.options.workerFactoryForTest) this.worker = this.options.workerFactoryForTest(data);
@@ -253,6 +258,11 @@ export class AsyncProviderHomeLeaseRegistry {
       if (isSea()) {
         code = getAsset(LEASE_WORKER_ASSET, "utf8");
         if (Buffer.byteLength(code) > 1024 * 1024) throw new Error("packaged lease worker byte limit");
+      } else if (typeof __WOLLIPOG_LEASE_SOURCE_WORKER__ !== "undefined") {
+        code = __WOLLIPOG_LEASE_SOURCE_WORKER__;
+        if (typeof code !== "string" || !code.length || Buffer.byteLength(code) > 1024 * 1024) {
+          throw new Error("built source lease worker byte limit");
+        }
       } else {
         const url = import.meta.url ?? pathToFileURL(__filename).href;
         const source = fileURLToPath(url).endsWith(".ts");

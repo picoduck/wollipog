@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { LeaseHelperArtifact, leaseHelperParent } from "./provider-home-lease-staging.js";
+import { helperDigest, helperPositionName, installLeaseHelper, LEASE_HELPER_TARGETS, publishSourceHelperTuple, type HelperTuple } from "../../../scripts/lease-helper-distribution.mjs";
 
 const registryModule = new URL("./provider-home-lease.ts", import.meta.url).href;
 const ioModule = new URL("./provider-home-lease-io.ts", import.meta.url).href;
@@ -43,29 +44,42 @@ test("trusted helper capture compares complete bounded bytes before establishing
   }
 });
 
-test("source and actual POSIX SEA extraction refuse write faults before proof, execution or HOME publication", {
+test("source and actual POSIX SEA refuse corrupt, partial and substituted installed inputs without runtime production or fallback", {
   skip: process.platform !== "linux" && process.platform !== "darwin", timeout: 180_000,
-}, (t) => {
+}, async (t) => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-extraction-sea-")));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let ownedChildrenClosed = true;
+  t.after(() => {
+    if (!ownedChildrenClosed) { t.diagnostic(`Retain synthetic fixture; owned child closure unproved: ${root}`); return; }
+    const writableDirectories = (path: string): void => {
+      chmodSync(path, 0o700);
+      for (const entry of readdirSync(path, { withFileTypes: true })) if (entry.isDirectory() && !entry.isSymbolicLink()) writableDirectories(join(path, entry.name));
+    };
+    writableDirectories(root); rmSync(root, { recursive: true, force: true });
+  });
   const require = createRequire(import.meta.url);
   const entry = fileURLToPath(new URL("./fixtures/provider-home-lease-extraction.cjs", import.meta.url));
   const bundle = join(root, "fixture-bundle.cjs"), binary = join(root, "fixture-sea");
   const helper = join(root, "native-helper"), blob = join(root, "fixture.blob"), config = join(root, "sea.json");
   const run = (command: string, args: string[]) => {
+    ownedChildrenClosed = false;
     const result = spawnSync(command, args, { encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 });
+    ownedChildrenClosed = !result.error && Number.isSafeInteger(result.status);
     assert.equal(result.status, 0, command + ": " + String(result.error ?? "") + "\n" + result.stderr + "\n" + result.stdout);
   };
   const compiler = process.platform === "darwin" ? "/usr/bin/clang" : "/usr/bin/cc";
   run(compiler, ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", ...(process.platform === "linux" ? ["-static"] : []),
     fileURLToPath(new URL("../native/provider-home-lease-io.c", import.meta.url)), "-o", helper]);
+  const image = readFileSync(helper);
+  const tuple: HelperTuple = { schema: "WPLI1", target: LEASE_HELPER_TARGETS[`${process.platform}/${process.arch}`]!,
+    protocol: "WPLL4", sourceSha256: helperDigest(readFileSync(new URL("../native/provider-home-lease-io.c", import.meta.url))),
+    imageSha256: helperDigest(image), imageBytes: image.length, abi: "posix64" };
   const builder = join(root, "build.cjs");
   writeFileSync(builder, "require(" + JSON.stringify(require.resolve("esbuild")) + ").buildSync("
     + JSON.stringify({ entryPoints: [entry], outfile: bundle, bundle: true, platform: "node", format: "cjs",
-      target: "node24", define: { "import.meta.url": "undefined" } }) + ");");
+      target: "node24", define: { "import.meta.url": "undefined", __WOLLIPOG_LEASE_HELPER_TUPLE__: JSON.stringify(tuple) } }) + ");");
   run(process.execPath, [builder]);
-  writeFileSync(config, JSON.stringify({ main: bundle, output: blob, disableExperimentalSEAWarning: true,
-    assets: { "wollipog/provider-home-lease-io": helper } }));
+  writeFileSync(config, JSON.stringify({ main: bundle, output: blob, disableExperimentalSEAWarning: true }));
   run(process.execPath, ["--experimental-sea-config", config]);
   copyFileSync(process.execPath, binary); chmodSync(binary, 0o700);
   if (process.platform === "darwin") {
@@ -81,16 +95,44 @@ test("source and actual POSIX SEA extraction refuse write faults before proof, e
   run(process.execPath, [injector]);
   if (process.platform === "darwin") run("/usr/bin/codesign", ["--sign", "-", binary]);
   for (const sea of [false, true]) {
-    for (const mode of sea ? ["success", "corrupt", "partial", "partial-throw", "substitute", "fallback"] : ["success", "compiler-partial"]) {
+    for (const mode of ["success", "corrupt", "partial", "partial-throw", "substitute", "fallback", "compiler-partial"]) {
       const caseRoot = join(root, (sea ? "sea-" : "source-") + mode);
       const home = join(caseRoot, "home"), temporary = join(caseRoot, "tmp"), data = join(caseRoot, "data");
       for (const path of [home, temporary, data]) mkdirSync(path, { recursive: true, mode: 0o700 });
+      const installedRoot = join(caseRoot, "installed"); mkdirSync(installedRoot, { mode: 0o700 });
+      publishSourceHelperTuple(installedRoot, tuple);
+      const chunks = function* () { for (let offset = 0; offset < image.length; offset += 65536) yield image.subarray(offset, offset + 65536); };
+      if (mode === "compiler-partial") {
+        const position = join(installedRoot, helperPositionName(0)); mkdirSync(position, { mode: 0o700 });
+        writeFileSync(join(position, "lease-io"), image.subarray(0, 32), { mode: 0o600 });
+      } else {
+        const installed = await installLeaseHelper(installedRoot, tuple, chunks());
+        if (mode === "partial-throw") {
+          chmodSync(installed.root, 0o700); unlinkSync(join(installed.root, "contract.json")); chmodSync(installed.root, 0o555);
+        } else if (mode === "substitute") {
+          chmodSync(installed.root, 0o700); renameSync(installed.path, installed.path + ".original");
+          symlinkSync(installed.path + ".original", installed.path); chmodSync(installed.root, 0o555);
+        } else if (mode !== "success") {
+          const altered = Buffer.from(image); altered[altered.length - 1] = altered[altered.length - 1]! ^ 1;
+          chmodSync(installed.path, 0o700);
+          writeFileSync(installed.path, mode === "partial" ? altered.subarray(0, altered.length / 2) : altered);
+          chmodSync(installed.path, 0o555);
+        }
+      }
+      if (mode !== "success") for (const parent of [temporary, data]) {
+        const legacy = join(parent, "wollipog-provider-home-lease-io-old-unknown"); mkdirSync(legacy);
+        writeFileSync(join(legacy, "lease-io"), image, { mode: 0o700 });
+      }
       writeFileSync(join(home, "credential-sentinel"), "synthetic unchanged");
+      ownedChildrenClosed = false;
       const result = spawnSync(sea ? binary : process.execPath,
         [...(sea ? [] : ["--require", require.resolve("tsx/cjs"), entry]), mode, caseRoot], {
-          env: { HOME: home, TMPDIR: temporary, TMP: temporary, TEMP: temporary, PATH: "/usr/bin:/bin" },
+          // The source loader must not add its own cache while the evidence snapshot is frozen.
+          env: { HOME: home, TMPDIR: temporary, TMP: temporary, TEMP: temporary, PATH: "/usr/bin:/bin",
+            TSX_DISABLE_CACHE: "1", WOLLIPOG_LEASE_HELPER_ROOT: installedRoot },
           encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024,
         });
+      ownedChildrenClosed = !result.error && Number.isSafeInteger(result.status);
       assert.equal(result.status, 0, (sea ? "SEA " : "source ") + mode + ": " + String(result.error ?? "")
         + "\n" + result.stderr + "\n" + result.stdout);
       const receipt = JSON.parse(result.stdout.trim());
@@ -127,13 +169,12 @@ const other=spawnSync(process.execPath,['--import','tsx',${JSON.stringify(conten
   t.diagnostic(`${process.platform}: 9 long-form in-profile lifetimes, selected v4, foreign lease and credential sentinel unchanged`);
 });
 
-test("rejected temporary execution falls back to existing in-profile runner data", { skip: process.platform === "win32" }, (t) => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-profile-fallback-")));
+test("direct immutable execution ignores temporary and runner-data staging locations", { skip: process.platform === "win32" }, (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-direct-helper-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const home = join(root, "profile"), temporary = join(home, "tmp"), data = join(home, ".agent-manager");
-  mkdirSync(temporary, { recursive: true }); mkdirSync(data);
-  const script = join(root, "fallback.mts");
-  writeFileSync(script, `import{refuseLeaseIoProbeForTest}from${JSON.stringify(ioModule)};import{ProviderHomeLeaseRegistry}from${JSON.stringify(registryModule)};let rejected=0;refuseLeaseIoProbeForTest(p=>{if(p.startsWith(${JSON.stringify(temporary)})){rejected++;return true;}return false;});const r=new ProviderHomeLeaseRegistry('a'.repeat(64),{helperDataDir:${JSON.stringify(data)}});r.acquireHome(${JSON.stringify(home)});if(!r.releaseHome(${JSON.stringify(home)})||rejected!==1)throw Error('fallback failed');`);
+  const home = join(root, "home"), temporary = join(root, "tmp"), data = join(root, "data"), script = join(root, "direct.mts");
+  mkdirSync(temporary); mkdirSync(data);
+  writeFileSync(script, `import assert from'node:assert/strict';import{refuseLeaseIoProbeForTest}from${JSON.stringify(ioModule)};import{ProviderHomeLeaseRegistry}from${JSON.stringify(registryModule)};let probes=0;refuseLeaseIoProbeForTest(p=>{probes++;assert.ok(!p.startsWith(${JSON.stringify(temporary)})&&!p.startsWith(${JSON.stringify(data)}));return false});const r=new ProviderHomeLeaseRegistry('a'.repeat(64),{helperDataDir:${JSON.stringify(data)}});r.acquireHome(${JSON.stringify(home)});assert.equal(r.releaseHome(${JSON.stringify(home)}),true);assert.equal(probes,1);`);
   const result = spawnSync(process.execPath, ["--import", "tsx", script], { env: { ...process.env, TMPDIR: temporary }, encoding: "utf8", timeout: 30_000 });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(readdirSync(temporary).filter(name => name.startsWith("wollipog-provider-home-lease-io-")), []);
@@ -215,24 +256,19 @@ test("normal runner exits remove only their exact fixed helper copies on every n
   t.diagnostic(`${process.platform}: 5 normal exits leave 0 lease-helper copies and preserve unrelated evidence`);
 });
 
-test("fixed lease helper probes an executable runner-data fallback and cleans exact normal-exit copies", { skip: process.platform === "win32" }, (t) => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-lease-staging-test-")));
+test("failed direct probe preserves old crash artifacts and never allocates a fallback", { skip: process.platform === "win32" }, (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-direct-refusal-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const temporary = join(root, "tmp"), data = join(root, "runner-data"), home = join(root, "home");
+  const temporary = join(root, "tmp"), data = join(root, "data"), home = join(root, "home"), script = join(root, "refusal.mts");
   mkdirSync(temporary); mkdirSync(data);
-  const script = join(root, "probe.mts");
-  writeFileSync(script, `const{refuseLeaseIoProbeForTest}=await import(${JSON.stringify(ioModule)});let refused=0;
-refuseLeaseIoProbeForTest(path=>{if(path.startsWith(${JSON.stringify(temporary)})){refused++;return true;}return false;});
-const{ProviderHomeLeaseRegistry}=await import(${JSON.stringify(registryModule)});
-const r=new ProviderHomeLeaseRegistry('a'.repeat(64),{helperDataDir:${JSON.stringify(data)}});r.acquireHome(${JSON.stringify(home)});if(!r.releaseHome(${JSON.stringify(home)}))throw Error('release failed');if(refused!==1)throw Error('temporary execution probe was not rejected exactly once');console.log('fallback acquired and released');`);
-  for (let pass = 0; pass < 5; pass++) {
-    const result = spawnSync(process.execPath, ["--import", "tsx", script], { env: { ...process.env, TMPDIR: temporary }, encoding: "utf8", timeout: 30_000 });
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /fallback acquired and released/);
-    assert.deepEqual(readdirSync(temporary).filter(name => name.startsWith("wollipog-provider-home-lease-io-")), [], "failed probe copy removed; unrelated tsx cache untouched");
-    assert.deepEqual(readdirSync(data), [], "normal exit removes only the exact staged copy");
+  for (const parent of [temporary, data]) { const old = join(parent, "wollipog-provider-home-lease-io-old-unknown"); mkdirSync(old); writeFileSync(join(old, "unproven"), "retain unknown evidence"); }
+  writeFileSync(script, `import assert from'node:assert/strict';import{refuseLeaseIoProbeForTest}from${JSON.stringify(ioModule)};import{ProviderHomeLeaseRegistry}from${JSON.stringify(registryModule)};let probes=0;refuseLeaseIoProbeForTest(()=>{probes++;return true});assert.throws(()=>new ProviderHomeLeaseRegistry('a'.repeat(64),{helperDataDir:${JSON.stringify(data)}}).acquireHome(${JSON.stringify(home)}),/helper unavailable/);assert.equal(probes,1);`);
+  const result = spawnSync(process.execPath, ["--import", "tsx", script], { env: { ...process.env, TMPDIR: temporary }, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr); assert.equal(existsSync(home), false);
+  for (const parent of [temporary, data]) {
+    assert.deepEqual(readdirSync(parent).filter(name => name.startsWith("wollipog-provider-home-lease-io-")), ["wollipog-provider-home-lease-io-old-unknown"]);
+    assert.equal(readFileSync(join(parent, "wollipog-provider-home-lease-io-old-unknown", "unproven"), "utf8"), "retain unknown evidence");
   }
-  t.diagnostic("5 exited lifetimes: 0 private helper cache entries under both staging roots");
 });
 
 test("unavailable helper refuses before publishing HOME evidence with a non-quarantine remedy", { skip: process.platform === "win32" }, (t) => {

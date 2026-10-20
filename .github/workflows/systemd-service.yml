@@ -44,6 +44,15 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
+      # Real matching CLI/service bytes and native helper inputs; no source-wrapper identity bypass.
+      # This preparation stays within the existing 20-minute job; fresh timing is unmeasured.
+      - name: Build Matching Runner and Lease Helper
+        env:
+          TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: |
+          mkdir -m 700 apps/runner/dist-bin
+          node apps/runner/scripts/build-binary.mjs
+
       - name: Open the checkout to the service account
         # The control plane and runner run as the `wollipog` system account from this checkout.
         run: chmod o+rx "$HOME"

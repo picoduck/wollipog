@@ -27,7 +27,7 @@ function verifyWorkerDeadlines(code, filename, { canonical = true } = {}) {
     class ClockDate extends Date { static now() { return time.wall; } }
     const native = require("node:child_process");
     const controlledRequire = name => name === "node:worker_threads" ? { parentPort: port,
-      workerData: { epoch, ownerHash: "a".repeat(64), ...(startupClock === "missing" ? {} : { clock: startupClock }) } }
+      workerData: { epoch, ownerHash: "a".repeat(64), helperRoot: process.env.WOLLIPOG_LEASE_HELPER_ROOT || require("node:path").dirname(filename), ...(startupClock === "missing" ? {} : { clock: startupClock }) } }
       : name === "node:child_process" ? { ...native, spawnSync(...args) {
         const result = native.spawnSync(...args);
         time.afterNative?.();

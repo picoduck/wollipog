@@ -1,0 +1,3 @@
+# Native source digests bind the exact bytes compiled into every helper.
+apps/runner/native/provider-home-lease-io.c text eol=lf
+apps/runner/native/provider-home-lease-io.cs text eol=lf

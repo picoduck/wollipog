@@ -1,13 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { chmodSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { getAsset, isSea } from "node:sea";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { windowsLeaseIoCommand } from "./provider-home-lease-windows-io.js";
-import { leaseHelperParent, LeaseHelperArtifact } from "./provider-home-lease-staging.js";
+import { installedLeaseHelper } from "./provider-home-lease-assets.js";
+import type { InstalledHelper } from "../../../scripts/lease-helper-distribution.mjs";
 
-const ASSET = "wollipog/provider-home-lease-io";
 export type LeaseIoWork = { records: number; bytes: number };
 let workObserver: ((work: LeaseIoWork) => void) | undefined;
 export function observeLeaseIoWorkForTest(observer?: (work: LeaseIoWork) => void): void { workObserver = observer; }
@@ -24,18 +19,13 @@ const RECORD_BYTES = 2 * 1024 * 1024;
 const HELPER_TIMEOUT_MS = 120_000;
 const NAME = /^[a-z0-9._-]{1,255}$/u;
 const DECIMAL = /^(?:0|[1-9][0-9]{0,19})$/u;
-let executable: LeaseHelperArtifact | undefined;
+let executable: InstalledHelper | undefined;
 let ioOptions: { helperDataDir?: string; fenceWaitMs?: number; providerHome?: string } = {};
 export function withLeaseIoOptions<T>(options: typeof ioOptions, action: () => T): T {
   const previous = ioOptions; ioOptions = { ...previous, ...options };
   try { return action(); } finally { ioOptions = previous; }
 }
-const HELPER_UNAVAILABLE = "provider-HOME lease helper unavailable; restore the packaged fixed helper and an executable temporary or configured runner data directory; preserve all lease evidence and retry";
-function stagingRoots(): string[] {
-  return [...new Set([tmpdir(), ...(ioOptions.helperDataDir ? [ioOptions.helperDataDir] : [])].flatMap(root => {
-    try { return [leaseHelperParent(root, ioOptions.providerHome)]; } catch { return []; }
-  }))];
-}
+const HELPER_UNAVAILABLE = "provider-HOME lease helper unavailable; install the matching companion or explicitly prepare offline source assets in the protected helper parent; preserve all occupied positions and canonical lease evidence";
 
 export interface LeaseIoIdentity { device: string; inode: string }
 export interface LeaseIoEntry extends LeaseIoIdentity {
@@ -76,50 +66,24 @@ export interface LeaseIoPlan {
 function nativeExecutable(): string {
   if (executable) {
     try {
-      leaseHelperParent(executable.root, ioOptions.providerHome);
-      executable.verify();
+      installedLeaseHelper(ioOptions.providerHome).verify();
       return executable.path;
     } catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
   }
-  // Establish the trusted digest before staging can create or change any file.
-  let embedded: Uint8Array | undefined;
-  let expectedSha256: string | undefined;
-  if (isSea()) {
-    try {
-      embedded = new Uint8Array(getAsset(ASSET));
-      expectedSha256 = createHash("sha256").update(embedded).digest("hex");
-    } catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
-  }
-  for (const parent of stagingRoots()) {
-    let artifact: LeaseHelperArtifact | undefined;
-    try {
-      artifact = new LeaseHelperArtifact(parent, "lease-io");
-      const path = artifact.path;
-      if (embedded) {
-        writeFileSync(path, embedded, { flag: "wx", mode: 0o700 });
-      } else {
-        const source = fileURLToPath(new URL("../native/provider-home-lease-io.c", import.meta.url ?? pathToFileURL(__filename).href));
-        const compiler = process.platform === "darwin" ? "/usr/bin/clang" : "/usr/bin/cc";
-        const args = ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", ...(process.platform === "linux" ? ["-static"] : []), source, "-o", path];
-        const compiled = spawnSync(compiler, args, { encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 });
-        if (compiled.error || compiled.status !== 0) throw new Error("the fixed provider-HOME lease helper could not be compiled", { cause: new Error((compiled.stderr ?? "").slice(0, 2_048)) });
-        chmodSync(path, 0o700);
-      }
-      artifact.capture(expectedSha256);
-      const probe = spawnSync(path, ["--probe"], { timeout: 10_000, maxBuffer: 1024, env: {} });
-      artifact.verify();
-      if (probe.error || probe.status !== 0 || rejectProbeForTest?.(path)) throw new Error("helper execution probe failed");
-      executable = artifact;
-      process.once("exit", artifact.cleanup);
-      return path;
-    } catch { artifact?.cleanup(); }
-  }
+  try {
+    const installed = installedLeaseHelper(ioOptions.providerHome);
+    const probe = spawnSync(installed.path, ["--probe"], { timeout: 10_000, maxBuffer: 1024, env: {} });
+    installed.verify();
+    if (probe.error || probe.status !== 0 || rejectProbeForTest?.(installed.path)) throw new Error("helper execution probe failed");
+    executable = installed;
+    return installed.path;
+  } catch { /* Immutable installation inputs and all legacy crash artifacts are retained. */ }
   throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE);
 }
 
 /** Prove availability before creating any HOME lease publication. */
 export function ensureLeaseIoAvailable(): void {
-  try { if (process.platform === "win32") windowsLeaseIoCommand(stagingRoots(), ioOptions.providerHome); else nativeExecutable(); }
+  try { if (process.platform === "win32") windowsLeaseIoCommand(undefined, ioOptions.providerHome); else nativeExecutable(); }
   catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
 }
 
@@ -167,11 +131,11 @@ export class LeaseIoError extends Error {
   constructor(readonly kind: "busy" | "refusal" | "unavailable", message: string) { super(message); }
 }
 function run(input: Buffer): Reader {
-  let command: { command: string; args: string[] };
-  try { command = process.platform === "win32" ? windowsLeaseIoCommand(stagingRoots(), ioOptions.providerHome) : { command: nativeExecutable(), args: [] }; }
+  let command: { command: string; args: string[]; input?: Buffer };
+  try { command = process.platform === "win32" ? windowsLeaseIoCommand(input, ioOptions.providerHome) : { command: nativeExecutable(), args: [] }; }
   catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
   const started = performance.now();
-  const result = spawnSync(command.command, command.args, { input, timeout: HELPER_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: IPC_BYTES, windowsHide: true });
+  const result = spawnSync(command.command, command.args, { input: command.input ?? input, timeout: HELPER_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: IPC_BYTES, windowsHide: true });
   runObserver?.({ durationMs: performance.now() - started, timeoutMs: HELPER_TIMEOUT_MS, error: (result.error as NodeJS.ErrnoException | undefined)?.code, signal: result.signal, status: result.status });
   if (result.error) throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE);
   const reader = new Reader(result.stdout ?? Buffer.alloc(0));

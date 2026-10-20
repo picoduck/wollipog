@@ -1,16 +1,40 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   assertRunnerTargetHost,
   publishLegacyRunnerAlias,
+  publishLeaseHelperCompanion,
   runnerArtifactNames,
   runnerPlatformOfTarget,
   RUNNER_TARGET_TRIPLES,
 } from "./runner-artifacts.mjs";
+
+test("offline companion publication reuses identical read-only output and preserves substitutions", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-offline-companion-"));
+  const bytes = Buffer.from("bounded-companion"), hash = value => createHash("sha256").update(value).digest("hex");
+  const tuple = { schema: "WPLI1", target: "x86_64-unknown-linux-gnu", protocol: "WPLL4", sourceSha256: "a".repeat(64), imageSha256: hash(bytes), imageBytes: bytes.length, abi: "posix64" };
+  try {
+    const destination = join(root, "image");
+    assert.deepEqual(publishLeaseHelperCompanion(destination, bytes, tuple), { reused: false });
+    const before = statSync(destination, { bigint: true });
+    assert.equal(before.mode & 0o777n, 0o555n);
+    assert.deepEqual(publishLeaseHelperCompanion(destination, bytes, tuple), { reused: true });
+    assert.deepEqual(statSync(destination, { bigint: true }), before);
+    const different = join(root, "different"); writeFileSync(different, "preserved"); chmodSync(different, 0o555);
+    assert.throws(() => publishLeaseHelperCompanion(different, bytes, tuple));
+    assert.equal(readFileSync(different, "utf8"), "preserved");
+    const symbolic = join(root, "symbolic"); symlinkSync(different, symbolic);
+    assert.throws(() => publishLeaseHelperCompanion(symbolic, bytes, tuple));
+    const hard = join(root, "hard"); linkSync(destination, hard);
+    assert.throws(() => publishLeaseHelperCompanion(hard, bytes, tuple));
+    assert.equal(readFileSync(hard).equals(bytes), true);
+    assert.throws(() => publishLeaseHelperCompanion(join(root, "oversized"), Buffer.alloc(2097153), tuple));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("runner release names cover the exact six native targets", () => {
   assert.deepEqual(RUNNER_TARGET_TRIPLES.map(runnerArtifactNames), [

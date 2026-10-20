@@ -56,7 +56,23 @@ verify_linux_release_baseline() {
     "apps/control-plane/dist-bin/wollipog-control-plane-$target"
   cmp "apps/desktop/src-tauri/binaries/control-plane-$target" "apps/control-plane/dist-bin/wollipog-control-plane-$target"
   cmp "apps/desktop/src-tauri/binaries/runner-$target" "apps/runner/dist-bin/wollipog-runner-$target"
-  echo "Linux release architecture, ABI, loader and SEA entry points verified on Ubuntu 22.04"
+  # Verify the actual closed helper resource produced for Tauri, then execute its native probe.
+  # This is offline packaging-stage proof, not an assertion about installed runtime ownership.
+  node --input-type=module - "$target" <<'NODE'
+import assert from "node:assert/strict";
+import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { helperAssociationName, helperDigest, LEASE_HELPER_LIMITS, parseHelperAssociation, readHelperFile } from "./scripts/lease-helper-distribution.mjs";
+import { verifyDesktopLeaseHelperResource } from "./apps/desktop/scripts/lease-helper-resources.mjs";
+const target = process.argv[2];
+const association = parseHelperAssociation(readHelperFile(resolve("apps/runner/dist-bin", helperAssociationName(target)), LEASE_HELPER_LIMITS.contractBytes, undefined, false).bytes);
+assert.equal(association.helper.target, target);
+assert.equal(association.helper.sourceSha256, helperDigest(readFileSync("apps/runner/native/provider-home-lease-io.c")));
+assert.equal(association.runnerSha256, helperDigest(readFileSync("apps/runner/dist-bin/wollipog-runner-" + target)));
+verifyDesktopLeaseHelperResource(resolve("apps/desktop/.sidecar-build/lease-helper"), association.helper);
+NODE
+  "apps/desktop/.sidecar-build/lease-helper/wollipog-lease-helper-00/lease-io" --probe
+  echo "Linux release architecture, ABI, loader, SEA entry points and native helper resources verified on Ubuntu 22.04"
 }
 
 if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then

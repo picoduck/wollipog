@@ -5,6 +5,9 @@ import {
   BoxOrchestrator,
   binaryIsCurrent,
   binaryDeployIdentity,
+  buildBoxHelperInstallCommand,
+  validateBoxLeaseHelper,
+  type ResolvedBoxLeaseHelper,
   buildContentAddressedAttestationCommand,
   buildContentAddressedPromoteCommand,
   buildContentAddressedStageCommand,
@@ -30,6 +33,54 @@ import {
 } from "./box-orchestrator.js";
 import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
+import { helperAssociationBytes, helperDigest } from "../../../scripts/lease-helper-distribution.mjs";
+
+async function fixtureBoxLeaseHelper(triple: string, runnerSha256: string): Promise<ResolvedBoxLeaseHelper> {
+  const image = Buffer.from("fixed box helper");
+  const association = { schema: "WPLR1" as const, helper: {
+    schema: "WPLI1" as const, target: triple, protocol: "WPLL4" as const,
+    sourceSha256: "28492e116000c648cd5ddc19f8db5ebe6d775c66f1fa57103235051e837af3d7",
+    imageSha256: helperDigest(image), imageBytes: image.length, abi: "posix64" as const },
+    canonical: `wollipog-runner-${triple}`, legacy: `agent-manager-runner-${triple}`,
+    runnerSha256, storage: "external" as const, installerMode: "--lease-helper-install" as const };
+  return { association, associationSha256: helperDigest(helperAssociationBytes(association)), image };
+}
+
+test("box pairing rejects wrong runner, source, target, publisher or image before remote invocation", async () => {
+  const triple = "x86_64-unknown-linux-gnu", runnerSha256 = "a".repeat(64);
+  const fixture = await fixtureBoxLeaseHelper(triple, runnerSha256);
+  assert.deepEqual(validateBoxLeaseHelper(fixture, triple, runnerSha256).image, fixture.image);
+  assert.match(buildBoxHelperInstallCommand(".agent-manager/runner", fixture), /--parent "\$HOME\/\.agent-manager"$/u);
+  assert.throws(() => validateBoxLeaseHelper(fixture, triple, "b".repeat(64)), /association unavailable/u);
+  assert.throws(() => validateBoxLeaseHelper(fixture, "aarch64-unknown-linux-gnu", runnerSha256), /association unavailable/u);
+  assert.throws(() => validateBoxLeaseHelper({ ...fixture, image: Buffer.alloc(2097153) }, triple, runnerSha256), /association unavailable/u);
+  assert.throws(() => validateBoxLeaseHelper({ ...fixture, associationSha256: "f".repeat(64) }, triple, runnerSha256), /association unavailable/u);
+  const changed = { ...fixture.association, helper: { ...fixture.association.helper, sourceSha256: "b".repeat(64) } };
+  assert.throws(() => validateBoxLeaseHelper({ ...fixture, association: changed, associationSha256: helperDigest(helperAssociationBytes(changed)) }, triple, runnerSha256), /association unavailable/u);
+});
+
+test("real staged box resolver requires the exact bounded companion and never writes missing evidence", async (t) => {
+  const { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os"), { join } = await import("node:path");
+  const { makeBinaryResolver: realResolver } = await import("./box-orchestrator.js");
+  const { helperAssociationName, helperReleaseAssetName } = await import("../../../scripts/lease-helper-distribution.mjs");
+  const root = mkdtempSync(join(tmpdir(), "wollipog-box-pairing-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const triple = "x86_64-unknown-linux-gnu", runner = Buffer.from("owned runner");
+  const runnerSha256 = helperDigest(runner), fixture = await fixtureBoxLeaseHelper(triple, runnerSha256);
+  writeFileSync(join(root, fixture.association.canonical), runner, { mode: 0o555 });
+  const resolver = realResolver({ repo: "picoduck/wollipog", releaseTag: "v1.2.3", cacheDir: join(root, "unused-cache"), distBinDir: root, token: null, env: {} });
+  const before = readdirSync(root);
+  await assert.rejects(resolver(triple));
+  assert.deepEqual(readdirSync(root), before, "missing companion cannot create an adoption record or cache");
+  writeFileSync(join(root, helperAssociationName(triple)), helperAssociationBytes(fixture.association), { mode: 0o444 });
+  const imagePath = join(root, helperReleaseAssetName(triple)); writeFileSync(imagePath, fixture.image, { mode: 0o555 });
+  const resolved = await resolver(triple);
+  assert.deepEqual(resolved.leaseHelper!.image, fixture.image);
+  assert.equal(resolved.sha256, runnerSha256);
+  assert.deepEqual(readFileSync(imagePath), fixture.image);
+});
+
 
 const LEGACY_RUNNER_ASSET_WARNING =
   "Wollipog used a legacy runner asset because the canonical asset was absent; update the release producer before compatibility is removed.";
@@ -258,7 +309,7 @@ test("buildRemoteCommand quotes every value, uses --token-file, and repeats --wo
   });
   assert.equal(
     cmd,
-    "'.agent-manager/agent-manager-runner' --runner-id 'box-abc' " +
+    `WOLLIPOG_LEASE_HELPER_ROOT="$HOME/.agent-manager" '.agent-manager/agent-manager-runner' --runner-id 'box-abc' ` +
       "--control-plane-url 'ws://127.0.0.1:47100/runner' " +
       "--token-file '.agent-manager/credentials/rcred_0123456789abcdef0123456789abcdef' " +
       "--workspace 'repo:/home/me/repo' --workspace 'docs:/srv/my docs'",
@@ -749,7 +800,7 @@ test("owned layouts and pending, completed, or sibling-account adoption never fa
     assert.equal(runtime.activeBinaryVerified, false);
     const box = db.getBox(launchedBoxId);
     assert.equal(box?.status, "failed", `${scenario} fallback must fail the managed bootstrap: ${JSON.stringify(box)}`);
-    assert.match(box?.lastError ?? "", /requires the current binary/);
+    assert.match(box?.lastError ?? "", /artifact unavailable/);
     if (scenario === "adoption") {
       assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, "adopt-current");
       orchestrator.onRunnerRegistered("box-runner", "unrelated-active-credential");
@@ -894,10 +945,11 @@ test("flag-dependent runner paths are immutable, digest-addressed, and promotion
     dataDir: ".agent-manager/runner-data/box",
     workspaces: [],
   });
-  assert.ok(launch.startsWith(`'${firstPath}' `), "the attested immutable path is shell-quoted as the executable");
+  assert.ok(launch.startsWith(`WOLLIPOG_LEASE_HELPER_ROOT="$HOME/.agent-manager" '${firstPath}' `), "the attested immutable path is shell-quoted after the fixed shared helper locator");
 });
 
 type BinaryHarness = {
+  admitRemoteHelper(cfg: Exclude<ReturnType<ControlPlaneDb["getBoxConfig"]>, null>, runnerPath: string, helper: ResolvedBoxLeaseHelper): Promise<void>;
   ensureBinary(
     cfg: Exclude<ReturnType<ControlPlaneDb["getBoxConfig"]>, null>,
     triple: string,
@@ -920,7 +972,7 @@ test("stale deployed metadata and an overwritten shared alias cannot bypass remo
     hub: { boxChanged() {} } as unknown as Hub,
     cpPort: 4317,
     issueCredential: () => { throw new Error("not used"); },
-    resolveBinary: async () => ({ path: "/local/current-runner", sha256: digest, source: "staged" }),
+    resolveBinary: async () => ({ path: "/local/current-runner", sha256: digest, source: "staged", leaseHelper: await fixtureBoxLeaseHelper("x86_64-unknown-linux-gnu", digest) }),
   });
   const runtime: TestRuntime = {
     child: null,
@@ -941,6 +993,7 @@ test("stale deployed metadata and an overwritten shared alias cannot bypass remo
   };
   const commands: Array<{ command: string; args: string[] }> = [];
   harness.runCmd = async (command, args) => { commands.push({ command, args }); };
+  harness.admitRemoteHelper = async () => {};
   const cfg = db.getBoxConfig("box-0123abcd");
   assert.ok(cfg);
   const readiness = await harness.ensureBinary(cfg, "x86_64-unknown-linux-gnu", runtime, 1);
@@ -963,7 +1016,7 @@ test("failed post-promotion attestation aborts before credential issue or manage
       credentialsIssued++;
       throw new Error("must not be reached");
     },
-    resolveBinary: async () => ({ path: "/local/current-runner", sha256: digest, source: "staged" }),
+    resolveBinary: async () => ({ path: "/local/current-runner", sha256: digest, source: "staged", leaseHelper: await fixtureBoxLeaseHelper("x86_64-unknown-linux-gnu", digest) }),
   });
   const runtime: TestRuntime = {
     child: null,
@@ -981,6 +1034,7 @@ test("failed post-promotion attestation aborts before credential issue or manage
   harness.detectTriple = async () => "x86_64-unknown-linux-gnu";
   harness.remoteRunnerMatches = async () => false;
   harness.runCmd = async () => {};
+  harness.admitRemoteHelper = async () => {};
   const cfg = db.getBoxConfig("box-0123abcd");
   assert.ok(cfg);
   await harness.bootstrap(cfg, runtime, 1, null);
@@ -1019,6 +1073,7 @@ test("makeBinaryResolver prefers the Wollipog staged directory and warns once on
 
   const preferredWarnings: string[] = [];
   const preferred = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1032,6 +1087,7 @@ test("makeBinaryResolver prefers the Wollipog staged directory and warns once on
 
   const legacyWarnings: string[] = [];
   const legacy = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1050,6 +1106,7 @@ test("makeBinaryResolver prefers the Wollipog staged directory and warns once on
 
   const laterWarnings: string[] = [];
   const later = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1067,6 +1124,7 @@ test("makeBinaryResolver prefers the Wollipog staged directory and warns once on
 
   const releaseWarnings: string[] = [];
   const release = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1093,6 +1151,7 @@ test("makeBinaryResolver prefers the Wollipog staged directory and warns once on
 
   const restartWarnings: string[] = [];
   const restartedRelease = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1120,6 +1179,7 @@ test("makeBinaryResolver falls back only when the canonical release asset is abs
   let releaseResolutions = 0;
   const warnings: string[] = [];
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1147,6 +1207,7 @@ test("makeBinaryResolver falls back only when the canonical release asset is abs
   );
 
   const failClosed = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.9.0",
     token: null,
@@ -1158,6 +1219,7 @@ test("makeBinaryResolver falls back only when the canonical release asset is abs
 
   const attemptedNames: string[] = [];
   const injectedFallback = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.10.0",
     token: null,
@@ -1187,6 +1249,7 @@ test("makeBinaryResolver does not warn when a canonical release asset succeeds",
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const warnings: string[] = [];
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1210,6 +1273,7 @@ test("makeBinaryResolver verifies publisher digests and records their provenance
   const bytes = "verified release bytes";
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1227,6 +1291,7 @@ test("makeBinaryResolver verifies publisher digests and records their provenance
   assert.equal(manifest.sha256, sha256);
 
   const rejected = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.9.0",
     token: null,
@@ -1265,6 +1330,7 @@ test("makeBinaryResolver reuses an exact legacy-name schema-1 rollback cache", a
     size: Buffer.byteLength(bytes),
   }));
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1303,6 +1369,7 @@ test("makeBinaryResolver repairs damaged canonical cache without downgrading to 
   writeFileSync(`${legacyPath}.manifest.json`, manifest(legacyName, "valid legacy"));
 
   const attemptedDowngrade = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1322,6 +1389,7 @@ test("makeBinaryResolver repairs damaged canonical cache without downgrading to 
   let failCanonicalRepair = true;
   const requestedGenerations: string[][] = [];
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1374,6 +1442,7 @@ test("makeBinaryResolver: refresh bypasses the cache and re-downloads; dev dirs 
   const downloads: { repo: string; releaseTag: string; assetName: string; token?: string }[] = [];
   const warnings: string[] = [];
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1426,6 +1495,7 @@ test("makeBinaryResolver: a failed refresh keeps the previously-cached binary in
   let fail = false;
 
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1457,6 +1527,7 @@ test("makeBinaryResolver: release cache is rehashed before reuse and deployment 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   let hashes = 0;
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1485,6 +1556,7 @@ test("makeBinaryResolver: an empty download is rejected and leaves no cache entr
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const releaseDir = join(root, "cache", "v0.8.0");
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1510,6 +1582,7 @@ test("makeBinaryResolver: concurrent refreshes of one triple share a single down
   let release: () => void = () => {};
   const gate = new Promise<void>((r) => (release = r));
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1541,6 +1614,7 @@ test("makeBinaryResolver: corrupt content is rejected even when release identity
   let calls = 0;
   const warnings: string[] = [];
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,
@@ -1609,6 +1683,7 @@ test("makeBinaryResolver: malformed, wrong-release, and wrong-size manifests are
     let calls = 0;
     const warnings: string[] = [];
     const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
       repo: "acme/wollipog",
       releaseTag: "v0.8.0",
       token: null,
@@ -1639,6 +1714,7 @@ test("makeBinaryResolver: release tags partition cache and token never enters lo
   const requests: { releaseTag: string; token?: string }[] = [];
   const build = (releaseTag: string) =>
     makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
       repo: "private/wollipog",
       releaseTag,
       token: "top-secret-token",
@@ -1671,6 +1747,7 @@ test("makeBinaryResolver: release tags partition cache and token never enters lo
   assert.throws(
     () =>
       makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
         repo: "https://evil.invalid/wollipog",
         releaseTag: "v0.8.0",
         cacheDir: join(root, "cache"),
@@ -1692,6 +1769,7 @@ test("makeBinaryResolver: retention keeps current plus one rollback release", as
   const warnings: string[] = [];
   const resolveRelease = async (releaseTag: string) => {
     const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
       repo: "acme/wollipog",
       releaseTag,
       token: null,
@@ -1744,6 +1822,7 @@ test("makeBinaryResolver: release directory symlinks cannot redirect managed wri
     return;
   }
   const resolve = makeBinaryResolver({
+    helper: fixtureBoxLeaseHelper,
     repo: "acme/wollipog",
     releaseTag: "v0.8.0",
     token: null,

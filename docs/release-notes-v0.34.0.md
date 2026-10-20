@@ -104,11 +104,11 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
 - Headless upgrade staging gains phase diagnostics and safe recovery for blocked staging.
   Pull-request waits report merge-queue state, and merge-group cleanup shares one monitor.
 
-The release workflow builds all six supported native targets. Its base draft holds exactly 34 assets:
-14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the
+The release workflow builds all six supported native targets. Its base draft holds exactly 44 assets:
+14 desktop bundles, 12 runner names, 10 native helper assets, 6 headless `wollipog-control-plane-<triple>` executables, the
 `wollipog-web.tar.gz` dashboard bundle, and
 `SHA256SUMS`. A signed tag run adds 12 updater signatures and
-`latest.json` for exactly 47 assets. The final workflow verifies inventory, signatures,
+`latest.json` for exactly 57 assets. The final workflow verifies inventory, signatures,
 byte-identical compatibility copies, and publisher digests before publication.
 Publishing the verified draft remains a manual operator step.
 This release is intended for publication as the latest stable release.

@@ -1,4 +1,5 @@
 import { parentPort, workerData } from "node:worker_threads";
+import { setLeaseHelperRoot } from "./provider-home-lease-assets.js";
 import { leaseWorkerDelay, leaseWorkerNow, parseLeaseWorkerDeadline } from "./provider-home-lease-clock.js";
 import { ProviderHomeLeaseRegistry, providerHomeLeaseRefusalKind, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRefusalKind } from "./provider-home-lease.js";
 import { adoptProviderProfileMarker, createProviderProfileMarker, revokeProviderProfileMarkerGrant } from "./provider-profile.js";
@@ -8,6 +9,8 @@ import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys
 /** Only the fixed source/SEA entry starts this worker; there is no public RPC/CLI entry. */
 export function runProviderHomeLeaseWorker(): void {
   if (!parentPort || workerData?.clock !== LEASE_WORKER_CLOCK || typeof workerData.epoch !== "string" || !/^[a-f0-9-]{36}$/u.test(workerData.epoch)) throw new Error("invalid lease worker startup");
+  if (typeof workerData.helperRoot !== "string") throw new Error("missing private helper locator");
+  setLeaseHelperRoot(workerData.helperRoot);
   const instance: unknown = workerData.controlPlaneInstanceId;
   if (instance !== undefined && (typeof instance !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(instance))) throw new Error("invalid lease worker startup");
   const marker: unknown = workerData.runnerMarker;
@@ -48,7 +51,7 @@ export function runProviderHomeLeaseWorker(): void {
     const known = code(providerHomeLeaseRefusalKind(error));
     if (known) return known;
     const message = error instanceof Error ? error.message : "";
-    return message.includes("helper unavailable") ? "unavailable" : /already in use|publication is in progress/u.test(message) ? "busy" : "refusal";
+    return /helper unavailable|matching installed lease helper unavailable|offline source runner bundle|native lease helper target/u.test(message) ? "unavailable" : /already in use|publication is in progress/u.test(message) ? "busy" : "refusal";
   };
   port.on("message", (message: LeaseWorkerExecute | LeaseWorkerAccept) => {
     if (!boundedLeaseWorkerFrame(message, LEASE_WORKER_LIMITS.requestBytes) || message?.epoch !== epoch ||

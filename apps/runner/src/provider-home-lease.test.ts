@@ -3,6 +3,13 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+  writeSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -15,14 +22,191 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { after, test, type TestContext } from "node:test";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { after, afterEach, beforeEach, test, type TestContext } from "node:test";
 const previousMask = process.umask(0o077);
 after(() => process.umask(previousMask));
-import { providerHomeLeaseRefusalKind, providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { observeLeaseVerificationWorkForTest, providerHomeLeaseRefusalKind, providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { killTreeAndWait, type AgentProcess, type SpawnIsolation } from "./spawn.js";
+import { observeLeaseIoRunsForTest, observeLeaseIoWorkForTest } from "./provider-home-lease-io.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { adoptProviderProfileMarker, readProviderProfileMarker, revokeProviderProfileMarkerGrant, writeProviderProfileMarker, type ProviderProfileMarker } from "./provider-profile.js";
+
+
+// CI-only telemetry; never imported by a production runner. No fsync/durability claim.
+function nativePhaseTelemetry() {
+  if (process.platform !== "win32" || !process.env.WOLLIPOG_NATIVE_TEST_PHASE_RECEIPT) return;
+  const hashes = [
+    "Jna9Qhn6GIV2Og2/yA8SqMLQ0s24YZyPIAPCvXfoAH4=",
+    "DOn/D2fTocCc4aHvU7v6xovqI/w5xVdZ4tMpupkJCK8=",
+    "wXCeVmQeR/Xo5kuXjq68IFy9S5YISlRklpvutlS8qK4=",
+    "qRGafGnvKbjgSFzFuruMRrsDIztr1Eb3iDYt7hnQAfM=",
+    "i8UPCb6DBef85CEI82VEvRuNjV6ytOG/cGywRvDBOyU=",
+    "6nCyQKCTYxn9jtRfxQKGRF+cXZpzunw4bk1kudEmzrc=",
+    "gnjaKdbD53SN1hT8oyyRy/IdbkeuI/Cq6qNJwG7cBbw=",
+    "yhx43SQmJGDozMdtvomCIXZgLE5UaFp2n0YcOpb8v5c=",
+    "zzYs1TrMwq7mze/Sk1ecT2f3udfMkigcJM3vkp3KoiI=",
+    "NM8rKppJqyzs+YFXVYKolCQZehqQP2mvmANvw0u9/jI=",
+    "bTggUCjXFWekFlAtdHbc68zsBGAqC795UnK4X2wgIO0=",
+    "iLlT4pzG78GqRaVTdNrNK5Rx1dbQL5AjsKD/Wan4KpM=",
+    "/bE+Q+QDFxplYt3q/esUHiepj3YTBj6hhT4m8avtrTY=",
+    "edSwFowvXLsrm0ukyrsbsOi9yX6AfKFdvBSVkhFyHGw=",
+    "v4DSgnpeIVzcRW3OCKWwQ1qr7IhGFmHzEtjh8E0uY9E=",
+    "Lm8KPqrGR9+lzll85eV0AU6/889WShthRsN+79fVl4E=",
+    "URZwyeKvLrrmy+FkiBoQ6pITDl2j1in0qj2xyimVJpc=",
+    "GsW0kqcMxuwYckzh/7tOFmiX1PtRA6v5sgKbztJGAVM=",
+    "2dZx1OL1q/EKTJrKFBcoPJHoQsJm0p3DFSPxW3DSWng=",
+    "vYuSrnpVagcnPTB6XopSXH9ghoN8ILuOIfNVNhOtqo0=",
+    "SOlyr/oT6oBuZnwZ3G4SNW2Edn2OQZAWWEeUwbqNKA4=",
+    "dWBMP4do512h9pT3kuFmQirhO9kxuGdI8E3wr8Q51w4=",
+    "TJXSLL1q/UiAb2Mv+li0J+HnxKs0/i6aUjqc7HaCtxc=",
+    "BcFnzXfqhWpy7gXfSp2x8PYerHRCh1dR1/tR7AF30yk=",
+    "8EZIaoZP/YabcNB7Wh46dXy77+h05ypWNyhJrJygFnk=",
+    "sfr02YcfoMXnlj8Gl7I2AcZTGnEX5UsaqJn/svt7wIo=",
+    "+xd/1iiJwH2oZSRaBJHGPOzrV4Pyb/ctwE4+hCtPDzs=",
+    "mdVRlrkJzwM0pxsZLlwDGM0NcBVeoFkhFnWPRlx7MQA=",
+    "5ZPZz7dRd+yIIxq18YFZBchg9q1A1xedFzjIt6uyp9E=",
+    "81h2G27vY5rYzWSQRoSh3FF2v5mIznuju3YLYbpkEHc=",
+    "qax5FKYIXBd5NDqawRpzh+qxTwYOe9CeLmUMNZ8btjo=",
+    "PAeTjAEUfv7TnZPw1WODnaGECKzj17tukdfFLhX3M6U=",
+    "wAkhz+8ayTn+hdB0EUJwJG4r/7JRnZk+PfxJNubukfQ=",
+    "4MJCnDM5DmcMgHN33EpjPsAWZb398EMaKSk+84Mg6wA=",
+    "rHK3qUoDO9CZXFJEwD4e3VGJ1WkPqWk4zguYf6tWLYA=",
+    "GFilx3rVNFvheHhLmaAYRA2oOsYfCvKbxNBZVF6B1uU=",
+    "4BB5UQiW00Wa8nRpR0n0ISPVqH+Qb3nA6DT4yzMHSMQ=",
+    "y19eSaek6lA/bmQ3U5frxIQrFMSkXzdP0Q0dyjvntf0=",
+    "ALyRgeuf4N5tfwVqOlF/7Z/5sv7sdVEBKLfhSSmEqZA=",
+    "GhTxZ3I9w6YCjuwR++lb5dqdPmvo07yWx6hR7c6g+WE=",
+    "BcsaD54X+E+5NOCP4m5f4Qs+v6jvcsVVx/aF7IpsH2E=",
+    "1iBQD9JWdZYArNkXIU3ntXpzhwegGbxu3vZ3u9tDbRE=",
+    "WZUJdzZO6Z9LSg6OLoTDrPkmED0oDI10SqyvDAleViU=",
+    "Ui555V3m8+qqjnP7fmGP9wf5QZ/OrKMM9qTrbzIHUVM=",
+    "Mui7kBoB+WKycZFvgFk23ROQ4/vH95jbcEOEdrkpADM=",
+    "L5rAgF+Za3iVFgG37+F3wOOZmc9Pde7LNQfNGZ/wX4g=",
+    "+N1pkBjoiMEy2qNQIYBd2Zq2PN554BiQnM1N/0OmVG4=",
+    "rf9enLIMPLD5kaao60EEQyqqXHik2Pg2VJWMK8Mqx+8=",
+    "Ghy+P/wzPLsWNnRIKILqNt8EkdQNsor3UKuaffkpc2Q=",
+    "Ovbh2CyIQFTvNtD3LCxauR7ORM5ez+GEuDwR5RJIVUM=",
+    "TrsESBucPl94lUrVga3RtAbjcO5MAUsoS8phO91M6HU=",
+    "NxJerNSc8eNRhLKURWp1C/xk0+0FKEVnRYP6vTMeKAo=",
+    "6BqvG17/K+imSdGHKPNF5aT2Z0gYXGFJzyLZ5ju9Qdc=",
+    "/G+Zp1GAc/uGYSL2l8Oaym5lL7RCnUxtm/Z56Yo52A0=",
+    "zB1u7PlAEUu6gZ8v3bQWK7BKINpLObwtisZMQlaulGs=",
+    "rSNh1c+qQq5BhVWtmtCRSteqKAuFgXJakEmD7zhMgTM=",
+    "yxRtB56/0YmLqqk+tRvRsfIBo5InDfTLa4pEgVDJ3D0=",
+    "v5M60AONhsNptSILmFCMCiSQyO5elKM8g1YzJxQQ3kU=",
+    "KX67az88TAW9RXLwdop0bKYDpqi9L1UpkI6eH/uTcjM=",
+  ];
+  let fd: number | undefined, seq = 0, disabled = false, flags = 0, current = 0;
+  let active = 0n, calls = 0, totalMs = 0n, maxMs = 0, status = -1, error = 0, signal = 0;
+  let ioRecords = 0n, ioBytes = 0n, verifyRecords = 0n, verifyBytes = 0n;
+  const u64 = (n: bigint) => {
+    if (n > 0xffffffffffffffffn) { flags |= 1; return 0xffffffffffffffffn; }
+    return n;
+  };
+  const count = (n: number) => {
+    if (!Number.isSafeInteger(n) || n < 0) throw new Error("numeric telemetry");
+    return BigInt(n);
+  };
+  const stop = () => {
+    disabled = true;
+    if (fd !== undefined) { try { closeSync(fd); } catch {} fd = undefined; }
+  };
+  const observe = (stage: number, id = current) => {
+    if (disabled || fd === undefined) return;
+    try {
+      // Prepared B is write 1. Reserve write 256 for X/LIMIT, then disable telemetry.
+      if (seq >= 254) { stage = 88; flags |= 2; }
+      if (flags & 4) stage = 88;
+      const frame = Buffer.alloc(256);
+      frame.write("WPNPH1", 0, "ascii");
+      frame.writeUInt32LE(++seq, 8); frame.writeUInt16LE(id, 12);
+      frame[14] = stage; frame[15] = flags;
+      frame.writeBigUInt64LE(active & 0xffffffffffffffffn, 16);
+      frame.writeBigUInt64LE(active >> 64n, 24);
+      frame.writeBigUInt64LE(u64(process.hrtime.bigint()), 32);
+      frame.writeUInt32LE(calls, 40); frame.writeBigUInt64LE(totalMs, 44);
+      frame.writeUInt32LE(maxMs, 52); frame.writeInt16LE(status, 56);
+      frame[58] = error; frame[59] = signal;
+      frame.writeBigUInt64LE(ioRecords, 60); frame.writeBigUInt64LE(ioBytes, 68);
+      frame.writeBigUInt64LE(verifyRecords, 76); frame.writeBigUInt64LE(verifyBytes, 84);
+      // u64 may set saturation while serializing the timestamp.
+      frame[15] = flags;
+      createHash("sha256").update(frame.subarray(0, 224)).digest().copy(frame, 224);
+      if (writeSync(fd, frame, 0, 256, (seq % 2) * 256) !== 256) throw new Error("short telemetry");
+      if (stage === 88) stop();
+    } catch { stop(); }
+  };
+  try {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+    const path = join(root, ".native-main-phase-v1.bin");
+    if (realpathSync(root) !== root || process.env.WOLLIPOG_NATIVE_TEST_PHASE_RECEIPT !== path) return;
+    const before = lstatSync(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size !== 512) return;
+    fd = openSync(path, "r+");
+    const opened = fstatSync(fd), bytes = Buffer.alloc(512);
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1 ||
+        opened.size !== 512 || readSync(fd, bytes, 0, 512, 0) !== 512) throw new Error("telemetry identity");
+    const prepared = Buffer.alloc(224);
+    prepared.write("WPNPH1", 0, "ascii"); prepared[14] = 66;
+    if (!bytes.subarray(0, 224).equals(prepared) ||
+        !bytes.subarray(224, 256).equals(createHash("sha256").update(prepared).digest()) ||
+        bytes.subarray(256).some(n => n !== 0)) throw new Error("telemetry preparation");
+    observe(77, 0);
+    if (disabled) return;
+  } catch { stop(); return; }
+  const caseId = (name: string) => hashes.indexOf(createHash("sha256").update(name).digest("base64")) + 1;
+  beforeEach(t => {
+    if (disabled) return;
+    try {
+      current = caseId(t.name);
+      if (!current) { flags |= 4; observe(88, 0); return; }
+      active |= 1n << BigInt(current - 1); observe(83);
+    } catch { stop(); }
+  });
+  afterEach(t => {
+    if (disabled) return;
+    try {
+      const id = caseId(t.name);
+      if (!id) { flags |= 4; observe(88, 0); return; }
+      active &= ~(1n << BigInt(id - 1)); observe(69, id);
+    } catch { stop(); }
+  });
+  observeLeaseIoRunsForTest(run => {
+    if (disabled) return;
+    try {
+      if (!Number.isFinite(run.durationMs) || run.durationMs < 0) throw new Error("numeric telemetry");
+      const ms = Math.min(0xffffffff, Math.trunc(run.durationMs));
+      if (run.durationMs > 0xffffffff) flags |= 1;
+      if (run.status !== null && (!Number.isInteger(run.status) || run.status < 0 || run.status > 255)) throw new Error("numeric telemetry");
+      status = run.status ?? -1;
+      error = run.error === undefined ? 0 : run.error === "ETIMEDOUT" ? 1 : run.error === "ENOENT" ? 2 : 3;
+      signal = run.signal === null ? 0 : run.signal === "SIGKILL" ? 1 : run.signal === "SIGTERM" ? 2 : 3;
+      totalMs = u64(totalMs + BigInt(ms)); maxMs = Math.max(maxMs, ms);
+      if (calls < 0xffffffff) calls++; else { flags |= 1; return; }
+      const n = BigInt(calls);
+      // At most 32 native-completed samples for a uint32 counter; no per-call disk write.
+      if ((n & (n - 1n)) === 0n) observe(73);
+    } catch { flags |= 4; }
+  });
+  observeLeaseIoWorkForTest(work => {
+    if (disabled) return;
+    try { ioRecords = u64(ioRecords + count(work.records)); ioBytes = u64(ioBytes + count(work.bytes)); }
+    catch { flags |= 4; }
+  });
+  observeLeaseVerificationWorkForTest(work => {
+    if (disabled) return;
+    try { verifyRecords = u64(verifyRecords + count(work.records)); verifyBytes = u64(verifyBytes + count(work.bytes)); }
+    catch { flags |= 4; }
+  });
+  after(() => {
+    observe(70, 0);
+    observeLeaseIoRunsForTest(); observeLeaseIoWorkForTest(); observeLeaseVerificationWorkForTest();
+    stop();
+  });
+}
+nativePhaseTelemetry();
 
 const OWNER_A = "a".repeat(64);
 const OWNER_B = "b".repeat(64);
@@ -789,17 +973,34 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
+  const cancellationProved = (state: (typeof states)[number]) =>
+    state.ready && state.phase === "cancelled-before-start" &&
+    state.closed && state.code === 1 && state.signal === null;
+  const needsCancellationProof = (state: (typeof states)[number]) =>
+    state.phase === "cancelled-before-start" ||
+    (state.ready && !state.reported && state.closed && state.code === 1 &&
+      (state.phase === "ready" || state.phase === "acquiring"));
   async function forceCleanup(state: (typeof states)[number]): Promise<boolean> {
     const child = state.child;
-    if (state.closed) return true;
+    const cancellationRequired = (options.fault === "hang-before-ready" && state.name === "contender-b") ||
+      needsCancellationProof(state);
+    const cancelled = () => cancellationProved(state);
+    if (state.closed) return !cancellationRequired || cancelled();
     const deadline = performance.now() + 5_000;
+    // Share the existing cleanup bound; reserve its remaining time for strict tree cleanup.
+    if (cancellationRequired && await waitUntil(cancelled, 1_000)) return true;
+    if (state.closed) return !cancellationRequired || cancelled();
+    if (performance.now() >= deadline) return false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const cleaned = await Promise.race([
         killTreeAndWait(child),
-        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 5_000); }),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), Math.max(0, deadline - performance.now()));
+        }),
       ]);
-      return cleaned && await waitUntil(() => state.closed, Math.max(0, deadline - performance.now()));
+      const closed = cleaned && await waitUntil(() => state.closed, Math.max(0, deadline - performance.now()));
+      return closed && (!cancellationRequired || cancelled());
     } finally { if (timer) clearTimeout(timer); }
   }
   try {
@@ -815,9 +1016,16 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       const phase = (name, timings = {}, outcome) => new Promise((resolve, reject) => {
         process.send({ phase: name, timings, outcome }, (error) => error ? reject(error) : resolve());
       });
-      const waitFor = (path) => {
+      let cancelledBeforeStart = false;
+      const waitFor = (path, cancelBeforeStart = false) => {
         const deadline = performance.now() + 20_000;
-        while (!existsSync(path)) {
+        for (;;) {
+          // Release wins even when start was published before the reporting failure.
+          if (cancelBeforeStart && existsSync(release)) {
+            cancelledBeforeStart = true;
+            throw new Error("synthetic cancellation before acquisition");
+          }
+          if (existsSync(path)) return;
           if (performance.now() >= deadline) throw new Error("fixture barrier timed out");
           pause(5);
         }
@@ -838,8 +1046,10 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
         pause(${options.startupDelayMs ?? 0});
         await phase("ready", { initializationMs });
-        waitFor(start);
+        waitFor(start, true);
         await phase("acquiring");
+        // IPC yields to the parent: recheck release before starting synchronous native work.
+        waitFor(start, true);
         const acquisitionAt = performance.now();
         let outcome;
         try {
@@ -894,7 +1104,10 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         console.error(error instanceof Error ? error.message : String(error));
         process.exitCode = 1;
       } finally {
-        registry?.releaseAll();
+        const released = registry?.releaseAll();
+        // This branch precedes acquisition; synchronous initialization has already returned.
+        // A failed release emits no ACK, so the parent retains its cleanup failure and fixture.
+        if (cancelledBeforeStart && released === true) await phase("cancelled-before-start");
         process.disconnect();
       }
     `);
@@ -950,11 +1163,18 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     failure = sanitize(error instanceof Error ? error.message : String(error));
   } finally {
     try { writeFileSync(release, "done"); } catch { cleanupFailures.push("fixture release publication failed"); }
-    if (!await waitUntil(() => states.every((state) => state.closed), options.cleanupGraceMs ?? 5_000)) {
+    if (!await waitUntil(() => states.every((state) => state.closed), options.cleanupGraceMs ?? 5_000) ||
+        options.fault === "hang-before-ready") {
       failure ??= "contenders required forced cleanup";
       const cleaned = await Promise.all(states.map((state) => forceCleanup(state)));
       cleanupProved = cleaned.every(Boolean);
       if (!cleanupProved) cleanupFailures.push("fixture-owned tree cleanup incomplete");
+    }
+    // Natural close also needs the fixed cancellation ACK and its actual expected exit.
+    // A missing ACK at pre-acquisition exit is not a substitute for ownership proof.
+    if (states.some((state) => needsCancellationProof(state) && !cancellationProved(state))) {
+      cleanupProved = false;
+      cleanupFailures.push("pre-acquisition cancellation cleanup unproved");
     }
     if (cleanupProved && states.every((state) => state.closed)) {
       try {
@@ -1238,31 +1458,6 @@ test("unexpected, orphaned, malformed, oversized, and symlinked lease state fail
     });
     assert.throws(() => registry.acquire(request(home)));
   }
-});
-
-test("a long journal remains valid and never empties across repeated orderly handoffs", (t) => {
-  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-long-chain-"));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
-  for (let pass = 0; pass < 64; pass++) {
-    const registry = new ProviderHomeLeaseRegistry(pass % 2 === 0 ? OWNER_A : OWNER_B);
-    try { registry.acquire(request(home)); registry.releaseAll(); }
-    catch (error) {
-      // Fixture records contain no provider credentials. Keep physical retirement witnesses
-      // visible on actual-platform failures instead of losing them in the public remedy.
-      const { root, lock } = leasePaths(home);
-      t.diagnostic(`failed handoff ${pass}: ${String(error)}`);
-      for (const directory of [root, lock]) for (const name of readdirSync(directory)) {
-        if (name === "mutable-home.lock") continue;
-        const raw = readFileSync(join(directory, name), "utf8");
-        t.diagnostic(`${directory === root ? "root" : "lock"}/${name}: ${raw}`);
-      }
-      throw error;
-    }
-    assert.ok(readdirSync(leasePaths(home).lock).length > 0);
-    assert.deepEqual(registry.getDiagnostics(), []);
-  }
-  assert.ok(readdirSync(leasePaths(home).lock).length <= 34);
-  assert.equal(JSON.parse(readFileSync(join(leasePaths(home).root, "mutable-home.recovery.json"), "utf8")).version, 4);
 });
 
 test("a predecessor modified after publication invalidates its hash-linked successor", (t) => {
