@@ -26,10 +26,13 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
   test(`a pruned workflow keeps its outcome and explains missing events at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/command-inbox-projects-e2e.html?view=run&workflowPruned=1");
-    const progress = page.getByRole("region", { name: "Workflow Progress" });
+    // The steps' side column (#2977), which a phone shows under its Steps tab.
+    const progress = viewport.width > 760
+      ? page.getByRole("region", { name: "Workflow Progress" })
+      : page.getByRole("tabpanel", { name: "Steps" });
     await expect(progress).toContainText("Event History Pruned");
     await expect(progress).toContainText("1,284 workflow events were removed by the 90-day retention policy.");
-    await expect(progress).toContainText("Outcome: Success");
-    await expect(progress).toContainText("Succeeded");
+    await expect(progress.locator(".wf-panel .facts")).toContainText(/Outcome\s*Succeeded/u);
+    await expect(progress.locator(".wf-step .status")).toHaveText("Succeeded");
   });
 }

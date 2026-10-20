@@ -447,3 +447,28 @@ export function formatCalendarTime(instant: number, now = Date.now(), timeZone?:
   const year = (value: number) => new Intl.DateTimeFormat("en-CA", { year: "numeric", ...zone }).format(new Date(value));
   return `${format({ month: "short", day: "numeric", ...(year(instant) !== year(now) ? { year: "numeric" } : {}) })}, ${time}`;
 }
+
+const countOf = (count: number, unit: string) => `${count} ${unit}${count === 1 ? "" : "s"}`;
+
+/**
+ * A moment still to come, as its time and how long until it (#2977): "2:36 AM, in 4 minutes",
+ * "2:36 AM, in less than a minute", "3:40 AM, in 1 hour 4 minutes"; on another day the time is
+ * `formatCalendarTime()`'s ("Tomorrow, 2:36 AM, in 23 hours"). The wait counts the clock's minutes
+ * from now to then, so at 2:31 the words for 2:36 always say 5 minutes, whatever the seconds. Under a
+ * minute away reads "in less than a minute", and a moment already here reads "now". In the viewer's
+ * time zone unless one is given.
+ */
+export function formatFuture(at: number, now = Date.now(), timeZone?: string, locale?: string): string {
+  if (!Number.isFinite(at) || !Number.isFinite(now)) return "";
+  const wait = at - now;
+  if (wait <= 0) return "now";
+  const time = calendarDay(at, timeZone) === calendarDay(now, timeZone)
+    ? formatClock(at, locale, timeZone)
+    : formatCalendarTime(at, now, timeZone, locale);
+  const minutes = Math.floor(at / 60_000) - Math.floor(now / 60_000);
+  const until = wait < 60_000 ? "less than a minute"
+    : minutes < 60 ? countOf(minutes, "minute")
+      : minutes % 60 === 0 || minutes >= 24 * 60 ? countOf(Math.round(minutes / 60), "hour")
+        : `${countOf(Math.floor(minutes / 60), "hour")} ${countOf(minutes % 60, "minute")}`;
+  return `${time}, in ${until}`;
+}
