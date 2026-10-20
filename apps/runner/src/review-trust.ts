@@ -122,7 +122,7 @@ const PROVIDER_HOME_VARIABLES = ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] as const;
 
 /** Where the runner's configuration and its sessions say provider state lives. */
 export interface SessionWritableSources {
-  workspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "path" | "additionalDirectoryGrants">>;
+  workspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "path" | "additionalDirectoryGrants" | "sharedWritableDirectories">>;
   providerAccounts?: ReadonlyArray<Pick<RunnerProviderAccount, "directory">>;
   agents?: ReadonlyArray<Pick<RunnerConfigAgent, "id" | "env">>;
   sessions?: Iterable<Pick<SessionMeta, "repoPath" | "worktreePath" | "worktrees" | "env" | "providerCredentialHome" |
@@ -146,7 +146,8 @@ export function configuredSessionWritablePaths(sources: SessionWritableSources):
   };
   const hostEnv = sources.hostEnv ?? {};
   fromEnvironment((name) => hostEnv[name]);
-  for (const workspace of sources.workspaces ?? []) paths.push(workspace.path, ...(workspace.additionalDirectoryGrants ?? []));
+  for (const workspace of sources.workspaces ?? []) paths.push(workspace.path, ...(workspace.additionalDirectoryGrants ?? []),
+    ...(workspace.sharedWritableDirectories ?? []));
   for (const account of sources.providerAccounts ?? []) paths.push(account.directory);
   for (const agent of sources.agents ?? []) {
     fromEnvironment((name) => {

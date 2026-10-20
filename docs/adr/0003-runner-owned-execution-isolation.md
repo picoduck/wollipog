@@ -156,6 +156,12 @@ Credentials, configuration, plugin state, and unknown ACP adapter layouts remain
 refresh or an adapter that requires a different writable home path may fail with `EROFS`; the runner
 does not broaden home write access by guessing. Provider mode remains the native compatibility option.
 
+For deliberately shared application runtime state, an operator may configure exact per-workspace
+`sharedWritableDirectories` on native Linux. These are explicit exceptions, separate from provider
+credentials and private transcript state; see [Project Shared Runtime Directories](../project-shared-directories.md).
+The containing credential directory remains read-only. Reviewers and scratch-only Orchestrators do
+not inherit these grants.
+
 The runner creates an empty real-home target directory when a provider has never created its transcript
 path; bubblewrap needs that mountpoint under the read-only parent. An explicit absolute agent `HOME`
 override is normalized and used consistently for the bind target; relative, NUL-bearing, and
