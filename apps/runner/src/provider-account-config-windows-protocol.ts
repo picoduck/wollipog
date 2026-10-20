@@ -2,7 +2,7 @@
 export const WACW_LIMITS = Object.freeze({ frame: 8 * 1024 * 1024, config: 2 * 1024 * 1024, assembly: 1024 * 1024 });
 export type WindowsPublication = "not_published" | "unknown" | "committed";
 export type WindowsCode = "SOURCE_BUSY" | "SOURCE_CHANGED" | "STORE_UNVERIFIABLE" | "CAPACITY" | "IO";
-export const WACW_DIAGNOSTIC_TAGS = Object.freeze(["Alive","Part","Blob","ExactHash","Stat","Id","Identity","Canonical","Security","Check","Open","Streams","New","Write","Read","Rename","ReleaseGuard","ContextFor","Entries","Unseal","TipFor","ReadCount","Observe","Bootstrap","LastRecordDigest","Record","Append","Fault","Run","RecordAbsent","ReadStream","Fixture"] as const);
+export const WACW_DIAGNOSTIC_TAGS = Object.freeze(["Alive","Part","Blob","ExactHash","Stat","Id","Identity","Canonical","Security","Check","Open","Streams","New","Write","Read","Rename","ReleaseGuard","ContextFor","Entries","Unseal","TipFor","ReadCount","Observe","Bootstrap","LastRecordDigest","Record","Append","Fault","Run","RecordAbsent","ReadStream","Fixture","ContextPathShape","ContextPathColon","ContextPathExact","ContextArchitecture","ContextBasename","ContextParentQuery","ContextParentPid","ContextParentOpen","ContextParentTimes","ContextParentBirth","ContextDriveType","ContextGeometryQuery","ContextGeometryValues","ContextCluster","ContextVolumeQuery","ContextVolumeType","ContextLegacy"] as const);
 export type WindowsDiagnosticTag = (typeof WACW_DIAGNOSTIC_TAGS)[number];
 const DIAGNOSTIC_TAGS = new Set<string>(WACW_DIAGNOSTIC_TAGS);
 export class WindowsAccountConfigError extends Error {

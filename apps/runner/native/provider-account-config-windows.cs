@@ -18,7 +18,7 @@ public static class WollipogAccountConfigWindowsV1 {
  static readonly Encoding Utf=new UTF8Encoding(false,true);
  static readonly string[] Slots={"anchor","header","journal","guard","anchor.pending","header.pending","journal.pending","config.pending"};
  // Diagnostics are fixed member literals only; never paths, SIDs, expressions or OS error text.
- static readonly string[] DiagnosticTags={"Alive","Part","Blob","ExactHash","Stat","Id","Identity","Canonical","Security","Check","Open","Streams","New","Write","Read","Rename","ReleaseGuard","ContextFor","Entries","Unseal","TipFor","ReadCount","Observe","Bootstrap","LastRecordDigest","Record","Append","Fault","Run","RecordAbsent","ReadStream","Fixture"};
+ static readonly string[] DiagnosticTags={"Alive","Part","Blob","ExactHash","Stat","Id","Identity","Canonical","Security","Check","Open","Streams","New","Write","Read","Rename","ReleaseGuard","ContextFor","Entries","Unseal","TipFor","ReadCount","Observe","Bootstrap","LastRecordDigest","Record","Append","Fault","Run","RecordAbsent","ReadStream","Fixture","ContextPathShape","ContextPathColon","ContextPathExact","ContextArchitecture","ContextBasename","ContextParentQuery","ContextParentPid","ContextParentOpen","ContextParentTimes","ContextParentBirth","ContextDriveType","ContextGeometryQuery","ContextGeometryValues","ContextCluster","ContextVolumeQuery","ContextVolumeType","ContextLegacy"};
  sealed class Refusal:Exception { internal string Code,Phase; internal Refusal(string code,string phase){Code=code;Phase=Array.IndexOf(DiagnosticTags,phase)>=0?phase:"";} }
  sealed class Request { internal byte Op,Fault; internal int Pid; internal string Path,Stamp,Birth,Before,After,Bindings; internal byte[] Next; }
  sealed class Tip { internal string Epoch="",Identity="",Digest="",Config=""; internal int Revision,Records; internal long Bytes; }
@@ -115,18 +115,18 @@ public static class WollipogAccountConfigWindowsV1 {
  }
  static void ReleaseGuard(SafeFileHandle h){IntPtr p=Marshal.AllocHGlobal(1);try{Marshal.WriteByte(p,1);Need(SetFileInformationByHandle(h,4,p,1),"IO");}finally{Marshal.FreeHGlobal(p);}}
  static Context ContextFor(Request r){
-  Need(r.Path.Length>3&&r.Path.Length<32768&&Char.IsLetter(r.Path[0])&&r.Path[1]==':'&&r.Path[2]=='\\');Need(r.Path.IndexOf(':',2)<0);string full=System.IO.Path.GetFullPath(r.Path);Need(String.Equals(full,r.Path,StringComparison.OrdinalIgnoreCase));
+  Need(r.Path.Length>3&&r.Path.Length<32768&&Char.IsLetter(r.Path[0])&&r.Path[1]==':'&&r.Path[2]=='\\',"STORE_UNVERIFIABLE","ContextPathShape");Need(r.Path.IndexOf(':',2)<0,"STORE_UNVERIFIABLE","ContextPathColon");string full=System.IO.Path.GetFullPath(r.Path);Need(String.Equals(full,r.Path,StringComparison.OrdinalIgnoreCase),"STORE_UNVERIFIABLE","ContextPathExact");
   var c=new Context{Path=full,Parent=System.IO.Path.GetDirectoryName(full),Sid=WindowsIdentity.GetCurrent().User.Value};
   try{
-   Need(IntPtr.Size==8);string name=System.IO.Path.GetFileName(full);Need(name.Length<=100&&!name.EndsWith(".")&&!name.EndsWith(" "));c.Prefix="."+name+".account-publications-win-v1.";
-   PBI pi;int returned;Need(NtQueryInformationProcess(GetCurrentProcess(),0,out pi,Marshal.SizeOf(typeof(PBI)),out returned)==0&&pi.ParentPid.ToInt64()==r.Pid);
-   c.ParentProcess=OpenProcess(0x101000,false,r.Pid);Need(!c.ParentProcess.IsInvalid);long creation,exit,kernel,user;Need(GetProcessTimes(c.ParentProcess,out creation,out exit,out kernel,out user));c.Birth=creation.ToString();Need(r.Birth==""||r.Birth==c.Birth,"SOURCE_CHANGED");c.Alive();
-   string root=System.IO.Path.GetPathRoot(full);Need(GetDriveTypeW(root)==3);uint sectors,bytes,free,total;Need(GetDiskFreeSpaceW(root,out sectors,out bytes,out free,out total));Need(sectors>0&&bytes>0&&(long)sectors*bytes<=4096);
+   Need(IntPtr.Size==8,"STORE_UNVERIFIABLE","ContextArchitecture");string name=System.IO.Path.GetFileName(full);Need(name.Length<=100&&!name.EndsWith(".")&&!name.EndsWith(" "),"STORE_UNVERIFIABLE","ContextBasename");c.Prefix="."+name+".account-publications-win-v1.";
+   PBI pi;int returned;Need(NtQueryInformationProcess(GetCurrentProcess(),0,out pi,Marshal.SizeOf(typeof(PBI)),out returned)==0,"STORE_UNVERIFIABLE","ContextParentQuery");Need(pi.ParentPid.ToInt64()==r.Pid,"STORE_UNVERIFIABLE","ContextParentPid");
+   c.ParentProcess=OpenProcess(0x101000,false,r.Pid);Need(!c.ParentProcess.IsInvalid,"STORE_UNVERIFIABLE","ContextParentOpen");long creation,exit,kernel,user;Need(GetProcessTimes(c.ParentProcess,out creation,out exit,out kernel,out user),"STORE_UNVERIFIABLE","ContextParentTimes");c.Birth=creation.ToString();Need(r.Birth==""||r.Birth==c.Birth,"SOURCE_CHANGED","ContextParentBirth");c.Alive();
+   string root=System.IO.Path.GetPathRoot(full);Need(GetDriveTypeW(root)==3,"STORE_UNVERIFIABLE","ContextDriveType");uint sectors,bytes,free,total;Need(GetDiskFreeSpaceW(root,out sectors,out bytes,out free,out total),"STORE_UNVERIFIABLE","ContextGeometryQuery");Need(sectors>0&&bytes>0,"STORE_UNVERIFIABLE","ContextGeometryValues");Need((long)sectors*bytes<=4096,"STORE_UNVERIFIABLE","ContextCluster");
    string part=root;var dirs=c.Parent.Substring(root.Length).Split(new char[]{'\\'},StringSplitOptions.RemoveEmptyEntries);c.Pins.Add(Open(part,c.Sid,true,false,Attr,ReadShare|WriteShare));
    foreach(string next in dirs){part=System.IO.Path.Combine(part,next);c.Pins.Add(Open(part,c.Sid,true,false,Attr,ReadShare|WriteShare));}
    c.ParentHandle=Open(c.Parent,c.Sid,true,false,Attr|2,ReadShare|WriteShare,true);c.Pins.Add(c.ParentHandle);
-   uint serial,max,flags;var fs=new StringBuilder(32);Need(GetVolumeInformationByHandleW(c.ParentHandle,null,0,out serial,out max,out flags,fs,(uint)fs.Capacity)&&fs.ToString()=="NTFS");
-   foreach(string legacy in new string[]{"."+name+".account-publications-v1","."+name+".account-publications-anchor-v1"}){uint attr=GetFileAttributesW(System.IO.Path.Combine(c.Parent,legacy));int error=Marshal.GetLastWin32Error();Need(attr==0xffffffff&&(error==2||error==3));}return c;
+   uint serial,max,flags;var fs=new StringBuilder(32);Need(GetVolumeInformationByHandleW(c.ParentHandle,null,0,out serial,out max,out flags,fs,(uint)fs.Capacity),"STORE_UNVERIFIABLE","ContextVolumeQuery");Need(fs.ToString()=="NTFS","STORE_UNVERIFIABLE","ContextVolumeType");
+   foreach(string legacy in new string[]{"."+name+".account-publications-v1","."+name+".account-publications-anchor-v1"}){uint attr=GetFileAttributesW(System.IO.Path.Combine(c.Parent,legacy));int error=Marshal.GetLastWin32Error();Need(attr==0xffffffff&&(error==2||error==3),"STORE_UNVERIFIABLE","ContextLegacy");}return c;
   }catch{c.Dispose();throw;}
  }
  static HashSet<string> Entries(Context c,bool ownGuard){

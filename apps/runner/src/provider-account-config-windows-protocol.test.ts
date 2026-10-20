@@ -19,14 +19,14 @@ test("WACW1 valid failure frames retain publication classification", () => {
   }
   for (const [state, expected] of [[0,"not_published"],[1,"unknown"],[2,"committed"]] as const) {
     for (const code of ["SOURCE_BUSY","SOURCE_CHANGED","STORE_UNVERIFIABLE","CAPACITY","IO"] as const) {
-      for (const tag of [undefined,"ContextFor","Security","Run"] as const) {
+      for (const tag of [undefined,"ContextFor","ContextParentPid","ContextCluster","Security","Run"] as const) {
         const raw=reply(code+(tag === undefined ? "" : ":"+tag),state);
         assert.throws(() => decodeWindowsReply(raw, 2), (e: unknown) => e instanceof WindowsAccountConfigError && e.verifiedTerminal && e.publication === expected && e.code === code && e.diagnostic === tag);
         assert.throws(() => decodeWindowsReply(Buffer.concat([raw,Buffer.alloc(1)]),2));
       }
     }
   }
-  for (const code of ["IO:","IO::Security","IO:UnknownCheck","IO:Security:Run","BAD:Security","IO:C:\\private","IO:"+"x".repeat(65)]) {
+  for (const code of ["IO:","IO::Security","IO:UnknownCheck","IO:ContextClusterExtra","IO:Security:Run","BAD:Security","IO:C:\\private","IO:"+"x".repeat(65)]) {
     assert.throws(() => decodeWindowsReply(reply(code,2),2), (e: unknown) => e instanceof WindowsAccountConfigError && !e.verifiedTerminal && e.diagnostic === undefined);
   }
   for (const raw of [reply("IO:Security",0,2),reply("IO:Security",0,0,"unexpected")]) {
