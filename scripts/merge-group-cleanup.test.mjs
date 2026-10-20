@@ -66,6 +66,24 @@ test("a deleted integration absent from complete live evidence is obsolete", () 
   assert.equal(obsoleteEvidence(empty, target).obsolete, true);
 });
 
+test("explicitly unbuilt queued entries do not mask obsolete integrations", () => {
+  const payload = proof();
+  const entries = payload.data.repository.mergeQueue.entries;
+  entries.nodes.push({ state: "QUEUED", headCommit: null });
+  entries.totalCount++;
+  assert.equal(obsoleteEvidence(payload, target).obsolete, true);
+  entries.nodes[1].headCommit = { oid: sha };
+  assert.equal(obsoleteEvidence(payload, target).reason, "integration-still-needed");
+  for (const entry of [
+    { state: "QUEUED" }, { state: "QUEUED", headCommit: {} },
+    ...["AWAITING_CHECKS", "MERGEABLE", "LOCKED", "UNMERGEABLE", "UNKNOWN"]
+      .map((state) => ({ state, headCommit: null })),
+  ]) {
+    entries.nodes[1] = entry;
+    assert.equal(obsoleteEvidence(payload, target).obsolete, false);
+  }
+});
+
 test("all live queue entries and refs protect an integration, including another PR", () => {
   for (const source of ["ref", "entry", "own-ref"]) {
     const payload = proof();
@@ -140,6 +158,19 @@ test("two separated observations plus a fresh recheck cancel only the obsolete r
   assert.ok(result.logs.every((log) => log.entryPoint === "workflow_run"));
   assert.ok(result.logs.some((log) => log.runId === 456 && log.reason === "integration-ref-present"));
   assert.equal(result.result, "retained");
+});
+
+test("unbuilt entries preserve the two-observation and immediate live-head recheck", async () => {
+  const unbuilt = proof();
+  unbuilt.data.repository.mergeQueue.entries.nodes.push({ state: "QUEUED", headCommit: null });
+  unbuilt.data.repository.mergeQueue.entries.totalCount++;
+  const result = await simulate({ proofs: [unbuilt, unbuilt, unbuilt] });
+  assert.equal(result.calls.filter((c) => c.path.endsWith("/cancel")).length, 1);
+  const becomesLive = structuredClone(unbuilt);
+  becomesLive.data.repository.mergeQueue.entries.nodes[1].headCommit = { oid: sha };
+  const retained = await simulate({ proofs: [unbuilt, unbuilt, becomesLive], polls: 2 });
+  assert.equal(retained.calls.filter((c) => c.path.endsWith("/cancel")).length, 0);
+  assert.ok(retained.logs.some((l) => l.reason === "integration-still-needed"));
 });
 
 test("an attempt asked to stop is not asked again while it is still listed", async () => {

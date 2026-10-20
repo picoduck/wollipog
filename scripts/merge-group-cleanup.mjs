@@ -51,13 +51,17 @@ export function obsoleteEvidence(payload, target) {
   if (!complete(refs) || !complete(entries))
     return { obsolete: false, reason: "queue-evidence-incomplete" };
   if (refs.nodes.some((ref) => !QUEUE_BRANCH.test(QUEUE_PREFIX + ref?.name) || !SHA.test(ref?.target?.oid)) ||
-      entries.nodes.some((entry) => !STATES.has(entry?.state) || !SHA.test(entry?.headCommit?.oid)))
+      entries.nodes.some((entry) => !STATES.has(entry?.state) ||
+        // Build-concurrency admission leaves unbuilt entries QUEUED with an explicit null head.
+        // They name no integration. All computed heads (even QUEUED) remain live dependencies;
+        // absent fields and null heads on any other state are still ambiguous.
+        (!SHA.test(entry?.headCommit?.oid) && !(entry?.state === "QUEUED" && entry.headCommit === null))))
     return { obsolete: false, reason: "queue-evidence-ambiguous" };
   // The ref listing is complete, so the integration's own ref exists exactly when it is listed.
   if (refs.nodes.some((ref) => QUEUE_PREFIX + ref.name === target.branch))
     return { obsolete: false, reason: "integration-ref-present" };
   if (refs.nodes.some((ref) => ref.target.oid === target.sha) ||
-      entries.nodes.some((entry) => entry.headCommit.oid === target.sha))
+      entries.nodes.some((entry) => entry.headCommit?.oid === target.sha))
     return { obsolete: false, reason: "integration-still-needed" };
   return { obsolete: true, reason: "integration-absent-from-complete-queue" };
 }
