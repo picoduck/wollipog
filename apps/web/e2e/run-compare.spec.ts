@@ -57,6 +57,17 @@ test.describe("at 1440×900", () => {
       expect(column.border, "hairlines between columns, no boxes").toBe(index === 0 ? "0px" : "1px");
     });
     await expect(page.locator(".compare-member").nth(0).locator(".compare-member-meta")).toHaveText("2 commands, 1 edit, 2 files read");
+
+    // The task strip's meta keeps every item whole, its last included.
+    const meta = await page.locator(".run-task-meta").evaluate((element) => {
+      const strip = element.getBoundingClientRect();
+      return [...element.children].map((item) => ({
+        text: item.textContent ?? "",
+        clipped: item.scrollWidth > item.clientWidth || item.getBoundingClientRect().right > strip.right,
+      }));
+    });
+    expect(meta.at(-1)?.text).toBe("Each agent works in its own worktree");
+    for (const item of meta) expect(item.clipped, `${item.text} is whole`).toBe(false);
   });
 
   test("a running member says Working…, and the run reads Running", async ({ page }) => {
@@ -69,17 +80,21 @@ test.describe("at 1440×900", () => {
 test.describe("at 834×1112 (compact)", () => {
   test.use({ viewport: { width: 834, height: 1112 } });
 
-  test("three agents show two at a time and the row fades its right edge while more lie beyond", async ({ page }) => {
+  test("three agents show two at a time and the row fades its right edge over the next column", async ({ page }) => {
     await open(page, "three");
     const row = page.locator(".compare");
-    const geometry = await row.evaluate((element) => ({
-      rowWidth: element.clientWidth,
-      columnWidths: [...element.querySelectorAll<HTMLElement>(":scope > .compare-member")].map((column) => column.getBoundingClientRect().width),
-    }));
-    for (const width of geometry.columnWidths) {
-      expect(width).toBeGreaterThanOrEqual(320);
-      expect(Math.abs(width - geometry.rowWidth / 2)).toBeLessThanOrEqual(1);
+    const geometry = await row.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const columns = [...element.querySelectorAll<HTMLElement>(":scope > .compare-member")].map((column) => column.getBoundingClientRect());
+      return { rowWidth: element.clientWidth, rowRight: rect.right, columns: columns.map((column) => ({ width: column.width, left: column.left })) };
+    });
+    const fade = 24;
+    for (const column of geometry.columns) {
+      expect(column.width).toBeGreaterThanOrEqual(320);
+      expect(Math.abs(column.width - (geometry.rowWidth - fade) / 2)).toBeLessThanOrEqual(1);
     }
+    // The third column shows the fade's width under the fade, so the fade covers a column.
+    expect(Math.abs(geometry.rowRight - geometry.columns[2]!.left - fade)).toBeLessThanOrEqual(1);
     await expect(row).toHaveAttribute("data-clip-end", "");
     await row.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
     await expect(row).not.toHaveAttribute("data-clip-end", "");

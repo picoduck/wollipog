@@ -11139,10 +11139,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin-left: 0;
 }
 .compare[data-clip-end] { mask-image: linear-gradient(to left, transparent, #000 var(--space-6)); }
-/* The compact tier shows two columns at a time (§15.2). A fixed size: the row already overflows, so
-   a track's minmax() maximum would never be reached. */
+/* The compact tier shows two columns at a time (§15.2), leaving the fade's width of the next column
+   showing under it, so the fade covers a column rather than the second one's padding. A fixed size:
+   the row already overflows, so a track's minmax() maximum would never be reached. */
 @container app (max-width: 1099px) {
-  .compare:has(> :nth-child(3)) { grid-auto-columns: max(320px, 50%); }
+  .compare:has(> :nth-child(3)) { grid-auto-columns: max(320px, calc(50% - var(--space-6) / 2)); }
 }
 .compare-member {
   display: flex;
