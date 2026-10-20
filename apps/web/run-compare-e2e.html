@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wollipog Comparison Run E2E</title>
+    <!-- Text-heavy cross-platform measurements must not depend on each host's system-ui choice. -->
+    <style>
+      html body { font-family: Arial, sans-serif; }
+      /* The desktop rail's width, so the columns get the room they get in the app. */
+      @media (min-width: 761px) { .run-compare-e2e-rail { flex: none; width: 64px; border-right: 1px solid var(--border); } }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/e2e/run-compare-main.tsx"></script>
+  </body>
+</html>

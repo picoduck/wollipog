@@ -937,7 +937,7 @@ export function Shell() {
               removing the branch entirely would make a bookmarked /runs a silent Inbox redirect. */}
           {(view.name === "runs" || view.name === "run") && (
             <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view, entityTitle)} onOpenSettings={openExperimentalSettings}>
-              {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} />}
+              {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} member={view.member} />}
             </ExperimentGate>
           )}
           {(view.name === "pods" || view.name === "pod") && (

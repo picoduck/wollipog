@@ -1,15 +1,15 @@
 import { BotIcon, CompareIcon, ProjectsIcon, RunsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
-import { StatusBadge } from "./StatusBadge.js";
-import { statusMeta } from "../status-meta.js";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { StatusBadge, statusToneClass } from "./StatusBadge.js";
+import { sessionStatusSummary, statusMeta } from "../status-meta.js";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import type { RunView, SessionView, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { formatRecordedRelativeTime, relativeTime, titleCaseLabel } from "../format.js";
+import { formatClock, formatRecordedRelativeTime, localDayLabel, relativeTime, titleCaseLabel } from "../format.js";
 import { useApi } from "../api-context.js";
-import { SessionStatusIndicators } from "./common.js";
-import { EventTimeline } from "./EventTimeline.js";
+import { CompareMemberBody, CompareMemberHead, CompareRow } from "./CompareColumns.js";
 import { useTimeline } from "./useTimeline.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { nextWorkflowRetryAt, workflowRetryTimerDelay } from "../workflow-retry.js";
@@ -21,56 +21,122 @@ import { transcriptPresentation } from "../transcript-presentation.js";
 import { ArtifactPreviewDialog, ArtifactRow } from "./ArtifactPreview.js";
 import { ListFoot } from "./ListFoot.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { DetailBar, PageHeader } from "./PageHeader.js";
+import { DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
 import { StaleContent } from "./StaleContent.js";
 import { indexRunWorkflows, runStatus, runType, runTypeLabel, type RunWorkflows } from "../run-status.js";
-import { backLabel, destination, viewTitle } from "../navigation.js";
-import { isTimelineSessionActive, useTimelineClock } from "../timeline-clock.js";
+import { absoluteViewUrl, backLabel, destination, viewTitle } from "../navigation.js";
+import { useTimelineClock } from "../timeline-clock.js";
+import { memberActivity, memberActivityLine } from "../member-activity.js";
+import { useIsMobile } from "./useIsMobile.js";
+import { TabList } from "./Tabs.js";
+import { Modal } from "./Modal.js";
+import { useFeedback } from "./FeedbackProvider.js";
+import { useDashboardPublicOrigin } from "../remote-access-context.js";
+import { writeClipboardText } from "../clipboard.js";
+import { DEVELOPMENT_BUILD } from "../config.js";
 
 const EMPTY_SESSION_IDS: string[] = [];
+const NO_RUN_LINK_REASON = "Open Wollipog in a browser to copy a link.";
+const DEVELOPMENT_LINK_HINT = "Development builds can set VITE_DASHBOARD_ORIGIN.";
 const sameSessionIds = (left: readonly string[], right: readonly string[]) =>
   left.length === right.length && left.every((id, index) => id === right[index]);
 
-/** One member's live column. Its own component so each member subscribes to ITS event slice
- * and folds incrementally — a 4-agent compare no longer re-derives four full timelines per
- * streamed chunk of any one of them. */
-function MemberColumn({ sessionId }: { sessionId: string }) {
+/** The member's ⋯ (#2975), the same in a desktop column's head and the phone's member bar. */
+function memberMenu(openSession: () => void): PageMenuAction[] {
+  return [{ label: "Open Session", onClick: openSession }];
+}
+
+/** One member's live column (§12.5's reading column, #2975). Its own component so each member
+ * subscribes to ITS event slice and folds incrementally — a 4-agent compare no longer re-derives
+ * four full timelines per streamed chunk of any one of them. */
+function MemberColumn({ sessionId, onRetry, panel }: {
+  sessionId: string;
+  /** Loads the run's member histories again after a failure. */
+  onRetry: () => void;
+  /** On a phone, the one column is the member tabs' panel. */
+  panel?: { id: string; labelledBy: string };
+}) {
   const { navigate } = useStoreActions();
   const session = useStoreSelector((state) => selectComparisonSession(state, sessionId));
   const evs = useStoreSelector((state) => selectComparisonEvents(state, sessionId));
   const history = useStoreSelector((state) => selectComparisonHistory(state, sessionId));
+  // Only a machine known to be offline is Disconnected, as in the member's tab (§4.3).
   const runnerOnline = useStoreSelector((state) => session
-    ? state.runners.get(session.runnerId)?.status === "online"
+    ? state.runners.get(session.runnerId)?.status !== "offline"
     : true);
   const conn = useStoreSelector((state) => state.conn);
   const items = useTimeline(sessionId, evs, session?.eventEpoch ?? 0);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const activity = useMemo(() => memberActivity(items), [items]);
   if (!session) return null;
   const presentation = transcriptPresentation({ itemCount: items.length, hasOptimistic: false, working: false, history, conn });
   const agentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
+  const openSession = () => navigate({ name: "session", id: sessionId });
+  // What it did, counted from its timeline once that is known.
+  const known = presentation.body === "timeline" || presentation.body === "empty";
+  const did = memberActivityLine(statusMeta("session", session.status).pulse, known ? activity : null);
   return (
-    <div className="compare-col">
-      <button className="compare-head" type="button" onClick={() => navigate({ name: "session", id: sessionId })}>
-        <div className="compare-agent">{agentLabel}</div>
-        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-      </button>
-      <div className="compare-body measured-virtual-scroll" ref={scrollRef} role="region" aria-label={`${agentLabel} activity`} aria-busy={presentation.busy} tabIndex={0}>
-        {presentation.notice === "refreshing" && <div className="muted sm" role="status">Checking for missed activity…</div>}
-        {presentation.notice === "stale" && <div className="muted sm" role="status">Showing cached activity.</div>}
-        {presentation.notice === "error" && <div className="muted sm" role="status">Activity refresh failed.</div>}
-        {presentation.body === "timeline" ? (
-          <EventTimeline
-            items={items}
-            driver={session.driver}
-            sessionActive={isTimelineSessionActive(session.status)}
-            scrollRef={scrollRef}
-            historyKey={`${sessionId}:${session.eventEpoch ?? 0}`}
-          />
-        ) : presentation.body === "empty" ? <div className="muted sm" role="status">No activity yet.</div>
-          : presentation.body === "skeleton" ? <div className="muted sm" role="status">Loading activity…</div>
-            : <div className="muted sm" role="status">Activity unavailable.</div>}
-      </div>
-    </div>
+    <section
+      className="compare-member"
+      aria-label={panel ? undefined : agentLabel}
+      id={panel?.id}
+      role={panel ? "tabpanel" : undefined}
+      aria-labelledby={panel?.labelledBy}
+    >
+      <CompareMemberHead
+        agent={agentLabel}
+        session={session}
+        runnerOnline={runnerOnline}
+        onOpenSession={openSession}
+        menu={memberMenu(openSession)}
+      />
+      <p className="compare-member-meta">{did}</p>
+      <CompareMemberBody
+        agent={agentLabel}
+        session={session}
+        items={items}
+        presentation={presentation}
+        conn={conn}
+        loaded={evs?.length ?? 0}
+        onRetry={onRetry}
+      />
+    </section>
+  );
+}
+
+const memberTabId = (index: number) => `run-member-tab-${index}`;
+const MEMBER_PANEL_ID = "run-member-panel";
+
+/** A phone's member tab: the agent and its status as a dot, named in words. */
+function MemberTab({ sessionId, index, selected, onSelect, onKeyDown }: {
+  sessionId: string;
+  index: number;
+  selected: boolean;
+  onSelect: () => void;
+  onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
+}) {
+  const session = useStoreSelector((state) => selectComparisonSession(state, sessionId));
+  const runnerOnline = useStoreSelector((state) => session
+    ? state.runners.get(session.runnerId)?.status !== "offline"
+    : true);
+  if (!session) return null;
+  const agentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
+  const status = sessionStatusSummary(session, { runnerOnline }).primary.meta;
+  return (
+    <button
+      id={memberTabId(index)}
+      type="button"
+      role="tab"
+      aria-selected={selected}
+      aria-controls={MEMBER_PANEL_ID}
+      tabIndex={selected ? 0 : -1}
+      className="tab compare-tab"
+      onClick={onSelect}
+      onKeyDown={onKeyDown}
+    >
+      <span className={`compare-tab-dot ${statusToneClass(status.tone)}`} aria-hidden="true" />
+      {agentLabel}
+      <span className="sr-only">, {status.label}</span>
+    </button>
   );
 }
 
@@ -226,12 +292,23 @@ export function RunRow({ run, sessions, workflows, now, onOpen }: {
 
 /** Keyed by run: the route renders this in place, so a direct run-to-run change would otherwise
  * reuse one instance and show the previous run's workflow, artifacts and errors. */
-export function RunDetail({ runId }: { runId: string }) {
-  return <RunDetailContent key={runId} runId={runId} />;
+export function RunDetail({ runId, member }: {
+  runId: string;
+  /** The member the URL names (`?member=`), which a phone shows. */
+  member?: string;
+}) {
+  return <RunDetailContent key={runId} runId={runId} member={member} />;
 }
 
-function RunDetailContent({ runId }: { runId: string }) {
+function RunDetailContent({ runId, member }: { runId: string; member?: string }) {
   const api = useApi();
+  const phone = useIsMobile();
+  const { showToast } = useFeedback();
+  const dashboardOrigin = useDashboardPublicOrigin();
+  const [taskOpen, setTaskOpen] = useState(false);
+  // Retry on a member's failed history loads every member's history again.
+  const [historyRetry, setHistoryRetry] = useState(0);
+  const retryHistory = useCallback(() => setHistoryRetry((value) => value + 1), []);
   const { eventEpoch, loadEvents, navigate, recoveryAfter, beginEventHistoryLoad, failEventHistoryLoad } = useStoreActions();
   const run = useStoreSelector((s) => s.runs.get(runId));
   const conn = useStoreSelector((s) => s.conn);
@@ -254,6 +331,8 @@ function RunDetailContent({ runId }: { runId: string }) {
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [workflow, setWorkflow] = useState<WorkflowInstanceDetail | null>(null);
   const [workflowError, setWorkflowError] = useState<string | null>(null);
+  // Whether a load has said if the run has a workflow, so a run with none reads as a Comparison.
+  const [workflowKnown, setWorkflowKnown] = useState(false);
   const [workflowBusy, setWorkflowBusy] = useState<string | null>(null);
   // Retry delays are durable timestamps, not socket events. Keep a small local clock while a
   // delayed node exists so the button becomes actionable at readyAt even if nothing else renders.
@@ -309,7 +388,7 @@ function RunDetailContent({ runId }: { runId: string }) {
       },
     );
     return () => { current = false; };
-  }, [api, recoverySessionIds, eventEpoch, loadEvents, recoveryAfter, conn, recoveryRevision, recoveryEpochKey, recoveryGeneration, beginEventHistoryLoad, failEventHistoryLoad]);
+  }, [api, recoverySessionIds, eventEpoch, loadEvents, recoveryAfter, conn, recoveryRevision, recoveryEpochKey, recoveryGeneration, beginEventHistoryLoad, failEventHistoryLoad, historyRetry]);
 
   useEffect(() => {
     if (!run || conn !== "online") return;
@@ -319,6 +398,7 @@ function RunDetailContent({ runId }: { runId: string }) {
       .then((detail) => {
         if (!current) return;
         setWorkflow(detail);
+        setWorkflowKnown(true);
         setWorkflowError(null);
       })
       .catch((error: unknown) => { if (current) setWorkflowError((error as Error).message); });
@@ -391,6 +471,8 @@ function RunDetailContent({ runId }: { runId: string }) {
     }
   };
 
+  const status = useStoreSelector((state) => run ? runStatus(run, state.sessions, workflow) : null);
+
   const back = () => navigate({ name: "runs" });
   if (!run) {
     const placeholder = detailPlaceholder("Run", { authoritative: snapshotLoaded, conn });
@@ -410,10 +492,67 @@ function RunDetailContent({ runId }: { runId: string }) {
     );
   }
 
+  const members = run.sessionIds;
+  // A phone shows one member: the one the URL names while it is still a member, else the first.
+  const shownMember = member !== undefined && members.includes(member) ? member : members[0];
+  const selectMember = (sessionId: string) => {
+    // The choice replaces the entry rather than adding one, so Back still leaves the run.
+    navigate({ name: "run", id: runId, member: sessionId }, { replace: true });
+  };
+  const onMemberTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const last = members.length - 1;
+    const next = event.key === "ArrowRight" ? (index === last ? 0 : index + 1)
+      : event.key === "ArrowLeft" ? (index === 0 ? last : index - 1)
+        : event.key === "Home" ? 0
+          : event.key === "End" ? last
+            : null;
+    if (next === null) return;
+    event.preventDefault();
+    flushSync(() => selectMember(members[next]!));
+    document.getElementById(memberTabId(next))?.focus();
+  };
+
+  const runLink = dashboardOrigin ? absoluteViewUrl(dashboardOrigin, { name: "run", id: runId, ...(member ? { member } : {}) }) : null;
+  const copyLink = async () => {
+    if (!runLink) return;
+    const copied = await writeClipboardText(runLink, () => true);
+    if (copied === null) return;
+    showToast(copied ? "Link copied." : "Couldn't copy the link.", { tone: copied ? "success" : "error" });
+  };
+  const typeLabel = workflow ? workflow.definition.name : workflowKnown ? "Comparison" : null;
+  const started = `Started ${localDayLabel(run.createdAt, Date.now())}, ${formatClock(run.createdAt)}`;
+
   return (
     <div className="run-detail">
-      <DetailBar title={viewTitle({ name: "run", id: runId }, run.title)} backLabel={backLabel("runs")} onBack={back} />
-      <p className="detail-summary">{run.prompt}</p>
+      <DetailBar
+        title={viewTitle({ name: "run", id: runId }, run.title)}
+        backLabel={backLabel("runs")}
+        onBack={back}
+        status={status && <StatusBadge meta={statusMeta("run", status)} />}
+        menu={[
+          { label: "Show Full Task", onClick: () => setTaskOpen(true) },
+          {
+            label: "Copy Link",
+            disabled: !runLink,
+            description: runLink ? undefined : DEVELOPMENT_BUILD ? `${NO_RUN_LINK_REASON} ${DEVELOPMENT_LINK_HINT}` : NO_RUN_LINK_REASON,
+            onClick: () => void copyLink(),
+          },
+        ]}
+      />
+      <div className="run-task">
+        <p className="run-task-prompt">{run.prompt}</p>
+        <p className="run-task-meta">
+          {typeLabel && <span>{typeLabel}</span>}
+          {run.workspaceName && <span><ProjectsIcon size={14} aria-hidden="true" /><span>{run.workspaceName}</span></span>}
+          <span><time dateTime={new Date(run.createdAt).toISOString()}>{started}</time></span>
+          {!workflow && workflowKnown && <span>Each agent works in its own worktree</span>}
+        </p>
+      </div>
+      {taskOpen && (
+        <Modal title="Task" onClose={() => setTaskOpen(false)} footer={<button type="button" className="btn" onClick={() => setTaskOpen(false)}>Done</button>}>
+          <p className="run-task-full">{run.prompt}</p>
+        </Modal>
+      )}
 
       {(workflow || workflowError) && (
         <section className="workflow-inspector" aria-label="Workflow Progress">
@@ -475,9 +614,37 @@ function RunDetailContent({ runId }: { runId: string }) {
       )}
       {selectedArtifact && <ArtifactPreviewDialog artifact={selectedArtifact} onClose={() => setSelectedArtifact(null)} />}
 
-      <div className="compare-grid" style={{ gridTemplateColumns: `repeat(${Math.max(run.sessionIds.length, 1)}, minmax(320px, 1fr))` }}>
-        {run.sessionIds.map((sessionId) => <MemberColumn key={sessionId} sessionId={sessionId} />)}
-      </div>
+      {phone ? (
+        // One member at a time under its tabs (§15.1); the column's head is the member bar.
+        members.length > 0 && (
+          <div className="compare-phone">
+            <TabList label="Agents" className="compare-tabs">
+              {members.map((sessionId, index) => (
+                <MemberTab
+                  key={sessionId}
+                  sessionId={sessionId}
+                  index={index}
+                  selected={sessionId === shownMember}
+                  onSelect={() => selectMember(sessionId)}
+                  onKeyDown={(event) => onMemberTabKeyDown(event, index)}
+                />
+              ))}
+            </TabList>
+            {shownMember && (
+              <MemberColumn
+                key={shownMember}
+                sessionId={shownMember}
+                onRetry={retryHistory}
+                panel={{ id: MEMBER_PANEL_ID, labelledBy: memberTabId(members.indexOf(shownMember)) }}
+              />
+            )}
+          </div>
+        )
+      ) : (
+        <CompareRow label="Agents">
+          {members.map((sessionId) => <MemberColumn key={sessionId} sessionId={sessionId} onRetry={retryHistory} />)}
+        </CompareRow>
+      )}
     </div>
   );
 }

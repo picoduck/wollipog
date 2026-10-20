@@ -21,7 +21,8 @@ export type View =
   | { name: "archived" }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
   | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
-  | { name: "run"; id: string }
+  /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
+  | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
   | { name: "pod"; id: string };
 
@@ -409,7 +410,7 @@ export function viewPath(view: View): string {
       : view.attention
       ? `/sessions/~${encodeResourceId(view.id)}/attention${view.attention.requestId === undefined ? "" : `/~${encodeOpaque(view.attention.requestId)}`}?epoch=${view.attention.eventEpoch}`
       : `/sessions/~${encodeResourceId(view.id)}`;
-    case "run": return `/runs/~${encodeResourceId(view.id)}`;
+    case "run": return `/runs/~${encodeResourceId(view.id)}${runMemberSearch(view.member)}`;
     case "settings": return view.section === "approvals" && view.policyId !== undefined
       ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
       : view.section ? `/settings/${view.section}` : "/settings";
@@ -440,11 +441,30 @@ function locationFromSearch(path: string, search: string): SourceLocation | null
   });
 }
 
-function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string): View | null {
+const RUN_MEMBER_PARAM = "member";
+
+function runMemberSearch(member: string | undefined): string {
+  return member === undefined ? "" : `?${new URLSearchParams({ [RUN_MEMBER_PARAM]: member }).toString()}`;
+}
+
+/** The member a run URL names: undefined when it names none or its query is not a member. */
+function runMemberFromSearch(search: string): string | undefined {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const keys = [...params.keys()];
+  if (keys.length !== 1 || keys[0] !== RUN_MEMBER_PARAM) return undefined;
+  const member = params.get(RUN_MEMBER_PARAM) ?? "";
+  return !member.trim() || member.length > MAX_RESOURCE_ID_LENGTH ? undefined : member;
+}
+
+function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string, search: string): View | null {
   const id = decodeResourceId(encodedId);
   if (id === null) return null;
   if (kind === "sessions") return { name: "session", id };
-  if (kind === "runs") return { name: "run", id };
+  if (kind === "runs") {
+    // A query that is not a member keeps the run open rather than failing the route.
+    const member = runMemberFromSearch(search);
+    return member === undefined ? { name: "run", id } : { name: "run", id, member };
+  }
   return { name: "pod", id };
 }
 
@@ -516,7 +536,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return location ? { name: "session", id, location } : null;
   }
   const match = /^\/(sessions|runs|pods)\/~([^/]+)$/.exec(path);
-  return match ? resourceView(match[1] as "sessions" | "runs" | "pods", match[2]!) : null;
+  return match ? resourceView(match[1] as "sessions" | "runs" | "pods", match[2]!, search) : null;
 }
 
 /** Compatibility bridge for notification links created by older service workers. */
