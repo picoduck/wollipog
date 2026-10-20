@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
-import { readReleaseTimings } from "./release-timings.mjs";
+import { FINALIZER_JOB, NATIVE_RELEASE_JOBS, readReleaseTimings } from "./release-timings.mjs";
 
 const SHA = /^[a-f0-9]{40}$/;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -17,6 +17,7 @@ const VERSION_FILES = ["package.json", "apps/desktop/package.json", "apps/deskto
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const positive = (value) => Number.isSafeInteger(value) && value > 0;
+const entry = (path) => { try { return lstatSync(path); } catch (error) { if (error.code === "ENOENT") return null; throw error; } };
 export const notesPath = (version) => `docs/release-notes-v${version}.md`;
 
 /** No credentials or persisted authority: grants are supplied anew by the caller on each invocation. */
@@ -35,7 +36,7 @@ export function validateCheckpoint(state) {
 export function saveCheckpoint(path, state) {
   validateCheckpoint(state);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  check(!existsSync(path) || !lstatSync(path).isSymbolicLink(), "Checkpoint must not be a symlink");
+  check(!entry(path)?.isSymbolicLink(), "Checkpoint must not be a symlink");
   const temporary = `${path}.${randomUUID()}.tmp`;
   const fd = openSync(temporary, "wx", 0o600);
   try { writeFileSync(fd, JSON.stringify(state, null, 2) + "\n"); fsyncSync(fd); }
@@ -79,6 +80,7 @@ export function services(cwd = process.cwd(), cacheDirectory = null) {
     run: (program, args, options) => command(program, args, { cwd, ...options }),
     notes: (state) => command("git", ["show", `${state.headSha}:${state.notesPath}`], { cwd }),
     verify: (state, release) => verifyPublishedAssets(state, release, { cwd, git, api, pages, cacheDirectory }),
+    gates: (state) => verifyReleaseJobs(state, pages(`repos/${state.repository}/actions/runs/${state.runId}/jobs?filter=latest`, "jobs")),
     timings: (state) => readReleaseTimings(state.repository, state.runId, (args) => JSON.parse(gh(args))),
   };
 }
@@ -176,6 +178,27 @@ export function prepare(version, checkpoint, io = services()) {
 
 export const PR_QUERY = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){nameWithOwner pullRequest(number:$number){number state isDraft headRefOid headRefName baseRefName headRepository{nameWithOwner} mergeCommit{oid} mergeQueueEntry{state position headCommit{oid}}}}}`;
 
+/** Main may legitimately change dependency-bearing files while a version PR waits in the queue. */
+export function verifyMergedPreparation(state, io) {
+  const files = Object.fromEntries(VERSION_FILES.map((file) => [file, io.run("git", ["show", `${state.mergeSha}:${file}`])]));
+  try { bumpVersions(files, state.version, state.version); }
+  catch { throw new Error("Merged release versions differ from the reviewed preparation"); }
+  check(digest(io.run("git", ["show", `${state.mergeSha}:${state.notesPath}`])) === state.notesSha256,
+    "Merged release notes differ from the reviewed preparation");
+}
+
+/** Publication gates depend on job identity and success, independently of timing availability. */
+export function verifyReleaseJobs(state, jobs) {
+  for (const name of [...NATIVE_RELEASE_JOBS, FINALIZER_JOB]) {
+    const matches = jobs.filter((job) => job.name === name);
+    check(matches.length === 1, `Missing or ambiguous required release job: ${name}`);
+    const job = matches[0];
+    check(job.run_id === state.runId && job.head_sha === state.mergeSha && positive(job.run_attempt) &&
+      job.run_attempt <= state.runAttempt && job.status === "completed" && job.conclusion === "success",
+    `Required release job has not succeeded: ${name}`);
+  }
+}
+
 function verifyTag(state, ref, io) {
   let object = ref?.object;
   for (let depth = 0; object?.type === "tag" && depth < 5; depth++) {
@@ -223,7 +246,7 @@ export function advance(state, grants, io, save = () => {}) {
   const comparison = io.api(`repos/${state.repository}/compare/${state.mergeSha}...main`);
   check(["ahead", "identical"].includes(comparison.status), "Release merge is not reachable from main");
   io.git(["fetch", "origin", "main"]);
-  check(io.git(["diff", "--name-only", state.headSha, state.mergeSha, "--", ...VERSION_FILES, state.notesPath]) === "", "Merged release preparation differs from the reviewed head");
+  verifyMergedPreparation(state, io);
   const ref = io.optional(`repos/${state.repository}/git/ref/tags/${state.tag}`);
   if (!ref) {
     if (grants.reviewedHead !== state.headSha || !grants.allowTag) return finish("tag-approval", { action: "Supply the reviewed head and explicit --allow-tag authority." });
@@ -233,7 +256,7 @@ export function advance(state, grants, io, save = () => {}) {
   }
   verifyTag(state, ref, io);
   const runs = io.pages(`repos/${state.repository}/actions/workflows/release.yml/runs?head_sha=${state.mergeSha}`, "workflow_runs")
-    .filter((run) => run.head_sha === state.mergeSha && run.head_branch === state.tag && run.event === "push");
+    .filter((run) => run.head_sha === state.mergeSha && run.head_branch === state.tag && ["push", "workflow_dispatch"].includes(run.event));
   check(runs.length <= 1, "Multiple tag workflows require operator reconciliation");
   if (!runs.length) return finish("await-release-workflow", { waiting: true, action: "No tag-push workflow found yet; check workflow admission if this persists." });
   const run = io.api(`repos/${state.repository}/actions/runs/${runs[0].id}`);
@@ -243,10 +266,15 @@ export function advance(state, grants, io, save = () => {}) {
   state.runId = run.id; state.runAttempt = run.run_attempt;
   if (run.status !== "completed") return finish("native-builds-and-verification", { waiting: true, runId: run.id, attempt: run.run_attempt });
   check(run.conclusion === "success", "Release workflow did not succeed; inspect the exact attempt before retrying");
-  state.timings = io.timings(state);
-  check(state.timings.runId === state.runId && state.timings.attempt === state.runAttempt &&
-    state.timings.headSha === state.mergeSha && state.timings.conclusion === "success" &&
-    state.timings.jobs.every((job) => job.conclusion === "success"), "Release attempt changed during verification");
+  io.gates(state);
+  try {
+    const timings = io.timings(state);
+    check(timings.runId === state.runId && timings.attempt === state.runAttempt && timings.headSha === state.mergeSha,
+      "Timing attempt changed");
+    state.timings = timings;
+  } catch {
+    state.timings = { runId: state.runId, attempt: state.runAttempt, status: "unmeasured", reason: "timing-metadata-unavailable" };
+  }
   const releases = io.pages(`repos/${state.repository}/releases`).filter((release) => release.tag_name === state.tag);
   check(releases.length === 1 && positive(releases[0].id), "Expected exactly one release for the intended tag");
   check(!state.releaseId || state.releaseId === releases[0].id, "Release ID changed");
@@ -308,12 +336,13 @@ export function verifyPublishedAssets(state, release, io) {
       if (!["SHA256SUMS", "latest.json"].includes(asset.name) && !/\.(sig|AppImage|msi|deb|rpm)$|\.app\.tar\.gz$|-setup\.exe$/.test(asset.name)) continue;
       const cached = io.cacheDirectory && join(io.cacheDirectory, asset.digest.slice(7));
       if (io.cacheDirectory) mkdirSync(io.cacheDirectory, { recursive: true, mode: 0o700 });
-      let bytes = cached && existsSync(cached) && !lstatSync(cached).isSymbolicLink() ? readFileSync(cached) : null;
+      check(!cached || !entry(cached)?.isSymbolicLink(), "Asset cache must not contain symlinks");
+      let bytes = cached && entry(cached)?.isFile() ? readFileSync(cached) : null;
       if (!bytes || bytes.length !== asset.size || `sha256:${digest(bytes)}` !== asset.digest)
         bytes = execute("gh", ["api", `repos/${state.repository}/releases/assets/${asset.id}`, "--header", "Accept: application/octet-stream"], { encoding: null, maxBuffer: 256 * 1024 * 1024, timeout: 5 * 60_000 });
       check(bytes.length === asset.size && `sha256:${digest(bytes)}` === asset.digest, "Downloaded release asset differs from publisher metadata");
       if (cached) {
-        check(!existsSync(cached) || !lstatSync(cached).isSymbolicLink(), "Asset cache must not contain symlinks");
+        check(!entry(cached)?.isSymbolicLink(), "Asset cache must not contain symlinks");
         writeFileSync(cached, bytes, { mode: 0o600 });
       }
       writeFileSync(join(assetDirectory, asset.name), bytes);
@@ -343,19 +372,29 @@ export function verifyPublishedAssets(state, release, io) {
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
-function lock(path) {
+export function acquireCheckpointLock(path) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const lockPath = path + ".lock";
-  if (existsSync(lockPath)) {
-    check(!lstatSync(lockPath).isSymbolicLink(), "Checkpoint lock must not be a symlink");
-    const pid = Number(readFileSync(lockPath, "utf8"));
-    check(positive(pid), "Malformed checkpoint lock needs operator inspection");
-    let alive = true;
-    try { process.kill(pid, 0); } catch (error) { if (error.code === "ESRCH") alive = false; }
-    check(!alive, "Another release process may own this checkpoint");
-    unlinkSync(lockPath);
+  // Every acquirer serializes the stale-read/unlink/create sequence, including first acquisition.
+  // A crash in this short critical section leaves recovery guarded for operator inspection.
+  let guard;
+  try { guard = openSync(lockPath + ".recovery", "wx", 0o600); }
+  catch { throw new Error("Checkpoint lock recovery may be active; inspect the recovery guard before retrying"); }
+  try {
+    writeFileSync(guard, String(process.pid));
+    if (entry(lockPath)) {
+      check(!entry(lockPath).isSymbolicLink(), "Checkpoint lock must not be a symlink");
+      const pid = Number(readFileSync(lockPath, "utf8"));
+      check(positive(pid), "Malformed checkpoint lock needs operator inspection");
+      let alive = true;
+      try { process.kill(pid, 0); } catch (error) { if (error.code === "ESRCH") alive = false; }
+      check(!alive, "Another release process may own this checkpoint");
+      unlinkSync(lockPath);
+    }
+    const fd = openSync(lockPath, "wx", 0o600); writeFileSync(fd, String(process.pid)); closeSync(fd);
+  } finally {
+    closeSync(guard); unlinkSync(lockPath + ".recovery");
   }
-  const fd = openSync(lockPath, "wx", 0o600); writeFileSync(fd, String(process.pid)); closeSync(fd);
   return () => unlinkSync(lockPath);
 }
 
@@ -371,7 +410,7 @@ export async function main(args) {
   const root = io.git(["rev-parse", "--show-toplevel"]);
   const location = relative(root, checkpoint);
   check(isAbsolute(location) || location === ".." || location.startsWith(".." + (process.platform === "win32" ? "\\" : "/")), "Keep release checkpoints outside the repository");
-  const unlock = lock(checkpoint);
+  const unlock = acquireCheckpointLock(checkpoint);
   try {
     if (positionals[0] === "prepare") { console.log(JSON.stringify(prepare(values.version, checkpoint, io))); return; }
     const state = validateCheckpoint(JSON.parse(readFileSync(checkpoint, "utf8")));

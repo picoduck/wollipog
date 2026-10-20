@@ -651,7 +651,8 @@ jobs:
   verify-runner-release:
     name: Verify runner release assets
     needs: [preflight, build]
-    runs-on: ubuntu-24.04
+    # Activation requires a separately provisioned, trusted release-only runner pool.
+    runs-on: ${{ vars.RELEASE_FINALIZER_USE_DEDICATED == 'true' && 'wollipog-release-finalizer' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

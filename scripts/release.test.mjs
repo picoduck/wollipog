@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { advance, bumpVersions, notesPath, prepare, saveCheckpoint, validateCheckpoint } from "./release.mjs";
+import { acquireCheckpointLock, advance, bumpVersions, notesPath, prepare, saveCheckpoint, validateCheckpoint, verifyMergedPreparation, verifyReleaseJobs } from "./release.mjs";
+import { FINALIZER_JOB, NATIVE_RELEASE_JOBS } from "./release-timings.mjs";
 
 const head = "a".repeat(40), merge = "b".repeat(40), base = "c".repeat(40);
 const notes = "# Wollipog v0.35.0\n\nRelease notes.\n\n";
@@ -50,7 +51,17 @@ function fixture() {
       throw new Error(`Unexpected fixture listing: ${path}`);
     },
     git(args) { calls.push({ git: args }); return args[0] === "diff" && controls.changedPreparation ? "package.json" : ""; },
+    run(program, args) {
+      assert.equal(program, "git"); assert.equal(args[0], "show");
+      const path = args[1].slice(41);
+      if (path === notesPath("0.35.0")) return notes;
+      const original = readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+      const originals = Object.fromEntries(["package.json", "apps/desktop/package.json", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock", "apps/runner/src/version.ts", "apps/control-plane/src/release-version.ts"].map((file) => [file, readFileSync(new URL(`../${file}`, import.meta.url), "utf8")]));
+      const files = bumpVersions(originals, JSON.parse(originals["package.json"]).version, "0.35.0");
+      return controls.changedPreparation && path === "package.json" ? original : files[path];
+    },
     notes() { return notes; },
+    gates() { verifyReleaseJobs({ runId: 100, runAttempt: run.run_attempt, mergeSha: merge }, releaseJobs()); },
     timings() { return { runId: 100, attempt: run.run_attempt, headSha: merge, conclusion: run.conclusion, jobs: [{ conclusion: run.conclusion }] }; },
     verify() { calls.push({ verify: true }); if (controls.failVerification) throw new Error("bad signature or digest"); return () => calls.push({ recheck: true }); },
   };
@@ -60,6 +71,9 @@ function fixture() {
     mutations: () => calls.filter((c) => c.body && c.path !== "graphql"),
   };
 }
+
+const releaseJobs = () => [...NATIVE_RELEASE_JOBS, FINALIZER_JOB].map((name) => ({ name, run_id: 100,
+  head_sha: merge, run_attempt: 1, status: "completed", conclusion: "success" }));
 
 test("checkpoints are private atomic snapshots and carry no publication grant", () => {
   const directory = mkdtempSync(join(tmpdir(), "release-state-test-"));
@@ -126,7 +140,7 @@ test("current workflow identity and every completed gate must pass before public
   for (const edit of [{ status: "in_progress" }, { conclusion: "failure" }, { head_sha: base }, { path: ".github/workflows/other.yml" }, { head_branch: "v9.0.0" }, { event: "workflow_dispatch" }]) {
     const f = fixture(); Object.assign(f.run, edit); f.controls.runs = [f.run];
     if (edit.status) assert.equal(advance(state(), grants, f.io).stage, "native-builds-and-verification");
-    else if (edit.head_sha || edit.head_branch || edit.event) assert.equal(advance(state(), grants, f.io).stage, "await-release-workflow");
+    else if (edit.head_sha || edit.head_branch) assert.equal(advance(state(), grants, f.io).stage, "await-release-workflow");
     else assert.throws(() => advance(state(), grants, f.io));
     assert.equal(f.mutations().length, 0);
   }
@@ -138,8 +152,10 @@ test("current workflow identity and every completed gate must pass before public
 test("duplicate workflows, release replacement, and merge-preparation drift block mutation", () => {
   const f = fixture(); f.controls.runs.push({ ...f.run, id: 101 });
   assert.throws(() => advance(state(), grants, f.io), /Multiple tag workflows/);
+  f.controls.runs[1].event = "workflow_dispatch";
+  assert.throws(() => advance(state(), grants, f.io), /Multiple tag workflows/);
   f.controls.runs.pop(); f.controls.changedPreparation = true;
-  assert.throws(() => advance(state(), grants, f.io), /differs from the reviewed head/);
+  assert.throws(() => advance(state(), grants, f.io), /versions differ from the reviewed preparation/);
   f.controls.changedPreparation = false;
   assert.throws(() => advance({ ...state(), releaseId: 201 }, grants, f.io), /Release ID changed/);
   assert.equal(f.mutations().length, 0);
@@ -151,6 +167,50 @@ test("successful checks do not substitute for publication authority", () => {
   assert.equal(f.mutations().length, 0);
   assert.ok(f.calls.some((call) => call.verify));
   assert.equal(f.saved.at(-1).releaseId, 200);
+});
+
+test("missing timing metadata does not weaken or replace semantic release gates", () => {
+  const f = fixture(), s = state();
+  f.io.timings = () => { throw new Error("missing timestamps"); };
+  assert.equal(advance(s, grants, f.io).stage, "publication-requested");
+  assert.equal(advance(s, {}, f.io).stage, "published");
+  assert.equal(s.timings.status, "unmeasured");
+  const other = fixture();
+  other.io.gates = () => { throw new Error("required job failed"); };
+  assert.throws(() => advance(state(), grants, other.io), /required job failed/);
+  assert.equal(other.mutations().length, 0);
+});
+
+test("required release jobs retain identity and success gates without requiring timestamps", () => {
+  const s = { runId: 100, runAttempt: 2, mergeSha: merge };
+  verifyReleaseJobs(s, releaseJobs()); // Successful jobs copied by a failed-job rerun remain valid.
+  for (const edit of [{ conclusion: "failure" }, { status: "in_progress" }, { run_id: 101 }, { head_sha: base }, { run_attempt: 3 }]) {
+    const jobs = releaseJobs(); Object.assign(jobs[0], edit);
+    assert.throws(() => verifyReleaseJobs(s, jobs), /has not succeeded/);
+  }
+  assert.throws(() => verifyReleaseJobs(s, releaseJobs().slice(1)), /Missing or ambiguous/);
+  assert.throws(() => verifyReleaseJobs(s, [...releaseJobs(), releaseJobs()[0]]), /Missing or ambiguous/);
+});
+
+test("checkpoint locking serializes stale recovery and preserves live or ambiguous owners", () => {
+  const directory = mkdtempSync(join(tmpdir(), "release-lock-test-"));
+  const checkpoint = join(directory, "state.json"), lock = checkpoint + ".lock";
+  try {
+    const unlock = acquireCheckpointLock(checkpoint);
+    assert.throws(() => acquireCheckpointLock(checkpoint), /Another release process/);
+    assert.equal(readFileSync(lock, "utf8"), String(process.pid)); unlock();
+    // A process known to have exited provides an actual stale owner, without guessing a PID.
+    const deadPid = execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+    writeFileSync(lock, deadPid);
+    writeFileSync(lock + ".recovery", "another recovery owner");
+    assert.throws(() => acquireCheckpointLock(checkpoint), /recovery may be active/);
+    assert.equal(readFileSync(lock, "utf8"), deadPid);
+    rmSync(lock + ".recovery");
+    acquireCheckpointLock(checkpoint)();
+    writeFileSync(lock, "ambiguous");
+    assert.throws(() => acquireCheckpointLock(checkpoint), /operator inspection/);
+    assert.equal(readFileSync(lock, "utf8"), "ambiguous");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("accepted publication is recovered after interruption without another PATCH", () => {
@@ -246,6 +306,19 @@ test("preparation recovers accepted commits and PR creation without repeating ei
     const edited = JSON.parse(packageText); edited.scripts.unrelated = "preserve this edit";
     writeFileSync(packagePath, JSON.stringify(edited, null, 2) + "\n");
     assert.throws(() => prepare(targetVersion, checkpoint, io), /Unrelated edits within package.json/);
+    git(["add", "package.json"]); git(["commit", "-m", "Concurrent dependency-bearing change"]);
+    // The actual merged tree may contain main's unrelated edits in release-bearing files.
+    const merged = { ...resumed, mergeSha: git(["rev-parse", "HEAD"]) };
+    verifyMergedPreparation(merged, io);
+    assert.notEqual(git(["diff", resumed.headSha, merged.mergeSha, "--", "package.json"]), "");
+    edited.version = "1.0.0"; writeFileSync(packagePath, JSON.stringify(edited));
+    git(["add", "package.json"]); git(["commit", "-m", "Wrong release version"]);
+    assert.throws(() => verifyMergedPreparation({ ...merged, mergeSha: git(["rev-parse", "HEAD"]) }, io), /versions differ/);
+    git(["reset", "--hard", resumed.headSha]);
+    writeFileSync(notesFile, fixtureNotes + "Changed after review\n");
+    git(["add", notesPath(targetVersion)]); git(["commit", "-m", "Changed notes"]);
+    assert.throws(() => verifyMergedPreparation({ ...merged, mergeSha: git(["rev-parse", "HEAD"]) }, io), /notes differ/);
+    git(["reset", "--hard", resumed.headSha]);
     writeFileSync(packagePath, packageText);
     writeFileSync(join(worktree, "unrelated.txt"), "preserve this work");
     assert.throws(() => prepare(targetVersion, checkpoint, io), /Unrelated working-tree changes/);

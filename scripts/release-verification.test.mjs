@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,7 +47,7 @@ function fixture() {
         assert.match(args[1], /^repos\/example\/project\/releases\/assets\/\d+$/);
         return files.get(assets.find((asset) => asset.id === id).name);
       }
-      return execFileSync(program, args, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], ...options });
+      return execFileSync(program, args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"], ...options });
     },
   };
   return { state: { repository, version, tag: `v${version}`, mergeSha }, release: { id: 200 }, io, files, assets,
@@ -77,6 +77,17 @@ test("changed bytes cannot pass even when the download request itself succeeds",
     const name = desktopUpdaterArtifacts(version)[0].asset;
     f.files.set(name, Buffer.from("tampered package"));
     assert.throws(() => verifyPublishedAssets(f.state, f.release, f.io), /differs from publisher metadata/);
+  } finally { f.close(); }
+});
+
+test("a dangling cache symlink cannot redirect a downloaded asset write", { skip: process.platform === "win32" }, () => {
+  const f = fixture();
+  try {
+    const target = join(f.directory, "must-not-be-created");
+    const latest = f.assets.find((asset) => asset.name === "latest.json");
+    symlinkSync(target, join(f.directory, latest.digest.slice(7)));
+    assert.throws(() => verifyPublishedAssets(f.state, f.release, f.io), /symlink/);
+    assert.equal(existsSync(target), false);
   } finally { f.close(); }
 });
 

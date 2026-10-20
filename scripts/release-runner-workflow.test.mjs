@@ -7,6 +7,13 @@ import {
   EXPECTED_RELEASE_ASSET_COUNT,
 } from "./verify-runner-release-assets.mjs";
 
+test("only the finalizer can opt into the fixed trusted runner label and defaults to Ubuntu", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const boundary = workflow.indexOf("  verify-runner-release:");
+  assert.doesNotMatch(workflow.slice(0, boundary), /RELEASE_FINALIZER_USE_DEDICATED|wollipog-release-finalizer/);
+  assert.ok(workflow.slice(boundary).includes("runs-on: ${{ vars.RELEASE_FINALIZER_USE_DEDICATED == 'true' && 'wollipog-release-finalizer' || 'ubuntu-24.04' }}"));
+});
+
 test("release workflow natively verifies dual runner assets and gates the final hosted inventory", () => {
   const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
   const sidecar = readFileSync(new URL("../apps/desktop/scripts/build-sidecar.mjs", import.meta.url), "utf8");
