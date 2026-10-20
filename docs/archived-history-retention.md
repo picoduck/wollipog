@@ -174,12 +174,101 @@ after it, so a crash can never restore an artifact row whose blob is gone. See
   older build has written to the database since, the mapping starts again from the first row: that
   build numbers its rows from the highest one left, which a prune may have lowered below rows
   already mapped.
-- The database file does not shrink: freed pages are reused, so it stops growing. To return the
-  space, stop the control plane and run `sqlite3 control-plane.db 'VACUUM'`, which needs as much free
-  disk as the database itself. The control plane never vacuums automatically: on its single
-  connection a vacuum would block every request for as long as it takes.
+- By default the database file does not shrink: freed pages are reused. The host operator can
+  enable [incremental vacuum](#returning-free-pages-to-the-filesystem) to return them in paced steps.
+  A full `VACUUM` still requires downtime and substantial temporary disk; startup and background
+  maintenance never run one.
 - WAL frames and existing backups keep old content until they are overwritten or rotated. Blob files
   are unlinked, not overwritten.
+
+## Returning free pages to the filesystem
+
+Incremental vacuum (#3321) is **off by default**, including after upgrade. Only the host operator
+can enable it, with `CONTROL_PLANE_DB_INCREMENTAL_VACUUM=1` in `control-plane.env`. There is no
+organization override, API, agent tool or UI switch: all organizations share the same database file.
+Unset, empty or `0` is off; other values log a warning and are treated as off. Environment changes
+are observed at the next operator-controlled start. Enabling waits **24 hours**, using a persisted
+arming deadline like retention (#2777); unchanged restarts do not delay it again. An observed off
+disables immediately and clears the deadline; reenabling arms anew. Changes made and undone between
+starts are not observed. File mode stays incremental when maintenance is disabled.
+
+An enabled **new empty database** sets `auto_vacuum=INCREMENTAL` before creating its schema. An
+existing database is never rewritten at startup. If its mode is not incremental, it stays usable,
+maintenance refuses to run, and startup logs `incremental_vacuum_conversion_required` with this
+guide. Changing the environment alone cannot convert an existing database.
+
+### One-time offline conversion
+
+Use a matching source checkout with dependencies installed and a supported Node.js runtime:
+
+1. Make and verify a SQLite-aware backup. Arrange downtime and stop every control-plane instance,
+   reader and backup process that opens this file. Do not run conversion from an agent hosted by
+   that control plane; an independent operator must perform the downtime procedure.
+2. Reserve free disk on **both** the database and SQLite temporary-file filesystems. With
+   `N = max(page_count × page_size, main-file bytes)`, each must report at least
+   `2 × N + max(256 MiB, ceil(N / 10))` free bytes. If both paths use the same filesystem, this is
+   one requirement, not twice the requirement. SQLite can need two additional copies during a
+   full rewrite; the extra margin leaves headroom. Other processes can still consume disk after
+   the check, so avoid concurrent large writes.
+3. Run `pnpm db:enable-incremental-vacuum --db <existing-database-file> --owner-stopped`.
+   Optional `--temp-dir <directory>` chooses the temporary-file directory (otherwise the OS temp
+   directory). The command pins and verifies SQLite's temp directory and takes an exclusive SQLite
+   lock before checking disk or changing mode. Missing acknowledgement, a contended lock,
+   unsupported temp-directory control, unknown space or insufficient space refuses conversion.
+   The mode is not changed on those refusals; there is no startup or unchecked fallback.
+4. The command sets `auto_vacuum=INCREMENTAL` and runs one full offline `VACUUM`, preserving WAL
+   mode and logical records. It prints a structured completion or refusal record and returns
+   nonzero on failure. Running it on an already incremental file is a no-op. Verify the backup and
+   database before the independent operator starts the control plane with the opt-in environment.
+
+Exclusive locking keeps other SQLite operations out during conversion; it cannot prove that all
+idle rollback-mode handles have been closed or prevent an operator trying to reopen the file.
+The stopped-owner acknowledgement is an operational requirement, not an automatic process stop.
+An I/O or disk failure during the rewrite is reported; inspect the database and backup before
+retrying. Never copy only the main file of a live WAL database as a backup.
+
+### Pacing and limits
+
+The first pass waits 10 minutes after startup; subsequent passes start an hour after the previous
+one finishes, once armed. Passes are independent of retention, so pages freed by every deletion
+policy qualify. A pass starts only with at least **256 free pages** (1 MiB at 4 KiB pages), then
+drains free pages in steps starting at **1 page**, adapting toward **4 ms**, capped at **32 pages**.
+After every step it rests at least **1 ms and three times the measured step duration**. A pass
+stops after **1,000 steps** and continues at the next scheduled pass. Stop interrupts between
+steps; a restart safely resumes from SQLite's current free-page list. Busy or other failures defer
+until the next pass without using the request connection's 250 ms lock wait.
+
+At 4 KiB pages the ceiling is **about 128 MiB per hourly pass** (32 × 1,000 pages); initial small
+steps and slow storage reduce throughput. Reclaiming 2 GiB can therefore take more than 16 passes.
+This is bounded background reclamation, not immediate recovery from a full disk. The existing WAL
+checkpointer copies the truncation to the main file; retained readers can delay visible shrinkage.
+No forced checkpoint or change to checkpoint thresholds is introduced.
+
+Structured startup logs report enabled state, mode and arming deadline. Pass logs include run ID,
+entry point, reclaimed pages/bytes, p95 and maximum complete-step latency, interruption and step-limit
+status. A step reaching 16 ms warns with `incremental_vacuum_slow_step`; a failed pass logs
+`incremental_vacuum_deferred`. Run `pnpm benchmark:incremental-vacuum [--dir <fixture-parent>]` on
+the database's storage to measure complete steps with concurrent `FULL` writes and the normal
+checkpoint worker. It creates and removes its own fixture, verifies file shrinkage and kept data,
+and fails at **p95 >= 16 ms**. This is a measured target, not a hard real-time guarantee on arbitrary
+storage. Slow-step warnings mean the operator should benchmark the storage or disable maintenance.
+
+For example, a Linux/Node 24.18.1 NVMe fixture run with 16,000 indexed records, the checkpoint worker
+and 3,751 interleaved `FULL` writes measured **9.78 ms p95 / 11.44 ms max** over 1,000 complete
+steps. This disk kept the adaptive budget at one page: the file shrank from 68,567,040 to
+64,466,944 bytes (about 3.91 MiB reclaimed), demonstrating why 128 MiB is a ceiling, not a promised
+hourly rate. The same fixture on tmpfs measured 0.30 ms p95; memory-backed results are not a
+substitute for testing the database's filesystem.
+
+`secure_delete`, WAL checkpoints and every existing durability guard remain unchanged; each vacuum
+step uses the connection's normal `FULL` durability. Vacuum changes allocation, not which records
+retention keeps. It does not add an erasure guarantee for WAL files, backups or external blobs.
+SQLite-aware backups keep their usual consistency and rotation requirements. A restore retains
+the source's auto-vacuum mode: a pre-conversion backup needs offline conversion again, and startup
+will never do it silently. Persisted opt-in/arming state also restores with the backup; a mature
+deadline can resume at the next eligible pass when the host environment is enabled. Leave the
+environment off if maintenance should stay disabled after a restore. See
+[database durability](./control-plane-database-durability.md).
 
 ## Pruned sessions
 

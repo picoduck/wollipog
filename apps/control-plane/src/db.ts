@@ -5977,7 +5977,7 @@ export class ControlPlaneDb {
   /** Server-only wrapper: insert a campaign child and open its work-item attempt together (#3106). */
   campaignChildCreationTransaction<T>(work: () => T): T { return this.atomic(work); }
 
-  static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string } = {}): ControlPlaneDb {
+  static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string; incrementalVacuum?: boolean } = {}): ControlPlaneDb {
     if (location !== ":memory:") mkdirSync(dirname(location), { recursive: true });
     const artifactBlobs = location === ":memory:" && !options.artifactBlobDir
       ? new MemoryArtifactBlobStore()
@@ -5990,6 +5990,11 @@ export class ControlPlaneDb {
     try {
       publicationNewDatabase = !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
     } catch (error) { db.close(); throw error; }
+    // Only empty databases can opt in without a full rewrite. Existing files are converted by
+    // the explicit offline CLI, never by startup. Turning maintenance off preserves file mode.
+    if (options.incrementalVacuum && !db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()) {
+      db.exec("PRAGMA auto_vacuum = INCREMENTAL;");
+    }
     const journalMode = (db.prepare("PRAGMA journal_mode = WAL;").get() as { journal_mode: string })
       .journal_mode;
     // FULL flushes the WAL at every commit, so control-plane decisions are durable once
@@ -17437,6 +17442,47 @@ export class ControlPlaneDb {
        ON CONFLICT(organization_id) DO UPDATE SET retention_days=excluded.retention_days,
          prunes_from=excluded.prunes_from, updated_at=excluded.updated_at, updated_by=excluded.updated_by`,
     ).run(organizationId, policy.retentionDays, policy.prunesFrom, now, updatedBy);
+  }
+
+  getIncrementalVacuumPolicy(): { enabled: boolean; armedAt: number | null } | null {
+    const row = this.stmt("SELECT value FROM control_plane_metadata WHERE key='incremental_vacuum_policy'")
+      .get() as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.value) as { enabled?: unknown; armedAt?: unknown } | null;
+      if (!parsed || typeof parsed.enabled !== "boolean" || !(parsed.armedAt === null ||
+        typeof parsed.armedAt === "number" && Number.isSafeInteger(parsed.armedAt) && parsed.armedAt >= 0)) return null;
+      return { enabled: parsed.enabled, armedAt: parsed.armedAt };
+    } catch { return null; } // Malformed restored state re-arms, never silently enables maintenance.
+  }
+
+  saveIncrementalVacuumPolicy(policy: { enabled: boolean; armedAt: number | null }): void {
+    this.stmt("INSERT OR REPLACE INTO control_plane_metadata(key,value) VALUES ('incremental_vacuum_policy',?)")
+      .run(JSON.stringify(policy));
+  }
+
+  incrementalVacuumStats(): { mode: number; freePages: number; pageSize: number; pages: number } {
+    return {
+      mode: (this.stmt("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum,
+      freePages: (this.stmt("PRAGMA freelist_count").get() as { freelist_count: number }).freelist_count,
+      pageSize: (this.stmt("PRAGMA page_size").get() as { page_size: number }).page_size,
+      pages: (this.stmt("PRAGMA page_count").get() as { page_count: number }).page_count,
+    };
+  }
+
+  incrementalVacuumStep(pages: number): { reclaimedPages: number; freePages: number } {
+    if (!Number.isSafeInteger(pages) || pages < 1 || pages > 32) throw new Error("incremental vacuum step must be 1–32 pages");
+    if (this.db.isTransaction) throw new Error("incremental vacuum cannot run inside a transaction");
+    const initial = this.incrementalVacuumStats();
+    if (initial.mode !== 2) return { reclaimedPages: 0, freePages: initial.freePages };
+    const timeout = (this.stmt("PRAGMA busy_timeout").get() as { timeout: number }).timeout;
+    // A contended maintenance tick must defer, not spend the request path's 250 ms lock budget.
+    // No asynchronous gap exists while this connection setting differs.
+    this.db.exec("PRAGMA busy_timeout=0");
+    try { this.db.exec(`PRAGMA incremental_vacuum(${pages})`); }
+    finally { this.db.exec(`PRAGMA busy_timeout=${timeout}`); }
+    const after = this.incrementalVacuumStats();
+    return { reclaimedPages: Math.max(0, initial.pages - after.pages), freePages: after.freePages };
   }
 
   /** The environment default's own arming state, kept across restarts. */
