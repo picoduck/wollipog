@@ -221,7 +221,7 @@ public static class WollipogAccountConfigWindowsV1 {
  public static string Fixture(string path,string mode){
   if(mode=="owner-path"){
    string os=System.IO.Path.Combine(Environment.SystemDirectory,"kernel32.dll");using(var h=CreateFileW(os,RC|Attr,ReadShare|WriteShare|DeleteShare,IntPtr.Zero,3,Reparse,IntPtr.Zero)){
-    Need(!h.IsInvalid);IntPtr owner,group,dacl,sacl,sd;Need(GetSecurityInfo(h,1,1,out owner,out group,out dacl,out sacl,out sd)==0);try{Need(new SecurityIdentifier(owner).Value!=WindowsIdentity.GetCurrent().User.Value);return Canonical(h);}finally{LocalFree(sd);}
+    Need(!h.IsInvalid);IntPtr owner,group,dacl,sacl,ownerDescriptor;Need(GetSecurityInfo(h,1,1,out owner,out group,out dacl,out sacl,out ownerDescriptor)==0);try{Need(new SecurityIdentifier(owner).Value!=WindowsIdentity.GetCurrent().User.Value);return Canonical(h);}finally{LocalFree(ownerDescriptor);}
    }
   }
   Need(System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(path)).StartsWith("wollipog-account-config-",StringComparison.Ordinal));Need(!File.Exists(path));
