@@ -1071,6 +1071,7 @@ for (const cancel of ["none", "stop", "policy", "unarchive", "stop-intent"] as c
     const fastSent = new Promise<void>((resolve) => { notifyFast = resolve; });
     const sent: string[] = [];
     let activeSlow = 0;
+    let maxActiveSlow = 0;
     const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
       now: () => clock.now, sleep: clock.sleep, hub: {
         isRunnerOnline: (id) => id !== "offline",
@@ -1078,7 +1079,7 @@ for (const cancel of ["none", "stop", "policy", "unarchive", "stop-intent"] as c
           if (message.type !== "trim_session_history") throw new Error("unexpected request");
           sent.push(message.sessionId);
           if (runnerId === RUNNER_ID) {
-            assert.equal(activeSlow++, 0, "one request per runner across organizations");
+            maxActiveSlow = Math.max(maxActiveSlow, ++activeSlow);
             await blocked;
             activeSlow--;
           } else notifyFast();
@@ -1110,6 +1111,7 @@ for (const cancel of ["none", "stop", "policy", "unarchive", "stop-intent"] as c
       }
       release();
       await running;
+      assert.equal(maxActiveSlow, 1, "one request per runner across organizations");
       assert.deepEqual(sent, cancel === "none" ? ["slow-a", "fast", "slow-b"] : ["slow-a", "fast"]);
     } finally { release(); await running; subject.stop(); db.close(); }
   });
