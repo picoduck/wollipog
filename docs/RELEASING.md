@@ -397,7 +397,7 @@ that the current head was tested.
 
 ## Runner History Retention Upgrade Note
 
-Releases containing protocol v229 must call out the runner-log retention change in their upgrade
+Releases containing protocol v231 must call out the runner-log retention change in their upgrade
 and rollback guidance. Organizations with archived-history retention already enabled automatically
 trim capable runners after completed control-plane pruning, including sessions pruned before the
 upgrade, without a new switch or another 24-hour arming delay. Off remains off. Preserve a runner

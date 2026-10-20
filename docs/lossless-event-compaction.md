@@ -147,7 +147,7 @@ startup migration; repeated maintenance gradually converts an oversized active f
 ## Audit retention
 
 Lossless session-event compaction never rewrites or filters an event. Separately, opt-in organization
-[archived-history retention](./archived-history-retention.md) also trims protocol-v229 runners after
+[archived-history retention](./archived-history-retention.md) also trims protocol-v231 runners after
 the control plane completes its prune. It keeps prompts, the final response, turn completions and
 final reports, usage and attachments, plus approval, review, workflow, automation, provenance and
 resume evidence. Removed tool-call ids remain hashed accounting evidence; costs, usage, native
