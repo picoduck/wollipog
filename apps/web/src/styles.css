@@ -11795,9 +11795,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     min-width: 0;
     min-height: 44px;
   }
+  /* Promoted out of the heading, the description is a flex item, whose automatic minimum is its
+     content's width: a nowrap description (Snooze's session title) would widen the header past the
+     sheet instead of ellipsizing. Bounded here as the heading's column bounded it. */
   .modal-head:has(> .modal-heading > .modal-desc) .modal-desc {
     flex-basis: 100%;
     order: 1;
+    min-width: 0;
+    max-width: 100%;
   }
   /* The close and back buttons keep a 44px hit area whatever their drawn size. */
   .modal-close,
