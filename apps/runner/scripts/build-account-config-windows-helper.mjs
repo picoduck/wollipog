@@ -33,7 +33,7 @@ function compile(file, fixture) {
     `$runtime=[Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory();$compiler=[IO.Path]::Combine($runtime,'csc.exe');` +
     `if(-not [IO.File]::Exists($compiler)){throw 'fixed CLR compiler unavailable'};` +
     `$cscArgs='/noconfig /nologo /target:library /platform:anycpu /optimize+ /debug- /warnaserror+ /nostdlib+ ` + (fixture ? `/define:WACW_FIXTURE ` : "") +
-    `/reference:"'+[IO.Path]::Combine($runtime,'mscorlib.dll')+'" /reference:"'+[IO.Path]::Combine($runtime,'System.dll')+'" /out:"'+$env:WACW_BUILD_OUTPUT+'" "'+$env:WACW_BUILD_SOURCE+'"';` +
+    `/reference:"'+[IO.Path]::Combine($runtime,'mscorlib.dll')+'" /reference:"'+[IO.Path]::Combine($runtime,'System.dll')+'" /reference:"'+[IO.Path]::Combine($runtime,'System.Core.dll')+'" /out:"'+$env:WACW_BUILD_OUTPUT+'" "'+$env:WACW_BUILD_SOURCE+'"';` +
     `$info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$compiler;$info.UseShellExecute=$false;$info.Arguments=$cscArgs;` +
     `$p=[Diagnostics.Process]::Start($info);$p.WaitForExit();if($p.ExitCode -ne 0){exit $p.ExitCode};` +
     `[Console]::WriteLine('WACW_COMPILER='+$compiler);`;
