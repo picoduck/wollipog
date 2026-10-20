@@ -465,7 +465,7 @@ test("dirty drafts save once per debounce firing and once on unmount", async (t)
         },
         clearTimeout: (id: number | ReturnType<typeof realSetTimeout> | undefined) => {
           if (typeof id === "number") timers.delete(id);
-          else realClearTimeout(id);
+          else if (id !== undefined) realClearTimeout(id);
         },
       }, async () => {
         const view = await mount();
