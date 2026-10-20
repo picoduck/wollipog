@@ -220,7 +220,9 @@ every UI evidence decision, including video without a certified media reviewer, 
 an Orchestrator whose client cannot view images. It is delivered only the child's own inspectable
 screenshots, and approval still needs a receipt for every item, so it asks the child for screenshots
 attached as Session artifacts or denies the claim as unproven. Certified delegated video review
-still applies when available. Ownership the Orchestrator holds only because Full Control kept a
+still applies when available, and operator-enabled frame review derives a short video's frames for
+the boundary's UI Evidence Approval exactly as it does for a Custom saved Orchestrator owner; the
+root's own saved owner plays no part (#1321). Ownership the Orchestrator holds only because Full Control kept a
 decision from the Human can deny, never approve: an approval needs every evidence route (screenshot
 review, operator-enabled frame review, the certified media-only reviewer) directly available to the
 Orchestrator when it resolves, and an approved decision stays consumable only while they still are,
