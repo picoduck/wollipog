@@ -300,6 +300,63 @@ test("two entries, two members and a note send one relayPod with them; success i
   }
 });
 
+/** A promise the test settles itself, so it can act while a request is in flight. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
+test("an edit made while Save Note or Relay is in flight survives the request; an unchanged draft clears (CR-1.1)", async () => {
+  const saving = deferred<{ entry: PodContextEntry; created: boolean; pod: PodView }>();
+  const relaying = deferred<RelayPodResult>();
+  const view = await mount([pod()], members(), {
+    podContext: async () => ({ entries: [entry(1, "First note."), entry(2, "Second note.")] }),
+    appendPodContext: () => saving.promise,
+    relayPod: () => relaying.promise,
+  });
+  const field = () => huddle().querySelector("textarea")!;
+  try {
+    // Save Note: submit A, type B while it saves, then let it save A.
+    await act(async () => typeInto(field(), "Draft A"));
+    await act(async () => buttonNamed(huddle(), "Save Note")!.click());
+    assert.equal(field().disabled, false, "the field stays editable while the note saves");
+    await act(async () => typeInto(field(), "Draft B"));
+    await act(async () => saving.resolve({ entry: entry(3, "Draft A"), created: true, pod: pod() }));
+    await settle();
+    assert.equal(field().value, "Draft B", "the newer draft was never saved, so it stays");
+
+    // Relay: submit B with the first entry, then type C and select the second entry while it runs.
+    await act(async () => entryBox("First note.").click());
+    await act(async () => buttonNamed(huddle(), "Relay to 3")!.click());
+    await act(async () => typeInto(field(), "Draft C"));
+    await act(async () => entryBox("Second note.").click());
+    await act(async () => relaying.resolve({
+      pod: pod(), sessions: [],
+      receipts: ["lead", "worker", "reviewer"].map((sessionId) => ({ sessionId, status: "delivered" as const })),
+      appendedEntry: entry(4, "Draft B"),
+    }));
+    await settle();
+    assert.equal(field().value, "Draft C", "the newer draft was never relayed, so it stays");
+    assert.equal(entryBox("First note.").checked, false, "the relayed entry clears");
+    assert.equal(entryBox("Second note.").checked, true, "an entry selected while relaying stays selected");
+  } finally {
+    await view.unmount();
+  }
+
+  const unchanged = await mount([pod()], members(), {
+    appendPodContext: async () => ({ entry: entry(1, "Saved as typed"), created: true, pod: pod() }),
+  });
+  try {
+    await act(async () => typeInto(huddle().querySelector("textarea")!, "Saved as typed"));
+    await act(async () => buttonNamed(huddle(), "Save Note")!.click());
+    await settle();
+    assert.equal(huddle().querySelector("textarea")!.value, "", "a draft left as it was sent clears");
+  } finally {
+    await unchanged.unmount();
+  }
+});
+
 test("Relay is disabled with its reason while automatic turns run, and when there is nothing to relay", async () => {
   const view = await mount([pod({}, { status: "running", runId: "run-1", turnsUsed: 2, currentSessionId: "worker" })], members(), {
     podContext: async () => ({ entries: [entry(1, "First note.")] }),

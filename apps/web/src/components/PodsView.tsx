@@ -709,7 +709,9 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
 
   const relay = async () => {
     if (relayReason || busy) return;
-    const note = text.trim();
+    // The field stays editable while the relay runs, so only what it sent is cleared afterwards.
+    const draft = text;
+    const note = draft.trim();
     const entries = selectedEntries;
     setBusy("relay");
     setRelayError(null);
@@ -722,8 +724,8 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
         contextEntryIds: entries,
       });
       if (result.appendedEntry) loadPodContext(pod.id, [result.appendedEntry]);
-      setText("");
-      setSelectedContext([]);
+      setText((current) => current === draft ? "" : current);
+      setSelectedContext((current) => current.filter((id) => !entries.includes(id)));
       // A retry relays the note as the entry it became; past the entry limit it sends the note again.
       const withNote = result.appendedEntry ? [...entries, result.appendedEntry.id] : entries;
       const retry = withNote.length <= MAX_RELAY_ENTRIES ? { contextEntryIds: withNote } : { text: note, contextEntryIds: entries };
@@ -760,13 +762,15 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
 
   const saveNote = async () => {
     if (busy || !active || !text.trim()) return;
+    const draft = text;
     setBusy("note");
     setNoteError(null);
     setRelayError(null);
     try {
-      const result = await api.appendPodContext(pod.id, { kind: "note", text: text.trim() });
+      const result = await api.appendPodContext(pod.id, { kind: "note", text: draft.trim() });
       loadPodContext(pod.id, [result.entry]);
-      setText("");
+      // An edit made while the note was saving is a new draft, which stays.
+      setText((current) => current === draft ? "" : current);
     } catch (cause) {
       setNoteError((cause as Error).message);
     } finally {
