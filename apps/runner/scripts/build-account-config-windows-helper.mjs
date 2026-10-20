@@ -2,20 +2,31 @@
 import { build } from "esbuild";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../.."), DIR = join(ROOT, "apps/runner/.bin-build");
-const PS = String.raw`\\?\GLOBALROOT\SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`;
+const OS_ANCHOR = String.raw`\\?\GLOBALROOT\SystemRoot`, OS_IMAGE = String.raw`System32\WindowsPowerShell\v1.0\powershell.exe`;
+function resolveWindowsPlatform() {
+  if (process.platform !== "win32") throw new Error("Windows OS required");
+  const systemRoot = realpathSync.native(OS_ANCHOR);
+  const executable = realpathSync.native(OS_ANCHOR + "\\" + OS_IMAGE);
+  const parts = systemRoot.slice(3).split("\\");
+  if (!/^[A-Za-z]:\\/u.test(systemRoot) || systemRoot.length > 200 ||
+      parts.some(p => !p || p === "." || p === ".." || /[ .]$/u.test(p) || /[\x00-\x1f<>:"|?*]/u.test(p)) ||
+      executable.length > 259 || executable.toLowerCase() !== (systemRoot + "\\" + OS_IMAGE).toLowerCase())
+    throw new Error("unproved canonical Windows OS launcher");
+  return Object.freeze({ systemRoot, executable });
+}
 const SHA = b => createHash("sha256").update(b).digest("hex");
 const sourcePath = join(ROOT, "apps/runner/native/provider-account-config-windows.cs");
 const enginePath = join(ROOT, "apps/runner/src/provider-account-config-windows-engine.ts");
 const identityPath = join(DIR, "provider-account-config-windows-v1.identity.json");
 function need(ok, why) { if (!ok) throw new Error(why); }
 function save(path, bytes, cap) { need(bytes.length <= cap, "build output capacity"); writeFileSync(path, bytes, { flag: "wx", mode: 0o600 }); }
-const ENV = { SystemRoot: String.raw`\\?\GLOBALROOT\SystemRoot`, WINDIR: String.raw`\\?\GLOBALROOT\SystemRoot`, PSModuleAnalysisCachePath: "NUL" };
 function compile(file, fixture) {
   need(!existsSync(file), "native compiler output already exists; no replay");
+  const { systemRoot, executable } = resolveWindowsPlatform();
   const temp = join(DIR, fixture ? "account-config-compiler-fixture-tmp" : "account-config-compiler-prod-tmp");
   mkdirSync(temp, { mode: 0o700 });
   const script = `$ErrorActionPreference='Stop';$PSModuleAutoLoadingPreference='None';` +
@@ -26,8 +37,8 @@ function compile(file, fixture) {
     `$info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$compiler;$info.UseShellExecute=$false;$info.Arguments=$cscArgs;` +
     `$p=[Diagnostics.Process]::Start($info);$p.WaitForExit();if($p.ExitCode -ne 0){exit $p.ExitCode};` +
     `[Console]::WriteLine('WACW_COMPILER='+$compiler);`;
-  const result = spawnSync(PS, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
-    env: { ...ENV, TEMP: temp, TMP: temp, WACW_BUILD_SOURCE: sourcePath, WACW_BUILD_OUTPUT: file }, shell: false,
+  const result = spawnSync(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+    env: { SystemRoot: systemRoot, WINDIR: systemRoot, PATH: "", PSModuleAnalysisCachePath: "NUL", TEMP: temp, TMP: temp, WACW_BUILD_SOURCE: sourcePath, WACW_BUILD_OUTPUT: file }, shell: false,
     windowsHide: true, timeout: 120_000, maxBuffer: 1024 * 1024,
   });
   const receipt = Buffer.from(JSON.stringify({ actualOSExit: result.status, signal: result.signal, error: result.error?.message,

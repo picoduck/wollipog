@@ -1,20 +1,32 @@
 /** Fixed synchronous engine asset. OS/administrator installation trust is a prerequisite, not child self-attestation. */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { getAsset, isSea } from "node:sea";
 import { decodeWindowsReply, encodeWindowsRequest, WACW_LIMITS, WindowsAccountConfigError, type NativeRequest, type NativeCapture } from "./provider-account-config-windows-protocol.js";
 declare const __WACW_DLL_SHA__: string;
 declare const __WACW_FIXTURE__: boolean;
 export const FIXED_WINDOWS_POWERSHELL = String.raw`\\?\GLOBALROOT\SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`;
+const OS_ANCHOR = String.raw`\\?\GLOBALROOT\SystemRoot`, OS_IMAGE = String.raw`System32\WindowsPowerShell\v1.0\powershell.exe`;
 export const DLL_ASSET = "wollipog/account-config-windows-ntfs-v1";
 export const sha256 = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
-export function fixedWindowsEnvironment(): NodeJS.ProcessEnv {
-  // Deliberately do not inherit PATH, PS/CLR/DOTNET/COMPLUS/COR or Node command/module hooks.
-  // These fixed child values do not modify the host environment or choose a launcher.
-  return { SystemRoot: String.raw`\\?\GLOBALROOT\SystemRoot`, WINDIR: String.raw`\\?\GLOBALROOT\SystemRoot`,
-    PSModuleAnalysisCachePath: "NUL" };
+export function validateWindowsPlatform(systemRoot: string, executable: string): Readonly<{ systemRoot: string; executable: string }> {
+  const parts = systemRoot.slice(3).split("\\");
+  if (!/^[A-Za-z]:\\/u.test(systemRoot) || systemRoot.length > 200 ||
+      parts.some(p => !p || p === "." || p === ".." || /[ .]$/u.test(p) || /[\x00-\x1f<>:"|?*]/u.test(p)) ||
+      executable.length > 259 || executable.toLowerCase() !== (systemRoot + "\\" + OS_IMAGE).toLowerCase())
+    throw new Error("unproved canonical Windows OS launcher");
+  return Object.freeze({ systemRoot, executable });
+}
+export function resolveWindowsPlatform(): Readonly<{ systemRoot: string; executable: string }> {
+  if (process.platform !== "win32") throw new Error("Windows OS required");
+  return validateWindowsPlatform(realpathSync.native(OS_ANCHOR), realpathSync.native(FIXED_WINDOWS_POWERSHELL));
+}
+export function fixedWindowsEnvironment(systemRoot: string): NodeJS.ProcessEnv {
+  // Startup hooks stay absent; explicit empty PATH prevents libuv's parent-PATH refill.
+  // libuv still supplies other Windows compatibility fields; this is not the full effective env.
+  return { SystemRoot: systemRoot, WINDIR: systemRoot, PATH: "", PSModuleAnalysisCachePath: "NUL" };
 }
 function program(expected: string, fixture: boolean): string {
   if (!/^[0-9a-f]{64}$/u.test(expected)) throw new WindowsAccountConfigError("not_published", "STORE_UNVERIFIABLE");
@@ -40,9 +52,12 @@ function invoke(request: NativeRequest): NativeCapture | undefined {
   const dll = assembly(), prefix = Buffer.alloc(4); prefix.writeInt32LE(dll.length);
   const input = Buffer.concat([prefix, dll, encodeWindowsRequest(request)]);
   if (input.length > WACW_LIMITS.frame) throw new WindowsAccountConfigError("not_published", "CAPACITY");
-  // Trust derives from the stated protected OS installation prerequisite, never a report from this child.
-  const result = spawnSync(FIXED_WINDOWS_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program(__WACW_DLL_SHA__, false)],
-    { input, env: fixedWindowsEnvironment(), shell: false, windowsHide: true, timeout: 10_000, killSignal: "SIGTERM", maxBuffer: WACW_LIMITS.frame });
+  // Same protected OS image, resolved read-only; never PATH/env selection or child self-attestation.
+  let platform: Readonly<{ systemRoot: string; executable: string }>;
+  try { platform = resolveWindowsPlatform(); }
+  catch { throw new WindowsAccountConfigError(request.operation === 2 ? "unknown" : "not_published", "IO"); }
+  const result = spawnSync(platform.executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program(__WACW_DLL_SHA__, false)],
+    { input, env: fixedWindowsEnvironment(platform.systemRoot), shell: false, windowsHide: true, timeout: 10_000, killSignal: "SIGTERM", maxBuffer: WACW_LIMITS.frame });
   if (result.error || result.status !== 0 || result.signal || result.stderr.length !== 0) throw new WindowsAccountConfigError(request.operation === 2 ? "unknown" : "not_published", "IO");
   try { return decodeWindowsReply(result.stdout, request.operation); }
   catch (error) { if (error instanceof WindowsAccountConfigError && error.verifiedTerminal) throw error;
@@ -54,8 +69,9 @@ export function publish(request: Omit<NativeRequest, "operation">): void { invok
 function fixtureOperation(path: string, mode: "private" | "foreign-write" | "null-dacl" | "full-store" | "owner-path"): string {
   if (!(typeof __WACW_FIXTURE__ === "boolean" && __WACW_FIXTURE__) || isSea()) throw new Error("fixture-only native assembly required");
   const dll = assembly(), prefix = Buffer.alloc(4); prefix.writeInt32LE(dll.length);
-  const result = spawnSync(FIXED_WINDOWS_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program(__WACW_DLL_SHA__, true)],
-    { input: Buffer.concat([prefix, dll]), env: { ...fixedWindowsEnvironment(), WACW_FIXTURE_PATH: path, WACW_FIXTURE_MODE: mode }, shell: false, windowsHide: true, timeout: 10_000, maxBuffer: 32768 });
+  const platform = resolveWindowsPlatform();
+  const result = spawnSync(platform.executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program(__WACW_DLL_SHA__, true)],
+    { input: Buffer.concat([prefix, dll]), env: { ...fixedWindowsEnvironment(platform.systemRoot), WACW_FIXTURE_PATH: path, WACW_FIXTURE_MODE: mode }, shell: false, windowsHide: true, timeout: 10_000, maxBuffer: 32768 });
   if (result.error || result.status !== 0 || result.signal || result.stderr.length) throw new Error("native synthetic fixture creation failed");
   return result.stdout.toString("utf8");
 }

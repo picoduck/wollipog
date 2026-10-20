@@ -409,10 +409,24 @@ OS Windows PowerShell/.NET installation and OS administrators, analogous to trus
 GLOBALROOT selects the true object-manager root; it is not executable image attestation. No
 postlaunch self-report supplies first-launch trust. A compromised/misconfigured trusted OS is
 outside this candidate's guarantee and must be disclosed in independent review and merge risk.
-Only the fixed GLOBALROOT SystemRoot System32 WindowsPowerShell path is used. No PATH,
-SystemRoot environment or RPC command selector, alternate launcher, inherited CLR/DOTNET/
-COMPLUS/PS startup override, runtime compiler, PowerShell module autoload/profile or
-ExecutionPolicy change is used. The source/SEA engine and DLL are build-hash-bound.
+The fixed GLOBALROOT SystemRoot anchor and its System32 WindowsPowerShell image are resolved
+read-only with realpathSync.native to a bounded local drive-qualified OS root and that SAME
+canonical image. Node/libuv uses GetFinalPathNameByHandleW with VOLUME_NAME_DOS here.
+Only that canonical absolute image is launched: no PATH/environment/RPC selector, hardcoded
+C: installation, alternate launcher or fallback. Resolution failure refuses conservatively.
+This is documented API design basis, not actual Windows launch or image-attestation proof.
+The observed GLOBALROOT spawnSync EINVAL does not establish its exact failing Win32 call.
+
+SystemRoot/WINDIR come from that validated root; PATH is explicitly empty. libuv supplies
+other mandatory Windows compatibility variables from the parent when omitted, so the JS
+dictionary is not the complete effective environment. CLR/DOTNET/COMPLUS/PS/Node startup
+hooks remain absent; no runtime compiler, module autoload/profile or ExecutionPolicy change
+is used. Build-only TEMP/TMP and fixed native payload fields retain their existing controls.
+Two read-only metadata resolutions add no process/temp producer; their OS-call duration is
+outside the existing child termination control, with no hard total metadata-call deadline.
+The source/SEA engine and DLL remain build-hash-bound. Both Windows jobs must still execute
+the existing 13 source cases and actual SEA verification; pure validation/env assertions do
+not replace native success, architecture, death, sharing or durability evidence.
 
 Inside that trusted engine, all actual config/store file and parent owner SID, DACL, reparse,
 hardlink, alternate-stream, fixed-local-NTFS, canonical-path and identity checks remain mandatory
