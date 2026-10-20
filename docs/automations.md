@@ -94,7 +94,10 @@ tables, never in a schedule.
 
 Authenticated routes are:
 
-- `GET /api/automations`
+- `GET /api/automations`: each automation also carries an optional `latestExecution`, its newest
+  execution's `status` and `at` (completion, else start, else creation), with no error text. It is
+  absent for an automation that has never run and from control planes that predate it; the
+  Automations list then shows no Last Run Failed badge, and the automation's page still does.
 - `POST /api/automations`
 - `GET /api/automations/:id`
 - `PUT /api/automations/:id`

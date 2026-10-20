@@ -116,7 +116,7 @@ for (const theme of ["dark", "light"] as const) {
       });
 
       test("the Outbound Events Selects, inside their labels, read at the Callback URL's weight on the body line", async ({ page }) => {
-        await page.goto(`/automations-e2e.html?theme=${theme}`);
+        await page.goto(`/automations-e2e.html?theme=${theme}&route=${encodeURIComponent("/automations/outbound")}`);
         await page.getByRole("button", { name: "New Subscription" }).click();
         const editor = page.locator(".outbound-event-editor");
         await expectTriggerType(page, editor, ["Scope Type", "Project"], editor.getByRole("textbox", { name: "Callback URL", exact: true }));

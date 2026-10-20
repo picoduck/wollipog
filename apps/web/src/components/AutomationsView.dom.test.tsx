@@ -13,6 +13,7 @@ import type {
   OutboundEventDeliveryView,
   OutboundEventSubscriptionView,
   RunnerView,
+  SessionView,
   UiSnapshotMessage,
   WorkflowDefinition,
 } from "@wollipog/protocol";
@@ -34,6 +35,7 @@ import { agentDisplayName } from "../agent-presentation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withScopedClockOverrides } from "./test-clock-overrides.js";
+import { formatCalendarTime } from "../format.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -139,6 +141,11 @@ class FakeSocket implements UiSocket {
 /** Confirmations and toasts for a fixture mounted while it is set; none otherwise (every confirm declines). */
 let feedback: FeedbackContextValue | null = null;
 
+/** Renders a fixture under React StrictMode while set, as the app does. */
+let strictMode = false;
+/** The sessions the fixture's snapshot carries. */
+let snapshotSessions: SessionView[] = [];
+
 /** The route a fixture opens on: the list, unless a test opens an editor route directly. */
 let initialView: View = { name: "automations" };
 const navigation: ViewNavigation = {
@@ -158,7 +165,7 @@ function snapshot(runnerViews = runners): UiSnapshotMessage {
     },
     runners: runnerViews,
     boxes: [],
-    sessions: [],
+    sessions: snapshotSessions,
     runs: [],
     pods: [],
   };
@@ -186,6 +193,8 @@ interface Fixture {
   deletes: string[];
   replaceClient: (overrides: Partial<ApiClient>) => Promise<void>;
   pushRunners: (views: RunnerView[]) => Promise<void>;
+  /** Drops the live connection after the snapshot: the store shows it reconnecting. */
+  closeSocket: () => Promise<void>;
 }
 
 let fixtureSequence = 0;
@@ -298,11 +307,12 @@ async function mountFixture(
       <AutomationsWhenReady />
     </StoreProvider>
   );
-  const render = () => root.render(
+  const tree = () => (
     <ApiProvider client={client}>
       {feedback ? <FeedbackContext.Provider value={feedback}>{store}</FeedbackContext.Provider> : store}
-    </ApiProvider>,
+    </ApiProvider>
   );
+  const render = () => root.render(strictMode ? <React.StrictMode>{tree()}</React.StrictMode> : tree());
   await act(async () => { render(); });
   await act(async () => { socket.push(snapshot(runnerViews)); });
   await act(settle);
@@ -315,6 +325,10 @@ async function mountFixture(
     },
     pushRunners: async (views) => {
       await act(async () => { socket.push(snapshot(views)); });
+      await act(settle);
+    },
+    closeSocket: async () => {
+      await act(async () => { socket.onclose?.({ code: 1006 }); });
       await act(settle);
     },
   };
@@ -419,22 +433,22 @@ async function setLabeledInput(container: HTMLDivElement, label: string, value: 
   });
 }
 
+/** A list row's one open target (#2969), found by the automation's name. */
 function cardToggle(container: HTMLDivElement, name: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]
-    .find((candidate) => candidate.querySelector(".automation-card-name")?.textContent === name);
-  assert.ok(found, `${name} automation card is rendered`);
+  const found = maybeCardToggle(container, name);
+  assert.ok(found, `${name} automation row is rendered`);
   return found;
 }
 
-/** A card's heading opens the automation's page (#2968). */
+/** A row's open target opens the automation's page (#2968, #2969). */
 async function openPage(fixture: Fixture, name: string): Promise<void> {
   await act(async () => { cardToggle(fixture.container, name).click(); });
   await act(settle);
 }
 
 function maybeCardToggle(container: HTMLDivElement, name: string): HTMLButtonElement | undefined {
-  return [...container.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]
-    .find((candidate) => candidate.querySelector(".automation-card-name")?.textContent === name);
+  return [...container.querySelectorAll<HTMLButtonElement>(".automation-row-open")]
+    .find((candidate) => candidate.querySelector(".row-title")?.textContent === name);
 }
 
 /** The automation page's title, from its detail bar. */
@@ -524,7 +538,7 @@ test("Agent, Machine, and Model controls invoke their capability-transition help
 
 test("outbound event subscriptions expose privacy opt-ins and reveal the signing secret once", async () => {
   const automation = schedule("automation-events", "Event Source");
-  const fixture = await mountFixture([automation]);
+  const fixture = await mountAt({ name: "automations", tab: "outbound" }, [automation]);
   try {
     await act(async () => { button(fixture.container, "New Subscription").click(); });
     await choose(fixture.container, "Scope Type", "Automation");
@@ -1194,23 +1208,403 @@ test("legacy alternate targets auto-pin while explicitly unbound alternates warn
   }
 });
 
-test("a card's heading opens its automation's page, and the list reads the list alone", async () => {
+/** The list's group headers and, under each, its rows' names, in order. */
+function listGroups(container: HTMLDivElement): Array<{ label: string; count: string; rows: string[] }> {
+  return [...container.querySelectorAll<HTMLElement>(".automation-list .automation-group")].map((group) => ({
+    label: group.querySelector(".group-label")?.firstChild?.textContent ?? "",
+    count: group.querySelector(".group-label > .count")?.textContent ?? "",
+    rows: [...group.querySelectorAll(".automation-row .row-title")].map((title) => title.textContent ?? ""),
+  }));
+}
+
+function rowOf(container: HTMLDivElement, name: string): HTMLElement {
+  const row = cardToggle(container, name).closest<HTMLElement>(".automation-row");
+  assert.ok(row, `${name} is a list row`);
+  return row;
+}
+
+function enabledSwitch(container: HTMLDivElement, name: string): HTMLButtonElement {
+  const control = rowOf(container, name).querySelector<HTMLButtonElement>('[role="switch"]');
+  assert.ok(control, `${name} has an Enabled switch`);
+  return control;
+}
+
+const DAY = 86_400_000;
+
+test("each row names the automation, one badge, its schedule in words, its next run and its target, with no ids", async () => {
+  const now = Date.now();
+  const agent = { ...schedule("automation-agent", "Nightly Sweep"), nextFireAt: now + DAY };
+  const failedAndWaiting = {
+    ...schedule("automation-failed", "Failed and Waiting"), nextFireAt: now + 2 * DAY,
+    latestExecution: { status: "failed" as const, at: now - DAY },
+    targetHealth: { scheduledFor: now + 2 * DAY, firstSeenAt: now, error: "runner-1 is offline" },
+  };
+  const waiting = {
+    ...schedule("automation-waiting", "Waiting"), nextFireAt: now + 3 * DAY,
+    latestExecution: { status: "succeeded" as const, at: now - DAY },
+    targetHealth: { scheduledFor: now + 3 * DAY, firstSeenAt: now, error: "runner-1 is offline" },
+  };
+  const workflow = { ...workflowAutomation("automation-workflow", "Build Graph"), enabled: false };
+  const prompt = { ...schedule("automation-prompt", "Triage Prompt"), enabled: false };
+  prompt.action = { kind: "prompt_session", sessionId: "session-xyz", request: { text: "Triage." } };
+  const unloaded = { ...schedule("automation-unloaded", "Unloaded Prompt"), enabled: false };
+  unloaded.action = { kind: "prompt_session", sessionId: "session-gone", request: { text: "Triage." } };
+  const graph = { workflowId: "graph-1", version: 1, name: "Build and Review", nodes: [] } as unknown as WorkflowDefinition;
+  snapshotSessions = [{
+    id: "session-xyz", title: "Nightly triage\nsecond line", preview: null, agentId: "rich-agent", agentName: "Rich Agent",
+    driver: "claude-code", status: "idle", pendingApproval: null, runnerId: "runner-1",
+  } as unknown as SessionView];
+  const fixture = await mountFixture([agent, failedAndWaiting, waiting, workflow, prompt, unloaded],
+    {}, {}, [], {}, runners, [graph]);
+  try {
+    const meta = (name: string) => [...rowOf(fixture.container, name).querySelectorAll(".automation-row-meta > span")]
+      .map((item) => item.textContent);
+    const badges = (name: string) => [...rowOf(fixture.container, name).querySelectorAll(".status")]
+      .map((badge) => badge.textContent);
+    assert.deepEqual(meta("Nightly Sweep"), [
+      "Every day at 2:00 AM", `Next ${formatCalendarTime(agent.nextFireAt, Date.now())}`, "Rich Agent",
+    ]);
+    assert.deepEqual(badges("Nightly Sweep"), [], "no badge while nothing needs attention");
+    assert.deepEqual(badges("Failed and Waiting"), ["Last Run Failed"], "a failed run outranks an unavailable target");
+    assert.deepEqual(badges("Waiting"), ["Target Unavailable"]);
+    assert.deepEqual(meta("Build Graph"), ["Every day at 2:00 AM", "Paused", "Build and Review"]);
+    assert.deepEqual(meta("Triage Prompt").at(-1), "Nightly triage", "a session reads by its display title");
+    assert.deepEqual(meta("Unloaded Prompt").at(-1), "Session", "a session that isn't loaded reads as its kind");
+    // Each row's one icon per meta item, 14px, and no middle dots.
+    for (const icon of rowOf(fixture.container, "Nightly Sweep").querySelectorAll(".automation-row-meta svg")) {
+      assert.equal(icon.getAttribute("width"), "14");
+    }
+    const listText = fixture.container.querySelector(".automation-list")?.textContent ?? "";
+    assert.doesNotMatch(listText, /·/);
+    for (const id of ["automation-", "runner-1", "runner-1-workspace", "rich-agent", "graph-1", "session-xyz", "session-gone"]) {
+      assert.ok(!listText.includes(id), `no row text contains the id ${id}: ${listText}`);
+    }
+  } finally {
+    snapshotSessions = [];
+    await unmountFixture(fixture);
+  }
+});
+
+test("an older control plane's list without latestExecution shows no Last Run Failed badge", async () => {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {
+    "automation-a": [{ executionId: "e1", automationId: "automation-a", status: "failed" } as AutomationExecution],
+  });
+  try {
+    assertNoDomNode(rowOf(fixture.container, "Alpha").querySelector(".status"), "no badge");
+    assert.deepEqual(fixture.requests, ["list"], "the list never reads an automation's history for its badge");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("rows sit under Scheduled, soonest next run first, and Paused, each with its count; an empty group is omitted", async () => {
+  const now = Date.now();
+  const fixture = await mountFixture([
+    { ...schedule("automation-late", "Later"), nextFireAt: now + 3 * DAY },
+    { ...schedule("automation-paused", "Resting", false) },
+    { ...schedule("automation-soon", "Sooner"), nextFireAt: now + DAY },
+  ]);
+  try {
+    assert.deepEqual(listGroups(fixture.container), [
+      { label: "Scheduled", count: "2", rows: ["Sooner", "Later"] },
+      { label: "Paused", count: "1", rows: ["Resting"] },
+    ]);
+    assert.equal(fixture.container.querySelectorAll(".automation-group > .surface").length, 2, "one Surface per group");
+  } finally {
+    await unmountFixture(fixture);
+  }
+  const onlyPaused = await mountFixture([schedule("automation-paused", "Resting", false)]);
+  try {
+    assert.deepEqual(listGroups(onlyPaused.container).map((group) => group.label), ["Paused"]);
+  } finally {
+    await unmountFixture(onlyPaused);
+  }
+});
+
+for (const strict of [false, true]) {
+  test(`toggling a row's Enabled switch sends the full spec, moves the row and keeps focus${strict ? " under StrictMode" : ""}`, async () => {
+    const now = Date.now();
+    const items = [
+      { ...schedule("automation-a", "Alpha"), nextFireAt: now + DAY },
+      { ...schedule("automation-b", "Beta", false) },
+    ];
+    const stored = structuredClone(items[0]!);
+    strictMode = strict;
+    const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+      updateAutomation: async (id: string, spec: AutomationSpec) => {
+        fixture.updates.push({ id, spec: structuredClone(spec) });
+        const index = items.findIndex((item) => item.automationId === id);
+        items[index] = { ...items[index]!, ...spec, nextFireAt: spec.enabled ? now + DAY : undefined };
+        return items[index]!;
+      },
+    });
+    try {
+      const control = enabledSwitch(fixture.container, "Alpha");
+      assert.equal(control.getAttribute("aria-label"), "Enabled");
+      assert.equal(control.getAttribute("aria-checked"), "true");
+      const titleId = control.getAttribute("aria-describedby")!;
+      assert.equal(fixture.container.ownerDocument.getElementById(titleId)?.textContent, "Alpha",
+        "the switch is described by its row's title");
+      assert.ok(!cardToggle(fixture.container, "Alpha").contains(control), "the switch is not inside the open target");
+      control.focus();
+      await act(async () => { control.click(); });
+      await act(settle);
+
+      const { automationId: _id, revision: _revision, nextFireAt: _next, createdBy: _by, createdAt: _at, updatedAt: _up, ...spec } = stored;
+      assert.deepEqual(fixture.updates, [{ id: "automation-a", spec: { ...spec, enabled: false } }],
+        "the full stored spec, with enabled flipped");
+      assert.deepEqual(listGroups(fixture.container).map((group) => [group.label, group.rows]), [["Paused", ["Alpha", "Beta"]]]);
+      assert.ok(fixture.container.querySelector(".automation-list"), "the switch does not open the automation");
+      assert.ok(!fixture.requests.some((request) => request.startsWith("automation:")), "nor read its page");
+      const moved = enabledSwitch(fixture.container, "Alpha");
+      assert.equal(moved.getAttribute("aria-checked"), "false");
+      assert.ok(fixture.container.ownerDocument.activeElement === moved, "focus follows the switch into its new group");
+
+      await act(async () => { moved.click(); });
+      await act(settle);
+      assert.deepEqual(fixture.updates.at(-1), { id: "automation-a", spec: { ...spec, enabled: true } });
+      assert.deepEqual(listGroups(fixture.container).map((group) => [group.label, group.rows]),
+        [["Scheduled", ["Alpha"]], ["Paused", ["Beta"]]]);
+    } finally {
+      strictMode = false;
+      await unmountFixture(fixture);
+    }
+  });
+}
+
+test("a failed toggle keeps the row where it was and names what didn't happen", async () => {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+    updateAutomation: async () => { throw new Error("Pause refused"); },
+  });
+  try {
+    await act(async () => { enabledSwitch(fixture.container, "Alpha").click(); });
+    await act(settle);
+    assert.equal(pageError(fixture), "Automation Not Paused");
+    assert.match(fixture.container.querySelector(".automation-list > .notice")?.textContent ?? "", /Pause refused/);
+    assert.equal(enabledSwitch(fixture.container, "Alpha").getAttribute("aria-checked"), "true");
+    assert.equal(enabledSwitch(fixture.container, "Alpha").getAttribute("aria-busy"), null, "no longer busy");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a toggle that settles after the list unmounts changes nothing on screen", async () => {
+  let release: (() => void) | undefined;
+  const errors: unknown[] = [];
+  const consoleError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  strictMode = true;
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+    updateAutomation: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      throw new Error("Late failure");
+    },
+  });
+  try {
+    await act(async () => { enabledSwitch(fixture.container, "Alpha").click(); });
+    assert.equal(enabledSwitch(fixture.container, "Alpha").getAttribute("aria-busy"), "true");
+    await unmountFixture(fixture);
+    await act(async () => { release?.(); });
+    await act(settle);
+    assert.equal(fixture.container.textContent, "");
+    assert.deepEqual(errors, []);
+  } finally {
+    console.error = consoleError;
+    strictMode = false;
+    release?.();
+  }
+});
+
+test("with the connection lost after a load, the rows stay dimmed under Reconnecting and no empty state renders", async () => {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")]);
+  try {
+    await fixture.closeSocket();
+    const list = fixture.container.querySelector(".automation-list")!;
+    const line = list.querySelector('.notice[role="status"]');
+    assert.equal(line?.textContent, "Reconnecting…");
+    const stale = list.querySelector(".is-stale");
+    assert.ok(stale?.contains(cardToggle(fixture.container, "Alpha")), "the last-known row is inside StaleContent");
+    assert.ok(!stale?.contains(line!), "the Reconnecting line is not dimmed");
+    assert.ok(!cardToggle(fixture.container, "Alpha").disabled, "the stale row still opens");
+    assertNoDomNode(fixture.container.querySelector(".state"), "never an empty state");
+  } finally {
+    await unmountFixture(fixture);
+  }
+  const empty = await mountFixture([]);
+  try {
+    await empty.closeSocket();
+    assert.equal(empty.container.querySelector('.automation-list .notice[role="status"]')?.textContent, "Reconnecting…");
+    assertNoDomNode(empty.container.querySelector(".state"), "an empty list proves nothing while reconnecting");
+  } finally {
+    await unmountFixture(empty);
+  }
+});
+
+test("a failed list request shows Couldn't Load Automations with Retry and the raw error behind Show Details", async () => {
+  let fail = true;
+  const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
+    automations: async () => {
+      if (fail) throw new Error("Synthetic list failure");
+      return { automations: [schedule("automation-a", "Alpha")] };
+    },
+  });
+  try {
+    assert.equal(pageError(fixture), "Couldn't Load Automations");
+    assertNoDomNode(fixture.container.querySelector(".state"), "no empty state beside the error");
+    assert.ok(fixture.container.querySelector('#page-title'), "the header stays");
+    assert.ok(fixture.container.querySelector('[role="tab"]'), "the tabs stay");
+    assert.ok(button(fixture.container, "New Automation"), "the primary stays");
+    await act(async () => { button(fixture.container, "Show Details").click(); });
+    assert.match(fixture.container.querySelector(".automation-list > .notice")?.textContent ?? "", /Synthetic list failure/);
+    fail = false;
+    await act(async () => { button(fixture.container, "Retry").click(); });
+    await act(settle);
+    assert.equal(pageError(fixture), null);
+    assert.ok(cardToggle(fixture.container, "Alpha"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("until the first response the list is five skeleton rows; an empty list has exactly one New Automation", async () => {
+  let release: (() => void) | undefined;
+  const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
+    automations: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { automations: [] };
+    },
+  });
+  try {
+    const skeleton = fixture.container.querySelector('.automation-list > .surface[role="status"]');
+    assert.equal(skeleton?.querySelectorAll(".row.row-2").length, 5);
+    assertNoDomNode(fixture.container.querySelector(".state"));
+    await act(async () => { release?.(); });
+    await act(settle);
+    const creates = [...fixture.container.querySelectorAll("button")]
+      .filter((candidate) => candidate.textContent?.trim() === "New Automation" ||
+        candidate.getAttribute("aria-label") === "New Automation");
+    assert.equal(creates.length, 1, "exactly one New Automation");
+    assert.ok(creates[0]!.closest(".state"), "and it is the empty state's");
+    assert.equal(fixture.container.querySelector(".state-title, .state h3")?.textContent, "No Automations Yet");
+    assert.match(fixture.container.querySelector(".state")?.textContent ?? "",
+      /Run an agent every weekday morning, or whenever a webhook fires\./);
+  } finally {
+    release?.();
+    await unmountFixture(fixture);
+  }
+});
+
+test("one list poll makes one request, however many automations it lists", async () => {
+  const intervals = new Set<() => void>();
+  const reads: string[] = [];
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+  }, async () => {
+    const fixture = await mountFixture([
+      schedule("automation-a", "Alpha"), schedule("automation-b", "Beta", false), workflowAutomation("automation-c", "Gamma"),
+    ], {}, {}, [], {}, runners, [], {
+      automations: async () => {
+        reads.push("/api/automations");
+        return { automations: [schedule("automation-a", "Alpha"), schedule("automation-b", "Beta", false),
+          workflowAutomation("automation-c", "Gamma")] };
+      },
+      workflowDefinitions: async () => { reads.push("/api/workflows"); return []; },
+    });
+    try {
+      assert.deepEqual(reads.filter((read) => read === "/api/automations"), ["/api/automations"]);
+      reads.length = 0;
+      await invokePolls(intervals);
+      await invokePolls(intervals);
+      assert.deepEqual(reads, ["/api/automations", "/api/automations"],
+        "each poll is the list alone: no history, triggers or workflow reads per automation");
+      assert.deepEqual(fixture.requests, [], "nor any automation's detail or triggers");
+    } finally { await unmountFixture(fixture); }
+  });
+});
+
+test("the list's poll pauses while the tab is hidden and skips a poll while one is in flight", async () => {
+  const intervals = new Set<() => void>();
+  let reads = 0;
+  let hold: Promise<void> | null = null;
+  let release: (() => void) | undefined;
+  const visibility = Object.getOwnPropertyDescriptor(domWindow.document, "visibilityState");
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+  }, async () => {
+    strictMode = true;
+    const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+      automations: async () => {
+        reads += 1;
+        if (hold) await hold;
+        return { automations: [schedule("automation-a", "Alpha")] };
+      },
+    });
+    try {
+      const afterLoad = reads;
+      Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "hidden" });
+      await invokePolls(intervals);
+      assert.equal(reads, afterLoad, "a hidden tab reads nothing");
+      Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "visible" });
+      hold = new Promise<void>((resolve) => { release = resolve; });
+      await invokePolls(intervals);
+      assert.equal(reads, afterLoad + 1);
+      await invokePolls(intervals);
+      assert.equal(reads, afterLoad + 1, "a poll while one is in flight is skipped");
+      hold = null;
+      await act(async () => { release?.(); });
+      await act(settle);
+      assert.ok(cardToggle(fixture.container, "Alpha"));
+    } finally {
+      release?.();
+      strictMode = false;
+      if (visibility) Object.defineProperty(domWindow.document, "visibilityState", visibility);
+      else Reflect.deleteProperty(domWindow.document, "visibilityState");
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("the tabs are routes: Automations opens on the list, Outbound Events on its own tab", async () => {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")]);
+  try {
+    const tabs = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    assert.deepEqual(tabs.map((tab) => [tab.textContent, tab.getAttribute("aria-selected")]),
+      [["Automations", "true"], ["Outbound Events", "false"]]);
+    const panel = fixture.container.querySelector('[role="tabpanel"]')!;
+    assert.ok(panel.firstElementChild?.classList.contains("automation-group"), "the list is the first content");
+    assertNoDomNode(fixture.container.querySelector(".outbound-events"), "Outbound Events is not on the list's tab");
+    await act(async () => { tabs[1]!.click(); });
+    await act(settle);
+    assert.ok(fixture.container.querySelector(".outbound-events"));
+    assertNoDomNode(fixture.container.querySelector(".automation-list"));
+    assert.equal(fixture.container.querySelector('[role="tab"][aria-selected="true"]')?.textContent, "Outbound Events");
+    assertNoDomNode(fixture.container.querySelector('.page-actions button.primary, .page-actions .btn.primary'),
+      "New Automation is the list tab's primary");
+  } finally {
+    await unmountFixture(fixture);
+  }
+  const direct = await mountAt({ name: "automations", tab: "outbound" }, [schedule("automation-a", "Alpha")]);
+  try {
+    assert.equal(direct.container.querySelector('[role="tab"][aria-selected="true"]')?.textContent, "Outbound Events",
+      "/automations/outbound selects its tab on load");
+    assert.ok(direct.container.querySelector(".outbound-events"));
+  } finally {
+    await unmountFixture(direct);
+  }
+});
+
+test("a row's open target opens its automation's page, and the list reads the list alone", async () => {
   const fixture = await mountFixture([
     schedule("automation-a", "Alpha"),
     schedule("automation-b", "Beta", false),
   ]);
   try {
     const alpha = cardToggle(fixture.container, "Alpha");
-    // A native button, so pointer, touch, Enter and Space all open it; it no longer discloses.
+    // A native button, so pointer, touch, Enter and Space all open it; it does not disclose.
     assert.equal(alpha.tagName, "BUTTON");
     assert.equal(alpha.getAttribute("aria-expanded"), null);
-    assert.equal(alpha.getAttribute("aria-controls"), null);
-    assert.doesNotMatch(alpha.textContent ?? "", /▸/);
-    assert.equal(alpha.querySelector(".automation-card-action")?.textContent, "Create rich-agent session on runner-1");
-    assert.equal(alpha.querySelector(".status.t-success")?.textContent, "Enabled");
-    assert.equal(cardToggle(fixture.container, "Beta").querySelector(".status.t-neutral")?.textContent, "Paused");
-    // The card body is gone: the heading is the card's only control.
-    assert.equal(fixture.container.querySelectorAll(".automation-card button").length, 2);
+    // Each row holds two controls: its open target and its Enabled switch.
+    assert.equal(rowOf(fixture.container, "Alpha").querySelectorAll("button").length, 2);
     assert.equal(fixture.container.querySelectorAll(".automation-history, .automation-trigger").length, 0);
     assert.deepEqual(fixture.requests, ["list"], "the list reads no automation's history or triggers");
 
@@ -1357,8 +1751,8 @@ test("execution history shows content-free signed delivery provenance", async ()
  * automation page's one notice (#2968).
  */
 function pageError(fixture: Fixture): string | null {
-  const list = fixture.container.querySelector('.page > .automation-error[role="alert"]');
-  if (list) return list.textContent;
+  const list = fixture.container.querySelector<HTMLElement>('.automation-list > .notice[role="alert"]');
+  if (list) return list.querySelector(".notice-title")?.textContent ?? null;
   return fixture.container.querySelector(".automation-notice-slot .notice-body")?.textContent ?? null;
 }
 
@@ -1479,8 +1873,8 @@ test("the list's failed read shows above it, and the next complete read clears i
     try {
       fail = true;
       await invokePolls(intervals);
-      assert.equal(pageError(fixture), "List unavailable");
-      assert.ok(maybeCardToggle(fixture.container, "Alpha"), "the last-known cards stay");
+      assert.equal(pageError(fixture), "Couldn't Load Automations");
+      assert.ok(maybeCardToggle(fixture.container, "Alpha"), "the last-known rows stay");
       fail = false;
       await invokePolls(intervals);
       assert.equal(pageError(fixture), null);

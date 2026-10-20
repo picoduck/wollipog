@@ -15,7 +15,7 @@ export type View =
   | { name: "runners"; section?: ConnectionSection; machineId?: string }
   | { name: "runs" }
   | { name: "pods" }
-  | { name: "automations"; editor?: AutomationEditorRoute }
+  | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
   | { name: "automation"; id: string }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage" }
@@ -140,6 +140,12 @@ export type ConnectionSection = "instances" | "machines" | "people";
  * leaves it.
  */
 export type AutomationEditorRoute = { kind: "new" } | { kind: "edit"; automationId: string };
+
+/**
+ * The Automations page's tabs (#2969): the list at `/automations`, and Outbound Events at
+ * `/automations/outbound`. Absent is the list; the editor routes have no tab.
+ */
+export type AutomationsTab = "outbound";
 
 /**
  * Agent Skills panes that are not a skill (docs/design-system.md §6): the Orphaned Copies pane and
@@ -418,7 +424,7 @@ export function viewPath(view: View): string {
     case "pods": return "/pods";
     case "automations": return view.editor?.kind === "new" ? "/automations/new"
       : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
-        : "/automations";
+        : view.tab === "outbound" ? "/automations/outbound" : "/automations";
     case "automation": return `/automations/~${encodeResourceId(view.id)}`;
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return "/usage";
@@ -509,6 +515,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
   if (path === "/automations/new") return { name: "automations", editor: { kind: "new" } };
+  if (path === "/automations/outbound") return { name: "automations", tab: "outbound" };
   const automationEditMatch = /^\/automations\/~([^/]+)\/edit$/.exec(path);
   if (automationEditMatch) {
     const automationId = decodeResourceId(automationEditMatch[1]!);

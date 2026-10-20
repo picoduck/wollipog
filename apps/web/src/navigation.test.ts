@@ -38,6 +38,7 @@ const routes: Array<[View, string]> = [
   [{ name: "runs" }, "/runs"],
   [{ name: "pods" }, "/pods"],
   [{ name: "automations" }, "/automations"],
+  [{ name: "automations", tab: "outbound" }, "/automations/outbound"],
   [{ name: "automations", editor: { kind: "new" } }, "/automations/new"],
   [{ name: "automations", editor: { kind: "edit", automationId: "automation / ✅" } },
     `/automations/~${encodeResourceId("automation / ✅")}/edit`],

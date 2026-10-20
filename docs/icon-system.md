@@ -39,7 +39,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | Export | Decision | Mapping or Exception | Rationale |
 | --- | --- | --- | --- |
 | `GridIcon` | Lucide | `Grid2X2` | Generic grid navigation. |
-| `InboxIcon` | Lucide | `Inbox` | Generic inbox navigation, and the Sessions No Sessions Yet state (#2220). |
+| `InboxIcon` | Lucide | `Inbox` | Generic inbox navigation, and the Sessions No Sessions Yet state (#2220); an automation row's session target (#2969). |
 | `ProjectsIcon` | Lucide | `FolderKanban` | Project collection navigation. |
 | `BoardIcon` | Lucide | `Columns3` | Generic board columns. |
 | `ListIcon` | Lucide | `List` | Generic list layout. |
@@ -47,7 +47,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210), and the Sessions No Snoozed Sessions and No Active Sessions states (#2220). |
 | `DismissReminderIcon` | Lucide | `AlarmClockOff` | Dismiss Reminder in the Sessions context menu (#2214). |
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
-| `RunsIcon` | Lucide | `Workflow` | Generic workflow runs, and a workflow run's row in Multi-Agent Runs (#2974). |
+| `RunsIcon` | Lucide | `Workflow` | Generic workflow runs, and a workflow run's row in Multi-Agent Runs (#2974); an automation row's workflow target (#2969). |
 | `CompareIcon` | Lucide | `Columns2` | A comparison run's row in Multi-Agent Runs: several agents side by side on one task (#2974). `Columns3` is the Board. |
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
@@ -200,7 +200,9 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `TerminalIcon` | Lucide | `Terminal` | A command step in the transcript; distinct from the Command Line destination's framed terminal. |
 | `ThoughtIcon` | Lucide | `Brain` | A thought step in the transcript. |
 | `AgentLogIcon` | Lucide | `ScrollText` | An Agent Log step (a harness's own output) in the transcript. |
-| `BotIcon` | Lucide | `Bot` | An agent step in the transcript; the Agents tool in the Session Tools list and the tool switcher (#2844). |
+| `BotIcon` | Lucide | `Bot` | An agent step in the transcript; the Agents tool in the Session Tools list and the tool switcher (#2844); an automation row's agent target (#2969). |
+| `ScheduleIcon` | Lucide | `Repeat` | An automation's schedule in words, on its Automations list row (#2969). |
+| `NextRunIcon` | Lucide | `CalendarClock` | An automation's next run, or Paused, on its Automations list row (#2969). |
 | `ToolIcon` | Lucide | `Hammer` | A tool step of any other kind; distinct from the project setup wrench; the Request Card's Tool Calls kind. |
 
 The Visual Studio Code mark comes from Microsoft's

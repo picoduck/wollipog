@@ -74,6 +74,7 @@ import {
   type AutomationCommandView,
   type AutomationExecution,
   type AutomationExecutionStatus,
+  type AutomationLatestExecution,
   type AutomationSchedule,
   type AutomationSpec,
   type AutomationTriggerDeliveryMetadata,
@@ -29867,6 +29868,26 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM automation_executions WHERE execution_id=?")
       .get(executionId) as unknown as AutomationExecutionRow | undefined;
     return row ? this.automationExecution(row) : null;
+  }
+
+  /**
+   * Each live automation's newest execution, in the history's own order (`scheduled_for`, then
+   * `execution_id`, both descending), as its status and time alone (#2969). One indexed lookup per
+   * automation, so the list never reads anyone's history or error text.
+   */
+  latestAutomationExecutions(): Map<string, AutomationLatestExecution> {
+    const rows = this.stmt(
+      `SELECT e.automation_id, e.status, e.created_at, e.started_at, e.completed_at
+       FROM automations a JOIN automation_executions e ON e.execution_id = (
+         SELECT x.execution_id FROM automation_executions x WHERE x.automation_id = a.automation_id
+         ORDER BY x.scheduled_for DESC, x.execution_id DESC LIMIT 1)
+       WHERE a.deleted_at IS NULL`,
+    ).all() as unknown as Array<Pick<AutomationExecutionRow,
+      "automation_id" | "status" | "created_at" | "started_at" | "completed_at">>;
+    return new Map(rows.map((row) => [row.automation_id, {
+      status: row.status,
+      at: row.completed_at ?? row.started_at ?? row.created_at,
+    }]));
   }
 
   listAutomationExecutions(automationId: string, limit = 50): AutomationExecution[] {

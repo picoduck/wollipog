@@ -582,8 +582,16 @@ export class AutomationsService {
     return this.commandOutbox.receipt(runnerId, message, now);
   }
 
+  /** The list (#2969): each automation with its newest execution's status and time, so the
+   * Automations list can flag a failed last run without reading every automation's history. */
   list(): { automations: AutomationSchedule[] } {
-    return { automations: this.db.listAutomations() };
+    const latest = this.db.latestAutomationExecutions();
+    return {
+      automations: this.db.listAutomations().map((automation) => {
+        const execution = latest.get(automation.automationId);
+        return execution ? { ...automation, latestExecution: execution } : automation;
+      }),
+    };
   }
 
   get(automationId: string): ServiceResult<{

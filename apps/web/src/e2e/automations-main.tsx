@@ -8,6 +8,7 @@ import type {
   OutboundEventDeliveryView,
   OutboundEventSubscriptionView,
   RunnerView,
+  SessionView,
   UiSnapshotMessage,
   WorkflowDefinition,
 } from "@wollipog/protocol";
@@ -301,6 +302,70 @@ if (params.has("failed-run")) {
   });
 }
 
+// The Automations list's scenarios (#2969). `list` adds a fuller list: agents, a workflow and a
+// session by name, scheduled and paused, each with its next run in this browser's own zone.
+// `needs-attention` gives the first a failed last run and another an unavailable target.
+const viewerZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+/** The next local minute matching `minute`, one of `hours` (every hour when empty) and a weekday or month day. */
+function nextLocal(minute: number, hours: number[], days: { weekdays?: number[]; monthDay?: number } = {}): number {
+  const now = Date.now();
+  for (let offset = 0; offset < 62; offset++) {
+    const day = new Date();
+    day.setHours(0, 0, 0, 0);
+    day.setDate(day.getDate() + offset);
+    if (days.weekdays && !days.weekdays.includes(day.getDay())) continue;
+    if (days.monthDay !== undefined && day.getDate() !== days.monthDay) continue;
+    for (const hour of hours.length ? hours : Array.from({ length: 24 }, (_, index) => index)) {
+      const at = new Date(day);
+      at.setHours(hour, minute, 0, 0);
+      if (at.getTime() > now) return at.getTime();
+    }
+  }
+  return now + 86_400_000;
+}
+const listSessions: SessionView[] = [];
+if (params.has("list")) {
+  runner.agents.push(
+    { ...runner.agents[0]!, id: "claude", name: "Claude Code", driver: "claude-code" },
+    { ...runner.agents[0]!, id: "codex", name: "Codex", driver: "codex-app-server" },
+  );
+  if (!workflowDefinitions.some((workflow) => workflow.workflowId === "build-review")) workflowDefinitions.push({
+    workflowId: "build-review", version: 1, name: "Build and Review", source: "custom", maxTransitions: 4,
+    createdBy: { kind: "human", id: "e2e" }, createdAt: 1, edges: [], nodes: [],
+  });
+  listSessions.push({
+    id: "s_release_notes", title: "Release notes for 4.2", preview: null, agentId: "claude", agentName: "Claude Code",
+    driver: "claude-code", status: "idle", pendingApproval: null, runnerId: "runner-1",
+  } as unknown as SessionView);
+  const base = items[1]!;
+  const local = (automationId: string, name: string, cron: string, enabled: boolean, action: AutomationSchedule["action"],
+    nextFireAt?: number): AutomationSchedule => ({
+    ...base, automationId, name, cron, timezone: viewerZone, enabled, action, ...(nextFireAt ? { nextFireAt } : {}),
+  });
+  const agent = (agentId: string, prompt: string): AutomationSchedule["action"] => ({
+    kind: "create_session", request: { runnerId: "runner-1", workspaceId: "workspace-1", agentId, prompt, useWorktree: true },
+  });
+  items[0] = { ...items[0]!, timezone: viewerZone, nextFireAt: nextLocal(0, [2]) };
+  items.push(
+    local("automation-morning-triage", "Morning Issue Triage", "0 9 * * 1-5", true,
+      agent("codex", "Triage new issues."), nextLocal(0, [9], { weekdays: [1, 2, 3, 4, 5] })),
+    local("automation-health-check", "Hourly Health Check", "0 * * * *", true,
+      agent("claude", "Check the build."), nextLocal(0, [])),
+    local("automation-build-review", "Build and Review the Main Branch", "0 9 * * 1", true, { kind: "workflow_run", request: {
+      runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "build-review", task: "Build and review main.",
+    } }, nextLocal(0, [9], { weekdays: [1] })),
+    local("automation-release-notes", "Release Notes Follow-Up", "0 10 1 * *", false,
+      { kind: "prompt_session", sessionId: "s_release_notes", request: { text: "Update the release notes." } }),
+  );
+  items[1] = { ...items[1]!, timezone: viewerZone };
+  if (params.has("needs-attention")) {
+    items[0]!.latestExecution = { status: "failed", at: Date.now() - 3_600_000 };
+    items[2]!.targetHealth = { scheduledFor: Date.now() - 60_000, firstSeenAt: Date.now() - 59_000, error: targetReason };
+  }
+}
+if (params.has("failed-run")) items[0]!.latestExecution = { status: "failed", at: executions[0]!.completedAt! };
+if (params.has("list-empty")) items.length = 0;
+
 const outboundSubscriptions: OutboundEventSubscriptionView[] = [{
   subscriptionId: "oes_release_events",
   callbackUrl: "https://events.example.com/wollipog",
@@ -346,6 +411,8 @@ const outboundDeliveries: OutboundEventDeliveryView[] = [{
 const fixtureRunners = () => [runner, ...(alternateRunner ? [alternateRunner] : []),
   ...(workflowSwitchRunner ? [workflowSwitchRunner] : []), ...(offlineRunner ? [offlineRunner] : [])];
 let liveSocket: FixtureSocket | null = null;
+/** Set by `automationsDisconnect()`: the connection drops and stays down. */
+let disconnected = false;
 
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
@@ -356,6 +423,10 @@ class FixtureSocket implements UiSocket {
   constructor() {
     liveSocket = this;
     window.setTimeout(() => {
+      if (disconnected) {
+        this.onclose?.({ code: 1006 });
+        return;
+      }
       this.onopen?.();
       this.pushRunners();
     }, 0);
@@ -371,7 +442,7 @@ class FixtureSocket implements UiSocket {
       },
       runners: fixtureRunners(),
       boxes: [],
-      sessions: [],
+      sessions: listSessions,
       runs: [],
       pods: [],
     });
@@ -406,6 +477,12 @@ function AutomationsRoute() {
     : <AutomationsView />;
 }
 
+// Reconnecting (#2969): the live connection drops after the list has loaded, and stays down.
+Object.assign(window, { automationsDisconnect: () => {
+  disconnected = true;
+  liveSocket?.onclose?.({ code: 1006 });
+} });
+
 // Rediscovery while an editor is open: another installation becomes selected on every Machine.
 if (params.has("rediscover")) Object.assign(window, { automationsRediscover: () => {
   for (const agent of fixtureRunners().flatMap((machine) => machine.agents)) {
@@ -433,7 +510,11 @@ const client = {
   automations: async () => {
     if (pollingFixture) pollingFixture.listCalls++;
     if (pollingFixture?.failure === "list") throw new Error("Synthetic polling failure");
-    return { automations: items };
+    // `list-loading` never answers; `list-error` always fails (#2969).
+    if (params.has("list-loading")) return new Promise<never>(() => {});
+    if (params.has("list-error")) throw new ApiError("GET /api/automations failed: 503 Service Unavailable", 503);
+    // A new array per read, as the control plane sends.
+    return { automations: [...items] };
   },
   automation: async (id: string) => {
     if (pollingFixture) pollingFixture.detailCalls++;
@@ -459,6 +540,12 @@ const client = {
     const index = items.findIndex((item) => item.automationId === id);
     items[index] = { ...items[index]!, ...spec };
     if (pollingFixture.failRefreshAfterMutation) pollingFixture.failure = "detail";
+    return items[index]!;
+  } } : {}),
+  // `list`: the Enabled switch saves, and a resumed automation is scheduled again.
+  ...(params.has("list") && !pollingFixture ? { updateAutomation: async (id: string, spec: AutomationSpec) => {
+    const index = items.findIndex((item) => item.automationId === id);
+    items[index] = { ...items[index]!, ...spec, nextFireAt: spec.enabled ? Date.now() + 3_600_000 : undefined };
     return items[index]!;
   } } : {}),
   // `save-error`: the control plane refuses every save, with a reason no field owns.

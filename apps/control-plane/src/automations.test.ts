@@ -1090,6 +1090,35 @@ test("a due create-session occurrence claims once, applies ceilings, and reconci
   assert.equal(notifications.at(-1)?.endsWith(":succeeded"), true);
 });
 
+test("the list carries each automation's newest execution as its status and time, never its error", () => {
+  const { db, service } = harness();
+  const actor = { kind: "human" as const, id: "device-1" };
+  const ran = service.create(baseSpec({ name: "Ran" }), actor, 0).data!;
+  const never = service.create(baseSpec({ name: "Never", enabled: false }), actor, 0).data!;
+  const latestOf = (automationId: string) =>
+    service.list().automations.find((item) => item.automationId === automationId)?.latestExecution;
+  assert.equal(latestOf(ran.automationId), undefined, "an automation that never ran has none");
+
+  assert.equal(service.tick(60_000), 1);
+  const first = db.listAutomationExecutions(ran.automationId)[0]!;
+  assert.deepEqual(latestOf(ran.automationId), { status: "dispatching", at: first.createdAt });
+  db.settleAutomationExecution({
+    executionId: first.executionId, status: "failed", actor, error: "secret-bearing failure detail", now: 61_000,
+  });
+  assert.deepEqual(latestOf(ran.automationId), { status: "failed", at: 61_000 });
+  assert.doesNotMatch(JSON.stringify(service.list()), /secret-bearing failure detail/,
+    "the list never carries an execution's error text");
+
+  // The next occurrence is the newest, in the history's own order.
+  assert.equal(service.tick(120_000), 1);
+  const second = db.listAutomationExecutions(ran.automationId)[0]!;
+  assert.notEqual(second.executionId, first.executionId);
+  assert.deepEqual(latestOf(ran.automationId), { status: second.status, at: second.createdAt });
+  assert.equal(latestOf(never.automationId), undefined);
+  assert.equal("latestExecution" in service.list().automations.find((item) => item.automationId === never.automationId)!,
+    false, "the field is omitted, not null");
+});
+
 test("scheduled sessions follow the saved installation through rediscovery and refuse a reused id", () => {
   const system = { ...runner("runner-1").agents[0]!, driver: "codex-app-server" as const,
     command: "/usr/bin/codex", installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
