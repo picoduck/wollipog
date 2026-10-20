@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { EventEmitter, once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +22,7 @@ import {
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
 import { isProviderProfileId, readProviderProfileMarker } from "./provider-profile.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
+import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
 import { AccountConfigPublicationError } from "./provider-account-config-publication.js";
 
 test("provider sign-in only uses the saved installation in its execution context", () => {
@@ -86,7 +89,10 @@ const agents: AgentDefinition[] = [
   },
 ];
 
+declare const __WACW_FIXTURE_ENGINE_SHA__: string;
+
 function fixture(options: {
+  nativePrivateConfig?: boolean;
   timeoutMs?: number;
   ceremonyTimeoutMs?: number;
   codexVersion?: string;
@@ -104,8 +110,16 @@ function fixture(options: {
   profiles?: (root: string) => ProviderLoginProfileOptions;
   platform?: NodeJS.Platform;
 } = {}) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-provider-login-")));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), options.nativePrivateConfig ? "wollipog-account-config-" : "wollipog-provider-login-")));
   const configPath = join(root, "runner.config.json");
+  if (options.nativePrivateConfig) {
+    assert.equal(process.platform, "win32");
+    const enginePath = join(dirname(__filename), "provider-account-config-windows-fixture-engine.cjs");
+    assert.equal(createHash("sha256").update(readFileSync(enginePath)).digest("hex"), __WACW_FIXTURE_ENGINE_SHA__);
+    const engine = createRequire(__filename)(enginePath) as { createSyntheticFixture(path: string, mode: "private"): void };
+    // Fresh synthetic config only: private owner/DACL at CREATE_NEW, never repair an existing config.
+    engine.createSyntheticFixture(configPath, "private");
+  }
   writeFileSync(configPath, `${JSON.stringify({ runnerId: "machine", untouched: true })}\n`, { mode: 0o600 });
   const children: FakeLoginChild[] = [];
   const spawns: SpawnAgentOptions[] = [];
@@ -1019,7 +1033,7 @@ test("a new sign-in to an account already on the Machine is discarded instead of
 });
 
 test("a new sign-in to a different account is recorded when the existing identities differ", async () => {
-  const fx = fixture({ identify: async (login) => login.accountId === "existing" ? "first" : "second" });
+  const fx = fixture({ nativePrivateConfig: process.platform === "win32", identify: async (login) => login.accountId === "existing" ? "first" : "second" });
   try {
     fx.accounts.push({ id: "existing", label: "Personal", provider: "claude", directory: join(fx.root, "existing") });
     fx.saveAccounts();
@@ -1029,13 +1043,18 @@ test("a new sign-in to a different account is recorded when the existing identit
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(fx.supervisor.views()[0]?.status, "succeeded");
     assert.equal(fx.accounts.length, 2);
+    if (process.platform === "win32") {
+      const prefix=`.${basename(fx.configPath)}.account-publications-win-v1.`, names=readdirSync(dirname(fx.configPath));
+      for(const slot of ["anchor","header","journal"]) assert.ok(names.includes(prefix+slot),"default Windows writer must enroll native evidence");
+      assert.equal(names.includes(prefix+"guard"),false,"completed native publication releases only its owned guard");
+    }
   } finally {
     fx.cleanup();
   }
 });
 
 test("removing an account forgets it while truthfully reporting its credential HOME retained", async () => {
-  const fx = fixture();
+  const fx = fixture({ nativePrivateConfig: process.platform === "win32" });
   try {
     const directory = join(fx.root, "provider-accounts", "work-1234");
     mkdirSync(directory, { recursive: true });
@@ -1050,6 +1069,11 @@ test("removing an account forgets it while truthfully reporting its credential H
     const saved = JSON.parse(readFileSync(fx.configPath, "utf8")) as { providerAccounts: Array<{ id: string }>; untouched: boolean };
     assert.deepEqual(saved.providerAccounts.map((account) => account.id), ["keep"]);
     assert.equal(saved.untouched, true);
+    if (process.platform === "win32") {
+      const prefix=`.${basename(fx.configPath)}.account-publications-win-v1.`, names=readdirSync(dirname(fx.configPath));
+      for(const slot of ["anchor","header","journal"]) assert.ok(names.includes(prefix+slot),"default Windows writer must enroll native evidence");
+      assert.equal(names.includes(prefix+"guard"),false,"completed native publication releases only its owned guard");
+    }
     await assert.rejects(fx.supervisor.removeAccount("work-1234"), /not configured/i);
   } finally {
     fx.cleanup();
@@ -1195,10 +1219,11 @@ function profileFixture(t: TestContext, options: Parameters<typeof fixture>[0] &
         state.grants!.recordCreated(profileId, grantId);
       }),
       settle: async (input) => {
-        state.grants!.settleCreated(input.profileId, input.grantId, input.recorded === true);
-        if (input.recorded === false && !input.homeRemoved && existsSync(input.home)) {
-          await state.registry!.revokeProfileGrant(input.home, input.provider, input.profileId, input.grantId);
-        }
+        await createProviderProfileLoginSettlement({
+          settleCreated: (profileId, grantId, recorded) => state.grants!.settleCreated(profileId, grantId, recorded),
+          revoke: (home, provider, profileId, grantId) => state.registry!.revokeProfileGrant(home, provider, profileId, grantId),
+          log: () => {},
+        })(input);
         settled.push(input);
       },
     }),

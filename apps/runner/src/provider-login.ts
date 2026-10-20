@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { agentContextKey, type AgentContext, type AgentDefinition, type ProviderLoginView } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
 import { captureProviderAccountsConfigPreimage, writeProviderAccountsConfig } from "./config.js";
-import { accountConfigPublicationMayHaveOccurred } from "./provider-account-config-publication.js";
+import { accountConfigPublicationErrorMessage, accountConfigPublicationMayHaveOccurred } from "./provider-account-config-publication.js";
 import { codexLauncherBootstrap } from "./codex-plugins.js";
 import { runContextCommand } from "./context-command.js";
 import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
@@ -677,7 +677,7 @@ export class ProviderLoginSupervisor {
       this.writeAccounts(this.options.configPath, this.options.accounts.filter((candidate) => candidate !== account), preimage);
     } catch (error) {
       if (accountConfigPublicationMayHaveOccurred(error)) throw error;
-      throw new Error("The runner configuration could not be updated.");
+      throw new Error(accountConfigPublicationErrorMessage(error, "The runner configuration could not be updated."));
     }
     this.options.accounts.splice(this.options.accounts.indexOf(account), 1);
     if (options.retainCredentialHome !== true) {
@@ -964,7 +964,7 @@ export class ProviderLoginSupervisor {
         this.update(operation, {
           status: "failed",
           expectsCode: false,
-          error: publicationUncertain && error instanceof Error ? error.message : "Authentication succeeded, but the runner configuration could not be updated.",
+          error: accountConfigPublicationErrorMessage(error, "Authentication succeeded, but the runner configuration could not be updated."),
           verificationUrl: undefined,
           userCode: undefined,
         });

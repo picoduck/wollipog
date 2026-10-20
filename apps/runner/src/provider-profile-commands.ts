@@ -5,7 +5,7 @@ import type {
   RevokeProviderProfileGrantResultMessage,
 } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
-import { accountConfigPublicationMayHaveOccurred, type AccountConfigPreimage } from "./provider-account-config-publication.js";
+import { accountConfigPublicationErrorMessage, accountConfigPublicationMayHaveOccurred, type AccountConfigPreimage } from "./provider-account-config-publication.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import type { ProviderAccountRemovalOptions } from "./provider-login.js";
 import type { ProviderProfileGrants, StaleProviderProfileGrant } from "./provider-profile-grants.js";
@@ -78,47 +78,73 @@ export async function adoptProviderProfileCommand(
   if (!deps.controlPlaneInstanceId || !deps.grants.supportsProfiles()) {
     return fail("This control plane did not negotiate provider profiles.");
   }
-  let profileId: string;
-  let preimage: AccountConfigPreimage;
-  try { preimage = deps.captureAccountsPreimage(); }
-  catch { return fail("The runner configuration account source could not be verified."); }
+  const ticket = deps.grants.captureAdoptionTicket(msg.grantId);
+  if (!ticket) return fail("Provider profile adoption capacity is unavailable.");
+  // Immutable marker target: a later account-array mutation must not retarget cleanup.
+  const target = { ...account };
   try {
-    ({ profileId } = await deps.adopt(account.directory, account.provider, msg.grantId));
-  } catch (error) {
-    if (error instanceof ProviderHomeLeaseError && HOME_IN_USE.has(error.code)) return fail(error.message, "HOME_IN_USE");
-    if (error instanceof ProviderHomeLeaseError && PROFILE_EXISTS.has(error.code)) return fail(error.message, "PROFILE_EXISTS");
-    return fail(error instanceof Error ? error.message : "The provider profile could not be adopted.");
-  }
-  // The marker alone never makes a grant usable. Publish against the pre-await revision even
-  // when its profile id was already present; stale decisions must not complete an adoption.
-  try {
-    deps.persistAccounts(preimage.accounts.map((candidate) => candidate.id === account.id ? { ...candidate, profileId } : { ...candidate }), preimage);
-  } catch (error) {
-    if (accountConfigPublicationMayHaveOccurred(error)) {
-      // A committed or uncertain config may reference the marker. Retain it without granting
-      // local access or claiming definitely-unpublished rollback; CP revocation still wins.
-      deps.grants.recordRevoked(undefined, msg.grantId);
-    } else {
-      await rollBackAdoption(deps, account, profileId, msg.grantId);
+    let preimage: AccountConfigPreimage;
+    try { preimage = deps.captureAccountsPreimage(); }
+    catch (error) { return fail(accountConfigPublicationErrorMessage(error, "The runner configuration account source could not be verified.")); }
+    const beforeMarker = read(deps, target);
+    const persisted = preimage.accounts.find(candidate => candidate.id === target.id &&
+      candidate.provider === target.provider && candidate.directory === target.directory);
+    // A readable existing marker or a persisted binding can prove a prior exact CP grant.
+    // An unreadable marker is ambiguous; it never proves that this attempt introduced a grant.
+    const markerProfileId = beforeMarker.state === "present" &&
+      providerProfileGrantFor(beforeMarker.marker, deps.controlPlaneInstanceId)?.grantId === msg.grantId
+      ? beforeMarker.marker.profileId : undefined;
+    const priorKnownProfiles = [persisted?.profileId, markerProfileId].filter((id): id is string =>
+      id !== undefined && deps.grants.hasKnownGrant(id, msg.grantId));
+    let profileId: string;
+    try {
+      ({ profileId } = await deps.adopt(target.directory, target.provider, msg.grantId));
+    } catch (error) {
+      if (error instanceof ProviderHomeLeaseError && HOME_IN_USE.has(error.code)) return fail(error.message, "HOME_IN_USE");
+      if (error instanceof ProviderHomeLeaseError && PROFILE_EXISTS.has(error.code)) return fail(error.message, "PROFILE_EXISTS");
+      return fail(error instanceof Error ? error.message : "The provider profile could not be adopted.");
     }
+    const stale = () => {
+      // The current CP snapshot/revocation owns current grants. Never delete one to compensate
+      // an older command, including an unrelated global fence or remove/re-add ABA.
+      deps.publish();
+      return fail("The adoption authorization changed; its marker was retained and no local grant was activated.");
+    };
+    if (!deps.grants.adoptionTicketCurrent(ticket)) return stale();
+    try {
+      // Config generation remains independently fenced; no account-specific merge or retry.
+      deps.persistAccounts(preimage.accounts.map(candidate => candidate.id === target.id ? { ...candidate, profileId } : { ...candidate }), preimage);
+    } catch (error) {
+      if (!deps.grants.adoptionTicketCurrent(ticket)) {
+        deps.publish();
+        return fail(accountConfigPublicationErrorMessage(error, "The adoption authorization changed; evidence was retained without local activation."));
+      }
+      if (accountConfigPublicationMayHaveOccurred(error)) {
+        deps.grants.recordRevoked(undefined, msg.grantId);
+      } else {
+        const current = read(deps, target);
+        const configured = deps.accounts().some(candidate => candidate.id === target.id && candidate.provider === target.provider &&
+          candidate.directory === target.directory && candidate.profileId === profileId);
+        const retainedKnownGrant = deps.grants.hasKnownGrant(profileId, msg.grantId) &&
+          (priorKnownProfiles.includes(profileId) || configured);
+        // Preserve both proven preexisting grants and unproved marker provenance. Even when
+        // these reads suggest a newly introduced grant, an async revoke cannot carry this
+        // command's CP generation into the worker's later mutation. Do not start that rollback.
+        if (!retainedKnownGrant) deps.log(beforeMarker.state === "unverifiable" || current.state === "unverifiable"
+          ? "a failed adoption retained unverifiable marker evidence without activating a new local grant"
+          : "a failed adoption retained its marker without activating a new local grant");
+      }
+      deps.publish();
+      return fail(accountConfigPublicationErrorMessage(error, "The runner configuration could not be updated."));
+    }
+    // Atomically recheck/consume the CP capability immediately before local activation. A map
+    // entry after a snapshot ABA cannot make the old capability valid again.
+    if (!deps.grants.activateAdoption(profileId, ticket)) return stale();
+    account.profileId = profileId;
     deps.publish();
-    return fail(accountConfigPublicationMayHaveOccurred(error) && error instanceof Error ? error.message : "The runner configuration could not be updated.");
-  }
-  account.profileId = profileId;
-  deps.grants.recordAdopted(profileId, msg.grantId);
-  deps.publish();
-  return { type: "adopt_provider_profile_result", requestId: msg.requestId, ok: true, profileId };
-}
-
-/** Undo a failed adoption's marker write under the HOME's lease. The grant was never recorded as
- * usable; if the marker update fails too, the grant stays unusable here and the next registration
- * removes it once the control plane no longer lists it. */
-async function rollBackAdoption(deps: ProviderProfileCommandDeps, account: RunnerProviderAccount, profileId: string, grantId: string): Promise<void> {
-  deps.grants.recordRevoked(undefined, grantId);
-  try {
-    await deps.revoke(account.directory, account.provider, profileId, grantId);
-  } catch (error) {
-    deps.log(`a failed provider profile adoption could not be removed from the HOME's marker: ${error instanceof Error ? error.message : "unknown error"}`);
+    return { type: "adopt_provider_profile_result", requestId: msg.requestId, ok: true, profileId };
+  } finally {
+    deps.grants.releaseAdoptionTicket(ticket);
   }
 }
 

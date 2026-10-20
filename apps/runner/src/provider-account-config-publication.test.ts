@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { captureProviderAccountsConfigPreimage, validateProviderAccounts, writeProviderAccountsConfig, type RunnerProviderAccount } from "./config.js";
-import { AccountConfigPublicationError, publishAccountConfig, type AccountConfigPublicationTestHooks } from "./provider-account-config-publication.js";
+import { AccountConfigPublicationError, accountConfigPublicationErrorMessage, publishAccountConfig, type AccountConfigPublicationTestHooks } from "./provider-account-config-publication.js";
 
 const posixOnly = { skip: process.platform === "win32" };
 function fixture(t: TestContext) {
@@ -142,4 +142,25 @@ test("unsafe config files and changed account decisions refuse before creating e
     assert.throws(() => f.capture(fault === "accounts" ? [f.account] : []), AccountConfigPublicationError);
     assert.equal(existsSync(f.store), false);
   }
+});
+
+test("publication refusal guidance is actionable without disclosing raw filesystem errors", () => {
+  const fallback = "The runner configuration could not be updated.";
+  const guidance = accountConfigPublicationErrorMessage(new AccountConfigPublicationError("not_published", "STORE_UNVERIFIABLE"), fallback);
+  assert.match(guidance, /owned by the runner OS account/u);
+  assert.match(guidance, /not group- or world-writable/u);
+  assert.match(guidance, /no automatic permission change or repair/u);
+  assert.match(guidance, /Windows requires a supported native proof adapter/u);
+  assert.equal(accountConfigPublicationErrorMessage(new Error("secret-config-path and credential-content"), fallback), fallback);
+  assert.equal(accountConfigPublicationErrorMessage(new AccountConfigPublicationError("not_published", "IO"), fallback), fallback);
+  for (const publication of ["unknown", "committed"] as const) {
+    const error = new AccountConfigPublicationError(publication, "STORE_UNVERIFIABLE");
+    assert.equal(accountConfigPublicationErrorMessage(error, fallback), error.message);
+  }
+});
+
+test("a Windows backend ticket cannot enter the POSIX publisher", posixOnly, t => {
+  const f=fixture(t), pre=captureProviderAccountsConfigPreimage(f.config,[]);
+  assert.throws(()=>publishAccountConfig({...pre,backend:"windows-wacw1"},[],validateProviderAccounts),
+    (e:unknown)=>e instanceof AccountConfigPublicationError && e.code==="SOURCE_CHANGED");
 });

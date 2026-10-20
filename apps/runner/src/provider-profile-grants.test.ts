@@ -6,7 +6,7 @@ import { test, type TestContext } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
 import { captureProviderAccountsConfigPreimage, writeProviderAccountsConfig } from "./config.js";
-import { publishAccountConfig } from "./provider-account-config-publication.js";
+import { AccountConfigPublicationError, publishAccountConfig } from "./provider-account-config-publication.js";
 import { validateProviderAccounts } from "./config.js";
 import { providerAccountDefinition, skillReconciliationProviderAccountPlan } from "./provider-accounts.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
@@ -137,7 +137,7 @@ test("an adoption resumed after another config writer cannot overwrite the new a
   assert.equal((await adoption).ok, false);
   assert.deepEqual(readFileSync(f.configPath), published);
   const read = readProviderProfileMarker(f.accounts[0]!.directory);
-  assert.deepEqual(read.state === "present" && read.marker.grants, [], "definitely-unpublished stale decisions still roll back their own grant");
+  assert.deepEqual(read.state === "present" && read.marker.grants.map(grant => grant.grantId), [GRANT], "a stale config decision retains marker evidence rather than racing a newer CP grant with rollback");
   assert.deepEqual(f.grants.access().activeProfileIds, []);
 });
 
@@ -336,18 +336,18 @@ test("a revocation that follows a completed adoption stops use without a reconne
     (error: unknown) => error instanceof Error && /not granted to this control plane/u.test(error.message));
 });
 
-test("an adoption whose configuration write fails after the marker write never uses the grant and removes it", posixOnly, async (t) => {
+test("an adoption whose configuration write fails retains marker evidence without activating a new grant", posixOnly, async (t) => {
   const f = fixture(t);
   const [work] = f.accounts as [RunnerProviderAccount];
   f.grants.synchronize(225, []);
-  // An Owner or Admin revoked the pending grant while this adoption ran. The control plane could not
-  // name a profile then, and the uncoded failure below makes its adoption route send nothing either.
+  // This synthetic write refusal does not inject a CP revocation. It must not invent a local
+  // activation or dispatch a compensating worker revoke that could race a later CP snapshot.
   const deps: ProviderProfileCommandDeps = { ...f.deps, persistAccounts: () => { throw new Error("EROFS: read-only file system"); } };
   const result = await adoptProviderProfileCommand(deps, { type: "adopt_provider_profile", requestId: "r1", accountId: "work", grantId: GRANT });
   assert.deepEqual(result, { type: "adopt_provider_profile_result", requestId: "r1", ok: false, error: "The runner configuration could not be updated." });
   const read = readProviderProfileMarker(work.directory);
   assert.equal(read.state, "present", "the identity the adoption created stays");
-  assert.deepEqual(read.state === "present" && read.marker.grants, [], "but the grant it wrote is back out of the marker");
+  assert.deepEqual(read.state === "present" && read.marker.grants.map(grant => grant.grantId), [GRANT], "retain the marker until independently authorized retirement, without local activation");
   assert.equal(work.profileId, undefined, "and the account records no profile");
   assert.equal(f.grants.usable(work), false, "the grant was never usable, with no reconnect");
   assert.deepEqual(f.grants.access().activeProfileIds, []);
@@ -476,4 +476,113 @@ test("account removal retains unshared HOMEs and a grant recorded by another con
   assert.deepEqual(read.state === "present" && read.marker.grants.map((grant) => [grant.controlPlaneInstanceId, grant.grantId]),
     [[OTHER_INSTANCE, OTHER_GRANT]], "with the other control plane's grant, and without this one");
   assert.deepEqual(grants.access().activeProfileIds, []);
+});
+
+test("adoption tickets are bounded, one-shot capabilities and complete CP snapshots fence ABA", () => {
+  const grants = new ProviderProfileGrants({ controlPlaneInstanceId: INSTANCE, accounts: () => [] });
+  grants.synchronize(225, []);
+  const tickets = Array.from({ length: 32 }, () => grants.captureAdoptionTicket(GRANT)!);
+  assert.equal(tickets.every(Boolean), true);
+  assert.equal(grants.captureAdoptionTicket(GRANT), undefined);
+  grants.releaseAdoptionTicket(tickets.pop()!);
+  const fresh = grants.captureAdoptionTicket(GRANT)!;
+  assert.equal(grants.activateAdoption(PROFILE, fresh), true);
+  assert.equal(grants.activateAdoption(PROFILE, fresh), false);
+  assert.equal(grants.activateAdoption(PROFILE, { ...tickets[0]! }), false, "a cloned ticket is not an admitted capability");
+  const stale = tickets[0]!;
+  grants.synchronize(225, []);
+  grants.synchronize(225, [{ grantId: GRANT, profileId: PROFILE, status: "pending" }]);
+  assert.equal(grants.adoptionTicketCurrent(stale), false);
+  assert.equal(grants.activateAdoption(PROFILE, stale), false);
+  for (const ticket of tickets) grants.releaseAdoptionTicket(ticket);
+  const beforeUnsupported = grants.captureAdoptionTicket(GRANT)!;
+  grants.synchronize(223, undefined); grants.synchronize(225, []);
+  assert.equal(grants.activateAdoption(PROFILE, beforeUnsupported), false);
+  grants.releaseAdoptionTicket(beforeUnsupported);
+  const malformed = grants.captureAdoptionTicket(GRANT)!;
+  grants.synchronize(225, [{ bad: true }]);
+  assert.equal(grants.adoptionTicketCurrent(malformed), true, "malformed is not an authoritative replacement");
+  grants.releaseAdoptionTicket(malformed);
+});
+
+test("initial and retry adoption never activate across revocation, snapshot ABA or unrelated fences", posixOnly, async t => {
+  for (const retry of [false, true]) {
+    for (const event of ["revoke", "snapshot-aba", "unrelated-revoke", "same-snapshot", "support-transition"] as const) {
+      const f = fixture(t); f.grants.synchronize(225, []);
+      const msg = { type: "adopt_provider_profile" as const, requestId: "first", accountId: "work", grantId: GRANT };
+      if (retry) assert.equal((await adoptProviderProfileCommand(f.deps, msg)).ok, true);
+      let writes = 0, removals = 0, expected: unknown;
+      const deps: ProviderProfileCommandDeps = { ...f.deps,
+        adopt: async (...args) => {
+          const result = await f.deps.adopt(...args);
+          if (event === "revoke") f.grants.recordRevoked(result.profileId, GRANT);
+          if (event === "unrelated-revoke") f.grants.recordRevoked(undefined, OTHER_GRANT);
+          if (event === "snapshot-aba" || event === "same-snapshot") {
+            if (event === "snapshot-aba") f.grants.synchronize(225, []);
+            f.grants.synchronize(225, [{ grantId: GRANT, profileId: result.profileId, status: "pending" }]);
+          }
+          if (event === "support-transition") { f.grants.synchronize(223, undefined); f.grants.synchronize(225, []); }
+          expected = f.grants.accountProfile(f.accounts[0]!);
+          return result;
+        },
+        persistAccounts: () => { writes++; },
+        revoke: async () => { removals++; return false; },
+      };
+      const result = await adoptProviderProfileCommand(deps, { ...msg, requestId: "pending" });
+      assert.equal(result.ok, false);
+      assert.equal(writes, 0); assert.equal(removals, 0, "a stale command cannot delete a current grant");
+      assert.deepEqual(f.grants.accountProfile(f.accounts[0]!), expected, "old completion cannot activate or remove the newer CP state");
+      const marker = readProviderProfileMarker(f.accounts[0]!.directory);
+      assert.deepEqual(marker.state === "present" && marker.marker.grants.map(g => g.grantId), [GRANT]);
+    }
+  }
+});
+
+test("initial and retry activation recheck the ticket after synchronous config publication", posixOnly, async t => {
+  for (const retry of [false, true]) {
+    const f = fixture(t); f.grants.synchronize(225, []);
+    const msg = { type: "adopt_provider_profile" as const, requestId: "first", accountId: "work", grantId: GRANT };
+    if (retry) assert.equal((await adoptProviderProfileCommand(f.deps, msg)).ok, true);
+    let profile!: string;
+    const deps = { ...f.deps, adopt: async (...args: Parameters<ProviderProfileCommandDeps["adopt"]>) => {
+      const value = await f.deps.adopt(...args); profile = value.profileId; return value;
+    }, persistAccounts: (accounts: RunnerProviderAccount[], preimage: Parameters<ProviderProfileCommandDeps["persistAccounts"]>[1]) => {
+      f.deps.persistAccounts(accounts, preimage);
+      f.grants.recordRevoked(profile, GRANT);
+      f.grants.synchronize(225, [{ grantId: GRANT, profileId: profile, status: "pending" }]);
+    } };
+    assert.equal((await adoptProviderProfileCommand(deps, { ...msg, requestId: "pending" })).ok, false);
+    assert.deepEqual(f.grants.accountProfile(f.accounts[0]!), { id: profile, access: "pending" });
+  }
+});
+
+test("a refused recorded retry retains its exact current grant even when marker observation is unverifiable", posixOnly, async t => {
+  for (const unreadable of [false, true]) {
+    const f = fixture(t); f.grants.synchronize(225, []);
+    const msg = { type: "adopt_provider_profile" as const, requestId: "first", accountId: "work", grantId: GRANT };
+    const first = await adoptProviderProfileCommand(f.deps, msg); assert.equal(first.ok, true);
+    const bytes = readFileSync(f.configPath); let removals = 0;
+    const deps: ProviderProfileCommandDeps = { ...f.deps,
+      ...(unreadable ? { readMarker: () => ({ state: "unverifiable" as const, cause: "marker" as const }) } : {}),
+      persistAccounts: () => { throw new AccountConfigPublicationError("not_published", "SOURCE_BUSY"); },
+      revoke: async () => { removals++; return false; },
+    };
+    assert.equal((await adoptProviderProfileCommand(deps, { ...msg, requestId: "retry" })).ok, false);
+    assert.equal(removals, 0); assert.equal(f.grants.hasKnownGrant(first.profileId!, GRANT), true);
+    assert.equal(f.grants.usable(f.accounts[0]!), true); assert.deepEqual(readFileSync(f.configPath), bytes);
+  }
+});
+
+test("a refused initial adoption never dispatches asynchronous compensating revocation", posixOnly, async t => {
+  const f = fixture(t); f.grants.synchronize(225, []);
+  let removals = 0;
+  const deps: ProviderProfileCommandDeps = { ...f.deps,
+    persistAccounts: () => { throw new AccountConfigPublicationError("not_published", "SOURCE_BUSY"); },
+    revoke: async () => { removals++; return false; },
+  };
+  const result = await adoptProviderProfileCommand(deps, { type: "adopt_provider_profile", requestId: "refused", accountId: "work", grantId: GRANT });
+  assert.equal(result.ok, false); assert.equal(removals, 0);
+  assert.deepEqual(f.grants.access().activeProfileIds, []);
+  const marker = readProviderProfileMarker(f.accounts[0]!.directory);
+  assert.deepEqual(marker.state === "present" && marker.marker.grants.map(g => g.grantId), [GRANT]);
 });

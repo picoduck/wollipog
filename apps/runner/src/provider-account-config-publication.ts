@@ -6,6 +6,8 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import type { RunnerProviderAccount } from "./config.js";
+import { captureWindowsAccountConfig, publishWindowsAccountConfig, type WindowsPreimage } from "./provider-account-config-windows.js";
+import { WindowsAccountConfigError } from "./provider-account-config-windows-protocol.js";
 
 interface Limits { intents: number; records: number; recordBytes: number; totalBytes: number; }
 export const ACCOUNT_CONFIG_PUBLICATION_LIMITS: Readonly<Limits> = Object.freeze({
@@ -39,12 +41,21 @@ export class AccountConfigPublicationError extends Error {
     this.name = "AccountConfigPublicationError";
   }
 }
+/** Sanitized refusal guidance; never include raw I/O messages, config paths or credentials. */
+export function accountConfigPublicationErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof AccountConfigPublicationError)) return fallback;
+  if (error.publication !== "not_published") return error.message;
+  if (error.code !== "STORE_UNVERIFIABLE") return fallback;
+  return `${fallback} Account publication proof is unavailable. On supported POSIX hosts, an operator must verify that the config and its parent directory are owned by the runner OS account and are not group- or world-writable; private publication evidence must also remain verifiable. Windows requires a supported native proof adapter and its documented trusted OS PowerShell/.NET installation prerequisite; config/store owner SIDs, DACLs and retained evidence must remain verifiable. Preserve the config, credential HOMEs and publication evidence; no automatic permission change or repair is attempted.`;
+}
 export function accountConfigPublicationMayHaveOccurred(error: unknown): boolean {
   return error instanceof AccountConfigPublicationError && error.publication !== "not_published";
 }
 interface Location { path: string; parent: string; parentIdentity: string; root: string; anchor: string; key: string; }
 interface Tip { epoch: string | null; rootIdentity: string | null; revision: number; records: number; bytes: number; }
 export interface AccountConfigPreimage {
+  readonly backend?: "windows-wacw1";
+  readonly windows?: WindowsPreimage;
   readonly path: string;
   readonly configIdentity: string;
   readonly configDigest: string;
@@ -232,6 +243,13 @@ function readTip(loc: Location, limits: Limits, ownGuard = false): Tip {
 }
 /** Capture before an asynchronous caller decision; do not recreate the ticket at commit. */
 export function captureAccountConfigPreimage(configPath: string, expectedAccounts: Accounts, normalize: Normalize): AccountConfigPreimage {
+  if (process.platform === "win32") {
+    try { return captureWindowsAccountConfig(configPath, expectedAccounts, normalize); }
+    catch (error) {
+      if (error instanceof WindowsAccountConfigError) throw new AccountConfigPublicationError(error.publication, error.code);
+      throw new AccountConfigPublicationError("not_published", "STORE_UNVERIFIABLE");
+    }
+  }
   try {
     const limits = ACCOUNT_CONFIG_PUBLICATION_LIMITS, loc = location(configPath);
     const first = readTip(loc, limits), config = readConfig(loc, normalize, limits), second = readTip(loc, limits);
@@ -258,6 +276,17 @@ export function publishAccountConfig(
   preimage: AccountConfigPreimage, nextAccounts: RunnerProviderAccount[], normalize: Normalize,
   hooks: AccountConfigPublicationTestHooks = {},
 ): void {
+  if (process.platform === "win32") {
+    try {
+      need(Object.keys(hooks).length === 0); // Native fault seams exist only in the separately built fixture assembly.
+      publishWindowsAccountConfig(preimage, nextAccounts, normalize); return;
+    } catch (error) {
+      if (error instanceof WindowsAccountConfigError) throw new AccountConfigPublicationError(error.publication, error.code);
+      if (error instanceof AccountConfigPublicationError) throw error;
+      throw new AccountConfigPublicationError("not_published", "STORE_UNVERIFIABLE");
+    }
+  }
+  need(preimage.backend === undefined && preimage.windows === undefined, "SOURCE_CHANGED");
   let loc: Location | undefined, guardIdentity: string | undefined;
   let intentAttempted = false, renameAttempted = false, committed = false;
   try {
