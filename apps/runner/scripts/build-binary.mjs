@@ -65,10 +65,11 @@ if (!Buffer.from(workerCode).equals(Buffer.from(workerBytes))) throw new Error("
 writeFileSync(leaseWorker, workerBytes);
 
 // Explicit offline source product: Node executes the actual daemon and its exact eval worker.
+// Keep the canonical CLI name so unchanged default re-entry validation admits this bundle.
 // Raw Windows tsx has no independent expected DLL input and refuses lease operations.
 await build({
   entryPoints: [join(runner, "src", "cli.ts")], bundle: true, platform: "node",
-  format: "cjs", target: "node24", outfile: join(buildDir, "runner-source.cjs"),
+  format: "cjs", target: "node24", outfile: join(buildDir, "cli.cjs"),
   define: { ...nativeDefine, "import.meta.url": "__wollipog_source_module_url__", __WOLLIPOG_LEASE_SOURCE_WORKER__: JSON.stringify(workerCode) },
   banner: { js: 'const __wollipog_source_module_url__ = require("node:url").pathToFileURL(__filename).href;' },
   legalComments: "none", logLevel: "info",

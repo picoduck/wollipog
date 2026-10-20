@@ -170,7 +170,7 @@ async function start(dataDir) {
   const config = `${dataDir}.config.json`;
   writeFileSync(config, JSON.stringify({ runnerId, controlPlaneUrl: `ws://127.0.0.1:${server.address().port}/runner`,
     token: "isolated-smoke-token", dataDir, agents: [], workspaces: [], features: { acpRegistry: false } }));
-  const child = launchDaemon(binary, [...(source ? ["--import", loader, join(repo, "apps/runner/src/cli.ts")] : sourceBundle ? [join(repo, "apps/runner/.bin-build/runner-source.cjs")] : []), "--config", config], {
+  const child = launchDaemon(binary, [...(source ? ["--import", loader, join(repo, "apps/runner/src/cli.ts")] : sourceBundle ? [join(repo, "apps/runner/.bin-build/cli.cjs")] : []), "--config", config], {
     cwd: dataDir, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
     env: { ...fixtureEnvironment,
       RUNNER_ID: runnerId, RUNNER_DATA_DIR: dataDir, RUNNER_TOKEN: "isolated-smoke-token",

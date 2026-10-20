@@ -112,7 +112,7 @@ with a preparation instruction rather than building during startup.
 
 Windows raw TypeScript/tsx execution refuses lease I/O before mutable metadata lookup or native
 loading. Explicitly build `node apps/runner/scripts/build-binary.mjs`, then run the source product
-with `node apps/runner/.bin-build/runner-source.cjs`. It contains the actual daemon and actual private
+with `node apps/runner/.bin-build/cli.cjs`. It contains the actual daemon and actual private
 worker with the same admitted managed bytes as the SEA. No PowerShell 7, runtime SDK or new
 credentials are required. Native Windows PowerShell 5, actual loaded CLR architecture and the exact
 Framework reference/ABI contract are checked; timeouts remain refusals, not compatibility proof.
