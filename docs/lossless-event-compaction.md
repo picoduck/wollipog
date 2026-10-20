@@ -151,7 +151,8 @@ automation, provenance, and usage events. The runner's log stays complete even w
 archived session's cached transcript ([archived-history retention](./archived-history-retention.md)). Control-plane `governance_audit` remains append-only and
 independent of the session foreign-key lifecycle.
 
-Mutation attribution has a bounded hot table and an indexed append-only archive. Before completed
+Mutation attribution has a bounded hot table and an indexed archive, kept forever unless the host
+operator enables [mutation audit archive retention](./archived-history-retention.md#mutation-audit-archive-retention). Before completed
 rows can leave the 180-day/100,000-row hot window, one SQLite transaction copies them into
 `mutation_audit_archive` and only then removes the hot copies. Status-0 crash intents stay hot until
 completion. Authorized listing merges hot and archived rows into the same bounded newest-first
