@@ -6,7 +6,7 @@ import type { ControlPlaneDb } from "./db.js";
 import type { AgentPrincipal, AuthPrincipal } from "./identity.js";
 import type { Hub } from "./hub.js";
 import { automationCapabilityError, pinAutomationSpec, validateAutomationSpec } from "./automations.js";
-import { nextCronFire } from "./automation-schedule.js";
+import { nextCronFire } from "@wollipog/protocol/cron-schedule";
 import { auditDigest, capabilityConfigError, claudeModelConfigForValidation, defaultPermissionModeForNewSession, resolveEffectiveModelEffort, type ServiceResult, type SessionsService } from "./sessions.js";
 
 const PROPOSAL_TTL_MS = 24 * 60 * 60_000;

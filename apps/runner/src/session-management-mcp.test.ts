@@ -88,10 +88,10 @@ test("Normal and Orchestrator automation tools are session-bound and never fall 
     assert.deepEqual(calls.at(-1)!.body, { resourceDigest: "a".repeat(64) });
     assert.equal(calls.at(-1)!.url, `${CP_URL}/api/sessions/${SELF_ID}/automation-proposals/workflow_1/execute`);
     calls.length = 0;
-    deps.controlPlaneProtocolVersion = 231;
+    deps.controlPlaneProtocolVersion = 235;
     const refused = await callTool(deps, "request_automation_creation", proposal);
     assert.equal(refused.isError, true);
-    assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, 232);
+    assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, 236);
     assert.equal(calls.length, 0);
     deps.controlPlaneProtocolVersion = undefined;
     const unknown = await callTool(deps, "request_automation_creation", proposal);
