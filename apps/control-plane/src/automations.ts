@@ -337,7 +337,7 @@ export function validateAutomationSpec(value: unknown): ServiceResult<Automation
   return ok(value as unknown as AutomationSpec);
 }
 
-function automationCapabilityError(
+export function automationCapabilityError(
   db: ControlPlaneDb,
   sessions: SessionsService,
   spec: AutomationSpec,
@@ -415,7 +415,7 @@ function automationCapabilityError(
 
 /** Pin an exact advertised installation. Legacy create-session ids are recaptured only when their
  * saved id has one advertised installation; unresolved and explicit unbound choices stay blocked. */
-function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: AutomationSchedule): AutomationSpec {
+export function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: AutomationSchedule): AutomationSpec {
   if (spec.action.kind === "prompt_session") return spec;
   const uniqueInstallation = (runnerId: string, agentId: string) => {
     const advertised = db.getRunner(runnerId)?.agents.filter((agent) =>

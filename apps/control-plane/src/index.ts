@@ -2,6 +2,8 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
+import { registerAutomationCreationRoutes } from "./automation-creation-routes.js";
+import { AutomationCreationService } from "./automation-creation.js";
 /**
  * Control plane: routes UI commands to runners, ingests runner events, persists
  * everything, and streams live updates to the UI.
@@ -4391,6 +4393,7 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
 });
 
 registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
+registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub), requestPrincipal });
 
 app.post("/api/sessions/:id/github-issue-closures", async (req, reply) => {
   const { id } = req.params as { id: string };

@@ -6825,6 +6825,8 @@ export class ControlPlaneDb {
       "human_fallback TEXT",
       "authority_evaluation TEXT",
       "issue_closure_result TEXT",
+      "automation_creation_result TEXT",
+      "automation_creation_approved_by TEXT",
       "resume_state TEXT",
       "resume_command_id TEXT",
       "resume_updated_at INTEGER",
@@ -20481,6 +20483,37 @@ export class ControlPlaneDb {
     };
   }
 
+  /** Commit the authenticated approver and durable resume with the human decision. */
+  resolveAutomationCreationDecision(occurrenceId: string, outcome: "approved" | "denied", userId: string, now: number, oweResume: boolean): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      if (!decision || decision.category !== "automation_creation" || decision.authority !== "human") {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      const resolved = this.resolveWorkflowDecision(occurrenceId, "human", outcome, now, undefined, undefined, undefined, undefined, oweResume);
+      if (resolved) this.stmt("UPDATE workflow_decisions SET automation_creation_approved_by=? WHERE occurrence_id=?").run(userId, occurrenceId);
+      this.db.exec("COMMIT");
+      return resolved;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  automationCreationApprover(occurrenceId: string): string | null {
+    return (this.stmt("SELECT automation_creation_approved_by AS id FROM workflow_decisions WHERE occurrence_id=? AND category='automation_creation'")
+      .get(occurrenceId) as { id: string | null } | undefined)?.id ?? null;
+  }
+
+  /** Revalidate the recorded human against live identity and membership, including role downgrade. */
+  automationCreationHuman(userId: string, organizationId: string): HumanPrincipal | null {
+    const row = this.stmt(`SELECT user.display_name AS userName, organization.name AS organizationName, membership.role
+      FROM identity_memberships membership JOIN identity_users user ON user.user_id=membership.user_id
+      JOIN identity_organizations organization ON organization.organization_id=membership.organization_id
+      WHERE membership.user_id=? AND membership.organization_id=? AND user.status='active' AND membership.role!='viewer'`)
+      .get(userId, organizationId) as { userName: string; organizationName: string; role: HumanPrincipal["role"] } | undefined;
+    return row ? { kind: "human", actorId: userId, userId, organizationId, ...row, deviceId: null, localBootstrap: false } : null;
+  }
+
   recordGithubIssueClosureResult(occurrenceId: string, result: NonNullable<WorkflowDecisionView["issueClosureResult"]>): void {
     this.stmt(`UPDATE workflow_decisions SET issue_closure_result=?
       WHERE occurrence_id=? AND category='issue_closure' AND status='consumed'`)
@@ -28324,6 +28357,7 @@ export class ControlPlaneDb {
   /* -------------------------- Durable automations ------------------------- */
 
   createAutomation(input: {
+    approval?: { occurrenceId: string; resourceDigest: string; result: NonNullable<WorkflowDecisionView["automationCreationResult"]> };
     automationId: string;
     spec: AutomationSpec;
     nextFireAt: number | null;
@@ -28333,6 +28367,13 @@ export class ControlPlaneDb {
     const { spec } = input;
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      if (input.approval) {
+        const changed = this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, automation_creation_result=?
+          WHERE occurrence_id=? AND category='automation_creation' AND authority='human' AND status='approved'
+          AND resource_digest=? AND automation_creation_approved_by IS NOT NULL`)
+          .run(input.now, JSON.stringify(input.approval.result), input.approval.occurrenceId, input.approval.resourceDigest);
+        if (Number(changed.changes) !== 1) throw new Error("Automation creation approval is no longer available");
+      }
       this.stmt(
         `INSERT INTO automations
          (automation_id, name, cron_expression, timezone, enabled, next_fire_at, misfire_policy,
@@ -28347,7 +28388,8 @@ export class ControlPlaneDb {
       );
       this.insertAutomationEvent({
         automationId: input.automationId, kind: "created", actor: input.actor,
-        detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt }, now: input.now,
+        detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt,
+          ...(input.approval ? { occurrenceId: input.approval.occurrenceId, resourceDigest: input.approval.resourceDigest } : {}) }, now: input.now,
       });
       this.db.exec("COMMIT");
     } catch (error) {
@@ -30598,6 +30640,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_runner_history_epoch?: number | null;
     child_message?: string | null;
     issue_closure_result?: string | null;
+    automation_creation_result?: string | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -30623,6 +30666,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(humanFallback ? { humanFallback } : {}),
     status: row.status,
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
+    ...(row.automation_creation_result ? { automationCreationResult: JSON.parse(row.automation_creation_result) as NonNullable<WorkflowDecisionView["automationCreationResult"]> } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),

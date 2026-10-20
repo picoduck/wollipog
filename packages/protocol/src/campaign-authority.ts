@@ -70,7 +70,7 @@ const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr
  * sensitive-effect evaluation; this value is never a consumable grant. */
 export function campaignWorkflowOwner(control: CampaignControl | undefined, decisions: ParentControlDecisionPolicy,
   category: WorkflowDecisionCategory, supported: boolean): "human" | "orchestrator" {
-  if (!supported) return "human";
+  if (!supported || category === "automation_creation") return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
@@ -311,6 +311,7 @@ export function resolveCampaignAuthority(input: {
   // The server answers a declined occurrence itself; owning it never lets the Orchestrator approve it.
   const declined = (requestClass: FullControlRequestClass) => result("orchestrator", "standing_decline", "declined_request", { requestClass, disposition: "decline" });
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
+  if (category === "automation_creation") return result("human", "human_required", "protected_request");
   if (!input.supported) return result("human", "human_required", "unsupported_provider");
   // Rules a person marked Human Required, and built-in safety rules, stay theirs in every mode.
   if (input.humanRequired) return result("human", "human_required", "human_required_rule",
