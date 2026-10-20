@@ -32,11 +32,17 @@ export class AutomationCreationService {
   }
 
   /** All referenced targets must be in the requester's audience. Runtime admission still applies. */
-  private prepare(principal: AuthPrincipal, input: AutomationSpec, requesterId: string): ServiceResult<{ spec: AutomationSpec; targetDigest: string }> {
+  private prepare(principal: AuthPrincipal, input: AutomationSpec, requesterId: string): ServiceResult<Pick<AutomationCreationSnapshot, "spec" | "targetDigest" | "effectiveTargets">> {
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "Invalid automation configuration", 400);
     const spec = pinAutomationSpec(this.db, structuredClone(parsed.data!));
     const states: unknown[] = [this.db.sessionScope(requesterId)];
+    const effectiveTargets: AutomationCreationSnapshot["effectiveTargets"] = [];
+    let inheritedConfig: SessionConfig | undefined;
+    const placementIdentity = (location: NonNullable<ReturnType<ControlPlaneDb["projectLocation"]>>) => ({
+      id: location.id, projectId: location.projectId, runnerId: location.runnerId, workspaceId: location.workspaceId,
+      path: location.path, source: location.source,
+    });
     const targets: AutomationRunnerTarget[] = [];
     const action = spec.action;
     if (action.kind !== "prompt_session") action.request.useWorktree ??= action.kind === "workflow_run";
@@ -45,8 +51,8 @@ export class AutomationCreationService {
       const target = this.db.getSession(action.sessionId);
       if (!target || target.archived || isTerminal(target.status) || !target.agentId || !target.workspaceId) return fail("Target session is unavailable");
       targets.push({ runnerId: target.runnerId, workspaceId: target.workspaceId, agentId: target.agentId });
-      action.request.config = { model: target.model ?? undefined, effort: target.effort ?? undefined,
-        permissionMode: target.permissionMode ?? undefined, ...action.request.config };
+      inheritedConfig = { model: target.model ?? undefined, effort: target.effort ?? undefined,
+        permissionMode: target.permissionMode ?? undefined };
       states.push({ sessionId: target.id, scope: this.db.sessionScope(target.id), model: target.model,
         effort: target.effort, permissionMode: target.permissionMode, worktreePath: target.worktreePath });
     } else {
@@ -78,10 +84,10 @@ export class AutomationCreationService {
             location.projectId !== target.projectId || location.runnerId !== target.runnerId || location.workspaceId !== target.workspaceId) {
           return fail("Automation Project Location no longer matches its target");
         }
-        states.push(location);
+        states.push(placementIdentity(location));
       }
-      states.push({ runnerId: target.runnerId, workspace, scope: this.db.workspaceScope(target.runnerId, target.workspaceId),
-        locations: this.db.projectLocationsForWorkspace(target.runnerId, target.workspaceId) });
+      states.push({ runnerId: target.runnerId, workspace: { id: workspace.id, path: workspace.path }, scope: this.db.workspaceScope(target.runnerId, target.workspaceId),
+        locations: this.db.projectLocationsForWorkspace(target.runnerId, target.workspaceId).map(placementIdentity) });
       const ids = action.kind === "workflow_run"
         ? this.db.getWorkflowDefinition(action.request.workflowId, action.request.workflowVersion)!.nodes
           .filter((node) => node.kind === "agent").map((node) => ({ key: `role:${node.agentId!}`,
@@ -95,7 +101,7 @@ export class AutomationCreationService {
         const agentId = pin ? this.db.resolveSavedHarnessInstallation(target.runnerId, pin) : id;
         const agent = runner.agents.find((a) => a.id === agentId && a.available);
         if (!agentId || !agent || !this.db.getAgentLaunch(target.runnerId, agentId)) return fail("The selected agent installation is unavailable");
-        const config: SessionConfig = { ...action.request.config };
+        const config: SessionConfig = { ...inheritedConfig, ...action.request.config };
         const configError = capabilityConfigError(claudeModelConfigForValidation(config, agent.capabilities, agent.driver ?? "acp"), agent.capabilities);
         if (configError) return fail(configError);
         const model = resolveEffectiveModelEffort(config, agent.capabilities, agent.driver ?? "acp");
@@ -104,17 +110,20 @@ export class AutomationCreationService {
         config.permissionMode ??= defaultPermissionModeForNewSession(agent.driver ?? "acp", agent.capabilities);
         if (!config.permissionMode && agent.capabilities?.permissionModes?.includes("default")) config.permissionMode = "default";
         if (!config.permissionMode) return fail("Choose an explicit supported permission mode before requesting automation approval");
-        // Persist known defaults, so preference changes cannot silently widen an approved action.
-        action.request.config = config;
-        states.push({ runnerId: target.runnerId, agentId, installation: agent.installation,
-          driver: agent.driver, context: agent.context, capabilities: agent.capabilities, config });
+        // Preview each role independently. Inheritance is not a persistent configuration override:
+        // particularly, a prompt must not restore a target's former permission mode on every fire.
+        effectiveTargets.push({ runnerId: target.runnerId, workspaceId: target.workspaceId, agentId, role: key, config });
+        const launch = this.db.getAgentLaunch(target.runnerId, agentId)!;
+        states.push({ runnerId: target.runnerId, agentId, installationId: agent.installation?.id,
+          driver: agent.driver, context: agent.context, supportsApprovals: agent.capabilities?.supportsApprovals, config,
+          launchDigest: auditDigest({ command: launch.command, args: launch.args }) });
       }
     }
     const capabilityError = automationCapabilityError(this.db, this.sessions, spec);
     if (capabilityError) return fail(capabilityError);
     const normalizedSpec = validateAutomationSpec(spec);
     if (!normalizedSpec.ok) return fail(normalizedSpec.error ?? "Prepared automation configuration is invalid", 400);
-    return ok({ spec, targetDigest: auditDigest(states)! });
+    return ok({ spec, targetDigest: auditDigest(states)!, effectiveTargets });
   }
 
   request(sessionId: string, input: AutomationCreationRequest, principal: AgentPrincipal, now = Date.now()): ServiceResult<WorkflowDecisionView> {
@@ -131,8 +140,10 @@ export class AutomationCreationService {
     }
     const prepared = this.prepare(principal, input.spec, sessionId);
     if (!prepared.ok) return fail(prepared.error!, prepared.status);
-    const snapshot: AutomationCreationSnapshot = { category: "automation_creation", ...prepared.data!,
-      nextFireAt: nextCronFire(prepared.data!.spec.cron, prepared.data!.spec.timezone, now),
+    let nextFireAt: number;
+    try { nextFireAt = nextCronFire(prepared.data!.spec.cron, prepared.data!.spec.timezone, now); }
+    catch (error) { return fail((error as Error).message, 400); }
+    const snapshot: AutomationCreationSnapshot = { category: "automation_creation", ...prepared.data!, nextFireAt,
       requestedSpecDigest: requestedSpecDigest!, expiresAt: now + PROPOSAL_TTL_MS };
     return this.sessions.createWorkflowDecision(sessionId, { requestId: input.requestId, resourceKey: input.resourceKey,
       resourceSnapshot: snapshot }, (id) => this.db.canAccessSession(principal, id), { trustedAutomationCreation: true });
@@ -166,9 +177,19 @@ export class AutomationCreationService {
     const result: AutomationCreationResult = { automationId,
       navigationPath: `/automations/~${Buffer.from(automationId, "utf16le").toString("base64url")}`,
       spec: snapshot.spec, createdAt: now };
-    const saved = this.db.createAutomation({ automationId, spec: snapshot.spec,
-      nextFireAt: snapshot.spec.enabled ? nextCronFire(snapshot.spec.cron, snapshot.spec.timezone, now) : null,
-      actor: { kind: "human", id: approver }, now, approval: { occurrenceId, resourceDigest: digest, result } });
+    let nextFireAt: number | null;
+    try { nextFireAt = snapshot.spec.enabled ? nextCronFire(snapshot.spec.cron, snapshot.spec.timezone, now) : null; }
+    catch (error) { return fail((error as Error).message, 400); }
+    let saved: ReturnType<ControlPlaneDb["createAutomation"]>;
+    try {
+      saved = this.db.createAutomation({ automationId, spec: snapshot.spec, nextFireAt,
+        actor: { kind: "human", id: approver }, now, approval: { occurrenceId, resourceDigest: digest, result } });
+    } catch (error) {
+      // A concurrent winner or interrupted acknowledgement is reconciled from the durable receipt.
+      const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (latest?.status === "consumed" && latest.resourceDigest === digest && latest.automationCreationResult) return ok(latest);
+      throw error;
+    }
     if (!saved || saved.automationId !== automationId ||
         (Object.keys(snapshot.spec) as Array<keyof AutomationSpec>).some((key) => auditDigest(saved[key]) !== auditDigest(snapshot.spec[key]))) {
       throw new Error("Automation creation readback failed; inspect the durable receipt before retrying");

@@ -8,6 +8,7 @@ import {
   type DescendantRequestView,
   type PendingApproval,
   type SessionView,
+  type AutomationCreationSnapshot,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -291,7 +292,9 @@ function issueClosureSession(): SessionView {
 
 function automationCreationSession(): SessionView {
   const base = evidenceSession();
-  const snapshot = { category: "automation_creation" as const, targetDigest: "a".repeat(64), requestedSpecDigest: "b".repeat(64),
+  const snapshot: AutomationCreationSnapshot = { category: "automation_creation", targetDigest: "a".repeat(64), requestedSpecDigest: "b".repeat(64),
+    effectiveTargets: [{ runnerId: "example-machine", workspaceId: "example-workspace", agentId: "example-agent", role: "agent",
+      config: { model: "example-model", effort: "high", permissionMode: "default" } }],
     nextFireAt: Date.parse("2026-10-21T06:00:00Z"), expiresAt: Date.parse("2026-10-21T05:00:00Z"),
     spec: { name: "Daily CI Reliability Review", cron: "0 6 * * *", timezone: "UTC", enabled: query.get("paused") !== "1",
       action: { kind: "create_session" as const, request: { runnerId: "example-machine", workspaceId: "example-workspace", agentId: "example-agent",
@@ -301,6 +304,14 @@ function automationCreationSession(): SessionView {
         installationBindings: { agent: { driver: "acp" as const, context: { kind: "native" as const }, installationId: "example-installation" } } },
       misfirePolicy: { kind: "skip" as const }, runnerPolicy: { kind: "wait" as const }, concurrencyPolicy: "wait" as const,
       limits: { maxCostUsd: 5, maxToolCalls: 50 }, notifications: { pushEvents: ["succeeded" as const, "failed" as const] } } };
+  if (query.get("action") === "prompt") {
+    snapshot.spec.action = { kind: "prompt_session", sessionId: "example-target-session", request: { text: "", slashCommand: "/inspect-ci" } };
+    snapshot.effectiveTargets[0]!.config.permissionMode = "read-only";
+  }
+  if (query.get("action") === "workflow") {
+    snapshot.spec.action = { kind: "workflow_run", request: { runnerId: "example-machine", workspaceId: "example-workspace",
+      workflowId: "example-health-workflow", workflowVersion: 3, useWorktree: true, task: "Inspect CI outcomes and report findings." } };
+  }
   return { ...base, title: "Automation Creation", pendingApproval: { ...base.pendingApproval!, title: "Create Automation Approval Required",
     context: { input: JSON.stringify(snapshot) }, workflowDecision: { ...base.pendingApproval!.workflowDecision!,
       category: "automation_creation", resourceSnapshot: snapshot, controllingSessionId: base.id, authority: "human" } } };

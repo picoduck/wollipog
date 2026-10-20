@@ -4649,6 +4649,8 @@ export interface AutomationCreationSnapshot {
   /** Binds target identity, capabilities and ownership without retaining credentials. */
   targetDigest: string;
   requestedSpecDigest: string;
+  /** Observed defaults, not persisted overrides. Omitted settings inherit at each normal run. */
+  effectiveTargets: Array<{ runnerId: string; workspaceId: string; agentId: string; role: string; config: SessionConfig }>;
   expiresAt: number;
 }
 

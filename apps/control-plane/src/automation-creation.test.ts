@@ -43,7 +43,7 @@ function harness(file = ":memory:", seed = true) {
   return { db, hub, sessions, service, principal, owner, request, resolve };
 }
 
-test("Normal sessions require human approval, pin effective defaults and create exactly once", () => {
+test("Normal sessions require human approval, preview inherited defaults and create exactly once", () => {
   const h = harness();
   try {
     const proposal = h.request();
@@ -55,7 +55,8 @@ test("Normal sessions require human approval, pin effective defaults and create 
     assert.equal(h.db.getSession("self")!.status, "input_required");
     assert.equal(decision.resourceSnapshot.category, "automation_creation");
     if (decision.resourceSnapshot.category !== "automation_creation") assert.fail();
-    assert.deepEqual(decision.resourceSnapshot.spec.action.request.config, { model: "model", effort: "high", permissionMode: "default" });
+    assert.equal(decision.resourceSnapshot.spec.action.request.config, undefined);
+    assert.deepEqual(decision.resourceSnapshot.effectiveTargets[0]!.config, { model: "model", effort: "high", permissionMode: "default" });
     assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).ok, false);
     assert.equal(h.db.listAutomations().length, 0);
     assert.equal(h.resolve(decision.occurrenceId).ok, true);
@@ -138,6 +139,81 @@ test("changed proposals need a fresh human decision and supersede prior unconsum
     assert.equal(h.db.workflowDecisionByOccurrence(first.occurrenceId)!.status, "superseded");
     assert.equal(h.service.execute("self", first.occurrenceId, first.resourceDigest, h.principal).ok, false);
     assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); }
+});
+
+test("unchanged runner registration preserves an approved automation target", () => {
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    h.db.registerRunner(metadata, Date.now() + 5, PROTOCOL_VERSION);
+    const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(executed.ok, true, executed.error ?? "An unchanged registration is not target drift");
+  } finally { h.db.close(); }
+});
+
+test("calendar-impossible schedules fail as a validation result before creating a decision", () => {
+  const h = harness();
+  try {
+    const input = spec(); input.cron = "0 0 30 2 *";
+    const result = h.request("impossible", "impossible", input);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 400);
+    assert.equal(h.db.pendingWorkflowDecisionsForSession("self").length, 0);
+  } finally { h.db.close(); }
+});
+
+test("workflow roles resolve disjoint defaults independently without storing shared overrides", () => {
+  const h = harness();
+  try {
+    h.db.registerRunner({ ...metadata, agents: [...metadata.agents, { ...metadata.agents[0]!, id: "second-agent",
+      capabilities: { ...metadata.agents[0]!.capabilities!, models: [{ id: "second-model", default: true, efforts: ["high"] }] } }] }, Date.now(), PROTOCOL_VERSION);
+    h.db.createWorkflowDefinition({ workflowId: "mixed-workflow", name: "Mixed Defaults", maxTransitions: 3,
+      nodes: ["agent", "second-agent"].map((agentId, index) => ({ nodeId: `inspect-${index}`, kind: "agent" as const,
+        role: `inspector-${index}`, agentId, inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 })),
+      edges: [], source: "custom", createdBy: { kind: "system", id: "test" }, createdAt: Date.now() });
+    const input = spec(); input.action = { kind: "workflow_run", request: { runnerId: "runner", workspaceId: "repo", workflowId: "mixed-workflow", task: "Inspect" } };
+    const result = h.request("mixed-workflow", "mixed-workflow", input);
+    assert.equal(result.ok, true, result.error ?? "Disjoint defaults should not be chained");
+    const snapshot = result.data!.resourceSnapshot;
+    if (snapshot.category !== "automation_creation") assert.fail();
+    assert.equal(snapshot.spec.action.request.config, undefined);
+    assert.deepEqual(snapshot.effectiveTargets.map((target) => target.config.model), ["model", "second-model"]);
+    assert.equal(h.resolve(result.data!.occurrenceId).ok, true);
+    assert.equal(h.service.execute("self", result.data!.occurrenceId, result.data!.resourceDigest, h.principal).ok, true);
+  } finally { h.db.close(); }
+});
+
+test("prompt automation defaults stay inherited after the target owner changes session settings", () => {
+  const h = harness();
+  try {
+    h.db.createSession({ id: "target", runnerId: "runner", workspaceId: "repo", agentId: "agent", title: "Target", driver: "acp",
+      useWorktree: false, config: { model: "model", effort: "high", permissionMode: "default" }, now: Date.now() });
+    h.db.updateSessionStatus("target", "idle", Date.now());
+    const input = spec(); input.action = { kind: "prompt_session", sessionId: "target", request: { text: "Inspect" } };
+    const decision = h.request("inherit", "inherit", input).data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(executed.ok, true);
+    h.db.raw().prepare("UPDATE sessions SET permission_mode='read-only' WHERE id='target'").run();
+    const saved = h.db.getAutomation(executed.data!.automationCreationResult!.automationId)!;
+    assert.equal(saved.action.request.config, undefined, "Future normal prompts must not reapply the previous permission mode");
+  } finally { h.db.close(); }
+});
+
+test("an interrupted post-commit acknowledgement reconciles the same durable receipt", () => {
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const create = h.db.createAutomation.bind(h.db);
+    h.db.createAutomation = (input) => { create(input); throw new Error("Interrupted acknowledgement after commit"); };
+    const recovered = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(recovered.ok, true);
+    assert.equal(h.db.listAutomations().length, 1);
+    assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).data!.automationCreationResult!.automationId,
+      recovered.data!.automationCreationResult!.automationId);
   } finally { h.db.close(); }
 });
 

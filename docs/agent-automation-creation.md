@@ -49,7 +49,7 @@ The proposal contains `requestId`, `resourceKey` and a complete `spec`:
 
 Read visible machines, workspaces and installation capabilities before choosing a
 target. The server validates the normal AutomationSpec, pins advertised
-installations, records known effective model/effort/permission defaults and exact
+installations, records an effective settings preview for each target and exact
 Project placement, and presents the resulting configuration to the human. Prompt
 session and workflow actions use the existing automation schema and admission.
 
@@ -57,6 +57,13 @@ The request returns a pending typed decision, not an automation. Its approval ca
 shows the schedule, timezone, next occurrence, enabled state, task and complete
 configuration. The proposed occurrence is a preview: execution calculates the
 next future occurrence again. A paused automation stays paused after creation.
+
+Explicit model, effort and permission settings remain explicit. Omitted settings
+are inherited at each normal execution; the per-target preview describes current
+defaults without converting them into overrides. A prompt-session automation
+therefore does not restore its target's former permission mode after the owner
+changes that session. Workflow roles and alternate machines resolve their own
+defaults independently. The preview is revalidated at creation time.
 
 Proposals expire after 24 hours; an approval must be executed within 30 minutes
 and before the proposal expires. Execution accepts only the occurrence identifier
@@ -80,6 +87,8 @@ rewrite it or authorize creating a replacement.
 Before creation the server rechecks requester ownership, the approving human's
 session ownership, referenced workspaces, Project placement, installation
 identity and capabilities. Drift refuses creation and requires fresh approval.
+Discovery timestamps and online/offline availability are not target identity:
+an unchanged runner reconnect does not invalidate human approval.
 Creation does not reserve runner capacity, bypass governance or grant blanket
 approval for actions taken by scheduled sessions. Runtime admission and finite
 limits remain unchanged.
