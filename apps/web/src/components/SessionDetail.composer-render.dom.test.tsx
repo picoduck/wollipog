@@ -8,6 +8,7 @@ import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView } from "@w
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { loadComposerDraft } from "../composer-drafts.js";
+import { instanceStorageKey } from "../instance-storage.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -15,6 +16,7 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { observeRenderProbe, SESSION_VIEW_PROBE, TRANSCRIPT_PROBE } from "./render-probe.js";
+import { withScopedClockOverrides } from "./test-clock-overrides.js";
 
 /**
  * Typing in the composer renders the composer, not the session view around it (#2764).
@@ -444,6 +446,61 @@ test("a native undo is followed like any other edit", async () => {
     assert.equal(view.button("Send")?.disabled, false, "and a redo brings Send back");
   } finally {
     await view.unmount();
+  }
+});
+
+test("dirty drafts save once per debounce firing and once on unmount", async (t) => {
+  for (const path of ["debounce", "unmount"] as const) {
+    await t.test(path, async (t) => {
+      const timers = new Map<number, () => void>();
+      let nextTimer = -1;
+      const realSetTimeout = domWindow.setTimeout.bind(domWindow);
+      const realClearTimeout = domWindow.clearTimeout.bind(domWindow);
+      await withScopedClockOverrides(domWindow, {
+        setTimeout: (callback: () => void, delay?: number) => {
+          if (delay !== 400) return realSetTimeout(callback, delay);
+          const id = nextTimer--;
+          timers.set(id, callback);
+          return id;
+        },
+        clearTimeout: (id: number) => {
+          if (!timers.delete(id)) realClearTimeout(id);
+        },
+      }, async () => {
+        const view = await mount();
+        let unmounted = false;
+        const storage = t.mock.method(domWindow.localStorage, "setItem");
+        const key = instanceStorageKey(`wollipog.composer.draft.${view.first.id}`);
+        const saves = () => storage.mock.calls.filter((call) => call.arguments[0] === key);
+        try {
+          await view.change("First edit");
+          await view.change("");
+          await view.change("Latest dirty draft");
+          assert.equal(saves().length, 0, "edits and their renders do not flush before the debounce");
+          assert.equal(timers.size, 1, "edits coalesce into one 400 ms timer");
+          if (path === "debounce") {
+            await act(async () => {
+              const callbacks = [...timers.values()];
+              timers.clear();
+              callbacks.forEach((callback) => callback());
+            });
+            assert.equal(saves().length, 1, "the timer saves exactly once");
+            assert.equal(JSON.parse(saves()[0].arguments[1]).text, "Latest dirty draft");
+            await view.settle();
+            assert.equal(saves().length, 1, "settling does not save the draft again");
+          }
+          const beforeUnmount = saves().length;
+          await view.unmount();
+          unmounted = true;
+          assert.equal(saves().length, beforeUnmount + 1, "unmount flushes the dirty draft exactly once");
+          assert.equal(JSON.parse(saves().at(-1)!.arguments[1]).text, "Latest dirty draft");
+          assert.equal(timers.size, 0, "unmount cancels the pending debounce");
+        } finally {
+          if (!unmounted) await view.unmount();
+          storage.mock.restore();
+        }
+      });
+    });
   }
 });
 

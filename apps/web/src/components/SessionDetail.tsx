@@ -2655,6 +2655,44 @@ function SessionDetailLoaded({
   }, [activeComposerMutation, instanceScope, mutationKey, queuedEditRecovered, queuedEditRecoveryScope, sessionId, replace,
     restoreQueuedPromptEditRecovery, setProgrammaticComposerText, storeQueuedPromptEditRecovery]);
 
+  // Keep this identity tied to the cleanup effect's persistence/scope dependencies only.
+  // Text and images are read from refs so edits do not trigger the cleanup flush.
+  const flushComposerDraft = useCallback(() => {
+    if (!draftDirty.current) return;
+    if (queuedEditRef.current) {
+      const recovery = queuedEditRecoveryScope
+        ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+        : undefined;
+      if (recovery) {
+        storeQueuedPromptEditRecovery(mutationKey, {
+          ...recovery,
+          edit: queuedEditRef.current,
+          draft: draftState.current,
+        });
+      } else {
+        const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
+        if (pending) {
+          const updated = {
+            ...pending,
+            edit: queuedEditRef.current,
+            draft: draftState.current,
+          };
+          updateQueuedPromptEditMutationRecovery(mutationKey, updated);
+          persistQueuedPromptEditRecovery(updated);
+        }
+      }
+      return;
+    }
+    const latest = draftState.current;
+    const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
+    if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
+        composerDraftMatches(latest, consumed.text, consumed.images)) {
+      return;
+    }
+    void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
+  }, [instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope, sessionId,
+    storeQueuedPromptEditRecovery]);
+
   // Coalesce rapid edits so typing beside a large base64 attachment does not rewrite it on every
   // keystroke. Dirty edits save even while hydration is pending; unmount cleanup below flushes
   // captured state when the user navigates away before the timer fires. The draft's text is not state
@@ -2666,41 +2704,7 @@ function SessionDetailLoaded({
     // decided when the timer fires, where the effect used to decide it after the commit.
     const schedule = () => {
       window.clearTimeout(timer);
-      timer = window.setTimeout(save, 400);
-    };
-    const save = () => {
-      if (!draftDirty.current) return;
-      if (queuedEditRef.current) {
-        const recovery = queuedEditRecoveryScope
-          ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
-          : undefined;
-        if (recovery) {
-          storeQueuedPromptEditRecovery(mutationKey, {
-            ...recovery,
-            edit: queuedEditRef.current,
-            draft: draftState.current,
-          });
-        } else {
-          const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
-          if (pending) {
-            const updated = {
-              ...pending,
-              edit: queuedEditRef.current,
-              draft: draftState.current,
-            };
-            updateQueuedPromptEditMutationRecovery(mutationKey, updated);
-            persistQueuedPromptEditRecovery(updated);
-          }
-        }
-        return;
-      }
-      const latest = draftState.current;
-      const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
-      if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
-          composerDraftMatches(latest, consumed.text, consumed.images)) {
-        return;
-      }
-      void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
+      timer = window.setTimeout(flushComposerDraft, 400);
     };
     if (draftDirty.current) schedule();
     let lastText = composerText.text;
@@ -2713,47 +2717,10 @@ function SessionDetailLoaded({
       unsubscribe();
       window.clearTimeout(timer);
     };
-  }, [composerText, images, instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope,
-    sessionId, storeQueuedPromptEditRecovery]);
+  }, [composerText, flushComposerDraft, images, instanceScope, mutationKey, persistQueuedPromptEditRecovery,
+    queuedEditRecoveryScope, sessionId, storeQueuedPromptEditRecovery]);
 
-  useEffect(
-    () => () => {
-      if (!draftDirty.current) return;
-      if (queuedEditRef.current) {
-        const recovery = queuedEditRecoveryScope
-          ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
-          : undefined;
-        if (recovery) {
-          storeQueuedPromptEditRecovery(mutationKey, {
-            ...recovery,
-            edit: queuedEditRef.current,
-            draft: draftState.current,
-          });
-        } else {
-          const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
-          if (pending) {
-            const updated = {
-              ...pending,
-              edit: queuedEditRef.current,
-              draft: draftState.current,
-            };
-            updateQueuedPromptEditMutationRecovery(mutationKey, updated);
-            persistQueuedPromptEditRecovery(updated);
-          }
-        }
-        return;
-      }
-      const latest = draftState.current;
-      const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
-      if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
-          composerDraftMatches(latest, consumed.text, consumed.images)) {
-        return;
-      }
-      void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
-    },
-    [instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope, sessionId,
-      storeQueuedPromptEditRecovery],
-  );
+  useEffect(() => flushComposerDraft, [flushComposerDraft]);
 
   // A newly opened conversation can already exist in the REST API while the UI socket is
   // connecting or its stream acknowledgement is missing. Read one bounded opening window and
