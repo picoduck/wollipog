@@ -12,6 +12,16 @@ const control: CampaignControl = { mode: "full_control", boundary: {
   operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge"], delegatablePolicyIds: ["review-tools"],
 } };
 const base = { control, parentControl: "off" as const, decisions: HUMAN_ONLY_PARENT_CONTROL_POLICY, root: false, supported: true };
+test("automation creation always stays human-owned even under Full Control or an unsupported peer", () => {
+  for (const root of [true, false]) for (const supported of [true, false]) {
+    const result = resolveCampaignAuthority({ ...base, root, supported, snapshot: {
+      category: "automation_creation", spec: {} as never, targetDigest: "a".repeat(64), requestedSpecDigest: "b".repeat(64),
+      nextFireAt: 1, expiresAt: 2,
+    }, trustedSource: "workflow_route" });
+    assert.equal(result.owner, "human");
+    assert.equal(result.basis, "human_required");
+  }
+});
 const question = (text: string, extra: Partial<PendingApproval> = {}): PendingApproval => ({
   requestId: "q", kind: "question", title: text, options: [], requestSource: "provider_question",
   questions: [{ id: "choice", question: text, options: [{ label: "A" }, { label: "B" }] }], ...extra,

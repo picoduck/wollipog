@@ -30,6 +30,9 @@ wollipog pr wait <number|owner/name#number|url> [--head <sha>] [--timeout <ms>] 
 wollipog review run --repo <owner/name> --pr <number> --head <sha> [--brief-file <path>] --json
 wollipog review get <job-id> --json
 wollipog artifact attach --file <absolute-path> [--name <display-name>] --json
+wollipog automation request --proposal '<json>' --json
+wollipog automation get <occurrence-id> --json
+wollipog automation execute <occurrence-id> --digest <resource-digest> --json
 wollipog worktree create --branch <name> [--base <ref>] --json
 wollipog worktree attach --path <absolute-path> --json
 wollipog worktree select --path <absolute-path> --json
@@ -275,6 +278,40 @@ settings, hooks, skills or MCP servers, takes no session slot, and returns `revi
   changing code, and treat a `stale` review as covering an older head.
 - One review session is active per session at a time; `review session cancel` stops it. A review
   session takes no messages; request a new one for a new head.
+
+## Creating an Automation With Human Approval
+
+Normal and Orchestrator sessions can propose persistent scheduled work with
+`request_automation_creation` (`automation request --proposal '<json>'`). Supply
+`requestId`, a stable `resourceKey` for the intended automation, and the complete
+AutomationSpec as `spec`: name, five-field cron, IANA timezone, enabled state,
+action, missed-run and runner policies, concurrency, finite cost/tool limits and
+notification settings. Inspect machines, workspaces and agent capabilities first.
+
+The server prepares the effective configuration and returns a human-owned typed
+decision. It creates no automation yet. This approval is never delegated to an
+agent, including a Full Control Orchestrator. The human must be able to inspect
+the exact prompt, schedule, targets, installation/configuration, policies and
+limits before approving. Do not approve your own request or borrow a human's
+credential to bypass this gate.
+
+Read the outcome with `get_automation_creation` (`automation get <occurrence-id>`).
+After human approval, call `execute_automation_creation` with that occurrence and
+its exact `resourceDigest` (`automation execute <id> --digest <digest>`). Proposals
+expire after 24 hours and approvals after 30 minutes. Target/configuration drift
+or changes to the proposal require fresh human approval; execution accepts no
+configuration override. A new request ID with the same resource key replaces an
+older unconsumed proposal.
+
+Retry an uncertain proposal with the same request ID and unchanged contents.
+Retry uncertain execution with the same occurrence and digest. Creation and its
+receipt are atomic: `automationCreationResult` gives the original automation ID,
+navigation path, saved spec and time, even after later human edits or deletion.
+Never create a replacement merely because the response was lost. Scheduled runs
+retain their own permissions, budgets and approval gates. This capability does
+not grant general automation administration. If the command/tool is missing or
+reports unsupported components, report the limitation; do not invent a command,
+broaden credentials or restart the stack hosting you.
 
 ## Private Session Artifacts
 

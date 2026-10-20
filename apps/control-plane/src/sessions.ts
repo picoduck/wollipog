@@ -31,6 +31,7 @@ import { SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN, type S
   type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
+import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot } from "@wollipog/protocol";
 /**
@@ -731,6 +732,10 @@ export function normalizeWorkflowDecisionSnapshot(
   }
   const value = input as Record<string, unknown>;
   const category = value.category;
+  if (category === "automation_creation") {
+    const snapshot = normalizeAutomationCreationSnapshot(value);
+    return snapshot ? ok(snapshot) : fail("automation creation requires a server-prepared exact configuration");
+  }
   if (category === "campaign_issue_scope") {
     const normalized = normalizeCampaignIssueScopeSnapshot(value);
     return normalized ? ok(normalized) : fail("scope changes require exact bounded repository, revision, additions, removals, and affected work");
@@ -1458,7 +1463,7 @@ export function workflowRunCapabilityError(
   return null;
 }
 
-function auditDigest(value: unknown): string | undefined {
+export function auditDigest(value: unknown): string | undefined {
   if (value == null) return undefined;
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
 }
@@ -9528,7 +9533,7 @@ export class SessionsService {
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
-    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean },
+    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean },
   ): ServiceResult<WorkflowDecisionView> {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before requesting another decision", 409);
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
@@ -9559,6 +9564,9 @@ export class SessionsService {
     }
     if (normalized.data.category === "issue_closure" && !internal?.trustedIssueClosure) {
       return fail("use request_github_issue_closure for server-verified issue evidence", 403);
+    }
+    if (normalized.data.category === "automation_creation" && !internal?.trustedAutomationCreation) {
+      return fail("use request_automation_creation for a server-validated automation proposal", 403);
     }
     const controller = this.workflowDecisionController(child, normalized.data.category);
     if (!controller) {
@@ -9691,6 +9699,33 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean,
   ): ServiceResult<WorkflowDecisionView> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (decision?.category === "automation_creation") {
+      if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+          parentSessionId !== childSessionId || !canAccess(childSessionId)) return fail("workflow decision not found", 404);
+      const session = this.db.getSession(childSessionId);
+      const scope = this.db.sessionScope(childSessionId);
+      if (authority !== "human" || actor.kind !== "human" || !actor.id || !scope ||
+          !this.db.automationCreationHuman(actor.id, scope.organizationId) ||
+          !this.db.isSessionOwner({ userId: actor.id, organizationId: scope.organizationId }, childSessionId)) {
+        return fail("Only the authenticated session owner can approve automation creation", 403);
+      }
+      const snapshot = decision.resourceSnapshot;
+      if (!session || isTerminal(session.status) || session.archived || decision.status !== "pending" ||
+          snapshot.category !== "automation_creation" || resolution?.outcome === "approve" && Date.now() >= snapshot.expiresAt) {
+        return fail("Automation proposal has ended, expired, or was already resolved", 409);
+      }
+      const checked = this.validateWorkflowDecisionResolution(decision, resolution);
+      if (!checked.ok) return failAs(checked);
+      const now = Date.now();
+      const oweResume = this.workflowDecisionResumeOwed(session);
+      const resolved = this.db.resolveAutomationCreationDecision(occurrenceId,
+        resolution.outcome === "approve" ? "approved" : "denied", actor.id, now, oweResume);
+      if (!resolved) return fail("Automation proposal was resolved concurrently", 409);
+      this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+      this.recordWorkflowDecisionAudit(resolved, resolution.outcome === "approve" ? "allowed" : "denied", actor, now);
+      this.hub.sessionChangedById(childSessionId);
+      return ok(resolved);
+    }
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
         !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && parentSessionId === childSessionId ||
           this.workflowDecisionRelationship(parentSessionId, childSessionId)) ||
@@ -9876,6 +9911,7 @@ export class SessionsService {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
+    if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
     if (decision.category === "issue_closure") return fail("use close_github_issue to consume and execute the exact approved closure", 403);
     if (decision.status !== "approved") {
       return fail(`workflow decision cannot be consumed from ${decision.status} state`, 409);
@@ -10351,6 +10387,9 @@ export class SessionsService {
     session: SessionView;
     policy: ParentControlPolicy;
   } | null {
+    if (category === "automation_creation") return {
+      session: child, policy: { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+    };
     if (child.orchestratorPolicy?.control?.mode === "full_control" && child.parentControlPolicy &&
         this.workflowDecisionRelationship(child.id, child.id)) {
       return { session: child, policy: child.parentControlPolicy };
@@ -10556,6 +10595,8 @@ export class SessionsService {
     policy: ParentControlPolicy,
     decision: WorkflowDecisionView,
   ): boolean {
+    if (decision.category === "automation_creation") return decision.authority === "human" &&
+      decision.controllingSessionId === decision.sessionId;
     // Human scope approval intentionally invalidates prior standing authorization. The
     // independent human issue routes remain usable under the current workflow policy.
     if (decision.authority === "human" && ["campaign_issue_scope", "issue_closure"].includes(decision.category)) {
@@ -10709,6 +10750,7 @@ export class SessionsService {
       merged_branch_deletion: "Merged Branch Deletion Approval Required",
       follow_up_issue_publication: "Follow-Up Issue Publication Approval Required",
       issue_closure: "Issue Closure Approval Required",
+      automation_creation: "Create Automation Approval Required",
       campaign_issue_scope: "Campaign Issue Scope Approval Required",
       ui_evidence_approval: "UI Evidence Approval Required",
     };
