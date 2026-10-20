@@ -2341,7 +2341,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Skill deployment | Edited (a machine copy differs from the library) | warning |
 | Skill deployment | Update Held (a Git or built-in update waits for review) | warning |
 | Skill deployment | Error | danger |
-| Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger · Last Run Failed: danger (the automation page's one badge when its latest run failed, ahead of Enabled or Paused, #2968) |
+| Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger · Last Run Failed: danger (the automation page's one badge when its latest run failed, ahead of Enabled or Paused, #2968) · Target Unavailable: warning. An Automations list row (#2969) shows at most one: Last Run Failed, else Target Unavailable, and none otherwise; its group and its Enabled switch say whether it is scheduled or paused. |
 | Automation run (the page's Last Run fact, inline) | Starting, Running: info (pulse) · Succeeded: success · Failed: danger · Skipped, Expired: neutral |
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
 | Session family rollup chip | Needs Your Input (or "N Awaiting Input") when a child waits on the user: warning. Ready for Review: review (purple). Otherwise neutral. Input takes priority over review. |

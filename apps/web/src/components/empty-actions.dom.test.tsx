@@ -176,11 +176,11 @@ const buttonLabelled = (container: HTMLElement, text: string) =>
 
 const settleReads = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 
-/** A card's heading opens its automation's page (#2968), which holds Edit and, in ⋯, Delete. */
+/** A row's open target opens its automation's page (#2968, #2969), which holds Edit and, in ⋯, Delete. */
 const openAutomation = async (container: HTMLElement, name: string) => {
-  const card = [...container.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]
-    .find((toggle) => toggle.querySelector(".automation-card-name")?.textContent === name);
-  assert.ok(card, `${name}'s card is rendered`);
+  const card = [...container.querySelectorAll<HTMLButtonElement>(".automation-row-open")]
+    .find((toggle) => toggle.querySelector(".row-title")?.textContent === name);
+  assert.ok(card, `${name}'s row is rendered`);
   await act(async () => { fireDomEvent.click(card); });
   await settleReads();
 };
@@ -413,12 +413,12 @@ test("serialized polling lists a newly discovered automation that Edit can then 
       await act(async () => { for (const poll of polls.values()) poll(); });
       assert.equal(calls, 1, "a slow initial list prevents the next interval from starting a newer read");
       await act(async () => { for (const release of held) release(); });
-      assert.equal(container.querySelectorAll(".automation-card").length, 1,
+      assert.equal(container.querySelectorAll(".automation-row").length, 1,
         "the older one-item list settles before another refresh can start");
 
       await act(async () => { for (const poll of polls.values()) poll(); });
       assert.equal(calls, 2, "the next interval reads the new authoritative list");
-      assert.equal(container.querySelectorAll(".automation-card").length, 2,
+      assert.equal(container.querySelectorAll(".automation-row").length, 2,
         "both automations render after the serialized fresh read");
       await openAutomation(container, "Weekly");
       await act(async () => { fireDomEvent.click(buttonLabelled(container, "Edit")!); });
@@ -465,7 +465,7 @@ test("a workflow-definition failure cannot keep a deleted automation on screen",
 
   assertNoDomNode(container.querySelector(".automation-detail"),
     "an unrelated service being down must not keep a deleted automation's page open");
-  assertNoDomNode(container.querySelector(".automation-card"), "and the list no longer holds it");
+  assertNoDomNode(container.querySelector(".automation-row"), "and the list no longer holds it");
   assert.deepEqual(updated, []);
   await unmount();
 });
@@ -491,7 +491,7 @@ test("deleting an automation from its page leaves the others alone", async () =>
   await deleteFromPage(container);
 
   assertNoDomNode(container.querySelector(".automation-detail"), "the deleted automation's page is gone");
-  assert.deepEqual([...container.querySelectorAll(".automation-card-name")].map((name) => name.textContent), ["Nightly"],
+  assert.deepEqual([...container.querySelectorAll(".automation-row .row-title")].map((name) => name.textContent), ["Nightly"],
     "the other one is not");
   await unmount();
 });

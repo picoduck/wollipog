@@ -15,6 +15,7 @@ import {
   Braces as LucideBraces,
   Brain as LucideBrain,
   Building as LucideBuilding,
+  CalendarClock as LucideCalendarClock,
   ChartNoAxesColumn as LucideChartNoAxesColumn,
   Check as LucideCheck,
   CircleAlert as LucideCircleAlert,
@@ -121,6 +122,7 @@ import {
   Play as LucidePlay,
   Plus as LucidePlus,
   RefreshCw as LucideRefreshCw,
+  Repeat as LucideRepeat,
   Reply as LucideReply,
   RotateCcw as LucideRotateCcw,
   ScrollText as LucideScrollText,
@@ -1073,6 +1075,16 @@ export function AgentLogIcon(props: IconProps) {
 
 export function BotIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideBot} {...props} />;
+}
+
+/** An automation's schedule in words, on its list row (#2969). */
+export function ScheduleIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideRepeat} {...props} />;
+}
+
+/** An automation's next run, or Paused, on its list row (#2969). */
+export function NextRunIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCalendarClock} {...props} />;
 }
 
 export function ToolIcon(props: IconProps) {

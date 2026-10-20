@@ -569,7 +569,7 @@ test("a delete that settles after the person left does not move them", async () 
     await click(menuItem(menu, "Delete Automation…"));
     await click(buttonNamed(dialogNamed(view.body, "Delete Automation")!, "Delete Automation"));
     await click(view.body.querySelector<HTMLButtonElement>('.detail-bar button[aria-label="Back to Automations"]'));
-    await click([...view.body.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]
+    await click([...view.body.querySelectorAll<HTMLButtonElement>(".automation-row-open")]
       .find((button) => button.textContent?.includes("Weekly Digest")));
     assert.equal(page(view.body)?.querySelector(".detail-bar-title")?.textContent, "Weekly Digest");
     await act(async () => { release?.(); });

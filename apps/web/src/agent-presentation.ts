@@ -86,28 +86,36 @@ function baseAgentName(agent: AgentDefinition): string {
 }
 
 /** What tells an agent from another of the same name, in the order a name tries them: the version,
- * then where it runs, then its executable, then its id, which is unique. */
-const NAME_QUALIFIERS: ReadonlyArray<(agent: AgentDefinition) => string | null> = [
-  (agent) => agent.version ? `v${agent.version}` : null,
-  (agent) => agentContextLabel(agent.context),
-  (agent) => agent.installation?.path ?? null,
-  (agent) => agent.id,
+ * then where it runs, then its executable, then its id, which is unique. The last two identify
+ * rather than describe. */
+const NAME_QUALIFIERS: ReadonlyArray<{ identifies: boolean; of: (agent: AgentDefinition) => string | null }> = [
+  { identifies: false, of: (agent) => agent.version ? `v${agent.version}` : null },
+  { identifies: false, of: (agent) => agentContextLabel(agent.context) },
+  { identifies: true, of: (agent) => agent.installation?.path ?? null },
+  { identifies: true, of: (agent) => agent.id },
 ];
 
 /**
  * An agent's name. Given the machine's agents, a name two of them share gets the first qualifier
  * no namesake has: "Codex App Server (v0.155.1)" beside "Codex App Server (v0.140.0)", or
- * "Claude Code (WSL: Ubuntu)" when the versions match (#2990).
+ * "Claude Code (WSL: Ubuntu)" when the versions match (#2990). With `identifiers: false` a name
+ * is qualified only by its version or where it runs, never by its path or id, and otherwise stays
+ * plain: for surfaces that never show an id, such as an Automations list row (#2969).
  */
-export function agentDisplayName(agent: AgentDefinition, machineAgents?: readonly AgentDefinition[]): string {
+export function agentDisplayName(
+  agent: AgentDefinition,
+  machineAgents?: readonly AgentDefinition[],
+  options: { identifiers?: boolean } = {},
+): string {
   const name = baseAgentName(agent);
   const namesakes = machineAgents?.filter((other) => other.id !== agent.id && baseAgentName(other) === name) ?? [];
   if (namesakes.length === 0) return name;
   for (const qualifier of NAME_QUALIFIERS) {
-    const own = qualifier(agent);
-    if (own && namesakes.every((other) => qualifier(other) !== own)) return `${name} (${own})`;
+    if (qualifier.identifies && options.identifiers === false) break;
+    const own = qualifier.of(agent);
+    if (own && namesakes.every((other) => qualifier.of(other) !== own)) return `${name} (${own})`;
   }
-  return `${name} (${agent.id})`;
+  return options.identifiers === false ? name : `${name} (${agent.id})`;
 }
 
 /** Where an agent runs: "Native", or its WSL distribution ("WSL: Ubuntu"). */

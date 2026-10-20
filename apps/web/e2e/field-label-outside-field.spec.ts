@@ -117,7 +117,7 @@ for (const theme of ["dark", "light"] as const) {
       });
 
       test("the Outbound Events subscription form, on the same grid, has §8.1 field labels", async ({ page }) => {
-        await page.goto(`/automations-e2e.html?theme=${theme}`);
+        await page.goto(`/automations-e2e.html?theme=${theme}&route=${encodeURIComponent("/automations/outbound")}`);
         await page.getByRole("button", { name: "New Subscription" }).click();
         const editor = page.locator(".outbound-event-editor");
         await expectLabelStyle(page, editor.locator(AUTOMATION_LABELS), ["Scope Type", "Project", "Callback URL"]);

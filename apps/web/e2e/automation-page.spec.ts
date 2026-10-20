@@ -38,12 +38,13 @@ for (const { label, viewport } of [
   test.describe(`${label} width list`, () => {
     test.use({ viewport });
 
-    test("a card shows its name, summary and state, and its heading opens the automation's page", async ({ page }) => {
+    test("a row shows its name, schedule, next run and target, and opens the automation's page", async ({ page }) => {
       await open(page);
       const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
       await expect(card).not.toHaveAttribute("aria-expanded");
-      await expect(card).toContainText("Enabled");
-      await expect(card).toContainText("Create agent-1 session on runner-1");
+      // The schedule is in the automation's own zone; its next run is in the browser's, from its clock.
+      await expect(card).toContainText(label === "mobile" ? /Next \w+, \d{1,2}:\d{2} [AP]M/ : "Every day at 2:00 AM");
+      await expect(card).not.toContainText("agent-1");
       await expect(page.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
       await card.click();
       await expect(page.getByRole("heading", { level: 1, name: NIGHTLY })).toBeVisible();
@@ -169,20 +170,14 @@ for (const { label, viewport } of [
       await page.goto(`/automations-e2e.html?theme=${theme}&waiting-target`);
       const unhealthy = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
       await expect(unhealthy).toContainText("Target Unavailable");
-      if (label === "mobile") {
-        const checkRows = async (button: typeof unhealthy) => {
-          const layout = await button.evaluate((element) => {
-            const summary = element.querySelector(".automation-card-summary")!.getBoundingClientRect();
-            const badges = element.querySelector(".automation-card-meta")!.getBoundingClientRect();
-            return { summaryWidth: summary.width, buttonWidth: element.getBoundingClientRect().width,
-              summaryBottom: summary.bottom, badgesTop: badges.top };
-          });
-          expect(layout.summaryWidth).toBeGreaterThanOrEqual(layout.buttonWidth - 1);
-          expect(layout.badgesTop).toBeGreaterThan(layout.summaryBottom);
-        };
-        await checkRows(unhealthy);
-        await checkRows(page.getByRole("button", { name: /Weekly Digest/ }));
-      }
+      // The badge sits on the row's first line, beside the name, at every width (#2969).
+      const line = await unhealthy.evaluate((element) => {
+        const title = element.querySelector(".row-title")!.getBoundingClientRect();
+        const badge = element.querySelector(".status")!.getBoundingClientRect();
+        return { titleMiddle: title.top + title.height / 2, badgeTop: badge.top, badgeBottom: badge.bottom };
+      });
+      expect(line.badgeTop).toBeLessThan(line.titleMiddle);
+      expect(line.badgeBottom).toBeGreaterThan(line.titleMiddle);
       await unhealthy.click();
       const notice = page.locator(".automation-notice-slot .notice");
       await expect(notice.locator(".notice-title")).toHaveText("Waiting for runner-1");
@@ -311,7 +306,7 @@ test("configured trigger controls and content-free delivery provenance are visib
 });
 
 test("outbound subscription state, privacy defaults, pause reason, and journal are visible", async ({ page }) => {
-  await open(page);
+  await page.goto(`/automations-e2e.html?theme=dark&route=${encodeURIComponent("/automations/outbound")}`);
   const outbound = page.locator(".outbound-event-subscription");
   await expect(page.getByRole("heading", { name: "Outbound Events" })).toBeVisible();
   await expect(outbound.getByText("Paused", { exact: true })).toBeVisible();

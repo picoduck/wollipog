@@ -8313,9 +8313,22 @@ export interface AutomationSchedule extends AutomationSpec {
   lastFiredAt?: number;
   /** Current scheduled occurrence is waiting for target resolution. */
   targetHealth?: { scheduledFor: number; firstSeenAt: number; error: string };
+  /**
+   * The newest execution's outcome, on `GET /api/automations` only (#2969): its status and when it
+   * last changed, never its error text. Absent when the automation has never run, and from control
+   * planes that predate it; the automation's own page reads the full history.
+   */
+  latestExecution?: AutomationLatestExecution;
   createdBy: GovernanceActor;
   createdAt: number;
   updatedAt: number;
+}
+
+/** What the Automations list shows of an automation's newest execution (#2969). */
+export interface AutomationLatestExecution {
+  status: AutomationExecutionStatus;
+  /** Its completion, else its start, else its creation: the time the automation page's Last Run shows. */
+  at: number;
 }
 
 export type AutomationTriggerKind = "webhook" | "chatops";
