@@ -56,3 +56,60 @@ in normal use, no merge group whose jobs all pass is removed with `checks_timed_
 and p90 time to the required result is at most 60 minutes. Run the report over each
 day of that period. Changing the queue ruleset or scheduling policy remains a
 separate, human-approved operation.
+
+## Build-Concurrency Trial: October 19, 2026
+
+At 18:42:33 UTC on October 19, an explicitly human-approved update to the
+`main: merge queue` ruleset (ID `22200037`) reduced `max_entries_to_build` from
+5 to 2. A full ruleset readback matched the approved payload: that was the only
+field changed. The 120-minute check-response timeout, `ALLGREEN` strategy,
+required check, squash merge, bypass actors, branch conditions and maximum
+merge batch of 5 were preserved. This document records the applied setting;
+merging it does not apply another ruleset update.
+
+The current workflow can request eight initial worker jobs per merge group:
+unit/build, five browser shards, WebKit and settings-row change detection.
+Five groups can therefore request 40 worker jobs; two request 16. Against the
+20-job hosted-runner ceiling measured in #2674, this removes the queue's own
+overcommitment before other workflows. It does not reserve slots or establish
+that pull-request CI, cleanup, optional jobs and other demand cannot contend.
+Fewer speculative builds can also reduce peak merge throughput; measure the
+tradeoff rather than treating the lower limit as proof of delivery.
+
+### Baseline
+
+The existing read-only report measured 153 completed merge-group runs created
+between October 17 at 00:00 UTC and October 19 at 18:39:31 UTC. Neither run nor
+removal pagination was truncated.
+
+| Measure | Median | p90 |
+| --- | --- | --- |
+| Run created to required result | 67.5 min | 131.5 min |
+| Critical path waiting | 39.9 min | 109.6 min |
+| Critical path executing | 30.5 min | 34.3 min |
+| Aggregator wait after dependencies | 3.9 min | 26.9 min |
+
+Waiting exceeded execution in 93 runs. The report found 23 required results
+later than 120 minutes and seven `checks_timed_out` removals among the PRs it
+covered. Those are different counts: a late result does not itself establish
+which queue entry expired. The existing report limits above still apply.
+
+### Verification and Completion
+
+- Treat October 19 as a partial-day transition, including already-built groups;
+  its results do not constitute a clean five-day post-change sample.
+- Measure the next five full UTC working days separately: October 20, 21, 22,
+  23 and 26. Each window is midnight to the following midnight; exclude the
+  weekend from the five-day sample. Use the report command above with each
+  day's exact `--since`, `--until` and the unchanged `--timeout-minutes 120`.
+- Retain both critical-path waiting/execution and aggregator wait. Reconcile
+  timeout removals with their exact merge groups and conclusions; do not count
+  a manually canceled obsolete group's later failure as the reason it expired.
+- The acceptance target remains no all-green group removed for
+  `checks_timed_out` and p90 time to the required result at most 60 minutes
+  under normal contended use. Insufficient traffic or contention is incomplete
+  evidence, not a passing result. Keep #2674 open until this is demonstrated.
+- If the target is missed, inspect the measurements and propose the next
+  bounded change for human review. Do not silently increase the timeout, alter
+  required checks, buy runner capacity or retune the ruleset. Restoring the
+  old build limit is another policy change requiring explicit approval.
