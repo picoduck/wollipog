@@ -722,7 +722,7 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      so clients offer a recovery action per code. Older peers omit it and show only the text.
 // 235: extend v233 providerHomeRefusal with specific recovery causes and authorized, path-free
 //      lease-inspection process observations (#3585). Older peers retain the original shapes.
-export const PROTOCOL_VERSION = 235;
+export const PROTOCOL_VERSION = 236;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -1027,6 +1027,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundRetryExhaustion: 221,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
+  agentAutomationCreation: 236,
   fullControlAuthority: 215,
   /** Bounded Full Control issue lineage, publication admission and verified closure. */
   fullControlIssueAuthority: 217,
@@ -2540,7 +2541,7 @@ export const WORKFLOW_DECISION_CATEGORIES = [
 ] as const;
 export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
 /** Issue closure is permanently human-owned and never appears in delegation settings. */
-export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope";
+export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -4769,7 +4770,33 @@ export interface GithubIssueClosureResult {
   completedAt: number;
 }
 
+export interface AutomationCreationRequest {
+  requestId: string;
+  /** Stable identity for revisions of one intended automation. */
+  resourceKey: string;
+  spec: AutomationSpec;
+}
+
+export interface AutomationCreationSnapshot {
+  category: "automation_creation";
+  spec: AutomationSpec;
+  /** Server-calculated preview, including for a paused automation. */
+  nextFireAt: number;
+  /** Binds target identity, capabilities and ownership without retaining credentials. */
+  targetDigest: string;
+  requestedSpecDigest: string;
+  expiresAt: number;
+}
+
+export interface AutomationCreationResult {
+  automationId: string;
+  navigationPath: string;
+  spec: AutomationSpec;
+  createdAt: number;
+}
+
 export type WorkflowDecisionResourceSnapshot =
+  | AutomationCreationSnapshot
   | GithubIssueClosureSnapshot
   | CampaignIssueScopeSnapshot
   | {
@@ -4923,6 +4950,7 @@ export interface WorkflowDecisionView {
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
   issueClosureResult?: GithubIssueClosureResult;
+  automationCreationResult?: AutomationCreationResult;
   /** v166: the resolver's message to the child, present only when one was attached. */
   childMessage?: string;
 }

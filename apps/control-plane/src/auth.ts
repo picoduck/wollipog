@@ -99,6 +99,9 @@ export function isPolicyHookApiRouteAllowed(method: string, routePath: string): 
  * the HTTP method so a newly-added API is denied until it is deliberately added here.
  */
 const AGENT_CONTROL_API_ROUTES = new Set([
+  "POST /api/sessions/:id/automation-proposals",
+  "GET /api/sessions/:id/automation-proposals/:occurrenceId",
+  "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute",
   "GET /api/compatibility",
   "GET /api/runners",
   "GET /api/sessions",
@@ -162,6 +165,9 @@ const AGENT_CONTROL_API_ROUTES = new Set([
 ]);
 
 const ORCHESTRATOR_API_ROUTES = new Set([
+  "POST /api/sessions/:id/automation-proposals",
+  "GET /api/sessions/:id/automation-proposals/:occurrenceId",
+  "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute",
   "POST /api/sessions/:id/result/handoff",
   "GET /api/compatibility", "GET /api/runners", "GET /api/sessions", "GET /api/sessions/:id",
   "GET /api/sessions/:id/events", "GET /api/governance/policies",

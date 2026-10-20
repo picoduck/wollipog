@@ -2,11 +2,14 @@ import React from "react";
 import { CampaignIssueScopeSummary } from "../CampaignIssueScopePanel.js";
 import type { WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
+import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
 
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without
  * a review of their own, and the read-only summary of a decision the Orchestrator owns. */
 export function WorkflowDecisionSummary({ snapshot }: { snapshot: WorkflowDecisionResourceSnapshot }) {
   switch (snapshot.category) {
+    case "automation_creation":
+      return <AutomationCreationSummary snapshot={snapshot} />;
     case "implementation_question":
       return <>
         <p>{snapshot.question}</p>

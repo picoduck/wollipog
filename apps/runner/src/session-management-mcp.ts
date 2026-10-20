@@ -1014,6 +1014,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
 const CAMPAIGN_WORK_LEDGER_TOOLS = ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
   "adjudicate_campaign_recommendation", "get_campaign_work_items"];
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
+  "request_automation_creation", "get_automation_creation", "execute_automation_creation",
   "allocate_campaign_budget",
   "run_campaign_review_job",
   "get_campaign_review_job",
@@ -1054,7 +1055,41 @@ async function pacedVideoReviewCompatibilityError(deps: McpDeps): Promise<ToolRe
   return null;
 }
 
+async function automationCreationCall(deps: McpDeps, method: "GET" | "POST", suffix: string, body?: Json): Promise<ToolResult> {
+  if (!deps.selfSessionId) return errorResult("Automation proposals require a Wollipog session identity");
+  const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
+  const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : undefined);
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.agentAutomationCreation;
+  if (!Number.isSafeInteger(version) || version < required) {
+    return controlPlaneUpdateRequired("Automation creation needs a newer version of Wollipog. Update Wollipog and try again; no automation was created.", required, version);
+  }
+  const response = await cpFetch(deps, method, `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/automation-proposals${suffix}`, body);
+  return response.ok ? textResult(response.data) : errorResult(response.message);
+}
+
 export const TOOLS: McpTool[] = [
+  {
+    name: "request_automation_creation",
+    description: "Propose an exact automation for authenticated human approval. Available to Normal and Orchestrator sessions; Full Control never delegates this approval. Returns a pending typed decision, never creates a schedule. Reuse requestId with identical content to recover its result; reuse resourceKey with a new requestId to revise a proposal. Read the decision with get_automation_creation and execute only after human approval. Future runs retain their own budgets, permissions and approval gates.",
+    inputSchema: { type: "object", properties: {
+      requestId: { type: "string", minLength: 1, maxLength: 256 },
+      resourceKey: { type: "string", minLength: 1, maxLength: 512 },
+      spec: { type: "object", description: "Complete AutomationSpec: name, cron, timezone, enabled, action, misfirePolicy, runnerPolicy, concurrencyPolicy, finite limits and notifications." },
+    }, required: ["requestId", "resourceKey", "spec"], additionalProperties: false },
+    handler: async (args, deps) => automationCreationCall(deps, "POST", "", args),
+  },
+  {
+    name: "get_automation_creation",
+    description: "Read your own automation creation proposal, exact human approval status and durable creation receipt. A consumed receipt identifies the original creation even if the human subsequently edits or deletes the automation. No approval or creation occurs.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["occurrenceId"], additionalProperties: false },
+    handler: async (args, deps) => automationCreationCall(deps, "GET", `/${encodeURIComponent(args.occurrenceId)}`),
+  },
+  {
+    name: "execute_automation_creation",
+    description: "Create the exact human-approved automation once, after revalidating targets and capabilities. Supply the occurrenceId and resourceDigest returned by the proposal. No configuration overrides are accepted. Approval expires after 30 minutes; stale or changed proposals require fresh human approval. Retry the same occurrence after a lost response: creation and its receipt commit atomically.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" } }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
+    handler: async (args, deps) => automationCreationCall(deps, "POST", `/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest }),
+  },
   {
     name: "get_campaign_issue_scope",
     description: "Inspect the root campaign's authorized repository-qualified issue scope, revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. Use before delegating an epic and after any human scope change.",

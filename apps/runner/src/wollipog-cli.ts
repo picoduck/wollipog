@@ -241,6 +241,22 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  if (words[0] === "automation") {
+    if (optionPresent(args, "--session")) return { error: "automation commands act only on the injected session" };
+    const groupIndex = args.indexOf("automation");
+    const verb = args[groupIndex + 1];
+    if (verb === "request") {
+      const proposal = jsonObjectOption(args, "--proposal");
+      return "error" in proposal ? proposal : { tool: "request_automation_creation", input: proposal.value };
+    }
+    const occurrenceId = args[groupIndex + 2];
+    if (verb === "get" && occurrenceId && !occurrenceId.startsWith("--")) return { tool: "get_automation_creation", input: { occurrenceId } };
+    const resourceDigest = option(args, "--digest");
+    if (verb === "execute" && occurrenceId && !occurrenceId.startsWith("--") && resourceDigest) {
+      return { tool: "execute_automation_creation", input: { occurrenceId, resourceDigest } };
+    }
+    return { error: "use automation request --proposal <json>, automation get <occurrence-id>, or automation execute <occurrence-id> --digest <digest>" };
+  }
   if (words[0] === "issue-scope") {
     if (optionPresent(args, "--session")) return { error: "issue-scope commands act only on the injected session" };
     if (words[1] === "get") {

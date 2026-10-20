@@ -289,6 +289,23 @@ function issueClosureSession(): SessionView {
   } };
 }
 
+function automationCreationSession(): SessionView {
+  const base = evidenceSession();
+  const snapshot = { category: "automation_creation" as const, targetDigest: "a".repeat(64), requestedSpecDigest: "b".repeat(64),
+    nextFireAt: Date.parse("2026-10-21T06:00:00Z"), expiresAt: Date.parse("2026-10-21T05:00:00Z"),
+    spec: { name: "Daily CI Reliability Review", cron: "0 6 * * *", timezone: "UTC", enabled: query.get("paused") !== "1",
+      action: { kind: "create_session" as const, request: { runnerId: "example-machine", workspaceId: "example-workspace", agentId: "example-agent",
+        projectId: "example-project", projectLocationId: "example-location", useWorktree: true,
+        config: { model: "example-model", effort: "high", permissionMode: "default" },
+        prompt: "Inspect CI outcomes and report reliability.\nKeep all repository protections unchanged." },
+        installationBindings: { agent: { driver: "acp" as const, context: { kind: "native" as const }, installationId: "example-installation" } } },
+      misfirePolicy: { kind: "skip" as const }, runnerPolicy: { kind: "wait" as const }, concurrencyPolicy: "wait" as const,
+      limits: { maxCostUsd: 5, maxToolCalls: 50 }, notifications: { pushEvents: ["succeeded" as const, "failed" as const] } } };
+  return { ...base, title: "Automation Creation", pendingApproval: { ...base.pendingApproval!, title: "Create Automation Approval Required",
+    context: { input: JSON.stringify(snapshot) }, workflowDecision: { ...base.pendingApproval!.workflowDecision!,
+      category: "automation_creation", resourceSnapshot: snapshot, controllingSessionId: base.id, authority: "human" } } };
+}
+
 function standaloneApprovalSession(): SessionView {
   return {
     ...evidenceSession(),
@@ -793,7 +810,7 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "issue-scope" ? issueScopeSession() : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()
@@ -942,7 +959,7 @@ function Fixture() {
       return updated;
     },
   } as ApiClient;
-  const standaloneTemplate = scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
+  const standaloneTemplate = scenario === "automation-creation" ? automationCreationSession().pendingApproval! : scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
     ? standaloneApprovalSession().pendingApproval!
     // Only a provider's permission has a transcript row; a policy ask or a pause is the control plane's.
     : DOCK_SCENARIOS[scenario]?.requests().find((request) => request.kind === "permission") ?? null;
