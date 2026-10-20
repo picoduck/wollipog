@@ -463,8 +463,9 @@ test("dirty drafts save once per debounce firing and once on unmount", async (t)
           timers.set(id, callback);
           return id;
         },
-        clearTimeout: (id: number) => {
-          if (!timers.delete(id)) realClearTimeout(id);
+        clearTimeout: (id: number | ReturnType<typeof realSetTimeout> | undefined) => {
+          if (typeof id === "number") timers.delete(id);
+          else realClearTimeout(id);
         },
       }, async () => {
         const view = await mount();
@@ -485,7 +486,7 @@ test("dirty drafts save once per debounce firing and once on unmount", async (t)
               callbacks.forEach((callback) => callback());
             });
             assert.equal(saves().length, 1, "the timer saves exactly once");
-            assert.equal(JSON.parse(saves()[0].arguments[1]).text, "Latest dirty draft");
+            assert.equal(JSON.parse(saves()[0]!.arguments[1]).text, "Latest dirty draft");
             await view.settle();
             assert.equal(saves().length, 1, "settling does not save the draft again");
           }
