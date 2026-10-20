@@ -125,8 +125,9 @@ unchanged. Shrinkage becomes visible as ordinary checkpoints apply the WAL's tru
 can delay it. No forced checkpoint is added.
 
 Startup logs report mode/arming; pass logs report reclaimed pages/bytes, p95/max complete-step
-latency and stop/limit state with a run ID and entry point. Busy/errors defer to the next pass;
-steps >=16 ms warn. `pnpm benchmark:incremental-vacuum [--dir <fixture-parent>]` creates a disposable
+latency, slow-step count and stop/limit state with a run ID and entry point. Busy/errors defer to
+the next pass; the first step >=16 ms warns once per pass.
+`pnpm benchmark:incremental-vacuum [--dir <fixture-parent>]` creates a disposable
 file-backed fixture, checks kept data and physical shrinkage, and measures complete steps alongside
 ordinary `FULL` writes and the existing checkpoint worker, failing at **p95 >=16 ms**. The 16 ms
 target requires measurement on the operator's storage, not an unconditional timing guarantee.

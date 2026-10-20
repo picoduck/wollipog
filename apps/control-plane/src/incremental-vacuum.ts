@@ -83,6 +83,7 @@ export class IncrementalVacuum {
     const durations: number[] = [];
     let pages = 1;
     let deferred = false;
+    let slowSteps = 0;
     try {
       const initial = this.db.incrementalVacuumStats();
       if (initial.mode !== 2 || initial.freePages < INCREMENTAL_VACUUM_MIN_FREE_PAGES) return result;
@@ -94,8 +95,8 @@ export class IncrementalVacuum {
         result.steps++;
         result.reclaimedPages += step.reclaimedPages;
         result.reclaimedBytes += step.reclaimedPages * initial.pageSize;
-        if (elapsed >= 16) this.options.log.warn({ ...context, event: "incremental_vacuum_slow_step", stepMs: elapsed, pages },
-          "incremental vacuum step exceeded the 16 ms latency target; benchmark this storage");
+        if (elapsed >= 16 && ++slowSteps === 1) this.options.log.warn({ ...context, event: "incremental_vacuum_slow_step", stepMs: elapsed, pages },
+          "incremental vacuum step exceeded the 16 ms latency target; benchmark this storage; further slow steps are counted in the pass summary");
         pages = Math.max(1, Math.min(32, Math.floor(pages * 4 / Math.max(1, elapsed))));
         // Yield even after the final step, leaving at least three quarters of time for requests.
         await this.sleep(Math.max(1, Math.ceil(elapsed * 3)));
@@ -109,7 +110,7 @@ export class IncrementalVacuum {
     durations.sort((a, b) => a - b);
     result.p95StepMs = durations[Math.ceil(durations.length * 0.95) - 1] ?? 0;
     result.maxStepMs = durations.at(-1) ?? 0;
-    this.options.log.info({ ...context, event: "incremental_vacuum_pass", ...result, deferred,
+    this.options.log.info({ ...context, event: "incremental_vacuum_pass", ...result, deferred, slowSteps,
       durationMs: this.now() - started, interrupted: this.stopped, stepLimitReached: result.steps === INCREMENTAL_VACUUM_MAX_STEPS },
     "incremental vacuum pass finished; reclaimed bytes reach the main file through normal WAL checkpoints");
     return result;

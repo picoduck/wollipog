@@ -168,15 +168,19 @@ test("slow-step telemetry and three-times pacing use the measured complete step 
   const db = ControlPlaneDb.open(":memory:", { incrementalVacuum: true });
   try {
     db.incrementalVacuumStats = () => ({ mode: 2, freePages: 256, pageSize: 4096, pages: 1000 });
-    db.incrementalVacuumStep = () => ({ reclaimedPages: 1, freePages: 0 });
+    let steps = 0;
+    db.incrementalVacuumStep = () => ({ reclaimedPages: 1, freePages: 3 - ++steps });
     let elapsed = 0;
     t.mock.method(performance, "now", () => { elapsed += 20; return elapsed; });
     const rests: number[] = [];
     const h = setup(db, "1", async (ms) => { rests.push(ms); }); h.clock.now += DAY;
     const result = await h.worker.runPass();
-    assert.deepEqual(rests, [60]);
+    assert.deepEqual(rests, [60, 60, 60]);
     assert.equal(result.p95StepMs, 20); assert.equal(result.maxStepMs, 20);
-    assert.ok(h.logs.some((l) => l.details.event === "incremental_vacuum_slow_step" && l.details.stepMs === 20));
+    const warnings = h.logs.filter((l) => l.details.event === "incremental_vacuum_slow_step");
+    assert.equal(warnings.length, 1, "slow storage warns once per pass, not once per step");
+    assert.equal(warnings[0]!.details.stepMs, 20);
+    assert.equal(h.logs.find((l) => l.details.event === "incremental_vacuum_pass")!.details.slowSteps, 3);
   } finally { db.close(); }
 });
 

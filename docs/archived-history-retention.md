@@ -246,7 +246,8 @@ No forced checkpoint or change to checkpoint thresholds is introduced.
 
 Structured startup logs report enabled state, mode and arming deadline. Pass logs include run ID,
 entry point, reclaimed pages/bytes, p95 and maximum complete-step latency, interruption and step-limit
-status. A step reaching 16 ms warns with `incremental_vacuum_slow_step`; a failed pass logs
+status and slow-step count. The first step reaching 16 ms in each pass warns with
+`incremental_vacuum_slow_step`; further slow steps are counted in its summary. A failed pass logs
 `incremental_vacuum_deferred`. Run `pnpm benchmark:incremental-vacuum [--dir <fixture-parent>]` on
 the database's storage to measure complete steps with concurrent `FULL` writes and the normal
 checkpoint worker. It creates and removes its own fixture, verifies file shrinkage and kept data,
