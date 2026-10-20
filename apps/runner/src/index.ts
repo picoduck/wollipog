@@ -11,6 +11,7 @@ import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
  * ACP agent sessions on behalf of the control plane.
  */
 
+import { setTimeout as delay } from "node:timers/promises";
 import { homedir, hostname } from "node:os";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
@@ -104,6 +105,7 @@ import {
   describeManagedSettings,
   managedSettingsGuardSocket,
   provisionClaudeHooks,
+  requiresClaudeManagerHook,
   policyHookRegistrationsToResend,
   provisionCodexGuard,
   refreshClaudeGuardProtections,
@@ -787,6 +789,7 @@ function sameAcpCapabilities(
 let ws: WebSocket | null = null;
 let registered = false;
 let controlPlaneProtocolVersion: number | null = null;
+let policyHookRegistrationGeneration = 0;
 const registerPolicyHookCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "policy_hook_credential", sessionId, tokenHash });
 /** Re-send every current policy-hook registration still unacknowledged after `minAgeMs`. A frame
@@ -1019,25 +1022,58 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     } else if (meta.driver === "claude-code") {
       managedWorktreeGuardSocket = await memoryGuardSocket(meta, () => sessions.managedWorktreeGuardProtections(meta));
     }
-    provisionClaudeHooks(
-      meta,
-      {
-        controlPlaneUrl: config.controlPlaneUrl,
-        controlPlaneProtocolVersion,
-        enabled: claudeHookFeatureEnabled,
-        executionIsolationMode: config.executionIsolation.mode,
-        onManagerHookUnavailable: (reason) => sessions.noticeSessionLaunch(meta.sessionId, reason),
-        allowInsecureTransport,
-        registerCredential: registerPolicyHookCredential,
-        // The live runner-owned worktree set for this session, written into the managed-worktree
-        // guard's list. The guard is provisioned even while it is empty (#1303), which is what
-        // protects a worktree created later in the same turn and lets the launch keep the user's mode.
-        managedWorktreeProtections: sessions.managedWorktreeGuardProtections(meta),
-        ...(managedWorktreeGuardSocket !== undefined ? { managedWorktreeGuardSocket } : {}),
-      },
-      log,
-      claudeHookHost,
-    );
+    if (requiresClaudeManagerHook(meta, claudeHookFeatureEnabled) && controlPlaneProtocolVersion == null) {
+      sessions.noticeSessionLaunch(meta.sessionId, "Claude manager policy hooks are waiting for control-plane registration.");
+      while (controlPlaneProtocolVersion == null) {
+        await delay(100);
+        assertPreparationCurrent();
+      }
+    }
+    const claudeHookConfig = {
+      controlPlaneUrl: config.controlPlaneUrl,
+      controlPlaneProtocolVersion,
+      enabled: claudeHookFeatureEnabled,
+      executionIsolationMode: config.executionIsolation.mode,
+      onManagerHookUnavailable: (reason: string) => sessions.noticeSessionLaunch(meta.sessionId, reason),
+      allowInsecureTransport,
+      registerCredential: registerPolicyHookCredential,
+      // The live runner-owned worktree set for this session, written into the managed-worktree
+      // guard's list. The guard is provisioned even while it is empty (#1303), which is what
+      // protects a worktree created later in the same turn and lets the launch keep the user's mode.
+      managedWorktreeProtections: sessions.managedWorktreeGuardProtections(meta),
+      ...(managedWorktreeGuardSocket !== undefined ? { managedWorktreeGuardSocket } : {}),
+    };
+    provisionClaudeHooks(meta, claudeHookConfig, log, claudeHookHost);
+    let provisionedMode = meta.config.permissionMode;
+    // Registration can change protocol support without changing the requested mode. Revisit the
+    // provisioning decision at the next spawn boundary after every registration acknowledgement.
+    let provisionedRegistration = policyHookRegistrationGeneration;
+    const prepareClaudeHooks = meta.driver === "claude-code" && meta.context.kind === "native" &&
+      (!meta.executionTarget || meta.executionTarget.adapter === "host") ? (sessionConfig: typeof meta.config) => {
+      const current = { ...meta, config: sessionConfig, args: [...meta.args] };
+      const managerRequired = requiresClaudeManagerHook(current, claudeHookFeatureEnabled);
+      if (managerRequired && controlPlaneProtocolVersion == null) {
+        throw new Error("Claude manager policy hooks are waiting for control-plane registration.");
+      }
+      if (provisionedMode !== sessionConfig.permissionMode ||
+          provisionedRegistration !== policyHookRegistrationGeneration) {
+        provisionClaudeHooks(current, {
+          ...claudeHookConfig,
+          controlPlaneProtocolVersion,
+          managedWorktreeProtections: sessions.managedWorktreeGuardProtections(current),
+        }, log, claudeHookHost);
+        meta.args = current.args;
+        meta.capabilities = current.capabilities;
+        const updated = store.patchMeta(meta.sessionId, {
+          args: current.args,
+          capabilities: current.capabilities,
+        });
+        if (updated) sendUp({ type: "session_runtime_updated", snapshot: sessions.snapshotForControlPlane(updated) });
+        provisionedMode = sessionConfig.permissionMode;
+        provisionedRegistration = policyHookRegistrationGeneration;
+      }
+      return { args: meta.args, managerRequired };
+    } : undefined;
     await provisionAgentControl(
       meta,
       {
@@ -1112,6 +1148,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     const launchPrompts = codexPrompts.outcome === "prepared" ? codexPrompts.prompts : [];
     if (codexPrompts.outcome !== "not_applicable") meta.sessionSlashCommands = launchPrompts.map(codexPromptCommand);
     return {
+      prepareClaudeHooks,
       sessionCommandCatalogFresh:
         meta.driver === "claude-code" &&
         (commandPreparation.outcome === "updated" || commandPreparation.outcome === "cleared"),
@@ -2286,6 +2323,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // Whatever registration the previous socket lost, this control plane has not seen (#1841).
       resendAgentControlRegistrations(0);
       resendPolicyHookRegistrations(0);
+      policyHookRegistrationGeneration++;
       // Registration snapshots are sent before the control plane's protocol version is known, so
       // they conservatively omit native capability overlays. Re-publish negotiated snapshots now;
       // v65 peers continue to receive no overlay, while v66+ peers get the hook transport truth.
@@ -2521,31 +2559,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log("ignored start_session with malformed prompt images");
         break;
       }
-      // Provision managed hooks before persisting launch metadata. A review session gets none: its
-      // launch preset disables every hook (#3368).
-      try {
-        if (!msg.spec.review) provisionClaudeHooks(
-          msg.spec,
-          {
-            controlPlaneUrl: config.controlPlaneUrl,
-            controlPlaneProtocolVersion,
-            enabled: claudeHookFeatureEnabled,
-            executionIsolationMode: config.executionIsolation.mode,
-            allowInsecureTransport,
-            registerCredential: registerPolicyHookCredential,
-          },
-          log,
-          claudeHookHost,
-        );
-      } catch (err) {
-        sendUp({
-          type: "session_status",
-          sessionId: msg.spec.sessionId,
-          status: "failed",
-          detail: `session launch provisioning failed: ${errText(err)}`,
-        });
-        break;
-      }
+      // Hook provisioning follows runner-local launch authorization in prepareLaunch.
       startTrackedSession(msg);
       break;
     case "prompt_session":
@@ -2647,24 +2661,6 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         else sessions.setProjectMemory(msg.command.sessionId, msg.projectMemory);
       }
       if (msg.command.type === "start_session") {
-        try {
-          if (!msg.command.spec.review) provisionClaudeHooks(
-            msg.command.spec,
-            {
-              controlPlaneUrl: config.controlPlaneUrl,
-              controlPlaneProtocolVersion,
-              enabled: claudeHookFeatureEnabled,
-              executionIsolationMode: config.executionIsolation.mode,
-              allowInsecureTransport,
-              registerCredential: registerPolicyHookCredential,
-            },
-            log,
-            claudeHookHost,
-          );
-        } catch (error) {
-          lifecycle.failed(`session launch provisioning failed: ${errText(error)}`, "INVALID_COMMAND");
-          break;
-        }
         startTrackedSession(msg.command, lifecycle);
       } else if (msg.command.type === "prompt_session") {
         try {

@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -28,7 +29,7 @@ interface UpgradeRefusal {
 }
 const PAGED_READER_REFUSAL = "This machine needs a newer runner for paged session event reads. Update and restart the runner. " +
   "To read now, request an explicit limit and eventEpoch.";
-import { ControlPlaneDb } from "./db.js";
+import { CONTROL_PLANE_DB_BUSY_TIMEOUT_MS, ControlPlaneDb } from "./db.js";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "./local-device-credential.js";
 import { MAX_UI_CLIENT_MESSAGE_BYTES } from "./ui-channel.js";
 
@@ -792,6 +793,16 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     },
   );
   const providerLoginCommand = await runnerInbox.take((message) => message.type === "start_provider_login");
+  const publications = new DatabaseSync(databasePath, { timeout: CONTROL_PLANE_DB_BUSY_TIMEOUT_MS });
+  t.after(() => publications.close());
+  const publicationIntent = publications.prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?")
+    .get(`request:${providerLoginCommand.requestId}`) as { record: string } | undefined;
+  assert.ok(publicationIntent, "actual HTTP Add Account committed enrollment before its stub runner received the RPC");
+  const loginTicket = JSON.parse(publicationIntent.record) as { grantId: string; ticket: string; profileId: string | null; kind: string };
+  assert.equal(loginTicket.grantId, providerLoginCommand.profileGrantId);
+  assert.equal(loginTicket.kind, "login");
+  assert.equal(loginTicket.profileId, null, "a dispatch does not invent the future HOME identity");
+  assert.match(loginTicket.ticket, /^[a-f0-9]{64}$/u);
   assert.equal(providerLoginCommand.provider, "claude");
   assert.equal(providerLoginCommand.label, "Work");
   assert.match(String(providerLoginCommand.profileGrantId), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
@@ -827,6 +838,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   );
   const codeCommand = await runnerInbox.take((message) => message.type === "submit_provider_login_code");
   assert.equal(codeCommand.code, "transient-response");
+  const evidenceRows = publications.prepare("SELECT record FROM provider_profile_publication_events ORDER BY seq LIMIT 65")
+    .all() as unknown as Array<{ record: string }>;
+  assert.doesNotMatch(JSON.stringify(evidenceRows), /transient-response|Blocked Fixture|Still Blocked/,
+    "the publication ledger does not store auth codes or account labels");
   runner.send(JSON.stringify({
     type: "provider_login_result",
     requestId: codeCommand.requestId,
@@ -850,6 +865,9 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     login: { ...providerLogin, status: "cancelled", expectsCode: false, verificationUrl: undefined },
   }));
   assert.equal((await cancelLoginResponse).status, 200);
+  assert.equal((publications.prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?")
+    .get(`request:${providerLoginCommand.requestId}`) as { record: string }).record, publicationIntent.record,
+  "cancellation preserves the exact durable intent");
 
   runner.send(JSON.stringify({ type: "provider_logins_updated", runnerId: "runner-ui-route", logins: [providerLogin] }));
   const projectedProviderLogins = await waitForValue(
@@ -2591,6 +2609,43 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   });
   assert.equal(missingRestore.status, 404);
   assert.deepEqual(Object.keys(await missingRestore.json() as Record<string, unknown>), ["error"]);
+
+  // Permanent fault injection follows all existing grant-producing scenarios.
+  let refusedStarts = 0;
+  const rejectUnexpectedLogin = (event: MessageEvent) => {
+    const command = JSON.parse(String(event.data)) as { type: string; requestId: string };
+    if (command.type !== "start_provider_login") return;
+    refusedStarts++;
+    // Make a regression fail promptly instead of waiting for an unanswered runner RPC timeout.
+    runner.send(JSON.stringify({ type: "provider_login_result", requestId: command.requestId,
+      action: "start", ok: false, error: "Unexpected fixture sign-in command" }));
+  };
+  runner.addEventListener("message", rejectUnexpectedLogin);
+  const placeholderCount = (status: "pending" | "revoked") => (publications.prepare(`SELECT count(*) AS n
+    FROM provider_profile_grants WHERE origin='created' AND status=? AND provider_account_id LIKE 'login:%'`)
+    .get(status) as { n: number }).n;
+  const pendingPlaceholders = placeholderCount("pending"), revokedPlaceholders = placeholderCount("revoked");
+  publications.exec(`CREATE TRIGGER publication_login_fault BEFORE INSERT ON provider_profile_publication_events
+    WHEN json_extract(NEW.record,'$.kind')='login' BEGIN SELECT RAISE(ABORT,'fixture publication unavailable'); END`);
+  const deniedLogin = await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-logins`, ownerToken, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude", label: "Blocked Fixture" }),
+  });
+  assert.equal(deniedLogin.status, 503, await deniedLogin.clone().text());
+  assert.equal((await deniedLogin.json() as { code: string }).code, "PROVIDER_PUBLICATION_UNAVAILABLE");
+  assert.equal(refusedStarts, 0, "dispatch-write failure must not silently fall through to ungranted Add Account");
+  assert.equal(placeholderCount("pending"), pendingPlaceholders, "failed enrollment must not publish a new unbindable pending grant");
+  assert.equal(placeholderCount("revoked"), revokedPlaceholders + 1, "the fresh grant is spent under the same writer lock");
+  assert.equal((publications.prepare("SELECT degraded FROM provider_profile_publication_source").get() as { degraded: number }).degraded, 1);
+  publications.exec("DROP TRIGGER publication_login_fault");
+  const degradedLogin = await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-logins`, ownerToken, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude", label: "Still Blocked" }),
+  });
+  assert.equal(degradedLogin.status, 503, "committed degradation continues to refuse after the write fault disappears");
+  assert.equal(placeholderCount("pending"), pendingPlaceholders);
+  assert.equal(placeholderCount("revoked"), revokedPlaceholders + 1, "already-degraded refusal creates no additional grant");
+  assert.equal(refusedStarts, 0);
+  runner.removeEventListener("message", rejectUnexpectedLogin);
+
 });
 
 test("legacy workspace rename cannot bypass durable Project management authority", { timeout: 30_000 }, async (t) => {

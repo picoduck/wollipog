@@ -81,12 +81,13 @@ After all six native jobs finish, a verification job builds the browser web bund
 (`pnpm --filter @wollipog/web build`, PWA assets included) and uploads it as `wollipog-web.tar.gz`,
 a tarball whose single top-level `web/` directory the control plane serves from beside its
 executable or through `WOLLIPOG_WEB_DIST`. The job then downloads the 12 published runner assets,
-the 6 control-plane executables, and the web bundle, requires all six runner pairs to have identical
-SHA-256 digests, and uploads a lexically sorted `SHA256SUMS` covering all 19 names. It then compares
-that manifest with GitHub's recorded asset digests and requires exactly 34 release assets: 14 desktop
-bundles, 12 runner names, 6 control-plane executables, the web bundle, and the manifest. A release
+the 6 control-plane executables, the web bundle, and 10 native helper assets (6 closed association
+records and 4 POSIX companions), requires all six runner pairs to have identical SHA-256 digests,
+and uploads a lexically sorted `SHA256SUMS` covering all 29 names. It then compares that manifest
+with GitHub's recorded asset digests and requires exactly 44 release assets: 14 desktop bundles,
+12 runner names, 10 helper assets, 6 control-plane executables, the web bundle, and the manifest. A release
 signed for [in-place desktop updates](#in-place-desktop-updates), which is every tag run, adds 12
-update signatures and `latest.json`, and the gate then requires exactly 47 release assets and the
+update signatures and `latest.json`, and the gate then requires exactly 57 release assets and the
 exact `latest.json` bytes the job verified. A missing, extra, empty, malformed, or mismatched asset
 fails the release workflow.
 Because GitHub's release-by-tag endpoint does not expose drafts, this final gate resolves exactly one
@@ -316,7 +317,7 @@ git push origin vX.Y.Z
 
 The push triggers the workflow. When all six matrix jobs and the final runner-release verification are green, open the draft release on
 GitHub, replace the generic draft body with release notes, review upgrade behavior and known
-limitations, sanity-check the exact 47-asset inventory, `SHA256SUMS`, and `latest.json`, and
+limitations, sanity-check the exact 57-asset inventory, `SHA256SUMS`, and `latest.json`, and
 **Publish**. Publishing is also what makes the release visible to installed apps. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
 as a GitHub pre-release automatically.
 
@@ -348,7 +349,7 @@ this example, while app metadata, artifact filenames, and signed update versions
 Wollipog's semantic version comparison prevents equal-version installs and downgrades.
 
 Wait for every native build and final verification job to pass, review the release notes and all
-47 assets, and publish with **Pre-release** still selected. It must never be marked as the latest
+57 assets, and publish with **Pre-release** still selected. It must never be marked as the latest
 stable release. Only opted-in desktop installations discover it. A tag without a published
 release, or a draft release, is invisible to both channels. Use `-rc.2` for a subsequent candidate;
 to graduate to stable, prepare a new version-checked `v0.30.0` tag and build its artifacts again.

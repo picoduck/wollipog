@@ -42,7 +42,8 @@ const fixtureEnvironment = { ...inherited, HOME: home, USERPROFILE: home, LOCALA
   TMPDIR: temp, TMP: temp, TEMP: temp, PATH: source || sourceBundle || process.platform === "win32" ? systemPath : emptyBin };
 if (!source) {
   // Exercise the shipped association/installer, not a pre-existing source helper pool.
-  const helperRoot = join(root, "installed-helper"); mkdirSync(helperRoot, { mode: 0o700 });
+  // Retain immutable inputs separately from the removable, fully reaped daemon fixture.
+  const helperRoot = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-worker-helper-")));
   fixtureEnvironment.WOLLIPOG_LEASE_HELPER_ROOT = helperRoot;
 }
 let output = "", outputBytes = 0, outputExceeded = false, lastHeartbeat = 0, delays = [], measuring = false;
@@ -261,6 +262,7 @@ async function stop(child, signal) {
   } finally { controller.abort(); }
 }
 
+let verificationComplete = false, primaryFailure;
 try {
   await admitFixtureHelper();
   // The delivery harness uses the same locator as the daemons and its real native engine.
@@ -314,13 +316,19 @@ try {
   assert.equal(outputExceeded, false, "all safe daemon diagnostics must fit the fixed budget");
   assert.deepEqual(readdirSync(temp).filter(name => name.startsWith("wollipog-provider-home-lease-io-")), []);
   for (const dir of [first.dataDir, second.dataDir]) assert.deepEqual(readdirSync(dir).filter(name => name.startsWith("wollipog-provider-home-lease-io-")), []);
-} finally {
-  for (const child of holders) await stop(child, "SIGKILL");
-  for (const child of children) await stop(child, "SIGKILL");
-  for (const { peer } of peers) peer.terminate();
-  await new Promise(resolveClose => wss.close(resolveClose));
-  await new Promise(resolveClose => server.close(resolveClose));
+  verificationComplete = true;
+} catch (error) { primaryFailure = error; }
+finally {
+  const failures = verificationComplete ? [] : [primaryFailure];
+  const clean = async action => { try { await action(); } catch (error) { failures.push(error); } };
+  for (const child of holders) await clean(() => stop(child, "SIGKILL"));
+  for (const child of children) await clean(() => stop(child, "SIGKILL"));
+  for (const { peer } of peers) await clean(() => peer.terminate());
+  await clean(() => new Promise(resolveClose => wss.close(resolveClose)));
+  await clean(() => new Promise(resolveClose => server.close(resolveClose)));
+  if (failures.length) throw new AggregateError(failures, `worker verification/cleanup failed; fixture retained at ${root}; helper inputs at ${fixtureEnvironment.WOLLIPOG_LEASE_HELPER_ROOT}`);
   rmSync(root, { recursive: true, force: true });
+  if (!source) console.log(JSON.stringify({ retainedImmutableHelperParent: fixtureEnvironment.WOLLIPOG_LEASE_HELPER_ROOT }));
 }
 
 if (process.platform === "win32") {

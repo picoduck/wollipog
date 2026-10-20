@@ -486,6 +486,15 @@ export function removeClaudeHookFiles(sessionId: string, configDir = defaultHook
   }
 }
 
+/** Fixed-rule native launches have no stdio approval fallback for governance. */
+export function requiresClaudeManagerHook(spec: ClaudeHookLaunchSpec, enabled: boolean): boolean {
+  const mode = effectiveClaudePermissionMode(spec.config ?? {});
+  return enabled && spec.driver === "claude-code" &&
+    (spec.context?.kind ?? "native") === "native" &&
+    (!spec.executionTarget || spec.executionTarget.adapter === "host") &&
+    mode !== "default" && mode !== "auto" && mode !== "orchestrator";
+}
+
 function hookTransportSupported(spec: ClaudeHookLaunchSpec): boolean {
   const mode = effectiveClaudePermissionMode(spec.config ?? {});
   const transports = spec.capabilities?.elicitation?.[mode];
@@ -738,6 +747,9 @@ export function provisionClaudeHooks(
   host: ClaudeHookHost = defaultClaudeHookHost(),
 ): void {
   if (spec.driver !== "claude-code") return;
+  if (requiresClaudeManagerHook(spec, config.enabled) && config.controlPlaneProtocolVersion == null) {
+    throw new Error("Claude manager policy hooks are waiting for control-plane registration.");
+  }
   assertSafeSessionFileId(spec.sessionId);
   const expectedFile = claudeHookSettingsPath(host.configDir, spec.sessionId);
   const existingIndex = spec.args.findIndex(
@@ -898,7 +910,8 @@ export function provisionClaudeHooks(
         spec.config?.permissionMode !== "orchestrator" && hookTransportSupported(spec)) {
       const reason = "Manager policy hooks are unavailable under runner bwrap isolation: the hook " +
         "cannot write its circuit in the masked runner state. Set executionIsolation.mode to " +
-        "provider to use the runner-memory policy relay.";
+        "provider to use the runner-memory policy relay. Fixed-rule turns are refused until hook " +
+        "support is restored; use Default or Auto to continue without the manager hook.";
       log(`Claude hooks ${spec.sessionId}: ${reason}`);
       config.onManagerHookUnavailable?.(reason);
     } else if (config.enabled &&
