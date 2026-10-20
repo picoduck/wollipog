@@ -17,7 +17,7 @@ import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
-import { FeedbackContext, type ConfirmationOptions } from "./FeedbackProvider.js";
+import { FeedbackContext, FeedbackProvider, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { OutboundEventSubscriptions } from "./OutboundEventSubscriptions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -95,7 +95,8 @@ function delivery(id: string, overrides: Partial<OutboundEventDeliveryView>): Ou
     status: "delivered",
     attemptCount: 1,
     createdAt: NOW - 10 * MINUTE,
-    updatedAt: NOW - 10 * MINUTE,
+    // Settled as it was attempted, unless a test says otherwise.
+    updatedAt: overrides.lastAttemptAt ?? NOW - 10 * MINUTE,
     lastAttemptAt: NOW - 10 * MINUTE,
     statusCode: 204,
     ...overrides,
@@ -122,6 +123,8 @@ async function mount(
   subscriptions: OutboundEventSubscriptionView[],
   deliveries: Record<string, OutboundEventDeliveryView[]> = {},
   overrides: Partial<ApiClient> = {},
+  /** The app's own FeedbackProvider, so confirmations are real dialogs, instead of `answer`. */
+  realFeedback = false,
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -155,14 +158,17 @@ async function mount(
     showUndo: () => 1,
     dismissToast: () => {},
   };
+  const tab = (
+    <StoreProvider connection={connection}>
+      <OutboundEventSubscriptions projects={projects} automations={automations} />
+    </StoreProvider>
+  );
   const tree = (
     <React.StrictMode>
       <ApiProvider client={client}>
-        <FeedbackContext.Provider value={feedback}>
-          <StoreProvider connection={connection}>
-            <OutboundEventSubscriptions projects={projects} automations={automations} />
-          </StoreProvider>
-        </FeedbackContext.Provider>
+        {realFeedback
+          ? <FeedbackProvider>{tab}</FeedbackProvider>
+          : <FeedbackContext.Provider value={feedback}>{tab}</FeedbackContext.Provider>}
       </ApiProvider>
     </React.StrictMode>
   );
@@ -374,6 +380,53 @@ test("Rotate Secret and Revoke Subscription confirm with the callback's host and
     assert.ok(domWindow.document.querySelector('[role="menu"]'), "Back brings the ⋯ menu back");
   } finally {
     answer = async () => false;
+    await unmount(fixture);
+  }
+});
+
+test("a running Rotate Secret can't be dismissed, so a late rotation never replaces a newer secret or outlives a revoke (CR-1.2)", async () => {
+  const rotations: Array<ReturnType<typeof deferred<OutboundEventSubscriptionCredential>>> = [];
+  const revocation = deferred<{ revoked: boolean }>();
+  const fixture = await mount([subscription("hooks")], {}, {
+    rotateOutboundEventSubscription: () => {
+      const next = deferred<OutboundEventSubscriptionCredential>();
+      rotations.push(next);
+      return next.promise;
+    },
+    deleteOutboundEventSubscription: () => revocation.promise,
+  } as Partial<ApiClient>, true);
+  const confirmation = () => domWindow.document.querySelector(".feedback-confirmation") as unknown as HTMLElement | null;
+  const secret = () => fixture.container.querySelector(".outbound-events-secret code")?.textContent ?? null;
+  try {
+    await openMenu(fixture.container, "hooks");
+    await click(menuItem("Rotate Secret…"));
+    assert.ok(confirmation(), "Rotate Secret asks first");
+    await click(byText(confirmation()!, "button", "Rotate Secret"));
+    assert.equal(rotations.length, 1);
+    // While the rotation runs, Cancel and Escape leave the confirmation where it is.
+    await click(byText<HTMLButtonElement>(confirmation()!, "button", "Cancel"));
+    await act(async () => {
+      domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+    });
+    await act(settle);
+    assert.ok(confirmation(), "a running rotation can't be dismissed");
+    // No second rotation can start beside it.
+    assert.equal(rotations.length, 1);
+    await act(async () => { rotations[0]!.resolve({ subscription: subscription("hooks"), secret: "whsec_first" }); });
+    await act(settle);
+    assertNoDomNode(confirmation(), "the confirmation closes once the rotation settles");
+    assert.equal(secret(), "whsec_first");
+
+    await openMenu(fixture.container, "hooks");
+    await click(menuItem("Revoke Subscription…"));
+    await click(byText(confirmation()!, "button", "Revoke Subscription"));
+    await click(byText<HTMLButtonElement>(confirmation()!, "button", "Cancel"));
+    assert.ok(confirmation(), "a running revoke can't be dismissed");
+    await act(async () => { revocation.resolve({ revoked: true }); });
+    await act(settle);
+    assertNoDomNode(confirmation());
+    assert.equal(secret(), null, "the revoked subscription's secret is cleared and stays cleared");
+  } finally {
     await unmount(fixture);
   }
 });

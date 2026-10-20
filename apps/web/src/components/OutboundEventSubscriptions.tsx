@@ -349,9 +349,18 @@ export function OutboundEventSubscriptions({
     else showToast("Couldn't copy the callback URL.", { tone: "error" });
   };
 
-  // On a phone the confirmation replaces the row's ⋯ sheet, and Back brings it back (§7.5).
-  const confirmFromMenu = (choice: ActionsMenuChoice, options: ConfirmationOptions) =>
-    void confirm({ ...options, tone: "danger", back: { label: BACK_TO_MORE_ACTIONS, run: choice.reopen } });
+  // On a phone the confirmation replaces the row's ⋯ sheet, and Back brings it back (§7.5). Neither
+  // Rotate nor Revoke can be withdrawn once sent, so the confirmation stays until the request settles
+  // (CR-1.2): a dismissed request still running could otherwise overlap the next one, and its late
+  // secret replace a newer one or come back after a revoke.
+  const confirmFromMenu = (choice: ActionsMenuChoice, options: ConfirmationOptions) => void confirm({
+    ...options,
+    tone: "danger",
+    cancelWhileRunning: false,
+    back: { label: BACK_TO_MORE_ACTIONS, run: choice.reopen },
+  });
+  /** Subscriptions revoked here: a rotation's secret for one of them signs nothing and is never shown. */
+  const revokedIds = useRef(new Set<string>());
 
   const rotate = (subscription: OutboundEventSubscriptionView, choice: ActionsMenuChoice) => {
     const { host } = callbackParts(subscription.callbackUrl);
@@ -360,9 +369,9 @@ export function OutboundEventSubscriptions({
       message: `The subscription to ${host} gets a new signing secret. The old one stops working and any request in flight is canceled.`,
       confirmLabel: "Rotate Secret",
       progress: "Rotating the secret…",
-      onConfirm: async () => {
+      onConfirm: async (signal) => {
         const rotated = await api.rotateOutboundEventSubscription(subscription.subscriptionId);
-        if (!mounted.current) return;
+        if (signal.aborted || !mounted.current || revokedIds.current.has(subscription.subscriptionId)) return;
         setCredential(rotated);
         setActionFailure(null);
         void load(false);
@@ -380,6 +389,7 @@ export function OutboundEventSubscriptions({
       progress: "Revoking the subscription…",
       onConfirm: async () => {
         await api.deleteOutboundEventSubscription(id);
+        revokedIds.current.add(id);
         if (!mounted.current) return;
         // A secret shown for this subscription signs nothing any more.
         setCredential((current) => current?.subscription.subscriptionId === id ? null : current);

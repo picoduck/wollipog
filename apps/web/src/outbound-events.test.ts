@@ -42,7 +42,8 @@ const delivery = (overrides: Partial<OutboundEventDeliveryView> = {}): OutboundE
   status: "delivered",
   attemptCount: 1,
   createdAt: NOW - 10 * MINUTE,
-  updatedAt: NOW - 10 * MINUTE,
+  // Settled as it was attempted, unless a test says otherwise.
+  updatedAt: overrides.lastAttemptAt ?? NOW - 10 * MINUTE,
   lastAttemptAt: NOW - 10 * MINUTE,
   ...overrides,
 });
@@ -125,6 +126,22 @@ test("the subscription's badge: Delivery Failed when its latest settled delivery
   // A pause for a backlog, with the last delivery delivered, is Paused.
   assert.equal(subscriptionStatus(subscription({ state: "paused", pauseReason: "Paused because 1000 deliveries are pending" }),
     [delivery()]), "paused");
+});
+
+test("deliveries claimed in one tick are ordered by when they settled, in either API order (CR-1.1)", () => {
+  // The control plane gives every delivery it claims in one tick the same lastAttemptAt; updatedAt
+  // is when each settled.
+  const claimedAt = NOW - 5 * MINUTE;
+  const delivered = delivery({ deliveryId: "ok", lastAttemptAt: claimedAt, updatedAt: claimedAt + 1_000 });
+  const failed = delivery({ deliveryId: "bad", status: "failed", statusCode: 500, lastAttemptAt: claimedAt, updatedAt: claimedAt + 2_000 });
+  for (const order of [[delivered, failed], [failed, delivered]]) {
+    assert.equal(subscriptionStatus(subscription(), order), "delivery_failed");
+    assert.equal(lastDeliveryLabel(subscription(), order, NOW), "Last delivery failed 5 minutes ago");
+  }
+  const recovered = delivery({ deliveryId: "ok", lastAttemptAt: claimedAt, updatedAt: claimedAt + 3_000 });
+  for (const order of [[recovered, failed], [failed, recovered]]) {
+    assert.equal(subscriptionStatus(subscription(), order), "active");
+  }
 });
 
 test("the last delivery reads in words", () => {

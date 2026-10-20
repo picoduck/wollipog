@@ -141,13 +141,22 @@ export function nextRetryLabel(delivery: OutboundEventDeliveryView, now: number)
 }
 
 
+/**
+ * When a settled delivery settled. The control plane stamps every delivery it claims in one tick with
+ * the same `lastAttemptAt`, and records the settlement in `updatedAt`, so `updatedAt` orders them.
+ */
+function settledAt(delivery: OutboundEventDeliveryView): number {
+  return delivery.updatedAt;
+}
+
 /** The delivery whose attempt settled last: delivered, failed, or failed and waiting to retry. */
 export function latestSettledDelivery(deliveries: readonly OutboundEventDeliveryView[]): OutboundEventDeliveryView | undefined {
   let latest: OutboundEventDeliveryView | undefined;
   for (const delivery of deliveries) {
     if (delivery.status !== "delivered" && !deliveryFailure(delivery)) continue;
-    const at = delivery.lastAttemptAt ?? delivery.updatedAt;
-    if (!latest || at > (latest.lastAttemptAt ?? latest.updatedAt)) latest = delivery;
+    const later = !latest || settledAt(delivery) > settledAt(latest) ||
+      (settledAt(delivery) === settledAt(latest) && (delivery.lastAttemptAt ?? 0) > (latest.lastAttemptAt ?? 0));
+    if (later) latest = delivery;
   }
   return latest;
 }
@@ -173,8 +182,8 @@ export function lastDeliveryLabel(
 ): string {
   const ago = (at: number) => now - at < MINUTE ? "just now" : `${spanInWords(now - at)} ago`;
   const latest = latestSettledDelivery(deliveries);
-  if (latest && latest.status !== "delivered") return `Last delivery failed ${ago(latest.lastAttemptAt ?? latest.updatedAt)}`;
-  const delivered = Math.max(subscription.lastDeliveredAt ?? 0, latest?.lastAttemptAt ?? latest?.updatedAt ?? 0);
+  if (latest && latest.status !== "delivered") return `Last delivery failed ${ago(settledAt(latest))}`;
+  const delivered = Math.max(subscription.lastDeliveredAt ?? 0, latest ? settledAt(latest) : 0);
   return delivered > 0 ? `Last delivered ${ago(delivered)}` : "No deliveries yet";
 }
 
