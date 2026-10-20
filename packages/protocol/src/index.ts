@@ -713,6 +713,7 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      keeps an accepted Dismiss Recovery durable until the provider turn settles, so only then does
 //      the control plane fence its standing sign-in dismissal permanently.
 // 231: runner archived-history retention: bounded trim request/result, gated by capability.
+// 232: human-approved automation creation proposals, exact execution and durable creation receipts.
 export const PROTOCOL_VERSION = 232;
 
 export * from "./campaign-authority.js";

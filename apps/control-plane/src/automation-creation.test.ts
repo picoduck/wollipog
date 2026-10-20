@@ -10,6 +10,7 @@ import type { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal } from "./identity.js";
 import { SessionsService } from "./sessions.js";
 import { AutomationCreationService } from "./automation-creation.js";
+import { AutomationsService } from "./automations.js";
 import { registerAutomationCreationRoutes } from "./automation-creation-routes.js";
 import { isAgentControlApiRouteAllowed } from "./auth.js";
 
@@ -92,6 +93,34 @@ test("Orchestrator and descendant agents cannot approve automation creation thro
     assert.equal(h.db.listAutomations().length, 0);
   } finally { h.db.close(); }
 });
+
+for (const [driver, permissionModes] of [
+  ["codex-app-server", ["read-only", "on-request", "auto-review", "danger-full-access"]],
+  ["pi", []],
+  ["acp", []],
+] as const) {
+  test(`${driver} automations inherit an unnamed provider permission default`, () => {
+    const h = harness();
+    try {
+      h.db.registerRunner({ ...metadata, agents: [{ ...metadata.agents[0]!, driver,
+        capabilities: { ...metadata.agents[0]!.capabilities!, permissionModes: [...permissionModes] } }] }, Date.now(), PROTOCOL_VERSION);
+      const normal = new AutomationsService(h.db, h.hub, h.sessions, { info() {}, warn() {} });
+      assert.equal(normal.create(spec(), { kind: "human", id: h.owner }).ok, true);
+      const proposed = h.request();
+      assert.equal(proposed.ok, true, proposed.error ?? "Provider defaults must remain available");
+      const decision = proposed.data!;
+      if (decision.resourceSnapshot.category !== "automation_creation") assert.fail();
+      assert.equal(decision.resourceSnapshot.effectiveTargets[0]!.config.permissionMode, undefined);
+      assert.equal(h.resolve(decision.occurrenceId).ok, true);
+      const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+      assert.equal(executed.ok, true, executed.error ?? "Approved provider-default creation should succeed");
+      assert.equal(executed.data!.automationCreationResult!.spec.action.request.config, undefined);
+      const unsupported = spec(); unsupported.action.request.config = { permissionMode: "unsupported" };
+      assert.equal(h.request("unsupported", "unsupported", unsupported).ok, false,
+        "Explicit modes must still pass capability admission");
+    } finally { h.db.close(); }
+  });
+}
 
 test("expired pending proposals cannot be approved but can still be denied and cleared", () => {
   const h = harness();

@@ -109,7 +109,8 @@ export class AutomationCreationService {
         Object.assign(config, model.value);
         config.permissionMode ??= defaultPermissionModeForNewSession(agent.driver ?? "acp", agent.capabilities);
         if (!config.permissionMode && agent.capabilities?.permissionModes?.includes("default")) config.permissionMode = "default";
-        if (!config.permissionMode) return fail("Choose an explicit supported permission mode before requesting automation approval");
+        // Some providers have no named default (or expose no selectable modes). Preserve normal
+        // runtime inheritance; explicit unsupported modes were already refused above.
         // Preview each role independently. Inheritance is not a persistent configuration override:
         // particularly, a prompt must not restore a target's former permission mode on every fire.
         effectiveTargets.push({ runnerId: target.runnerId, workspaceId: target.workspaceId, agentId, role: key, config });
