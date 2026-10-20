@@ -24,6 +24,7 @@ import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type
 import { pickTopmost } from "./layers.js";
 import { useIsMobile } from "./components/useIsMobile.js";
 import { ViewerIdentityProvider } from "./components/ViewerIdentityProvider.js";
+import { EntityTitleProvider, reportedTitleFor, useEntityTitleState } from "./entity-title.js";
 import { GovernancePolicyNamesProvider } from "./components/GovernancePolicyNamesProvider.js";
 import { SessionPanelToggles } from "./components/SessionPanelToggles.js";
 import { parseStoredDockVisible } from "./dock.js";
@@ -124,6 +125,7 @@ const NewPodDialog = lazy(() => import("./components/NewPodDialog.js").then((mod
 const PodDetail = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodDetail })));
 const PodsView = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodsView })));
 const AutomationsView = lazy(() => import("./components/AutomationsView.js").then((module) => ({ default: module.AutomationsView })));
+const AutomationDetail = lazy(() => import("./components/AutomationDetail.js").then((module) => ({ default: module.AutomationDetail })));
 const AutomationEditor = lazy(() => import("./components/AutomationEditor.js").then((module) => ({ default: module.AutomationEditor })));
 const SkillsView = lazy(() => import("./components/SkillsView.js").then((module) => ({ default: module.SkillsView })));
 const UsageView = lazy(() => import("./components/UsageView.js").then((module) => ({ default: module.UsageView })));
@@ -310,11 +312,14 @@ export function Shell() {
   const theme = useTheme();
   const { navigate, reconnectNow } = useStoreActions();
   const view = useStoreSelector((s) => s.view);
-  // A loaded run or pod titles its page by name; the generic noun is only the loading fallback.
-  const entityTitle = useStoreSelector((s) =>
+  // A loaded run or pod titles its page by name; the generic noun is only the loading fallback. An
+  // automation is not in the store: its page and its editor report its name (#2968).
+  const storeEntityTitle = useStoreSelector((s) =>
     s.view.name === "run" ? s.runs.get(s.view.id)?.title
       : s.view.name === "pod" ? s.pods.get(s.view.id)?.title
         : undefined);
+  const [reportedEntityTitle, reportEntityTitle] = useEntityTitleState();
+  const entityTitle = storeEntityTitle ?? reportedTitleFor(reportedEntityTitle, view);
   const viewRef = useRef(view);
   viewRef.current = view;
   const settingsReturnView = useStoreSelector((s) => s.settingsReturnView);
@@ -895,6 +900,7 @@ export function Shell() {
           tabIndex={-1}
         >
           <ViewerIdentityProvider>
+          <EntityTitleProvider report={reportEntityTitle}>
           <GovernancePolicyNamesProvider>
           <SearchPaletteContext.Provider value={openPalette}>
           <AppBarSearchProvider onSearch={isMobile ? openPalette : undefined}>
@@ -947,6 +953,7 @@ export function Shell() {
             </ExperimentGate>
           )}
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
+          {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}
           {view.name === "usage" && <UsageView />}
           {view.name === "archived" && <ArchivedSessionsView />}
@@ -1018,6 +1025,7 @@ export function Shell() {
           </AppBarSearchProvider>
           </SearchPaletteContext.Provider>
           </GovernancePolicyNamesProvider>
+          </EntityTitleProvider>
           </ViewerIdentityProvider>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only

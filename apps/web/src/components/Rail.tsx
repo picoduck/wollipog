@@ -140,6 +140,7 @@ function selectedRailView(view: View): GlobalViewName | null {
   if (view.name === "session" || view.name === "board") return "inbox";
   if (view.name === "run") return "runs";
   if (view.name === "pod") return "pods";
+  if (view.name === "automation") return "automations";
   return GLOBAL_VIEW_ITEMS.some((item) => item.id === view.name) ? view.name as GlobalViewName : null;
 }
 

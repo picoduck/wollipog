@@ -169,6 +169,33 @@ export function formatClock(
   return timestampFormatter("clock", locale, timeZone).format(date);
 }
 
+/** The calendar day of `instant` in `timeZone` (the viewer's when omitted), as a UTC midnight. */
+function calendarDay(instant: number, timeZone?: string): number {
+  return Date.parse(new Intl.DateTimeFormat("en-CA", {
+    year: "numeric", month: "2-digit", day: "2-digit", ...(timeZone ? { timeZone } : {}),
+  }).format(new Date(instant)));
+}
+
+/**
+ * A moment in words, without seconds (#2968): "Today, 2:00 AM", "Tomorrow, 2:00 AM",
+ * "Yesterday, 2:00 AM", "Sat, 9:00 AM" later this week, and "Oct 14, 9:00 AM" otherwise, with the
+ * year only when it is not this year's. In the viewer's time zone unless one is given.
+ */
+export function formatCalendarTime(instant: number, now = Date.now(), timeZone?: string, locale?: string): string {
+  if (!Number.isFinite(instant) || !Number.isFinite(now)) return "";
+  const zone = timeZone ? { timeZone } : {};
+  const format = (options: Intl.DateTimeFormatOptions) =>
+    new Intl.DateTimeFormat(locale, { ...options, ...zone }).format(new Date(instant));
+  const time = format({ hour: "numeric", minute: "2-digit" });
+  const days = Math.round((calendarDay(instant, timeZone) - calendarDay(now, timeZone)) / 86_400_000);
+  if (days === 0) return `Today, ${time}`;
+  if (days === 1) return `Tomorrow, ${time}`;
+  if (days === -1) return `Yesterday, ${time}`;
+  if (days > 1 && days < 7) return `${format({ weekday: "short" })}, ${time}`;
+  const year = (value: number) => new Intl.DateTimeFormat("en-CA", { year: "numeric", ...zone }).format(new Date(value));
+  return `${format({ month: "short", day: "numeric", ...(year(instant) !== year(now) ? { year: "numeric" } : {}) })}, ${time}`;
+}
+
 /** Session event time means recorded by the runner; adopted history may not retain provider time. */
 export function formatRecordedTimestamp(
   timestamp: number | undefined,

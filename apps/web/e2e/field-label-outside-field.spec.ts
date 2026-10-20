@@ -127,7 +127,8 @@ for (const theme of ["dark", "light"] as const) {
       test("the signed trigger editor's labels are §8.1 field labels, and its helper stays dim 4px under the control", async ({ page }) => {
         await page.goto(`/automations-e2e.html?theme=${theme}`);
         await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
-        await page.getByRole("button", { name: "Add Webhook" }).click();
+        await page.locator(".detail-bar").getByRole("button", { name: "More Actions" }).click();
+        await page.getByRole("menuitem", { name: "Add Webhook Trigger…" }).click();
         await page.getByRole("checkbox", { name: "Accept Delivery Fields" }).check();
         const editor = page.locator(".automation-trigger-editor");
         await expectLabelStyle(page, editor.locator(AUTOMATION_LABELS), ["Name", "Kind", "Missing References", "Parameter Names"]);

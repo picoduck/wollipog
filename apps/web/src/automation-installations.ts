@@ -1,10 +1,12 @@
-import type { AgentDefinition, SavedHarnessInstallation, RunnerView } from "@wollipog/protocol";
+import type {
+  AgentDefinition, AutomationSchedule, SavedHarnessInstallation, RunnerView, WorkflowDefinition,
+} from "@wollipog/protocol";
 import { isRetiredCodexExec, runnerSupportsProtocol } from "@wollipog/protocol";
 import { agentOptions } from "./components/agent-options.js";
 
 /**
- * How an automation's agents resolve against a Machine's discovered installations. The Automations
- * list flags a card whose saved installation is gone, and the Automation editor (#2967) shows the
+ * How an automation's agents resolve against a Machine's discovered installations. The automation
+ * page warns when a saved installation is gone (#2968), and the Automation editor (#2967) shows the
  * same fact beside the field it concerns, so both read these.
  */
 
@@ -60,4 +62,60 @@ export function resolvedInstallationAgentId(runner: Runner, saved: SavedHarnessI
 /** Whether the saved installation is still on this Machine. */
 export function bindingAvailable(runner: Runner, saved: SavedHarnessInstallation): boolean {
   return Boolean(resolvedInstallationAgentId(runner, saved));
+}
+
+/**
+ * Whether an automation cannot run because an agent installation it needs is unbound or gone, on
+ * its primary Machine or on an alternate: the checks the Automations card made, which the
+ * automation page's Agent Unavailable notice now makes (#2968). `workflows` resolves a workflow
+ * action's roles; without its definition, no role is judged.
+ */
+export function automationInstallationUnavailable(
+  item: AutomationSchedule,
+  runners: ReadonlyMap<string, RunnerView>,
+  workflows: readonly WorkflowDefinition[],
+): boolean {
+  const actionRunner = item.action.kind === "prompt_session" ? undefined : runners.get(item.action.request.runnerId);
+  const savedBindings = item.action.kind === "prompt_session" ? undefined : item.action.installationBindings;
+  const unavailableInstallation = savedBindings && Object.values(savedBindings)
+    .some((binding) => !bindingAvailable(actionRunner, binding));
+  const unboundInstallation = item.action.kind === "create_session" && !savedBindings?.agent &&
+    unboundInstallationUnavailable(actionRunner, item.action.request.agentId, savedBindings === undefined);
+  const workflowAction = item.action.kind === "workflow_run" ? item.action : null;
+  const workflow = workflowAction && workflows.find((definition) =>
+    definition.workflowId === workflowAction.request.workflowId &&
+    (workflowAction.request.workflowVersion === undefined ||
+      definition.version === workflowAction.request.workflowVersion));
+  const unboundWorkflow = workflowAction !== null && (workflow?.nodes.some((node) => {
+    if (node.kind !== "agent") return false;
+    const role = node.agentId!;
+    if (savedBindings?.[`role:${role}`]) return false;
+    const id = workflowAction.request.agentBindings?.[role] ?? role;
+    return !actionRunner?.agents.some((agent) => agent.id === id && !agent.installation);
+  }) ?? false);
+  const unboundOrchestrator = workflowAction?.request.orchestratorAgentId &&
+    !savedBindings?.orchestrator && !actionRunner?.agents.some((agent) =>
+      agent.id === workflowAction.request.orchestratorAgentId && !agent.installation);
+  const unavailableAlternate = item.runnerPolicy.kind === "alternate" &&
+    item.runnerPolicy.targets.some((target) => {
+      const runner = runners.get(target.runnerId);
+      const bindings = target.installationBindings;
+      if (Object.values(bindings ?? {}).some((binding) => !bindingAvailable(runner, binding))) return true;
+      if (item.action.kind === "create_session") {
+        return !bindings?.agent &&
+          unboundInstallationUnavailable(runner, target.agentId!, bindings === undefined);
+      }
+      if (!workflowAction) return false;
+      const unboundRole = workflow?.nodes.some((node) => {
+        if (node.kind !== "agent") return false;
+        const role = node.agentId!;
+        if (bindings?.[`role:${role}`]) return false;
+        const id = target.agentBindings?.[role] ?? workflowAction.request.agentBindings?.[role] ?? role;
+        return !runner?.agents.some((agent) => agent.id === id && !agent.installation);
+      }) ?? false;
+      const orchestrator = target.orchestratorAgentId ?? workflowAction.request.orchestratorAgentId;
+      return unboundRole || Boolean(orchestrator && !bindings?.orchestrator &&
+        !runner?.agents.some((agent) => agent.id === orchestrator && !agent.installation));
+    });
+  return Boolean(unavailableInstallation || unboundInstallation || unboundWorkflow || unboundOrchestrator || unavailableAlternate);
 }

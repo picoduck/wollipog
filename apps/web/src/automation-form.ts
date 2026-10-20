@@ -5,12 +5,15 @@ import type {
   AutomationSchedule,
   AutomationSpec,
   ProjectView,
+  RunnerView,
   SessionConfig,
 } from "@wollipog/protocol";
+import { agentDisplayName } from "./agent-presentation.js";
 import {
   automationProjectPlacement,
   validateAutomationAlternatePlacement,
 } from "./automation-project-placement.js";
+import { formatCalendarTime, formatCost } from "./format.js";
 
 export type ActionKind = AutomationAction["kind"];
 
@@ -372,3 +375,241 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
     notifications: { pushEvents: form.pushEvents },
   };
 }
+
+/* ========================================================================== */
+/* The automation in words (#2968): its schedule, its action and its policies */
+/* ========================================================================== */
+
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
+
+/** "1st", "2nd", "3rd", "11th", "22nd". */
+function ordinal(day: number): string {
+  const tens = day % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : day % 10 === 1 ? "st" : day % 10 === 2 ? "nd" : day % 10 === 3 ? "rd" : "th";
+  return `${day}${suffix}`;
+}
+
+function cronNumber(field: string, min: number, max: number): number | null {
+  if (!/^\d{1,2}$/.test(field)) return null;
+  const value = Number(field);
+  return value >= min && value <= max ? value : null;
+}
+
+/** The months a quarterly expression runs in: `*` + `/3`, `1-12/3`, or four months three apart. */
+function quarterMonths(field: string): number[] | null {
+  if (field === "*/3" || field === "1-12/3") return [1, 4, 7, 10];
+  const months = field.split(",").map((part) => cronNumber(part, 1, 12));
+  if (months.length !== 4 || months.some((month) => month === null)) return null;
+  const sorted = (months as number[]).slice().sort((a, b) => a - b);
+  return sorted.every((month, index) => index === 0 || month - sorted[index - 1]! === 3) ? sorted : null;
+}
+
+/** A wall-clock time of day as the viewer writes it ("9:00 AM"), independent of any time zone. */
+function wallClock(hour: number, minute: number, locale?: string): string {
+  return new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit", timeZone: "UTC" })
+    .format(new Date(Date.UTC(2000, 0, 1, hour, minute)));
+}
+
+/** A recognized schedule: its words, and which wall-clock minutes of which days it runs at. */
+interface SchedulePattern {
+  label: string;
+  /** Whether it runs on this calendar date (month 1–12, weekday 0 = Sunday). */
+  runsOn: (month: number, day: number, weekday: number) => boolean;
+  /** Hours it runs at on such a day, each at `minute`. */
+  hours: readonly number[];
+  minute: number;
+}
+
+function schedulePattern(cron: string, locale?: string): SchedulePattern | null {
+  const fields = cron.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const [minuteField, hourField, dayField, monthField, weekdayField] = fields as [string, string, string, string, string];
+  const minute = cronNumber(minuteField, 0, 59);
+  if (minute === null) return null;
+  const everyDay = () => true;
+  if (hourField === "*" && dayField === "*" && monthField === "*" && weekdayField === "*") {
+    return {
+      label: minute === 0 ? "Every hour" : `Every hour at :${String(minute).padStart(2, "0")}`,
+      runsOn: everyDay, hours: Array.from({ length: 24 }, (_, hour) => hour), minute,
+    };
+  }
+  const hour = cronNumber(hourField, 0, 23);
+  if (hour === null) return null;
+  const at = `at ${wallClock(hour, minute, locale)}`;
+  const pattern = (label: string, runsOn: SchedulePattern["runsOn"]): SchedulePattern => ({ label, runsOn, hours: [hour], minute });
+  if (dayField === "*" && monthField === "*") {
+    if (weekdayField === "*") return pattern(`Every day ${at}`, everyDay);
+    if (weekdayField === "1-5") return pattern(`Weekdays ${at}`, (_month, _day, weekday) => weekday >= 1 && weekday <= 5);
+    if (weekdayField === "0,6" || weekdayField === "6,0") {
+      return pattern(`Weekends ${at}`, (_month, _day, weekday) => weekday === 0 || weekday === 6);
+    }
+    const weekday = cronNumber(weekdayField, 0, 7);
+    if (weekday === null) return null;
+    const day = weekday % 7;
+    return pattern(`Every ${WEEKDAY_NAMES[day]} ${at}`, (_month, _day, current) => current === day);
+  }
+  const day = cronNumber(dayField, 1, 31);
+  if (day === null || weekdayField !== "*") return null;
+  if (monthField === "*") return pattern(`Monthly on the ${ordinal(day)} ${at}`, (_month, current) => current === day);
+  const months = quarterMonths(monthField);
+  if (!months) return null;
+  return pattern(`Quarterly on the ${ordinal(day)} ${at}`, (month, current) => current === day && months.includes(month));
+}
+
+/** The calendar fields of `instant` in `timeZone`. */
+function zonedParts(instant: number, timeZone: string): Record<string, string> {
+  return Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric",
+  }).formatToParts(new Date(instant)).map((part) => [part.type, part.value]));
+}
+
+/** `timeZone`'s offset from UTC at `instant`, in milliseconds. */
+function zoneOffset(instant: number, timeZone: string): number {
+  const parts = zonedParts(instant, timeZone);
+  const wall = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute));
+  return wall - Math.floor(instant / 60_000) * 60_000;
+}
+
+/** The instant a wall-clock minute in `timeZone` names. */
+function zonedInstant(year: number, month: number, day: number, hour: number, minute: number, timeZone: string): number {
+  const wall = Date.UTC(year, month - 1, day, hour, minute);
+  const first = wall - zoneOffset(wall, timeZone);
+  return wall - zoneOffset(first, timeZone);
+}
+
+/** The first run of `pattern` after `now`, or null when none falls within the next 400 days. */
+function nextRun(pattern: SchedulePattern, timeZone: string, now: number): number | null {
+  const today = zonedParts(now, timeZone);
+  for (let offset = 0; offset <= 400; offset += 1) {
+    const date = new Date(Date.UTC(Number(today.year), Number(today.month) - 1, Number(today.day) + offset));
+    const [year, month, day] = [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()];
+    if (!pattern.runsOn(month, day, date.getUTCDay())) continue;
+    for (const hour of pattern.hours) {
+      const instant = zonedInstant(year, month, day, hour, pattern.minute, timeZone);
+      if (instant > now) return instant;
+    }
+  }
+  return null;
+}
+
+export interface ScheduleDescription {
+  /** The schedule in words ("Weekdays at 9:00 AM"), or the cron text itself when unrecognized. */
+  label: string;
+  /** Its next run in words, in the viewer's time zone ("Tomorrow, 9:00 AM"); null when unrecognized. */
+  nextLabel: string | null;
+}
+
+/**
+ * A cron schedule in words (#2968): every hour, every day, weekdays, weekends, one weekday, a day
+ * of the month, and a day of every third month. Anything else reads as its cron text. The words
+ * are the automation's own wall clock in its own time zone; the next run is in the viewer's. The
+ * list (#2969) and the editor (#2971) use the same words.
+ */
+export function describeSchedule(
+  cron: string,
+  timezone: string,
+  now = Date.now(),
+  options: { viewerTimeZone?: string; locale?: string } = {},
+): ScheduleDescription {
+  const pattern = schedulePattern(cron, options.locale);
+  if (!pattern) return { label: cron.trim(), nextLabel: null };
+  let next: number | null;
+  try {
+    next = nextRun(pattern, timezone, now);
+  } catch {
+    // An unknown time zone: the words still hold, and nothing says when they next apply.
+    next = null;
+  }
+  return {
+    label: pattern.label,
+    nextLabel: next === null ? null : formatCalendarTime(next, now, options.viewerTimeZone, options.locale),
+  };
+}
+
+/** What `actionSentence` names things by. Each lookup answers undefined for what it doesn't know. */
+export interface ActionNames {
+  runners: ReadonlyMap<string, RunnerView>;
+  /** A machine's label, as the editor's Machine field shows it. */
+  machineLabel: (runnerId: string) => string | undefined;
+  sessionTitle: (sessionId: string) => string | undefined;
+  workflowName: (workflowId: string) => string | undefined;
+}
+
+/**
+ * What an automation does, in one sentence with display names and no ids (#2968): "Starts Claude
+ * Code in acme-storefront on Build Server.", "Runs the Build and Review workflow in acme-storefront
+ * on Build Server.", "Prompts “Nightly triage”.". The prompt or task is shown under it.
+ */
+export function actionSentence(action: AutomationAction, names: ActionNames): string {
+  if (action.kind === "prompt_session") {
+    const title = names.sessionTitle(action.sessionId);
+    return title ? `Prompts “${title}”.` : "Prompts a session that isn't loaded.";
+  }
+  const runner = names.runners.get(action.request.runnerId);
+  const folder = runner?.workspaces.find((workspace) => workspace.id === action.request.workspaceId)?.name;
+  const machine = names.machineLabel(action.request.runnerId) ?? "a machine that isn't connected";
+  const where = `in ${folder ?? "a folder that isn't available"} on ${machine}`;
+  if (action.kind === "workflow_run") {
+    const workflow = names.workflowName(action.request.workflowId);
+    return `Runs ${workflow ? `the ${workflow} workflow` : "a workflow that isn't available"} ${where}.`;
+  }
+  const agentId = action.request.agentId;
+  const agent = runner?.agents.find((candidate) => candidate.id === agentId);
+  return `Starts ${agent ? agentDisplayName(agent, runner!.agents) : "an agent that isn't on this machine"} ${where}.`;
+}
+
+/** The prompt or task an action sends. */
+export function actionText(action: AutomationAction): string {
+  if (action.kind === "prompt_session") return action.request.text;
+  return action.kind === "workflow_run" ? action.request.task : (action.request.prompt ?? "");
+}
+
+function joinWords(words: readonly string[], conjunction: "and" | "or"): string {
+  if (words.length <= 1) return words[0] ?? "";
+  return `${words.slice(0, -1).join(", ")} ${conjunction} ${words[words.length - 1]}`;
+}
+
+function minutes(count: number): string {
+  return `${count.toLocaleString()} ${count === 1 ? "minute" : "minutes"}`;
+}
+
+const NOTIFICATION_WORDS: Record<AutomationNotificationEvent, string> = {
+  started: "starts", succeeded: "succeeds", failed: "fails", expired: "expires",
+};
+
+/**
+ * Each policy's answer in plain words, for the automation page's Rules and Limits (#2968). They
+ * say what the control plane does: an alternate machine is used as soon as the primary is offline,
+ * and its time limit is when the run gives up if none is online.
+ */
+export const policyCopy = {
+  missed(policy: AutomationSpec["misfirePolicy"]): string {
+    if (policy.kind === "skip") return "Skip it";
+    if (policy.kind === "fire_once") return "Run it once";
+    return `Catch up, at most ${policy.maxRuns} ${policy.maxRuns === 1 ? "run" : "runs"}`;
+  },
+  offline(policy: AutomationSpec["runnerPolicy"], machineLabel: (runnerId: string) => string | undefined): string {
+    if (policy.kind === "wait") return "Wait until it's back";
+    if (policy.kind === "expire") return `Give up after ${minutes(policy.afterMinutes)}`;
+    const machines = [...new Set(policy.targets.map((target) => machineLabel(target.runnerId) ?? "a machine that isn't connected"))];
+    const none = policy.targets.length > 1 ? "none is online" : "neither is online";
+    return `Use ${joinWords(machines, "or")} instead; ${policy.expireAfterMinutes === undefined
+      ? `wait if ${none}`
+      : `give up after ${minutes(policy.expireAfterMinutes)} if ${none}`}`;
+  },
+  concurrency(policy: AutomationSpec["concurrencyPolicy"]): string {
+    if (policy === "wait") return "Wait for it to finish";
+    return policy === "skip" ? "Skip this run" : "Run both at once";
+  },
+  cost(limits: AutomationSpec["limits"]): string {
+    return `${formatCost(limits.maxCostUsd) || "$0.00"} per run`;
+  },
+  toolCalls(limits: AutomationSpec["limits"]): string {
+    return `${limits.maxToolCalls.toLocaleString()} ${limits.maxToolCalls === 1 ? "tool call" : "tool calls"} per run`;
+  },
+  notifications(routing: AutomationSpec["notifications"]): string {
+    const words = (Object.keys(NOTIFICATION_WORDS) as AutomationNotificationEvent[])
+      .filter((event) => routing.pushEvents.includes(event)).map((event) => NOTIFICATION_WORDS[event]);
+    return words.length ? `When a run ${joinWords(words, "or")}` : "Off";
+  },
+};

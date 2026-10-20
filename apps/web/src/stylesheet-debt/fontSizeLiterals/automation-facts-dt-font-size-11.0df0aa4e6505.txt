@@ -1,1 +1,0 @@
-|.automation-facts dt|font-size|11

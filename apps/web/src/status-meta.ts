@@ -129,6 +129,18 @@ const VOCABULARY = {
     running: info("Running", { pulse: true }),
     failed: danger("Failed"),
     target_unavailable: warning("Target Unavailable"),
+    /** The automation page's badge when its latest run failed (#2968): attention outranks Enabled
+     * or Paused. */
+    last_run_failed: danger("Last Run Failed"),
+  },
+  /** One run of an automation, by its wire status: the page's Last Run fact (#2968). */
+  automation_run: {
+    dispatching: info("Starting", { pulse: true }),
+    running: info("Running", { pulse: true }),
+    succeeded: success("Succeeded"),
+    failed: danger("Failed"),
+    skipped: neutral("Skipped"),
+    expired: neutral("Expired"),
   },
   tool: {
     pending: neutral("Pending"),
