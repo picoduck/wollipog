@@ -9002,8 +9002,8 @@ export class SessionManager {
       worktreeLeaseOwner,
       context: meta.context,
       ...(isolation?.backend === "seatbelt" ? { seatbeltWritableRoots: [...isolation.writableRoots] } : {}),
-      ...(isolation?.backend === "bwrap" ? { codexPackageReadOnlyPaths: [...(isolation.readOnlyBinds ?? [])] } :
-        isolation?.backend === "seatbelt" ? { codexPackageReadOnlyPaths: [...(isolation.readOnlyPaths ?? [])] } : {}),
+      ...((isolation?.backend === "bwrap" || isolation?.backend === "seatbelt")
+        ? { codexPackageReadOnlyPaths: [...(isolation.codexPackageReadOnlyPaths ?? [])] } : {}),
       ...(boundOwnedWorktrees.length ? { boundOwnedWorktrees } : {}),
       status: "starting",
       providerReady: false,

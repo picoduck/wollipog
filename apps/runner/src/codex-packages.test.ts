@@ -111,19 +111,38 @@ for (const mode of ["bwrap", "seatbelt"] as const) {
   });
 }
 
-test("a package alias protects its target without making the replaceable link trusted", posixOnly, async (t) => {
+test("readonly account aliases add no host bind; writable package aliases fail closed", posixOnly, async (t) => {
   const f = fixture(t);
   rmSync(f.packages, { recursive: true });
-  mkdirSync(join(f.root, "elsewhere"));
-  symlinkSync(join(f.root, "elsewhere"), f.packages);
+  symlinkSync("/tmp", f.packages);
+  const cwd = join(f.root, "work");
+  mkdirSync(cwd);
+  const deps = {
+    platform: "linux", uid: () => 1000, nativeHome: () => f.home, nativeEnvironment: () => ({}),
+    resolveNative: async () => ({ path: "/bin/bwrap", via: "path" as const, launch: { command: "/bin/bwrap", args: [] } }),
+  } as const;
+  const state = { driver: "claude-code" as const, dataDir: f.root, env: { HOME: f.home }, sessionId: "s1", cwd };
+  const isolation = await resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, deps, state);
+  assert.ok(isolation?.backend === "bwrap");
+  assert.equal(isolation.readOnlyBinds, undefined, "the host's /tmp must not replace the sandbox's private /tmp");
+  assert.equal(isolation.codexPackageReadOnlyPaths, undefined);
+  await assert.rejects(resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, deps,
+    { ...state, additionalWritableRoots: [f.codexHome] }), /packages in a writable home must be a real directory/);
+  assert.throws(() => trustedPath(f.command, [f.codexHome], process.getuid!(), statSync("/").uid, { home: f.home }),
+    /a session can write/);
+});
+
+test("an already-readonly package tree is attested without adding an unnecessary bind", posixOnly, async (t) => {
+  const f = fixture(t);
+  const cwd = join(f.root, "work");
+  mkdirSync(cwd);
   const isolation = await resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, {
     platform: "linux", uid: () => 1000, nativeHome: () => f.home, nativeEnvironment: () => ({}),
     resolveNative: async () => ({ path: "/bin/bwrap", via: "path", launch: { command: "/bin/bwrap", args: [] } }),
-  }, { driver: "claude-code", dataDir: f.root, env: { HOME: f.home }, sessionId: "s1", cwd: f.root });
+  }, { driver: "claude-code", dataDir: f.root, env: { HOME: f.home }, sessionId: "s1", cwd });
   assert.ok(isolation?.backend === "bwrap");
-  assert.deepEqual(isolation.readOnlyBinds, [join(f.root, "elsewhere")]);
-  assert.throws(() => trustedPath(f.command, [f.codexHome], process.getuid!(), statSync("/").uid, { home: f.home }),
-    /a session can write/);
+  assert.equal(isolation.readOnlyBinds, undefined);
+  assert.deepEqual(isolation.codexPackageReadOnlyPaths, [f.packages]);
 });
 
 test("foreign or traversal-containing installation hints do not fail unrelated Linux launches", posixOnly, async () => {

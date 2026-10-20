@@ -102,8 +102,9 @@ isolated store, so switching an existing session may be non-resumable.
 Native bwrap and Seatbelt launches also protect `packages/` beneath configured Codex homes,
 including a writable credential home preserved by a managed worktree. Linux overlays the directory
 read-only after writable mounts; macOS denies writes after its writable-root rules and prevents
-renaming package ancestors outside those rules. Package aliases protect their canonical target;
-their replaceable link remains ineligible for reviewer trust. Credentials
+renaming package ancestors outside those rules. Only package directories within existing write
+grants receive Linux overlays; unrelated readonly account aliases are ignored, and package aliases
+inside writable homes fail closed. An already-readonly package tree needs no new bind. Credentials
 and transcripts keep their existing write permissions. Package updates must run outside these agent
 boundaries. A real Codex App smoke test exercises a failed installer write followed by two local
 mock-inference turns; a separate bwrap test verifies the mount when user namespaces are available.
@@ -113,6 +114,9 @@ package protection proven for every live agent writer. Each structured launch su
 denial snapshot; an unprotected session or Agent TUI is named in the refusal. Human-operated
 terminals remain the operator boundary. Uncertain TUI writer markers survive runner restarts and
 require operator reconciliation when no complete process-tree exit proof retired them.
+The native-Linux marker directory is `agent-tui-writers` beneath runner data. A failed or interrupted
+spawn can retain conservative evidence too. Before retiring a retained record, the operator must
+prove that session's TUI process tree gone; restarting the runner or aging the file is not that proof.
 This is an admission-time check: it does not block future
 unisolated agent launches during a review. Those agents already have host-user write access,
 including to the runner itself. All other writable-root and executable-ownership checks still apply.

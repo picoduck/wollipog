@@ -178,6 +178,8 @@ export interface BwrapSpawnIsolation {
   /** Runner-owned administrative entries bound read-only over themselves. Rendered after every
    * writable bind, including the cwd, so the narrower rule is the one that lands. */
   readOnlyBinds?: string[];
+  /** Exact host package directories protected by this launch's readonly root/overlays. */
+  codexPackageReadOnlyPaths?: readonly string[];
   /** The runner's hook state directory, replaced by an empty read-only tmpfs so neither the
    * provider nor anything it spawns can read, list, or change it (#1336). `readable` entries are
    * bound back read-only; `socket` is the verdict socket inside one of them. Rendered LAST, so no
@@ -214,6 +216,8 @@ export interface SeatbeltSpawnIsolation {
   writableRoots: string[];
   /** Runner-owned entries the profile denies writes to even though a writable root contains them. */
   readOnlyPaths?: string[];
+  /** Exact package directories denied writes (including ancestor relocation). */
+  codexPackageReadOnlyPaths?: readonly string[];
   /** The hook state directory the profile denies, with the entries it re-exposes (#1336). */
   guardStateMask?: { directory: string; readable: string[]; socket?: string };
 }

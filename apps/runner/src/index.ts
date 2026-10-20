@@ -1267,6 +1267,7 @@ const pendingShellOpenCancellations = new PendingShellOpenCancellations();
 // authoritative inventory after every registration instead.
 /** Agent TUIs running without the managed-worktree guard, which a later worktree cannot reach (#1438). */
 const unguardedAgentTuis = new UnguardedAgentTuiRegistry();
+// Reviewer admission is native-Linux only; avoid accumulating unsupported-platform records.
 const shells = new ShellManager({
   onOutput: (shellId, sessionId, stream, data, seq) => {
     if (ws && ws.readyState === WebSocket.OPEN && registered) {
@@ -1277,7 +1278,7 @@ const shells = new ShellManager({
     unguardedAgentTuis.exited(shellId);
     sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq });
   },
-}, join(config.dataDir, "agent-tui-writers"));
+}, process.platform === "linux" ? join(config.dataDir, "agent-tui-writers") : undefined);
 sessions.setWorktreeShellRetirement((sessionId, context, path) =>
   shells.closeForWorktree(sessionId, context, path));
 // Keep the Claude managed-worktree guard's protection set live: a worktree created, activated,
@@ -1622,7 +1623,7 @@ sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
 const codexProtection = () => {
   const tuiSession = shells.unprotectedAgentTuiSessions()[0];
   return tuiSession
-    ? { home: homedir(), refusal: `Codex packages are unprotected from session ${tuiSession} (Agent TUI)` }
+    ? { home: homedir(), refusal: `Codex packages are unprotected from session ${tuiSession} (Agent TUI). Close its process tree or have the operator reconcile retained agent-tui-writers evidence.` }
     : sessions.codexReviewerProtection();
 };
 const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths, codexProtection);

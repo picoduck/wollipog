@@ -231,25 +231,41 @@ function providerCredentialRoot(state: IsolationStateOptions, inherited: NodeJS.
   return null;
 }
 
-/** Protect installer state independently of the current harness. A package alias's target is
- * protected too; executable trust still refuses its replaceable link inside a writable home. */
-async function codexPackageDirectories(state: IsolationStateOptions, runtime: IsolationDeps): Promise<string[]> {
+/** Only overlay package directories inside existing identity write grants. Following an arbitrary
+ * packages alias into a fresh bind could undo /tmp or /dev/shm masks. An alias in a readonly
+ * home needs no overlay; one in a writable home cannot safely protect its replaceable link. */
+async function codexPackageDirectories(
+  state: IsolationStateOptions, runtime: IsolationDeps, writable: readonly string[], remapped: readonly string[] = [],
+): Promise<Array<{ path: string; writable: boolean }>> {
   const inherited = runtime.nativeEnvironment();
   const homes = new Set([
     posix.join(state.env.HOME ?? runtime.nativeHome(), ".codex"),
     state.env.CODEX_HOME, inherited.CODEX_HOME, ...(state.codexHomes ?? []),
   ].filter((home): home is string => Boolean(home)));
-  const paths = new Set<string>();
+  const canonicalRoots = async (roots: readonly string[]) => Promise.all(roots.map(async (root) => {
+    try { return await runtime.realpathNative(root); } catch { return root; }
+  }));
+  const writableRoots = await canonicalRoots(writable);
+  const remappedRoots = await canonicalRoots(remapped);
+  const paths = new Map<string, { path: string; writable: boolean }>();
   for (const home of homes) {
     // These are installation hints from other agents/accounts, not writable grants. Do not fail
     // unrelated launches on a foreign-platform or traversal-containing hint. Actual writable
     // provider/transcript roots retain their own strict validation above.
     if (!home.startsWith("/") || home.split("/").includes("..")) continue;
-    const path = posix.join(absoluteHome(home, "Codex home"), "packages");
-    if (!await runtime.existsNative(path)) continue;
-    paths.add(await runtime.realpathNative(path));
+    if (!await runtime.existsNative(posix.join(home, "packages"))) continue;
+    const path = posix.join(await runtime.realpathNative(home), "packages");
+    // A virtual transcript mount does not expose the original host directory at its target.
+    // Never bind host entries back through that replacement or claim a proof about its contents.
+    if (remappedRoots.some((root) => pathWithinOrEqual(root, path))) continue;
+    const writable = writableRoots.some((root) => pathWithinOrEqual(root, path));
+    if (!await runtime.isExposableEntryNative(path)) {
+      if (writable) throw new Error(`Codex packages in a writable home must be a real directory: ${path}`);
+      continue;
+    }
+    paths.set(path, { path, writable });
   }
-  return [...paths];
+  return [...paths.values()];
 }
 
 /** Common build caches whose writes previously worked in provider mode. Each is a directory below
@@ -874,7 +890,8 @@ export async function resolveExecutionIsolation(
       runtime.realpathNative,
     );
     const packageAncestors = new Set<string>();
-    for (const path of await codexPackageDirectories(state, runtime)) {
+    const packages = await codexPackageDirectories(state, runtime, writableRoots);
+    for (const { path } of packages) {
       if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
       for (let ancestor = posix.dirname(path); ancestor !== "/"; ancestor = posix.dirname(ancestor)) {
         packageAncestors.add(ancestor);
@@ -894,6 +911,7 @@ export async function resolveExecutionIsolation(
         [...packageAncestors],
       ),
       writableRoots,
+      ...(packages.length ? { codexPackageReadOnlyPaths: packages.map(({ path }) => path) } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
     };
@@ -1008,8 +1026,12 @@ export async function resolveExecutionIsolation(
   // Resolved after the writable binds are materialized: the entries live inside those roots, and
   // the launcher renders them last so the narrower read-only rule wins over the containing mount.
   const readOnlyBinds = await bwrapReadOnlyBinds(state?.readOnlyPaths, runtime.isRunnerOwnedEntryNative);
-  if (state) for (const path of await codexPackageDirectories(state, runtime)) {
-    if (!readOnlyBinds.includes(path)) readOnlyBinds.push(path);
+  const packages = state ? await codexPackageDirectories(state, runtime, [
+    state.cwd, ...(protectedWorktree?.gitWritableRoots ?? []),
+    ...writableBinds.filter((bind) => bind.source === bind.target).map((bind) => bind.target),
+  ], writableBinds.filter((bind) => bind.source !== bind.target).map((bind) => bind.target)) : [];
+  for (const { path, writable } of packages) {
+    if (writable && !readOnlyBinds.includes(path)) readOnlyBinds.push(path);
   }
   if (state?.protectedWorktree?.requiredReadOnlyPaths.some((path) => !readOnlyBinds.includes(path))) {
     throw new Error("managed worktree Git registration changed before bubblewrap isolation");
@@ -1030,6 +1052,7 @@ export async function resolveExecutionIsolation(
     ...(writableBinds.length ? { writableBinds } : {}),
     ...(protectedWorktree ? { protectedWorktree } : {}),
     ...(readOnlyBinds.length ? { readOnlyBinds } : {}),
+    ...(packages.length ? { codexPackageReadOnlyPaths: packages.map(({ path }) => path) } : {}),
     ...(guardStateMask ? { guardStateMask } : {}),
   };
 }
