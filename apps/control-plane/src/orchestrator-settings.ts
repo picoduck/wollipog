@@ -1,6 +1,7 @@
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
+  completeParentControlDecisions,
   builtInAgentHarnessName,
   canonicalAgentHarnessIdentity,
   exactAgentHarnessIdentityKey,
@@ -73,10 +74,9 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       Object.keys(execution).length !== EXECUTION_KEYS.length ||
       typeof execution.strictProjectIsolation !== "boolean" ||
       typeof execution.integrationIsolation !== "boolean") return null;
-  const decisions = delegation.decisions as Record<string, unknown> | undefined;
-  if (!decisions || Array.isArray(decisions) || Object.keys(decisions).length !== WORKFLOW_DECISION_CATEGORIES.length ||
-      !WORKFLOW_DECISION_CATEGORIES.every((category) =>
-        decisions[category] === "human" || decisions[category] === "orchestrator")) return null;
+  // Defaults saved before a later category existed read it as human-owned.
+  const decisions = completeParentControlDecisions(delegation.decisions);
+  if (!decisions) return null;
   return {
     ...(input.controlMode === undefined ? {} : { controlMode: input.controlMode }),
     ...(input.campaignBudget === undefined ? {} : { campaignBudget: input.campaignBudget === null ? null

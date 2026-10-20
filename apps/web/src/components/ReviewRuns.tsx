@@ -7,6 +7,7 @@ import {
   reportFindingLocation,
   reviewRunProblem,
   reviewRunRound,
+  reviewRunPhase,
   reviewRunState,
   reviewRunTitle,
 } from "../review-run-copy.js";
@@ -17,6 +18,11 @@ import { FindingBody } from "./ReviewFindings.js";
 import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
+
+function phaseMeta(latest: ReviewSessionView) {
+  const phase = reviewRunPhase(latest);
+  return phase.domain === "reviewPhase" ? statusMeta("reviewPhase", phase.value) : statusMeta("reviewRun", phase.value);
+}
 
 function ReportFindingRow({ finding, onOpenSourceLocation }: {
   finding: ReviewReportFinding;
@@ -113,7 +119,6 @@ export function ReviewRuns({ runs, total, error, older, onOpenSession, onOpenSou
 }) {
   const bodyId = `${useId().replace(/:/g, "")}-review-runs`;
   const [expanded, setExpanded] = useState(true);
-  const active = runs.some((run) => !run.terminal);
   const now = useTimelineClock(runs.length > 0);
   const latest = runs[0];
   if (!latest && total === 0) return null;
@@ -131,8 +136,8 @@ export function ReviewRuns({ runs, total, error, older, onOpenSession, onOpenSou
           Cross-Model Reviews
           <span className="review-findings-count">{Math.max(total, runs.length)}</span>
         </button>
-        {/* The newest review's state is the section's summary; while one runs, that is Reviewing. */}
-        {latest && <StatusBadge meta={statusMeta("reviewRun", active ? "running" : reviewRunState(latest))} />}
+        {/* Where the run stands, from its newest review: the section's one summary. */}
+        {latest && <StatusBadge meta={phaseMeta(latest)} />}
       </div>
       {error && <Notice tone="danger" compact>Cross-model reviews: {error}</Notice>}
       <div id={bodyId} hidden={!expanded}>

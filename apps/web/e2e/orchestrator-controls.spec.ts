@@ -90,7 +90,7 @@ for (const viewport of [
     await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
     await row.scrollIntoViewIfNeeded();
     await expect(row).toBeInViewport();
-    await expect(row).toHaveAccessibleDescription("3 of 5 decisions stay with a person.");
+    await expect(row).toHaveAccessibleDescription("4 of 6 decisions stay with a person.");
     await expect(menu.locator("dl, .ui-select")).toHaveCount(0);
     await expect(menu).not.toContainText("Campaign Behavior");
     await expect(menu).not.toContainText("approvals");
@@ -229,7 +229,7 @@ for (const theme of ["dark", "light"] as const) {
     const requests = summary.getByRole("button", { name: /^Child Session Requests/ });
     const decisions = summary.getByRole("button", { name: /^Workflow Decisions/ });
     await expect(requests).toContainText("Questions and Approvals");
-    await expect(decisions).toContainText("3 of 5 decisions stay with a person.");
+    await expect(decisions).toContainText("4 of 6 decisions stay with a person.");
     await expect(requests.locator(".ps-go")).toBeVisible();
     await summary.screenshot({ path: `${SHOT}/desktop-${theme}-pinned-summary.png` });
     await decisions.click();

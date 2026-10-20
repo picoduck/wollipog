@@ -373,14 +373,14 @@ for (const viewport of viewports) {
     await shoot(page, dialog.getByRole("heading", { name: "Workflow Decisions", exact: true }), `${captures}/legacy-${viewport.name}-${theme}-owners.png`);
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Attach and Settings" }).click();
-    await expect(page.getByRole("menuitem", { name: "Orchestrator Controls…" })).toHaveAccessibleDescription("3 of 5 decisions stay with a person.");
+    await expect(page.getByRole("menuitem", { name: "Orchestrator Controls…" })).toHaveAccessibleDescription("4 of 6 decisions stay with a person.");
   });
   for (const theme of themes) test(`routed owner ${viewport.name} ${theme}: summaries count the server's effective owners`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto(`/session-usage-e2e.html?width=${viewport.width}&height=${viewport.height}&composer=orchestrator&owners=routed${viewport.name === "desktop" ? "&pinned=1" : ""}`);
     await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
     // Saved: two gates delegated plus UI Evidence Approval; effective: that one goes to a person here.
-    const effective = "3 of 5 decisions stay with a person.";
+    const effective = "4 of 6 decisions stay with a person.";
     if (viewport.name === "desktop") {
       const summary = page.locator('aside.ps[aria-label="Pinned Summary"]');
       await expect(summary.getByRole("button", { name: /^Workflow Decisions/ })).toContainText(effective);

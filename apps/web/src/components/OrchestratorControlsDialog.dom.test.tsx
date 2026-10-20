@@ -63,6 +63,7 @@ const HUMAN_ONLY: ParentControlDecisionPolicy = {
   merged_branch_deletion: "human",
   follow_up_issue_publication: "human",
   ui_evidence_approval: "human",
+  review_round_extension: "human",
 };
 
 const POLICY: OrchestratorCampaignPolicy = {
@@ -93,6 +94,7 @@ const POLICY: OrchestratorCampaignPolicy = {
         merged_branch_deletion: "legacy_session",
         follow_up_issue_publication: "legacy_session",
         ui_evidence_approval: "legacy_session",
+        review_round_extension: "legacy_session",
       },
     },
   },
@@ -490,7 +492,7 @@ test("under Full Control the video line follows the server's campaign fact, and 
   const withVideo = (videoEvidenceReview?: { status: "available" | "unavailable"; reason: string }) => {
     const view = fullControlProjection();
     return { ...view, orchestratorCampaign: { ...view.orchestratorCampaign!,
-      decisionOwners: { ...view.orchestratorCampaign!.decisionOwners, ui_evidence_approval: "orchestrator" as const },
+      decisionOwners: { ...view.orchestratorCampaign!.decisionOwners, ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" as const },
       uiEvidenceReview: { status: "available" as const, effectiveOwner: "orchestrator" as const },
       ...(videoEvidenceReview ? { videoEvidenceReview } : {}) } } as SessionView;
   };
@@ -583,33 +585,33 @@ test("a descendant with a reported Custom root keeps its editable gates", async 
 });
 
 test("the summaries count the gates that stay with a person", () => {
-  assert.equal(workflowDecisionsSummary(HUMAN_ONLY), "5 of 5 decisions stay with a person.");
+  assert.equal(workflowDecisionsSummary(HUMAN_ONLY), "6 of 6 decisions stay with a person.");
   assert.equal(
     workflowDecisionsSummary({ ...HUMAN_ONLY, pr_merge: "orchestrator", implementation_question: "orchestrator" }),
-    "3 of 5 decisions stay with a person.",
+    "4 of 6 decisions stay with a person.",
   );
   assert.equal(
     workflowDecisionsSummary({
       implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "orchestrator",
     }),
-    "1 of 5 decisions stays with a person.",
+    "1 of 6 decisions stays with a person.",
   );
   assert.equal(orchestratorControlsSummary({ parentControl: "questions", parentControlPolicy: undefined }),
     "Child session requests: Questions.", "a control plane without typed gates summarizes the one choice it has");
   // Under Full Control the summaries describe the effective owners, never the inactive Custom choices.
   const full = fullControlProjection();
-  assert.equal(orchestratorControlsSummary(full), "Full Control: 4 of 5 decisions stay with a person.");
+  assert.equal(orchestratorControlsSummary(full), "Full Control: 5 of 6 decisions stay with a person.");
   assert.equal(childSessionRequestsNote(full), "Full Control");
   assert.equal(orchestratorControlsSummary({ ...full, orchestratorCampaign: undefined }), "Full Control.");
   // Under Custom the summaries count the effective owners too: the saved choices delegate two gates,
   // but the server reports one of them routed to a person.
   const custom = orchestrator({ orchestratorCampaign: { ...CAMPAIGN, decisionOwners: { ...HUMAN_ONLY, implementation_question: "orchestrator" } } });
-  assert.equal(workflowDecisionsNote(custom), "4 of 5 decisions stay with a person.");
-  assert.equal(workflowDecisionsNote({ ...custom, orchestratorCampaign: undefined }), "3 of 5 decisions stay with a person.",
+  assert.equal(workflowDecisionsNote(custom), "5 of 6 decisions stay with a person.");
+  assert.equal(workflowDecisionsNote({ ...custom, orchestratorCampaign: undefined }), "4 of 6 decisions stay with a person.",
     "without a projection the saved choices are all there is");
   // An unknown root: the effective owners when reported, and never the descendant's copied choices.
-  assert.equal(workflowDecisionsNote(unknownRootDescendant()), "4 of 5 decisions stay with a person.");
+  assert.equal(workflowDecisionsNote(unknownRootDescendant()), "5 of 6 decisions stay with a person.");
   assert.equal(childSessionRequestsNote(unknownRootDescendant()), "Not Reported");
   assert.equal(workflowDecisionsNote(unknownRootDescendant(null)), "The root campaign's control isn't reported.");
   assert.equal(orchestratorControlsSummary({ ...unknownRootDescendant(null), parentControlPolicy: undefined }),

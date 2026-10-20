@@ -135,7 +135,7 @@ async function acceptanceStack(options: { completion?: "retain" | "stop_and_arch
 
   const decisions = {
     implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
-    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator",
+    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator",
   } as const;
   const createRoot = (title: string) => {
     const created = svc.createSession({

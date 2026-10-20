@@ -365,6 +365,20 @@ attempt, mode, base and the files in scope):
   retried in the same round; an attempt that timed out or failed before producing a report does
   not count. A head with an upvote, a head unchanged since the last valid round, a spent round
   budget and a spent round are refused with fixed reasons.
+- An epoch that used its rounds without an upvote takes more only through a typed
+  `review_round_extension` workflow decision (`request_workflow_decision`).
+  - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
+    of the last valid round, 1 to 4 extra rounds, and a reason of at most 1000 characters.
+  - **Resource key:** `review_round_extension:<owner/name>#<number>:epoch-<epoch>:rounds-<rounds>`.
+  - **Checks:** the control plane checks the request against the run as it records it. A run with
+    rounds left, an upvote, or any other epoch, round count or blocking count is refused.
+  - **Ownership:** it is human-owned by default. A session with no Orchestrator above it controls it
+    itself, and a person resolves it from its card. Under an Orchestrator it is delegated only by
+    an explicit Parent Control grant; Full Control never takes it as part of its own boundary.
+  - **Effect:** approved and consumed extensions add their rounds to that epoch's budget. The next
+    review request consumes an approved one, so a session restart, which revokes unconsumed
+    decisions, cannot take back rounds already granted. A policy stored before this category
+    existed reads it as human-owned.
 
 Each finished attempt is judged against the review contract (`verdict`: `valid`, `consumed`,
 `effectiveVote`, `failureClass`, at most 8 `validationErrors`): the report must name the reviewed
@@ -378,6 +392,26 @@ protocol 228 reviews every request in full without a verdict. `review session ge
 first, and `review session cancel` (`cancel_review_session`) stops the review session. The runner
 persists the outcome before reporting it and re-sends it at each registration; a runner restart
 fails any unsettled review session for good, and the checkout is removed once the review settles.
+
+#### Review Continuation
+
+A finished review owes its requester exactly one continuation (#3369), recorded with the review's
+outcome so a crash cannot lose it. A review the requester cancelled, or one whose launch was
+refused at once, owes nothing. The continuation is a framed prompt,
+`[Wollipog Cross-Model Review — <reviewSessionId>]` … `[End Wollipog Cross-Model Review]`:
+- the reviewer, the pull request, its head, and the round and epoch;
+- the outcome: a valid UPVOTE or DOWNVOTE with its findings (up to 20, one bounded line each), an
+  invalid attempt with its first reason, or the fixed reason a review failed;
+- an instruction to read the full report with `get_review_session`, adjudicate every finding,
+  and request the next round once fixes are pushed.
+
+Like a restart notice, it goes only to an idle requester that nothing would refuse it for. A
+requester mid-turn takes it after its turn settles, through the control plane's retry sweep. A
+worktree-backed session receives it as a durable command that a reconnect or runner restart
+delivers exactly once; any other session receives it on the immediate lane, recorded as
+delivered before the send. A requester that ends for good is owed nothing more. The review's
+`continuation` field reads `pending`, `delivered`, `uncertain`, `failed` or `abandoned`, or
+null when nothing was owed.
 
 In the web app, a review session is titled **Codex Review** or **Claude Review** of its pull
 request. The requester's Review panel lists its reviews under Cross-Model Reviews, newest first:

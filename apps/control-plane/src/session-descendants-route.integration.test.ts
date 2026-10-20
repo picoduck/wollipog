@@ -386,6 +386,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
           merged_branch_deletion: "human",
           follow_up_issue_publication: "human",
           ui_evidence_approval: "human",
+          review_round_extension: "human",
         } })).status, 200, "only the owning human can delegate one typed category");
         const childRequest = (operation: string, body: unknown, method = "POST") => fetch(
           `http://127.0.0.1:${port}/api/sessions/${mode}-child/${operation}`, {
@@ -534,6 +535,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
           merged_branch_deletion: "human",
           follow_up_issue_publication: "human",
           ui_evidence_approval: "human",
+          review_round_extension: "human",
         } })).status, 200, "the owning human can take back a typed category");
         const humanCreatedResponse = await childRequest("workflow-decisions", {
           requestId: "implementation-human", resourceKey: "implementation:human", resourceSnapshot: snapshot,

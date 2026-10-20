@@ -267,6 +267,7 @@ const ORCHESTRATOR: Partial<SessionView> = {
       merged_branch_deletion: "human",
       follow_up_issue_publication: "orchestrator",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     },
   },
 };
@@ -285,7 +286,7 @@ test("an Orchestrator's Pinned Summary states how its requests and decisions are
       .find((candidate) => candidate.querySelector(":scope > .k")?.textContent === label);
     for (const [label, value] of [
       ["Child Session Requests", "Questions"],
-      ["Workflow Decisions", "3 of 5 decisions stay with a person."],
+      ["Workflow Decisions", "4 of 6 decisions stay with a person."],
     ] as const) {
       const fact = row(label);
       assert.ok(fact, `${label} is a Session row`);
@@ -321,7 +322,7 @@ test("the composer's + menu opens Orchestrator Controls from its one Orchestrato
     const item = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>(".menu-item")]
       .find((candidate) => candidate.querySelector(".menu-text")?.textContent === "Orchestrator Controls…");
     assert.ok(item, "the row is in the menu");
-    assert.equal(item.querySelector(".menu-desc")?.textContent, "3 of 5 decisions stay with a person.");
+    assert.equal(item.querySelector(".menu-desc")?.textContent, "4 of 6 decisions stay with a person.");
     await act(async () => item.click());
     await settle();
     assert.ok(orchestratorDialog(), "it opens the dialog");

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ReviewAttemptVerdictView } from "@wollipog/protocol";
 import {
-  reportFindingDetail, reportFindingLocation, reviewRunProblem, reviewRunRound, reviewRunState, reviewRunTitle,
+  reportFindingDetail, reportFindingLocation, reviewRunPhase, reviewRunProblem, reviewRunRound, reviewRunState, reviewRunTitle,
 } from "./review-run-copy.js";
 
 const verdict = (over: Partial<ReviewAttemptVerdictView> = {}): ReviewAttemptVerdictView => ({
@@ -26,6 +26,21 @@ test("a review's one state is where it is while it runs, then its verdict", () =
   assert.equal(reviewRunState({ state: "failed", verdict: verdict({ valid: false, effectiveVote: "INVALID", failureClass: "evidence_contract" }) }), "invalid");
   assert.equal(reviewRunState({ state: "failed", verdict: verdict({ valid: false, consumed: false, effectiveVote: null, failureClass: "timeout" }) }), "failed");
   assert.equal(reviewRunState({ state: "failed", verdict: null }), "failed");
+});
+
+test("the run's phase follows its newest review through findings, fixes and re-review", () => {
+  const round = (n: number, epoch = 1) => ({ epoch, round: n, attempt: 1, mode: "full" as const, baseSha: "b".repeat(40), scopeFiles: [] });
+  const phase = (latest: Parameters<typeof reviewRunPhase>[0]) => reviewRunPhase(latest).value;
+  assert.equal(phase({ state: "requested", verdict: null, round: null }), "requested");
+  assert.equal(phase({ state: "running", verdict: null, round: null }), "reviewing");
+  assert.equal(phase({ state: "running", verdict: null, round: round(1) }), "reviewing");
+  assert.equal(phase({ state: "running", verdict: null, round: round(2) }), "re_reviewing");
+  assert.equal(phase({ state: "running", verdict: null, round: round(1, 2) }), "re_reviewing", "a new epoch reviews again");
+  const down = verdict({ effectiveVote: "DOWNVOTE" });
+  assert.equal(phase({ state: "completed", verdict: down, round: round(1), continuation: "pending" }), "delivering");
+  assert.equal(phase({ state: "completed", verdict: down, round: round(1), continuation: "delivered" }), "fixing");
+  assert.equal(phase({ state: "completed", verdict: verdict(), round: round(2), continuation: "delivered" }), "settled");
+  assert.deepEqual(reviewRunPhase({ state: "failed", verdict: null, round: null }), { domain: "reviewRun", value: "failed" });
 });
 
 test("a review's round names its epoch, a retried attempt and what it reviewed", () => {

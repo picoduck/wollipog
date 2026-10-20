@@ -327,7 +327,7 @@ test("campaign notices stay under the session bar, in order, outside the slot (#
     policyRevision: 1,
     decisionOwners: {
       implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
     },
     limits: { maximumConcurrentChildren: 4, occupied: 1, remaining: 3, costBudgetUsd: null, maxToolCalls: null },
     uiEvidenceReview: { status: "available", effectiveOwner: "human" },

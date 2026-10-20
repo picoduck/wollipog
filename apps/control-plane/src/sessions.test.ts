@@ -752,6 +752,7 @@ test("orchestrator separates default provider execution from the negotiated stri
             merged_branch_deletion: "human",
             follow_up_issue_publication: "human",
             ui_evidence_approval: "human",
+            review_round_extension: "human",
           },
         },
         execution: { strictProjectIsolation: true },
@@ -932,6 +933,7 @@ test("a fixed Child Harness admits the same harness under another Machine's agen
             merged_branch_deletion: "human",
             follow_up_issue_publication: "human",
             ui_evidence_approval: "human",
+            review_round_extension: "human",
           },
         },
         execution: { strictProjectIsolation: false, integrationIsolation: false },
@@ -1010,6 +1012,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
             merged_branch_deletion: "human",
             follow_up_issue_publication: "human",
             ui_evidence_approval: "human",
+            review_round_extension: "human",
           },
         },
         execution: { strictProjectIsolation: false, integrationIsolation: false },
@@ -1482,6 +1485,7 @@ test("approved UI evidence and implementation-question decisions do not block ca
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     } as const;
     const created = svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
@@ -1647,6 +1651,7 @@ function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive"
     merged_branch_deletion: "human",
     follow_up_issue_publication: "human",
     ui_evidence_approval: "human",
+    review_round_extension: "human",
   } as const;
   const created = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
@@ -2297,7 +2302,7 @@ test("resolving a child's typed decision with resolve_descendant_workflow_decisi
   try {
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "human", pr_merge: "orchestrator", merged_branch_deletion: "human",
-      follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator",
+      follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator",
     }, 0).ok);
     const merge = svc.createWorkflowDecision(child.id, {
       requestId: "merge-1", resourceKey: "picoduck/wollipog#123", resourceSnapshot: {
@@ -4719,6 +4724,7 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "orchestrator",
+      review_round_extension: "orchestrator",
     } as const;
     const configured = svc.setParentControlPolicy(parent.data.id, decisions, 0);
     assert.ok(configured.ok && configured.data, configured.error);
@@ -5251,6 +5257,7 @@ test("a resolver's child-facing message reaches the child's decision view and re
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 0).ok);
     const mergeSnapshot = (pullRequest: number) => ({
       category: "pr_merge" as const,
@@ -5437,6 +5444,7 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
       merged_branch_deletion: "orchestrator",
       follow_up_issue_publication: "orchestrator",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 0).ok);
     const snapshots = {
       implementation_question: {
@@ -5511,6 +5519,7 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
       merged_branch_deletion: "orchestrator",
       follow_up_issue_publication: "orchestrator",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 1).ok);
     const human = svc.createWorkflowDecision(child.id, {
       requestId: "wake-human", resourceKey: "wake:human", resourceSnapshot: snapshots.implementation_question,
@@ -5587,6 +5596,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 0).ok);
     let sequence = 0;
     let runnerSeq = 0;
@@ -6571,6 +6581,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
               merged_branch_deletion: "human",
               follow_up_issue_publication: "human",
               ui_evidence_approval: "human",
+              review_round_extension: "human",
             }, 1).ok);
           } else {
             db.registerRunner(runnerMeta(), Date.now(),
@@ -6812,6 +6823,7 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     } as const;
     assert.ok(svc.setParentControlPolicy(parent.data.id, policy, 0).ok);
     const implementationSnapshot = {
@@ -22583,7 +22595,7 @@ function uiEvidenceReviewHarness(
   };
   const decisions = {
     implementation_question: "human", pr_merge: "orchestrator", merged_branch_deletion: "human",
-    follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator",
+    follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator",
   } as const;
   assert.ok(svc.setParentControlPolicy(parent.data.id, decisions, 0).ok);
   const screenshot = (sessionId: string, label: string) => {
@@ -23838,6 +23850,7 @@ function worktreeRecoveryCampaign(protocolVersion = PROTOCOL_VERSION) {
     merged_branch_deletion: "orchestrator",
     follow_up_issue_publication: "orchestrator",
     ui_evidence_approval: "human",
+    review_round_extension: "human",
   }, 0).ok);
   const worktreePath = `/repos/demo/.agent-worktrees/${child.id}`;
   const recovery = {
@@ -24153,7 +24166,7 @@ test("a revoked or superseded decision withdraws a resume still waiting in the o
     pendingAgain(staged.commandId);
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "orchestrator", pr_merge: "human", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
     }, 1).ok);
     assert.equal(db.workflowDecisionByOccurrence(revoked.occurrenceId)?.status, "revoked");
     assert.equal(f.resumeState(revoked.occurrenceId), "abandoned");
@@ -24165,7 +24178,7 @@ test("a revoked or superseded decision withdraws a resume still waiting in the o
     // Superseded by the child's own newer request for the same resource.
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
     }, 2).ok);
     const superseded = f.requestMerge(1657);
     svc.onSessionStatus(child.id, "idle");
@@ -24190,7 +24203,7 @@ test("a revoked or superseded decision withdraws a resume still waiting in the o
     f.approve(sent.occurrenceId);
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "orchestrator", pr_merge: "human", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
     }, 3).ok);
     assert.equal(f.resumeState(sent.occurrenceId), "delivering");
   } finally {
@@ -24254,7 +24267,7 @@ test("a held child is reported to its Orchestrator even with Parent Control off 
   try {
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
     }, 1).ok);
     const quiet = svc.descendantRequests(root.id, () => true);
     assert.equal(quiet.status, 403, "with nothing held, Parent Control off still refuses");
@@ -24894,7 +24907,7 @@ test("a decision revoked or superseded while its resume is owed to an offline ru
   const { db, svc, root, child } = f;
   const policy = (prMerge: "orchestrator" | "human", revision: number) => assert.ok(svc.setParentControlPolicy(root.id, {
     implementation_question: "orchestrator", pr_merge: prMerge, merged_branch_deletion: "orchestrator",
-    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
   }, revision).ok);
   try {
     // Revoked by a policy change while the runner is away.

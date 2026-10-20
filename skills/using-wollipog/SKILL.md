@@ -269,10 +269,16 @@ settings, hooks, skills or MCP servers, takes no session slot, and returns `revi
 - Reviews of one pull request form a run: the first round reviews it in full, later rounds only
   the changes since the last valid round with its open findings (add `--full-reason <text>` for a
   full review), and a rebased head starts a new epoch that reviews the range-diff. Each epoch allows
-  4 valid rounds and each round 2 counted attempts; an upvoted or unchanged head is refused.
+  4 valid rounds and each round 2 counted attempts; an upvoted or unchanged head is refused. When
+  the rounds are used without an upvote, ask for more with a `review_round_extension` workflow
+  decision naming the epoch, rounds used, open blocking findings, head, 1 to 4 extra rounds and why;
+  request the review again once it is approved.
 - A finished review carries its `verdict`. Only a valid report's vote and `findings` count; an
   invalid attempt's output is not a review, so request the round again. Prove every finding before
   changing code, and treat a `stale` review as covering an older head.
+- When a review finishes, your session receives one `[Wollipog Cross-Model Review — …]` message
+  with its outcome and findings once you are idle, so you need not stay in a turn polling. Read the
+  full report with `review session get` before acting on it.
 - One review session is active per session at a time; `review session cancel` stops it. A review
   session takes no messages; request a new one for a new head.
 
