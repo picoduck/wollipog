@@ -170,7 +170,7 @@ export class AutomationCreationService {
     const scope = this.db.sessionScope(sessionId);
     const approver = this.db.automationCreationApprover(occurrenceId);
     const human = scope && approver ? this.db.automationCreationHuman(approver, scope.organizationId) : null;
-    if (!scope || !approver || !human || !this.db.isSessionOwner(human, sessionId)) return fail("Automation approver no longer owns this session");
+    if (!scope || !approver || !human || !this.db.isSessionOwner(human, sessionId)) return fail("Automation approver no longer has the required session ownership and automation permissions");
     const prepared = this.prepare(human, snapshot.spec, sessionId);
     if (!prepared.ok) return fail(prepared.error!, prepared.status);
     if (prepared.data!.targetDigest !== snapshot.targetDigest || auditDigest(prepared.data!.spec) !== auditDigest(snapshot.spec)) return fail("Automation targets or effective settings changed; request fresh approval");

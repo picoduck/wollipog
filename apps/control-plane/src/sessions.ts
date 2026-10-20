@@ -10151,7 +10151,7 @@ export class SessionsService {
       if (authority !== "human" || actor.kind !== "human" || !actor.id || !scope ||
           !this.db.automationCreationHuman(actor.id, scope.organizationId) ||
           !this.db.isSessionOwner({ userId: actor.id, organizationId: scope.organizationId }, childSessionId)) {
-        return fail("Only the authenticated session owner can approve automation creation", 403);
+        return fail("Automation creation requires the authenticated session owner to be an owner or admin of the personal control-plane organization", 403);
       }
       const snapshot = decision.resourceSnapshot;
       if (!session || isTerminal(session.status) || session.archived || decision.status !== "pending" ||

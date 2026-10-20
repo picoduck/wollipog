@@ -20882,12 +20882,13 @@ export class ControlPlaneDb {
       .get(occurrenceId) as { id: string | null } | undefined)?.id ?? null;
   }
 
-  /** Revalidate the recorded human against live identity and membership, including role downgrade. */
+  /** Match the existing global automation API: active personal-organization owner/admin only. */
   automationCreationHuman(userId: string, organizationId: string): HumanPrincipal | null {
+    if (organizationId !== PERSONAL_ORGANIZATION_ID) return null;
     const row = this.stmt(`SELECT user.display_name AS userName, organization.name AS organizationName, membership.role
       FROM identity_memberships membership JOIN identity_users user ON user.user_id=membership.user_id
       JOIN identity_organizations organization ON organization.organization_id=membership.organization_id
-      WHERE membership.user_id=? AND membership.organization_id=? AND user.status='active' AND membership.role!='viewer'`)
+      WHERE membership.user_id=? AND membership.organization_id=? AND user.status='active' AND membership.role IN ('owner','admin')`)
       .get(userId, organizationId) as { userName: string; organizationName: string; role: HumanPrincipal["role"] } | undefined;
     return row ? { kind: "human", actorId: userId, userId, organizationId, ...row, deviceId: null, localBootstrap: false } : null;
   }

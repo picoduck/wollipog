@@ -134,7 +134,7 @@ test("expired pending proposals cannot be approved but can still be denied and c
   } finally { h.db.close(); }
 });
 
-for (const scenario of ["deny", "expired", "revoked", "capability", "workspace", "owner", "stopped", "membership-removed", "suspended", "viewer"] as const) {
+for (const scenario of ["deny", "expired", "revoked", "capability", "workspace", "owner", "stopped", "membership-removed", "suspended", "viewer", "operator"] as const) {
   test(`creation refuses ${scenario} without leaving an automation`, () => {
     const h = harness();
     try {
@@ -148,6 +148,7 @@ for (const scenario of ["deny", "expired", "revoked", "capability", "workspace",
       if (scenario === "membership-removed") h.db.raw().prepare("DELETE FROM identity_memberships WHERE user_id=?").run(h.owner);
       if (scenario === "suspended") h.db.raw().prepare("UPDATE identity_users SET status='suspended' WHERE user_id=?").run(h.owner);
       if (scenario === "viewer") h.db.raw().prepare("UPDATE identity_memberships SET role='viewer' WHERE user_id=?").run(h.owner);
+      if (scenario === "operator") h.db.raw().prepare("UPDATE identity_memberships SET role='operator' WHERE user_id=?").run(h.owner);
       const result = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal,
         scenario === "expired" ? Date.now() + 31 * 60_000 : Date.now());
       assert.equal(result.ok, false, scenario);
@@ -155,6 +156,35 @@ for (const scenario of ["deny", "expired", "revoked", "capability", "workspace",
     } finally { h.db.close(); }
   });
 }
+
+test("automation approval preserves the existing global-resource role and organization boundary", () => {
+  for (const role of ["owner", "admin", "operator", "viewer"] as const) {
+    const h = harness();
+    try {
+      const decision = h.request().data!;
+      h.db.raw().prepare("UPDATE identity_memberships SET role=? WHERE user_id=?").run(role, h.owner);
+      const allowed = role === "owner" || role === "admin";
+      assert.equal(h.resolve(decision.occurrenceId).ok, allowed, role);
+      const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+      assert.equal(executed.ok, allowed, role);
+      assert.equal(h.db.listAutomations().length, allowed ? 1 : 0);
+    } finally { h.db.close(); }
+  }
+});
+
+test("automation approval stays within the personal control-plane organization", () => {
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    h.db.raw().prepare("INSERT INTO identity_organizations VALUES ('other-org','Other',1,1)").run();
+    h.db.raw().prepare("INSERT INTO identity_memberships VALUES ('other-org',?,'owner',1,1)").run(h.owner);
+    h.db.raw().prepare("UPDATE session_ownership SET organization_id='other-org',owner_kind='user',owner_id=? WHERE session_id='self'").run(h.owner);
+    assert.equal(h.db.isSessionOwner({ userId: h.owner, organizationId: "other-org" }, "self"), true);
+    assert.equal(h.db.automationCreationHuman(h.owner, "other-org"), null);
+    assert.equal(h.resolve(decision.occurrenceId).status, 403);
+    assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); }
+});
 
 test("changed proposals need a fresh human decision and supersede prior unconsumed approval", () => {
   const h = harness();

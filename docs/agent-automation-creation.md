@@ -2,7 +2,9 @@
 
 Normal and Orchestrator sessions can propose a Wollipog automation through the
 injected CLI or MCP server. Every creation requires the authenticated session
-owner's approval, including under Full Control. This capability does not expose
+owner's approval, including under Full Control. The owner must also meet existing
+automation administration permissions: owner or admin of the personal control-plane
+organization. This capability does not expose
 general automation administration or agent approval of persistent scheduled work.
 
 ## Propose, Inspect, and Execute

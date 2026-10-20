@@ -316,6 +316,10 @@ blockers; do not switch routes or launch a reviewer inside the session to evade 
 
 ## Creating an Automation With Human Approval
 
+The approving session owner must also have the existing automation administration
+permissions: owner or admin of the personal control-plane organization. Session
+ownership alone does not grant permission to create global automations.
+
 Normal and Orchestrator sessions can propose persistent scheduled work with
 `request_automation_creation` (`automation request --proposal '<json>'`). Supply
 `requestId`, a stable `resourceKey` for the intended automation, and the complete
