@@ -328,6 +328,43 @@ test("while the pod is being created the dialog cannot be dismissed, and then op
   }
 });
 
+test("the new pod arriving before its answer keeps the list, so New Session… cannot replace the dialog mid-create (CR-1.1)", async () => {
+  for (const outcome of ["resolve", "reject"] as const) {
+    const request = deferred<{ pod: PodView }>();
+    let opened = 0;
+    const two = SESSIONS.slice(0, 2);
+    const view = await mount({ sessions: two, createPod: () => request.promise, onNewSession: () => { opened += 1; } });
+    try {
+      await view.setName("Retry Migration");
+      await view.check("Plan the retry migration");
+      await view.check("Migrate the call sites", "Codex");
+      await act(async () => view.create().click());
+      // The control plane announces the pod (pod_upsert) before it answers the request.
+      await act(async () => view.socket.push(snapshot(two, [pod("pod-new", ["plan", "migrate"])])));
+      assert.equal(view.rows().length, 2, `${outcome}: the list stays while creating`);
+      assert.doesNotMatch(view.dialog().textContent ?? "", /No Sessions Can Join/u);
+      assert.equal(view.button(view.dialog(), "New Session…"), undefined);
+      assert.equal(view.reason(), null, "the chosen sessions still count");
+
+      if (outcome === "resolve") {
+        await act(async () => request.resolve({ pod: pod("pod-new", ["plan", "migrate"]) }));
+        assert.deepEqual(view.pushed.at(-1), { name: "pod", id: "pod-new" });
+        assert.equal(view.closes.length, 1);
+      } else {
+        await act(async () => request.reject(new Error("refused")));
+        // Settled: the list follows this device's state again, and New Session… works.
+        const newSession = view.button(view.dialog(), "New Session…")!;
+        assert.equal(newSession.disabled, false);
+        await act(async () => newSession.click());
+        assert.deepEqual(view.pushed, []);
+      }
+      assert.equal(opened, outcome === "resolve" ? 0 : 1);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
 test("an answer that arrives after the dialog unmounted neither navigates nor updates it", async () => {
   for (const outcome of ["resolve", "reject"] as const) {
     const request = deferred<{ pod: PodView }>();

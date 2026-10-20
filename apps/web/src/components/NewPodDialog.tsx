@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
 import { POD_SESSION_RULE, newPodBlockedReason, podEligibleSessions } from "../pod-session-choices.js";
@@ -14,8 +15,8 @@ import { BusyButton } from "./ui/BusyButton.js";
  * sessions as one filterable list. Create Pod stays disabled with its reason in the footer until a
  * name and two sessions are chosen; a server error is a danger notice at the body's end. With no
  * eligible session the list's place says No Sessions Can Join and offers New Session…. On a phone
- * it is a full-height sheet. While the pod is being created the dialog cannot be dismissed, so the
- * person always lands on the pod it made or sees why it wasn't.
+ * it is a full-height sheet. While the pod is being created the dialog cannot be dismissed or
+ * replaced, so the person always lands on the pod it made or sees why it wasn't.
  */
 export function NewPodDialog({ onClose, onNewSession }: {
   onClose: () => void;
@@ -25,7 +26,12 @@ export function NewPodDialog({ onClose, onNewSession }: {
   const api = useApi();
   const { sessions, pods, navigate } = useStore();
   const ids = useId();
-  const candidates = useMemo(() => podEligibleSessions(sessions.values(), pods.values()), [sessions, pods]);
+  const live = useMemo(() => podEligibleSessions(sessions.values(), pods.values()), [sessions, pods]);
+  // The list as it stood when Create Pod was pressed, kept until the request settles: the new pod
+  // reaches this device (pod_upsert) before the request's answer, and would otherwise empty the list
+  // and offer New Session… in the middle of creating it (CR-1.1).
+  const [submitted, setSubmitted] = useState<SessionView[] | null>(null);
+  const candidates = submitted ?? live;
   const [name, setName] = useState("");
   const [objective, setObjective] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
@@ -50,10 +56,12 @@ export function NewPodDialog({ onClose, onNewSession }: {
     current.includes(sessionId) ? current.filter((id) => id !== sessionId) : [...current, sessionId],
   );
   const close = () => { if (!creating.current) onClose(); };
+  const newSession = () => { if (!creating.current) onNewSession?.(); };
 
   const submit = async () => {
     if (creating.current || blockedReason) return;
     creating.current = true;
+    setSubmitted(candidates);
     setBusy(true);
     setFailure(null);
     try {
@@ -70,6 +78,7 @@ export function NewPodDialog({ onClose, onNewSession }: {
       creating.current = false;
       if (!mounted.current) return;
       setFailure(cause instanceof Error && cause.message ? cause.message : String(cause));
+      setSubmitted(null);
       setBusy(false);
     }
   };
@@ -108,7 +117,7 @@ export function NewPodDialog({ onClose, onNewSession }: {
             icon={<PodsIcon />}
             title="No Sessions Can Join"
             actions={onNewSession && (
-              <button type="button" className="btn" onClick={onNewSession}>New Session…</button>
+              <button type="button" className="btn" disabled={busy} onClick={newSession}>New Session…</button>
             )}
           >
             {POD_SESSION_RULE}
