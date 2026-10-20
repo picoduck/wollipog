@@ -690,6 +690,71 @@ test("search rows indexed before keyed rows are mapped first, so their pruned te
   }
 });
 
+test("legacy search mapping is bounded, paced and restart-safe while retention is off", async () => {
+  const root = mkdtempSync(join(tmpdir(), "retention-off-mapping-"));
+  let db: ControlPlaneDb | undefined;
+  try {
+    const path = join(root, "db.sqlite");
+    db = openDb(path);
+    createSession(db, "s1");
+    for (let index = 0; index < 2_005; index += 1) {
+      db.appendEvent("s1", { kind: "command_output", text: "legacysearchword" }, T0 + index);
+    }
+    archive(db, "s1", T0);
+    db.raw().exec(`UPDATE session_events_fts SET rowid=rowid+900000;
+      UPDATE fts_state SET keyed_through=NULL;
+      DELETE FROM control_plane_metadata WHERE key='session_events_fts_legacy_scan'`);
+    db.close();
+    db = ControlPlaneDb.open(path);
+    const cursor = () => JSON.parse((db!.raw().prepare(
+      "SELECT value FROM control_plane_metadata WHERE key='session_events_fts_legacy_scan'",
+    ).get() as { value: string }).value) as { cursor: number; end: number };
+    const initial = cursor();
+    assert.equal(initial.cursor, 0);
+    const clock = new Clock();
+    clock.now = T0 + 365 * DAY;
+    const warnings: string[] = [];
+    let firstSleeps = 0;
+    const interrupted = new ArchivedHistoryRetention(db, {
+      env: {}, now: () => clock.now,
+      log: { info() {}, warn: (_details, message) => warnings.push(message) },
+      sleep: async (ms) => {
+        assert.ok(ms >= 1, "every mapping transaction yields");
+        firstSleeps += 1;
+        assert.equal(db!.raw().prepare("SELECT COUNT(*) AS n FROM session_events_fts_legacy_rowids").get()!.n, 1_000,
+          "only one bounded step runs before yielding");
+        interrupted.stop();
+      },
+    });
+    assert.equal(interrupted.policy(ORG).retentionDays, null);
+    assert.equal((await interrupted.runPass()).events, 0);
+    assert.equal(firstSleeps, 1);
+    assert.equal(db.legacySearchRowsPending(), true);
+    const saved = cursor();
+    assert.ok(saved.cursor > 0 && saved.cursor < saved.end);
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.deepEqual(cursor(), saved, "restart preserves mapping progress");
+    const resumed = retention(db, clock, {}, warnings);
+    assert.equal(resumed.policy(ORG).retentionDays, null);
+    assert.equal((await resumed.runPass()).events, 0);
+    assert.equal(db.legacySearchRowsPending(), false);
+    assert.equal(clock.sleeps.length, 2, "the remaining 1,005 rows take two paced steps");
+    assert.ok(clock.sleeps.every((ms) => ms >= 1));
+    assert.equal(db.listEvents("s1").length, 2_005, "off never prunes transcript events");
+    assert.equal(db.getSession("s1")!.historyPruned, undefined);
+    assert.equal(db.archivedHistoryRetentionLastRun(ORG), null, "mapping is not recorded as a retention run");
+    assert.equal(searchHits(db, "legacysearchword", "s1"), 2_005, "mapping preserves searchable text");
+    assert.deepEqual(warnings, []);
+    const completedSleeps = clock.sleeps.length;
+    await resumed.runPass();
+    assert.equal(clock.sleeps.length, completedSleeps, "completed mapping is not scanned again");
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a search row id collision falls back to a recorded row the prune still removes", async () => {
   const db = openDb();
   try {
@@ -740,7 +805,7 @@ test("a later legacy scan keeps a recorded fallback row and removes duplicates a
   }
 });
 
-test("an older build's search row numbered below a finished scan is mapped and leaves search with its event", () => {
+test("an older build's search row numbered below a finished scan is mapped and leaves search with its event", async () => {
   const root = mkdtempSync(join(tmpdir(), "retention-rescan-reused-"));
   try {
     const path = join(root, "db.sqlite");
@@ -766,7 +831,12 @@ test("an older build's search row numbered below a finished scan is mapped and l
     db.close();
     db = ControlPlaneDb.open(path);
     assert.equal(db.legacySearchRowsPending(), true);
-    while (db.mapLegacySearchRows(100).pending) { /* paced steps */ }
+    const clock = new Clock();
+    const policy = retention(db, clock);
+    assert.equal(policy.policy(ORG).retentionDays, null);
+    assert.equal((await policy.runPass()).events, 0);
+    assert.equal(db.legacySearchRowsPending(), false, "off still remaps an older build's rows from the first row");
+    assert.equal(searchHits(db, "rescansecret", "s1"), 1);
     while (!db.pruneArchivedHistoryBatch("s1", input).finished) { /* batches */ }
     assert.deepEqual(kinds(db, "s1"), ["user_message"]);
     assert.equal(searchHits(db, "rescansecret", "s1"), 0);

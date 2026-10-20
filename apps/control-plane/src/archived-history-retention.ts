@@ -191,7 +191,7 @@ export class ArchivedHistoryRetention {
     this.timer.unref?.();
   }
 
-  /** One pass over every organization whose policy is armed. A pass already running is shared. */
+  /** Map legacy search rows, then visit organizations for retention. A running pass is shared. */
   runPass(): Promise<ArchivedHistoryPassResult> {
     this.running ??= this.pass().finally(() => {
       this.running = null;
@@ -203,10 +203,11 @@ export class ArchivedHistoryRetention {
     const started = this.now();
     const result: ArchivedHistoryPassResult = { sessions: 0, events: 0, batches: 0, maxBatchMs: 0 };
     try {
+      // Mapping also makes ordinary session deletion keyed, even when every retention policy is off.
+      if (!await this.mapLegacySearchRows(result)) return result;
       for (const organizationId of this.db.listOrganizationIds()) {
         if (this.stopped) break;
         const armed = this.armed(this.policy(organizationId));
-        if (armed && !await this.mapLegacySearchRows(result)) break;
         const pruned = await this.pruneOrganization(organizationId, result);
         if (this.stopped) break;
         if (armed) this.db.recordArchivedHistoryRetentionRun(organizationId, this.now(), pruned.sessions, pruned.events);

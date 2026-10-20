@@ -167,7 +167,10 @@ after it, so a crash can never restore an artifact row whose blob is gone. See
   every supported Node.js bundles. Terms deleted before the option was set stay until the index
   merges their segments.
 - Search rows are deleted by key. New search rows are written with their event's row id; rows
-  indexed earlier are mapped to their events once, in paced steps, before the first prune. If an
+  indexed earlier are mapped to their events once, in paced steps at the start of a background pass,
+  even when every organization's retention policy is off. Mapping uses the same 10-minute startup
+  delay and per-step rests, saves its cursor after at most 1,000 rows, and resumes after a restart.
+  It enables keyed session deletion without turning retention on or pruning history. If an
   older build has written to the database since, the mapping starts again from the first row: that
   build numbers its rows from the highest one left, which a prune may have lowered below rows
   already mapped.
