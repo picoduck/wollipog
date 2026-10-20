@@ -7307,8 +7307,9 @@ body.shell-dock-dragging * {
    its form can fix: "Choose an online location to continue." Add Location (#2966) says what its one
    Add Location waits for: "Choose a location or a folder." or "Match the access levels to continue."
    New Project (#2965) says why Create Project is off: a Viewer's refusal, or access levels loading.
-   A run's Follow Up (#2976) says what Send waits for: "Write a message to send." or a chosen agent. */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason) {
+   A run's Follow Up (#2976) says what Send waits for: "Write a message to send." or a chosen agent.
+   New Subscription (#2973) counts the events it will send: "2 events selected". */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -7319,7 +7320,7 @@ body.shell-dock-dragging * {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason) { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -12057,7 +12058,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
    `.new-session-field-label`, or the first item of a `.field-head` row (below). Later bare spans in
    a field keep the dim rule above. Two forms stack their labels over the control outside a `.field`
    and take the same label (#2366): Archived Sessions (its search label and filters' `.field-label`s)
-   and the Automations page's `.automation-form-grid` forms, the editor and Outbound Events (a grid
+   and the Automations page's `.automation-form-grid` forms and the editor (a grid
    label's own text, an `.automation-field`'s `.field-label`, and a fieldset legend). */
 .field > span:first-child,
 .field > .field-label,
@@ -16629,12 +16630,6 @@ button.review-finding-location {
 
 
 /* --------------------------- Durable automations -------------------------- */
-.automation-error, .automation-execution-error {
-  color: var(--red-on-tint); background: color-mix(in srgb, var(--red) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
-  border-radius: 8px; padding: 10px 12px; overflow-wrap: anywhere;
-}
-.automation-error > .btn { display: block; margin-top: 8px; }
 .automation-editor-actions {
   display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3);
 }
@@ -16855,37 +16850,112 @@ button.review-finding-location {
 .automation-trigger-secret { border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--border)); border-radius: 7px; padding: 9px; }
 .automation-trigger-secret strong { width: 100%; color: var(--yellow); }
 .automation-execution > small { display: block; margin-top: 6px; color: var(--text-dim); }
+/* Outbound Events, the second tab of Automations (#2973; docs/design-system.md §5.2, §5.5, §14).
+   The tab is a column of its help line, the one-time secret, a failure notice and one surface of
+   expandable subscription rows. */
 .outbound-events {
-  margin-bottom: 18px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-lg);
-  background: var(--bg-elev); box-shadow: var(--shadow);
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
 }
-.outbound-events-heading, .outbound-event-subscription-head {
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+.outbound-events-help {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-body);
 }
-.outbound-events-heading h3 { margin: 0; }
-.outbound-events-heading p { margin: 4px 0 0; color: var(--text-dim); }
-.outbound-event-editor { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
-.outbound-event-kinds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; }
-.outbound-event-list { display: grid; gap: 10px; margin-top: 14px; }
-.outbound-event-subscription { display: grid; gap: 8px; min-width: 0; padding: 12px; border-radius: var(--radius-sm); background: var(--bg-elev-2); }
-.outbound-event-subscription-head > div { display: grid; gap: 2px; }
-/* The metadata line only: the head also holds the status badge, which keeps its own tone text. */
-.outbound-event-subscription-head > div > span, .outbound-event-subscription p, .outbound-event-subscription summary {
-  color: var(--text-dim); font-size: var(--text-sm);
+.outbound-events-secret .notice-body {
+  display: grid;
+  gap: var(--space-2);
 }
-.outbound-event-subscription > code { overflow-wrap: anywhere; white-space: normal; }
-.outbound-event-subscription p { margin: 0; line-height: 1.45; }
-.outbound-event-badges { display: flex; flex-wrap: wrap; gap: 6px; }
-.outbound-event-badges span { padding: 3px 7px; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--text-dim); font-size: var(--text-xs); }
-.outbound-event-subscription summary { cursor: pointer; }
-.outbound-event-receipts { display: grid; gap: 6px; margin-top: 8px; }
-.outbound-event-receipts > div { display: grid; gap: 2px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: var(--text-sm); }
-.outbound-event-receipts span, .outbound-event-receipts small { color: var(--text-dim); }
-.outbound-event-receipts em { color: var(--red); font-style: normal; overflow-wrap: anywhere; }
-
+.outbound-events-secret .notice-body > p { margin: 0; }
+/* The rows' one wrapper, stale or not (StaleContent), so reconnecting never changes their spacing. */
+.outbound-subscriptions-list { min-width: 0; }
+/* One row per subscription, its opened body under it; the hairline goes between subscriptions. */
+.outbound-subscription + .outbound-subscription { box-shadow: inset 0 1px 0 var(--border); }
+.outbound-subscription-row {
+  gap: var(--space-2);
+  padding: 0 var(--space-2) 0 0;
+}
+/* The whole row before ⋯ is the disclosure's trigger: the row's own height and type, with the
+   §5.5 chevron leading it. */
+.outbound-subscription-open.disclosure-trigger {
+  flex: 1;
+  align-self: stretch;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 0 0 0 var(--space-2);
+  border-radius: inherit;
+  color: var(--text);
+  font: var(--type-body);
+}
+@media (hover: hover) {
+  .outbound-subscription-open.disclosure-trigger:hover:not(:disabled) { background: none; }
+  .outbound-subscription-row:hover { background: var(--bg-elev-2); }
+}
+.outbound-subscription-address { font-family: var(--font-mono); }
+.outbound-subscription-meta {
+  display: flex;
+  gap: var(--space-3);
+}
+.outbound-subscription-meta > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The scope, which can be a long automation name, gives way first; the count and the last delivery
+   stay whole. */
+.outbound-subscription-meta > span:not(:first-child) { flex: none; }
+.outbound-subscription-body {
+  padding: var(--space-2) var(--space-3) var(--space-4) calc(var(--space-2) + var(--icon-sm) + var(--space-2));
+}
+.outbound-subscription-events-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.outbound-subscription-deliveries {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.outbound-deliveries .col-result { width: 180px; }
+.outbound-deliveries .col-attempts { width: 96px; }
+.outbound-deliveries .col-retry { width: 140px; }
+/* The New Subscription dialog: the event groups and the extras are checkbox rows (§8.4), each group
+   under its label. */
+.outbound-subscription-dialog :is(.outbound-subscription-events, .outbound-subscription-extras) {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.outbound-subscription-dialog :is(.outbound-subscription-events, .outbound-subscription-extras) > legend {
+  margin-bottom: var(--space-1);
+  padding: 0;
+  font: var(--type-section);
+}
+.outbound-subscription-event-group .group-label { padding: 0; }
+/* The three groups side by side in the dialog's width, so the form stays short; one column on a phone. */
+.outbound-subscription-event-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  column-gap: var(--space-4);
+}
 @media (max-width: 760px) {
-  .outbound-events-heading { align-items: stretch; flex-direction: column; }
-  .outbound-event-kinds { grid-template-columns: minmax(0, 1fr); }
+  .outbound-subscription-event-groups { grid-template-columns: minmax(0, 1fr); }
+  /* On a phone line 2 keeps one whole fact, the last delivery; the opened row names the scope and
+     lists the events. */
+  .outbound-subscription-meta > span:not(:last-child) { display: none; }
+}
+@media (min-width: 761px) {
+  .outbound-subscription-scope { display: none; }
 }
 
 /* The reading column's one history notice (#2172; docs/design-system.md §12.4, §13.2), in a band

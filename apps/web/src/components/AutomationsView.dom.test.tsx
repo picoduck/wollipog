@@ -539,22 +539,39 @@ test("Agent, Machine, and Model controls invoke their capability-transition help
 test("outbound event subscriptions expose privacy opt-ins and reveal the signing secret once", async () => {
   const automation = schedule("automation-events", "Event Source");
   const fixture = await mountAt({ name: "automations", tab: "outbound" }, [automation]);
+  const page = domWindow.document.body as unknown as HTMLDivElement;
   try {
+    // The empty tab's state owns New Subscription; the header offers none beside it (§12.1).
     await act(async () => { button(fixture.container, "New Subscription").click(); });
-    await choose(fixture.container, "Scope Type", "Automation");
-    await setLabeledInput(fixture.container, "Callback URL", "https://events.example.test/wollipog");
-    const sessionName = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
-      .find((candidate) => candidate.textContent?.trim() === "Include Session Name")
-      ?.querySelector("input") as HTMLInputElement | null;
-    const questionTitle = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
-      .find((candidate) => candidate.textContent?.trim() === "Include Question Title")
-      ?.querySelector("input") as HTMLInputElement | null;
+    const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLDivElement;
+    assert.ok(dialog, "New Subscription opens its dialog");
+    const scope = [...dialog.querySelectorAll<HTMLInputElement>('[role="radiogroup"] [role="radio"], [role="radiogroup"] input')]
+      .find((candidate) => candidate.closest("label, button")?.textContent?.trim() === "An Automation");
+    assert.ok(scope, "Send Events For offers An Automation");
+    await act(async () => { scope.click(); });
+    await act(settle);
+    assert.equal(shownValue(dialog, "Automation"), "Event Source");
+    const url = dialog.querySelector<HTMLInputElement>("input[type=url]")!;
+    const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!;
+    await act(async () => {
+      url.focus();
+      setter.call(url, "https://events.example.test/wollipog");
+      url.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as never);
+      url.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as never);
+    });
+    // Both extras are off until chosen, under one helper that says so.
+    assert.match(dialog.textContent ?? "", /Excluded unless selected\./);
+    const extra = (label: string) => [...dialog.querySelectorAll<HTMLLabelElement>("label.checkbox")]
+      .find((candidate) => candidate.textContent?.trim() === label)?.querySelector("input") as HTMLInputElement | null;
+    const sessionName = extra("Session Name");
+    const questionTitle = extra("Question Title");
     assert.ok(sessionName && questionTitle);
+    assert.equal(sessionName.checked || questionTitle.checked, false);
     await act(async () => {
       sessionName.click();
       questionTitle.click();
     });
-    await act(async () => { button(fixture.container, "Create Subscription").click(); });
+    await act(async () => { button(page, "Create Subscription").click(); });
     await act(settle);
     assert.deepEqual(fixture.outboundCreates, [{
       callbackUrl: "https://events.example.test/wollipog",
@@ -563,11 +580,14 @@ test("outbound event subscriptions expose privacy opt-ins and reveal the signing
       includeSessionName: true,
       includeQuestionTitle: true,
     }]);
-    assert.match(fixture.container.textContent ?? "", /Copy this signing secret now/);
-    assert.match(fixture.container.textContent ?? "", /wollipogwhsec_B+/);
-    assert.match(fixture.container.textContent ?? "", /Session Name Included/);
-    assert.match(fixture.container.textContent ?? "", /Question Title Included/);
-    await act(async () => { button(fixture.container, "Hide").click(); });
+    assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'), "the dialog closes once created");
+    assert.match(fixture.container.textContent ?? "", /Copy the Signing Secret Now/);
+    assert.match(fixture.container.querySelector(".outbound-events-secret .code-well.one-line")?.textContent ?? "", /wollipogwhsec_B+/);
+    assert.ok(fixture.container.querySelector('.outbound-events-secret button[aria-label="Copy Secret"]'));
+    // The new row opens on what it sends, and names only what is included.
+    assert.match(fixture.container.textContent ?? "", /Also IncludesSession names and question titles/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Included|Excluded/);
+    await act(async () => { button(fixture.container, "Done").click(); });
     assert.doesNotMatch(fixture.container.textContent ?? "", /wollipogwhsec_B+/);
   } finally {
     await unmountFixture(fixture);
@@ -1611,6 +1631,43 @@ test("the tabs are routes: Automations opens on the list, Outbound Events on its
     assert.ok(direct.container.querySelector(".outbound-events"));
   } finally {
     await unmountFixture(direct);
+  }
+});
+
+test("Outbound Events' header primary is New Subscription, hidden while the tab is empty (#2973)", async () => {
+  const subscription: OutboundEventSubscriptionView = {
+    subscriptionId: "oes_hooks", callbackUrl: "https://hooks.example.com/wollipog",
+    scope: { kind: "automation", automationId: "automation-a" }, eventKinds: ["session.completed"],
+    includeSessionName: false, includeQuestionTitle: false, state: "active", generation: 1,
+    createdBy: { kind: "human", id: "test" }, createdAt: 1, updatedAt: 1,
+  };
+  const page = domWindow.document.body as unknown as HTMLDivElement;
+  const newSubscriptionButtons = () => [...page.querySelectorAll<HTMLButtonElement>("button")]
+    .filter((candidate) => candidate.textContent?.trim() === "New Subscription" || candidate.getAttribute("aria-label") === "New Subscription");
+  const fixture = await mountAt({ name: "automations", tab: "outbound" }, [schedule("automation-a", "Alpha")], {}, {}, [subscription]);
+  try {
+    const primary = fixture.container.querySelector<HTMLButtonElement>(".page-actions .btn.primary");
+    assert.equal(primary?.textContent?.trim(), "New Subscription");
+    assert.equal(newSubscriptionButtons().length, 1, "the header's primary is the tab's one New Subscription");
+    assert.doesNotMatch(page.textContent ?? "", /Close Subscription Form/);
+    assert.match(fixture.container.querySelector('[data-subscription-id="oes_hooks"]')?.textContent ?? "", /Automation: Alpha/);
+    await act(async () => { primary!.click(); });
+    await act(settle);
+    assert.equal(domWindow.document.querySelector('[role="dialog"] h2, [role="dialog"] .modal-title')?.textContent, "New Subscription");
+    await act(async () => { button(page, "Cancel").click(); });
+    await act(settle);
+    assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'));
+    assert.doesNotMatch(page.textContent ?? "", /Close Subscription Form/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+  const empty = await mountAt({ name: "automations", tab: "outbound" }, [schedule("automation-a", "Alpha")]);
+  try {
+    assertNoDomNode(empty.container.querySelector(".page-actions .btn.primary"), "the empty state owns New Subscription");
+    assert.equal(newSubscriptionButtons().length, 1);
+    assert.match(empty.container.textContent ?? "", /No Outbound Events Yet/);
+  } finally {
+    await unmountFixture(empty);
   }
 });
 

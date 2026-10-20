@@ -1,12 +1,13 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { viewPath } from "../src/navigation.js";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * #2366: two forms stack labels over their controls outside a `.field`, and their labels are the
  * field label of docs/design-system.md §8.1: --type-label (12px/500 on a 16px line) in --text, 8px
  * above the control. Archived Sessions: the search label and the filters' `.field-label`s. The
- * Automations page's grid forms, Outbound Events and the signed trigger editor: each grid label's own
- * text, each `.automation-field`'s `.field-label`, and its fieldset legends; a grid label's helper
+ * signed trigger editor's grid form and the New Subscription dialog's fields: each grid label's own
+ * text and each `.field-label`; a grid label's helper
  * stays dim, 4px under the control. The Automation editor became a page of `.field`s (#2967), whose
  * labels are checked here too. The labels that open redesigns owned went with them: Snooze's with #2181,
  * whose Snooze Until is a §8.1 field, Rename Project's with #2199, which made it one `.field`, and
@@ -66,16 +67,6 @@ async function expectLabelStyle(page: Page, locator: Locator, names: string[]) {
   }
 }
 
-/** A fieldset legend titles a group, not one control: it takes the label's look, not its spacing. */
-async function expectLegendStyle(page: Page, locator: Locator, names: string[]) {
-  const text = await token(page, "--text");
-  const measured = await locator.evaluateAll((elements) => elements.map((legend) => {
-    const style = getComputedStyle(legend);
-    return { text: legend.textContent, color: style.color, size: style.fontSize, lineHeight: style.lineHeight, weight: style.fontWeight };
-  }));
-  expect(measured).toEqual(names.map((name) => ({ text: name, color: text, size: "12px", lineHeight: "16px", weight: "500" })));
-}
-
 async function setTheme(page: Page, theme: Theme) {
   await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
 }
@@ -116,12 +107,13 @@ for (const theme of ["dark", "light"] as const) {
           ["Auditor Agent", "Orchestrator Agent", "Other Auditor Agent", "Other Orchestrator Agent"]);
       });
 
-      test("the Outbound Events subscription form, on the same grid, has §8.1 field labels", async ({ page }) => {
+      test("the New Subscription dialog has §8.1 field labels", async ({ page }) => {
         await page.goto(`/automations-e2e.html?theme=${theme}&route=${encodeURIComponent("/automations/outbound")}`);
         await page.getByRole("button", { name: "New Subscription" }).click();
-        const editor = page.locator(".outbound-event-editor");
-        await expectLabelStyle(page, editor.locator(AUTOMATION_LABELS), ["Scope Type", "Project", "Callback URL"]);
-        await expectLegendStyle(page, editor.locator(".automation-form-grid legend"), ["Event Kinds"]);
+        const dialog = page.getByRole("dialog", { name: "New Subscription" });
+        await expect(dialog).toBeVisible();
+        await dialogMotionSettled(page);
+        await expectLabelStyle(page, dialog.locator(".field > .field-label"), ["Send Events For", "Callback URL"]);
       });
 
       test("the signed trigger editor's labels are §8.1 field labels, and its helper stays dim 4px under the control", async ({ page }) => {

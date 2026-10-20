@@ -1,1 +1,0 @@
-|.outbound-event-list|gap|10px

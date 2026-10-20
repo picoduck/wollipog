@@ -5,8 +5,10 @@ import type {
   AutomationSchedule,
   AutomationSpec,
   AutomationTriggerView,
+  CreateOutboundEventSubscriptionRequest,
   OutboundEventDeliveryView,
   OutboundEventSubscriptionView,
+  ProjectView,
   RunnerView,
   SessionView,
   UiSnapshotMessage,
@@ -366,7 +368,28 @@ if (params.has("list")) {
 if (params.has("failed-run")) items[0]!.latestExecution = { status: "failed", at: executions[0]!.completedAt! };
 if (params.has("list-empty")) items.length = 0;
 
-const outboundSubscriptions: OutboundEventSubscriptionView[] = [{
+// Outbound Events (#2973): a healthy subscription for a project and a failing one for an automation,
+// paused after its bounded attempts, with deliveries relative to now so retries read in words.
+// `outbound-empty` has none; `outbound-loading` never answers.
+const outboundNow = Date.now();
+const outboundProjects: ProjectView[] = [{
+  id: "project-acme", name: "acme-storefront", hidden: false, locations: [],
+  activeSessionCount: 0, unarchivedSessionCount: 0, totalSessionCount: 0, createdAt: outboundNow, updatedAt: outboundNow,
+}];
+const outboundSubscriptions: OutboundEventSubscriptionView[] = params.has("outbound-empty") ? [] : [{
+  subscriptionId: "oes_storefront",
+  callbackUrl: "https://hooks.acme.dev/wollipog/events?key=e2e",
+  scope: { kind: "project", projectId: "project-acme" },
+  eventKinds: ["session.completed", "session.failed", "pull_request.merged", "checks.failed"],
+  includeSessionName: true,
+  includeQuestionTitle: false,
+  state: "active",
+  generation: 1,
+  createdBy: { kind: "human", id: "e2e" },
+  createdAt: outboundNow - 3 * 86_400_000,
+  updatedAt: outboundNow - 4 * 60_000,
+  lastDeliveredAt: outboundNow - 4 * 60_000,
+}, {
   subscriptionId: "oes_release_events",
   callbackUrl: "https://events.example.com/wollipog",
   scope: { kind: "automation", automationId: "automation-nightly-sweep" },
@@ -377,36 +400,72 @@ const outboundSubscriptions: OutboundEventSubscriptionView[] = [{
   pauseReason: "Paused after 6 bounded delivery attempts",
   generation: 2,
   createdBy: { kind: "human", id: "e2e" },
-  createdAt: Date.UTC(2026, 8, 14, 12),
-  updatedAt: Date.UTC(2026, 8, 14, 12, 31),
+  createdAt: outboundNow - 86_400_000,
+  updatedAt: outboundNow - 3 * 60_000,
 }];
 
-const outboundDeliveries: OutboundEventDeliveryView[] = [{
-  deliveryId: "oed_release_created",
-  subscriptionId: "oes_release_events",
-  eventId: "oev_release_created",
-  kind: "session.created",
-  status: "failed",
-  attemptCount: 6,
-  statusCode: 503,
-  error: "Callback returned 503",
-  createdAt: Date.UTC(2026, 8, 14, 12),
-  updatedAt: Date.UTC(2026, 8, 14, 12, 31),
-  lastAttemptAt: Date.UTC(2026, 8, 14, 12, 31),
-}, {
-  deliveryId: "oed_checks_failed",
-  subscriptionId: "oes_release_events",
-  eventId: "oev_checks_failed",
-  kind: "checks.failed",
-  status: "retrying",
-  attemptCount: 2,
-  statusCode: 503,
-  error: "Callback returned 503",
-  createdAt: Date.UTC(2026, 8, 14, 12, 30),
-  updatedAt: Date.UTC(2026, 8, 14, 12, 31),
-  lastAttemptAt: Date.UTC(2026, 8, 14, 12, 31),
-  nextRetryAt: Date.UTC(2026, 8, 14, 12, 33),
-}];
+const outboundDeliveries: Record<string, OutboundEventDeliveryView[]> = {
+  oes_storefront: [{
+    deliveryId: "oed_storefront_merged",
+    subscriptionId: "oes_storefront",
+    eventId: "oev_storefront_merged",
+    kind: "pull_request.merged",
+    status: "delivered",
+    attemptCount: 1,
+    statusCode: 204,
+    createdAt: outboundNow - 4 * 60_000,
+    updatedAt: outboundNow - 4 * 60_000,
+    lastAttemptAt: outboundNow - 4 * 60_000,
+  }, {
+    deliveryId: "oed_storefront_completed",
+    subscriptionId: "oes_storefront",
+    eventId: "oev_storefront_completed",
+    kind: "session.completed",
+    status: "delivered",
+    attemptCount: 2,
+    statusCode: 200,
+    createdAt: outboundNow - 40 * 60_000,
+    updatedAt: outboundNow - 39 * 60_000,
+    lastAttemptAt: outboundNow - 39 * 60_000,
+  }],
+  oes_release_events: [{
+    deliveryId: "oed_checks_failed",
+    subscriptionId: "oes_release_events",
+    eventId: "oev_checks_failed",
+    kind: "checks.failed",
+    status: "retrying",
+    attemptCount: 2,
+    statusCode: 500,
+    error: "Callback returned 500",
+    createdAt: outboundNow - 5 * 60_000,
+    updatedAt: outboundNow - 3 * 60_000,
+    lastAttemptAt: outboundNow - 3 * 60_000,
+    nextRetryAt: outboundNow + 6 * 60_000 + 20_000,
+  }, {
+    deliveryId: "oed_release_created",
+    subscriptionId: "oes_release_events",
+    eventId: "oev_release_created",
+    kind: "session.created",
+    status: "failed",
+    attemptCount: 6,
+    error: "connect ECONNREFUSED 203.0.113.7:443",
+    createdAt: outboundNow - 50 * 60_000,
+    updatedAt: outboundNow - 8 * 60_000,
+    lastAttemptAt: outboundNow - 8 * 60_000,
+  }, {
+    deliveryId: "oed_release_opened",
+    subscriptionId: "oes_release_events",
+    eventId: "oev_release_opened",
+    kind: "pull_request.opened",
+    status: "delivered",
+    attemptCount: 1,
+    statusCode: 202,
+    createdAt: outboundNow - 2 * 3_600_000,
+    updatedAt: outboundNow - 2 * 3_600_000,
+    lastAttemptAt: outboundNow - 2 * 3_600_000,
+  }],
+};
+const outboundSecret = `wollipogwhsec_${"e2eSigningSecret".repeat(3)}`;
 
 const fixtureRunners = () => [runner, ...(alternateRunner ? [alternateRunner] : []),
   ...(workflowSwitchRunner ? [workflowSwitchRunner] : []), ...(offlineRunner ? [offlineRunner] : [])];
@@ -445,6 +504,8 @@ class FixtureSocket implements UiSocket {
       sessions: listSessions,
       runs: [],
       pods: [],
+      // A project for Outbound Events' project-scoped subscription to name; only on that tab.
+      ...(params.get("route")?.startsWith("/automations/outbound") ? { projects: outboundProjects } : {}),
     });
   }
   send() {}
@@ -554,8 +615,42 @@ const client = {
       throw new ApiError("automation target \"runner-1/workspace-1/agent-1\" cannot honor config: " +
         "permission mode plan is not advertised by this agent", 400);
     }])) : {}),
-  outboundEventSubscriptions: async () => outboundSubscriptions,
-  outboundEventDeliveries: async () => outboundDeliveries,
+  outboundEventSubscriptions: async () => {
+    if (params.has("outbound-loading")) return new Promise<never>(() => {});
+    return [...outboundSubscriptions];
+  },
+  outboundEventDeliveries: async (subscriptionId: string) => outboundDeliveries[subscriptionId] ?? [],
+  createOutboundEventSubscription: async (request: CreateOutboundEventSubscriptionRequest) => {
+    const subscription: OutboundEventSubscriptionView = {
+      subscriptionId: `oes_created_${outboundSubscriptions.length}`,
+      callbackUrl: request.callbackUrl,
+      scope: request.scope,
+      eventKinds: request.eventKinds,
+      includeSessionName: request.includeSessionName === true,
+      includeQuestionTitle: request.includeQuestionTitle === true,
+      state: "active",
+      generation: 1,
+      createdBy: { kind: "human", id: "e2e" },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    outboundSubscriptions.unshift(subscription);
+    return { subscription, secret: outboundSecret };
+  },
+  rotateOutboundEventSubscription: async (subscriptionId: string) => ({
+    subscription: outboundSubscriptions.find((subscription) => subscription.subscriptionId === subscriptionId)!,
+    secret: outboundSecret,
+  }),
+  resumeOutboundEventSubscription: async (subscriptionId: string) => {
+    const index = outboundSubscriptions.findIndex((subscription) => subscription.subscriptionId === subscriptionId);
+    const { pauseReason: _pauseReason, ...rest } = outboundSubscriptions[index]!;
+    outboundSubscriptions[index] = { ...rest, state: "active" };
+    return outboundSubscriptions[index]!;
+  },
+  deleteOutboundEventSubscription: async (subscriptionId: string) => {
+    outboundSubscriptions.splice(outboundSubscriptions.findIndex((subscription) => subscription.subscriptionId === subscriptionId), 1);
+    return { revoked: true };
+  },
   workflowDefinitions: async () => {
     if (pollingFixture?.failure === "workflow") throw new Error("Synthetic post-mutation refresh failure");
     return workflowDefinitions;
