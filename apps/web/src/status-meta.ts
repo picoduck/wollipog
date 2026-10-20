@@ -122,7 +122,7 @@ const VOCABULARY = {
     error: danger("Error"),
     offline: neutral("Offline", { hollow: true }),
   },
-  /** Automations, their runs and outbound event subscriptions. */
+  /** Automations; their runs are `automation_run`, their outbound event subscriptions `subscription`. */
   automation: {
     enabled: success("Enabled"),
     paused: neutral("Paused"),
@@ -132,6 +132,22 @@ const VOCABULARY = {
     /** The automation page's badge when its latest run failed (#2968): attention outranks Enabled
      * or Paused. */
     last_run_failed: danger("Last Run Failed"),
+  },
+  /** An outbound event subscription's one badge (#2973): Delivery Failed when its latest delivery
+   * failed, including a pause the failures caused. */
+  subscription: {
+    active: success("Active"),
+    paused: neutral("Paused"),
+    delivery_failed: danger("Delivery Failed"),
+  },
+  /** One outbound event delivery's result (#2973). A failure's badge reads the failure in words
+   * ("HTTP 500", "Connection Refused") in place of this label. */
+  outbound_delivery: {
+    pending: neutral("Pending"),
+    sending: info("Sending", { pulse: true }),
+    delivered: success("Delivered"),
+    failed: danger("Failed"),
+    dropped: neutral("Dropped"),
   },
   /** One run of an automation, by its wire status: the page's Last Run fact (#2968). */
   automation_run: {

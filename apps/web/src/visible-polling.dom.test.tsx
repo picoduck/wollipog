@@ -57,7 +57,7 @@ test(`${surface} refreshes immediately after Strict Mode cleans up a pending ini
       </ApiProvider></React.StrictMode>);
     });
     assert.equal(calls, 2, "the remounted effect serializes a replacement initial refresh");
-    assert.doesNotMatch(container.textContent ?? "", /Loading automations|Loading outbound event subscriptions/,
+    assert.doesNotMatch(container.textContent ?? "", /Loading automations|Loading outbound events/,
       "the view completes its initial load without waiting for a five-second interval");
   } finally {
     await act(async () => { root.unmount(); });

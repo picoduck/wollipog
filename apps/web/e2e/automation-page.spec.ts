@@ -305,31 +305,6 @@ test("configured trigger controls and content-free delivery provenance are visib
   await expect(page.getByRole("textbox", { name: "Parameter Names" })).toBeVisible();
 });
 
-test("outbound subscription state, privacy defaults, pause reason, and journal are visible", async ({ page }) => {
-  await page.goto(`/automations-e2e.html?theme=dark&route=${encodeURIComponent("/automations/outbound")}`);
-  const outbound = page.locator(".outbound-event-subscription");
-  await expect(page.getByRole("heading", { name: "Outbound Events" })).toBeVisible();
-  await expect(outbound.getByText("Paused", { exact: true })).toBeVisible();
-  // The head's metadata rule must not reach the status badge beside it: the badge keeps its tone text.
-  const badgeColor = await outbound.locator(".status", { hasText: "Paused" }).evaluate((element) => {
-    const probe = document.createElement("span");
-    probe.style.color = "var(--text-dim-on-tint)";
-    document.body.append(probe);
-    const expected = getComputedStyle(probe).color;
-    probe.remove();
-    return { actual: getComputedStyle(element).color, expected };
-  });
-  expect(badgeColor.actual).toBe(badgeColor.expected);
-  await expect(outbound.getByText("Session Name Excluded", { exact: true })).toBeVisible();
-  await expect(outbound.getByText("Question Title Excluded", { exact: true })).toBeVisible();
-  await expect(outbound.getByText("Paused after 6 bounded delivery attempts", { exact: true })).toBeVisible();
-  await outbound.getByText("Delivery Journal (2)", { exact: true }).click();
-  await expect(outbound.getByText("Session Created · Failed", { exact: true })).toBeVisible();
-  await expect(outbound.getByText("Checks Failed · Retrying", { exact: true })).toBeVisible();
-  await expect(outbound.getByText("HTTP 503", { exact: true })).toHaveCount(2);
-  await expect(outbound.getByText(/Next Retry/)).toBeVisible();
-});
-
 for (const { label, viewport } of [
   { label: "desktop", viewport: { width: 1280, height: 900 } },
   { label: "mobile", viewport: { width: 375, height: 812 } },

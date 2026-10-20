@@ -188,7 +188,7 @@ for (const { label, viewport } of [
     if (label !== "834") test("Outbound Events", async ({ page }) => {
       await page.goto(`/automations-e2e.html?theme=${theme}&list&route=${encodeURIComponent("/automations/outbound")}`);
       await expect(page.getByRole("tab", { name: "Outbound Events" })).toHaveAttribute("aria-selected", "true");
-      await expect(page.locator(".outbound-event-subscription")).toBeVisible();
+      await expect(page.locator(".outbound-subscription")).toHaveCount(2);
       await expect(page.locator(".automation-list")).toHaveCount(0);
       await capture(page, `automations-outbound-${label}-${theme}`);
     });

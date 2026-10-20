@@ -184,6 +184,11 @@ export function AutomationsView() {
   /** The list has been read once; before that an empty list proves nothing (§12). */
   const [listLoaded, setListLoaded] = useState(false);
   const [toggling, setToggling] = useState<ReadonlySet<string>>(() => new Set());
+  // Outbound Events' New Subscription, which this header's primary opens on that tab (#2973), and
+  // whether the tab shows its empty state, which offers New Subscription itself.
+  const [newSubscriptionOpen, setNewSubscriptionOpen] = useState(false);
+  const [outboundEmpty, setOutboundEmpty] = useState(false);
+  useEffect(() => { if (tab !== "outbound") setNewSubscriptionOpen(false); }, [tab]);
 
   // The list alone, one request per poll: each automation's history and triggers are read by its
   // own page, and its last run's outcome comes with the list (`latestExecution`).
@@ -334,12 +339,14 @@ export function AutomationsView() {
 
   return (
     <section className="page">
-      {/* The empty state owns the one create action, so the header offers none beside it (§12.1).
-          Outbound Events brings its own primary with #2973. */}
+      {/* Each tab brings its own primary, and an empty tab's state owns its one create action, so
+          the header offers none beside it (§4.2, §12.1). */}
       <PageHeader
         title={destination("automations").name}
         description={destination("automations").description}
-        primary={tab === undefined && !empty ? { label: "New Automation", onClick: openNewAutomation } : undefined}
+        primary={tab === undefined
+          ? (!empty ? { label: "New Automation", onClick: openNewAutomation } : undefined)
+          : (!outboundEmpty ? { label: "New Subscription", onClick: () => setNewSubscriptionOpen(true) } : undefined)}
         tabs={(
           <TabList label={automationsDestination.name} onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
             {([[undefined, "Automations", "list"], ["outbound", "Outbound Events", "outbound"]] as const).map(([id, label, key]) => (
@@ -362,7 +369,13 @@ export function AutomationsView() {
       />
       {tab === "outbound" ? (
         <div id="automations-outbound-panel" role="tabpanel" aria-labelledby="automations-outbound-tab">
-          <OutboundEventSubscriptions projects={[...projects.values()]} automations={items} />
+          <OutboundEventSubscriptions
+            projects={[...projects.values()]}
+            automations={items}
+            creating={newSubscriptionOpen}
+            onCreatingChange={setNewSubscriptionOpen}
+            onEmptyChange={setOutboundEmpty}
+          />
         </div>
       ) : (
         <div id="automations-list-panel" role="tabpanel" aria-labelledby="automations-list-tab"

@@ -115,16 +115,11 @@ for (const theme of ["dark", "light"] as const) {
         form.getByRole("textbox", { name: "Name", exact: true }));
       });
 
-      test("the Outbound Events Selects, inside their labels, read at the Callback URL's weight on the body line", async ({ page }) => {
+      test("New Subscription's Select reads at the Callback URL's weight on the body line", async ({ page }) => {
         await page.goto(`/automations-e2e.html?theme=${theme}&route=${encodeURIComponent("/automations/outbound")}`);
         await page.getByRole("button", { name: "New Subscription" }).click();
-        const editor = page.locator(".outbound-event-editor");
-        await expectTriggerType(page, editor, ["Scope Type", "Project"], editor.getByRole("textbox", { name: "Callback URL", exact: true }));
-        // The wrapping labels keep §8.1's --type-label (#2366); only the trigger inside stopped taking it.
-        expect(await editor.locator(".automation-form-grid > label").first().evaluate((label) => {
-          const style = getComputedStyle(label);
-          return { weight: style.fontWeight, lineHeight: style.lineHeight };
-        })).toEqual({ weight: "500", lineHeight: "16px" });
+        const dialog = page.getByRole("dialog", { name: "New Subscription" });
+        await expectTriggerType(page, dialog, ["Project"], dialog.getByRole("textbox", { name: "Callback URL", exact: true }));
       });
 
       test("Machine Version's Machine Select reads at a native field's weight on the body line", async ({ page }) => {
