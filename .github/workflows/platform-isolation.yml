@@ -58,6 +58,15 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify Native Windows Account-Config Publication
+        if: startsWith(matrix.os, 'windows-')
+        shell: pwsh
+        run: |
+          node apps/runner/scripts/build-account-config-windows-helper.mjs --fixtures
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/runner/scripts/verify-account-config-windows-helper.mjs --source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify Retained Process Disposal Ten Times
         if: github.event_name == 'workflow_dispatch' && inputs.retained_disposal_validation && matrix.os == 'macos-latest'
         shell: bash
@@ -116,6 +125,9 @@ jobs:
         shell: bash
         run: |
           pnpm --filter @wollipog/runner build:binary
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            node apps/runner/scripts/verify-account-config-windows-helper.mjs --packaged
+          fi
           node apps/runner/scripts/verify-provider-home-worker-binary.mjs --packaged
 
       # The managed-worktree read-only rule and the hook-state mask (#1336) are only meaningful

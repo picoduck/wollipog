@@ -21,6 +21,7 @@ import {
   resolveWorkspacePath,
   validateProviderAccounts,
   writeProviderAccountsConfig,
+  captureProviderAccountsConfigPreimage,
 } from "./config.js";
 
 test("parseArgs defaults to runner.config.json (absolute)", () => {
@@ -154,12 +155,12 @@ test("a provider account's optional profile id is validated and preserved throug
   const directory = mkdtempSync(join(tmpdir(), "wollipog-config-profile-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const configPath = join(directory, "runner.json");
-  writeFileSync(configPath, `${JSON.stringify({ runnerId: "r", controlPlaneUrl: "ws://localhost", providerAccounts: [] })}\n`);
-  writeProviderAccountsConfig(configPath, accounts);
+  writeFileSync(configPath, `${JSON.stringify({ runnerId: "r", controlPlaneUrl: "ws://localhost", providerAccounts: [] })}\n`, { mode: 0o600 });
+  writeProviderAccountsConfig(configPath, accounts, captureProviderAccountsConfigPreimage(configPath, []));
   const written = JSON.parse(readFileSync(configPath, "utf8")) as { providerAccounts: unknown[] };
   assert.deepEqual(written.providerAccounts, accounts);
   assert.deepEqual(loadConfig(configPath).providerAccounts, accounts);
-  assert.throws(() => writeProviderAccountsConfig(configPath, [{ ...accounts[0]!, profileId: "../profile" }]), /profileId/u);
+  assert.throws(() => writeProviderAccountsConfig(configPath, [{ ...accounts[0]!, profileId: "../profile" }], captureProviderAccountsConfigPreimage(configPath, accounts)), /profileId/u);
   assert.deepEqual(loadConfig(configPath).providerAccounts, accounts, "a refused update leaves the committed config intact");
 });
 
