@@ -76,7 +76,7 @@ test("a real bwrap launch refuses provider writes to the managed worktree's Git 
     {
       driver: "claude-code",
       dataDir: join(root, "state"),
-      env: { HOME: home },
+      env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed",
       cwd: worktreePath,
       // The repository holds every worktree's real administrative directory; a session that can
@@ -175,7 +175,7 @@ test("a real bwrap launch pins a disposable managed worktree root while ordinary
     const isolation = await resolveExecutionIsolation(
       { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
         driver: provider.driver, dataDir: join(root, "state"),
-        env: { HOME: home, ...(provider.driver === "codex-app-server" ? { CODEX_HOME: providerHome } : {}) },
+        env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude"), ...(provider.driver === "codex-app-server" ? { CODEX_HOME: providerHome } : {}) },
         sessionId: "s_managed", cwd: worktreePath,
         additionalWritableRoots: [requested],
         readOnlyPaths: managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true),
@@ -226,7 +226,7 @@ test("an unmanaged worktree keeps a fully writable Git link", {
     {
       driver: "claude-code",
       dataDir: join(root, "state"),
-      env: { HOME: home },
+      env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_attached",
       cwd: worktreePath,
       additionalWritableRoots: [repoPath],
@@ -271,7 +271,7 @@ test("a selected requested worktree keeps its root while sibling edits wait for 
   const isolate = (path: string) => {
     const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath: path, repoPath }], true);
     return resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
-      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: path, additionalWritableRoots: [boundary],
       readOnlyPaths: requiredReadOnlyPaths,
       protectedWorktree: {
@@ -324,7 +324,7 @@ test("an ACP managed launch fails closed when its credential and transcript root
       platform: "linux", uid: () => 1000,
       resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
     }, {
-      driver: "acp", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "acp", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: worktreePath,
       readOnlyPaths: requiredReadOnlyPaths,
       protectedWorktree: {
@@ -353,7 +353,7 @@ test("symlinked worktree paths and uncommon Git layouts fail closed instead of w
       platform: "linux", uid: () => 1000,
       resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
     }, {
-      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: aliasWorktree,
       protectedWorktree: { path: aliasWorktree, gitWritableRoots: [], requiredReadOnlyPaths: [] },
     },
@@ -396,7 +396,7 @@ test("cache roots cannot alias the managed parent, child, or Git administration"
         platform: "linux", uid: () => 1000,
         resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
       }, {
-        driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+        driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
         sessionId: "s_managed", cwd: worktreePath,
         readOnlyPaths: requiredReadOnlyPaths,
         protectedWorktree: {
@@ -422,7 +422,7 @@ test("a provider transcript alias cannot reopen common Git administration or ins
   const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
   await assert.rejects(resolveExecutionIsolation(
     { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
-      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: worktreePath, readOnlyPaths: requiredReadOnlyPaths,
       protectedWorktree: {
         path: worktreePath,
@@ -456,7 +456,7 @@ test("a missing worktree config cannot install a hook for a later host Git opera
   const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
   const isolation = await resolveExecutionIsolation(
     { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
-      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: worktreePath, readOnlyPaths: requiredReadOnlyPaths,
       protectedWorktree: {
         path: worktreePath,
@@ -485,7 +485,7 @@ test("a symlinked worktree config fails closed before constructing a writable Gi
   assert.equal(requiredReadOnlyPaths.includes(join(adminDir, "config.worktree")), false);
   await assert.rejects(resolveExecutionIsolation(
     { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
-      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: worktreePath, readOnlyPaths: requiredReadOnlyPaths,
       protectedWorktree: {
         path: worktreePath,
@@ -513,7 +513,7 @@ test("every managed writable mount rejects aliases into Git administration or th
     const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
     await assert.rejects(resolveExecutionIsolation(
       { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
-        driver: "claude-code", dataDir, env: { HOME: home },
+        driver: "claude-code", dataDir, env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
         sessionId: "s_managed", cwd: worktreePath, readOnlyPaths: requiredReadOnlyPaths,
         additionalWritableRoots: role.startsWith("requested") ? [requested] : [],
         protectedWorktree: {
@@ -538,7 +538,7 @@ test("a cache symlink to a separate disk remains writable without widening Git a
   const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
   const isolation = await resolveExecutionIsolation(
     { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
-      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: worktreePath, readOnlyPaths: requiredReadOnlyPaths,
       protectedWorktree: {
         path: worktreePath,
@@ -589,7 +589,7 @@ test("every managed worktree the session owns stays usable while another session
   const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths(protections, true);
   const isolation = await resolveExecutionIsolation(
     { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
-      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: slot, additionalWritableRoots: [boundary],
       readOnlyPaths: requiredReadOnlyPaths,
       protectedWorktree: {
@@ -666,7 +666,7 @@ test("another owned worktree cannot widen the selected worktree's boundary", asy
       platform: "linux", uid: () => 1000,
       resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
     }, {
-      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: worktreePath, readOnlyPaths: requiredReadOnlyPaths,
       protectedWorktree: {
         path: worktreePath,
@@ -751,7 +751,7 @@ test("refs an isolated session cannot delete itself are deleted by the runner, a
   const requiredReadOnlyPaths = managedWorktreeReadOnlyPaths(protections, true);
   const isolation = await resolveExecutionIsolation(
     { mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
-      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home },
+      driver: "claude-code", dataDir: join(root, "state"), env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
       sessionId: "s_managed", cwd: worktreePath, readOnlyPaths: requiredReadOnlyPaths,
       protectedWorktree: {
         path: worktreePath,
