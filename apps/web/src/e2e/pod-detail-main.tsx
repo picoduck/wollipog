@@ -26,12 +26,16 @@ import "../styles.css";
  * carries the app's own pod route query (`?tab=huddle` or `?member=<sessionId>`), so choosing a
  * phone tab rewrites it and a reload keeps it. `?scenario=manual|turns|error|closed` picks the pod:
  * idle and open, automatic turns running, a relay that misses one member, or closed with Recent
- * Merges. `?theme=light|dark`. A 64px spacer stands in for the desktop rail.
+ * Merges. `?members=4` adds a second worker (#2983's one-line heads), and `?candidates=none` leaves
+ * no session that Add Member… could offer. `?theme=light|dark`. A 64px spacer stands in for the
+ * desktop rail.
  */
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 document.documentElement.setAttribute("data-theme", theme);
 const scenario = params.get("scenario") ?? "manual";
+const fourMembers = params.get("members") === "4";
+const withCandidates = params.get("candidates") !== "none";
 
 const NOW = Date.now();
 const MINUTE = 60_000;
@@ -50,7 +54,15 @@ const sessions = [
   member("s-lead", "claude", "Claude Code", "claude-code", "Lead: plan the retry migration", "idle"),
   member("s-worker", "codex", "Codex", "codex-app-server", "Worker: migrate the call sites", scenario === "turns" ? "running" : "idle"),
   member("s-reviewer", "opencode", "OpenCode", "acp", "Reviewer: check the migrated sites", "idle"),
+  ...(fourMembers ? [member("s-worker-2", "gemini", "Gemini", "acp", "Worker: update the retry tests", "idle")] : []),
 ];
+
+/** Sessions with their own worktree in no pod, which Add Member… offers. */
+const candidates = withCandidates ? [
+  { ...member("s-docs", "claude", "Claude Code", "claude-code", "Document the retry helper", "idle"), updatedAt: NOW - MINUTE },
+  { ...member("s-flaky", "codex", "Codex", "codex-app-server", "Fix the flaky upload test", "idle"), updatedAt: NOW - 2 * MINUTE },
+  { ...member("s-timeouts", "opencode", "OpenCode", "acp", "Audit the request timeouts", "running"), updatedAt: NOW - 3 * MINUTE },
+] : [];
 
 const reconciliations: PodReconciliation[] = scenario === "closed" ? [
   {
@@ -71,7 +83,7 @@ const pod: PodView = {
   objective: "Move every API call site to the shared retry helper, keep the existing timeouts, and agree on one error message for exhausted retries before the reviewer signs off.",
   status: scenario === "closed" ? "closed" : "active",
   members: sessions.map((session, index) => ({
-    sessionId: session.id, joinedAt: NOW - 40 * MINUTE, role: index === 0 ? "lead" : index === 1 ? "worker" : "reviewer",
+    sessionId: session.id, joinedAt: NOW - 40 * MINUTE, role: index === 0 ? "lead" : index === 2 ? "reviewer" : "worker",
     contextTokenBudget: null, lastContextSeq: 0,
   })),
   orchestration: {
@@ -147,7 +159,7 @@ const snapshot = {
     runnerId: "runner-1", hostname: "studio-mac", displayName: "Studio Mac", os: "macos", version: "1", status: "online",
     agents: [], workspaces: [{ id: "ws-wollipog", name: "Wollipog", path: "/repo" }], connectedAt: NOW, lastSeen: NOW,
   }],
-  boxes: [], projects: [], sessions, runs: [], pods: [pod],
+  boxes: [], projects: [], sessions: [...sessions, ...candidates], runs: [], pods: [pod],
 } as ControlPlaneToUi;
 
 class FixtureSocket implements UiSocket {
@@ -209,6 +221,10 @@ const client = {
     : { entries: OLDER },
   appendPodContext: async (_id: string, body: { kind: string; text?: string }) =>
     ({ entry: entry(100 + relays++, 0, human, body.text ?? "") }),
+  // Member changes answer without changing the fixture, so a capture can open each dialog again.
+  updatePodMember: async () => ({ pod, sessions }),
+  removePodMember: async () => ({ pod, sessions }),
+  addPodMember: async () => ({ pod, sessions }),
   relayPod: async (_id: string, request: RelayPodRequest): Promise<RelayPodResult> => {
     relays += 1;
     // A relay that misses the worker the first time, and reaches it on Retry Failed.

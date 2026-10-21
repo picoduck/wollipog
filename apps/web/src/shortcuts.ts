@@ -227,7 +227,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "relay-pod-note",
     group: "Actions",
-    label: "Add Pod Note",
+    label: "Relay Note",
     scope: "Pod detail",
     binding: { key: "Enter", primary: true },
   },

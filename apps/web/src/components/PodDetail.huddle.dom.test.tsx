@@ -218,8 +218,7 @@ test("the pod page lays out the objective and the member columns beside the Hudd
     assertNoDomNode(view.container.querySelector('[style*="grid-template-columns"]'), "no inline grid template");
     assertNoDomNode(view.container.querySelector('[class*="pod-relay"]'), "no relay panel");
     assertNoDomNode(view.container.querySelector('[class*="pod-context"], [class*="pod-receipt"]'), "no context panel or receipt spans");
-    assert.equal([...view.container.querySelectorAll("select")].filter((select) => !select.closest(".pod-member-setting")).length, 0,
-      "no Add Member select");
+    assert.equal(view.container.querySelectorAll("select").length, 0, "no Add Member select");
     for (const column of columns) {
       assert.equal(column.querySelectorAll('input[type="checkbox"]').length, 0, "no Relay checkbox in a member column");
     }
@@ -540,9 +539,13 @@ test("a closed pod disables the composer and keeps its Recent Merges readable, w
     assert.equal(buttonNamed(huddle(), "Save Note")!.disabled, true);
     assert.equal(buttonNamed(huddle(), "Relay to 3")!.disabled, true);
     assert.equal(huddle().querySelector(".pod-composer-reason")?.textContent, "This pod is closed.");
-    for (const share of [...view.container.querySelectorAll<HTMLButtonElement>(".pod-member-tools button")].filter((button) => button.textContent === "Share Latest")) {
-      assert.equal(share.disabled, true, "a closed pod's log takes no more answers");
-    }
+    await act(async () => view.container.querySelector<HTMLButtonElement>('.compare-member-head button[aria-label="Codex Actions"]')!.click());
+    const memberMenu = body().querySelector<HTMLElement>('[role="menu"][aria-label="Codex Actions"]')!;
+    const share = [...memberMenu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.querySelector(".menu-text")?.textContent === "Share Latest Answer")!;
+    assert.equal(share.disabled, true, "a closed pod's log takes no more answers");
+    assert.equal(share.querySelector(".menu-desc")?.textContent, "This pod is closed.");
+    await act(async () => { fireDomEvent.keyDown(memberMenu as never, { key: "Escape" }); });
 
     await act(async () => body().querySelector<HTMLButtonElement>('.detail-bar button[aria-label="More Actions"]')!.click());
     const menu = body().querySelector<HTMLElement>('[role="menu"][aria-label="More Actions"]')!;
