@@ -148,7 +148,7 @@ for (const theme of ["dark", "light"] as const) {
       await page.getByRole("button", { name: /^Project:/ }).click();
       await page.getByRole("option", { name: "Two Locations" }).click();
       const projectNote = field(page, "Project").locator(":scope > .field-helper");
-      await expect(projectNote).toHaveText("Wollipog can't show who can see this run.");
+      await expect(projectNote).toHaveText("Wollipog can't show who can see the agents' sessions.");
       expect((await look(projectNote)).color).toBe(dim);
       expect((await look(projectNote)).weight).toBe("400");
 

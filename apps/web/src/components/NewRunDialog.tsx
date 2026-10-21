@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { runnerSupportsProtocol, type BoxView, type ProjectView } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type BoxView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
@@ -16,6 +16,7 @@ import { ChoiceRows, SegmentedControl, Select, type SelectOption } from "./ui/Ch
 import { matchesShortcut } from "../shortcuts.js";
 import {
   NO_PROJECT_SELECTION,
+  projectNameQualifiers,
   projectSessionPlacement,
   suggestedProjectLocation,
 } from "../project-session-selection.js";
@@ -24,7 +25,6 @@ import { podMachineNames } from "../pod-session-choices.js";
 import {
   RUN_TYPE_DESCRIPTION,
   defaultRunAgentIds,
-  folderName,
   newRunBlockedReason,
   runAgentChoices,
   runLocationOptions,
@@ -296,18 +296,12 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const projectNameCounts = new Map<string, number>();
-  for (const project of projectList) projectNameCounts.set(project.name, (projectNameCounts.get(project.name) ?? 0) + 1);
-  // Two projects with one name are told apart by where each runs, never by an id.
-  const projectWhere = (project: ProjectView) => {
-    const location = project.locations.find((candidate) => candidate.isDefault) ?? project.locations[0];
-    if (!location) return undefined;
-    const name = machineNames.get(location.runnerId);
-    return name ? `${folderName(location.path)} on ${name}` : folderName(location.path);
-  };
+  // Two projects with one name are told apart by where each runs, as precisely as they need (as in
+  // New Session): the Machine, then its folder, then a longer path. A Machine is never named by id.
+  const projectQualifiers = projectNameQualifiers(projectList, (runnerId) => machineNames.get(runnerId) ?? "Unnamed Machine");
   const projectOptions: SelectOption<string>[] = [
     ...projectList.map((project) => {
-      const where = (projectNameCounts.get(project.name) ?? 0) > 1 ? projectWhere(project) : undefined;
+      const where = projectQualifiers.get(project.id);
       return {
         value: project.id,
         label: project.name,

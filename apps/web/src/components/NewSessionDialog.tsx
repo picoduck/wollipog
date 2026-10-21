@@ -34,11 +34,14 @@ import {
   isLaunchableProjectLocation,
   initialProjectSelectionForPreset,
   liveLocationAvailability,
+  primaryProjectLocation,
   projectForSessionPreset,
+  projectNameQualifiers,
   projectFallbacksAwaitingStore,
   projectLocationForSessionPreset,
   projectInventoryWithFallbacks,
   projectSessionPlacement,
+  startTruncatedPath,
   suggestedProjectLocation,
 } from "../project-session-selection.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
@@ -104,13 +107,6 @@ import {
 function usd(amount: number): string {
   return `$${Number.isInteger(amount) ? amount
     : amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 20, useGrouping: false })}`;
-}
-
-/** A path cut at its start, so the folder name and its parent stay whole: "…/repos/wollipog". */
-function startTruncatedPath(path: string): string {
-  const separator = path.includes("\\") ? "\\" : "/";
-  const segments = path.split(/[\\/]+/u).filter(Boolean);
-  return segments.length <= 2 ? path : `…${separator}${segments.slice(-2).join(separator)}`;
 }
 
 /** An account's sign-in in the words Switch Account and Choose Another Account use (§11.2). */
@@ -224,34 +220,8 @@ export function NewSessionDialog({
   // one name keep that name in the list, and the closed field adds the machine to tell them apart.
   const projectOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
     const nameOf = (id: string) => runnerDisplay(runners.get(id), boxByRunner.get(id), id).name;
-    const primaryOf = (project: ProjectView) => project.locations.find((location) => location.isDefault) ?? project.locations[0];
-    // Where each project runs, said no more precisely than its same-named projects need: the machine,
-    // then the machine and folder, then a longer path, and the project's id when nothing else differs.
-    const qualifiers = new Map<string, string>();
-    const sameName = new Map<string, ProjectView[]>();
-    for (const project of projectList) sameName.set(project.name, [...(sameName.get(project.name) ?? []), project]);
-    for (const group of sameName.values()) {
-      if (group.length < 2) continue;
-      const levels: Array<(project: ProjectView) => string> = [
-        (project) => { const primary = primaryOf(project); return primary ? nameOf(primary.runnerId) : ""; },
-        (project) => {
-          const primary = primaryOf(project);
-          return primary ? `${nameOf(primary.runnerId)} · ${primary.path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? primary.path}` : "";
-        },
-        (project) => { const primary = primaryOf(project); return primary ? `${nameOf(primary.runnerId)} · ${startTruncatedPath(primary.path)}` : ""; },
-        (project) => { const primary = primaryOf(project); return primary ? `${nameOf(primary.runnerId)} · ${primary.path}` : ""; },
-      ];
-      const level = levels.find((qualify) => {
-        const values = group.map(qualify);
-        return values.every(Boolean) && new Set(values).size === group.length;
-      });
-      for (const project of group) {
-        const primary = primaryOf(project);
-        qualifiers.set(project.id, level
-          ? level(project)
-          : `${primary ? `${nameOf(primary.runnerId)} · ` : ""}Project ${project.id.slice(-6)}`);
-      }
-    }
+    const primaryOf = primaryProjectLocation;
+    const qualifiers = projectNameQualifiers(projectList, nameOf);
     return [
       ...projectList.map((project) => {
         const primary = primaryOf(project);

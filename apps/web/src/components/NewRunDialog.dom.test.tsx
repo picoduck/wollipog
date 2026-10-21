@@ -406,12 +406,53 @@ test("Location options read <folder> on <Machine> with the path below, and an un
   }
 });
 
-test("Project's one sentence says who can see the run", async () => {
+test("two same-named projects in same-named folders on one Machine read apart, and each sends its own identity", async () => {
+  const docs = (id: string, path: string, workspaceId: string): ProjectView => ({
+    ...project,
+    id,
+    name: "Docs",
+    locations: [{ ...project.locations[0]!, id: `${id}-location`, projectId: id, workspaceId, path }],
+  });
+  const twoDocs = { ...runner, workspaces: [
+    { id: "workspace-a", name: "docs", path: "/home/me/a/docs" },
+    { id: "workspace-b", name: "docs", path: "/home/me/b/docs" },
+  ] };
   const expectations = [
-    ["user", "Only the project owner can see this run."],
-    ["team", "Everyone on the owning team can see this run."],
-    ["organization", "Everyone in your organization can see this run."],
-    [undefined, "Wollipog can't show who can see this run."],
+    ["project-a", "Build Server · …/a/docs", "workspace-a"],
+    ["project-b", "Build Server · …/b/docs", "workspace-b"],
+  ] as const;
+  for (const [projectId, where, workspaceId] of expectations) {
+    const fixture = await mountFixture({
+      runners: [twoDocs],
+      projects: [docs("project-a", "/home/me/a/docs", "workspace-a"), docs("project-b", "/home/me/b/docs", "workspace-b")],
+    });
+    try {
+      await openSelect(fixture.container, "Project");
+      const options = openOptions(fixture.container).filter((option) => option.label === "Docs");
+      assert.deepEqual(options.map((option) => option.text), ["DocsBuild Server · …/a/docs", "DocsBuild Server · …/b/docs"]);
+      const option = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+        .find((candidate) => candidate.textContent === `Docs${where}`);
+      assert.ok(option);
+      await act(async () => { option.click(); });
+      await settle();
+      assert.equal(trigger(fixture.container, "Project").getAttribute("aria-label"), `Project: Docs · ${where}`);
+      await enterTask(fixture.container);
+      await clickPrimary(fixture.container, "Run 2 Agents");
+      assert.equal(fixture.parallelRequests[0]?.projectId, projectId);
+      assert.equal(fixture.parallelRequests[0]?.projectLocationId, `${projectId}-location`);
+      assert.equal(fixture.parallelRequests[0]?.workspaceId, workspaceId);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  }
+});
+
+test("Project's one sentence says who can see the agents' sessions", async () => {
+  const expectations = [
+    ["user", "Only the project owner can see the agents' sessions."],
+    ["team", "Everyone on the owning team can see the agents' sessions."],
+    ["organization", "Everyone in your organization can see the agents' sessions."],
+    [undefined, "Wollipog can't show who can see the agents' sessions."],
   ] as const;
   for (const [audience, expected] of expectations) {
     const fixture = await mountFixture({ projects: [{ ...project, audience }] });
