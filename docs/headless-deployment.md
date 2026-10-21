@@ -65,6 +65,13 @@ instances from completion, waits 24 hours after enabling or shortening, and pres
 node outcomes, attempts, artifacts, decisions and receipts. A saved organization policy overrides
 it. See [workflow event retention](./workflow-event-retention.md).
 
+To return freed database pages to the filesystem, the host operator can set
+`CONTROL_PLANE_DB_INCREMENTAL_VACUUM=1`. It is off by default and waits 24 hours after enablement.
+Existing databases first need an explicit offline conversion with exclusive access and checked
+free disk; startup never rewrites them. Passes reclaim at most about 128 MiB per hour at 4 KiB
+pages, often less on slower storage. See
+[incremental vacuum](./archived-history-retention.md#returning-free-pages-to-the-filesystem).
+
 The generated units state the account and the data locations they use; read them before enabling
 in an environment with its own conventions.
 

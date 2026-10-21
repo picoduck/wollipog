@@ -84,6 +84,61 @@ events, 10 streaming sessions and 6 dashboards:
 | Runner-to-dashboard p50 / p95, 200 events/s | 1.4 s / 2.9 s        | 0.5 ms / 9 ms        |
 | Runner-to-dashboard p50 / p95, 300 events/s | 4.4 s / 8.6 s        | 0.5 ms / 12 ms       |
 
+## Optional incremental vacuum
+
+`CONTROL_PLANE_DB_INCREMENTAL_VACUUM=1` opts the **host** into paced free-page reclamation (#3321).
+It is off by default; unset, empty and `0` are off, invalid values warn and are off. There is no
+organization/API/UI override. Like #2777, an observed off-to-on transition arms for **24 hours**,
+persisted across restarts; observed off disables immediately at startup and reenabling arms anew.
+Only enabled new empty databases choose `auto_vacuum=INCREMENTAL` before schema creation. Existing
+files require the [explicit offline conversion](./archived-history-retention.md#one-time-offline-conversion).
+Startup never runs full `VACUUM` and refuses incremental maintenance on an unconverted database.
+
+The offline operator CLI is
+`pnpm db:enable-incremental-vacuum --db <existing-file> --owner-stopped [--temp-dir <directory>]`.
+Stop all owners/readers/backups first, from outside the hosting stack, and verify a SQLite-aware
+backup. The command requires exclusive SQLite access and pins SQLite's temp directory. On both
+the database and temporary-file filesystems it requires free bytes of at least
+`2 × N + max(256 MiB, ceil(N / 10))`, where `N = max(page_count × page_size, main-file bytes)`.
+Unknown or insufficient space, missing acknowledgement or failed locking refuses before setting
+auto-vacuum mode or starting the full rewrite. Unsupported temp-directory control also refuses.
+The same filesystem needs that amount once. Other writers can consume space after the check;
+the margin is headroom, not a disk reservation. Exclusive locking cannot prove an idle rollback
+handle is closed, so operator downtime remains mandatory. Conversion preserves WAL mode and
+logical records; failures require inspection before restart. It is never a live maintenance step.
+
+Once armed, maintenance starts 10 minutes after startup and hourly after the preceding pass ends,
+independently of retention. It starts only with at least **256 free pages**, then drains in **1–32-page**
+steps, initially one page, adapting toward **4 ms** and resting at least **1 ms and 3× work time**
+after every step. Each pass caps at **1,000 steps**: at 4 KiB pages, at most about **128 MiB per
+hourly pass**, with warmup and slower storage reducing that throughput. A 2 GiB reclamation takes
+more than 16 passes. It is not an emergency full-disk recovery mechanism.
+
+Each step runs with the main connection's normal **`synchronous=FULL`**, outside retention's or
+ingest's relaxed transactions. No replay, approval, accounting or privacy guard is weakened;
+`secure_delete=ON` and FTS5 secure-delete are unchanged. Only for the synchronous maintenance
+call, `busy_timeout` is zero so lock contention defers instead of blocking for the request path's
+250 ms; it is restored in `finally`, without an asynchronous gap. Steps are independent SQLite
+transactions; interruption safely leaves the remaining free list for the next pass. Retained
+records do not change. WAL checkpoints, worker settings, backstops and SQLite-version guards are
+unchanged. Shrinkage becomes visible as ordinary checkpoints apply the WAL's truncation; a reader
+can delay it. No forced checkpoint is added.
+
+Startup logs report mode/arming; pass logs report reclaimed pages/bytes, p95/max complete-step
+latency, slow-step count and stop/limit state with a run ID and entry point. Busy/errors defer to
+the next pass; the first step >=16 ms warns once per pass.
+`pnpm benchmark:incremental-vacuum [--dir <fixture-parent>]` creates a disposable
+file-backed fixture, checks kept data and physical shrinkage, and measures complete steps alongside
+ordinary `FULL` writes and the existing checkpoint worker, failing at **p95 >=16 ms**. The 16 ms
+target requires measurement on the operator's storage, not an unconditional timing guarantee.
+
+Backups and restores retain their existing SQLite-aware consistency, durability, privacy and
+rotation requirements. A restored pre-conversion backup retains `auto_vacuum=NONE` and needs
+conversion again; startup does not rewrite it. A converted backup retains incremental mode.
+Persisted arming state is backed up too: an enabled environment can resume an already mature
+deadline after restore, so leave it off if maintenance should remain disabled. Shrinking allocation
+does not erase old content from WAL, backups or external artifact storage.
+
 ## What a Crash Can Lose
 
 **A control-plane process crash, kill, or out-of-memory exit loses nothing.** Committed WAL frames

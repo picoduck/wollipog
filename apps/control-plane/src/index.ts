@@ -221,6 +221,7 @@ import { WorkflowEventRetention } from "./workflow-event-retention.js";
 import { registerWorkflowEventRetentionRoutes } from "./workflow-event-retention-route.js";
 import { ArchivedHistoryRetention } from "./archived-history-retention.js";
 import { MutationAuditArchiveRetention } from "./mutation-audit-archive-retention.js";
+import { IncrementalVacuum, INCREMENTAL_VACUUM_ENV, parseIncrementalVacuum } from "./incremental-vacuum.js";
 import { registerArchivedHistoryRetentionRoutes } from "./archived-history-retention-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
@@ -425,7 +426,10 @@ const LOCAL_DEVICE_TOKEN = (() => {
 const LOCAL_DEVICE_TOKEN_HASH = hashToken(LOCAL_DEVICE_TOKEN);
 const LOCAL_PAIRING_URL = localPairingUrl(PORT, LOCAL_DEVICE_TOKEN);
 
-const db = ControlPlaneDb.open(DB_PATH, ARTIFACT_BLOB_DIR ? { artifactBlobDir: ARTIFACT_BLOB_DIR } : {});
+const db = ControlPlaneDb.open(DB_PATH, {
+  ...(ARTIFACT_BLOB_DIR ? { artifactBlobDir: ARTIFACT_BLOB_DIR } : {}),
+  incrementalVacuum: parseIncrementalVacuum(process.env[INCREMENTAL_VACUUM_ENV]).enabled,
+});
 // Model rate table for pricing usage the provider bills opaquely (Codex). One outbound fetch per
 // day; `CONTROL_PLANE_USAGE_PRICING_URL=off` disables it and leaves such usage unpriced.
 const usagePricing = new UsageRateTableService({
@@ -1022,6 +1026,7 @@ registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log, hub });
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 const mutationAuditArchiveRetention = new MutationAuditArchiveRetention(db, { env: process.env, log: app.log });
+const incrementalVacuum = new IncrementalVacuum(db, { env: process.env, log: app.log });
 const workflowEventRetention = new WorkflowEventRetention(db, { env: process.env, log: app.log });
 registerWorkflowEventRetentionRoutes(app, workflowEventRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
@@ -6802,6 +6807,7 @@ const artifactMaintenanceTimer = setInterval(() => {
 artifactMaintenanceTimer.unref();
 archivedHistoryRetention.start();
 mutationAuditArchiveRetention.start();
+incrementalVacuum.start();
 workflowEventRetention.start();
 // Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
 // rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
@@ -6863,6 +6869,7 @@ app.addHook("onClose", async () => {
   clearInterval(artifactMaintenanceTimer);
   archivedHistoryRetention.stop();
   mutationAuditArchiveRetention.stop();
+  incrementalVacuum.stop();
   workflowEventRetention.stop();
   clearInterval(runnerLivenessTimer);
   try {
