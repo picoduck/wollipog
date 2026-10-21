@@ -904,6 +904,32 @@ test("a Windows Machine explains that its accounts can't be adopted, and still o
   }
 });
 
+test("a menu whose every item is unavailable takes focus and closes on Escape (#3240)", async () => {
+  // While Work signs in on a Windows Machine, Adopt as Profile… and Remove Account… are both disabled.
+  const ui = await render({
+    runner: runnerView({
+      os: "windows",
+      providerAccounts: SIGN_IN_ACCOUNTS,
+      providerLogins: [{ ...runningLogin("work", "Work"), provider: "codex", userCode: "WOLL-IPOGS",
+        verificationUrl: "https://auth.openai.com/codex/device" }],
+    }),
+  });
+  try {
+    const opened = await ui.openMenu("Work");
+    assert.ok(ui.menuItems(opened).every((item) => item.disabled), JSON.stringify(ui.menuItems(opened)));
+    // A browser focuses the menu only when it is focusable; happy-dom focuses it either way.
+    assert.equal(opened.getAttribute("tabindex"), "-1", "the menu itself can take focus");
+    assert.ok((domWindow.document.activeElement as unknown) === opened, "the menu itself takes focus");
+    await act(async () => {
+      opened.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event);
+    });
+    await ui.settle();
+    assertNoDomNode(ui.menu(), "Escape closes the menu");
+  } finally {
+    await ui.unmount();
+  }
+});
+
 test("a member with manage rights, or a runner below v225, gets no profile actions", async () => {
   for (const props of [
     { canManageProfiles: false },

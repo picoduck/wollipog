@@ -190,6 +190,8 @@ function AccountMenu({ name, heading, busy, items }: {
           sheetTitle="More Actions"
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
+          // A menu whose every item is unavailable takes focus itself, so Escape still closes it.
+          tabIndex={-1}
         >
           <MenuLabel>{heading}</MenuLabel>
           {ordered.map((item, index) => (

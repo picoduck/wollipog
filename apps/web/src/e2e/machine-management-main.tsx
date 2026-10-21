@@ -169,6 +169,8 @@ if (signInFixture && runner.providerAccounts) {
 }
 // Provider profiles (#3239): one account in each access state, and Codex Solo left a legacy HOME.
 if (new URLSearchParams(window.location.search).has("profiles") && runner.providerAccounts) {
+  // A Windows runner refuses every adoption, so the Machine that adopts is a Linux one (#3240).
+  runner.os = "linux";
   const access = { "claude-work": "granted", "claude-personal": "pending", "codex-team": "not_granted" } as const;
   for (const account of runner.providerAccounts) {
     const state = access[account.id as keyof typeof access];
