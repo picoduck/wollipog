@@ -11206,12 +11206,19 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* A pod member's "<Role> · <task>" (#2983) takes the room after the agent and gives it up first. */
+/* A pod member's name block (#2983): the agent over a dim "<Role> · <task>", each one line with an
+   ellipsis. The block takes the row's free room, so the status and ⋯ keep the far end. */
+.compare-member-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
 .compare-member-sub {
-  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   color: var(--text-dim);
+  font: var(--type-small);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

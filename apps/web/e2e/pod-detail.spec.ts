@@ -78,20 +78,23 @@ test.describe("at 1440×900 with three members", () => {
 test.describe("at 1440×900 with four members (#2983)", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("each member head is one line: the agent, Role · task, the status and ⋯", async ({ page }) => {
+  // The head is one row that never wraps (the issue's "one line"): the agent block, the status and
+  // ⋯ side by side. The block is the agent over a dim "<Role> · <task>", which keeps most of the
+  // column's width rather than the scraps beside the status (decision on #2983).
+  test("each member head is one row: the agent over Role · task, the status and ⋯", async ({ page }) => {
     await open(page, "&members=4");
     await expect(page.locator(".compare > .compare-member")).toHaveCount(4);
     const heads = await page.locator(".compare-member-head").evaluateAll((elements) => elements.map((head) => {
-      const box = head.getBoundingClientRect();
-      const middle = box.top + box.height / 2;
+      const parts = [...head.children].map((child) => child.getBoundingClientRect());
+      const middle = parts[0]!.top + parts[0]!.height / 2;
       const sub = head.querySelector<HTMLElement>(".compare-member-sub")!;
+      const agent = head.querySelector<HTMLElement>(".compare-member-agent")!;
       return {
-        height: box.height,
-        offsets: [...head.children].map((child) => {
-          const rect = child.getBoundingClientRect();
-          return Math.abs(rect.top + rect.height / 2 - middle);
-        }),
+        height: head.getBoundingClientRect().height,
+        offsets: parts.map((rect) => Math.abs(rect.top + rect.height / 2 - middle)),
+        stacked: sub.getBoundingClientRect().top >= agent.getBoundingClientRect().bottom - 1,
         sub: sub.textContent,
+        subWidth: sub.getBoundingClientRect().width,
         subHeight: sub.getBoundingClientRect().height,
         lineHeight: Number.parseFloat(getComputedStyle(sub).lineHeight),
         controls: head.querySelectorAll("select, input, textarea").length,
@@ -105,9 +108,13 @@ test.describe("at 1440×900 with four members (#2983)", () => {
       "Worker · update the retry tests",
     ]);
     for (const head of heads) {
+      expect(head.stacked, "the sub-line sits under the agent").toBe(true);
       expect(head.subHeight, "the sub-line never wraps").toBeLessThanOrEqual(head.lineHeight + 1);
-      expect(Math.max(...head.offsets), "every part of the head sits on one line").toBeLessThanOrEqual(4);
-      expect(head.height).toBeLessThanOrEqual(48);
+      // On one text row beside the badge it had 15–50px; under the agent it has the block's width
+      // (about 139px in a 320px column, beside the status and ⋯).
+      expect(head.subWidth, "the sub-line has room to be read").toBeGreaterThanOrEqual(120);
+      expect(Math.max(...head.offsets), "the head's parts share one row").toBeLessThanOrEqual(4);
+      expect(head.height, "the head never wraps into a second row").toBeLessThanOrEqual(56);
       expect(head.controls).toBe(0);
       expect(head.buttons).toHaveLength(1);
     }

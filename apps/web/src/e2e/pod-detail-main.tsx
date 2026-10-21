@@ -243,7 +243,9 @@ const viewer: ViewerIdentity = { userId: "local", shared: false, names: new Map(
 
 function PodRoute() {
   const view = useStoreSelector((state) => state.view);
-  return view.name === "pod" ? <PodDetail podId={view.id} member={view.member} /> : null;
+  return view.name === "pod"
+    ? <PodDetail podId={view.id} member={view.member} onNewSession={() => { document.body.dataset.opened = "new-session"; }} />
+    : null;
 }
 
 createRoot(document.getElementById("root")!).render(

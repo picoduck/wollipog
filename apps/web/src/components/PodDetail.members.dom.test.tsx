@@ -237,7 +237,7 @@ const dialogNamed = (title: string) => [...body().querySelectorAll<HTMLElement>(
   .find((candidate) => candidate.querySelector("h2")?.textContent?.trim() === title) ?? null;
 const closeMenu = (menu: HTMLElement) => act(async () => { fireDomEvent.keyDown(menu as never, { key: "Escape" }); });
 
-test("each member head is one line: the agent, Role · task, its status and ⋯, with no select, checkbox or text button", async () => {
+test("each member head is one row: the agent over Role · task, its status and ⋯, with no select, checkbox or text button", async () => {
   const view = await mount();
   try {
     const heads = [...view.container.querySelectorAll<HTMLElement>(".compare-member-head")];

@@ -49,9 +49,9 @@ export function CompareRow({ label, children }: { label: string; children: React
 }
 
 /**
- * A column's head, on one line: the agent (ending in an ellipsis), an optional dim sub-line that
- * takes the rest of the room, its status at its full width, a visible Open Session when the column
- * offers one, and ⋯. On a phone it is the member bar under the member tabs.
+ * A column's head, one row that never wraps: the agent (ending in an ellipsis), with an optional dim
+ * sub-line under it, its status at its full width, a visible Open Session when the column offers
+ * one, and ⋯. On a phone it is the member bar under the member tabs.
  */
 export function CompareMemberHead({ agent, sub, session, runnerOnline, onOpenSession, menu }: {
   agent: string;
@@ -66,8 +66,14 @@ export function CompareMemberHead({ agent, sub, session, runnerOnline, onOpenSes
 }) {
   return (
     <div className="compare-member-head">
-      <span className="compare-member-agent" title={agent}>{agent}</span>
-      {sub && <span className="compare-member-sub" title={sub}>{sub}</span>}
+      {sub ? (
+        <span className="compare-member-name">
+          <span className="compare-member-agent" title={agent}>{agent}</span>
+          <span className="compare-member-sub" title={sub}>{sub}</span>
+        </span>
+      ) : (
+        <span className="compare-member-agent" title={agent}>{agent}</span>
+      )}
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
       {onOpenSession && (
         <button type="button" className="icon-btn sm" title="Open Session" aria-label="Open Session" onClick={onOpenSession}>
