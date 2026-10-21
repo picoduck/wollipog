@@ -29,9 +29,9 @@ async function rowGeometry(page: Page, title: string) {
     return {
       row: { left: rect.left, width: rect.width, height: rect.height },
       title: box(".row-title"),
-      badge: box(".run-row-status"),
-      meta: box(".run-row-meta"),
-      firstMeta: box(".run-row-meta > span"),
+      badge: box(".list-row-status"),
+      meta: box(".list-row-meta"),
+      firstMeta: box(".list-row-meta > span"),
       titleTruncated: (() => {
         const title = element.querySelector<HTMLElement>(".row-title")!;
         return title.scrollWidth > title.clientWidth;
@@ -72,13 +72,13 @@ test.describe("at 390×844", () => {
   test("line 2 keeps its type whole, its items 12px apart, and folds what does not fit whole", async ({ page }) => {
     await open(page, "loaded");
     const rows = await page.locator(".surface > .row").evaluateAll((elements) => elements.map((element) => {
-      const meta = element.querySelector<HTMLElement>(".run-row-meta")!.getBoundingClientRect();
-      const items = [...element.querySelectorAll<HTMLElement>(".run-row-meta > span")].map((item) => {
+      const meta = element.querySelector<HTMLElement>(".list-row-meta")!.getBoundingClientRect();
+      const items = [...element.querySelectorAll<HTMLElement>(".list-row-meta > span")].map((item) => {
         const rect = item.getBoundingClientRect();
-        const text = item.matches(".run-row-type") ? item : item.querySelector<HTMLElement>("span")!;
+        const text = item.matches(".list-row-lead") ? item : item.querySelector<HTMLElement>("span")!;
         return {
           text: item.textContent ?? "",
-          type: item.matches(".run-row-type"),
+          type: item.matches(".list-row-lead"),
           visible: rect.top >= meta.top - 1 && rect.bottom <= meta.bottom + 1,
           hidden: rect.top >= meta.bottom - 1,
           left: rect.left,

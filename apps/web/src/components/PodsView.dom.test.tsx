@@ -1,10 +1,19 @@
 import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { describe } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { PodContextEntry, PodView, RunnerView, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
+import type {
+  PodArbitrationMode,
+  PodContextEntry,
+  PodOrchestrationStatus,
+  PodReconciliation,
+  PodView,
+  RunnerView,
+  SessionView,
+  UiSnapshotMessage,
+} from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { viewTitle, type View, type ViewNavigation } from "../navigation.js";
@@ -14,6 +23,7 @@ import { FeedbackContext } from "./FeedbackProvider.js";
 import { NewPodDialog } from "./NewPodDialog.js";
 import { PodDetail, PodsView } from "./PodsView.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -177,8 +187,16 @@ test("a direct pod-to-pod route change starts from the new pod's own draft, erro
   }
 });
 
-/** Renders the Pods list with a socket the test drives: nothing arrives until it says so. */
-async function renderPodsList(drive: (socket: FakeSocket) => void): Promise<{ text: string; createButton: boolean }> {
+interface PodsListFixture {
+  container: HTMLDivElement;
+  socket: FakeSocket;
+  /** Every view the list asked to open. */
+  opened: View[];
+  unmount: () => Promise<void>;
+}
+
+/** Mounts the Pods list with a socket the test drives: nothing arrives until it says so. */
+async function mountPodsList(drive: (socket: FakeSocket) => void): Promise<PodsListFixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -188,30 +206,47 @@ async function renderPodsList(drive: (socket: FakeSocket) => void): Promise<{ te
     createSocket: (() => { let first = true; return () => { if (!first) return new FakeSocket(); first = false; return socket; }; })(),
     close() {},
   };
-  const navigation: ViewNavigation = { current: () => ({ name: "pods" }), push() {}, listen: () => () => {} };
+  const opened: View[] = [];
+  const navigation: ViewNavigation = { current: () => ({ name: "pods" }), push: (view) => { opened.push(view); }, listen: () => () => {} };
+  await act(async () => root.render(
+    <ApiProvider client={api}>
+      <StoreProvider connection={connection} navigation={navigation}>
+        <PodsView onNewPod={() => {}} />
+      </StoreProvider>
+    </ApiProvider>,
+  ));
+  await act(async () => drive(socket));
+  return {
+    container, socket, opened,
+    unmount: async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+/** Renders the Pods list once and reads what it offers. */
+async function renderPodsList(
+  drive: (socket: FakeSocket) => void,
+): Promise<{ text: string; createButton: boolean; headerCreateButton: boolean; newPodButtons: number }> {
+  const fixture = await mountPodsList(drive);
   try {
-    await act(async () => root.render(
-      <ApiProvider client={api}>
-        <StoreProvider connection={connection} navigation={navigation}>
-          <PodsView onNewPod={() => {}} />
-        </StoreProvider>
-      </ApiProvider>,
-    ));
-    await act(async () => drive(socket));
+    const { container } = fixture;
     return {
       text: container.textContent ?? "",
       createButton: [...container.querySelectorAll(".state .actions button")].some((button) => button.textContent === "New Pod"),
+      headerCreateButton: [...container.querySelectorAll(".page-header button")].some((button) => button.textContent === "New Pod"),
+      newPodButtons: [...container.querySelectorAll("button")].filter((button) => button.textContent === "New Pod").length,
     };
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await fixture.unmount();
   }
 }
 
-const snapshotWithPods = (pods: PodView[]): UiSnapshotMessage => ({
+const snapshotWithPods = (pods: PodView[], sessions: SessionView[] = []): UiSnapshotMessage => ({
   type: "snapshot",
   capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-  runners: [runner], boxes: [], projects: [], sessions: [], runs: [], pods,
+  runners: [runner], boxes: [], projects: [], sessions, runs: [], pods,
 });
 
 test("before the first snapshot the Pods list is loading, not empty", async () => {
@@ -219,6 +254,8 @@ test("before the first snapshot the Pods list is loading, not empty", async () =
   assert.match(list.text, /Loading Pods…/u);
   assert.doesNotMatch(list.text, /No Pods Yet/u);
   assert.equal(list.createButton, false);
+  // The header keeps New Pod until the empty state can offer it.
+  assert.equal(list.headerCreateButton, true);
 });
 
 test("an offline or unpaired dashboard shows the Pods list as unavailable, not empty", async () => {
@@ -268,14 +305,160 @@ test("a loaded pod titles its page by name and returns to Pods", async () => {
   }
 });
 
-test("only a loaded snapshot with no pods shows the empty state and its create action", async () => {
+test("with no pods after the snapshot, exactly one New Pod renders, in the empty state", async () => {
   const empty = await renderPodsList((socket) => socket.push(snapshotWithPods([])));
   assert.match(empty.text, /No Pods Yet/u);
+  assert.match(empty.text, /Group two or more sessions so their agents can share notes and merge each other's work\./u);
+  assert.doesNotMatch(empty.text, /runners/u, "the body does not talk about runners");
   assert.equal(empty.createButton, true);
+  assert.equal(empty.headerCreateButton, false, "the empty state owns the one create action");
+  assert.equal(empty.newPodButtons, 1);
 
   const listed = await renderPodsList((socket) => socket.push(snapshotWithPods([podA])));
   assert.match(listed.text, /Pod A/u);
   assert.doesNotMatch(listed.text, /No Pods Yet|Loading/u);
+  assert.equal(listed.headerCreateButton, true);
+  assert.equal(listed.newPodButtons, 1);
+});
+
+describe("Pods list rows (#2979)", () => {
+  const minute = 60_000;
+  const member = (sessionId: string) => ({ sessionId, joinedAt: 1, role: "worker" as const, contextTokenBudget: null, lastContextSeq: 0 });
+  const orchestration = (mode: PodArbitrationMode, status: PodOrchestrationStatus, turnsUsed = 0) => ({
+    policy: { mode, contextTokenBudget: 8_192, summaryTokenBudget: 1_024, maxTurns: 12, maxRepeatedOutputs: 2 },
+    state: { status, turnsUsed, updatedAt: 1 },
+  });
+  const idle: PodView = {
+    id: "pod_idle_3f1a", title: "Idle pod", objective: "Tighten the retry helper", status: "active",
+    members: [member("s_idle_1"), member("s_idle_2"), member("s_idle_3")],
+    orchestration: orchestration("round_robin", "idle"), createdAt: 1, updatedAt: Date.now() - 2 * 60 * minute,
+  };
+  const turns: PodView = {
+    id: "pod_turns_7b2c", title: "Turns pod", objective: "", status: "active",
+    members: [member("s_turns_1"), member("s_turns_2")],
+    orchestration: orchestration("lead_driven", "running", 3), createdAt: 1, updatedAt: Date.now() - 5 * minute,
+  };
+  const manual: PodView = {
+    id: "pod_manual_0d4e", title: "Manual pod", objective: "", status: "active",
+    members: [member("s_manual_1"), member("s_manual_2")], createdAt: 1, updatedAt: Date.now() - 30 * minute,
+  };
+  const closed: PodView = {
+    id: "pod_closed_91aa", title: "Closed pod", objective: "Ship the parser", status: "closed",
+    members: [member("s_closed_1"), member("s_closed_2")],
+    orchestration: orchestration("event_triggered", "stopped", 4), createdAt: 1, updatedAt: Date.now() - minute,
+  };
+  const pods = [idle, turns, manual, closed];
+  const sessions = pods.flatMap((candidate) => candidate.members.map((entry) => session(entry.sessionId)));
+  const ids = [...pods.map((candidate) => candidate.id), ...sessions.map((candidate) => candidate.id), runner.runnerId];
+
+  const rowNamed = (container: HTMLDivElement, title: string) =>
+    [...container.querySelectorAll<HTMLButtonElement>(".surface > .row.row-2")].find((row) => row.querySelector(".row-title")?.textContent === title)!;
+  const meta = (row: Element) => [...row.querySelectorAll(".list-row-meta > span")].map((span) => span.textContent);
+  const badge = (container: HTMLDivElement, title: string) => rowNamed(container, title).querySelector(".status");
+  const loaded = (list: PodView[] = pods, members: SessionView[] = sessions) =>
+    mountPodsList((socket) => socket.push(snapshotWithPods(list, members)));
+
+  test("each row is one two-line row with the pods icon, the title, plain meta and the last update, and no ids", async () => {
+    const fixture = await loaded();
+    try {
+      const rows = [...fixture.container.querySelectorAll<HTMLButtonElement>(".surface > .row")];
+      assert.equal(rows.length, 4);
+      for (const row of rows) {
+        assert.ok(row.classList.contains("row-2"), "a 56px two-line row (§5.2)");
+        assert.ok(row.querySelector(".row-icon svg"), "a leading 16px icon");
+        assert.ok(row.querySelectorAll(".status").length <= 1, "at most one badge");
+        assert.ok(row.querySelector(".row-trail > time[datetime]"), "the last update trails");
+        assert.doesNotMatch(row.querySelector(".list-row-meta")?.textContent ?? "", /·/u, "meta is spaced, not dotted");
+        for (const id of ids) assert.ok(!row.outerHTML.includes(id), `no row carries ${id}`);
+      }
+      // Open pods by last update, then closed pods, even one updated more recently.
+      assert.deepEqual(rows.map((row) => row.querySelector(".row-title")?.textContent), [turns.title, manual.title, idle.title, closed.title]);
+
+      assert.deepEqual(meta(rowNamed(fixture.container, idle.title)), ["3 members", "Round robin", "Tighten the retry helper"]);
+      assert.equal(rowNamed(fixture.container, idle.title).querySelector(".row-trail time")?.textContent, "2h ago");
+      assert.deepEqual(meta(rowNamed(fixture.container, turns.title)), ["2 members", "Lead decides", "turn 3 of 12", "No objective"]);
+      // A pod from a control plane without orchestration is relayed by hand.
+      assert.deepEqual(meta(rowNamed(fixture.container, manual.title)), ["2 members", "Manual relay", "No objective"]);
+      assert.deepEqual(meta(rowNamed(fixture.container, closed.title)), ["2 members", "When a member finishes", "Ship the parser"]);
+      assert.ok(rowNamed(fixture.container, manual.title).querySelector(".list-row-fill > .pod-row-no-objective"),
+        "No objective is faint, not content");
+      assertNoDomNode(rowNamed(fixture.container, idle.title).querySelector(".pod-row-no-objective"), "a real objective is not faint");
+      assert.doesNotMatch(fixture.container.textContent ?? "", /Manual collaboration pod|Members|Round Robin|Lead Decides/u);
+    } finally {
+      await fixture.unmount();
+    }
+  });
+
+  test("an idle open pod shows no badge, running turns show Running, and a closed pod shows Closed", async () => {
+    const fixture = await loaded();
+    try {
+      assertNoDomNode(badge(fixture.container, idle.title), "an idle open pod: no badge");
+      assertNoDomNode(badge(fixture.container, manual.title), "an idle manual pod: no badge");
+      const running = badge(fixture.container, turns.title);
+      assert.equal(running?.textContent, "Running");
+      assert.ok(running?.classList.contains("t-info"));
+      assert.ok(running?.classList.contains("pulse"));
+      const shut = badge(fixture.container, closed.title);
+      assert.equal(shut?.textContent, "Closed");
+      assert.ok(shut?.classList.contains("t-neutral"));
+      assert.doesNotMatch(fixture.container.textContent ?? "", /Active/u, "no row says Active");
+
+      // A member's own turn is something happening too.
+      const working = sessions.map((candidate) => candidate.id === "s_manual_2" ? { ...candidate, status: "running" } as SessionView : candidate);
+      await act(async () => fixture.socket.push(snapshotWithPods(pods, working)));
+      assert.equal(badge(fixture.container, manual.title)?.textContent, "Running");
+      assert.deepEqual(meta(rowNamed(fixture.container, manual.title)), ["2 members", "Manual relay", "No objective"],
+        "no turn count without automatic turns");
+    } finally {
+      await fixture.unmount();
+    }
+  });
+
+  test("the newest merge's conflict or failure is the badge, and a later applied merge clears it", async () => {
+    const receipt = (reconciliationId: string, status: PodReconciliation["status"]): PodReconciliation => ({
+      reconciliationId, podId: idle.id, sourceSessionId: "s_idle_1", targetSessionId: "s_idle_2", actorId: "local", status, createdAt: 1,
+    });
+    const fixture = await loaded([{ ...idle, reconciliations: [receipt("r2", "conflicted"), receipt("r1", "applied")] }, turns]);
+    try {
+      assert.equal(badge(fixture.container, idle.title)?.textContent, "Conflicted");
+      assert.ok(badge(fixture.container, idle.title)?.classList.contains("t-warning"));
+      await act(async () => fixture.socket.push(snapshotWithPods([
+        { ...idle, reconciliations: [receipt("r3", "failed"), receipt("r2", "conflicted")] },
+        { ...turns, reconciliations: [receipt("r4", "conflicted")] },
+      ], sessions)));
+      assert.equal(badge(fixture.container, idle.title)?.textContent, "Failed");
+      assert.ok(badge(fixture.container, idle.title)?.classList.contains("t-danger"));
+      assert.equal(badge(fixture.container, turns.title)?.textContent, "Conflicted", "a conflict needs the person more than running turns");
+      await act(async () => fixture.socket.push(snapshotWithPods([
+        { ...idle, reconciliations: [receipt("r5", "applied"), receipt("r3", "failed")] },
+      ], sessions)));
+      assertNoDomNode(badge(fixture.container, idle.title), "an applied merge clears the earlier failure");
+    } finally {
+      await fixture.unmount();
+    }
+  });
+
+  test("offline with pods loaded, the rows stay dimmed under Reconnecting… and still open their pod", async () => {
+    const fixture = await loaded();
+    try {
+      await act(async () => fixture.socket.onclose?.({ code: 1006 }));
+      const page = fixture.container.querySelector(".page")!;
+      const line = page.querySelector('[role="status"]');
+      assert.equal(line?.textContent, "Reconnecting…");
+      const stale = page.querySelector(".is-stale");
+      assert.ok(stale, "the rows are wrapped in StaleContent");
+      assert.equal(line!.compareDocumentPosition(stale!) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING, domWindow.Node.DOCUMENT_POSITION_FOLLOWING,
+        "the line sits above the rows");
+      assert.ok(!stale!.contains(line), "the line is not dimmed with them");
+      assert.equal(stale!.querySelectorAll(".row").length, 4);
+      assert.doesNotMatch(page.textContent ?? "", /No Pods Yet|Unavailable/u, "never an empty state");
+      assert.equal(badge(fixture.container, turns.title)?.textContent, "Running", "last-known status stays");
+      await act(async () => rowNamed(fixture.container, closed.title).click());
+      assert.deepEqual(fixture.opened.at(-1), { name: "pod", id: closed.id });
+    } finally {
+      await fixture.unmount();
+    }
+  });
 });
 
 test("the New Pod dialog confirms with Create Pod at every selection count and keeps it while creating", async () => {

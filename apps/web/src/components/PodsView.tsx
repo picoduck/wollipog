@@ -3,7 +3,7 @@ import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { StatusBadge, statusToneClass } from "./StatusBadge.js";
 import { sessionStatusSummary, statusMeta } from "../status-meta.js";
-import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type {
   PodContextEntry,
@@ -14,7 +14,7 @@ import type {
   SessionView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { formatRecordedRelativeTime, relativeTime, titleCaseLabel } from "../format.js";
+import { formatRecordedRelativeTime } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -32,15 +32,19 @@ import { absoluteViewUrl, backLabel, destination, viewTitle } from "../navigatio
 import { useDashboardPublicOrigin } from "../remote-access-context.js";
 import { writeClipboardText } from "../clipboard.js";
 import {
+  comparePodsForList,
   podBadgeStatus,
   podEntrySourceName,
   podMemberNames,
   podMemberShortName,
   podMemberTask,
+  podModeLabel,
   podRoleLabel,
+  podRowStatus,
   podShareReason,
   podTurnsStopNotice,
 } from "../pod-presentation.js";
+import { StaleContent } from "./StaleContent.js";
 import { POD_MAX_SESSIONS } from "../pod-session-choices.js";
 import { PodAddMembersDialog, PodMemberSettingsDialog } from "./PodMemberDialogs.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -483,61 +487,98 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   const pods = useStoreSelector((state) => state.pods);
   const conn = useStoreSelector((state) => state.conn);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
-  const list = useMemo(() => [...pods.values()].sort((a, b) => b.updatedAt - a.updatedAt), [pods]);
+  const sessions = useStoreSelector((state) => state.sessions);
+  const list = useMemo(() => [...pods.values()].sort(comparePodsForList), [pods]);
+  const now = useTimelineClock(list.length > 0);
   const podsDestination = destination("pods");
-  const header = (
-    <PageHeader
-      title={podsDestination.name}
-      description={podsDestination.description}
-      primary={{ label: "New Pod", onClick: onNewPod }}
-    />
-  );
-  if (list.length === 0) {
+
+  let body: ReactNode;
+  const empty = list.length === 0 && snapshotLoaded && conn === "online";
+  if (list.length === 0 && !empty) {
     // An empty map proves nothing before the first snapshot or while disconnected (§12.5).
-    if (!snapshotLoaded || conn !== "online") {
-      const placeholder = listPlaceholder("pods", conn);
-      return (
-        <div className="page">
-          {header}
-          <State variant={placeholder.variant} icon={<PodsIcon />} title={placeholder.title}>{placeholder.hint}</State>
-        </div>
-      );
-    }
-    return (
-      <div className="page">
-        {header}
-        <State
-          icon={<PodsIcon />}
-          title={`No ${podsDestination.name} Yet`}
-          actions={<button type="button" className="btn primary" onClick={onNewPod}>New Pod</button>}
-        >
-          Group isolated sessions to relay context across agents and runners.
-        </State>
-      </div>
+    const placeholder = listPlaceholder("pods", conn);
+    body = <State variant={placeholder.variant} icon={<PodsIcon />} title={placeholder.title}>{placeholder.hint}</State>;
+  } else if (empty) {
+    body = (
+      <State
+        icon={<PodsIcon />}
+        title={`No ${podsDestination.name} Yet`}
+        actions={<button type="button" className="btn primary" onClick={onNewPod}>New Pod</button>}
+      >
+        Group two or more sessions so their agents can share notes and merge each other's work.
+      </State>
+    );
+  } else {
+    // Disconnected with pods: the last-known rows stay, dimmed and still openable, under one line
+    // that says why (§12.5). Never an empty state.
+    const stale = conn !== "online";
+    body = (
+      <>
+        {stale && <Notice compact tone="neutral" role="status" className="list-reconnecting">Reconnecting…</Notice>}
+        <StaleContent stale={stale}>
+          <div className="surface">
+            {list.map((pod) => (
+              <PodRow key={pod.id} pod={pod} sessions={sessions} now={now} onOpen={() => navigate({ name: "pod", id: pod.id })} />
+            ))}
+          </div>
+        </StaleContent>
+      </>
     );
   }
+
   return (
     <div className="page">
-    {header}
-    <div className="surface">
-      {list.map((pod) => (
-        <button key={pod.id} type="button" className="row row-2" onClick={() => navigate({ name: "pod", id: pod.id })}>
-          <span className="row-body">
-            <span className="row-line">
-              <span className="row-title">{pod.title}</span>
-              <StatusBadge meta={statusMeta("pod", pod.status)} />
-            </span>
-            <span className="row-sub">{pod.objective || "Manual collaboration pod"}</span>
-          </span>
-          <span className="row-trail">
-            {pod.members.length} Members · {titleCaseLabel(pod.orchestration?.policy.mode.replaceAll("_", " ") ?? "manual")}
-            {pod.orchestration?.state.status === "running" ? ` · turn ${pod.orchestration.state.turnsUsed}` : ""}
-            {` · updated ${relativeTime(pod.updatedAt)}`}
-          </span>
-        </button>
-      ))}
+      {/* The empty state owns the one create action, so the header offers none beside it (§12.1). */}
+      <PageHeader
+        title={podsDestination.name}
+        description={podsDestination.description}
+        primary={empty ? undefined : { label: "New Pod", onClick: onNewPod }}
+      />
+      {body}
     </div>
-    </div>
+  );
+}
+
+/**
+ * One pod (§5.2), on the Runs list's row recipe: a two-line row that opens the pod. Line 1 is the
+ * title and a badge only while something is happening (`podRowStatus()`); line 2 is meta 12px
+ * apart: the members, how turns pass, the turn while automatic turns run, and the objective, or
+ * "No objective". The last update trails. On phones the badge leads line 2, and the turn moves
+ * ahead of the mode, so the line keeps a running pod's progress when it folds facts away.
+ */
+export function PodRow({ pod, sessions, now, onOpen }: {
+  pod: PodView;
+  sessions: ReadonlyMap<string, SessionView>;
+  /** The shared clock the last update reads against. */
+  now: number;
+  onOpen: () => void;
+}) {
+  const status = podRowStatus(pod, sessions);
+  const orchestration = pod.orchestration;
+  const turnsRunning = pod.status === "active" && orchestration?.state.status === "running";
+  const objective = pod.objective.trim();
+  const updated = new Date(pod.updatedAt);
+  return (
+    <button type="button" className="row row-2" onClick={onOpen}>
+      <span className="row-icon" aria-hidden="true"><PodsIcon size={16} /></span>
+      <span className="row-body list-row-body">
+        <span className="row-title" title={pod.title}>{pod.title}</span>
+        {status && <StatusBadge meta={statusMeta("pod", status)} className="list-row-status" />}
+        <span className="row-sub list-row-meta pod-row-meta">
+          <span>{pod.members.length === 1 ? "1 member" : `${pod.members.length} members`}</span>
+          <span className="pod-row-mode">{podModeLabel(orchestration?.policy.mode)}</span>
+          {turnsRunning && <span>{`turn ${orchestration.state.turnsUsed} of ${orchestration.policy.maxTurns}`}</span>}
+          <span className="list-row-fill">
+            <span className={objective ? undefined : "pod-row-no-objective"} title={objective || undefined}>{objective || "No objective"}</span>
+          </span>
+        </span>
+      </span>
+      <span className="row-trail">
+        <time dateTime={updated.toISOString()} title={`Updated ${updated.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`}>
+          {formatRecordedRelativeTime(pod.updatedAt, now)}
+        </time>
+      </span>
+    </button>
   );
 }
 

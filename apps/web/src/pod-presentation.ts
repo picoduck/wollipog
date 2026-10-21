@@ -1,4 +1,13 @@
-import type { PodContextEntry, PodMemberRole, PodMemberView, PodOrchestrationState, PodView, SessionEvent, SessionView } from "@wollipog/protocol";
+import type {
+  PodArbitrationMode,
+  PodContextEntry,
+  PodMemberRole,
+  PodMemberView,
+  PodOrchestrationState,
+  PodView,
+  SessionEvent,
+  SessionView,
+} from "@wollipog/protocol";
 import { sessionAgentLabel } from "./components/agent-options.js";
 import { titleCaseLabel } from "./format.js";
 
@@ -109,6 +118,42 @@ export function podBadgeStatus(pod: PodView, sessions: ReadonlyMap<string, Sessi
     const status = sessions.get(member.sessionId)?.status;
     return status === "running" || status === "starting";
   }) ? "running" : "active";
+}
+
+/** The one badge a Pods list row shows (#2979); an idle open pod shows none. */
+export type PodRowStatus = "running" | "conflicted" | "failed" | "closed";
+
+/**
+ * The Pods list row's badge (#2979, §11.1), only while something is worth noticing. The first that
+ * applies: Closed for a closed pod; Conflicted or Failed when the pod's newest merge reports it,
+ * which outranks work in progress because it needs the person; Running while automatic turns or
+ * any member's turn run, as `podBadgeStatus` reads them. Otherwise none.
+ */
+export function podRowStatus(pod: PodView, sessions: ReadonlyMap<string, SessionView>): PodRowStatus | null {
+  if (pod.status === "closed") return "closed";
+  // Receipts are newest first, so a later merge that applied clears an earlier conflict.
+  const merge = pod.reconciliations?.[0]?.status;
+  if (merge === "conflicted" || merge === "failed") return merge;
+  return podBadgeStatus(pod, sessions) === "running" ? "running" : null;
+}
+
+const MODE_LABELS: Record<PodArbitrationMode, string> = {
+  manual: "Manual relay",
+  round_robin: "Round robin",
+  lead_driven: "Lead decides",
+  event_triggered: "When a member finishes",
+};
+
+/** How turns pass, in sentence case for row meta (§11.3): "Round robin". A pod from a control
+ * plane that predates orchestration is relayed by hand. */
+export function podModeLabel(mode: PodArbitrationMode | undefined): string {
+  return MODE_LABELS[mode ?? "manual"] ?? MODE_LABELS.manual;
+}
+
+/** The Pods list's order (#2979): open pods first, then closed ones, each newest update first. */
+export function comparePodsForList(left: PodView, right: PodView): number {
+  const closed = Number(left.status === "closed") - Number(right.status === "closed");
+  return closed || right.updatedAt - left.updatedAt;
 }
 
 /**
