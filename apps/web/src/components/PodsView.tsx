@@ -608,6 +608,8 @@ function PodDetailContent({ podId, member, onNewSession }: { podId: string; memb
       const retained = current.filter((id) => memberIds.includes(id));
       return retained.length ? retained : [...memberIds];
     });
+    // A member that leaves takes its Member Settings with it, so rejoining never reopens them.
+    setSettingsFor((current) => current !== null && !memberIds.includes(current) ? null : current);
   }, [memberIds]);
 
   useEffect(() => {

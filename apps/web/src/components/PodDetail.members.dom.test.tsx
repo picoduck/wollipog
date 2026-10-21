@@ -372,6 +372,20 @@ test("a refused save keeps Member Settings open with the reason above the footer
   }
 });
 
+test("a member that leaves closes its Member Settings, and rejoining does not reopen them", async () => {
+  const view = await mount();
+  try {
+    await click(itemNamed(await openMemberMenu("Codex"), "Member Settings…"));
+    assert.ok(dialogNamed("Member Settings"), "Member Settings opens");
+    await view.snapshot([pod(["lead", "reviewer", "worker-2"])]);
+    assertNoDomNode(dialogNamed("Member Settings"), "it closes with the member");
+    await view.snapshot([pod()]);
+    assertNoDomNode(dialogNamed("Member Settings"), "rejoining does not reopen it");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("while automatic turns or a merge run, Member Settings…, Remove from Pod… and Add Member… are disabled with the reason", async () => {
   const view = await mount({ pods: [pod(undefined, { status: "running", runId: "run-1", turnsUsed: 1 })] });
   try {
