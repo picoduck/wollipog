@@ -16,7 +16,7 @@ import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage } from "./ProviderAccountsSection.js";
+import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -886,6 +886,19 @@ test("Owners and Admins get Adopt as Profile… and Revoke Access… by access s
     assert.deepEqual(ui.menuItems(opened).map((item) => item.label),
       ["Sign In Again…", "Adopt as Profile…", "Revoke Access…", "Remove Account…"], "Remove Account… stays last");
     await ui.closeMenu();
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a Windows Machine explains that its accounts can't be adopted, and still offers Revoke Access… (#3240)", async () => {
+  const ui = await render({ runner: runnerView({ os: "windows" }) });
+  try {
+    const opened = await ui.openMenu("Legacy Work");
+    assert.deepEqual(ui.menuItems(opened).filter((item) => item.label === "Adopt as Profile…"),
+      [{ label: "Adopt as Profile…", disabled: true, reason: PROFILES_UNSUPPORTED_ON_WINDOWS }]);
+    await ui.closeMenu();
+    assert.deepEqual(await profileItems(ui, "Granted Work"), ["Revoke Access…"]);
   } finally {
     await ui.unmount();
   }

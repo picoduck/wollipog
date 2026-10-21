@@ -14,6 +14,12 @@ test("describeTurnError says known failures in plain words", () => {
     ["prompt failed: read ECONNRESET", "The connection to the provider was lost."],
     ["fetch failed", "The connection to the provider was lost."],
     ["Your request was flagged as potentially violating our usage policy", "The provider rejected the content of this turn."],
+    ["agent process could not be created: Provider HOME is already in use; retry after the current owner or publication finishes.",
+      "The runner couldn't use this session's provider account, so the agent didn't start."],
+    ["Provider-HOME lease helper unavailable; preserve all evidence and restore the fixed helper and executable staging directory before retrying.",
+      "The runner couldn't use this session's provider account, so the agent didn't start."],
+    ["provider account unavailable: This provider profile is not granted to this control plane. An Owner or Admin must grant access on this Machine before it can be used.",
+      "The runner couldn't use this session's provider account, so the agent didn't start."],
   ];
   for (const [message, sentence] of cases) assert.equal(describeTurnError(message), sentence, message);
 });

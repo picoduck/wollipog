@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   queueHoldReason,
+  validProviderHomeLaunchRefusal,
   queueHoldRecoveryAction,
   sessionHolds,
   worktreeRecoveryAction,
@@ -111,7 +112,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 232);
+  assert.equal(PROTOCOL_VERSION, 233);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -269,8 +270,31 @@ test("campaign review sessions require accounting-aware runners", () => {
   assert.equal(runnerSupportsProtocol(232, "campaignReviewSessions"), true);
 });
 
-test("PROTOCOL_VERSION is 232", () => {
-  assert.equal(PROTOCOL_VERSION, 232);
+test("provider-HOME launch refusals require v233 runners", () => {
+  assert.equal(runnerSupportsProtocol(232, "providerHomeLaunchRefusals"), false);
+  assert.equal(runnerSupportsProtocol(233, "providerHomeLaunchRefusals"), true);
+});
+
+test("a provider-HOME launch refusal is accepted only when well formed and content-free", () => {
+  const refusal = { code: "foreign_owner", provider: "claude", providerAccountId: "work", providerAccountLabel: "Work", detectedAt: 5 };
+  assert.deepEqual(validProviderHomeLaunchRefusal(refusal), refusal);
+  assert.deepEqual(validProviderHomeLaunchRefusal({ code: "busy", provider: "codex", detectedAt: 0 }),
+    { code: "busy", provider: "codex", detectedAt: 0 }, "the runner's own HOME names no account");
+  for (const invalid of [
+    null, [], "busy",
+    { ...refusal, code: "cancelled" },
+    { ...refusal, provider: "pi" },
+    { ...refusal, detectedAt: Number.NaN },
+    { ...refusal, home: "/home/user/.claude" },
+    { ...refusal, providerAccountId: "../work" },
+    { ...refusal, providerAccountLabel: "" },
+    { ...refusal, providerAccountLabel: "x".repeat(201) },
+    { code: "busy", provider: "claude", providerAccountLabel: "Work", detectedAt: 1 },
+  ]) assert.equal(validProviderHomeLaunchRefusal(invalid), null, JSON.stringify(invalid));
+});
+
+test("PROTOCOL_VERSION is 233", () => {
+  assert.equal(PROTOCOL_VERSION, 233);
   // A v229 runner cannot attest Full Control worktree containment (#2940).
   assert.equal(runnerSupportsProtocol(229, "campaignWorktreeContainment"), false);
   assert.equal(runnerSupportsProtocol(230, "campaignWorktreeContainment"), true);

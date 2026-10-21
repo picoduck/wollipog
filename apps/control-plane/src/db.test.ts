@@ -4468,6 +4468,25 @@ test("provider account switch failures round-trip and clear through runner snaps
   assert.equal(db.getSession("account-switch-failure")?.providerAccountId, "work");
 });
 
+test("provider-HOME launch refusals round-trip, survive an older runner's snapshot, and clear (#3240)", () => {
+  const db = withRunner();
+  const refusal = { code: "foreign_owner" as const, provider: "claude" as const, providerAccountId: "work",
+    providerAccountLabel: "Work", detectedAt: 2_000 };
+  db.createSessionFromSnapshot(snapshot({ id: "launch-refusal", providerHomeRefusal: refusal }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("launch-refusal")?.providerHomeRefusal, refusal);
+
+  db.updateSessionFromSnapshot("launch-refusal", snapshot({ id: "launch-refusal" }), 3_000);
+  assert.deepEqual(db.getSession("launch-refusal")?.providerHomeRefusal, refusal, "an absent field keeps it");
+
+  db.updateSessionFromSnapshot("launch-refusal", snapshot({ id: "launch-refusal",
+    providerHomeRefusal: { ...refusal, home: "/home/user/.claude" } as never }), 4_000);
+  assert.equal(db.getSession("launch-refusal")?.providerHomeRefusal, undefined, "a malformed refusal is not stored");
+
+  db.updateSessionFromSnapshot("launch-refusal", snapshot({ id: "launch-refusal", providerHomeRefusal: refusal }), 5_000);
+  db.updateSessionFromSnapshot("launch-refusal", snapshot({ id: "launch-refusal", providerHomeRefusal: null }), 6_000);
+  assert.equal(db.getSession("launch-refusal")?.providerHomeRefusal, undefined, "null clears it");
+});
+
 test("a session's recorded provider profile id is stored, projected, kept when absent and cleared by null (#3239)", () => {
   const db = withRunner();
   const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";

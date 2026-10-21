@@ -10,6 +10,12 @@ export const TURN_ERROR_FALLBACK = "The agent stopped because of an error.";
  */
 const TURN_ERROR_SHAPES: ReadonlyArray<{ pattern: RegExp; sentence: string }> = [
   {
+    // The runner's provider-HOME lease refusals (#3240). A v233 runner also reports the code, and the
+    // session's notice says what to do; this sentence covers every runner.
+    pattern: /\bProvider[- ]HOME\b|\bprovider account unavailable:|\bThis provider profile\b/,
+    sentence: "The runner couldn't use this session's provider account, so the agent didn't start.",
+  },
+  {
     pattern: /\b(?:rate[ -]?limit|usage limit|quota|too many requests|429|credit balance (?:is )?too low|hit your limit)\b/i,
     sentence: "The provider's usage limit was reached. Wait for it to reset, then retry.",
   },

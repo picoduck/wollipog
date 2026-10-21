@@ -92,6 +92,8 @@ export const SESSION_NOTICE_RANK = {
   worktreeSetupFailed: 3,
   worktreeSetupConfigInvalid: 4,
   accountSwitchFailed: 5,
+  // The provider-HOME lease refusal that stopped the session's last launch (#3240).
+  providerHomeRefusal: 6,
   archived: 7,
   skillsUnavailable: 8,
   setupSuggestion: 9,

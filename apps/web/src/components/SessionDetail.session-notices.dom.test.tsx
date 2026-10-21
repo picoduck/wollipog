@@ -14,7 +14,7 @@ import type {
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import type { ViewNavigation } from "../navigation.js";
+import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { readTranscriptAction } from "../dom-test-transcript-actions.js";
 import type { ComposerDraft } from "../composer-drafts.js";
@@ -167,8 +167,9 @@ async function mount(current: SessionView, { online = true, client: overrides = 
   const connection: UiConnectionRuntime = {
     instanceId: current.id, runtimeKey: `${current.id}:1`, createSocket: () => socket, close() {},
   };
+  const pushed: View[] = [];
   const navigation: ViewNavigation = {
-    current: () => ({ name: "session", id: current.id }), push() {}, listen: () => () => {},
+    current: () => ({ name: "session", id: current.id }), push(view) { pushed.push(view); }, listen: () => () => {},
   };
   const client = {
     ...api,
@@ -214,6 +215,7 @@ async function mount(current: SessionView, { online = true, client: overrides = 
     container,
     toasts,
     undos,
+    pushed,
     slot,
     notices: () => [...container.querySelectorAll(".session-notice-slot .notice")] as HTMLElement[],
     button: (name: string) => [...(slot()?.querySelectorAll("button") ?? [])]
@@ -401,6 +403,89 @@ test("Account Switch Failed offers Switch Account… and names a plain label", a
     assert.match(dialog.textContent ?? "", /Switch Account/);
     assert.match(dialog.textContent ?? "", /Continue this conversation with another Codex account on Build Box\./,
       "the dialog names the provider and the session's machine");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+function launchRefusal(code: NonNullable<SessionView["providerHomeRefusal"]>["code"], account = true): NonNullable<SessionView["providerHomeRefusal"]> {
+  return {
+    code, provider: "codex", detectedAt: 9,
+    ...(account ? { providerAccountId: "acct-1", providerAccountLabel: "Work" } : {}),
+  };
+}
+
+const actionNames = (notice: HTMLElement) => [...notice.querySelectorAll(".notice-actions button")].map((button) => button.textContent);
+
+test("a launch refused at its account's lease says why and opens the Machine's accounts (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerHomeRefusal: launchRefusal("foreign_owner") }), {
+    client: { sessionProviderAccounts: async () => ({ accounts: [] }) } as Partial<ApiClient>,
+  });
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Account Locked by Another Runner");
+    assert.ok(notice.classList.contains("t-warning"));
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "A runner or control plane that stopped left Work locked. An Owner or Admin can recover the lease from the Machine's accounts, or you can switch to another account.");
+    assert.deepEqual(actionNames(notice), ["Open Machine Accounts", "Switch Account…"]);
+    await act(async () => { fixture.button("Open Machine Accounts")!.click(); });
+    await flush();
+    assert.deepEqual(fixture.pushed.at(-1), { name: "runners", section: "machines", machineId: "runner-1" });
+    await act(async () => { fixture.button("Switch Account…")!.click(); });
+    await flush();
+    assert.ok(domWindow.document.querySelector('[role="dialog"]'), "Switch Account… opens the Switch Account dialog");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a busy account offers Restart Session, which restarts the session (#3240)", async () => {
+  const restarts: string[] = [];
+  const current = sessionView({ status: "failed", providerHomeRefusal: launchRefusal("busy") });
+  const fixture = await mount(current, {
+    client: { restart: async (id: string) => { restarts.push(id); return { ...current, status: "starting" }; } } as Partial<ApiClient>,
+  });
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Account In Use");
+    assert.deepEqual(actionNames(notice), ["Restart Session", "Switch Account…"]);
+    await act(async () => { fixture.button("Restart Session")!.click(); });
+    await flush();
+    assert.deepEqual(restarts, [current.id]);
+    assert.equal(fixture.container.querySelector('[aria-label="Account In Use"]'), null,
+      "a session starting again no longer shows the refusal");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a refusal of the Machine's own provider HOME names it and offers no account switch (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerAccountId: undefined, providerAccountLabel: undefined,
+    providerHomeRefusal: launchRefusal("foreign_owner", false) }));
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.match(notice.querySelector(".notice-body")?.textContent ?? "", /this Machine's Codex sign-in locked\. Add an account for this control plane/);
+    assert.deepEqual(actionNames(notice), ["Open Machine Accounts"]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("with the runner offline, the refusal's Restart Session says why it is disabled (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerHomeRefusal: launchRefusal("unavailable") }), { online: false });
+  try {
+    const restart = fixture.button("Restart Session")!;
+    assert.equal(restart.disabled, true);
+    assert.deepEqual(describedText(fixture.container, restart), ["Build Box is offline."]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a running session never shows a refusal a summary kept (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "running", providerHomeRefusal: launchRefusal("busy") }));
+  try {
+    assert.equal(fixture.container.querySelector('[aria-label="Account In Use"]'), null);
   } finally {
     await fixture.unmount();
   }

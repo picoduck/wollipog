@@ -15,7 +15,7 @@ import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
 import { ReviewSessions } from "./review-sessions.js";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
-import { PROJECT_CREATION_REQUEST_WINDOW_MS } from "@wollipog/protocol";
+import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
@@ -103,6 +103,7 @@ import {
   type BackgroundWorkState,
   type BackgroundWorkTracking,
   type ProviderAccountSwitchFailureView,
+  type ProviderHomeLaunchRefusalView,
   type ProviderHistoryQuarantineView,
   type WorktreeRecoveryView,
   type HeldSessionResumeView,
@@ -735,6 +736,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1)),
   provider_account_switch_failure TEXT,
   provider_profile_id TEXT,
+  provider_home_refusal TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
   semantic_title INTEGER NOT NULL DEFAULT 0,
@@ -3129,6 +3131,7 @@ interface SessionRow {
   provider_account_automatically_selected: number;
   provider_account_switch_failure: string | null;
   provider_profile_id: string | null;
+  provider_home_refusal: string | null;
   title: string;
   title_source: string | null;
   semantic_title: number;
@@ -7007,6 +7010,8 @@ export class ControlPlaneDb {
       "provider_account_switch_failure TEXT",
       // Provider profiles (#3239): the profile the session's account binding recorded.
       "provider_profile_id TEXT",
+      // The provider-HOME lease refusal that stopped the session's last launch (#3240).
+      "provider_home_refusal TEXT",
     ]) {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
@@ -13074,6 +13079,15 @@ export class ControlPlaneDb {
   /** A runner snapshot's `providerProfileId` (#3239) is three-valued: undefined carries no
    * information (an older runner, or a pre-negotiation registration snapshot) and keeps the stored
    * value; null clears it; a well-formed id records it. Anything else is ignored. */
+  /** Undefined (an older runner) keeps the stored refusal; null clears it; a malformed one is
+   * dropped, so the session falls back to the failure text. */
+  private writeSessionProviderHomeRefusal(sessionId: string, value: unknown): void {
+    if (value === undefined) return;
+    const refusal = value === null ? null : validProviderHomeLaunchRefusal(value);
+    this.stmt("UPDATE sessions SET provider_home_refusal=? WHERE id=?")
+      .run(refusal ? JSON.stringify(refusal) : null, sessionId);
+  }
+
   private writeSessionProviderProfileId(sessionId: string, value: string | null | undefined): void {
     if (value === undefined) return;
     if (value !== null && (typeof value !== "string" || !PROVIDER_PROFILE_ID.test(value))) return;
@@ -16076,6 +16090,7 @@ export class ControlPlaneDb {
             : null, snap.id);
       }
       this.writeSessionProviderProfileId(snap.id, snap.providerProfileId);
+      this.writeSessionProviderHomeRefusal(snap.id, snap.providerHomeRefusal);
       if (snap.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(snap.executionTarget), snap.id);
@@ -16386,6 +16401,7 @@ export class ControlPlaneDb {
           snap.providerAccountAutomaticallySelected ? 1 : 0, id);
     }
     this.writeSessionProviderProfileId(id, snap.providerProfileId);
+    this.writeSessionProviderHomeRefusal(id, snap.providerHomeRefusal);
     if (snap.providerAccountSwitchFailure !== undefined) {
       this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
         .run(snap.providerAccountSwitchFailure
@@ -24593,6 +24609,7 @@ export class ControlPlaneDb {
       providerAccountSwitchFailure:
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
       ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
+      ...providerHomeRefusalField(row.provider_home_refusal),
       title: row.title,
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
@@ -31096,4 +31113,13 @@ function validBackgroundTerminalStatus(
   value: unknown,
 ): value is ManagedBackgroundJobSnapshot["terminalStatus"] {
   return value === undefined || value === "completed" || value === "failed" || value === "killed";
+}
+
+/** The stored launch refusal (#3240), re-validated as it is projected. */
+function providerHomeRefusalField(value: string | null): { providerHomeRefusal?: ProviderHomeLaunchRefusalView } {
+  if (!value) return {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return {}; }
+  const refusal = validProviderHomeLaunchRefusal(parsed);
+  return refusal ? { providerHomeRefusal: refusal } : {};
 }

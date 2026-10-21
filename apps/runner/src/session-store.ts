@@ -70,6 +70,7 @@ import type {
   PendingApproval,
   PromptImageInput,
   ProviderAccountSwitchFailureView,
+  ProviderHomeLaunchRefusalView,
   ProviderHistoryQuarantineView,
   ProviderHistoryRecoveryMode,
   RunnerCapacityBlocker,
@@ -141,6 +142,8 @@ export interface SessionMeta {
   automaticProviderAccountCooldowns?: Record<string, number>;
   automaticProviderAccountLastSwitchAt?: number;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  /** The provider-HOME lease refusal that stopped the last launch (#3240); cleared by the next. */
+  providerHomeRefusal?: ProviderHomeLaunchRefusalView;
   /** Discovered adapter/CLI version, refreshed before launch for capability gates and telemetry; never an auth source. */
   agentVersion?: string;
   claudeUsageCheckpoint?: import("./drivers/claude-usage-accounting.js").ClaudeUsageCheckpoint;
@@ -4276,6 +4279,9 @@ export function metaToSnapshot(
       controlPlaneProtocolVersion >= RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch
       ? m.providerAccountSwitchFailure ?? null
       : undefined,
+    ...(runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeLaunchRefusals")
+      ? { providerHomeRefusal: m.providerHomeRefusal ?? null }
+      : {}),
     // Absent before version negotiation and for older control planes; null is "no profile".
     ...(runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")
       ? { providerProfileId: m.providerProfileId ?? null }
