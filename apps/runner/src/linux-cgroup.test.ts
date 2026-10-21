@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import cp, { spawn, type ChildProcess } from "node:child_process";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -233,6 +233,31 @@ function requireContainment(t: { skip(message: string): void }): boolean {
   t.skip(`containment unavailable: ${providerContainmentStatus().reason}`);
   return false;
 }
+
+test("user-manager native validation exercises the real query even if a delegation marker exists", {
+  skip: process.platform !== "linux" || process.env.WOLLIPOG_TEST_EXPECT_USER_MANAGER_QUERY !== "1",
+}, (t) => {
+  const original = cp.spawnSync;
+  let queries = 0;
+  const mock = t.mock.method(cp, "spawnSync", (...args: unknown[]) => {
+    // Only the marker's absence is simulated. The actual systemctl query, manager reply,
+    // directory identity, writes and all later contained launches remain real kernel I/O.
+    if (Array.isArray(args[1]) && args[1][0] === "--delegation-probe") {
+      return { pid: 0, output: [null, null, null], stdout: null, stderr: null, status: 3, signal: null };
+    }
+    if (args[0] === "/usr/bin/systemctl") queries++;
+    return Reflect.apply(original, cp, args);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.ok(providerContainmentIdentity(), "the real user manager must attest delegated containment");
+    assert.equal(queries, 1, "containment must be initialized through the real user-manager query");
+    assert.equal(providerContainmentStatus().proofStandard, "linux-cgroup-v2");
+  } finally {
+    mock.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
 
 test("successful preparation clears a transient boundary-creation failure", { skip: process.platform !== "linux" }, (t) => {
   if (!requireContainment(t)) return;

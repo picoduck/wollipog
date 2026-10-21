@@ -252,6 +252,8 @@ jobs:
             "$(command -v node)" --import tsx --test --test-timeout=60000 apps/runner/src/linux-cgroup.test.ts
           # User managers on systemd 255 do not set user.delegate. Exercise their authoritative
           # Delegate/ControlGroup query too, instead of only testing the system-manager marker.
+          # The suite hides only the marker probe for initialization and requires a real query,
+          # so a future user manager adding the marker cannot silently remove this coverage.
           # Start only this ephemeral CI user's manager; no lingering or persistent unit changes.
           sudo systemctl start "user@$(id -u).service"
           XDG_RUNTIME_DIR="/run/user/$(id -u)" systemd-run --user --wait --collect --pipe \
@@ -259,7 +261,7 @@ jobs:
             --working-directory="$PWD" \
             /usr/bin/env PATH="$PATH" HOME="$containment_root/home" TMPDIR="$containment_root/tmp" \
             XDG_CACHE_HOME="$containment_root/cache" XDG_RUNTIME_DIR="/run/user/$(id -u)" \
-            WOLLIPOG_TEST_REQUIRE_CGROUP=1 \
+            WOLLIPOG_TEST_REQUIRE_CGROUP=1 WOLLIPOG_TEST_EXPECT_USER_MANAGER_QUERY=1 \
             "$(command -v node)" --import tsx --test --test-timeout=60000 apps/runner/src/linux-cgroup.test.ts
 
       - name: Validate Web Production Build

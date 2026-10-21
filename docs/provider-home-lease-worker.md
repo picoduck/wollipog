@@ -390,6 +390,10 @@ The required Linux CI job launches this suite as the ordinary test user in two t
 `Delegate=yes` services, one owned by the system manager and one by the user manager, with this
 flag set. Both have bounded runtimes and are collected on completion. CI therefore exercises the
 marker and user-manager evidence paths without relying on the job's original unit delegation.
+The user-manager run additionally sets `WOLLIPOG_TEST_EXPECT_USER_MANAGER_QUERY=1`. In that test
+process only, the initial marker probe is treated as absent and the test requires an actual
+systemctl query to establish containment. All cgroup operations stay real. This preserves query
+coverage even if a future user manager starts setting the marker; production detection is unchanged.
 
 A surviving, unknown or unprobeable descendant keeps the reference until shutdown. So does a spawn without a POSIX boundary, where only the root's exit is observable: native Windows (whose kill-on-close Job is not verified), WSL, and remote spawns.
 
