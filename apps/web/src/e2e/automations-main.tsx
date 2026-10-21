@@ -5,6 +5,7 @@ import type {
   AutomationSchedule,
   AutomationSpec,
   AutomationTriggerView,
+  CreateAutomationTriggerRequest,
   CreateOutboundEventSubscriptionRequest,
   OutboundEventDeliveryView,
   OutboundEventSubscriptionView,
@@ -255,6 +256,7 @@ const triggerItems: AutomationTriggerView[] = [{
   name: "Issue Intake",
   generation: 1,
   invocationCount: 12,
+  lastInvokedAt: Date.now() - 2 * 3_600_000,
   createdBy: { kind: "human", id: "e2e" },
   createdAt: 1,
   updatedAt: 1,
@@ -263,7 +265,24 @@ const triggerItems: AutomationTriggerView[] = [{
     parameterNames: ["issue", "priority"],
     missingReferences: "reject",
   },
+}, {
+  triggerId: "atr_release_command",
+  automationId: "automation-nightly-sweep",
+  kind: "chatops",
+  name: "Release Command",
+  generation: 2,
+  invocationCount: 0,
+  createdBy: { kind: "human", id: "e2e" },
+  createdAt: 1,
+  updatedAt: 1,
 }];
+// `long-trigger-values`: Issue Intake accepts the most named values a trigger may, so its row's
+// facts wrap over several lines on a phone (#2972).
+if (params.has("long-trigger-values")) {
+  triggerItems[0]!.deliveryPolicy!.parameterNames = Array.from({ length: 16 }, (_, index) => `repository_value_${index + 1}`);
+}
+/** The secret every create and rotate in this harness returns (#2972). */
+const triggerSecret = `wollipogwhsec_${"e2eTriggerSecret".repeat(2)}${"A".repeat(11)}`;
 
 const executions: AutomationExecution[] = [{
   executionId: "axe_issue_1099",
@@ -648,7 +667,33 @@ const client = {
       await new Promise<void>((resolve) => { pollingFixture.pendingTriggers.push(resolve); });
     }
     if (pollingFixture?.failure === "trigger") throw new Error("Synthetic polling failure");
-    return { triggers: id === "automation-nightly-sweep" ? triggerItems : [] };
+    return { triggers: id === "automation-nightly-sweep" ? [...triggerItems] : [] };
+  },
+  createAutomationTrigger: async (automationId: string, request: CreateAutomationTriggerRequest) => {
+    const trigger: AutomationTriggerView = {
+      triggerId: `atr_created_${triggerItems.length}`,
+      automationId,
+      kind: request.kind,
+      name: request.name,
+      generation: 1,
+      invocationCount: 0,
+      createdBy: { kind: "human", id: "e2e" },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      ...(request.deliveryPolicy ? { deliveryPolicy: request.deliveryPolicy } : {}),
+    };
+    // Only the fixture automation lists its triggers.
+    if (automationId === "automation-nightly-sweep") triggerItems.push(trigger);
+    return { trigger, secret: triggerSecret };
+  },
+  rotateAutomationTrigger: async (_automationId: string, triggerId: string) => {
+    const index = triggerItems.findIndex((trigger) => trigger.triggerId === triggerId);
+    triggerItems[index] = { ...triggerItems[index]!, generation: triggerItems[index]!.generation + 1 };
+    return { trigger: triggerItems[index]!, secret: triggerSecret };
+  },
+  deleteAutomationTrigger: async (_automationId: string, triggerId: string) => {
+    triggerItems.splice(triggerItems.findIndex((trigger) => trigger.triggerId === triggerId), 1);
+    return { deleted: true };
   },
   ...(pollingFixture ? { updateAutomation: async (id: string, spec: AutomationSpec) => {
     pollingFixture.mutationCalls++;

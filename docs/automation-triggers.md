@@ -8,9 +8,12 @@ parameters, and (for `prompt_session`) a session selector. It can never change t
 agent, runner policy, concurrency policy, cost ceiling, or tool-call ceiling. Cron scheduling
 remains independent.
 
-Create a trigger from the Automations view or through the paired-device-authenticated management
-API. Creation and rotation return a 256-bit HMAC secret once. Copy it immediately; normal reads
-never return it. Rotation invalidates the previous secret immediately, and revocation clears the
+Create a trigger with **Add Trigger** in the Triggers section of an automation's page, or through
+the paired-device-authenticated management API. Creation and rotation return a 256-bit HMAC secret
+once. Copy it immediately; normal reads never return it, and the dashboard clears it from its own
+state when its dialog closes. A trigger's ⋯ menu offers Copy URL, How to Call… (the request line,
+headers, body shape and signed text for that trigger's kind and options), Rotate Secret… and
+Revoke Trigger…. Rotation invalidates the previous secret immediately, and revocation clears the
 active row's secret and rejects unclaimed deliveries. Older SQLite pages or backups can still
 contain prior key material, so revocation is not a substitute for protecting or expiring backups.
 Newly created and rotated secrets use the `wollipogwhsec_` prefix followed by exactly 43 base64url

@@ -74,6 +74,8 @@ export function useAutomationPolling(load: (current: () => boolean) => Promise<v
 
   // The current effect's poll, for Retry; a no-op between effects.
   const pollNow = useRef<() => void>(() => {});
+  /** Which polling lifecycle is current; each effect cleanup ends one. */
+  const lifecycle = useRef(0);
   useEffect(() => {
     let active = true;
     let initialRefresh = true;
@@ -98,6 +100,7 @@ export function useAutomationPolling(load: (current: () => boolean) => Promise<v
     pollNow.current = poll;
     return () => {
       active = false;
+      lifecycle.current += 1;
       pollNow.current = () => {};
       refreshGeneration.current += 1;
       errorRevision.current += 1;
@@ -129,5 +132,25 @@ export function useAutomationPolling(load: (current: () => boolean) => Promise<v
   /** Reads again now, as the next poll would; skipped while a read is already running. */
   const retry = useCallback(() => pollNow.current(), []);
 
-  return { busy, error, mutate, retry };
+  /**
+   * Reads again after a write the caller made and reported itself (a dialog's create, a
+   * confirmation's revoke). A read already running started before the write, so it commits nothing;
+   * this one waits for it and then reads. Its failure is a refresh error, which the next poll clears.
+   * It belongs to the lifecycle it was asked in: one that ends while it waits (an API change,
+   * unmount) skips it, so the obsolete loader never runs again.
+   */
+  const reread = useCallback(async () => {
+    refreshGeneration.current += 1;
+    const owner = lifecycle.current;
+    const live = () => owner === lifecycle.current;
+    const revision = errorRevision.current;
+    try {
+      await refresh(false, live);
+    } catch (cause) {
+      setError((previous) => live() && revision === errorRevision.current && previous?.source !== "mutation"
+        ? { source: "refresh", message: (cause as Error).message } : previous);
+    }
+  }, [refresh]);
+
+  return { busy, error, mutate, retry, reread };
 }

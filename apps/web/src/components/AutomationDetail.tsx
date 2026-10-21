@@ -2,9 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type {
   AutomationExecution,
   AutomationSchedule,
-  AutomationTriggerCredential,
   AutomationTriggerKind,
-  AutomationTriggerSessionSelector,
   AutomationTriggerView,
   WorkflowDefinition,
 } from "@wollipog/protocol";
@@ -16,7 +14,7 @@ import { automationInstallationUnavailable } from "../automation-installations.j
 import { writeClipboardText } from "../clipboard.js";
 import { detailPlaceholder } from "../detail-placeholder.js";
 import { useReportEntityTitle } from "../entity-title.js";
-import { formatCalendarTime, titleCaseLabel } from "../format.js";
+import { formatCalendarTime } from "../format.js";
 import { absoluteViewUrl, backLabel, viewTitle, type View } from "../navigation.js";
 import { timeZoneDisplayName } from "../reminder-schedule.js";
 import { useDashboardPublicOrigin } from "../remote-access-context.js";
@@ -24,6 +22,7 @@ import { machineOptionLabels } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { AutomationRunHistory, RunDetailsDialog } from "./AutomationRunHistory.js";
+import { AutomationTriggers } from "./AutomationTriggers.js";
 import { useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { EditIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
@@ -31,7 +30,6 @@ import { DetailBar, type ActionsMenuChoice, type PageMenuAction } from "./PageHe
 import { SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { Checkbox, Select } from "./ui/ChoiceControls.js";
 import { useAutomationPolling } from "./useAutomationPolling.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
@@ -52,28 +50,10 @@ export const AUTOMATION_NOTICE_RANK = {
 const BACK_TO_MORE_ACTIONS = "Back to More Actions";
 const NO_LINK_REASON = "Open Wollipog in a browser to copy a link.";
 
-interface TriggerDraft {
-  kind: AutomationTriggerKind;
-  name: string;
-  configurable: boolean;
-  allowPrompt: boolean;
-  parameterNames: string;
-  missingReferences: "reject" | "use_stored";
-  sessionSelectors: AutomationTriggerSessionSelector[];
-}
-
 type Stored =
   | { state: "loading" }
   | { state: "loaded"; automation: AutomationSchedule; executions: AutomationExecution[] }
   | { state: "missing" };
-
-function toggleSelector(
-  current: AutomationTriggerSessionSelector[],
-  selector: AutomationTriggerSessionSelector,
-  checked: boolean,
-): AutomationTriggerSessionSelector[] {
-  return checked ? [...current, selector] : current.filter((candidate) => candidate !== selector);
-}
 
 /** "Today, 2:00 AM", or a dash when there is no time. */
 function when(value: number | undefined, now: number): string {
@@ -107,10 +87,8 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
   const [stored, setStored] = useState<Stored>({ state: "loading" });
   const [triggers, setTriggers] = useState<AutomationTriggerView[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
-  const [credential, setCredential] = useState<AutomationTriggerCredential | null>(null);
-  const [triggerDraft, setTriggerDraft] = useState<TriggerDraft | null>(null);
-  const draftNameRef = useRef<HTMLInputElement>(null);
-  const focusDraft = useRef(false);
+  /** The kind New Trigger is open for: Add Trigger and the bar's ⋯ both open it. */
+  const [newTriggerKind, setNewTriggerKind] = useState<AutomationTriggerKind | null>(null);
   /** The run whose Run Details is open, by id, so the dialog follows that run through each poll. */
   const [detailsRunId, setDetailsRunId] = useState<string | null>(null);
   const mounted = useRef(false);
@@ -191,7 +169,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
     for (const result of results) if (result.status === "rejected") throw result.reason;
   }, [api, automationId]);
 
-  const { busy, error, mutate, retry } = useAutomationPolling(load);
+  const { busy, error, mutate, retry, reread } = useAutomationPolling(load);
 
   const automation = stored.state === "loaded" ? stored.automation : null;
   useReportEntityTitle({ name: "automation", id: automationId }, automation?.name);
@@ -204,13 +182,6 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
       setDetailsRunId(null);
     }
   }, [stored, detailsRunId]);
-
-  useEffect(() => {
-    if (!triggerDraft || !focusDraft.current) return;
-    focusDraft.current = false;
-    draftNameRef.current?.focus();
-    draftNameRef.current?.scrollIntoView?.({ block: "nearest" });
-  }, [triggerDraft]);
 
   const machineLabels = useMemo(() => {
     const boxByRunner = new Map([...boxes.values()].map((box) => [box.runnerId, box]));
@@ -277,11 +248,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
   const detailsRun = detailsRunId === null ? undefined
     : executions.find((execution) => execution.executionId === detailsRunId);
 
-  // Where focus lands after a trigger action: the revealed secret's Copy Secret, a row's Rotate
-  // Secret, or the Triggers heading once the row it was on is gone.
-  const copySecretButton = () => inPage(".automation-trigger-secret button");
-  const rotateButtonOf = (triggerId: string) => [...pageRef.current?.querySelectorAll<HTMLElement>("[data-trigger-id]") ?? []]
-    .find((row) => row.dataset.triggerId === triggerId)?.querySelector<HTMLElement>(".automation-trigger-actions button") ?? null;
+  // Where focus lands once a revoked trigger's row, and the ⋯ it was revoked from, are gone.
   const triggersHeading = () => inPage("#automation-triggers");
   /** The bar's Pause or Resume, or ⋯ where it lives on a phone. */
   const pauseControl = () => inPage(".detail-bar .detail-bar-action:not(.primary)") ?? moreTrigger();
@@ -294,87 +261,13 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
     ).finally(() => settleFocus(invoker, pauseControl));
   };
 
-  const openTriggerCreator = (kind: AutomationTriggerKind) => {
-    focusDraft.current = true;
-    setTriggerDraft({
-      kind,
-      name: `${automation.name} ${kind === "chatops" ? "chat-ops" : "webhook"}`.slice(0, 80),
-      configurable: false,
-      allowPrompt: false,
-      parameterNames: "",
-      missingReferences: "reject",
-      sessionSelectors: [],
-    });
-  };
-
-  const createTrigger = () => {
-    if (!triggerDraft) return;
+  // A revoked trigger's row goes at once, with the ⋯ focus came back to, and the page reads its
+  // triggers again; focus moves to the Triggers heading.
+  const triggerRevoked = (triggerId: string) => {
     const invoker = beginAction();
-    let created = false;
-    void mutate(async () => {
-      const parameterNames = [...new Set(triggerDraft.parameterNames.split(",")
-        .map((name) => name.trim()).filter(Boolean))];
-      const created = await api.createAutomationTrigger(automationId, {
-        kind: triggerDraft.kind,
-        name: triggerDraft.name,
-        ...(triggerDraft.configurable ? { deliveryPolicy: {
-          allowPrompt: triggerDraft.allowPrompt,
-          parameterNames,
-          missingReferences: triggerDraft.missingReferences,
-          ...(triggerDraft.sessionSelectors.length ? { sessionSelectors: triggerDraft.sessionSelectors } : {}),
-        } } : {}),
-      });
-      setCredential(created);
-      setTriggerDraft(null);
-    }, "Trigger Not Created").then((ok) => { created = ok; })
-      // The form, and the Create Trigger that started it, are gone: focus the new secret's Copy Secret.
-      .finally(() => settleFocus(invoker, () => created ? copySecretButton() : null));
-  };
-  const cancelTriggerDraft = () => {
-    settleFocus(beginAction(), moreTrigger);
-    setTriggerDraft(null);
-  };
-
-  /** Rotate Secret and Revoke confirm first; the confirmation hands focus back to the row's button. */
-  const rotateTrigger = async (triggerId: string) => {
-    const invoker = beginAction();
-    if (!await confirm({
-      title: "Rotate Signing Secret",
-      message: `The previous signing secret for “${automation.name}” stops working immediately. This cannot be undone.`,
-      confirmLabel: "Rotate Secret",
-      tone: "danger",
-    })) {
-      settleFocus(invoker, () => null);
-      return;
-    }
-    const rotated = await mutate(async () => {
-      setCredential(await api.rotateAutomationTrigger(automationId, triggerId));
-    }, "Secret Not Rotated");
-    settleFocus(invoker, () => rotated ? copySecretButton() : null);
-  };
-
-  const revokeTrigger = async (triggerId: string) => {
-    const invoker = beginAction();
-    if (!await confirm({
-      title: "Revoke Signed Trigger",
-      message: `The signed trigger for “${automation.name}” is revoked, and its pending unclaimed deliveries are rejected.`,
-      confirmLabel: "Revoke Trigger",
-      tone: "danger",
-    })) {
-      settleFocus(invoker, () => null);
-      return;
-    }
-    const revoked = await mutate(async () => {
-      await api.deleteAutomationTrigger(automationId, triggerId);
-      setCredential((current) => current?.trigger.triggerId === triggerId ? null : current);
-    }, "Trigger Not Revoked");
-    // Its row is gone with its Revoke button.
-    settleFocus(invoker, () => revoked ? triggersHeading() : null);
-  };
-
-  const hideSecret = (triggerId: string) => {
-    settleFocus(beginAction(), () => rotateButtonOf(triggerId));
-    setCredential(null);
+    setTriggers((current) => current.filter((trigger) => trigger.triggerId !== triggerId));
+    void reread();
+    settleFocus(invoker, triggersHeading);
   };
 
   const remove = async (back?: ConfirmationOptions["back"]) => {
@@ -429,8 +322,8 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
   const menu: PageMenuAction[] = [
     // On a phone the bar holds only the pencil and ⋯, so Pause and Resume move here (§15.1).
     ...(phone ? [{ label: pauseLabel, disabled: busy, onClick: togglePause }] : []),
-    { label: "Add Webhook Trigger…", disabled: busy, onClick: () => openTriggerCreator("webhook") },
-    { label: "Add Chat-Ops Trigger…", disabled: busy, onClick: () => openTriggerCreator("chatops") },
+    { label: "Add Webhook Trigger…", disabled: busy, onClick: () => setNewTriggerKind("webhook") },
+    { label: "Add Chat-Ops Trigger…", disabled: busy, onClick: () => setNewTriggerKind("chatops") },
     {
       label: "Copy Link",
       disabled: !linkUrl,
@@ -590,49 +483,17 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
           </dl>
         </section>
 
-        <section className="section" aria-labelledby="automation-triggers">
-          <div className="section-head"><h2 className="section-title" id="automation-triggers" tabIndex={-1}>Triggers</h2></div>
-          <p className="section-note">Pausing blocks cron and signed triggers, but credentials can be configured while paused.</p>
-          {triggerDraft && <div className="automation-trigger-editor" aria-label="New Signed Trigger">
-            <h3>New Signed Trigger</h3>
-            <div className="automation-form-grid">
-              <label>Name<input ref={draftNameRef} value={triggerDraft.name} maxLength={80} onChange={(event) => setTriggerDraft((current) => current ? { ...current, name: event.target.value } : current)} /></label>
-              <label>Kind<input className="is-read-only" value={titleCaseLabel(triggerDraft.kind)} readOnly /></label>
-              {automation.action.kind !== "workflow_run" && <div className="automation-span"><Checkbox checked={triggerDraft.configurable} label="Accept Delivery Fields" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, configurable: checked } : current)} /></div>}
-              {automation.action.kind !== "workflow_run" && triggerDraft.configurable && <>
-                <div><Checkbox checked={triggerDraft.allowPrompt} label="Delivered Prompt" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, allowPrompt: checked } : current)} /></div>
-                <div className="automation-field"><span className="field-label">Missing References</span><Select label="Missing References" value={triggerDraft.missingReferences} onChange={(missingReferences) => setTriggerDraft((current) => current ? { ...current, missingReferences } : current)} options={[
-                  { value: "reject", label: "Reject Delivery" },
-                  { value: "use_stored", label: "Use Stored Text" },
-                ]} /></div>
-                <label className="automation-span">Parameter Names<input value={triggerDraft.parameterNames} placeholder="issue, run_id" onInput={(event) => {
-                  const parameterNames = event.currentTarget.value;
-                  setTriggerDraft((current) => current ? { ...current, parameterNames } : current);
-                }} /><small>Comma-separated names. Reference them as <code>{"{{delivery.parameters.issue}}"}</code>.</small></label>
-                {automation.action.kind === "prompt_session" && <fieldset className="automation-span"><legend>Session Selectors</legend><div className="automation-checks">{([
-                  ["session_id", "Session ID"], ["branch", "Branch"], ["pull_request", "Pull Request"],
-                ] as const).map(([selector, label]) => <Checkbox key={selector} checked={triggerDraft.sessionSelectors.includes(selector)} label={label} onChange={(checked) => setTriggerDraft((current) => current ? { ...current, sessionSelectors: toggleSelector(current.sessionSelectors, selector, checked) } : current)} />)}</div></fieldset>}
-                <p className="automation-hint automation-span">Use <code>{"{{delivery.prompt}}"}</code> to place delivered text. Allowed parameters are also included in the signed-delivery context preamble.</p>
-              </>}
-            </div>
-            <div className="automation-editor-actions"><button className="btn ghost sm" type="button" onClick={cancelTriggerDraft}>Cancel</button><button className="btn primary sm" type="button" disabled={busy} onClick={createTrigger}>{busy ? "Creating…" : "Create Trigger"}</button></div>
-          </div>}
-          {triggers.length === 0 && !triggerDraft && <p className="automation-empty">No signed triggers yet.</p>}
-          {triggers.length > 0 && <div className="automation-triggers" aria-label="Signed Out-of-Band Triggers">{triggers.map((trigger) => {
-            const endpoint = publicOrigin
-              ? `${publicOrigin}/hooks/v1/automation-triggers/${trigger.triggerId}`
-              : "Unavailable until This Machine has a reachable dashboard address";
-            const revealed = credential?.trigger.triggerId === trigger.triggerId ? credential : null;
-            const policy = trigger.deliveryPolicy;
-            return <div className="automation-trigger" key={trigger.triggerId} data-trigger-id={trigger.triggerId}><div><strong>{trigger.name}</strong><span>{titleCaseLabel(trigger.kind)} · Key Generation {trigger.generation} · {trigger.invocationCount === 1 ? "1 Delivery" : `${trigger.invocationCount} Deliveries`}</span>{policy && <small>Accepts {[
-              ...(policy.allowPrompt ? ["Prompt"] : []),
-              ...(policy.parameterNames.length ? [`Parameters ${policy.parameterNames.join(", ")}`] : []),
-              ...(policy.sessionSelectors?.length ? [`Selectors ${policy.sessionSelectors.map(titleCaseLabel).join(", ")}`] : []),
-            ].join(" · ")}</small>}{trigger.lastInvokedAt && <small>Last Signed Delivery {when(trigger.lastInvokedAt, now)}</small>}</div><code>{endpoint}</code>{revealed && <div className="automation-trigger-secret" role="status"><strong>Copy this signing secret now. It will not be shown again.</strong><code>{revealed.secret}</code><button className="btn ghost sm" type="button" onClick={() => void navigator.clipboard.writeText(revealed.secret)}>Copy Secret</button><button className="btn ghost sm" type="button" onClick={() => hideSecret(trigger.triggerId)}>Hide</button></div>}<p>{policy
-              ? `Signed body may add: ${[policy.allowPrompt ? "prompt" : "", policy.parameterNames.length ? "parameters" : "", policy.sessionSelectors?.length ? "target" : ""].filter(Boolean).join(", ")}.`
-              : trigger.kind === "chatops" ? 'Signed body: {"eventId":"...","command":"run","sender":"opaque actor"}' : 'Signed body: {"eventId":"..."}'}</p><div className="automation-trigger-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void rotateTrigger(trigger.triggerId)}>Rotate Secret</button><button className="btn ghost danger sm" disabled={busy} onClick={() => void revokeTrigger(trigger.triggerId)}>Revoke</button></div></div>;
-          })}<p className="automation-hint">Send <code>application/vnd.wollipog.automation-trigger+json</code> with X-Wollipog-Timestamp, X-Wollipog-Nonce, and X-Wollipog-Signature. Every optional field must be explicitly allowed by this fixed automation trigger; deliveries cannot change agents, runners, policies, or ceilings.</p></div>}
-        </section>
+        <AutomationTriggers
+          automation={automation}
+          triggers={triggers}
+          publicOrigin={publicOrigin}
+          now={now}
+          disabled={busy}
+          adding={newTriggerKind}
+          onAddingChange={setNewTriggerKind}
+          onChanged={() => void reread()}
+          onRevoked={triggerRevoked}
+        />
 
         <section className="section" aria-labelledby="automation-history">
           <div className="section-head"><h2 className="section-title" id="automation-history">Run History</h2></div>
