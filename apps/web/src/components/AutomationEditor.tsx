@@ -1203,7 +1203,7 @@ function AutomationEditorForm({
           </section>
 
           {failure && !failure.field && (
-            <Notice tone="danger" className="automation-editor-failure" details={failure.message}>
+            <Notice tone="danger" details={failure.message}>
               {isNew ? "This automation wasn't created." : "These changes weren't saved."} Fix what the details
               below describe, then try again.
             </Notice>
