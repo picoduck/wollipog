@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { isTerminal, type SessionStatus, type SessionView } from "@wollipog/protocol";
+import { isTerminal, type ArchiveSessionMetadata, type SessionStatus, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ARCHIVE_SEARCH_EVENT, pendingArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
 import { sessionUnarchiveRestarts, unarchiveAndRestartFailureMessage } from "../archive-actions.js";
@@ -146,7 +146,7 @@ export function ArchivedSessionsView() {
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [facets, setFacets] = useState({ projects: [] as string[], locations: [] as string[], agents: [] as string[] });
-  const [pageMetadata, setPageMetadata] = useState<Record<string, { project: string; location: string; agent: string }>>({});
+  const [pageMetadata, setPageMetadata] = useState<Record<string, ArchiveSessionMetadata>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyIds, setBusyIds] = useState(() => new Set<string>());

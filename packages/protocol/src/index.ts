@@ -6001,6 +6001,13 @@ export interface UsageRetentionPolicy {
   coverageStartedAt: number;
 }
 
+/** Server-rendered display metadata for one archived-session row. */
+export interface ArchiveSessionMetadata {
+  project: string;
+  location: string;
+  agent: string;
+}
+
 /** Archived-history retention (#2777): bounds, in whole days after archiving. */
 export const ARCHIVED_HISTORY_RETENTION_LIMITS = { minDays: 7, maxDays: 3650, suggestedDays: 90 } as const;
 /** Turning retention on or shortening it takes effect only after this delay, so it can be undone. */

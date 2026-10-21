@@ -10,6 +10,7 @@ import type {
   AccessScopeChangePreview,
   AddPodMemberRequest,
   AppendPodContextRequest,
+  ArchiveSessionMetadata,
   ApprovalQueueItem,
   ApprovalQueueRejectRequest,
   ApprovalQueueRejectResult,
@@ -1128,7 +1129,7 @@ export function createApiClient(transport: ApiTransport) {
     return req<{
       sessions: SessionView[];
       snippets: Record<string, string>;
-      metadata: Record<string, { project: string; location: string; agent: string }>;
+      metadata: Record<string, ArchiveSessionMetadata>;
       nextCursor: string | null;
       hasMore: boolean;
       facets: { projects: string[]; locations: string[]; agents: string[] };
