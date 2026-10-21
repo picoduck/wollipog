@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * New Project (#2965; docs/design-system.md §7.1, §7.5, §8.1, §9.1): the Access field spans the
@@ -21,6 +22,7 @@ for (const { name, viewport, coarse } of VIEWPORTS) {
       await page.goto("/new-project-e2e.html");
       const dialog = newProject(page);
       await expect(dialog).toBeVisible();
+      await dialogMotionSettled(page);
       const trigger = dialog.getByRole("button", { name: /^Access:/ });
       await expect(trigger).toHaveAccessibleName("Access: Organization-Wide");
       const [triggerBox, formBox, nameBox] = await Promise.all([
@@ -32,6 +34,7 @@ for (const { name, viewport, coarse } of VIEWPORTS) {
       await trigger.click();
       const list = page.locator(".menu.listbox");
       await expect(list).toBeVisible();
+      await dialogMotionSettled(page);
       // Two-line options: the level, then who it reaches.
       await expect(list.getByRole("option")).toHaveCount(4);
       await expect(list.getByRole("option").first()).toContainText("Private to Me");

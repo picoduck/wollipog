@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * Add Location (#2966; docs/design-system.md §5.2, §7.1, §7.5, §8.4): the existing locations are
@@ -33,6 +34,7 @@ for (const { name, viewport, coarse, rowHeight } of VIEWPORTS) {
       expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(coarse);
       const dialog = addLocation(page);
       await expect(dialog).toBeVisible();
+      await dialogMotionSettled(page);
       const rows = dialog.locator(".add-location-list > .choice-row");
       await expect(rows).toHaveCount(11);
       const heights = await rows.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height));
