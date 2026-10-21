@@ -82,6 +82,7 @@ export class IncrementalVacuum {
     const context = { runId: randomUUID(), entryPoint: "maintenance" };
     const durations: number[] = [];
     let pages = 1;
+    let onePageMs = Infinity;
     let deferred = false;
     let slowSteps = 0;
     try {
@@ -97,7 +98,14 @@ export class IncrementalVacuum {
         result.reclaimedBytes += step.reclaimedPages * initial.pageSize;
         if (elapsed >= 16 && ++slowSteps === 1) this.options.log.warn({ ...context, event: "incremental_vacuum_slow_step", stepMs: elapsed, pages },
           "incremental vacuum step exceeded the 16 ms latency target; benchmark this storage; further slow steps are counted in the pass summary");
-        pages = Math.max(1, Math.min(32, Math.floor(pages * 4 / Math.max(1, elapsed))));
+        // FULL commits have a fixed sync cost. Measure the one-page baseline so
+        // that cost cannot consume the entire 4 ms budget for additional pages.
+        if (pages === 1) onePageMs = elapsed;
+        // Keep headroom below 16 ms regardless of the baseline estimate. Limit
+        // growth to doubling so a noisy first sample cannot jump straight to 32.
+        pages = elapsed >= 12
+          ? Math.max(1, Math.floor(pages * 8 / elapsed))
+          : Math.max(1, Math.min(32, pages * 2, Math.floor(pages * 4 / Math.max(1, elapsed - onePageMs))));
         // Yield even after the final step, leaving at least three quarters of time for requests.
         await this.sleep(Math.max(1, Math.ceil(elapsed * 3)));
         if (!step.reclaimedPages || step.freePages === 0) break;
@@ -111,6 +119,7 @@ export class IncrementalVacuum {
     result.p95StepMs = durations[Math.ceil(durations.length * 0.95) - 1] ?? 0;
     result.maxStepMs = durations.at(-1) ?? 0;
     this.options.log.info({ ...context, event: "incremental_vacuum_pass", ...result, deferred, slowSteps,
+      pagesPerStep: result.steps ? result.reclaimedPages / result.steps : 0,
       durationMs: this.now() - started, interrupted: this.stopped, stepLimitReached: result.steps === INCREMENTAL_VACUUM_MAX_STEPS },
     "incremental vacuum pass finished; reclaimed bytes reach the main file through normal WAL checkpoints");
     return result;

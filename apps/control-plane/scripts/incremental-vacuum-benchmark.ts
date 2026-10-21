@@ -40,7 +40,9 @@ try {
   worker = new IncrementalVacuum(db, { env: { [INCREMENTAL_VACUUM_ENV]: "1" }, now: () => now,
     log: { info() {}, warn(details) { if ((details as { event?: string }).event === "incremental_vacuum_deferred") deferred = true; } } });
   now += 86_400_000;
+  const started = performance.now();
   const result = await worker.runPass();
+  const durationMs = performance.now() - started;
   clearInterval(traffic); traffic = undefined;
   assert.equal(deferred, false);
   assert.ok(durations.length >= 100, "collect enough real complete steps for a useful p95");
@@ -57,7 +59,9 @@ try {
   const percentile = (p: number) => durations[Math.ceil(durations.length * p) - 1]!;
   console.log(JSON.stringify({ rows: 16_000, steps: durations.length, writes, checkpointWorker: checkpointWorker !== null,
     freePagesBefore: before.freePages, reclaimedPages: result.reclaimedPages, bytesBefore, bytesAfter: statSync(path).size,
-    maxPagesPerStep: Math.max(...budgets), p50Ms: percentile(0.5), p95Ms: percentile(0.95), p99Ms: percentile(0.99), maxMs: durations.at(-1) }));
+    maxPagesPerStep: Math.max(...budgets), pagesPerStep: result.reclaimedPages / result.steps,
+    reclaimedMiB: result.reclaimedBytes / 1024 ** 2, durationMs,
+    p50Ms: percentile(0.5), p95Ms: percentile(0.95), p99Ms: percentile(0.99), maxMs: durations.at(-1) }));
   assert.ok(percentile(0.95) < 16, "complete incremental vacuum step p95 must stay below 16 ms");
 } finally {
   if (traffic) clearInterval(traffic);

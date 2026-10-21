@@ -109,10 +109,15 @@ logical records; failures require inspection before restart. It is never a live 
 
 Once armed, maintenance starts 10 minutes after startup and hourly after the preceding pass ends,
 independently of retention. It starts only with at least **256 free pages**, then drains in **1–32-page**
-steps, initially one page, adapting toward **4 ms** and resting at least **1 ms and 3× work time**
-after every step. Each pass caps at **1,000 steps**: at 4 KiB pages, at most about **128 MiB per
-hourly pass**, with warmup and slower storage reducing that throughput. A 2 GiB reclamation takes
+steps, initially one page, adapting toward **4 ms above the measured one-page cost** and resting
+at least **1 ms and 3× work time** after every step. Each pass caps at **1,000 steps**: at 4 KiB pages,
+at most about **128 MiB per hourly pass**, with warmup and slower storage reducing that throughput. A 2 GiB reclamation takes
 more than 16 passes. It is not an emergency full-disk recovery mechanism.
+
+One-page samples estimate the fixed cost of a `FULL` commit, so sync latency alone cannot pin
+the budget at one page (#3575). Growth is at most doubling per step. Complete steps reaching
+**12 ms** reduce the next page budget proportionally toward **8 ms**, regardless of the baseline,
+leaving headroom below the 16 ms target. These estimates cannot guarantee a bound on arbitrary I/O.
 
 Each step runs with the main connection's normal **`synchronous=FULL`**, outside retention's or
 ingest's relaxed transactions. No replay, approval, accounting or privacy guard is weakened;
@@ -125,12 +130,17 @@ unchanged. Shrinkage becomes visible as ordinary checkpoints apply the WAL's tru
 can delay it. No forced checkpoint is added.
 
 Startup logs report mode/arming; pass logs report reclaimed pages/bytes, p95/max complete-step
-latency, slow-step count and stop/limit state with a run ID and entry point. Busy/errors defer to
-the next pass; the first step >=16 ms warns once per pass.
+latency, average reclaimed pages per step (`pagesPerStep`), slow-step count and stop/limit state
+with a run ID and entry point. Busy/errors defer to the next pass; the first step >=16 ms warns once per pass.
 `pnpm benchmark:incremental-vacuum [--dir <fixture-parent>]` creates a disposable
 file-backed fixture, checks kept data and physical shrinkage, and measures complete steps alongside
 ordinary `FULL` writes and the existing checkpoint worker, failing at **p95 >=16 ms**. The 16 ms
 target requires measurement on the operator's storage, not an unconditional timing guarantee.
+
+On a Linux/Node 24.18.1 NVMe fixture with 16,000 indexed records, the worker and concurrent `FULL`
+writes, the updated adaptation reclaimed **50.24 MiB in 10.42 seconds** (about **4.82 MiB/s** during
+the pass): **408 steps**, averaging **31.52 pages/step**, with **5.42 ms p95 / 14.34 ms max**.
+The fixture drained before the 1,000-step cap; this is a measured example, not a guaranteed hourly rate.
 
 Backups and restores retain their existing SQLite-aware consistency, durability, privacy and
 rotation requirements. A restored pre-conversion backup retains `auto_vacuum=NONE` and needs
