@@ -248,11 +248,24 @@ test("reviews under a campaign remain outside its membership, counts, requests a
     assert.deepEqual(h.db.campaignProjection("campaign")!.children, before.children);
     assert.equal(h.db.getSession(id)!.campaignMembership, undefined);
     assert.equal(h.db.campaignAncestryRoot(id), "none");
+    assert.equal(h.db.isSessionDescendant("s1", id), false);
+    assert.equal(h.db.isSessionDescendant("campaign", id), false);
     assert.equal(h.db.sessionResultOrchestrator(id), null);
     assert.equal(h.db.campaignBudgets.root(id), null);
     assert.deepEqual(h.db.listSessionDescendantRequestCandidates("campaign").map(s => s.id), ["s1"]);
+    const plan = h.svc.recordCampaignPlan("campaign", { items: [{ key: "implementation" }], planComplete: true });
+    assert.ok(plan.ok, plan.error ?? "campaign plan refused");
+    const workItemId = plan.data!.items[0]!.workItemId;
+    assert.equal(h.svc.assignCampaignWorkItem("campaign", { workItemId, childSessionId: id }).status, 404);
+    assert.equal(h.svc.verifyCampaignChild("campaign", { childSessionId: id, reportEventSeq: 1, followUpsAccounted: true }).status, 404);
+    const batch = h.svc.beginRunnerAttentionBatch("r");
+    assert.equal(batch.capture(h.db.getSession(id)), null);
+    h.db.createSession({ id: "ordinary", parentSessionId: "s1", runnerId: "r", workspaceId: "w", agentId: "claude",
+      title: "Ordinary Child", useWorktree: false, driver: "claude-code", config: {}, now: 5 });
+    assert.equal(batch.capture(h.db.getSession("ordinary"))?.id, "campaign", "a reviewer cannot poison its siblings' campaign cache");
     h.db.campaignBudgets.authorize("campaign", { version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 2 });
-    assert.equal(h.db.campaignBudgets.root(id), null, "a later allowance grant still excludes review children");
+    assert.equal(h.db.campaignBudgets.root(id), "campaign", "retroactive allowance accounting includes reviewer spending");
+    assert.equal(h.db.campaignBudgets.view("campaign")!.occupied, 2, "only the two implementation workers take slots");
   } finally { h.db.close(); }
 });
 
@@ -758,8 +771,8 @@ test("a campaign member's review reserves allowance and settles actual usage wit
       assert.equal(start.spec.config?.maxToolCalls, allocation.toolCalls);
       assert.equal(allocation.costUsd, 40, "uses free campaign capacity, not the requester's reserved allocation");
       assert.equal(h.db.campaignBudgets.view("root")!.outstanding.costUsd, before.outstanding.costUsd + 40);
-      assert.equal(h.db.campaignBudgets.view("root")!.occupied, before.occupied + 1);
-      assert.equal(h.db.getSession(id)!.parentSessionId ?? null, null, "accounting membership grants no descendant authority");
+      assert.equal(h.db.campaignBudgets.view("root")!.occupied, before.occupied);
+      assert.equal(h.db.getSession(id)!.parentSessionId, "s1", "display parentage grants no descendant authority");
       assert.equal(h.db.getSession("s1")!.liveChildCapacity?.occupied, 0);
       h.db.addSessionUsage(id, { costUsd: 3 }, 7);
       h.db.appendEvent(id, { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" }, 8);
@@ -840,11 +853,11 @@ test("campaign reviews without cost or tool ceilings still record actual spend",
   } finally { h.db.close(); }
 });
 
-test("campaign reviews refuse exhausted, stopped, fully reserved and concurrency-bound allowances before launch", () => {
-  for (const scenario of ["exhausted", "stopped", "reserved", "concurrency"] as const) {
+test("campaign reviews refuse exhausted, stopped and fully reserved allowances before launch", () => {
+  for (const scenario of ["exhausted", "stopped", "reserved"] as const) {
     const h = harness({ campaign: true });
     try {
-      h.enableCampaign(scenario === "concurrency" ? { concurrency: 2 } : {});
+      h.enableCampaign();
       if (scenario === "exhausted") h.db.addSessionUsage("root", { costUsd: 140 }, 7);
       if (scenario === "stopped") h.db.campaignBudgets.stop("root", "revoked", "Human stopped the campaign allowance.");
       if (scenario === "reserved") h.db.campaignBudgets.admit("root", { sessionId: "reserved", costUsd: 80, toolCalls: 80 }, {});
@@ -857,6 +870,36 @@ test("campaign reviews refuse exhausted, stopped, fully reserved and concurrency
       assert.equal(h.db.reviewSessions.activeFor("s1"), null);
     } finally { h.db.close(); }
   }
+});
+
+test("review admission and spending remain available with every campaign worker slot occupied", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ concurrency: 2, costUsd: undefined, toolCalls: undefined });
+    h.db.updateSessionMaxChildSessions("s1", 0, 4);
+    const before = h.db.campaignBudgets.view("root")!;
+    assert.equal(before.occupied, 2);
+    const { reviewSessionId: id } = requested(h);
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, before.occupied);
+    assert.equal(h.db.getSession("s1")!.liveChildCapacity!.occupied, 0);
+    h.db.addSessionUsage(id, { costUsd: 1 }, 5);
+    assert.equal(h.db.campaignBudgets.view("root")!.actual.costUsd, 1);
+    const second = requested(h, "s2");
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 2);
+    assert.equal(h.db.getSession(second.reviewSessionId)!.campaignMembership, undefined);
+  } finally { h.db.close(); }
+});
+
+test("a refused requester archive leaves its reviewer active", () => {
+  const h = harness();
+  try {
+    const { reviewSessionId: id } = requested(h);
+    h.svc.dedicatedMediaReviewerOpen = sessionId => sessionId === "s1";
+    assert.equal(h.svc.setArchived("s1", true).status, 409);
+    assert.equal(h.db.reviewSessions.view(id)!.cancelRequested, false);
+    assert.equal(h.db.getSession(id)!.archived, false);
+    assert.equal(h.db.hasSessionStopIntent(id), false);
+  } finally { h.db.close(); }
 });
 
 test("campaign reviews require accounting-aware runners and priced models, while non-campaign reviews keep older support", () => {

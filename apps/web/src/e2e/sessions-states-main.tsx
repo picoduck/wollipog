@@ -122,7 +122,8 @@ let sessions: SessionView[] = STATE === "sessions" ? Array.from({ length: 5 }, (
 
 // The real Shell with review-session metadata, including the rows startup reconciliation repairs.
 if (REVIEW_CHILDREN) {
-  const requester = { ...session(0), title: "Guard Empty Carts at Checkout", reviewRuns: { count: 2, active: STATE === "review-disposed" ? 0 : 1, updatedAt: 1 } };
+  const requester = { ...session(0), title: "Guard Empty Carts at Checkout", useWorktree: true, worktreePath: "/srv/docs",
+    reviewRuns: { count: 2, active: STATE === "review-disposed" ? 0 : 1, updatedAt: 1 } };
   const legacy = STATE === "review-legacy";
   sessions = [requester, ...[0, 1].map(index => ({
     ...session(index + 1), id: `review-${index}`, title: "Claude Review of acme/shop#42", kind: "review" as const,
@@ -215,6 +216,16 @@ window.__deliverSessions = () => {
   for (const value of sessions) socket?.push({ type: "session_upsert", session: structuredClone(value) });
 };
 
+function fixtureEventPage(id: string) {
+  return {
+    events: REVIEW_CHILDREN && id.startsWith("review-") ? [{
+      id: 1, sessionId: id, seq: 1, ts: NOW,
+      payload: { kind: "agent_message" as const, text: "Recorded reviewer transcript remains readable after archival.", final: true },
+    }] : [],
+    eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, hasMoreCached: false, cacheComplete: true,
+  };
+}
+
 const client = {
   ...api,
   // This synthetic Shell models an older server and must never query a real host.
@@ -227,8 +238,8 @@ const client = {
     if (!value) throw new Error("session not found");
     return { session: structuredClone(value) };
   },
-  getSessionEventPage: async () => ({ events: [], hasOlder: false }) as never,
-  getSessionEventTailPage: async () => ({ events: [], hasOlder: false }) as never,
+  getSessionEventPage: async (id: string) => fixtureEventPage(id),
+  getSessionEventTailPage: async (id: string) => fixtureEventPage(id),
   git: async () => ({}),
   gitSummary: async () => ({}),
   reviewFindings: async () => ({ findings: [], summary: {

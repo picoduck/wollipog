@@ -15473,7 +15473,8 @@ export class ControlPlaneDb {
 
   /** Server-owned ancestry only. UNION terminates even if legacy data contains a cycle. */
   isSessionDescendant(ancestorId: string, targetId: string): boolean {
-    if (ancestorId === targetId) return false;
+    // Reviewer parentage is for display/history and grants no descendant mutation authority.
+    if (ancestorId === targetId || this.reviewSessions.isReviewSession(targetId)) return false;
     return Boolean(this.stmt(`
       WITH RECURSIVE ancestry(id) AS (
         SELECT parent_session_id FROM sessions WHERE id=? AND parent_session_id IS NOT NULL
@@ -15813,8 +15814,8 @@ export class ControlPlaneDb {
   /** Commit the immutable review identity and its display parent before any observer sees it. */
   createReviewSession(input: NewSessionInput, review: Omit<NewReviewSession, "reviewSessionId" | "runnerId">): SessionView {
     return this.atomic(() => {
-      this.createSession(input);
       this.reviewSessions.record({ ...review, reviewSessionId: input.id, runnerId: input.runnerId }, input.now);
+      this.createSession(input);
       this.linkReviewSession(input.id);
       return this.getSession(input.id)!;
     });

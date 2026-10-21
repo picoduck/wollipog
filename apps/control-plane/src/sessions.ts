@@ -12734,11 +12734,6 @@ export class SessionsService {
       this.hub.sessionChanged(restored, refreshProject);
       return ok(restored);
     }
-    for (const reviewSessionId of this.db.reviewSessions.forRequester(sessionId)) {
-      this.db.abandonReviewContinuations(sessionId, now);
-      this.cancelReviewSession(sessionId, reviewSessionId);
-      this.setArchived(reviewSessionId, true, refreshProject);
-    }
     if (session.archiveStatus === "stop_failed") {
       return ok(session, 202);
     }
@@ -12762,17 +12757,32 @@ export class SessionsService {
       if (media && !pending.archived && !this.db.sessionStopIntent(sessionId)?.archiveAfterStop) {
         return fail("Prepared media archive requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
       }
+      this.archiveRequesterReviews(sessionId, now, refreshProject);
       return ok(pending, 202);
     }
-    if (session.archived) return ok(session);
+    if (session.archived) {
+      this.archiveRequesterReviews(sessionId, now, refreshProject);
+      return ok(session);
+    }
     // Archiving a terminal session needs no Stop, but it is an end all the same: a runner that
     // returns stops an archived session rather than restoring it, so a child a disconnect had
     // provisionally stopped can answer nothing and is owed no resume from here on (#1759).
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-archived");
     this.db.setSessionArchived(sessionId, true, now);
+    this.archiveRequesterReviews(sessionId, now, refreshProject);
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated, refreshProject);
     return ok(updated);
+  }
+
+  private archiveRequesterReviews(sessionId: string, now: number, refreshProject: boolean): void {
+    const reviews = this.db.reviewSessions.forRequester(sessionId);
+    if (!reviews.length) return;
+    this.db.abandonReviewContinuations(sessionId, now);
+    for (const id of reviews) {
+      this.cancelReviewSession(sessionId, id);
+      this.setArchived(id, true, refreshProject);
+    }
   }
 
   /** A verified child and its archived flag are the durable intent. Reconnect replays this
@@ -15895,7 +15905,7 @@ export class SessionsService {
       }
     };
     return { defer, capture: (session) => {
-      if (!session?.parentSessionId) return null;
+      if (!session?.parentSessionId || session.kind === "review") return null;
       let before = parents.get(session.parentSessionId);
       if (before === undefined) {
         before = this.campaignAttentionController(session);
@@ -16025,7 +16035,7 @@ export class SessionsService {
     const campaigns = this.runnerAttentionBeforeViews(runnerId);
     const parents = new Map<string, SessionView | null>();
     const campaignBefore = (session: SessionView | null): SessionView | null => {
-      if (!session?.parentSessionId) return null;
+      if (!session?.parentSessionId || session.kind === "review") return null;
       let controller = parents.get(session.parentSessionId);
       if (controller === undefined) {
         controller = this.campaignAttentionController(session);

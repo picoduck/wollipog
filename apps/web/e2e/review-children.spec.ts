@@ -17,3 +17,16 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(grid).not.toContainText("Claude Review");
   });
 }
+
+test("Open Transcript loads an archived reviewer omitted from the Sessions list", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/sessions-states-e2e.html?state=review-disposed");
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
+  await page.getByRole("button", { name: "Side Panel", exact: true }).click();
+  await page.locator('.session-tool[data-tool="review"]').click();
+  const reviews = page.getByRole("region", { name: "Cross-Model Reviews" });
+  await expect(reviews).toBeVisible();
+  await reviews.getByRole("button", { name: "Open Transcript" }).first().click();
+  await expect(page.getByRole("status", { name: "Session Archived", exact: true })).toBeVisible();
+  await expect(page.getByText("Recorded reviewer transcript remains readable after archival.")).toBeVisible();
+});
