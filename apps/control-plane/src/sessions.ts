@@ -4797,6 +4797,8 @@ export class SessionsService {
     }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
+      // For an ad-hoc browsed path there is NO workspace — send null, not the stale configured id, so
+      // the runner's persisted metadata + snapshots don't misattribute it to a workspace it isn't in.
       workspaceId,
       workspacePath,
       agentId: req.agentId,
@@ -4943,37 +4945,16 @@ export class SessionsService {
     // The runner emits the user_message into the box store (source of truth) when it runs the
     // initial prompt — the control plane no longer appends it locally.
 
+    // Keep the staged command separate: its durable snapshot has no budget dispatch. Resolve
+    // dispatch here, after materialization, image externalization and sessionChanged, as before.
+    const { sessionId: launchSessionId, ...sharedSpec } = commandSpec;
     const spec: SessionLaunchSpec = {
-      sessionId: id,
+      sessionId: launchSessionId,
       campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
-      // For an ad-hoc browsed path there is NO workspace — send null, not the stale configured id, so
-      // the runner's persisted metadata + snapshots don't misattribute it to a workspace it isn't in.
-      workspaceId,
-      workspacePath,
-      agentId: req.agentId,
-      providerAccountId: providerAccount?.id,
-      providerAccountLabel: providerAccount?.label,
-      agentVersion: launch.version,
-      capabilities: launch.capabilities,
-      title,
-      titleSource,
-      command: launch.command,
-      args: launch.args,
-      env: launch.env,
-      useWorktree,
-      executionTarget,
-      executionHandoff,
-      driver: launch.driver,
-      context: launch.context,
-      config,
-      ...(orchestratorPolicy ? { orchestrator: {
-        ...orchestratorPolicy.execution,
-        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
-        ...(orchestratorPolicy.issueScope ? { issueScope: orchestratorPolicy.issueScope } : {}),
-        ...(orchestratorPolicy.control ? { control: orchestratorPolicy.control } : {}),
-      } } : {}),
-      acpSessionContext,
-      ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
+      ...sharedSpec,
+      // The original frames also had distinct orchestrator containers; their nested values and
+      // config were already shared. Preserve that ownership without changing the staged frame.
+      ...(commandSpec.orchestrator ? { orchestrator: { ...commandSpec.orchestrator } } : {}),
     };
     if (capture) {
       if (command.type !== "start_session") throw new Error("Prepared media command is malformed.");
