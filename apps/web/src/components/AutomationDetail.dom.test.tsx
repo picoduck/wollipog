@@ -1362,6 +1362,19 @@ test("ceiling-paused runs have warning badges and explain possible output in Run
   } finally { await view.unmount(); }
 }));
 
+test("a workflow ceiling notice names its Open Run control", () => withRunClock(async () => {
+  const paused = run("ceiling_paused", { executionId: "axe_workflow_paused", actionKind: "workflow_run",
+    runId: "run-1", sessionId: undefined, governancePause: {
+      sessionId: "member-1", tripId: "trip-1", kind: "cost_budget", threshold: 6, observed: 6.71,
+    } });
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": [paused] } });
+  try {
+    const dialog = await openRunDetails(view.body, "axe_workflow_paused");
+    assert.match(dialog.querySelector(".notice.t-warning")?.textContent ?? "", /Choose Open Run to inspect it\./);
+    assert.ok(buttonNamed(dialog, "Open Run"));
+  } finally { await view.unmount(); }
+}));
+
 test("Run Details shows the run key only under Show Technical Details, and Copy copies all of it", () => withRunClock(async () => {
   const copied: string[] = [];
   const clipboard = withClipboard({ writeText: async (text) => { copied.push(text); } });

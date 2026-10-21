@@ -964,20 +964,32 @@ export class AutomationsService {
   }
 
   private pauseForGovernance(execution: AutomationExecution, now: number, onlySessionId?: string): boolean {
-    const sessionIds = execution.sessionId ? [execution.sessionId]
-      : execution.workflowInstanceId ? [
-          ...this.db.listAutomationCommands(execution.executionId)
-            .filter((command) => command.supersededBy === undefined).map((command) => command.sessionId),
-          ...this.db.listWorkflowAttempts(execution.workflowInstanceId)
-            .filter((attempt) => ["dispatching", "running", "awaiting_output"].includes(attempt.status))
-            .flatMap((attempt) => attempt.sessionId ? [attempt.sessionId] : []),
-        ] : [];
-    for (const sessionId of new Set(sessionIds)) {
+    const commands = this.db.listAutomationCommands(execution.executionId);
+    const sources = [
+      ...commands.filter((command) => command.supersededBy === undefined && command.startedAt !== undefined)
+        .map((command) => ({ sessionId: command.sessionId, startedAt: command.startedAt!, completedAt: command.completedAt })),
+      ...(execution.workflowInstanceId ? this.db.listWorkflowAttempts(execution.workflowInstanceId)
+        .filter((attempt) => ["dispatching", "running", "awaiting_output"].includes(attempt.status))
+        .flatMap((attempt) => attempt.sessionId ? [{ sessionId: attempt.sessionId, startedAt: attempt.startedAt,
+          completedAt: attempt.completedAt }] : []) : []),
+      ...(execution.deliveryMode !== "receipted_v53" && execution.sessionId && execution.startedAt !== undefined
+        ? [{ sessionId: execution.sessionId, startedAt: execution.startedAt, completedAt: execution.completedAt }] : []),
+    ];
+    for (const { sessionId, startedAt, completedAt } of sources) {
       if (onlySessionId && sessionId !== onlySessionId) continue;
       const session = this.db.getSession(sessionId);
       if (!session) continue;
-      const trip = pendingRequests(session.pendingApproval).find((request) => request.runnerGuardrail)?.runnerGuardrail;
+      // A retained card is not proof this execution caused the trip. The exact authenticated
+      // report must be within this claim and command/attempt's actual execution window.
+      const trip = pendingRequests(session.pendingApproval).find((request) => request.runnerGuardrail &&
+        this.db.hasRunnerGovernanceTripInWindow(sessionId, request.runnerGuardrail,
+          Math.max(execution.createdAt, startedAt), completedAt ?? now))?.runnerGuardrail;
       if (!trip) continue;
+      if (execution.actionKind === "workflow_run") {
+        this.failWorkflowExecution(execution, commands, sessionId,
+          commands.find((command) => command.sessionId === sessionId && command.supersededBy === undefined)?.commandId,
+          `runner governance paused ${trip.kind} at ${trip.threshold}`, now);
+      }
       const settled = this.db.settleAutomationExecution({
         executionId: execution.executionId, status: "ceiling_paused",
         governancePause: { sessionId, ...trip },
@@ -989,6 +1001,38 @@ export class AutomationsService {
       return true;
     }
     return false;
+  }
+
+  /** Governance changes the receipt classification, not a failed workflow's cleanup boundary.
+   * Stop all siblings and finish the instance before settlement releases its concurrency slot. */
+  private failWorkflowExecution(
+    execution: AutomationExecution,
+    commands: AutomationCommandRecord[],
+    sourceSessionId: string,
+    sourceCommandId: string | undefined,
+    error: string,
+    now: number,
+  ): void {
+    this.db.terminalizeAutomationExecutionCommands(execution.executionId, sourceCommandId ?? "", error, now);
+    const siblings = new Map(commands.filter((command) => command.sessionId !== sourceSessionId &&
+      !["completed", "rejected", "uncertain"].includes(command.state))
+      .map((command) => [command.sessionId, command.runnerId]));
+    if (execution.workflowInstanceId) {
+      const instance = this.db.getWorkflowInstance(execution.workflowInstanceId);
+      if (instance && !["succeeded", "failed", "stopped"].includes(instance.status)) {
+        for (const attempt of instance.attempts) {
+          if (!attempt.sessionId || attempt.sessionId === sourceSessionId ||
+              !["dispatching", "running", "awaiting_output"].includes(attempt.status)) continue;
+          const sibling = this.db.getSession(attempt.sessionId);
+          if (sibling) siblings.set(sibling.id, sibling.runnerId);
+        }
+        this.db.finishWorkflowInstance({ instanceId: execution.workflowInstanceId, status: "failed",
+          error, actor: { kind: "system", id: "automation-outbox" }, now });
+      }
+    }
+    for (const [sessionId, runnerId] of siblings) {
+      this.hub.sendToRunner(runnerId, { type: "cancel_session", sessionId });
+    }
   }
 
   private reconcileExecution(executionId: string, now: number): void {
@@ -1004,28 +1048,8 @@ export class AutomationsService {
       (command.state === "rejected" || command.state === "uncertain") && command.supersededBy === undefined);
     if (failed) {
       if (execution.actionKind === "workflow_run") {
-        this.db.terminalizeAutomationExecutionCommands(
-          executionId,
-          failed.commandId,
-          `workflow sibling '${failed.commandId}' became ${failed.state}`,
-          now,
-        );
-        for (const command of commands) {
-          if (command.commandId === failed.commandId || ["completed", "rejected", "uncertain"].includes(command.state)) continue;
-          this.hub.sendToRunner(command.runnerId, { type: "cancel_session", sessionId: command.sessionId });
-        }
-        if (execution.workflowInstanceId) {
-          const instance = this.db.getWorkflowInstance(execution.workflowInstanceId);
-          if (instance && !["succeeded", "failed", "stopped"].includes(instance.status)) {
-            this.db.finishWorkflowInstance({
-              instanceId: execution.workflowInstanceId,
-              status: "failed",
-              error: failed.lastError ?? `workflow launch command '${failed.commandId}' became ${failed.state}`,
-              actor: { kind: "system", id: "automation-outbox" },
-              now,
-            });
-          }
-        }
+        this.failWorkflowExecution(execution, commands, failed.sessionId, failed.commandId,
+          failed.lastError ?? `workflow sibling '${failed.commandId}' became ${failed.state}`, now);
       } else if (execution.actionKind === "create_session" && execution.sessionId && failed.state === "rejected") {
         // A rejected launch is a runner failure receipt, or a command never sent: either way no
         // provider process started for it.

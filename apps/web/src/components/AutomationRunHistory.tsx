@@ -181,7 +181,7 @@ export function RunDetailsDialog({ execution, now, policy, machineLabel, onOpen,
     >
       {execution.status === "ceiling_paused" && (
         <Notice tone="warning">
-          {reason} Partial or complete output may be available. {execution.runId ? "Open the workflow to inspect it." : "Open the session to inspect it."}
+          {reason} Partial or complete output may be available. {execution.runId ? "Choose Open Run to inspect it." : "Open the session to inspect it."}
         </Notice>
       )}
       {error && (

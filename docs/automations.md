@@ -49,6 +49,13 @@ report instead records `ceiling_paused`, with `governancePause` naming its sessi
 `cost_budget` or `max_tool_calls`, configured threshold and observed value. This is a receipt of
 interrupted work, not a claim that no output exists; the session's approval card remains available
 to continue or stop it. Run History and Run Details show a warning and the configured ceiling.
+Workflow pauses retain failure cleanup semantics: pending sibling commands are terminalized,
+active sibling turns receive cancellation, and the workflow instance finishes before the execution
+releases its concurrency slot. Matching requires a started command or workflow attempt and the exact
+runner trip's authenticated audit record at or after that start and the execution claim. Retained
+cards from earlier work cannot classify an undelivered occurrence, and later turns' reports cannot
+classify a completed command. Terminal executions cannot gain
+provider-retry replacement commands from trailing receipts.
 Only runner evidence establishes this distinction: pre-v129 runners and generic provider
 cancellations retain their existing settlement, and already terminal receipts are never rewritten.
 The additive `governance_pause_json` column preserves the original SQLite status constraint;

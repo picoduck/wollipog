@@ -218,6 +218,166 @@ function receiveSignedTrigger(
   }, body, now);
 }
 
+function runnerPause(db: ControlPlaneDb, sessionId: string, now: number, trip = {
+  tripId: "trip", kind: "cost_budget" as "cost_budget" | "max_tool_calls", threshold: 1.5, observed: 2,
+}): void {
+  const requestId = `runner-${trip.kind}:${trip.tripId}`;
+  db.setPendingApproval(sessionId, { requestId, kind: trip.kind, title: "Continue?",
+    options: [{ optionId: "continue", name: "Continue", kind: "allow_once" }], runnerGuardrail: trip });
+  db.appendGovernanceAudit({ requestId, approvalKind: trip.kind, stage: "policy_decision", outcome: "asked",
+    actor: { kind: "system", id: "runner-governance" }, scope: { sessionId, runnerId: "runner-1" }, timestamp: now });
+}
+
+test("a workflow ceiling pause finishes the instance and cancels siblings before releasing wait or skip", () => {
+  for (const concurrencyPolicy of ["wait", "skip"] as const) {
+    const { db, service, delivered } = harness();
+    try {
+      installCapabilityWorkflow(db, "wf-1");
+      const actor = { kind: "human" as const, id: "device" };
+      const automation = service.create(baseSpec({ concurrencyPolicy, action: { kind: "workflow_run", request: {
+        workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+        agentBindings: { worker: "agent-1", reviewer: "agent-1" },
+      } } }), actor, 0).data!;
+      service.tick(60_000);
+      const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+      const commands = execution.commands!;
+      db.createRun({ id: execution.runId!, title: "Run", prompt: "Build", workspaceId: null, runnerId: null, now: 60_000 });
+      db.createWorkflowInstance({ instanceId: execution.workflowInstanceId!, definition: db.getWorkflowDefinition("wf-1")!,
+        runId: execution.runId!, createdBy: actor, now: 60_000 });
+      for (const command of commands) {
+        db.createSession({ id: command.sessionId, runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+          title: "Member", useWorktree: false, driver: "acp", config: {}, now: 60_000 });
+        db.updateSessionStatus(command.sessionId, "running", 60_001);
+        service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+          commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
+      }
+      runnerPause(db, commands[0]!.sessionId, 60_002);
+      service.onGovernanceTripped(commands[0]!.sessionId, 60_003);
+      assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
+      assert.equal(db.getWorkflowInstance(execution.workflowInstanceId!)?.status, "failed",
+        "the workflow must be terminal before its automation slot is freed");
+      assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "uncertain");
+      assert.ok(delivered.some((message) => (message as { type: string; sessionId?: string }).type === "cancel_session" &&
+        (message as { sessionId?: string }).sessionId === commands[1]!.sessionId), "the sibling receives cancellation");
+      assert.ok(db.getSession(commands[0]!.sessionId)?.pendingApproval, "the source approval remains available");
+      service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+        commandId: commands[0]!.commandId, sessionId: commands[0]!.sessionId,
+        state: "failed", revision: 2, error: "provider cancelled" }, 60_004);
+      service.tick(120_000);
+      assert.equal(db.listAutomationExecutions(automation.automationId).length, 2,
+        "the next occurrence may launch only after the prior instance finished and siblings were cancelled");
+      assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
+    } finally { db.close(); }
+  }
+});
+
+test("a control-plane workflow pause cancels active attempt siblings without launch commands", () => {
+  const { db, service, delivered } = harness();
+  try {
+    installCapabilityWorkflow(db, "wf-1");
+    const actor = { kind: "human" as const, id: "device" };
+    const automation = service.create(baseSpec({ action: { kind: "workflow_run", request: {
+      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+      agentBindings: { worker: "agent-1", reviewer: "agent-1" },
+    } } }), actor, 0).data!;
+    db.claimAutomationExecution({ executionId: "native", automationId: automation.automationId,
+      expectedNextFireAt: 60_000, scheduledFor: 60_000, nextFireAt: 120_000, actionKind: "workflow_run",
+      status: "dispatching", deliveryMode: "receipted_v53", actor, now: 60_000 });
+    db.createRun({ id: "run-native", title: "Run", prompt: "Build", workspaceId: null, runnerId: null, now: 60_000 });
+    db.createWorkflowInstance({ instanceId: "wfi-native", definition: db.getWorkflowDefinition("wf-1")!,
+      runId: "run-native", createdBy: actor, now: 60_000 });
+    db.settleAutomationExecution({ executionId: "native", status: "running", runId: "run-native",
+      workflowInstanceId: "wfi-native", runnerId: "runner-1", actor, now: 60_001 });
+    for (const nodeId of ["build", "review"]) {
+      db.createSession({ id: nodeId, runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+        title: "Member", useWorktree: false, driver: "acp", config: {}, now: 60_001 });
+      db.updateSessionStatus(nodeId, "running", 60_001);
+      db.createWorkflowAttempt({ attemptId: `attempt-${nodeId}`, instanceId: "wfi-native", nodeId, attempt: 1,
+        status: "running", dispatchKey: nodeId, sessionId: nodeId, startedAt: 60_001, deadlineAt: 120_001 });
+    }
+    runnerPause(db, "build", 60_002);
+    service.onGovernanceTripped("build", 60_003);
+    assert.equal(db.getAutomationExecution("native")?.status, "ceiling_paused");
+    assert.equal(db.getWorkflowInstance("wfi-native")?.status, "failed");
+    assert.ok(db.getWorkflowInstance("wfi-native")?.attempts.every((attempt) => attempt.status === "cancelled"));
+    assert.deepEqual(delivered, [{ type: "cancel_session", sessionId: "review" }]);
+    assert.ok(db.getSession("build")?.pendingApproval);
+    assert.equal(db.activeAutomationExecution(automation.automationId), null);
+  } finally { db.close(); }
+});
+
+test("a transient-looking receipt cannot create a replacement for a ceiling-paused execution", () => {
+  const { db, service, delivered } = harness();
+  try {
+    const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+    service.tick(60_000);
+    const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+    const command = execution.commands![0]!;
+    service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+      commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
+    runnerPause(db, command.sessionId, 60_002);
+    service.onGovernanceTripped(command.sessionId, 60_003);
+    const sent = delivered.length;
+    service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+      commandId: command.commandId, sessionId: command.sessionId, state: "failed", revision: 2,
+      error: "Service temporarily unavailable, please retry later" }, 60_004);
+    assert.equal(db.listAutomationCommands(execution.executionId).length, 1);
+    assert.equal(db.listAutomationCommands(execution.executionId)[0]?.supersededBy, undefined);
+    service.recover(90_000);
+    assert.equal(delivered.length, sent);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
+  } finally { db.close(); }
+});
+
+test("an older runner card or an undelivered prompt cannot be attributed to a new execution", () => {
+  const { db, service } = harness();
+  try {
+    db.createSession({ id: "target", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      title: "Target", useWorktree: false, driver: "acp", config: {}, now: 0 });
+    runnerPause(db, "target", 1);
+    // Normal ingestion keeps the target parked. Even with a stale idle projection, attribution
+    // must prove this execution's command started after the older trip, rather than adopt its card.
+    db.updateSessionStatus("target", "idle", 2);
+    const automation = service.create(baseSpec({ action: { kind: "prompt_session", sessionId: "target",
+      request: { text: "Continue" } } }), { kind: "human", id: "device" }, 0).data!;
+    service.tick(60_000);
+    const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+    runnerPause(db, "target", 60_001, { tripId: "before-start", kind: "cost_budget", threshold: 1.5, observed: 2 });
+    service.onGovernanceTripped("target", 60_002);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "dispatching", "no command start proof");
+    const command = execution.commands![0]!;
+    service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update", commandId: command.commandId,
+      sessionId: command.sessionId, state: "started", revision: 1 }, 60_003);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running", "the earlier trip predates this start");
+    runnerPause(db, "target", 60_004, { tripId: "current", kind: "cost_budget", threshold: 1.5, observed: 2 });
+    service.onGovernanceTripped("target", 60_005);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
+    assert.equal(db.getAutomationExecution(execution.executionId)?.governancePause?.tripId, "current");
+  } finally { db.close(); }
+});
+
+test("trip attribution ends at command completion but recovers same-turn evidence after completion", () => {
+  for (const sameTurn of [false, true]) {
+    const { db, service, restartService } = harness();
+    try {
+      const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+      service.tick(60_000);
+      const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+      const command = execution.commands![0]!;
+      service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+        commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
+      if (sameTurn) runnerPause(db, command.sessionId, 60_002);
+      // Persist the completion before a simulated control-plane crash, without reconciliation.
+      db.recordAutomationCommandReceipt({ commandId: command.commandId, runnerId: "runner-1",
+        sessionId: command.sessionId, state: "completed", revision: 2, now: 60_003 });
+      if (!sameTurn) runnerPause(db, command.sessionId, 60_004); // another manual turn's trip
+      restartService().recover(60_005);
+      assert.equal(db.getAutomationExecution(execution.executionId)?.status, sameTurn ? "ceiling_paused" : "running");
+      assert.equal(Boolean(db.getAutomationExecution(execution.executionId)?.governancePause), sameTurn);
+    } finally { db.close(); }
+  }
+});
+
 test("runner ceiling evidence wins over cancellation receipts and survives recovery without rewriting old runs", () => {
   for (const kind of ["cost_budget", "max_tool_calls"] as const) {
     const { db, service, restartService, notifications } = harness();
@@ -233,10 +393,7 @@ test("runner ceiling evidence wins over cancellation receipts and survives recov
       const trip = { tripId: `trip-${kind}`, kind, threshold: kind === "cost_budget" ? 1.5 : 12,
         observed: kind === "cost_budget" ? 1.7 : 12 };
       // SessionsService installs this only after validating the authenticated runner report.
-      db.setPendingApproval(command.sessionId, {
-        requestId: `runner-${kind}:${trip.tripId}`, kind, title: "Continue?",
-        options: [{ optionId: "continue", name: "Continue", kind: "allow_once" }], runnerGuardrail: trip,
-      });
+      runnerPause(db, command.sessionId, 60_002, trip);
       db.updateSessionStatus(command.sessionId, "input_required", 60_002);
       if (kind === "cost_budget") service.onGovernanceTripped(command.sessionId, 60_003);
       else restartService().recover(60_003); // durable-card recovery before a trailing receipt
@@ -280,10 +437,10 @@ test("a prompt target or workflow member's runner pause identifies the owning ex
       if (kind === "workflow_run") db.createSession({ id: command.sessionId, runnerId: "runner-1",
         workspaceId: "ws-1", agentId: "agent-1", title: "Member", useWorktree: false,
         driver: "acp", config: {}, now: 60_000 });
-      db.setPendingApproval(command.sessionId, { requestId: "runner-cost_budget:trip", kind: "cost_budget",
-        title: "Continue?", options: [{ optionId: "continue", name: "Continue", kind: "allow_once" }],
-        runnerGuardrail: { tripId: "trip", kind: "cost_budget", threshold: 1.5, observed: 2 } });
-      service.onGovernanceTripped(command.sessionId, 60_001);
+      service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+        commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
+      runnerPause(db, command.sessionId, 60_002);
+      service.onGovernanceTripped(command.sessionId, 60_003);
       assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
       assert.equal(db.getAutomationExecution(execution.executionId)?.governancePause?.sessionId, command.sessionId);
       assert.ok(db.getSession(command.sessionId)?.pendingApproval, "the approval card remains available");

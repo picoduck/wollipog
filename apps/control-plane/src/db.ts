@@ -21675,6 +21675,20 @@ export class ControlPlaneDb {
     ).get(sessionId, requestId));
   }
 
+  hasRunnerGovernanceTripInWindow(
+    sessionId: string,
+    trip: Pick<NonNullable<AutomationExecution["governancePause"]>, "kind" | "tripId">,
+    since: number,
+    until: number,
+  ): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM governance_audit WHERE session_id=? AND request_id=?
+       AND stage='policy_decision' AND outcome='asked'
+       AND actor_kind='system' AND actor_id='runner-governance'
+       AND created_at BETWEEN ? AND ? LIMIT 1`,
+    ).get(sessionId, `runner-${trip.kind}:${trip.tripId}`, since, until));
+  }
+
   pruneGovernanceAudit(createdBefore: number, limit = 1_000): number {
     const bounded = Math.max(1, Math.min(10_000, Math.trunc(limit)));
     return Number(this.stmt(
@@ -29899,7 +29913,7 @@ export class ControlPlaneDb {
       const row = this.stmt(
         `SELECT command.*, execution.automation_id FROM automation_commands command
          JOIN automation_executions execution ON execution.execution_id=command.execution_id
-         WHERE command.command_id=?`,
+         WHERE command.command_id=? AND execution.status IN ('dispatching','running')`,
       ).get(input.commandId) as unknown as (AutomationCommandRow & { automation_id: string }) | undefined;
       if (!row || row.runner_id !== input.runnerId ||
           (input.sessionId !== undefined && row.session_id !== input.sessionId) ||
