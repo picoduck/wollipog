@@ -2038,7 +2038,7 @@ export class SessionManager {
         preview: null, pendingApproval: null, seq: 0, createdAt: now, updatedAt: now,
         campaignBudgetDispatch: spec.campaignBudgetDispatch,
         campaignBudgetCheckpoint: { generation: spec.campaignBudgetDispatch.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 },
-        review: { ...spec.review!, checkout: spec.workspacePath, launchOwner: this.lockOwner },
+        review: { ...spec.review!, checkout: spec.workspacePath, launchOwner: this.lockOwner, preparing: true },
       });
     }
     const driver = spec.driver;
@@ -6546,6 +6546,9 @@ export class SessionManager {
       acpSessionContext = undefined;
     }
     let prior = this.store.readMeta(spec.sessionId);
+    // This is still the first provider launch. The accounting-only preparation record must not
+    // select legacy credentials or suppress any other defaults reserved for a fresh session.
+    if (spec.review && prior?.review?.preparing) prior = null;
     const driver = spec.driver ?? "acp";
     let providerAccount: ReturnType<NonNullable<ProviderAccountResolver>>;
     try {

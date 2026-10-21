@@ -58,6 +58,7 @@ function harness(t: { after(fn: () => void): void }, options: {
   evaluate?: ReviewSessionHooks["evaluate"];
   /** Permission denials the fake Claude driver reports for the turn. */
   denials?: number;
+  providerAccount?: boolean;
 } = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-session-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -124,6 +125,8 @@ function harness(t: { after(fn: () => void): void }, options: {
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const internals = manager as any;
+  if (options.providerAccount) internals.resolveProviderAccount = () => ({ id: "account", label: "Reviewer Account",
+    provider: "claude", credentialHome: join(root, "provider-account"), profileId: "profile" });
   assert.equal(internals.boxAdmission.acquire({ sessionId: "holder", agentId: "claude", weight: 1, agentLimit: 1 }), true);
   assert.equal(internals.activeTurnAdmission.acquire({ sessionId: "holder", agentId: "claude", weight: 1 }), true);
   return {
@@ -191,6 +194,21 @@ test("a campaign review preserves its admitted generation through final usage an
   assert.equal(status.campaignBudgetCheckpoint.costUsd, 3);
   assert.deepEqual(h.manager.snapshotForControlPlane(h.store.readMeta("s_review")!).campaignBudgetCheckpoint,
     status.campaignBudgetCheckpoint, "reconnect carries the same final usage receipt");
+});
+
+test("campaign reviews keep fresh provider-account binding and state defaults", async (t) => {
+  for (const campaign of [false, true]) {
+    const h = harness(t, { hold: true, providerAccount: true });
+    const dispatch = { rootSessionId: "s_campaign", generation: "account-generation" };
+    assert.equal(await h.manager.start(reviewSpec(campaign ? { campaignBudgetDispatch: dispatch } : {}), "brief"), true);
+    await until(() => h.drivers[0]?.prompts.length === 1, "review account launch");
+    const meta = h.store.readMeta("s_review")!;
+    assert.equal(meta.providerAccountId, "account", `campaign=${campaign}`);
+    assert.equal(meta.providerCredentialHome, join(h.root, "provider-account"));
+    assert.equal(meta.providerStateVersion, 2, `campaign=${campaign}`);
+    assert.equal(meta.review?.preparing, undefined, "the real launch replaces the accounting-only record");
+    h.finishTurn();
+  }
 });
 
 test("a campaign review refused during preparation durably attests zero usage", async (t) => {
