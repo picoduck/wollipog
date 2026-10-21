@@ -7,13 +7,14 @@ callers in ways tests may not catch. Bias hard toward reporting fewer, more cert
 
 ## Ground Truth
 
-Start mechanically, then verify semantically:
+Start mechanically with the symbol inventory as the primary pass, then run `jscpd` as the
+secondary wide-net pass. Both passes run every time: the order reflects observed yield, not
+optionality or a presumption that `jscpd` hits are false positives. They cover disjoint classes
+that the other pass cannot see: the export-only inventory is blind to module-private code, while
+`jscpd` is blind to units shorter than its `--min-lines` threshold. One run
+([#430, September 17](https://github.com/picoduck/wollipog/issues/430#issuecomment-5720428711))
+produced its only finding through `jscpd`: module-private CLI helpers tracked in #1220.
 
-- `npx -y jscpd --min-lines 25 --min-tokens 120 --reporters json --output <scratch>/jscpd-report apps packages scripts`
-  for literal and near-literal duplication. Replace `<scratch>` with the run-scoped scratch
-  directory and read `jscpd-report/jscpd-report.json` for the duplicated blocks. The combination
-  `--reporters console --silent` suppresses the block list and prints only a summary; never use
-  the repository's default `./report` output directory;
 - `git grep -n "^export \(async \)\?function \|^export const \|^export class \|^export type \|^export interface " -- 'apps/**' 'packages/**' 'scripts/*.mjs' 'apps/*/scripts/*.mjs'`
   to build a symbol inventory. The `scripts/` trees are part of both passes: plain-`node` scripts
   cannot import `packages/protocol` (its `exports` point at TypeScript source), so constants and
@@ -22,8 +23,19 @@ Start mechanically, then verify semantically:
   globs by hand; most were boundary-forced, but that is a conclusion the job must be able to
   reach, not assume. Types and interfaces are included, because the duplicated
   abstractions in this repository are as often shapes as functions (one run's only finding was
-  an `interface` the narrower pattern could not match) — then
-  look for families of similar names across packages — the same concept implemented per-package.
+  an `interface` the narrower pattern could not match). Look for exact and normalized name
+  collisions across packages (for example, names that match after removing package-specific
+  prefixes or suffixes), as well as families of similar names — the same concept implemented
+  per-package;
+- `npx -y jscpd --min-lines 25 --min-tokens 120 --reporters json --output <scratch>/jscpd-report apps packages scripts`
+  as the secondary wide-net pass for long literal and near-literal duplicated blocks. Replace
+  `<scratch>` with the run-scoped scratch directory and read `jscpd-report/jscpd-report.json` for
+  the duplicated blocks. The combination
+  `--reporters console --silent` suppresses the block list and prints only a summary; never use
+  the repository's default `./report` output directory. At these configured thresholds, `jscpd`
+  cannot detect duplicated units shorter than `--min-lines` (25 lines). Short duplicated units
+  carry higher drift risk because this mechanical detector cannot see them; the inventory can
+  surface exported units of any length.
 
 Mechanical duplication is only the candidate list. For each candidate, read both implementations
 fully and establish whether they mean the same thing, not merely whether they look alike.
