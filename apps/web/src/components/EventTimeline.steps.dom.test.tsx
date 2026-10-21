@@ -49,7 +49,7 @@ const run = (id: number, title: string, status: string, startedAt: number, secon
   startedAt, lastActivityAt: startedAt + seconds * 1_000, completedAt: startedAt + seconds * 1_000,
 });
 
-/** A settled turn: four commands, one of them failed, and one edit, over 26 seconds. */
+/** A settled turn: three commands, one of them failed, a read and one edit, over 26 seconds. */
 const settledTurn: TimelineItem[] = [
   { kind: "user_message", id: 1, text: "Fix the header", createdAt: t0 },
   run(2, "Bash: npm ci", "completed", t0 + 1_000, 4),
@@ -69,7 +69,7 @@ test("a settled run of work is one ledger line with its failures counted in the 
   assert.equal(trigger.getAttribute("aria-expanded"), "false", "the work starts collapsed");
   assert.equal(trigger.querySelector(".tl-work-title")?.textContent, "Worked for 26s");
   const meta = [...trigger.querySelectorAll(".tl-work-meta > span")];
-  assert.deepEqual(meta.map((item) => item.textContent), ["4 Commands", "1 Edit", "1 Failed"]);
+  assert.deepEqual(meta.map((item) => item.textContent), ["3 Commands", "1 Edit", "1 Failed"]);
   assert.ok(meta[2]!.classList.contains("tl-work-failed"), "the failure count takes the danger colour");
   assert.ok(meta[2]!.querySelector("svg.lucide-circle-alert"), "with the alert icon");
 
@@ -78,8 +78,34 @@ test("a settled run of work is one ledger line with its failures counted in the 
     workspaceRoot="/repo"
   />));
   assert.deepEqual([...container.querySelectorAll(".tl-work-meta > span")].map((item) => item.textContent),
-    ["4 Commands", "1 Edit"], "no failure item and no zero counts");
+    ["3 Commands", "1 Edit"], "no failure item and no zero counts");
   assert.doesNotMatch(container.querySelector(".tl-work")?.textContent ?? "", /\b0 /);
+});
+
+test("the ledger line counts only shell commands, so reads and an edit are never commands (#3514)", async () => {
+  const { container, root } = await mount();
+  const read = (id: number, title: string, toolKind = "read") =>
+    ({ ...run(id, title, "completed", t0 + id * 1_000, 1), toolKind }) as TimelineItem;
+  const meta = () => [...container.querySelectorAll(".tl-work-meta > span")].map((item) => item.textContent);
+  await act(async () => root.render(<EventTimeline items={[
+    { kind: "user_message", id: 1, text: "Fix the header", createdAt: t0 },
+    run(2, "Bash: npm ci", "completed", t0 + 2_000, 1),
+    read(3, "Read: /repo/src/components/Header.tsx"),
+    read(4, "Read: /repo/src/components/Header.test.tsx"),
+    read(5, "Edit: /repo/src/components/Header.tsx", "edit"),
+    { kind: "file_edit", id: 6, path: "/repo/src/components/Header.tsx", diff: "@@ -1 +1 @@\n-old\n+new" },
+    run(7, "Bash: npm test", "completed", t0 + 7_000, 1),
+    { kind: "agent_message", id: 8, text: "Fixed.", createdAt: t0 + 9_000 },
+  ]} workspaceRoot="/repo" />));
+  assert.deepEqual(meta(), ["2 Commands", "1 Edit"]);
+
+  await act(async () => root.render(<EventTimeline items={[
+    { kind: "user_message", id: 1, text: "Where is the header?", createdAt: t0 },
+    read(2, "Read: /repo/src/components/Header.tsx"),
+    read(3, "Grep: Header", "search"),
+    { kind: "agent_message", id: 4, text: "In Header.tsx.", createdAt: t0 + 5_000 },
+  ]} workspaceRoot="/repo" />));
+  assert.deepEqual(meta(), [], "no Commands count, and no zero count");
 });
 
 test("the last run of work reads Working while the turn runs, and its time once something follows it", async () => {
