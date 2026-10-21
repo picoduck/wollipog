@@ -107,6 +107,15 @@ test("a merge request on a train waits for the train, reports its failure, and c
   assert.equal(failure.summary.outcome, "queue_failed");
   assert.deepEqual(failure.summary.mergeTrain, { status: "fresh", pipeline: { id: 950, status: "failed" } });
 
+  for (const blocked of ["manual", "skipped"]) {
+    const stuck = fakeGlab({
+      [MR]: [ok(mr())], [PROJECT]: [ok({ only_allow_merge_if_pipeline_succeeds: true })], [CAR]: [onTrain(blocked)],
+    });
+    const result = await wait(stuck.glab);
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "checks_blocked", `a ${blocked} train pipeline will not finish on its own`);
+  }
+
   const dropped = fakeGlab({
     [MR]: [ok(mr())], [PROJECT]: [ok({ only_allow_merge_if_pipeline_succeeds: true })],
     [CAR]: [onTrain("running"), NOT_FOUND],

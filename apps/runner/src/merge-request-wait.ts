@@ -306,6 +306,8 @@ export async function waitForMergeRequest(input: MergeRequestWaitInput, deps: Me
       // decides whether it rejoins.
       const status = seen.train.pipeline?.status;
       if (status === "failed" || status === "canceled") return { ok: true, summary: summarize("queue_failed", seen) };
+      // A train pipeline waiting for a manual action, or skipped, will not finish on its own either.
+      if (status === "skipped" || status === "manual") return { ok: true, summary: summarize("checks_blocked", seen) };
     } else if (sawTrain) {
       // The car can go a moment before the merge request reads merged, so a drop stands only once
       // the car has stayed missing for the whole confirmation interval.
