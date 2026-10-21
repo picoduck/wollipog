@@ -209,6 +209,16 @@ function liveFixtureProcess(pid: number, startedAt: string): boolean {
   }
 }
 
+function hasFixtureAncestor(pid: number, ancestor: { pid: number; startedAt: string }): boolean {
+  // tsx/cli is a supervisor itself: its Node child is the daemon that records the lease.
+  for (let depth = 0; depth < 32 && pid > 1; depth++) {
+    if (pid === ancestor.pid) return liveFixtureProcess(pid, ancestor.startedAt);
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)!.split(" ");
+    pid = Number(stat[1]);
+  }
+  return false;
+}
+
 for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "second-signal", "supervisor-stop"] as const) {
   test(
     stopMode === "smoke" ? "a session created over the control plane drives a mock-agent turn to /ui and survives a runner restart"
@@ -425,9 +435,12 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
         before = journal(runnerHome);
         const held = before.at(-1)!;
         assert.equal(held.record.state, "active");
-        const originalPid = stopMode === "supervisor-stop"
-          ? (JSON.parse(readFileSync(supervisedRunner, "utf8")) as { pid: number }).pid : runner.pid;
-        assert.equal(held.record.pid, originalPid, "the real daemon acquired this provider HOME");
+        if (stopMode === "supervisor-stop") {
+          const launcher = JSON.parse(readFileSync(supervisedRunner, "utf8")) as { pid: number; startedAt: string };
+          assert.ok(hasFixtureAncestor(held.record.pid, launcher), "the daemon owning the HOME is inside this fixture's supervisor tree");
+        } else {
+          assert.equal(held.record.pid, runner.pid, "the real daemon acquired this provider HOME");
+        }
         assert.ok(held.record.process, "the active record contains actual runner lifecycle evidence");
         const exited = new Promise<void>((resolvePromise) => runner!.once("exit", () => resolvePromise()));
         const shutdownOutputStart = runnerOutput.length;
@@ -493,7 +506,7 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
         assert.match(eventPayload(refusal).payload?.message ?? "", /Provider HOME is already in use/);
         assert.deepEqual(journal(runnerHome), before, "a refused replacement cannot append or release ownership");
         assert.ok(descendants().some((entry) => liveFixtureProcess(entry.pid, entry.startedAt)), "the refusal was observed while the old provider survived");
-        assert.equal(descendants().filter((entry) => entry.kind === "provider").length, 1, "refusal did not start a second provider");
+        assert.equal(descendants().filter((entry) => entry.kind === "provider").length, 1, "refusal did not start another provider turn");
         await killFixtureProcesses();
       }
 
