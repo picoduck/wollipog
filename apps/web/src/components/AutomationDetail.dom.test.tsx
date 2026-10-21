@@ -1352,8 +1352,11 @@ test("ceiling-paused runs have warning badges and explain possible output in Run
     const row = view.body.querySelector('tr[data-execution-id="axe_paused"]')!;
     assert.match(row.textContent ?? "", /Ceiling Paused/);
     assert.ok(row.querySelector(".status.t-warning"));
+    assertNoDomNode(row.querySelector(".automation-run-reason"), "the bound never squeezes into phone metadata");
     const dialog = await openRunDetails(view.body, "axe_paused");
     assert.match(dialog.querySelector(".notice.t-warning")?.textContent ?? "", /Paused at the \$6.00 cost ceiling\. Partial or complete output/);
+    assert.match(dialog.querySelector(".notice.t-warning")?.textContent ?? "", /Open the session to inspect it\./);
+    assert.equal(factsOf(dialog).Result, "Ceiling Paused", "the bound is stated only in the notice");
     assertNoDomNode(dialog.querySelector(".notice.t-danger"), "a governance pause is not a crash");
     assertNoDomNode(view.body.querySelector('[data-notice-key="last-run-failed"]'), "no failure alert");
   } finally { await view.unmount(); }

@@ -325,6 +325,7 @@ if (params.has("failed-run")) {
 
 // Synthetic #316 receipt comparison: pre-upgrade cancellation versus runner ceiling evidence.
 if (params.has("ceiling-run")) {
+  items[0]!.limits = { maxCostUsd: 6, maxToolCalls: 100 };
   const before = params.has("before-ceiling");
   executions.unshift({
     ...executions[0]!, executionId: "axe_ceiling", idempotencyKey: "schedule:automation-nightly-sweep:ceiling",
