@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../../control-plane/src/local-device-credential.js";
+import { linuxLeaseProcessProbe, proveLeaseAbandoned, type LeaseProcessEvidence } from "./provider-home-lease-evidence.js";
 
 // Real control plane + real runner daemon + real mock-agent, end to end. This is the first test to
 // exercise the runner's transport/reconnect module (apps/runner/src/index.ts) against a live control
@@ -156,7 +157,7 @@ async function waitForHealth(baseUrl: string, child: ChildProcess, logs: () => s
 type LeaseRecord = {
   version: number; state: "active" | "released"; pid: number; leaseId: string;
   previousLeaseId: string | null; previousRecordHash: string | null;
-  process?: { bootId: string; startTime: string; marker: string };
+  process?: LeaseProcessEvidence;
 };
 
 // Read canonical records without changing the private registry. Check links against exact bytes,
@@ -219,9 +220,33 @@ function hasFixtureAncestor(pid: number, ancestor: { pid: number; startedAt: str
   return false;
 }
 
-for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "second-signal", "supervisor-stop"] as const) {
+function abandonmentInspection(record: LeaseRecord, scannerPid: number, fixturePids: number[]) {
+  assert.ok(record.process, "the recorded runner has lifecycle evidence");
+  const probe = linuxLeaseProcessProbe("/proc", process.getuid?.(), scannerPid);
+  assert.ok(probe, "Linux process inspection is available");
+  let scan: { marked: number[]; uninspectable: number[] } | undefined;
+  const result = proveLeaseAbandoned(record.process, record.pid, {
+    ...probe,
+    scan: (marker, startTime) => {
+      scan = probe.scan(marker, startTime);
+      return scan;
+    },
+  });
+  // Counts and fixed reasons only: never log process environments, markers, or private paths.
+  return {
+    result,
+    markedProcesses: scan?.marked.length ?? 0,
+    markedFixtureProcesses: scan?.marked.filter((pid) => fixturePids.includes(pid)).length ?? 0,
+    uninspectableProcesses: scan?.uninspectable.filter((pid) => pid !== -1).length ?? 0,
+    settled: !scan?.uninspectable.includes(-1),
+  };
+}
+
+for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGKILL-empty", "second-signal", "supervisor-stop"] as const) {
   test(
     stopMode === "smoke" ? "a session created over the control plane drives a mock-agent turn to /ui and survives a runner restart"
+      : stopMode === "SIGKILL" || stopMode === "second-signal"
+        ? `provider-HOME pipeline refuses handoff after ${stopMode} while a descendant survives`
       : `provider-HOME pipeline handoff after ${stopMode}: journal ownership and completed turns`,
     { timeout: 120_000, skip: stopMode !== "smoke" && process.platform !== "linux" ? "lease process evidence uses Linux procfs" : false },
     async (t) => {
@@ -233,6 +258,7 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
       const workspaceDir = join(temp, "workspace");
       const runnerDataDir = join(temp, "runner-data");
       const runnerHome = join(temp, "home");
+      const runnerBin = join(temp, "bin");
       const configPath = join(temp, "runner.config.json");
       const fixtureProcesses = join(temp, "provider-processes.jsonl");
       const supervisedRunner = join(temp, "supervised-runner.json");
@@ -247,6 +273,8 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
       };
       mkdirSync(workspaceDir, { recursive: true });
       mkdirSync(runnerHome, { recursive: true });
+      mkdirSync(runnerBin);
+      if (process.platform === "linux") symlinkSync(process.execPath, join(runnerBin, "node"));
 
       // The control plane loads-or-creates its local device (owner) token beside the DB. Materialize it
       // first so the test can authenticate owner HTTP calls and the /ui route with a known secret.
@@ -297,6 +325,9 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
           // shared user home — otherwise it collides with any real runner (e.g. a dev stack) on this box.
           env: {
             ...hermeticEnv(),
+            // Keep developer-specific provider installations out of PATH (#3208). The current
+            // Node remains available to generated helper scripts; native tools use system bins.
+            ...(process.platform === "linux" ? { PATH: [runnerBin, "/usr/bin", "/bin"].join(":") } : {}),
             HOME: runnerHome,
             USERPROFILE: runnerHome,
             XDG_CONFIG_HOME: join(runnerHome, ".config"),
@@ -430,7 +461,8 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
       const counts = () => Object.fromEntries(["process", "session", "provider"].map((kind) =>
         [kind, descendants().filter((entry) => entry.kind === kind).length]));
       const beforeCounts = counts();
-      const abrupt = stopMode === "SIGKILL" || stopMode === "second-signal";
+      const survivorExpected = stopMode === "SIGKILL" || stopMode === "second-signal";
+      const abrupt = survivorExpected || stopMode === "SIGKILL-empty";
       if (stopMode === "smoke") {
         await stopChild(runner);
       } else {
@@ -447,7 +479,8 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
         assert.ok(held.record.process, "the active record contains actual runner lifecycle evidence");
         const exited = new Promise<void>((resolvePromise) => runner!.once("exit", () => resolvePromise()));
         const shutdownOutputStart = runnerOutput.length;
-        assert.ok(runner.kill(stopMode === "second-signal" || stopMode === "supervisor-stop" ? "SIGTERM" : stopMode));
+        assert.ok(runner.kill(stopMode === "second-signal" || stopMode === "supervisor-stop" ? "SIGTERM"
+          : stopMode === "SIGKILL-empty" ? "SIGKILL" : stopMode));
         if (stopMode === "second-signal") {
           await until(() => runnerOutput.slice(shutdownOutputStart).includes("shutting down"), "the first signal entered the pending-kill drain");
           assert.ok(runner.kill("SIGINT"));
@@ -465,6 +498,18 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
           assert.deepEqual(released.slice(0, before.length), before, "shutdown preserves predecessor bytes");
         }
 
+      }
+
+      if (stopMode === "SIGKILL-empty") {
+        // Case 2 is separate from case 3: remove only our recorded provider processes before the
+        // replacement starts. A dead runner PID by itself cannot establish abandonment.
+        await killFixtureProcesses();
+        const inspection = abandonmentInspection(before.at(-1)!.record, process.pid, descendants().map((entry) => entry.pid));
+        t.diagnostic(`empty crash boundary before replacement: ${JSON.stringify(inspection)}`);
+        assert.equal(inspection.markedProcesses, 0, "no old marked provider survives fixture cleanup");
+        assert.ok(inspection.result.proven,
+          `empty crash boundary was not proven; unrelated uninspectable processes require #3584: ${JSON.stringify(inspection)}`);
+        assert.deepEqual(journal(runnerHome), before, "read-only abandonment inspection preserves the crashed journal");
       }
 
       // Wait until the control plane has fully processed the old socket's close (onGone -> offline)
@@ -486,20 +531,30 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
 
       // HTTP acceptance alone is not success: a failed launch also acknowledges a prompt.
       const sendPrompt = async (text: string): Promise<void> => {
-        await until(async () => {
-          assert.equal(runner!.exitCode, null, `replacement exited before reconnecting\n${runnerOutput}`);
-          const response = await fetch(`${httpBase}/api/sessions/${sessionId}/prompt`, {
-            method: "POST",
-            headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
-            body: JSON.stringify({ text }),
-          });
-          if (response.status === 200) return true;
-          assert.ok([409, 503].includes(response.status), `unexpected prompt response: ${response.status}`);
-          return false;
-        }, `replacement never accepted a prompt\n${runnerOutput}`);
+        let lastResponse = "none";
+        try {
+          await until(async () => {
+            assert.equal(runner!.exitCode, null, `replacement exited before reconnecting\n${runnerOutput}`);
+            const response = await fetch(`${httpBase}/api/sessions/${sessionId}/prompt`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+              body: JSON.stringify({ text }),
+            });
+            if (response.status === 200) return true;
+            const detail = (await response.text()).slice(0, 512);
+            lastResponse = `${response.status}: ${detail}`;
+            assert.ok(!detail.includes("session is failed"), `a failed session requires Restart before another prompt: ${detail}`);
+            assert.ok([409, 503].includes(response.status), `unexpected prompt response: ${response.status}`);
+            return false;
+          }, "replacement never accepted a prompt");
+        } catch (error) {
+          const old = before.at(-1)?.record;
+          const proof = old ? abandonmentInspection(old, runner!.pid!, descendants().map((entry) => entry.pid)) : null;
+          throw new Error(`${(error as Error).message}; last HTTP response=${lastResponse}; read-only abandonment=${JSON.stringify(proof)}\n${runnerOutput}`, { cause: error });
+        }
       };
 
-      if (abrupt) {
+      if (survivorExpected) {
         await sendPrompt("Try while the old provider descendant is still alive");
         const refusal = await uiInbox.take((message) => {
           const event = eventPayload(message);
@@ -507,6 +562,11 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
             event.payload?.kind === "error" && event.payload.message?.includes("Provider HOME is already in use") === true;
         });
         assert.match(eventPayload(refusal).payload?.message ?? "", /Provider HOME is already in use/);
+        const inspection = abandonmentInspection(before.at(-1)!.record, runner.pid!, descendants().map((entry) => entry.pid));
+        t.diagnostic(`surviving crash boundary at refusal: ${JSON.stringify(inspection)}`);
+        assert.deepEqual(inspection.result, { proven: false, reason: "marked_process" },
+          `busy refusal must be caused by a marked survivor, not an unrelated unreadable process: ${JSON.stringify(inspection)}`);
+        assert.ok(inspection.markedFixtureProcesses > 0, "the proof identifies this fixture's surviving marked provider");
         assert.deepEqual(journal(runnerHome), before, "a refused replacement cannot append or release ownership");
         assert.ok(descendants().some((entry) => liveFixtureProcess(entry.pid, entry.startedAt)), "the refusal was observed while the old provider survived");
         const refusedCounts = counts();
@@ -515,7 +575,9 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
         t.diagnostic(`ACP executable/session/turn counts: before restart=${JSON.stringify(beforeCounts)}, at refusal=${JSON.stringify(refusedCounts)}`);
         assert.equal(refusedCounts.session, beforeCounts.session, "refusal did not initialize another provider session");
         assert.equal(refusedCounts.provider, beforeCounts.provider, "refusal did not start another provider turn");
-        await killFixtureProcesses();
+        // This is case 3's terminal outcome. Do not pretend prompting the now-failed session is
+        // a recovery attempt; the separate empty-boundary case verifies the replacement turn.
+        return;
       }
 
       await sendPrompt("Note again after the runner restart");
