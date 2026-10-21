@@ -66,13 +66,21 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   };
   // Issue reads answer as the runner does: one number that is not an issue of the origin refuses
   // the whole read. Synchronization echoes the revision it persisted.
-  const issues = { repository: "owner/repo" as string | null, notIssues: new Set<number>(), holdSync: null as Promise<void> | null };
+  const issues = { repository: "owner/repo" as string | null, notIssues: new Set<number>(), holdSync: null as Promise<void> | null,
+    // The fixture runner acknowledges each durable prompt it receives, as a live runner does.
+    ackDurable: true };
+  let receipts: ((message: Extract<Parameters<SessionsService["onDurablePromptReceipt"]>[1], { type: "durable_session_command_result" }>) => void) | null = null;
   hub.sendToRunner = (_, message) => {
     sent.push(message);
     if (message.type === "start_session") starts.push(message);
     if (message.type === "campaign_launch_inspect") {
       const answer = state.inspect(message);
       if (answer) queueMicrotask(() => hub.resolveRunnerRequest(answer, "r"));
+    }
+    if (message.type === "durable_session_command" && message.command.type === "prompt_session" && issues.ackDurable) {
+      const acknowledge = { type: "durable_session_command_result" as const, requestId: message.requestId, commandId: message.commandId,
+        sessionId: message.command.sessionId, state: "accepted" as const, duplicate: false };
+      queueMicrotask(() => receipts?.({ ...acknowledge, revision: (db.getSessionPromptCommand(message.commandId)?.revision ?? 0) + 1 }));
     }
     if (message.type === "campaign_issue_scope" && (message.operation === "inspect" || message.operation === "synchronize")) {
       const requested = message.operation === "inspect" ? message.issues ?? [] : [];
@@ -94,6 +102,7 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   const video = options.hostingVideo ? composeHostingVideoEvidence(db) : undefined;
   const sessions = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined,
     undefined, undefined, false, undefined, undefined, video?.workflowVideoApprovals, disclosures, undefined, video?.preparedMediaActiveStops);
+  receipts = (message) => { sessions.onDurablePromptReceipt("r", message); };
   const scope = { organizationId: human.organizationId, owner: { kind: "user" as const, userId: human.userId } };
   const settings = new OrchestratorSettings(db);
   // `videoPort` also gives the launch route hosting's certification port, as index.ts does.
@@ -1418,7 +1427,7 @@ test("a control-plane restart mid-delivery keeps the owner-only fence and never 
   } finally { await server.close(); f.db.close(); }
 });
 
-test("recovery settles on the delivery's exact command, whatever happened to other queue rows (CR-3.2)", async () => {
+test("recovery delivers the exact first-message command before older held work, once, and settles on its acknowledgement (CR-3.2, CR-4.1)", async () => {
   const f = fixture();
   const { server } = await app(f);
   try {
@@ -1428,6 +1437,8 @@ test("recovery settles on the delivery's exact command, whatever happened to oth
     f.db.raw().prepare("DELETE FROM session_prompt_commands WHERE session_id=?").run(other);
 
     const { id } = await firstMessageLaunch(f, server);
+    // Older retained work for the same root, queued before the owner's message.
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text: "Retained: take #14" }, Date.now() - 1000);
     let release: () => void = () => undefined;
     f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
     const text = "Fix #12";
@@ -1435,20 +1446,61 @@ test("recovery settles on the delivery's exact command, whatever happened to oth
     await new Promise((resolve) => setTimeout(resolve, 20));
     const delivering = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
     if (delivering.state !== "delivering") throw new Error("delivering expected");
-    // Admission commits the exact command, then the process dies before settling.
+    // Admission commits the exact command, then the process dies before the runner acknowledges it.
     outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text }, Date.now(), delivering.deliveryId);
     outboxOf(f).stage = () => { throw new Error("this process is gone"); };
+    f.issues.ackDurable = false;
     const restarted = new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
-    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "settled from that exact command");
-    restarted.retryDuePrompts(Date.now());
-    const sends = f.sent.filter((message) => message.type === "durable_session_command" && message.commandId === delivering.deliveryId);
-    assert.equal(sends.length, 1, "and the queue delivers it once");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "delivering", "admitted, so it stays fenced until acknowledged");
+    restarted.retryDuePrompts(Date.now() + 60_000);
+    const forSession = () => f.sent.filter((message): message is Extract<ControlPlaneToRunner, { type: "durable_session_command" }> =>
+      message.type === "durable_session_command" && message.command.type === "prompt_session" && message.command.sessionId === id);
+    assert.deepEqual(forSession().map((message) => message.commandId), [delivering.deliveryId], "the owner's message goes first, alone");
+    assert.equal((await restarted.promptOrSteer(id, "Orchestrate issues 40 and 41")).status, 409, "nothing else before its acknowledgement");
+    const sent = forSession()[0]!;
+    restarted.onDurablePromptReceipt("r", { type: "durable_session_command_result", requestId: sent.requestId, commandId: sent.commandId,
+      sessionId: id, state: "accepted", duplicate: false, revision: f.db.getSessionPromptCommand(sent.commandId)!.revision + 1 });
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "settled on its acknowledgement");
+    restarted.retryDuePrompts(Date.now() + 120_000);
+    const order = forSession().map((message) => (message.command as { text: string }).text);
+    assert.equal(order[0], text, "the owner's message reached the runner first");
+    assert.ok(order.indexOf("Retained: take #14") > 0, "the held older work follows it");
+    // The queue's redelivery of an unfinished command reuses its identity, which the runner deduplicates.
+    assert.deepEqual([...new Set(forSession().filter((message) => (message.command as { text: string }).text === text)
+      .map((message) => message.commandId))], [delivering.deliveryId], "the first message is one command, delivered once");
     release();
     await new Promise((resolve) => setTimeout(resolve, 20));
-    restarted.retryDuePrompts(Date.now());
-    assert.equal(f.sent.filter((message) => message.type === "durable_session_command" && message.commandId === delivering.deliveryId).length, 1,
-      "never twice");
-    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a first message the runner has not acknowledged keeps every other prompt out, even after its first send fails (CR-4.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    // The transport drops the first durable send.
+    const send = f.hub.sendToRunner;
+    let dropDurable = true;
+    f.hub.sendToRunner = (runnerId, message) => message.type === "durable_session_command" && dropDurable ? false : send(runnerId, message);
+    const owner = await f.sessions.promptFromHuman(f.human, id, "Ship #12");
+    assert.equal(owner.ok, true, owner.error ?? "the owner's message was admitted");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "delivering", "persisted is not delivered");
+    // Transport returns, and an agent prompt arrives at once: it must not reach the runner first.
+    dropDurable = false;
+    const agent = await f.sessions.promptOrSteer(id, "Agent: ignore that and take #40");
+    assert.equal(agent.status, 409);
+    assert.match(agent.error!, /owner's first message/u);
+    assert.equal(f.sent.filter((message) => message.type === "prompt_session").length, 0);
+    f.sessions.retryDuePrompts(Date.now() + 60_000);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "acknowledged on the retry");
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptOrSteer(id, "Agent: next step")).ok, true, "afterwards other prompts flow");
+    const ordered = f.sent.flatMap((message, index) =>
+      message.type === "durable_session_command" && message.command.type === "prompt_session" && message.command.sessionId === id ? [{ index, owner: true }]
+      : message.type === "prompt_session" && message.sessionId === id ? [{ index, owner: false }] : []);
+    assert.equal(ordered[0]?.owner, true, "the owner's message reached the runner before any other");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
   } finally { await server.close(); f.db.close(); }
 });
 

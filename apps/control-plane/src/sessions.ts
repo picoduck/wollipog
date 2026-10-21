@@ -5084,16 +5084,32 @@ export class SessionsService {
       ? "This Full Control campaign starts from its owner's first message." : null;
   }
 
-  /** At startup, a first message whose delivery the last process never settled: admitted (recorded
-   * or durably queued) becomes established; otherwise the campaign waits for its first message
-   * again, still fenced. It is never resent, so no duplicate turn can start. */
+  /** At startup, a first message whose delivery the last process never settled: one admitted to
+   * the durable queue stays `delivering`, and the queue sends it ahead of any older held work until
+   * the runner acknowledges it; one never admitted reopens the wait, still fenced. It is never
+   * resent, so no duplicate turn can start. */
   private recoverFirstMessageDeliveries(now: number): void {
-    for (const { sessionId, messageDigest, deliveryId } of this.db.firstMessageDeliveries()) {
-      const delivered = this.db.firstMessageAdmitted(sessionId, messageDigest, deliveryId);
-      if (this.db.settleFirstMessageDelivery(sessionId, messageDigest, delivered, now)) {
-        this.log.warn(JSON.stringify({ event: "full_control_first_message_recovered", sessionId, delivered, messageDigest }));
-      }
-    }
+    for (const { sessionId } of this.db.firstMessageDeliveries()) this.reconcileFirstMessageDelivery(sessionId, now, true);
+  }
+
+  /** The runner's acknowledgement of the first message's exact command opens the fence (#2940):
+   * accepted or later settles it as established and releases held work; a known failure or an
+   * uncertain delivery reopens the wait. A command still pending or sent keeps every other
+   * ingress and queued command closed, so nothing can reach the runner before the owner's
+   * message. A delivery with no admitted command reopens only when `orphaned` (at startup). */
+  private reconcileFirstMessageDelivery(sessionId: string, now: number, orphaned = false): void {
+    const first = this.db.getSession(sessionId)?.orchestratorPolicy?.firstMessageScope;
+    if (first?.state !== "delivering") return;
+    const command = this.db.getSessionPromptCommand(first.deliveryId);
+    const admitted = command?.sessionId === sessionId && this.db.firstMessageAdmitted(sessionId, first.messageDigest, first.deliveryId);
+    const acknowledged = admitted && ["accepted", "queued", "started", "completed"].includes(command!.state);
+    const undelivered = admitted ? command!.state === "uncertain" : orphaned || command?.state === "failed";
+    if (!acknowledged && !undelivered) return;
+    if (!this.db.settleFirstMessageDelivery(sessionId, first.messageDigest, acknowledged, now)) return;
+    this.log.info(JSON.stringify({ event: "full_control_first_message_settled", sessionId, delivered: acknowledged,
+      commandState: command?.state ?? null, messageDigest: first.messageDigest }));
+    if (acknowledged) this.promptOutbox.flush(now, command!.runnerId);
+    this.hub.sessionChangedById(sessionId);
   }
 
   /** The authenticated Human's message. To a Full Control campaign still waiting for its first
@@ -5187,9 +5203,16 @@ export class SessionsService {
         claimImmediate: () => true,
       });
     } finally { this.firstMessageDelivery = null; }
-    this.db.settleFirstMessageDelivery(sessionId, messageDigest, result.ok, Date.now());
-    // Retained work the queue held while the campaign waited runs now.
-    if (result.ok) this.promptOutbox.flush(Date.now(), session.runnerId);
+    if (!result.ok) {
+      this.db.settleFirstMessageDelivery(sessionId, messageDigest, false, Date.now());
+    } else if (this.db.getSessionPromptCommand(deliveryId)) {
+      // Admitted to the durable queue: the fence stays closed until the runner acknowledges it.
+      this.reconcileFirstMessageDelivery(sessionId, Date.now());
+    } else {
+      // A runner without durable queue identity took it on the session's ordered socket at once.
+      this.db.settleFirstMessageDelivery(sessionId, messageDigest, true, Date.now());
+      this.promptOutbox.flush(Date.now(), session.runnerId);
+    }
     this.hub.sessionChangedById(sessionId);
     return result;
   }
@@ -5710,6 +5733,10 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.campaignRecovery.maintain(now, runnerId);
+    // A first message whose command expired or failed without a receipt reopens its wait.
+    for (const { sessionId } of this.db.firstMessageDeliveries()) {
+      if (!this.firstMessagesInFlight.has(sessionId)) this.reconcileFirstMessageDelivery(sessionId, now);
+    }
     this.maintainCampaignContinuations(now, runnerId);
     // A receipt recorded just before a restart may never have reached its decision's resume.
     for (const commandId of this.db.settledWorkflowDecisionResumeCommands(runnerId)) {
@@ -5745,6 +5772,8 @@ export class SessionsService {
   ): boolean {
     const handled = this.promptOutbox.receipt(runnerId, message);
     if (handled) {
+      const first = this.db.getSession(message.sessionId)?.orchestratorPolicy?.firstMessageScope;
+      if (first?.state === "delivering" && first.deliveryId === message.commandId) this.reconcileFirstMessageDelivery(message.sessionId, Date.now());
       this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
       this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
       this.reconcileRestartNoticeCommand(message.commandId, Date.now());
