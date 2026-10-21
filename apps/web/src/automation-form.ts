@@ -8,13 +8,15 @@ import type {
   RunnerView,
   SessionConfig,
 } from "@wollipog/protocol";
+import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import { agentDisplayName } from "./agent-presentation.js";
 import { resolvedInstallationAgentId } from "./automation-installations.js";
 import {
   automationProjectPlacement,
   validateAutomationAlternatePlacement,
 } from "./automation-project-placement.js";
-import { formatCalendarTime, formatCost } from "./format.js";
+import { formatCalendarTime, formatCost, titleCaseLabel } from "./format.js";
+import { timeZoneDisplayName } from "./reminder-schedule.js";
 
 export type ActionKind = AutomationAction["kind"];
 
@@ -396,13 +398,13 @@ function cronNumber(field: string, min: number, max: number): number | null {
   return value >= min && value <= max ? value : null;
 }
 
-/** The months a quarterly expression runs in: `*` + `/3`, `1-12/3`, or four months three apart. */
-function quarterMonths(field: string): number[] | null {
-  if (field === "*/3" || field === "1-12/3") return [1, 4, 7, 10];
+/** Whether a month field names a quarter: `*` + `/3`, `1-12/3`, or four months three apart. */
+function quarterly(field: string): boolean {
+  if (field === "*/3" || field === "1-12/3") return true;
   const months = field.split(",").map((part) => cronNumber(part, 1, 12));
-  if (months.length !== 4 || months.some((month) => month === null)) return null;
+  if (months.length !== 4 || months.some((month) => month === null)) return false;
   const sorted = (months as number[]).slice().sort((a, b) => a - b);
-  return sorted.every((month, index) => index === 0 || month - sorted[index - 1]! === 3) ? sorted : null;
+  return sorted.every((month, index) => index === 0 || month - sorted[index - 1]! === 3);
 }
 
 /** A wall-clock time of day as the viewer writes it ("9:00 AM"), independent of any time zone. */
@@ -411,114 +413,60 @@ function wallClock(hour: number, minute: number, locale?: string): string {
     .format(new Date(Date.UTC(2000, 0, 1, hour, minute)));
 }
 
-/** A recognized schedule: its words, and which wall-clock minutes of which days it runs at. */
-interface SchedulePattern {
-  label: string;
-  /** Whether it runs on this calendar date (month 1–12, weekday 0 = Sunday). */
-  runsOn: (month: number, day: number, weekday: number) => boolean;
-  /** Hours it runs at on such a day, each at `minute`. */
-  hours: readonly number[];
-  minute: number;
-}
-
-function schedulePattern(cron: string, locale?: string): SchedulePattern | null {
+/**
+ * A cron schedule in words (#2968): every hour, every day, weekdays, weekends, one weekday, a day
+ * of the month, and a day of every third month, in sentence case. Null for anything else.
+ */
+export function scheduleWords(cron: string, locale?: string): string | null {
   const fields = cron.trim().split(/\s+/);
   if (fields.length !== 5) return null;
   const [minuteField, hourField, dayField, monthField, weekdayField] = fields as [string, string, string, string, string];
   const minute = cronNumber(minuteField, 0, 59);
   if (minute === null) return null;
-  const everyDay = () => true;
   if (hourField === "*" && dayField === "*" && monthField === "*" && weekdayField === "*") {
-    return {
-      label: minute === 0 ? "Every hour" : `Every hour at :${String(minute).padStart(2, "0")}`,
-      runsOn: everyDay, hours: Array.from({ length: 24 }, (_, hour) => hour), minute,
-    };
+    return minute === 0 ? "Every hour" : `Every hour at :${String(minute).padStart(2, "0")}`;
   }
   const hour = cronNumber(hourField, 0, 23);
   if (hour === null) return null;
   const at = `at ${wallClock(hour, minute, locale)}`;
-  const pattern = (label: string, runsOn: SchedulePattern["runsOn"]): SchedulePattern => ({ label, runsOn, hours: [hour], minute });
   if (dayField === "*" && monthField === "*") {
-    if (weekdayField === "*") return pattern(`Every day ${at}`, everyDay);
-    if (weekdayField === "1-5") return pattern(`Weekdays ${at}`, (_month, _day, weekday) => weekday >= 1 && weekday <= 5);
-    if (weekdayField === "0,6" || weekdayField === "6,0") {
-      return pattern(`Weekends ${at}`, (_month, _day, weekday) => weekday === 0 || weekday === 6);
-    }
+    if (weekdayField === "*") return `Every day ${at}`;
+    if (weekdayField === "1-5") return `Weekdays ${at}`;
+    if (weekdayField === "0,6" || weekdayField === "6,0") return `Weekends ${at}`;
     const weekday = cronNumber(weekdayField, 0, 7);
-    if (weekday === null) return null;
-    const day = weekday % 7;
-    return pattern(`Every ${WEEKDAY_NAMES[day]} ${at}`, (_month, _day, current) => current === day);
+    return weekday === null ? null : `Every ${WEEKDAY_NAMES[weekday % 7]} ${at}`;
   }
   const day = cronNumber(dayField, 1, 31);
   if (day === null || weekdayField !== "*") return null;
-  if (monthField === "*") return pattern(`Monthly on the ${ordinal(day)} ${at}`, (_month, current) => current === day);
-  const months = quarterMonths(monthField);
-  if (!months) return null;
-  return pattern(`Quarterly on the ${ordinal(day)} ${at}`, (month, current) => current === day && months.includes(month));
-}
-
-/** The calendar fields of `instant` in `timeZone`. */
-function zonedParts(instant: number, timeZone: string): Record<string, string> {
-  return Object.fromEntries(new Intl.DateTimeFormat("en-US", {
-    timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric",
-  }).formatToParts(new Date(instant)).map((part) => [part.type, part.value]));
-}
-
-/** `timeZone`'s offset from UTC at `instant` (a whole minute), in milliseconds: its wall clock less it. */
-function zoneOffset(instant: number, timeZone: string): number {
-  const parts = zonedParts(instant, timeZone);
-  return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute)) - instant;
+  if (monthField === "*") return `Monthly on the ${ordinal(day)} ${at}`;
+  return quarterly(monthField) ? `Quarterly on the ${ordinal(day)} ${at}` : null;
 }
 
 /**
- * The instant a wall-clock minute in `timeZone` names, or null for a minute the zone skips (a
- * spring-forward gap). The same four-step convergence the scheduler uses (`localEpoch` in the
- * control plane's automation-schedule.ts), so a minute a fall-back repeats resolves to the one
- * occurrence the scheduler runs, and a skipped minute is skipped here as it is there.
+ * The first run of `cron` in `timezone` after `now`: the scheduler's own `nextCronFire` (#2971), so
+ * every valid expression gets the run the control plane will make, daylight-saving gaps and
+ * repeats included. Null for an invalid expression or zone, or one that never runs.
  */
-function zonedInstant(year: number, month: number, day: number, hour: number, minute: number, timeZone: string): number | null {
-  const desired = Date.UTC(year, month - 1, day, hour, minute);
-  let guess = desired;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const delta = desired - (guess + zoneOffset(guess, timeZone));
-    if (delta === 0) return guess;
-    guess += delta;
+export function nextScheduleRun(cron: string, timezone: string, now: number): number | null {
+  try {
+    return nextCronFire(cron, timezone, now);
+  } catch {
+    return null;
   }
-  return guess + zoneOffset(guess, timeZone) === desired ? guess : null;
-}
-
-/**
- * The first run of `pattern` after `now`, as the scheduler finds it: the earliest instant after
- * `now` on the first local day that has one, or null when none falls within the next 400 days.
- */
-function nextRun(pattern: SchedulePattern, timeZone: string, now: number): number | null {
-  const today = zonedParts(now, timeZone);
-  for (let offset = 0; offset <= 400; offset += 1) {
-    const date = new Date(Date.UTC(Number(today.year), Number(today.month) - 1, Number(today.day) + offset));
-    const [year, month, day] = [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()];
-    if (!pattern.runsOn(month, day, date.getUTCDay())) continue;
-    let best: number | null = null;
-    for (const hour of pattern.hours) {
-      const instant = zonedInstant(year, month, day, hour, pattern.minute, timeZone);
-      if (instant !== null && instant > now && (best === null || instant < best)) best = instant;
-    }
-    if (best !== null) return best;
-  }
-  return null;
 }
 
 export interface ScheduleDescription {
   /** The schedule in words ("Weekdays at 9:00 AM"), or the cron text itself when unrecognized. */
   label: string;
-  /** Its next run in words, in the viewer's time zone ("Tomorrow, 9:00 AM"); null when unrecognized. */
+  /** Its next run in words, in the viewer's time zone ("Tomorrow, 9:00 AM"); null when it has none. */
   nextLabel: string | null;
 }
 
 /**
- * A cron schedule in words (#2968): every hour, every day, weekdays, weekends, one weekday, a day
- * of the month, and a day of every third month. Anything else reads as its cron text. The words
- * are the automation's own wall clock in its own time zone; the next run is in the viewer's. The
- * list (#2969) and the editor (#2971) use the same words.
+ * A cron schedule in words (#2968), `scheduleWords()`'s, with the cron text standing in for an
+ * expression they do not cover. The words are the automation's own wall clock in its own time zone;
+ * the next run is in the viewer's. The list (#2969), the page and the editor (#2971) use the same
+ * words.
  */
 export function describeSchedule(
   cron: string,
@@ -526,19 +474,153 @@ export function describeSchedule(
   now = Date.now(),
   options: { viewerTimeZone?: string; locale?: string } = {},
 ): ScheduleDescription {
-  const pattern = schedulePattern(cron, options.locale);
-  if (!pattern) return { label: cron.trim(), nextLabel: null };
-  let next: number | null;
-  try {
-    next = nextRun(pattern, timezone, now);
-  } catch {
-    // An unknown time zone: the words still hold, and nothing says when they next apply.
-    next = null;
-  }
+  const next = nextScheduleRun(cron, timezone, now);
   return {
-    label: pattern.label,
+    label: scheduleWords(cron, options.locale) ?? cron.trim(),
     nextLabel: next === null ? null : formatCalendarTime(next, now, options.viewerTimeZone, options.locale),
   };
+}
+
+/**
+ * The Schedule field's Examples menu (#2971), in its order. Each item's label is its expression's
+ * preview words in Title Case, so choosing one previews exactly what the item said.
+ */
+const SCHEDULE_EXAMPLE_EXPRESSIONS = ["0 * * * *", "0 9 * * *", "0 9 * * 1-5", "0 9 * * 1", "0 9 1 * *", "0 9 1 */3 *"] as const;
+
+export function scheduleExamples(locale?: string): { cron: string; label: string }[] {
+  return SCHEDULE_EXAMPLE_EXPRESSIONS.map((cron) => ({ cron, label: titleCaseLabel(scheduleWords(cron, locale)!) }));
+}
+
+/** The five fields in order, with the values each takes. */
+const CRON_FIELDS = [
+  { name: "minute", range: "0–59" },
+  { name: "hour", range: "0–23" },
+  { name: "day of month", range: "1–31" },
+  { name: "month", range: "1–12" },
+  { name: "weekday", range: "0–7, where 0 and 7 are Sunday" },
+] as const;
+
+export const SCHEDULE_FIVE_FIELDS_ERROR = "Use five fields: minute, hour, day of month, month, weekday.";
+export const SCHEDULE_NEVER_RUNS_ERROR = "This schedule never runs. Choose a day of month that each chosen month has.";
+
+/**
+ * Why the scheduler would refuse `cron` (§8.5), in one sentence, or null when it accepts it. The
+ * check is the scheduler's `parseCron` (#2971); a refused field is named with the values it takes.
+ * An enabled automation must also run within five years, as the control plane requires on save.
+ */
+export function scheduleError(cron: string, options: { timezone: string; enabled: boolean; now: number }): string | null {
+  try {
+    parseCron(cron);
+  } catch {
+    const fields = cron.trim().split(/\s+/);
+    if (fields.length !== CRON_FIELDS.length || fields[0] === "") return SCHEDULE_FIVE_FIELDS_ERROR;
+    // The first field that is refused on its own, with every other field a wildcard.
+    const refused = CRON_FIELDS.findIndex((_, index) => {
+      try {
+        parseCron(fields.map((field, other) => (other === index ? field : "*")).join(" "));
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    if (refused < 0) return SCHEDULE_FIVE_FIELDS_ERROR;
+    const field = CRON_FIELDS[refused]!;
+    return `Use ${field.range} for the ${field.name}, or a range, list or step of them.`;
+  }
+  if (!options.enabled || !validTimeZone(options.timezone)) return null;
+  return nextScheduleRun(cron, options.timezone, options.now) === null ? SCHEDULE_NEVER_RUNS_ERROR : null;
+}
+
+/** Whether the scheduler accepts `timezone`, by its own check. */
+export function validTimeZone(timezone: string): boolean {
+  try {
+    validateTimeZone(timezone);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The line under the Schedule field (#2971): "Weekdays at 9:00 AM · Next Mon, 9:00 AM", its words
+ * and its next run in the automation's zone, which is named when it is not the viewer's. "Custom
+ * schedule" stands in for words a valid expression has none of, and "Paused" for the next run of
+ * an automation that is not enabled. Null while the expression is invalid.
+ */
+export function schedulePreview(cron: string, options: {
+  timezone: string;
+  enabled: boolean;
+  now: number;
+  viewerTimeZone?: string;
+  locale?: string;
+}): string | null {
+  try {
+    parseCron(cron);
+  } catch {
+    return null;
+  }
+  const words = scheduleWords(cron, options.locale) ?? "Custom schedule";
+  if (!options.enabled) return `${words} · Paused`;
+  const next = nextScheduleRun(cron, options.timezone, options.now);
+  if (next === null) return words;
+  const zone = options.viewerTimeZone === options.timezone ? "" : ` (${timeZoneDisplayName(options.timezone, options.now)})`;
+  return `${words} · Next ${formatCalendarTime(next, options.now, options.timezone, options.locale)}${zone}`;
+}
+
+/** One Time Zone choice (#2971): "New York (UTC−4)", over its IANA name. */
+export interface TimeZoneChoice {
+  value: string;
+  label: string;
+  description: string;
+}
+
+/** The zones this browser knows, or none when it cannot list them. */
+function browserTimeZones(): readonly string[] {
+  try {
+    return Intl.supportedValuesOf("timeZone");
+  } catch {
+    return [];
+  }
+}
+
+/** `timeZone`'s offset from UTC at `instant` as "UTC−4", "UTC+5:30" or "UTC"; null for an unknown zone. */
+export function utcOffsetLabel(timeZone: string, instant: number): string | null {
+  let parts: Record<string, number>;
+  try {
+    parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+      timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric",
+    }).formatToParts(new Date(instant)).filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+  } catch {
+    return null;
+  }
+  const wall = Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour!, parts.minute!);
+  const minutes = Math.round((wall - Math.floor(instant / 60_000) * 60_000) / 60_000);
+  if (minutes === 0) return "UTC";
+  const size = Math.abs(minutes);
+  const rest = size % 60;
+  return `UTC${minutes < 0 ? "−" : "+"}${Math.floor(size / 60)}${rest ? `:${String(rest).padStart(2, "0")}` : ""}`;
+}
+
+/** A zone's city, as its IANA name's last part reads ("America/New_York" → "New York"). */
+function zoneCity(timeZone: string): string {
+  return (timeZone.split("/").at(-1) ?? timeZone).replace(/_/g, " ");
+}
+
+/**
+ * The Time Zone field's choices (#2971): every zone the browser lists, labelled by city and current
+ * offset, with the IANA name as the second line, in alphabetical order. UTC and the stored zone are
+ * always among them, so a zone this browser does not list (or an alias) stays chosen, and a browser
+ * with no list still offers the stored zone and UTC.
+ */
+export function timeZoneChoices(stored: string, now: number, zones: readonly string[] = browserTimeZones()): TimeZoneChoice[] {
+  const values = new Set(zones);
+  values.add("UTC");
+  if (stored.trim()) values.add(stored);
+  return [...values].map((value) => {
+    const offset = utcOffsetLabel(value, now);
+    const city = value === "UTC" ? "UTC" : zoneCity(value);
+    return { value, label: offset && value !== "UTC" ? `${city} (${offset})` : city, description: value };
+  }).sort((a, b) => a.label.localeCompare(b.label, "en") || a.value.localeCompare(b.value, "en"));
 }
 
 /** What `actionSentence` names things by. Each lookup answers undefined for what it doesn't know. */

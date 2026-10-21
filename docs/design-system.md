@@ -2207,7 +2207,10 @@ workflow step list is a different component and keeps a local name.
 
 Anchored, 8px from the trigger, same container recipe as the menu, padding 16px, width 280–360px.
 Optional title row (`--type-section` + close icon). Used for inline detail (usage cost breakdown,
-context window). Rules for both menus and popovers:
+context window). A field's rules that would otherwise sit under the form as body copy go in an
+`InfoPopover` whose `.icon-btn.sm` sits beside the field's label, overhanging the label's line on a
+fine pointer so the label stays 8px above its control (the Automation editor's About Time Zones,
+#2971). Rules for both menus and popovers:
 
 - `consumeEscape: true` by default (fixes Escape leaving the session).
 - Close on outside click and on ancestor scroll (or re-anchor); never float over a dialog header.

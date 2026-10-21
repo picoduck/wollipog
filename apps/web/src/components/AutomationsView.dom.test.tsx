@@ -35,7 +35,7 @@ import { agentDisplayName } from "../agent-presentation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withScopedClockOverrides } from "./test-clock-overrides.js";
-import { formatCalendarTime } from "../format.js";
+import { formatCalendarTime, titleCaseLabel } from "../format.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -2793,6 +2793,225 @@ test("a create that settles after the person left does not navigate away from wh
     assert.equal((editorRoot(fixture.container).querySelector("input") as HTMLInputElement).value, "Nightly Draft");
     assert.match(fixture.container.querySelector(".save-bar")?.textContent ?? "", /Unsaved changes/);
     assert.ok(toasts.includes("Automation created."), "the person still hears that it was created");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * When to Run (#2971): Schedule's preview, Examples and checks, and the Time Zone list
+ * ---------------------------------------------------------------------------------------------- */
+
+// Friday, October 23, 2026 at 5:00 PM in Chicago (22:00 UTC): the next weekday 9:00 AM is Monday's.
+const FRIDAY_EVENING = Date.UTC(2026, 9, 23, 22);
+
+/** Run `body` with `Date.now()` pinned, so every time the editor words is fixed. */
+async function atFixedNow<T>(now: number, body: () => Promise<T>): Promise<T> {
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    return await body();
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+function scheduleField(container: HTMLDivElement): HTMLInputElement {
+  const input = container.querySelector<HTMLInputElement>(".automation-cron-input");
+  assert.ok(input, "the Schedule field is rendered");
+  return input;
+}
+
+function schedulePreviewLine(container: HTMLDivElement): HTMLElement {
+  const preview = container.querySelector<HTMLElement>(".automation-schedule-preview");
+  assert.ok(preview, "the preview line is rendered");
+  return preview;
+}
+
+function timeZoneField(container: HTMLDivElement): HTMLInputElement {
+  const input = container.querySelector<HTMLInputElement>('input[role="combobox"][aria-label="Time Zone"]');
+  assert.ok(input, "the Time Zone field is rendered");
+  return input;
+}
+
+/** The ids a field's `aria-describedby` names, and the text of each. */
+function descriptions(container: HTMLDivElement, input: HTMLInputElement): string[] {
+  return (input.getAttribute("aria-describedby") ?? "").split(" ").filter(Boolean)
+    .map((id) => container.querySelector(`[id="${id}"]`)?.textContent ?? `missing #${id}`);
+}
+
+async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
+  const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
+  assert.ok(setter);
+  await act(async () => {
+    input.focus();
+    setter.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: value }) as never);
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as never);
+  });
+}
+
+async function blurField(input: HTMLInputElement): Promise<void> {
+  await act(async () => { input.blur(); });
+}
+
+const PREVIEW_ZONE = "( \\(Central Time\\))?";
+
+test("typing \"0 9 * * 1-5\" previews Weekdays at 9:00 AM and the next weekday 9:00 in the chosen zone, politely", async () => {
+  await atFixedNow(FRIDAY_EVENING, async () => {
+    const fixture = await mountAt(editRoute("automation-1"), [schedule("automation-1", "Nightly")]);
+    try {
+      const input = scheduleField(fixture.container);
+      const preview = schedulePreviewLine(fixture.container);
+      assert.equal(preview.getAttribute("aria-live"), "polite");
+      assert.equal(fixture.container.querySelector(`label[for="${input.id}"]`)?.textContent, "Schedule");
+      assert.match(preview.textContent ?? "", new RegExp(`^Every day at 2:00 AM · Next Tomorrow, 2:00 AM${PREVIEW_ZONE}$`));
+
+      await typeInto(input, "0 9 * * 1-5");
+      // The automation's zone is Chicago: Monday 9:00 AM there, named when the viewer is elsewhere.
+      assert.match(preview.textContent ?? "", new RegExp(`^Weekdays at 9:00 AM · Next Mon, 9:00 AM${PREVIEW_ZONE}$`));
+      assert.deepEqual(descriptions(fixture.container, input),
+        ["Minute, hour, day of month, month, weekday.", preview.textContent]);
+
+      // A valid expression the words do not cover still gets the scheduler's next run.
+      await typeInto(input, "*/20 9-17 * * 1-5");
+      assert.match(preview.textContent ?? "", new RegExp(`^Custom schedule · Next Today, 5:20 PM${PREVIEW_ZONE}$`));
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("each Examples item fills Schedule with its expression, whose preview matches the item's label", async () => {
+  await atFixedNow(FRIDAY_EVENING, async () => {
+    const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners);
+    try {
+      const input = scheduleField(fixture.container);
+      const examples = button(fixture.container, "Examples");
+      assert.equal(examples.getAttribute("aria-haspopup"), "menu");
+      const labels = [
+        "Every Hour", "Every Day at 9:00 AM", "Weekdays at 9:00 AM", "Every Monday at 9:00 AM",
+        "Monthly on the 1st at 9:00 AM", "Quarterly on the 1st at 9:00 AM",
+      ];
+      for (const label of labels) {
+        await act(async () => { examples.click(); });
+        const menu = document.querySelector('[role="menu"][aria-label="Schedule Examples"]');
+        assert.ok(menu, "the Examples menu opens");
+        const items = [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+        assert.deepEqual(items.map((item) => item.querySelector(".menu-text")?.textContent), labels);
+        const item = items.find((candidate) => candidate.querySelector(".menu-text")?.textContent === label)!;
+        const cron = item.querySelector(".menu-desc")?.textContent;
+        await act(async () => { item.click(); });
+        await act(settle);
+        assertNoDomNode(document.querySelector('[role="menu"][aria-label="Schedule Examples"]'), "choosing closes the menu");
+        assert.equal(input.value, cron, `${label} fills its expression`);
+        assert.equal(document.activeElement, input, "focus returns to Schedule");
+        const words = schedulePreviewLine(fixture.container).textContent?.split(" · ")[0] ?? "";
+        assert.equal(titleCaseLabel(words), label, `${cron} previews as ${label}`);
+      }
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+for (const strict of [false, true]) {
+  test(`blurring "0 9 * *" shows the five-field error under Schedule; submitting focuses Schedule and sends nothing${strict ? " under StrictMode" : ""}`, async () => {
+    strictMode = strict;
+    const fixture = await mountAt(editRoute("automation-1"), [schedule("automation-1", "Nightly")]);
+    try {
+      const input = scheduleField(fixture.container);
+      const preview = schedulePreviewLine(fixture.container);
+      await typeInto(input, "0 9 * *");
+      // Not yet: an error waits for the blur that ends the edit (§8.5), and the preview has nothing to say.
+      assertNoDomNode(fixture.container.querySelector(".field-error"), "no error while typing");
+      assert.equal(preview.textContent, "");
+
+      await blurField(input);
+      const error = fixture.container.querySelector(".field-error");
+      assert.equal(error?.textContent, "Use five fields: minute, hour, day of month, month, weekday.");
+      assert.equal(input.getAttribute("aria-invalid"), "true");
+      assert.deepEqual(descriptions(fixture.container, input), [error?.textContent]);
+      assert.ok(![...fixture.container.querySelectorAll(".field-helper")]
+        .some((helper) => helper.textContent === "Minute, hour, day of month, month, weekday."), "the error replaces the helper");
+      assert.equal(preview.textContent, "", "the preview is hidden");
+      assertNoDomNode(error?.closest('[role="alert"]') ?? null, "the error is not an alert");
+
+      await act(async () => { (document.activeElement as HTMLElement | null)?.blur(); });
+      await saveChanges(fixture);
+      assert.equal(fixture.updates.length, 0, "no request is sent");
+      assert.equal(document.activeElement, input, "Schedule takes focus");
+
+      // The error clears as soon as the expression is valid again, and the preview returns.
+      await typeInto(input, "0 9 * * 1-5");
+      assertNoDomNode(fixture.container.querySelector(".field-error"));
+      assert.equal(input.getAttribute("aria-invalid"), null);
+      assert.match(preview.textContent ?? "", /^Weekdays at 9:00 AM · Next /);
+      await saveChanges(fixture);
+      assert.equal(fixture.updates.length, 1);
+      assert.equal(fixture.updates[0]!.spec.cron, "0 9 * * 1-5");
+    } finally {
+      strictMode = false;
+      await unmountFixture(fixture);
+    }
+  });
+}
+
+test("a field the scheduler refuses for one value names that field and its values", async () => {
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners);
+  try {
+    const input = scheduleField(fixture.container);
+    await typeInto(input, "0 25 * * *");
+    await blurField(input);
+    assert.equal(fixture.container.querySelector(".field-error")?.textContent,
+      "Use 0–23 for the hour, or a range, list or step of them.");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Time Zone finds New York by typing \"york\", and a stored zone the browser does not list stays chosen", async () => {
+  await atFixedNow(FRIDAY_EVENING, async () => {
+    // US/Eastern is an alias that Intl.supportedValuesOf("timeZone") does not list.
+    assert.ok(!Intl.supportedValuesOf("timeZone").includes("US/Eastern"));
+    const stored = { ...schedule("automation-1", "Nightly"), timezone: "US/Eastern" };
+    const fixture = await mountAt(editRoute("automation-1"), [stored]);
+    try {
+      const zone = timeZoneField(fixture.container);
+      assert.equal(zone.value, "Eastern (UTC−4)", "the stored zone shows as chosen");
+      await act(async () => { zone.click(); });
+      // Opened, the list marks the stored zone as the chosen one.
+      assert.deepEqual([...fixture.container.querySelectorAll<HTMLElement>('[role="option"].is-selected')]
+        .map((option) => option.textContent), ["Eastern (UTC\u22124)US/Eastern"]);
+
+      await typeInto(zone, "york");
+      const options = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"]')];
+      assert.deepEqual(options.map((option) => option.textContent), ["New York (UTC−4)America/New_York"]);
+      await act(async () => { options[0]!.click(); });
+      await act(settle);
+      assert.equal(timeZoneField(fixture.container).value, "New York (UTC−4)");
+      await saveChanges(fixture);
+      assert.equal(fixture.updates[0]?.spec.timezone, "America/New_York");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("the daylight-saving rules appear only in the About Time Zones popover", async () => {
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners);
+  try {
+    const page = () => document.body.textContent ?? "";
+    assert.doesNotMatch(page(), /skip forward|spring-forward|fall back|fall-back/i);
+    const about = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="About Time Zones"]');
+    assert.ok(about, "About Time Zones is beside the Time Zone label");
+    assert.ok(about.classList.contains("icon-btn") && about.classList.contains("sm"));
+    assert.ok(about.closest(".automation-zone-label")?.textContent?.includes("Time Zone"));
+    await act(async () => { about.click(); });
+    const popover = document.querySelector('[role="dialog"][aria-label="About Time Zones"]');
+    assert.equal(popover?.querySelector(".info-popover-text")?.textContent,
+      "When clocks skip forward, a time that doesn't exist is skipped. When they fall back, a repeated time runs once.");
+    assert.equal(page().match(/When clocks skip forward/g)?.length, 1, "nowhere else");
   } finally {
     await unmountFixture(fixture);
   }
