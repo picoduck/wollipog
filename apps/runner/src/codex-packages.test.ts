@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -8,7 +8,7 @@ import { configuredCodexHomes, sessionWritableRoots, trustedPath } from "./revie
 import { verifySpawnedCommand } from "./review-sessions.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
-import { buildBwrapArgs, type SpawnIsolation } from "./spawn.js";
+import { buildBwrapArgs, killTree, ProviderProcessLedger, spawnAgent, waitForPendingKills, type SpawnIsolation } from "./spawn.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
 
 const posixOnly = { skip: process.platform === "win32" };
@@ -230,4 +230,97 @@ test("a stopped structured writer remains refused until its asynchronous full-tr
   t.after(() => afterRestart.shutdownAll());
   assert.match(afterRestart.codexReviewerProtection(f.home).refusal!, /session s_retiring/,
     "uncertain retired writers survive both session removal and runner reconstruction");
+});
+
+test("graceful shutdown retires only exact proven provider writers before restart", posixOnly, async (t) => {
+  const f = fixture(t);
+  const directory = join(f.root, "writers");
+  const registry = new ReviewWriterRegistry(directory);
+  const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
+  manager.setReviewWriterRegistry(registry);
+  const internal = manager as unknown as {
+    active: Map<string, unknown>;
+    driverReviewWriterTokens: Map<unknown, string>;
+  };
+  const proofs: string[] = [];
+  const cases = {
+    proven: { dispose() {}, proveProcessTreeExit: async (options: { terminate: boolean }) => {
+      assert.equal(options.terminate, true);
+      proofs.push("proven");
+      return true;
+    } },
+    live: { dispose() {}, proveProcessTreeExit: async () => false },
+    missing: { dispose() {} },
+    rejected: { dispose() {}, proveProcessTreeExit: async () => { throw new Error("no proof"); } },
+    throwing: { dispose() {}, proveProcessTreeExit: () => { throw new Error("no proof"); } },
+    pending: { dispose() {}, proveProcessTreeExit: () => new Promise<boolean>(() => {}) },
+    failed_dispose: { dispose() { throw new Error("dispose failed"); }, proveProcessTreeExit: async () => false },
+  };
+  for (const [sessionId, client] of Object.entries(cases)) {
+    internal.driverReviewWriterTokens.set(client, registry.acquire(sessionId, "provider"));
+    internal.active.set(sessionId, { sessionId, client });
+  }
+  // No instance exists for a construction interrupted after the pre-spawn marker write.
+  registry.acquire("interrupted", "provider");
+  await assert.rejects(manager.retireReviewWritersAfterShutdown(), /requires shutdown/);
+  assert.equal(manager.shutdownAll(), false);
+  assert.deepEqual(proofs, [], "shutdown initiation must leave the graceful EOF window intact");
+  await manager.retireReviewWritersAfterShutdown(20);
+  assert.deepEqual(proofs, ["proven"]);
+  assert.deepEqual(new Set(registry.sessions()), new Set([...Object.keys(cases).filter((id) => id !== "proven"), "interrupted"]));
+  assert.equal(readdirSync(directory).length, Object.keys(cases).length);
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /independently prove the tree gone/);
+  assert.ok(new ReviewWriterRegistry(directory).sessions().includes("live"));
+});
+
+test("a cleanly proven writer permits the standalone reviewer after graceful shutdown and reconstruction", posixOnly, async (t) => {
+  const f = fixture(t);
+  const directory = join(f.root, "writers");
+  const registry = new ReviewWriterRegistry(directory);
+  const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
+  manager.setReviewWriterRegistry(registry);
+  const client = { dispose() {}, proveProcessTreeExit: async () => true };
+  const internal = manager as unknown as { active: Map<string, unknown>; driverReviewWriterTokens: Map<unknown, string> };
+  internal.driverReviewWriterTokens.set(client, registry.acquire("s_clean", "provider"));
+  internal.active.set("s_clean", { sessionId: "s_clean", client });
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /s_clean/);
+  assert.equal(manager.shutdownAll(), true);
+  await manager.retireReviewWritersAfterShutdown();
+  assert.deepEqual(readdirSync(directory), []);
+  const restarted = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "empty-store")), "runner2");
+  restarted.setReviewWriterRegistry(new ReviewWriterRegistry(directory));
+  t.after(() => restarted.shutdownAll());
+  const protection = restarted.codexReviewerProtection(f.home);
+  assert.equal(protection.refusal, undefined);
+  assert.equal(verifySpawnedCommand(f.command, f.bin, sessionWritableRoots(f.home, join(f.root, "state"), [], []),
+    process.getuid!(), statSync("/").uid, protection), f.binary);
+});
+
+test("shutdown retires a real provider ledger after its earlier non-killing proof saw a live tree", posixOnly, async (t) => {
+  const f = fixture(t);
+  const directory = join(f.root, "writers");
+  const registry = new ReviewWriterRegistry(directory);
+  const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
+  manager.setReviewWriterRegistry(registry);
+  const ledger = new ProviderProcessLedger();
+  const token = registry.acquire("s_real", "provider");
+  const child = ledger.record(spawnAgent({
+    command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"], cwd: f.root,
+    descendantOwner: ledger.owner,
+  }));
+  t.after(async () => { killTree(child); await waitForPendingKills(10_000); manager.shutdownAll(); });
+  const client = {
+    dispose: () => killTree(child),
+    proveProcessTreeExit: (options: { terminate: boolean }) => ledger.prove(options),
+  };
+  const internal = manager as unknown as { active: Map<string, unknown>; driverReviewWriterTokens: Map<unknown, string> };
+  internal.driverReviewWriterTokens.set(client, token);
+  internal.active.set("s_real", { sessionId: "s_real", client });
+  assert.equal(await ledger.prove({ terminate: false }), false);
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /s_real/);
+  assert.equal(manager.shutdownAll(), true);
+  assert.equal(await waitForPendingKills(10_000), true);
+  await manager.retireReviewWritersAfterShutdown();
+  assert.deepEqual(readdirSync(directory), []);
+  assert.deepEqual(new ReviewWriterRegistry(directory).sessions(), []);
 });

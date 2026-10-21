@@ -16,7 +16,7 @@ import {
   type ShellCallbacks,
 } from "./shell-manager.js";
 import { EventEmitter } from "node:events";
-import type { AgentProcess } from "./spawn.js";
+import { waitForPendingKills, type AgentProcess } from "./spawn.js";
 import { WindowsConptyProcess } from "./windows-conpty.js";
 
 const NATIVE = { kind: "native" } as const;
@@ -286,16 +286,23 @@ test("Agent TUI writer evidence survives reconstruction and retires only with a 
 
 test("runner shutdown reports no agent TUI ending, so it settles no provider-HOME reference", {
   skip: !agentTuiPlatformSupported(process.platform, NATIVE) || process.platform === "win32",
-}, async () => {
+}, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-tui-shutdown-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const directory = join(root, "writers");
   const { exits, cb } = collector();
-  const mgr = new ShellManager(cb);
+  const mgr = new ShellManager(cb, directory);
   const ended: boolean[] = [];
   mgr.open("tui", "parent", tmpdir(), NATIVE, undefined, {
     kind: "agent_tui",
     launch: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
     onEnded: (proven) => ended.push(proven),
   });
+  assert.equal(readdirSync(directory).length, 1);
   mgr.dispose();
+  assert.equal(await waitForPendingKills(10_000), true);
+  assert.deepEqual(readdirSync(directory), [], "the bounded kill drain includes exact proof and marker retirement");
+  assert.deepEqual(new ShellManager(cb, directory).unprotectedAgentTuiSessions(), []);
   await waitFor(() => exits.some((exit) => exit.shellId === "tui"));
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.deepEqual(ended, []);

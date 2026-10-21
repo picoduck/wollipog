@@ -10,7 +10,7 @@ import { StringDecoder } from "node:string_decoder";
 import { ReviewWriterRegistry } from "./review-writers.js";
 import type { AgentContext, ShellKind, ShellOutputChunk, ShellSnapshotMessage } from "@wollipog/protocol";
 import { run } from "./discovery/resolve.js";
-import { killTree, killTreeAndWait, provenProcessTreeExit, spawnAgent, type AgentProcess } from "./spawn.js";
+import { killTree, killTreeAndWait, provenProcessTreeExit, spawnAgent, trackPendingKill, type AgentProcess } from "./spawn.js";
 import { openWindowsConpty, WindowsConptyProcess } from "./windows-conpty.js";
 import { sameWorktreePath } from "./worktree.js";
 
@@ -515,7 +515,15 @@ export class ShellManager {
   /** Kill everything (runner shutdown). */
   dispose(): void {
     this.disposed = true;
-    for (const s of this.shells.values()) this.kill(s);
+    for (const [shellId, s] of this.shells) {
+      this.kill(s);
+      // Await the exact TUI proof (including marker unlink) in the bounded shutdown drain.
+      // Close callbacks alone can race process.exit after the kill promise settles.
+      const token = this.agentTuiWriterTokens.get(shellId);
+      if (token) trackPendingKill(shellProcessTreeProof(s.child).then((proven) => {
+        this.retireAgentTuiWriter(shellId, proven);
+      }));
+    }
   }
 
   private kill(shell: LiveShell): void {
