@@ -260,8 +260,9 @@ reuse it for later requests. Preserve your workflow's reviewer, isolation and ad
   `wollipog review session get <id> --json` for the full `verdict`, `output` report and `findings`.
   Use that read to recover a missing continuation; where continuations are unavailable, poll every
   minute or two until `terminal` is true. `get_session_events` exposes the reviewer's transcript.
-- Only a validated, valid report's vote and findings count. An invalid attempt is retried in the
-  same round within the attempt limit; `verdict.consumed: false` does not use an attempt. Preserve
+- Only a validated, valid report's vote and findings count. After an invalid attempt, request the
+  same head again to retry that round within its attempt limit; `verdict.consumed: false` does not
+  use an attempt. Preserve
   invalid attempts and costs. Older runners that return no verdict have not supplied a validated
   review. Prove every finding yourself, record its adjudication as your workflow requires, fix only
   verified defects, then commit and push before requesting the next round. Check the actual head:
