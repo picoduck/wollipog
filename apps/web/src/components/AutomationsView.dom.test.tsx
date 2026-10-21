@@ -1744,15 +1744,19 @@ test("failed page reads stay busy until every request settles and a mutation the
   });
 });
 
-test("signed trigger editor sends an explicit prompt, parameter, and selector allowlist", async () => {
+test("New Webhook Trigger sends an explicit prompt, parameter, and selector allowlist, as the inline form did", async () => {
   const item = schedule("automation-a", "Alpha");
   item.action = { kind: "prompt_session", sessionId: "s_default", request: { text: "{{delivery.prompt}}" } };
   const fixture = await mountFixture([item]);
   try {
     await openPage(fixture, "Alpha");
     await chooseMoreAction(fixture, "Add Webhook Trigger…");
-    const editor = fixture.container.querySelector<HTMLElement>('[aria-label="New Signed Trigger"]');
-    assert.ok(editor);
+    // The dialog is portalled to the document, outside the fixture's container.
+    const editor = [...fixture.container.ownerDocument.querySelectorAll<HTMLElement>('[role="dialog"]')]
+      .find((dialog) => dialog.querySelector(".modal-title")?.textContent === "New Webhook Trigger");
+    assert.ok(editor, "New Webhook Trigger opens");
+    assertNoDomNode([...editor.querySelectorAll(".field-label")].find((label) => label.textContent === "Kind") ?? null,
+      "the kind is the title, not a field");
     const checkbox = (label: string) => {
       const wrapper = [...editor.querySelectorAll<HTMLLabelElement>("label")]
         .find((candidate) => candidate.textContent?.trim() === label);
@@ -1760,21 +1764,17 @@ test("signed trigger editor sends an explicit prompt, parameter, and selector al
       assert.ok(input, `${label} checkbox is rendered`);
       return input;
     };
-    await act(async () => { checkbox("Accept Delivery Fields").click(); });
-    await act(async () => { checkbox("Delivered Prompt").click(); });
+    const details = editor.querySelector<HTMLButtonElement>('[role="switch"]');
+    assert.equal(details?.textContent?.includes("Let Callers Add Details"), true);
+    await act(async () => { details!.click(); });
+    await act(async () => { checkbox("Prompt Text").click(); });
     await act(async () => { checkbox("Branch").click(); });
     const parameterInput = [...editor.querySelectorAll<HTMLInputElement>("input")]
-      .find((candidate) => candidate.closest("label")?.textContent?.includes("Parameter Names"));
+      .find((candidate) => candidate.closest(".field")?.querySelector(".field-label")?.textContent === "Named Values");
     assert.ok(parameterInput);
-    const inputSetter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
-    assert.ok(inputSetter);
-    await act(async () => {
-      inputSetter.call(parameterInput, "issue, run_id");
-      parameterInput.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: "issue, run_id" }) as never);
-      parameterInput.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
-    });
+    await typeInto(parameterInput, "issue, run_id");
     await act(settle);
-    await act(async () => { button(fixture.container, "Create Trigger").click(); });
+    await act(async () => { button(editor as HTMLDivElement, "Create Trigger").click(); });
     await act(settle);
     assert.deepEqual(fixture.triggerCreates, [{
       id: "automation-a",
@@ -1786,7 +1786,7 @@ test("signed trigger editor sends an explicit prompt, parameter, and selector al
         },
       },
     }]);
-    assert.match(fixture.container.textContent ?? "", /Accepts Prompt · Parameters issue, run_id · Selectors Branch/);
+    assert.match(fixture.container.textContent ?? "", /Accepts prompt text, issue, run_id and a session/);
   } finally {
     await unmountFixture(fixture);
   }

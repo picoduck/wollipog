@@ -405,7 +405,7 @@ test("a paused automation that never ran says Paused and Not Yet, with no zone i
     assert.equal(glance[2], "Weekdays at 9:00 AM0 9 * * 1-5");
     assertNoDomNode(detail.querySelector(".glance-zone"));
     assert.match(detail.textContent ?? "", /No runs yet\./);
-    assert.match(detail.textContent ?? "", /No signed triggers yet\./);
+    assert.match(detail.textContent ?? "", /No triggers yet\./);
   } finally {
     await view.unmount();
   }
@@ -709,50 +709,350 @@ test("a Copy Link that settles after the page left publishes nothing and moves n
   }
 });
 
-test("Create Trigger focuses the new secret's Copy Secret; Hide returns to that trigger's Rotate Secret", async () => {
+/* ------------- Triggers (#2972): a dialog to add one, rows with Copy URL and ⋯, How to Call ------------- */
+
+const SECRET = `wollipogwhsec_${"A".repeat(43)}`;
+const triggersSection = (body: HTMLElement) => page(body)!.querySelector<HTMLElement>('section[aria-labelledby="automation-triggers"]')!;
+const triggerRow = (body: HTMLElement, triggerId: string) =>
+  [...triggersSection(body).querySelectorAll<HTMLElement>("[data-trigger-id]")].find((row) => row.dataset.triggerId === triggerId) ?? null;
+const rowMeta = (row: HTMLElement) => [...row.querySelectorAll(".automation-trigger-meta > span")].map((span) => span.textContent);
+const fieldLabels = (scope: Element) => [...scope.querySelectorAll(".field-label")].map((label) => label.textContent);
+
+async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
+  const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    input.focus();
+    setter.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: value }) as never);
+    // React reads a text field's change from focus and keyup here, as SessionMoveDialogs' tests do.
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as never);
+  });
+  await settle();
+}
+
+async function openRowMenu(body: HTMLElement, trigger: AutomationTriggerView): Promise<HTMLElement> {
+  await click(triggerRow(body, trigger.triggerId)!.querySelector<HTMLButtonElement>(`button[aria-label="${trigger.name} Actions"]`));
+  const menu = body.querySelector<HTMLElement>(`[role="menu"][aria-label="${trigger.name} Actions"]`);
+  assert.ok(menu, "the row's ⋯ opens");
+  return menu;
+}
+
+/** The trigger fixture with a use, a policy and a last call. */
+function calledTrigger(): AutomationTriggerView {
+  return {
+    ...trigger("called"), name: "Issue Intake", invocationCount: 14, lastInvokedAt: Date.now() - 60_000,
+    deliveryPolicy: { allowPrompt: true, parameterNames: ["issue", "run_id"], missingReferences: "reject" },
+  };
+}
+
+test("Add Trigger › Webhook Trigger… opens New Webhook Trigger with no Kind field; Done clears the secret from the DOM and state", async () => {
   const triggers: Record<string, AutomationTriggerView[]> = { "automation-a": [] };
+  const creates: unknown[] = [];
   const view = await mount({
-    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], triggers,
-    client: { createAutomationTrigger: async (id: string) => {
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], triggers, origin: ORIGIN,
+    client: { createAutomationTrigger: async (id: string, request: unknown) => {
+      creates.push(request);
       const created = trigger("created");
       triggers[id] = [created];
-      return { trigger: created, secret: `wollipogwhsec_${"A".repeat(43)}` };
+      return { trigger: created, secret: SECRET };
     } } as Partial<ApiClient>,
   });
   try {
+    const section = triggersSection(view.body);
+    assert.match(section.querySelector(".section-note")?.textContent ?? "", /A paused automation ignores its triggers\./);
+    await click(buttonNamed(section.querySelector(".section-head")!, "Add Trigger"));
+    const menu = view.body.querySelector<HTMLElement>('[role="menu"][aria-label="Add Trigger"]')!;
+    assert.deepEqual(menuLabels(menu), ["Webhook Trigger…", "Chat-Ops Trigger…"]);
+    await click(menuItem(menu, "Webhook Trigger…"));
+
+    let dialog = dialogNamed(view.body, "New Webhook Trigger")!;
+    assert.ok(dialog, "the dialog opens, titled by its kind");
+    assert.deepEqual(fieldLabels(dialog), ["Name"], "no Kind field");
+    assert.equal(focused(), dialog.querySelector("input"), "the name takes focus");
+    assert.equal(dialog.querySelector<HTMLInputElement>("input")!.value, "Nightly Sweep webhook");
+    await click(buttonNamed(dialog, "How to Call"));
+    assert.match(dialog.textContent ?? "", /application\/vnd\.wollipog\.automation-trigger\+json/);
+    assert.match(dialog.textContent ?? "", /"eventId": "<unique event ID>"/);
+    await click(buttonNamed(dialog, "Create Trigger"));
+
+    assert.deepEqual(creates, [{ kind: "webhook", name: "Nightly Sweep webhook" }], "no delivery policy unless callers may add details");
+    dialog = dialogNamed(view.body, "Webhook Trigger Created")!;
+    assert.ok(dialog, "the same dialog shows what was created");
+    assert.equal(dialog.querySelector(".field .code-well.one-line code")?.textContent,
+      `${ORIGIN}/hooks/v1/automation-triggers/created`);
+    assert.ok(dialog.querySelector('button[aria-label="Copy URL"]'), "the address has Copy");
+    const notice = dialog.querySelector<HTMLElement>(".notice")!;
+    assert.match(notice.textContent ?? "", /Copy the Signing Secret Now/);
+    assert.match(notice.textContent ?? "", /It won't be shown again\./);
+    assert.equal(notice.querySelector(".code-well.one-line code")?.textContent, SECRET);
+    assert.equal(focused()?.getAttribute("aria-label"), "Copy Secret", "the secret's Copy Secret takes focus");
+    assert.ok(triggerRow(view.body, "created"), "the new trigger is listed");
+
+    await click(buttonNamed(dialog, "Done"));
+    assertNoDomNode(dialogNamed(view.body, "Webhook Trigger Created") ?? null, "Done closes the dialog");
+    assert.doesNotMatch(view.body.innerHTML, new RegExp(SECRET), "the secret is gone from the DOM");
+    // Opening the dialog again starts from a fresh form: nothing of the last create was kept.
     await click(menuItem(await openMore(view.body), "Add Webhook Trigger…"));
-    const create = buttonNamed(page(view.body)!, "Create Trigger")!;
-    await act(async () => create.focus());
-    await click(create);
-    assertNoDomNode(page(view.body)!.querySelector('[aria-label="New Signed Trigger"]'), "the form is gone");
-    assert.equal(focused()?.textContent, "Copy Secret");
-    await click(buttonNamed(page(view.body)!, "Hide"));
-    assert.equal(focused()?.textContent, "Rotate Secret");
-    assert.equal(focused()?.closest("[data-trigger-id]")?.getAttribute("data-trigger-id"), "created");
+    assert.ok(dialogNamed(view.body, "New Webhook Trigger"), "the page's ⋯ opens the same dialog, empty");
+    assert.doesNotMatch(view.body.innerHTML, new RegExp(SECRET));
   } finally {
     await view.unmount();
   }
 });
 
-test("Cancel in the trigger form returns focus to ⋯, and Revoke to the Triggers heading", async () => {
-  const triggers: Record<string, AutomationTriggerView[]> = { "automation-a": [trigger("one")] };
+test("Escape closes the created dialog and clears its secret too", async () => {
+  const triggers: Record<string, AutomationTriggerView[]> = { "automation-a": [] };
+  const view = await mount({
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], triggers,
+    client: { createAutomationTrigger: async (id: string) => {
+      triggers[id] = [trigger("created")];
+      return { trigger: trigger("created"), secret: SECRET };
+    } } as Partial<ApiClient>,
+  });
+  try {
+    await click(menuItem(await openMore(view.body), "Add Chat-Ops Trigger…"));
+    await click(buttonNamed(dialogNamed(view.body, "New Chat-Ops Trigger")!, "Create Trigger"));
+    const dialog = dialogNamed(view.body, "Chat-Ops Trigger Created")!;
+    assert.match(dialog.textContent ?? "", /No reachable address yet\./, "without a public address the dialog says so");
+    await act(async () => {
+      focused()!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+    });
+    await settle();
+    assertNoDomNode(dialogNamed(view.body, "Chat-Ops Trigger Created") ?? null);
+    assert.doesNotMatch(view.body.innerHTML, new RegExp(SECRET));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a configurable prompt-session trigger sends its prompt, named values, missing-value rule and session choices", async () => {
+  const creates: unknown[] = [];
+  const view = await mount({
+    view: route("automation-a"),
+    items: [automation("automation-a", "Nightly Sweep", {
+      action: { kind: "prompt_session", sessionId: "session-1", request: { text: "Work {{delivery.parameters.issue}}" } },
+    })],
+    client: { createAutomationTrigger: async (_id: string, request: unknown) => {
+      creates.push(request);
+      return { trigger: trigger("created"), secret: SECRET };
+    } } as Partial<ApiClient>,
+  });
+  try {
+    await click(menuItem(await openMore(view.body), "Add Webhook Trigger…"));
+    const dialog = dialogNamed(view.body, "New Webhook Trigger")!;
+    const details = dialog.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    assert.match(details.textContent ?? "", /Let Callers Add Details/);
+    assert.equal(details.getAttribute("aria-checked"), "false");
+    await click(details);
+    assert.deepEqual(fieldLabels(dialog), ["Name", "Named Values", "If a Referenced Value Is Missing", "Choose the Session By"]);
+    const check = (label: string) => [...dialog.querySelectorAll<HTMLLabelElement>("label.checkbox")]
+      .find((candidate) => candidate.textContent?.trim() === label)?.querySelector("input");
+    await click(check("Prompt Text"));
+    await click(check("Pull Request"));
+    await click(check("Session ID"));
+    const names = [...dialog.querySelectorAll<HTMLInputElement>("input")].find((input) => input.classList.contains("automation-trigger-names"))!;
+    assert.match(names.closest(".field")?.textContent ?? "", /Separate names with commas\./);
+    await typeInto(names, " issue, run_id, issue ,");
+    await click(dialog.querySelector<HTMLButtonElement>('button[aria-label^="If a Referenced Value Is Missing"]'));
+    await click([...view.body.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent?.includes("Use the Saved Text")));
+    await click(buttonNamed(dialog, "How to Call"));
+    assert.match(dialog.textContent ?? "", /Send one of pullRequest or sessionId in target\./);
+    await click(buttonNamed(dialog, "Create Trigger"));
+    assert.deepEqual(creates, [{
+      kind: "webhook",
+      name: "Nightly Sweep webhook",
+      deliveryPolicy: {
+        allowPrompt: true,
+        parameterNames: ["issue", "run_id"],
+        missingReferences: "use_stored",
+        sessionSelectors: ["pull_request", "session_id"],
+      },
+    }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a workflow automation's New Trigger has no details switch, and a blank name is refused in place", async () => {
+  const creates: unknown[] = [];
+  const view = await mount({
+    view: route("automation-a"),
+    items: [automation("automation-a", "Nightly Sweep", {
+      action: { kind: "workflow_run", request: { workflowId: "workflow-1", runnerId: "runner-1", workspaceId: "workspace-1", task: "Audit." } } as AutomationSchedule["action"],
+    })],
+    client: { createAutomationTrigger: async (_id: string, request: unknown) => {
+      creates.push(request);
+      return { trigger: trigger("created"), secret: SECRET };
+    } } as Partial<ApiClient>,
+  });
+  try {
+    await click(menuItem(await openMore(view.body), "Add Webhook Trigger…"));
+    const dialog = dialogNamed(view.body, "New Webhook Trigger")!;
+    assertNoDomNode(dialog.querySelector('[role="switch"]'), "workflow actions take no details");
+    const name = dialog.querySelector<HTMLInputElement>("input")!;
+    await typeInto(name, "   ");
+    await click(buttonNamed(dialog, "Create Trigger"));
+    assert.deepEqual(creates, [], "nothing is sent");
+    assert.equal(name.getAttribute("aria-invalid"), "true");
+    assert.match(dialog.textContent ?? "", /Enter a name for the trigger\./);
+    assert.equal(focused(), name);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a create the control plane refuses stays in the dialog as a notice", async () => {
+  const view = await mount({
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")],
+    client: { createAutomationTrigger: async () => { throw new ApiError("unsupported template reference", 400); } } as Partial<ApiClient>,
+  });
+  try {
+    await click(menuItem(await openMore(view.body), "Add Webhook Trigger…"));
+    const dialog = dialogNamed(view.body, "New Webhook Trigger")!;
+    await click(buttonNamed(dialog, "Create Trigger"));
+    const notice = dialog.querySelector<HTMLElement>(".notice")!;
+    assert.equal(notice.getAttribute("role"), "alert");
+    assert.match(notice.textContent ?? "", /Couldn't Create Trigger/);
+    await click(buttonNamed(notice, "Show Details"));
+    assert.match(notice.textContent ?? "", /unsupported template reference/);
+    assertNoDomNode(page(view.body)!.querySelector(".automation-notice-slot .notice"), "the page shows no notice for it");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("each trigger row names it, its kind and use in words, with Copy URL and ⋯ and nothing of the protocol", async () => {
+  const called = calledTrigger();
+  const view = await mount({
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], origin: ORIGIN,
+    triggers: { "automation-a": [called, { ...trigger("quiet"), kind: "chatops", name: "Release", generation: 4 }] },
+  });
+  try {
+    const row = triggerRow(view.body, "called")!;
+    assert.ok(row.classList.contains("row-2"), "a two-line row");
+    assert.equal(row.querySelector(".row-title")?.textContent, "Issue Intake");
+    const [kind, last, calls, accepts] = rowMeta(row);
+    assert.equal(kind, "Webhook");
+    assert.match(last ?? "", /^Last called Today, /);
+    assert.equal(calls, "14 calls");
+    assert.equal(accepts, "Accepts prompt text and issue, run_id");
+    assert.deepEqual(rowMeta(triggerRow(view.body, "quiet")!), ["Chat-Ops", "Never called"]);
+    assert.ok(buttonNamed(row, "Copy URL"), "Copy URL trails the row");
+    const text = triggersSection(view.body).textContent ?? "";
+    for (const retired of [/Key Generation/, /Signed body/, /application\/vnd/, /X-Wollipog/, /Deliveries/]) {
+      assert.doesNotMatch(text, retired);
+    }
+    assertNoDomNode(buttonNamed(row, "Rotate Secret"), "Rotate Secret is not a row button");
+    assertNoDomNode(buttonNamed(row, "Revoke"), "Revoke is not a row button");
+
+    const menu = await openRowMenu(view.body, called);
+    assert.deepEqual(menuLabels(menu), ["Copy URL", "How to Call…", "Rotate Secret…", "Revoke Trigger…"]);
+    const children = [...menu.children];
+    const revoke = children.findIndex((child) => child.textContent === "Revoke Trigger…");
+    assert.equal(revoke, children.length - 1, "Revoke Trigger… is last");
+    assert.equal(children[revoke - 1]?.getAttribute("role"), "separator", "after a separator");
+    assert.ok(menuItem(menu, "Revoke Trigger…")?.classList.contains("danger"));
+
+    await click(menuItem(menu, "How to Call…"));
+    const how = dialogNamed(view.body, "How to Call")!;
+    assert.equal(how.querySelector(".field .code-well.one-line code")?.textContent, `${ORIGIN}/hooks/v1/automation-triggers/called`);
+    assert.match(how.textContent ?? "", /POST \/hooks\/v1\/automation-triggers\/called/);
+    assert.match(how.textContent ?? "", /"parameters": \{\s+"issue": "<issue>",\s+"run_id": "<run_id>"/);
+    assert.deepEqual([...how.querySelectorAll(".code-well button")].map((button) => button.getAttribute("aria-label")),
+      ["Copy URL", "Copy Request", "Copy Body", "Copy Signed Text"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("without a public address, Copy URL is disabled and the row says No reachable address yet", async () => {
+  const view = await mount({
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")],
+    triggers: { "automation-a": [trigger("one")] },
+  });
+  try {
+    const row = triggerRow(view.body, "one")!;
+    assert.equal(buttonNamed(row, "Copy URL")?.disabled, true);
+    assert.deepEqual(rowMeta(row), ["Webhook", "No reachable address yet"]);
+    const menu = await openRowMenu(view.body, trigger("one"));
+    assert.equal(menuItem(menu, "Copy URL")?.getAttribute("aria-disabled") === "true" || (menuItem(menu, "Copy URL") as HTMLButtonElement)?.disabled, true);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Rotate Secret names the trigger, then shows the new secret once; Done clears it", async () => {
+  const called = calledTrigger();
+  const rotations: string[] = [];
+  const view = await mount({
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")],
+    triggers: { "automation-a": [called] },
+    client: { rotateAutomationTrigger: async (_id: string, triggerId: string) => {
+      rotations.push(triggerId);
+      return { trigger: called, secret: SECRET };
+    } } as Partial<ApiClient>,
+  });
+  try {
+    await click(menuItem(await openRowMenu(view.body, called), "Rotate Secret…"));
+    const confirmation = dialogNamed(view.body, "Rotate Secret")!;
+    assert.match(confirmation.textContent ?? "",
+      /“Issue Intake” gets a new signing secret\. Requests signed with the old one are rejected right away\./);
+    await click(buttonNamed(confirmation, "Rotate Secret"));
+    assert.deepEqual(rotations, ["called"]);
+    const shown = dialogNamed(view.body, "Secret Rotated")!;
+    assert.match(shown.textContent ?? "", /Copy the Signing Secret Now/);
+    assert.equal(shown.querySelector(".code-well.one-line code")?.textContent, SECRET);
+    await click(buttonNamed(shown, "Done"));
+    assert.doesNotMatch(view.body.innerHTML, new RegExp(SECRET));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Revoke Trigger names the trigger; its row goes and focus moves to the Triggers heading", async () => {
+  const called = calledTrigger();
+  const triggers: Record<string, AutomationTriggerView[]> = { "automation-a": [called] };
   const view = await mount({
     view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], triggers,
     client: { deleteAutomationTrigger: async (id: string) => { triggers[id] = []; return { deleted: true }; } } as Partial<ApiClient>,
   });
   try {
-    await click(menuItem(await openMore(view.body), "Add Chat-Ops Trigger…"));
-    const cancel = buttonNamed(page(view.body)!, "Cancel")!;
-    await act(async () => cancel.focus());
-    await click(cancel);
-    assert.equal(focused(), moreActions(view.body));
-
-    const revoke = buttonNamed(page(view.body)!, "Revoke")!;
-    await act(async () => revoke.focus());
-    await click(revoke);
-    await click(buttonNamed(dialogNamed(view.body, "Revoke Signed Trigger")!, "Revoke Trigger"));
-    assertNoDomNode(page(view.body)!.querySelector("[data-trigger-id]"), "the trigger is gone");
+    await click(menuItem(await openRowMenu(view.body, called), "Revoke Trigger…"));
+    const confirmation = dialogNamed(view.body, "Revoke Trigger")!;
+    assert.match(confirmation.textContent ?? "",
+      /“Issue Intake” stops accepting requests, and deliveries that haven't started are rejected\. This can't be undone\./);
+    await click(buttonNamed(confirmation, "Revoke Trigger"));
+    assertNoDomNode(triggerRow(view.body, "called"), "the trigger is gone");
     assert.equal(focused()?.id, "automation-triggers");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("at 390px Copy URL lives only in ⋯, and both confirmations replace the row's ⋯ sheet with Back", async () => {
+  await setWidth(390);
+  const called = calledTrigger();
+  const view = await mount({
+    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], origin: ORIGIN,
+    triggers: { "automation-a": [called] },
+  });
+  try {
+    const row = triggerRow(view.body, "called")!;
+    assertNoDomNode(buttonNamed(row, "Copy URL"), "the row has no Copy URL");
+    for (const [item, title] of [["Rotate Secret…", "Rotate Secret"], ["Revoke Trigger…", "Revoke Trigger"]] as const) {
+      const menu = await openRowMenu(view.body, called);
+      assert.ok(menuItem(menu, "Copy URL"), "Copy URL is in ⋯");
+      await click(menuItem(menu, item));
+      const confirmation = dialogNamed(view.body, title)!;
+      assert.ok(confirmation, `${title} opens`);
+      assertNoDomNode(view.body.querySelector(`[role="menu"][aria-label="${called.name} Actions"]`), "it replaced the sheet");
+      await click(confirmation.querySelector<HTMLButtonElement>('button[aria-label="Back to More Actions"]'));
+      assert.ok(view.body.querySelector(`[role="menu"][aria-label="${called.name} Actions"]`), "Back brings the ⋯ sheet back");
+      await act(async () => {
+        focused()!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+      });
+      await settle();
+    }
   } finally {
     await view.unmount();
   }

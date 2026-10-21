@@ -35,9 +35,6 @@ export const LABEL_SWAP = new RegExp(
 
 /** The inventory, exact: production file → label-swapping sites it still has. */
 const BASELINE: Readonly<Record<string, number>> = {
-  // The signed trigger form moved from the list's card to the automation page unchanged (#2968);
-  // #2972 rebuilds it.
-  "components/AutomationDetail.tsx": 1,
   "components/Board.tsx": 1,
   "components/InstancesPanel.tsx": 1,
   "components/NewRunDialog.tsx": 1,

@@ -12097,17 +12097,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* The field's label (§8.1) is --type-label in --text: a bare first span, a `.field-label` or
    `.new-session-field-label`, or the first item of a `.field-head` row (below). Later bare spans in
-   a field keep the dim rule above. Two forms stack their labels over the control outside a `.field`
-   and take the same label (#2366): Archived Sessions (its search label and filters' `.field-label`s)
-   and the Automations page's `.automation-form-grid` forms and the editor (a grid
-   label's own text, an `.automation-field`'s `.field-label`, and a fieldset legend). */
+   a field keep the dim rule above. Archived Sessions stacks its labels over the control outside a
+   `.field` and takes the same label (#2366): its search label and its filters' `.field-label`s. */
 .field > span:first-child,
 .field > .field-label,
 .archive-search > span,
 .archive-filter > .field-label,
-.automation-form-grid > label,
-.automation-field > .field-label,
-.automation-form-grid legend,
 .new-session-field-label {
   color: var(--text);
   font: var(--type-label);
@@ -12120,8 +12115,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin-bottom: 6px;
 }
 .field > .field-label,
-.archive-filter > .field-label,
-.automation-field > .field-label { margin-bottom: 0; }
+.archive-filter > .field-label { margin-bottom: 0; }
 .input {
   width: 100%;
   min-width: 0;
@@ -16795,29 +16789,7 @@ button.review-finding-location {
 
 
 /* --------------------------- Durable automations -------------------------- */
-.automation-editor-actions {
-  display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3);
-}
-.automation-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
-/* A grid label's text is the §8.1 label (shared rule, with the other field labels); its helper sits
-   4px under the control, as a field's does. */
-.automation-form-grid > label { display: grid; gap: var(--space-2); }
-.automation-form-grid > label > small { margin-top: calc(-1 * var(--space-1)); color: var(--text-dim); font: var(--type-small); }
-.automation-form-grid > .automation-field { display: grid; gap: var(--space-2); }
-/* The shared field recipe (§8.1) supplies the height, fill, edge and padding. */
-.automation-form-grid input, .automation-form-grid select, .automation-form-grid textarea {
-  width: 100%; min-width: 0;
-}
-.automation-form-grid textarea { resize: vertical; min-height: 96px; }
-.automation-span { grid-column: 1 / -1; }
 .automation-checks { display: flex; flex-wrap: wrap; column-gap: var(--space-5); }
-.automation-form-grid fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
-.automation-hint { color: var(--text-dim); font-size: 12px; line-height: 1.5; }
-/* The form grid is one column on phones, with the app's 760px phone rules (#2969). */
-@media (max-width: 760px) {
-  .automation-form-grid { grid-template-columns: minmax(0, 1fr); }
-  .automation-span { grid-column: auto; }
-}
 /* The Automations list (#2969; docs/design-system.md §5.2, §11.3, §12): the Scheduled and Paused
    groups, each a group header over one Surface of two-line rows. A row's one open target is its
    name, badge and meta; the Enabled switch beside it is a control of its own. */
@@ -17017,7 +16989,6 @@ button.review-finding-location {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.automation-triggers { display: grid; gap: var(--space-2); min-width: 0; }
 @media (max-width: 760px) {
   .glance {
     display: grid;
@@ -17026,21 +16997,71 @@ button.review-finding-location {
   }
   .glance > div { display: contents; }
 }
-.automation-trigger-editor {
-  padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
+/* An automation's Triggers (#2972; docs/design-system.md §5.2, §7, §11.7, §13.2): one surface of
+   two-line rows with Copy URL and ⋯, and the dialogs that add a trigger, show its secret once and
+   say how to call it. */
+.automation-trigger-row { gap: var(--space-2); padding: 0 var(--space-2) 0 var(--space-3); }
+.automation-trigger-meta { display: flex; gap: var(--space-3); }
+.automation-trigger-meta > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.automation-trigger-editor h3 { margin: 0; font: var(--type-body-strong); }
-.automation-trigger-editor .automation-form-grid { margin-top: 10px; }
-.automation-trigger-editor .automation-editor-actions { margin-top: 12px; }
-.automation-trigger { display: grid; gap: 8px; padding: 10px; border-radius: 8px; background: var(--bg-elev-2); margin-top: 8px; min-width: 0; }
-.automation-trigger > div:first-child { display: grid; gap: 2px; }
-.automation-trigger span, .automation-trigger small, .automation-trigger p { color: var(--text-dim); font-size: 12px; }
-.automation-trigger p { margin: 0; overflow-wrap: anywhere; }
-.automation-trigger > code, .automation-trigger-secret code { overflow-wrap: anywhere; white-space: normal; }
-.automation-trigger-actions, .automation-trigger-secret { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.automation-trigger-secret { border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--border)); border-radius: 7px; padding: 9px; }
-.automation-trigger-secret strong { width: 100%; color: var(--yellow); }
+/* The kind and the use stay whole; what the trigger accepts gives way first. */
+.automation-trigger-meta > span:not(:last-child) { flex: none; }
+.automation-trigger-details,
+.automation-trigger-reference {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+/* Let Callers Add Details: the whole row is the switch, its title the §8.1 label over a dim
+   sentence, its track at the form's right edge. */
+.automation-trigger-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  width: 100%;
+  min-height: var(--control-h);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.automation-trigger-switch-text {
+  display: grid;
+  gap: var(--space-0-5);
+  min-width: 0;
+}
+.automation-trigger-switch-title { font: var(--type-label); }
+.automation-trigger-switch-desc {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* The details callers may add sit indented under the switch that allows them. */
+.automation-trigger-detail-fields {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+  padding-left: var(--space-6);
+}
+.automation-trigger-names { font-family: var(--font-mono); }
+.automation-trigger-selectors {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.automation-trigger-selectors > legend { padding: 0; }
+.automation-trigger-reference > p { margin: 0; }
+.automation-trigger-secret-notice .notice-body {
+  display: grid;
+  gap: var(--space-2);
+}
+.automation-trigger-secret-notice .notice-body > p { margin: 0; }
 /* Run History (#2970, docs/design-system.md §14): Started takes what the declared columns leave.
    The actions column holds one inline button ("Open Session" at the longest) and ⋯. On a phone a
    skipped or expired run's reason replaces how long it took on line 2, and wraps. */

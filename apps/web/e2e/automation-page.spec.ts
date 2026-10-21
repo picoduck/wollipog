@@ -146,7 +146,7 @@ for (const { label, viewport } of [
       await expect(items.last()).toHaveText("Delete Automation…");
       await items.last().click();
       const dialog = page.getByRole("alertdialog").or(page.getByRole("dialog")).filter({ hasText: "Delete Automation" });
-      await expect(dialog).toContainText(`“${NIGHTLY}” stops running and is removed, with its 1 trigger. Its run history is kept.`);
+      await expect(dialog).toContainText(`“${NIGHTLY}” stops running and is removed, with its 2 triggers. Its run history is kept.`);
       if (phone) {
         await expect(page.getByRole("menu", { name: "More Actions" })).toHaveCount(0);
         await expect(dialog.getByRole("button", { name: "Back to More Actions" })).toBeVisible();
@@ -291,7 +291,7 @@ test("configured trigger controls and content-free delivery provenance are visib
   await open(page);
   await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
 
-  await expect(page.getByText("Accepts Prompt · Parameters issue, priority", { exact: true })).toBeVisible();
+  await expect(page.getByText("Accepts prompt text and issue, priority", { exact: true })).toBeVisible();
   // Run Details names what a signed delivery brought, never its content or its prompt digest (#2970).
   await page.locator('tr[data-execution-id="axe_issue_1099"] .actions-cell button[aria-haspopup="menu"]').click();
   await page.getByRole("menuitem", { name: "Run Details…" }).click();
@@ -302,11 +302,12 @@ test("configured trigger controls and content-free delivery provenance are visib
 
   await page.locator(".detail-bar").getByRole("button", { name: "More Actions" }).click();
   await page.getByRole("menuitem", { name: "Add Webhook Trigger…" }).click();
-  await expect(page.getByRole("textbox", { name: "Name" })).toBeFocused();
-  await page.getByRole("checkbox", { name: "Accept Delivery Fields" }).check();
-  await expect(page.getByRole("checkbox", { name: "Delivered Prompt" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Missing References" })).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Parameter Names" })).toBeVisible();
+  const dialog = page.getByRole("dialog", { name: "New Webhook Trigger" });
+  await expect(dialog.getByRole("textbox", { name: "Name", exact: true })).toBeFocused();
+  await dialog.getByRole("switch", { name: "Let Callers Add Details" }).click();
+  await expect(dialog.getByRole("checkbox", { name: "Prompt Text" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "If a Referenced Value Is Missing" })).toBeVisible();
+  await expect(dialog.getByRole("textbox", { name: "Named Values" })).toBeVisible();
 });
 
 for (const { label, viewport } of [

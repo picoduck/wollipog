@@ -129,5 +129,21 @@ export function useAutomationPolling(load: (current: () => boolean) => Promise<v
   /** Reads again now, as the next poll would; skipped while a read is already running. */
   const retry = useCallback(() => pollNow.current(), []);
 
-  return { busy, error, mutate, retry };
+  /**
+   * Reads again after a write the caller made and reported itself (a dialog's create, a
+   * confirmation's revoke). A read already running started before the write, so it commits nothing;
+   * this one waits for it and then reads. Its failure is a refresh error, which the next poll clears.
+   */
+  const reread = useCallback(async () => {
+    refreshGeneration.current += 1;
+    const revision = errorRevision.current;
+    try {
+      await refresh(false);
+    } catch (cause) {
+      setError((previous) => revision === errorRevision.current && previous?.source !== "mutation"
+        ? { source: "refresh", message: (cause as Error).message } : previous);
+    }
+  }, [refresh]);
+
+  return { busy, error, mutate, retry, reread };
 }
