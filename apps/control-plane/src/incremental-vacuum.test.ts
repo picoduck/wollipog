@@ -112,6 +112,7 @@ test("paced steps reclaim a real file after ordinary checkpointing, preserving r
     const log = h.logs.find((l) => l.details.event === "incremental_vacuum_pass")!;
     assert.equal(log.details.reclaimedPages, result.reclaimedPages);
     assert.equal(log.details.p95StepMs, result.p95StepMs);
+    assert.equal(log.details.pagesPerStep, result.reclaimedPages / result.steps);
     assert.equal(log.details.entryPoint, "maintenance"); assert.equal(typeof log.details.runId, "string");
   } finally { db.close(); f.cleanup(); }
 });
@@ -147,6 +148,68 @@ test("threshold, 1–32 page budget, 1000-step cap and single-flight are enforce
     assert.ok(requested.every((p) => p >= 1 && p <= 32));
     assert.ok(h.logs.some((l) => l.details.stepLimitReached === true));
   } finally { db.close(); }
+});
+
+test("fixed FULL sync overhead does not pin reclamation to one page per step", async (t) => {
+  const db = ControlPlaneDb.open(":memory:", { incrementalVacuum: true });
+  try {
+    db.incrementalVacuumStats = () => ({ mode: 2, freePages: 100_000, pageSize: 4096, pages: 200_000 });
+    let measured = 0;
+    t.mock.method(performance, "now", () => measured);
+    const requested: number[] = [];
+    db.incrementalVacuumStep = (pages) => {
+      requested.push(pages);
+      measured += 6 + pages * 0.05;
+      return { reclaimedPages: pages, freePages: 100_000 };
+    };
+    const h = setup(db, "1"); h.clock.now += DAY;
+    const result = await h.worker.runPass();
+    assert.equal(requested[0], 1);
+    assert.equal(Math.max(...requested), 32);
+    assert.ok(result.reclaimedPages / result.steps > 30);
+    assert.ok(result.p95StepMs < 16);
+  } finally { db.close(); }
+});
+
+test("adaptation responds to marginal cost, slow storage and changing measurements", async (t) => {
+  for (const scenario of [
+    { name: "expensive additional pages", cost: (pages: number, _step: number) => 6 + pages,
+      finalMin: 2, finalMax: 8 },
+    { name: "slow one-page commits", cost: (_pages: number, _step: number) => 20,
+      finalMin: 1, finalMax: 1 },
+    { name: "optimistic first sample", cost: (pages: number, step: number) => step === 1 ? 0 : 6 + pages * 0.05,
+      finalMin: 32, finalMax: 32 },
+    { name: "pessimistic first sample", cost: (pages: number, step: number) => step === 1 ? 10 : 2 + pages,
+      finalMin: 2, finalMax: 8 },
+    { name: "cost rises after warmup", cost: (pages: number, step: number) => 6 + pages * (step < 30 ? 0.05 : 1),
+      finalMin: 2, finalMax: 8 },
+  ]) await t.test(scenario.name, async (t) => {
+    const db = ControlPlaneDb.open(":memory:", { incrementalVacuum: true });
+    try {
+      db.incrementalVacuumStats = () => ({ mode: 2, freePages: 100_000, pageSize: 4096, pages: 200_000 });
+      let measured = 0;
+      t.mock.method(performance, "now", () => measured);
+      const requested: number[] = [];
+      const rests: number[] = [];
+      const costs: number[] = [];
+      db.incrementalVacuumStep = (pages) => {
+        requested.push(pages);
+        const cost = scenario.cost(pages, requested.length);
+        costs.push(cost); measured += cost;
+        return { reclaimedPages: pages, freePages: 100_000 };
+      };
+      const h = setup(db, "1", async (ms) => { rests.push(ms); }); h.clock.now += DAY;
+      const result = await h.worker.runPass();
+      assert.equal(result.steps, 1000);
+      assert.ok(requested.every((p) => Number.isInteger(p) && p >= 1 && p <= 32));
+      assert.ok(requested.slice(-100).every((p) => p >= scenario.finalMin && p <= scenario.finalMax));
+      assert.ok(rests.every((ms, i) => ms >= Math.max(1, costs[i]! * 3)));
+      if (scenario.finalMax > 1) assert.ok(result.p95StepMs < 16);
+      for (let i = 0; i < costs.length - 1; i++) {
+        if (costs[i]! >= 12 && requested[i]! > 1) assert.ok(requested[i + 1]! < requested[i]!);
+      }
+    } finally { db.close(); }
+  });
 });
 
 test("stop interrupts between steps; an error defers and a later pass resumes", async () => {

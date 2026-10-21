@@ -232,7 +232,11 @@ retrying. Never copy only the main file of a live WAL database as a backup.
 The first pass waits 10 minutes after startup; subsequent passes start an hour after the previous
 one finishes, once armed. Passes are independent of retention, so pages freed by every deletion
 policy qualify. A pass starts only with at least **256 free pages** (1 MiB at 4 KiB pages), then
-drains free pages in steps starting at **1 page**, adapting toward **4 ms**, capped at **32 pages**.
+drains free pages in steps starting at **1 page**, adapting toward **4 ms above the measured
+one-page cost**, capped at **32 pages**. One-page samples account for the fixed `FULL` sync cost;
+a faster multi-page step lowers an inflated baseline estimate.
+growth is at most doubling per step. When a complete step reaches **12 ms**, the next budget is
+reduced proportionally toward **8 ms**, regardless of that baseline, to leave headroom below 16 ms.
 After every step it rests at least **1 ms and three times the measured step duration**. A pass
 stops after **1,000 steps** and continues at the next scheduled pass. Stop interrupts between
 steps; a restart safely resumes from SQLite's current free-page list. Busy or other failures defer
@@ -245,8 +249,8 @@ checkpointer copies the truncation to the main file; retained readers can delay 
 No forced checkpoint or change to checkpoint thresholds is introduced.
 
 Structured startup logs report enabled state, mode and arming deadline. Pass logs include run ID,
-entry point, reclaimed pages/bytes, p95 and maximum complete-step latency, interruption and step-limit
-status and slow-step count. The first step reaching 16 ms in each pass warns with
+entry point, reclaimed pages/bytes, average reclaimed pages per step (`pagesPerStep`), p95 and maximum
+complete-step latency, interruption and step-limit status and slow-step count. The first step reaching 16 ms in each pass warns with
 `incremental_vacuum_slow_step`; further slow steps are counted in its summary. A failed pass logs
 `incremental_vacuum_deferred`. Run `pnpm benchmark:incremental-vacuum [--dir <fixture-parent>]` on
 the database's storage to measure complete steps with concurrent `FULL` writes and the normal
@@ -255,11 +259,13 @@ and fails at **p95 >= 16 ms**. This is a measured target, not a hard real-time g
 storage. Slow-step warnings mean the operator should benchmark the storage or disable maintenance.
 
 For example, a Linux/Node 24.18.1 NVMe fixture run with 16,000 indexed records, the checkpoint worker
-and 3,751 interleaved `FULL` writes measured **9.78 ms p95 / 11.44 ms max** over 1,000 complete
-steps. This disk kept the adaptive budget at one page: the file shrank from 68,567,040 to
-64,466,944 bytes (about 3.91 MiB reclaimed), demonstrating why 128 MiB is a ceiling, not a promised
-hourly rate. The same fixture on tmpfs measured 0.30 ms p95; memory-backed results are not a
-substitute for testing the database's filesystem.
+and 1,548 interleaved `FULL` writes reclaimed **50.24 MiB in 10.89 seconds** (about **4.61 MiB/s**
+during the pass), shrinking the file from 68,575,232 to 15,896,576 bytes. It used **411 steps**,
+averaging **31.29 pages/step**, reached the **32-page** budget and measured **8.73 ms p95 /
+10.46 ms max**. The fixture drained before the step cap. Before the fixed-sync-cost adaptation
+fix (#3575), the same benchmark on this disk stayed at one page, reclaiming about **3.91 MiB** in
+1,000 steps with **9.83 ms p95**. These are measured examples, not promised hourly rates;
+memory-backed measurements are not a substitute for testing the database's filesystem.
 
 `secure_delete`, WAL checkpoints and every existing durability guard remain unchanged; each vacuum
 step uses the connection's normal `FULL` durability. Vacuum changes allocation, not which records
