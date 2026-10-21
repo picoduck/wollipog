@@ -35,17 +35,6 @@ export async function persistProjectAssignment(
   await setProject(sessionId, projectId, { linkLocation });
 }
 
-export function projectAudienceVisibilityLabel(audience: ProjectView["audience"]): string | null {
-  return audience === "team" ? "Everyone on the Owning Team"
-    : audience === "organization" ? "Everyone in Your Organization"
-      : audience === "user" ? "Only the Project Owner" : null;
-}
-
-export function projectAudienceVisibilitySummary(audience: ProjectView["audience"]): string | null {
-  const label = projectAudienceVisibilityLabel(audience);
-  return label ? `Project Visibility: ${label}` : null;
-}
-
 /** Require consent for the supported personal-to-team share and fail closed when an older control
  * plane omits either audience, since the client cannot prove the move preserves transcript access. */
 export function projectAssignmentAudienceConfirmation(
