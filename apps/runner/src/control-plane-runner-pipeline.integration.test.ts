@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../../control-plane/src/local-device-credential.js";
 import { linuxLeaseProcessProbe, proveLeaseAbandoned, type LeaseProcessEvidence } from "./provider-home-lease-evidence.js";
 import { agentControlFifoRelayBase, sweepAgentControlFifoRelays } from "./agent-control-fifo-relay.js";
+import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 
 // Real control plane + real runner daemon + real mock-agent, end to end. This is the first test to
 // exercise the runner's transport/reconnect module (apps/runner/src/index.ts) against a live control
@@ -616,12 +617,15 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
         await sendPrompt("Try while the old provider descendant is still alive");
         const refusal = await uiInbox.take((message) => {
           const event = eventPayload(message);
-          return message.type === "session_event" && event.sessionId === sessionId &&
-            event.payload?.kind === "error" && event.payload.message?.includes("Provider HOME is already in use") === true;
+          return message.type === "session_event" && event.sessionId === sessionId && event.payload?.kind === "error";
+        }).catch((error) => {
+          const inspection = abandonmentInspection(before.at(-1)!.record, runner!.pid!, descendants().map((entry) => entry.pid));
+          throw new Error(`${(error as Error).message}; read-only abandonment=${JSON.stringify(inspection)}\n${runnerOutput}`, { cause: error });
         });
-        assert.match(eventPayload(refusal).payload?.message ?? "", /Provider HOME is already in use/);
         const inspection = abandonmentInspection(before.at(-1)!.record, runner.pid!, descendants().map((entry) => entry.pid));
         t.diagnostic(`surviving crash boundary at refusal: ${JSON.stringify(inspection)}`);
+        assert.ok(eventPayload(refusal).payload?.message?.endsWith(LEASE_WORKER_ERRORS.process_survivor),
+          `expected the specific process-survivor refusal, received ${JSON.stringify(eventPayload(refusal).payload)}`);
         assert.deepEqual(inspection.result, { proven: false, reason: "marked_process" },
           `busy refusal must be caused by a marked survivor, not an unrelated unreadable process: ${JSON.stringify(inspection)}`);
         assert.ok(inspection.markedFixtureProcesses > 0, "the proof identifies this fixture's surviving marked provider");
