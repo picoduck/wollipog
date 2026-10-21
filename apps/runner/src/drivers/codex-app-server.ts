@@ -283,6 +283,7 @@ export function buildCodexTurnParams(
    * from `managedWorktreeProtections`, which for an Orchestrator names every session's worktrees.
    */
   ownedWorktrees: readonly { path: string; gitAdmin: string }[] = [],
+  projectSharedWritableRoots: readonly string[] = [],
 ): Json {
   const protectManagedWorktrees = managedWorktreeProtections.length > 0;
   const selectedGitRoots = managedWorktreeGitWritableRoots(cwd, managedWorktreeProtections);
@@ -321,14 +322,14 @@ export function buildCodexTurnParams(
   // The profile carries this mode already, and its legacy projection is exactly the policy below,
   // so omitting the policy changes nothing except that the hook state directory stays denied. A
   // mode the running profile does NOT express keeps its policy and is documented as unenforced.
-  const carriedByProfile = gitWritableRoots.length === 0 && activeProfileBase !== null &&
+  const carriedByProfile = gitWritableRoots.length === 0 && projectSharedWritableRoots.length === 0 && activeProfileBase !== null &&
     codexPermissionProfileBase(mode) === activeProfileBase;
   const sandboxPolicy = {
     type: sandboxType,
-    ...(sandboxType === "workspaceWrite" && gitWritableRoots.length > 0
+    ...(sandboxType === "workspaceWrite" && (gitWritableRoots.length > 0 || projectSharedWritableRoots.length > 0)
       // An explicit root list is a complete workspace declaration at the App Server boundary.
       // Keep the selected worktree alongside its narrowly selected Git admin descendants.
-      ? { writableRoots: [cwd, ...gitWritableRoots] }
+      ? { writableRoots: [cwd, ...gitWritableRoots, ...projectSharedWritableRoots] }
       : {}),
   };
   const params: Json = {
@@ -1406,6 +1407,7 @@ export class CodexAppServerDriver implements Driver {
         this.threadCarriesLegacySandboxPolicy ? null : this.permissionProfileBase,
         this.managedWorktreeGuardActive,
         this.opts.isolation?.backend === "bwrap" ? this.opts.isolation.protectedWorktree?.ownedWorktrees : undefined,
+        this.opts.isolation?.backend === "bwrap" ? this.opts.isolation.projectSharedWritableRoots : undefined,
       );
       if (this.opts.review) {
         // A review turn is read-only with network access off, never asks, and must return the

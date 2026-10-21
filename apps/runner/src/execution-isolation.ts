@@ -156,6 +156,8 @@ export interface IsolationStateOptions {
   /** Session-private roots that may be populated after launch (for example an agent-requested
    * worktree). They are materialized before sandbox construction and never shared across sessions. */
   additionalWritableRoots?: string[];
+  /** Operator-approved shared project runtime roots; also present in additionalWritableRoots. */
+  projectSharedWritableRoots?: string[];
   /** Exact selected project-memory partition, including for scratch-only sessions. */
   projectMemoryDirectory?: string;
   /** Keep the provider's writable filesystem to its private cwd and transcript state. */
@@ -788,6 +790,17 @@ export async function resolveExecutionIsolation(
   state?: IsolationStateOptions,
 ): Promise<SpawnIsolation | undefined> {
   const runtime = { ...defaultDeps, ...deps };
+  if (state?.projectSharedWritableRoots?.length) {
+    if (policy.mode !== "bwrap" || context.kind !== "native" || runtime.platform !== "linux" || state.orchestratorScratchOnly) {
+      throw new Error("project shared writable directories require a native Linux provider bubblewrap boundary");
+    }
+    for (const root of state.projectSharedWritableRoots) {
+      if (!state.additionalWritableRoots?.includes(root) || !await runtime.existsNative(root) ||
+          await runtime.realpathNative(root) !== root) {
+        throw new Error("project shared writable directory changed before sandbox construction");
+      }
+    }
+  }
   if (state?.preserveProviderHome && !state.protectedWorktree) {
     throw new Error("provider home preservation requires a protected managed worktree");
   }
@@ -1050,6 +1063,7 @@ export async function resolveExecutionIsolation(
     ...(state?.dataDir ? { claudePipeHelperDataDir: state.dataDir } : {}),
     ...(state?.preserveProviderHome ? { preservesProviderHome: true } : {}),
     ...(writableBinds.length ? { writableBinds } : {}),
+    ...(state?.projectSharedWritableRoots?.length ? { projectSharedWritableRoots: [...state.projectSharedWritableRoots] } : {}),
     ...(protectedWorktree ? { protectedWorktree } : {}),
     ...(readOnlyBinds.length ? { readOnlyBinds } : {}),
     ...(packages.length ? { codexPackageReadOnlyPaths: packages.map(({ path }) => path) } : {}),

@@ -1234,6 +1234,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   () => subscriptionUsage.inventory(),
   attestation.instanceId,
 );
+sessions.configureSharedDirectories(config.workspaces, [parsed.configPath,
+  ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)]);
 sessions.configureProviderProfiles({
   access: () => providerProfileGrants.access(),
   expectedProfileIdForHome: (home) => providerProfileGrants.expectedProfileIdForHome(home),

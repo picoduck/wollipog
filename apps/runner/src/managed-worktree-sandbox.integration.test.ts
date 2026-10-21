@@ -32,6 +32,36 @@ function bubblewrapUsable(): boolean {
 const roots: string[] = [];
 after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5 }); });
 
+test("two real provider sandboxes share only the granted QA runtime and retain read-only credentials", {
+  skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
+}, async () => {
+  // Outside private /tmp, like the real operator-configured application state.
+  const { root, repoPath, worktreePath } = managedWorktreeFixture(process.cwd());
+  const runtime = join(root, "qa/runtime"), credentials = join(root, "qa/credentials.json");
+  mkdirSync(runtime, { recursive: true }); writeFileSync(credentials, "synthetic\n");
+  const readOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
+  const isolate = (sessionId: string) => resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, {}, {
+    driver: "acp", dataDir: join(root, "state"), env: {}, sessionId, cwd: worktreePath,
+    additionalWritableRoots: [runtime], projectSharedWritableRoots: [runtime], readOnlyPaths,
+    protectedWorktree: { path: worktreePath,
+      gitWritableRoots: managedWorktreeGitWritableRoots(worktreePath, [{ worktreePath, repoPath }]),
+      requiredReadOnlyPaths: readOnlyPaths },
+  });
+  const first = await isolate("first"), second = await isolate("second");
+  assert.ok(first?.backend === "bwrap" && second?.backend === "bwrap");
+  const exec = (isolation: typeof first, command: string, args: string[]) => {
+    assert.ok(isolation?.backend === "bwrap");
+    return run(isolation.command, buildBwrapArgs({ command, args, cwd: worktreePath }, isolation), worktreePath);
+  };
+  const lock = join(runtime, "qa.lock");
+  assert.equal(exec(first, "/bin/mkdir", [lock]).status, 0);
+  assert.notEqual(exec(second, "/bin/mkdir", [lock]).status, 0);
+  assert.notEqual(exec(second, "/usr/bin/touch", [credentials]).status, 0);
+  assert.equal(readFileSync(credentials, "utf8"), "synthetic\n");
+  assert.equal(exec(first, "/bin/rmdir", [lock]).status, 0);
+  assert.equal(exec(second, "/bin/mkdir", [lock]).status, 0);
+});
+
 /** `base` defaults to the host temp directory. A launch replaces /tmp with an empty tmpfs, so a
  * fixture whose sandboxed Git needs the common directory's root (config, packed refs) must live
  * elsewhere, as every real repository does. */

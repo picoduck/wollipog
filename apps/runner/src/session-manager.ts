@@ -173,7 +173,8 @@ const REVIEW_TIMEOUT_MS = 30 * 60_000;
 const REVIEW_TIMEOUT_GRACE_MS = 60_000;
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_WORKTREE_PORTS } from "./config.js";
-import type { RunnerAdmissionPolicy, RunnerExecutionIsolation, RunnerWorktreePorts } from "./config.js";
+import type { RunnerAdmissionPolicy, RunnerExecutionIsolation, RunnerWorktreePorts, RunnerConfigWorkspace } from "./config.js";
+import { projectSharedDirectories } from "./project-shared-directories.js";
 import { executionTargetLaunchError, hostExecutionTargetRefusal } from "./execution-target.js";
 import type { ContainerTargetRegistry } from "./container-target.js";
 import type { CloudTargetRegistry } from "./cloud-target.js";
@@ -1673,6 +1674,16 @@ export class SessionManager {
     observers: Set<(phase: SessionWorktreeProgressPhase) => void>;
     phase?: SessionWorktreeProgressPhase;
   }>();
+
+  private sharedDirectoryWorkspaces: readonly RunnerConfigWorkspace[] = [];
+  private sharedDirectoryForbiddenRoots: readonly string[] = [];
+
+  /** Called only by the host bootstrap, never from a session/control-plane request. */
+  configureSharedDirectories(workspaces: readonly RunnerConfigWorkspace[], forbiddenRoots: readonly string[] = []): void {
+    this.sharedDirectoryWorkspaces = workspaces.map((workspace) => ({ ...workspace,
+      sharedWritableDirectories: workspace.sharedWritableDirectories ? [...workspace.sharedWritableDirectories] : undefined }));
+    this.sharedDirectoryForbiddenRoots = [...forbiddenRoots];
+  }
 
   constructor(
     private send: Send,
@@ -9262,6 +9273,17 @@ export class SessionManager {
     const isolationPolicy = protectedWorktree
       ? { mode: "bwrap" as const, network: this.executionIsolation.network }
       : this.executionIsolation;
+    const projectSharedWritableRoots = purpose === "provider" && !this.strictProjectIsolation(meta)
+      ? projectSharedDirectories(this.sharedDirectoryWorkspaces, meta, [
+          this.stateDir, join(homedir(), ".config/wollipog"), join(homedir(), ".ssh"),
+          ...this.sharedDirectoryForbiddenRoots,
+          join(homedir(), ".aws"), join(homedir(), ".codex"), join(homedir(), ".claude"),
+          ...[meta.providerCredentialHome, meta.pendingProviderCredentialHome].filter((path): path is string => !!path),
+        ])
+      : [];
+    if (projectSharedWritableRoots.length && (isolationPolicy.mode !== "bwrap" || process.platform !== "linux")) {
+      throw new Error("project shared writable directories require native Linux bubblewrap isolation");
+    }
     this.assertHostIsolationContextSupported(meta);
     // The provider may write anywhere in its managed worktree except the entries the runner owns.
     // Ordinary command approval cannot see a write a script performs at runtime, so the same set of
@@ -9322,6 +9344,7 @@ export class SessionManager {
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
+      ...(projectSharedWritableRoots.length ? { projectSharedWritableRoots } : {}),
       ...(projectMemoryDirectory ? { projectMemoryDirectory } : {}),
       ...(protectedWorktree ? { protectedWorktree: {
         path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
@@ -9331,9 +9354,10 @@ export class SessionManager {
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
-      ...((additionalWritableRoots.length || meta.adoptedProviderState || projectMemoryDirectory)
+      ...((additionalWritableRoots.length || projectSharedWritableRoots.length || meta.adoptedProviderState || projectMemoryDirectory)
         ? { additionalWritableRoots: [
             ...additionalWritableRoots,
+            ...projectSharedWritableRoots,
             ...(projectMemoryDirectory ? [projectMemoryDirectory] : []),
             ...(meta.adoptedProviderState ? [meta.adoptedProviderState.sessionDir] : []),
           ] }

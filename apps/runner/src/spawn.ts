@@ -166,6 +166,8 @@ export interface BwrapSpawnIsolation {
   preservesProviderHome?: true;
   /** Narrow durable state exceptions; source lives under runner data, target is the CLI's home path. */
   writableBinds?: Array<{ source: string; target: string }>;
+  /** Exact operator-approved project runtime roots also admitted by the provider's inner sandbox. */
+  projectSharedWritableRoots?: string[];
   /** A managed worktree whose parent must remain read-only while the child stays writable.
    * `ownedWorktrees` are the session's other worktrees this boundary binds writable (#3316), each
    * with its own admin directory, so a provider's inner sandbox can grant exactly the same set. */
