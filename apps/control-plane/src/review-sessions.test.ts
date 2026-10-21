@@ -695,6 +695,33 @@ test("a campaign member's review reserves allowance and settles actual usage wit
   }
 });
 
+test("an authenticated prelaunch review checkpoint returns the reservation without refunding earlier spend", async () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign();
+    h.db.addSessionUsage("s1", { costUsd: 2 }, 5);
+    const before = h.db.campaignBudgets.view("root")!;
+    const review = requested(h);
+    const id = review.reviewSessionId;
+    const checkpoint = { generation: h.starts()[0]!.spec.campaignBudgetDispatch!.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 };
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: id, state: "failed", reason: "the review snapshot could not be prepared" });
+    h.db.reconcileRunnerHistory(id, 0, 0);
+    h.svc.onSessionStatus(id, "failed", undefined, undefined, "other-runner", undefined, undefined, checkpoint);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.db.campaignBudgets.active(id), true, "only the owning runner can attest zero spend");
+    h.svc.onSessionStatus(id, "failed", undefined, undefined, "r", undefined, undefined, checkpoint);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.db.campaignBudgets.active(id), false);
+    const after = h.db.campaignBudgets.view("root")!;
+    assert.deepEqual(after.actual, before.actual);
+    assert.deepEqual(after.outstanding, before.outstanding);
+    assert.equal(after.occupied, before.occupied);
+    h.svc.recoverCampaignBudgetAllocations("r");
+    assert.equal(h.db.campaignBudgets.active(id), false, "recovery cannot mint a new reservation for a finished review");
+    assert.ok(h.svc.requestReviewSession("s1", request()).ok);
+  } finally { h.db.close(); }
+});
+
 test("campaign review ceilings preserve the requester's original human budget across attempts", () => {
   const h = harness({ campaign: true });
   try {

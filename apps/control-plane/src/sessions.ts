@@ -8680,10 +8680,9 @@ export class SessionsService {
       return fail("fullReason (up to 500 characters) is accepted only with scope full", 400);
     }
     if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
-    // Decision for #3306: a campaign's allowance accounts for its reviews through the campaign's
-    // controlled review job, so no session under a campaign allowance can bypass it here.
+    // The legacy bridge has no campaign accounting. Review sessions use the managed allowance.
     if (this.db.campaignBudgets.root(session.id) !== null) {
-      return fail("This session is part of a campaign with an allowance, so its cross-model reviews run through the campaign's controlled review job (run_campaign_review_job, dispatched by the campaign's Orchestrator), which accounts for their cost. Ask the Orchestrator for that review.", 409);
+      return fail("This session is part of a campaign with an allowance, which the legacy review bridge cannot account for. Request a review session with request_review_session or `wollipog review session run` to reserve allowance and account for its cost.", 409);
     }
     const runner = this.db.getRunner(session.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionReviewJob")) {
