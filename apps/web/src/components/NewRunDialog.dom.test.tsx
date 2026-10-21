@@ -449,7 +449,7 @@ test("two same-named projects in same-named folders on one Machine read apart, a
 
 test("Project's one sentence says who can see the agents' sessions", async () => {
   const expectations = [
-    ["user", "Only the project owner can see the agents' sessions."],
+    ["user", "Only the project owner and organization admins can see the agents' sessions."],
     ["team", "Everyone on the owning team can see the agents' sessions."],
     ["organization", "Everyone in your organization can see the agents' sessions."],
     [undefined, "Wollipog can't show who can see the agents' sessions."],

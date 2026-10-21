@@ -144,13 +144,15 @@ function runLocationUnavailableReason(
 /**
  * Who can see the agents' sessions in the chosen Project, in one sentence under the Project field.
  * It names the sessions, not the run: a run itself is listed to every administrator, and only its
- * members' sessions and transcripts take the Project's audience (CR-1.1 of #3566).
+ * members' sessions and transcripts take the Project's audience (CR-1.1 of #3566). Organization
+ * owners and admins can open every scope, so a personal project's sentence names them too, as
+ * access-scopes.ts does (CR-2.1).
  */
 export function runVisibilitySentence(project: ProjectView | null, noProject: boolean): string | null {
   if (noProject) return "This run won't be added to a project.";
   if (!project) return null;
   switch (project.audience) {
-    case "user": return "Only the project owner can see the agents' sessions.";
+    case "user": return "Only the project owner and organization admins can see the agents' sessions.";
     case "team": return "Everyone on the owning team can see the agents' sessions.";
     case "organization": return "Everyone in your organization can see the agents' sessions.";
     default: return "Wollipog can't show who can see the agents' sessions.";
