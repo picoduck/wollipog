@@ -173,7 +173,7 @@ const REVIEW_TIMEOUT_GRACE_MS = 60_000;
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_WORKTREE_PORTS } from "./config.js";
 import type { RunnerAdmissionPolicy, RunnerExecutionIsolation, RunnerWorktreePorts } from "./config.js";
-import { executionTargetLaunchError, validateHostExecutionTarget } from "./execution-target.js";
+import { executionTargetLaunchError, hostExecutionTargetRefusal } from "./execution-target.js";
 import type { ContainerTargetRegistry } from "./container-target.js";
 import type { CloudTargetRegistry } from "./cloud-target.js";
 import {
@@ -219,7 +219,7 @@ import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type LeaseProfi
 import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
+import { LEASE_WORKER_ERRORS, type LeaseWorkerInspection } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
   ProviderStateCleanupJournal,
@@ -1634,6 +1634,8 @@ export class SessionManager {
   /** Agent TUI reference handles not yet settled; they share the driver handle budget. */
   private agentTuiProviderHomeHandles = 0;
   private readonly providerAuthOperations = new Set<string>();
+  /** Poll interval while an accepted Dismiss Recovery waits for its provider turn to settle. */
+  authDismissalPollMs = 100;
   private readonly providerAuthPreparations = new Map<string, {
     sessionId: string; requestId: string; controller: AbortController;
   }>();
@@ -5074,6 +5076,19 @@ export class SessionManager {
     await this.providerHomeLeases.createProfile(home, provider, profileId, grantId);
   }
 
+  /** #3241: one HOME's lease state for an Owner or Admin deciding on a recovery. */
+  async inspectProviderHomeLease(home: string): Promise<LeaseWorkerInspection> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    return this.providerHomeLeases.inspectHomeLease(home);
+  }
+
+  /** #3241: succeed exactly the authorized stale lease record of one HOME, then release it. */
+  async recoverProviderHomeLease(home: string, provider: string, staleTipHash: string, authorizationId: string): Promise<void> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    if (this.shuttingDown) throw new Error("provider HOME lease recovery was cancelled by shutdown");
+    await this.providerHomeLeases.recoverHomeLease(home, provider, staleTipHash, authorizationId);
+  }
+
   /** Drop one exact grant of this control plane from a HOME's profile marker under its lease. */
   async revokeProviderProfileGrant(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<boolean> {
     if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
@@ -5836,6 +5851,7 @@ export class SessionManager {
     this.reconcileReviewSessions();
     this.store.reapDeletedMarkers();
     void this.reconcileWorktreePullRequests();
+    this.resumeProviderAuthDismissals();
     // Keep archive/index work out of synchronous startup and provider command paths. One bounded
     // pass shortly after startup plus the periodic timer gradually drains legacy oversized logs.
     if (!this.historyMaintenanceKickoff) {
@@ -17851,10 +17867,10 @@ export class SessionManager {
     };
   }
 
-  private campaignHostTargetError(meta: SessionMeta): string | null {
+  private campaignHostTargetRefusal(meta: SessionMeta) {
     // Placement describes the original launch. Selecting or retiring a worktree later does not
     // change that placement; validate its own strategy rather than the current selected path.
-    return validateHostExecutionTarget(meta.executionTarget, this.runnerId,
+    return hostExecutionTargetRefusal(meta.executionTarget, this.runnerId,
       meta.executionTarget?.workspaceStrategy === "worktree", this.executionIsolation);
   }
 
@@ -17867,7 +17883,7 @@ export class SessionManager {
   ): Promise<CampaignForgeObserveResultMessage> {
     const base = { type: "campaign_forge_observe_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
-    if (!meta?.orchestrator || !meta.repoPath || this.campaignHostTargetError(meta)) {
+    if (!meta?.orchestrator || !meta.repoPath || this.campaignHostTargetRefusal(meta)) {
       return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
     }
     try {
@@ -17888,10 +17904,12 @@ export class SessionManager {
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, error: "Campaign issue scope requires a runner-local Orchestrator repository" };
     }
-    if (this.campaignHostTargetError(meta)) {
+    const targetRefusal = this.campaignHostTargetRefusal(meta);
+    if (targetRefusal) {
       this.log(JSON.stringify({ event: "campaign_issue_scope_refused", entryPoint: message.operation,
-        requestId: message.requestId, sessionId: message.sessionId, failure: "unsupported_execution_target" }));
-      return { ...base, ok: false, failure: "unsupported_execution_target",
+        requestId: message.requestId, sessionId: message.sessionId, failure: "unsupported_execution_target",
+        targetFailureReason: targetRefusal.reason }));
+      return { ...base, ok: false, failure: "unsupported_execution_target", targetFailureReason: targetRefusal.reason,
         error: "Campaign issue scope requires a valid local or SSH host execution target belonging to its runner" };
     }
     try {
@@ -17939,7 +17957,7 @@ export class SessionManager {
     if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, error: "Issue closure requires a runner-local Orchestrator repository" };
     }
-    if (this.campaignHostTargetError(meta)) {
+    if (this.campaignHostTargetRefusal(meta)) {
       return { ...base, ok: false, error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
     }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
@@ -20144,13 +20162,36 @@ export class SessionManager {
     }
   }
 
-  private async waitForAuthenticationTurnSettlement(sessionId: string): Promise<boolean> {
+  private async waitForAuthenticationTurnSettlement(sessionId: string, attempts = 100, intervalMs = 25,
+    stillWanted: () => boolean = () => true): Promise<boolean> {
     const settled = () => !this.active.get(sessionId)?.running && !this.launchGenerations.has(sessionId);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    for (let attempt = 0; attempt < attempts && stillWanted(); attempt += 1) {
       if (settled()) return true;
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
     return settled();
+  }
+
+  /** Complete every Dismiss Recovery a previous runner process accepted but could not finish
+   * (#2940). Startup rebuilt the card from durable block metadata; the persisted intent dismisses
+   * that card (matched by request id, or by recovery id when the rebuild changed it) instead of
+   * leaving it for a caller whose single response was already sent. */
+  private resumeProviderAuthDismissals(): void {
+    for (const meta of this.store.listSessions()) {
+      const intent = meta.pendingProviderAuthDismissal;
+      if (!intent) continue;
+      const card = pendingRequests(meta.pendingApproval).find((request) => request.kind === "authentication" &&
+        (request.requestId === intent.requestId ||
+          (intent.recoveryId !== undefined && meta.providerAuthBlock?.recoveryId === intent.recoveryId)));
+      if (!card) {
+        this.store.patchMeta(meta.sessionId, { pendingProviderAuthDismissal: undefined });
+        continue;
+      }
+      setImmediate(() => {
+        void this.resolveProviderAuthentication(meta.sessionId, card.requestId, "auth:dismiss", intent.resolvedBy)
+          .catch((error) => this.log(`resuming an accepted Dismiss Recovery for ${meta.sessionId} failed: ${errText(error)}`));
+      });
+    }
   }
 
   /** `decidedBy` is the person who chose this action (#2742); it names only this session's outcome. */
@@ -20165,13 +20206,32 @@ export class SessionManager {
     if (!meta || meta.pendingApproval?.requestId !== requestId ||
         meta.pendingApproval.kind !== "authentication") return;
     if (optionId === "auth:dismiss") {
-      if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
+      // An accepted dismissal is completed once the turn settles, never refused and never expired:
+      // a caller that answers at most once (Full Control, #2940) must not be left with a parked
+      // card. The intent is durable before any wait, so a runner that dies at any point after
+      // accepting it completes it on its next start.
+      this.store.patchMeta(sessionId, { pendingProviderAuthDismissal: {
+        requestId, ...(block ? { recoveryId: block.recoveryId } : {}), ...(decidedBy ? { resolvedBy: decidedBy } : {}) } });
+      this.store.flush(sessionId);
+      if (!await this.waitForAuthenticationTurnSettlement(sessionId, 100, 25, () => !this.shuttingDown)) {
+        if (this.shuttingDown) return;
         this.emitEvent(sessionId, {
           kind: "stderr",
-          text: "The provider turn is still settling. Dismiss Recovery again in a moment.",
+          text: "Dismiss Recovery was accepted and completes once the provider turn settles.",
         });
-        this.emitStatus(sessionId, "input_required", "Provider authentication recovery is still settling");
-        return;
+        const stillCurrent = () => this.store.readMeta(sessionId)?.pendingApproval?.requestId === requestId;
+        const waiting = () => !this.shuttingDown && stillCurrent();
+        while (!await this.waitForAuthenticationTurnSettlement(sessionId, 100, this.authDismissalPollMs, waiting)) {
+          if (!waiting() || !this.store.readMeta(sessionId)) break;
+        }
+        // A runner shutting down leaves the durable intent for the next process to complete.
+        if (this.shuttingDown) return;
+        if (!stillCurrent()) {
+          this.store.patchMeta(sessionId, { pendingProviderAuthDismissal: undefined });
+          return;
+        }
+        meta = this.store.readMeta(sessionId);
+        block = meta?.providerAuthBlock;
       }
       const preparing = block && this.providerAuthPreparations.get(block.credentialScopeId);
       if (preparing && preparing.sessionId === sessionId && preparing.requestId === requestId) {
@@ -20190,6 +20250,7 @@ export class SessionManager {
       this.store.patchMeta(sessionId, {
         providerAuthBlock: undefined,
         providerAuthDismissedCommandIds: dismissedCommandIds,
+        pendingProviderAuthDismissal: undefined,
         pendingApproval: null,
         ...(current.status === "stopped" ? {} : { status: "idle" as const }),
       });
@@ -20729,6 +20790,7 @@ function boundedProviderAccountSwitchFailureReason(reason: string): string {
 function isProviderAuthenticationBlock(pending: SessionMeta["pendingApproval"] | undefined): boolean {
   return pending?.kind === "authentication" && pending.requestId.startsWith("provider-auth:");
 }
+
 
 function providerAuthenticationRequestId(block: NonNullable<SessionMeta["providerAuthBlock"]>): string {
   return `provider-auth:${block.recoveryId}${block.loginOperationId ? `:${block.loginOperationId}` : ""}`;

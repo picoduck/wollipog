@@ -15,13 +15,14 @@ export type View =
   | { name: "runners"; section?: ConnectionSection; machineId?: string }
   | { name: "runs" }
   | { name: "pods" }
-  | { name: "automations" }
+  | { name: "automations"; editor?: AutomationEditorRoute }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage" }
   | { name: "archived" }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
   | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
-  | { name: "run"; id: string }
+  /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
+  | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
   | { name: "pod"; id: string };
 
@@ -131,6 +132,13 @@ export function approvalsPolicyAnchorId(policyId: string): string {
 }
 
 export type ConnectionSection = "instances" | "machines" | "people";
+
+/**
+ * The Automation editor's two routes (#2967): `/automations/new` and `/automations/~<id>/edit`. A
+ * route rather than a card in the list, so the editor has an address, a reload keeps it and Back
+ * leaves it.
+ */
+export type AutomationEditorRoute = { kind: "new" } | { kind: "edit"; automationId: string };
 
 /**
  * Agent Skills panes that are not a skill (docs/design-system.md §6): the Orphaned Copies pane and
@@ -252,11 +260,15 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
     // Board mode belongs to the Sessions destination; its page title matches the rail name.
     case "board":
       return destination("inbox").name;
+    case "automations":
+      // The editor is titled by what it edits; the list by its destination.
+      if (view.editor?.kind === "new") return "New Automation";
+      if (view.editor?.kind === "edit") return entityTitle ? `Edit ${entityTitle}` : "Edit Automation";
+      return destination(view.name).name;
     case "inbox":
     case "projects":
     case "runs":
     case "pods":
-    case "automations":
     case "usage":
     case "runners":
     case "archived":
@@ -399,7 +411,9 @@ export function viewPath(view: View): string {
       : `/connections/${view.section ?? "machines"}`;
     case "runs": return "/runs";
     case "pods": return "/pods";
-    case "automations": return "/automations";
+    case "automations": return view.editor?.kind === "new" ? "/automations/new"
+      : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
+        : "/automations";
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return "/usage";
     case "archived": return "/archived";
@@ -409,7 +423,7 @@ export function viewPath(view: View): string {
       : view.attention
       ? `/sessions/~${encodeResourceId(view.id)}/attention${view.attention.requestId === undefined ? "" : `/~${encodeOpaque(view.attention.requestId)}`}?epoch=${view.attention.eventEpoch}`
       : `/sessions/~${encodeResourceId(view.id)}`;
-    case "run": return `/runs/~${encodeResourceId(view.id)}`;
+    case "run": return `/runs/~${encodeResourceId(view.id)}${runMemberSearch(view.member)}`;
     case "settings": return view.section === "approvals" && view.policyId !== undefined
       ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
       : view.section ? `/settings/${view.section}` : "/settings";
@@ -440,11 +454,30 @@ function locationFromSearch(path: string, search: string): SourceLocation | null
   });
 }
 
-function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string): View | null {
+const RUN_MEMBER_PARAM = "member";
+
+function runMemberSearch(member: string | undefined): string {
+  return member === undefined ? "" : `?${new URLSearchParams({ [RUN_MEMBER_PARAM]: member }).toString()}`;
+}
+
+/** The member a run URL names: undefined when it names none or its query is not a member. */
+function runMemberFromSearch(search: string): string | undefined {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const keys = [...params.keys()];
+  if (keys.length !== 1 || keys[0] !== RUN_MEMBER_PARAM) return undefined;
+  const member = params.get(RUN_MEMBER_PARAM) ?? "";
+  return !member.trim() || member.length > MAX_RESOURCE_ID_LENGTH ? undefined : member;
+}
+
+function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string, search: string): View | null {
   const id = decodeResourceId(encodedId);
   if (id === null) return null;
   if (kind === "sessions") return { name: "session", id };
-  if (kind === "runs") return { name: "run", id };
+  if (kind === "runs") {
+    // A query that is not a member keeps the run open rather than failing the route.
+    const member = runMemberFromSearch(search);
+    return member === undefined ? { name: "run", id } : { name: "run", id, member };
+  }
   return { name: "pod", id };
 }
 
@@ -469,6 +502,12 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/runs") return { name: "runs" };
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
+  if (path === "/automations/new") return { name: "automations", editor: { kind: "new" } };
+  const automationEditMatch = /^\/automations\/~([^/]+)\/edit$/.exec(path);
+  if (automationEditMatch) {
+    const automationId = decodeResourceId(automationEditMatch[1]!);
+    return automationId === null ? null : { name: "automations", editor: { kind: "edit", automationId } };
+  }
   if (path === "/skills") return { name: "skills" };
   const skillsPaneMatch = /^\/skills\/(orphans|overview)$/.exec(path);
   if (skillsPaneMatch) return { name: "skills", pane: skillsPaneMatch[1] as SkillsPane };
@@ -516,7 +555,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return location ? { name: "session", id, location } : null;
   }
   const match = /^\/(sessions|runs|pods)\/~([^/]+)$/.exec(path);
-  return match ? resourceView(match[1] as "sessions" | "runs" | "pods", match[2]!) : null;
+  return match ? resourceView(match[1] as "sessions" | "runs" | "pods", match[2]!, search) : null;
 }
 
 /** Compatibility bridge for notification links created by older service workers. */

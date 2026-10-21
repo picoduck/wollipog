@@ -75,6 +75,7 @@ import {
   parseArgs,
   projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
+  resolveAgentEnvironmentValue,
   resolveRunnerLocalAgentEnvironment,
   captureProviderAccountsConfigPreimage,
   writeProviderAccountsConfig,
@@ -165,9 +166,11 @@ import {
 } from "./worktree-setup-generator.js";
 import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { ProviderLoginSupervisor } from "./provider-login.js";
+import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type ProviderHomeLeaseCommandDeps } from "./provider-home-lease-commands.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
 import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
+import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
 import {
   adoptProviderProfileCommand,
   removeProviderAccountWithProfile,
@@ -915,6 +918,23 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
 // This process holds the data-directory lease, so it is the one store allowed to recover a writer-lock
 // guard abandoned by a process that died inside its guard section.
 const store = new SessionStore(resolve(config.dataDir, "sessions"), undefined, undefined, true);
+// Full Control screens resolved targets against the directories this runner knows hold
+// credentials (#2940). Read on each request, so accounts added at runtime are covered.
+setCampaignCredentialRoots(() => {
+  const providerHomeNames = ["HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
+  // Agent values may defer to the runner's environment (`fromEnv`); read them as launches would.
+  const agentEnv = (agent: RunnerConfig["agents"][number]) => Object.fromEntries(providerHomeNames.flatMap((name) => {
+    try { const value = resolveAgentEnvironmentValue(agent, name); return value === undefined ? [] : [[name, value]]; } catch { return []; }
+  }));
+  const sessions = store.listSessions();
+  return runnerCredentialRoots({
+    dataDir: config.dataDir, worktreeRoot: resolve(config.dataDir, "worktrees"), profileRoot: managedProviderProfileRoot(),
+    providerAccountDirectories: config.providerAccounts.map((account) => account.directory),
+    agentEnvs: [process.env, ...config.agents.map(agentEnv), ...sessions.map((meta) => meta.env)],
+    credentialHomes: sessions.flatMap((meta) => [meta.providerCredentialHome, meta.pendingProviderCredentialHome]),
+    workspacePaths: config.workspaces.map((workspace) => workspace.path), userHome: homedir(),
+  });
+});
 store.scrubLegacyAgentEnv();
 const durableCommands = new DurableCommandStore(resolve(config.dataDir, "command-receipts"));
 durableCommands.prune();
@@ -1229,6 +1249,12 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   publish: () => publishProviderAccountInventory(),
   log,
 };
+const providerHomeLeaseCommands: ProviderHomeLeaseCommandDeps = {
+  accounts: () => config.providerAccounts,
+  inspect: (home) => sessions.inspectProviderHomeLease(home),
+  recover: (home, provider, staleTipHash, authorizationId) => sessions.recoverProviderHomeLease(home, provider, staleTipHash, authorizationId),
+  log,
+};
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
 const sessionStarts = new SessionStartFence();
@@ -1406,6 +1432,11 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 }
 
 function sendUp(msg: RunnerToControlPlane): void {
+  // Registration precedes agent discovery, so the review-session capability it advertised can say
+  // no reviewer is available. Every discovery result carries it again, from the agents it found.
+  if (msg.type === "agents_updated" && process.platform === "linux") {
+    msg = { ...msg, reviewSession: reviewSessionCapability() ?? null };
+  }
   if (msg.type === "session_status" && ["completed", "failed", "stopped"].includes(msg.status)) {
     removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
     void agentControlRelays.close(msg.sessionId);
@@ -1658,15 +1689,19 @@ function sessionReviewCapability(): SessionReviewCapability | undefined {
     return undefined;
   }
 }
+/** The review-session capability from the agents discovered so far (#3368, #3369). */
+function reviewSessionCapability(): ReturnType<ReviewSessionLauncher["capability"]> {
+  try {
+    return reviewSessionLauncher.capability();
+  } catch (error) {
+    log(`review session discovery failed: ${errText(error)}`);
+    return undefined;
+  }
+}
 function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]>): NonNullable<RunnerMetadata["runtime"]> {
   const { sessionReview: _previous, reviewSession: _previousReviewSession, ...rest } = runtime;
   const sessionReview = sessionReviewCapability();
-  let reviewSession: ReturnType<ReviewSessionLauncher["capability"]>;
-  try {
-    reviewSession = reviewSessionLauncher.capability();
-  } catch (error) {
-    log(`review session discovery failed: ${errText(error)}`);
-  }
+  const reviewSession = reviewSessionCapability();
   return { ...rest, ...(sessionReview ? { sessionReview } : {}), ...(reviewSession ? { reviewSession } : {}) };
 }
 
@@ -3133,6 +3168,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "revoke_provider_profile_grant":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")) break;
       runCommandTask("revoke_provider_profile_grant", revokeProviderProfileGrantCommand(providerProfileCommands, msg).then(sendUp));
+      break;
+    case "inspect_provider_home_lease":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeLeaseRecovery")) break;
+      runCommandTask("inspect_provider_home_lease", inspectProviderHomeLeaseCommand(providerHomeLeaseCommands, msg).then(sendUp));
+      break;
+    case "recover_provider_home_lease":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeLeaseRecovery")) break;
+      runCommandTask("recover_provider_home_lease", recoverProviderHomeLeaseCommand(providerHomeLeaseCommands, msg).then(sendUp));
       break;
     case "generate_session_title": {
       if (msg.mode === "custom_model_endpoint") {

@@ -147,6 +147,11 @@ const TABLE: readonly Row[] = [
   ["pod", "failed", "Failed", "danger"],
   // Provider account
   // Member
+  // Multi-Agent Run row (#2974)
+  ["run", "awaiting_decision", "Awaiting Decision", "warning"],
+  ["run", "approval_required", "Approval Required", "warning"],
+  ["run", "running", "Running", "info"],
+  ["run", "failed", "Failed", "danger"],
   ["member", "active", "Active", "success"],
   ["member", "suspended", "Suspended", "danger"],
   ["provider_account", "signed_in", "Signed In", "success"],
@@ -154,6 +159,7 @@ const TABLE: readonly Row[] = [
   ["provider_account", "signing_in", "Signing In", "info"],
   ["provider_account", "signed_out", "Signed Out", "neutral"],
   ["provider_account", "status_unknown", "Status Unknown", "neutral"],
+  ["provider_account", "not_added", "Not Added", "neutral"],
   // Terminal tab
   ["shell", "exited", "Exited", "neutral"],
   ["shell", "reconnecting", "Reconnecting", "info"],
@@ -173,6 +179,15 @@ const TABLE: readonly Row[] = [
   ["agent", "approval_required", "Approval Required", "warning"],
   ["agent", "unavailable", "Unavailable", "danger"],
   ["agent", "ready_when_last_seen", "Ready When Last Seen", "neutral"],
+  // Cross-model review
+  ["reviewRun", "requested", "Requested", "neutral"],
+  ["reviewRun", "running", "Reviewing", "info"],
+  ["reviewRun", "upvote", "Upvote", "success"],
+  ["reviewRun", "downvote", "Downvote", "warning"],
+  ["reviewRun", "unvalidated", "Not Validated", "neutral"],
+  ["reviewRun", "invalid", "Invalid", "danger"],
+  ["reviewRun", "failed", "Failed", "danger"],
+  ["reviewRun", "canceled", "Canceled", "neutral"],
 ];
 
 test("statusMeta holds every row of the §11.2 vocabulary with its label and tone", () => {
@@ -189,15 +204,19 @@ test("only actively progressing work pulses, and an unverified source draws a ho
   // A Stop waiting on an offline runner is not being delivered, so it does not claim progress (#208).
   assert.equal(statusMeta("session", "stop_waiting_for_runner").pulse, false);
   assert.equal(statusMeta("job", "running").pulse, true);
+  assert.deepEqual(pulsing("run"), ["running"]);
   assert.deepEqual(pulsing("queuedMessage"), ["sent", "started", "steering"]);
   // Sending is a spinner beside the word, never a pulsing badge (#2171).
   assert.deepEqual(pulsing("messageReceipt"), []);
+  assert.deepEqual(pulsing("reviewRun"), ["running"]);
   assert.equal(statusMeta("job", "stalled").pulse, false);
   assert.equal(statusMeta("machine", "offline").hollow, true);
   assert.equal(statusMeta("job", "unverified").hollow, true);
   // An agent not on the machine, or one whose machine is not online, is not a current fact (#2990).
   assert.deepEqual(statusValues("agent").filter((value) => statusMeta("agent", value).hollow),
     ["not_installed", "ready_when_last_seen"]);
+  // A new account that was never added, because it is already on the machine (#2996).
+  assert.deepEqual(statusValues("provider_account").filter((value) => statusMeta("provider_account", value).hollow), ["not_added"]);
 });
 
 test("an unknown value reads Status Unavailable, never its raw enum or a prototype member", () => {
@@ -208,7 +227,7 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
   for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "tool", "family",
-    "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "pod", "member", "provider_account",
+    "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "run", "pod", "member", "provider_account",
     "shell", "share", "usage", "agent"] as const) {
     for (const value of statusValues(domain)) {
       const { label } = statusMeta(domain, value);

@@ -3,7 +3,7 @@ import {
   REVIEW_ATTEMPTS_PER_ROUND, REVIEW_ROUND_BUDGET, REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, validateReviewReport,
   type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewFailureClass, type ReviewReport, type ReviewReportFinding,
   type ReviewRunHistory, type ReviewSessionLink, type ReviewSessionState, type ReviewSessionUpdate, type ReviewSessionView,
-  type ReviewSessionsPage, type SessionReviewHarness,
+  type ReviewRunsSummary, type ReviewSessionsPage, type SessionReviewHarness,
 } from "@wollipog/protocol";
 
 type Row = {
@@ -166,6 +166,14 @@ export class ReviewSessions {
     const row = this.sql.prepare(`SELECT COALESCE(SUM(s.cost_usd), 0) AS spent FROM review_sessions r
       JOIN sessions s ON s.id = r.review_session_id WHERE r.requester_session_id=?`).get(requesterSessionId) as { spent: number };
     return row.spent;
+  }
+
+  /** The requester's reviews summarized for its own view, or null when it has none. */
+  summaryFor(requesterSessionId: string): ReviewRunsSummary | null {
+    const row = this.sql.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(state IN ${ACTIVE}), 0) AS active,
+      MAX(updated_at) AS updated_at FROM review_sessions WHERE requester_session_id=?`)
+      .get(requesterSessionId) as { count: number; active: number; updated_at: number | null };
+    return row.count > 0 ? { count: row.count, active: row.active, updatedAt: row.updated_at ?? 0 } : null;
   }
 
   isReviewSession(sessionId: string): boolean {

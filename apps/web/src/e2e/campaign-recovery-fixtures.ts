@@ -2,7 +2,7 @@ import { CAMPAIGN_RECOVERY_EXPLANATIONS, type CampaignRecoveryReason, type Campa
 
 /** Deterministic content-safe evidence for the real Campaign Status / Requests components. */
 export function campaignRecoveryFixture(reason: CampaignRecoveryReason, now: number): CampaignRecoveryRecord {
-  const blocked = reason === "hard_denial" || reason === "attempts_exhausted";
+  const blocked = reason === "hard_denial" || reason === "attempts_exhausted" || reason === "request_declined";
   const automatic = ["failed_checks", "reviewer_objection", "transient_failure", "uncertain_outcome"].includes(reason);
   const requiredInput: CampaignRecoveryRecord["requiredInput"] = reason === "missing_access" ? "restore_existing_access"
     : reason === "missing_human_information" ? "answer_existing_request"
@@ -11,7 +11,7 @@ export function campaignRecoveryFixture(reason: CampaignRecoveryReason, now: num
     : reason === "human_required_rule" ? "perform_human_required_action"
     : reason === "uncertain_outcome" ? "reconcile_original_outcome" : "none";
   const action = reason === "failed_checks" ? "repair_checks" : reason === "reviewer_objection" ? "rereview"
-    : reason === "uncertain_outcome" ? "reconcile_outcome" : "answer_request";
+    : reason === "uncertain_outcome" ? "reconcile_outcome" : reason === "request_declined" ? "continue_without_request" : "answer_request";
   return { id: "recovery_fixture", action,
     resource: reason === "failed_checks" || reason === "reviewer_objection"
       ? { kind: "pull_request", sessionId: "s_root", repository: "team/repo", pullRequest: 123, occurrenceId: "a".repeat(40) }

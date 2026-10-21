@@ -38,7 +38,7 @@ function program(expected: string, fixture: boolean): string {
     `$h=[Security.Cryptography.SHA256]::Create();try{$digest=[BitConverter]::ToString($h.ComputeHash($b)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()};` +
     `if($digest -cne '${expected}'){throw 'assembly identity'};` +
     `$a=[Reflection.Assembly]::Load($b);$t=$a.GetType('WollipogAccountConfigWindowsV1',$true);` +
-    (fixture ? `$value=$t.GetMethod('Fixture').Invoke($null,@($env:WACW_FIXTURE_PATH,$env:WACW_FIXTURE_MODE));if($value){[Console]::Write($value)};` : `$null=$t.GetMethod('Run').Invoke($null,@($i,$o));`);
+    (fixture ? `$value=$t.GetMethod('Fixture').Invoke($null,@($env:WACW_FIXTURE_PATH,$env:WACW_FIXTURE_MODE));if($value){$v=[System.Text.Encoding]::UTF8.GetBytes($value);if($v.Length -gt 32768){throw 'fixture output capacity'};$o.Write($v,0,$v.Length);$o.Flush()};` : `$null=$t.GetMethod('Run').Invoke($null,@($i,$o));`);
 }
 function assembly(): Buffer {
   if (typeof __WACW_DLL_SHA__ !== "string") throw new WindowsAccountConfigError("not_published", "STORE_UNVERIFIABLE");
@@ -68,14 +68,25 @@ function invoke(request: NativeRequest): NativeCapture | undefined {
 }
 export function capture(path: string): NativeCapture { return invoke({ operation: 1, path })!; }
 export function publish(request: Omit<NativeRequest, "operation">): void { invoke({ ...request, operation: 2 }); }
-function fixtureOperation(path: string, mode: "private" | "foreign-write" | "null-dacl" | "full-store" | "owner-path"): string {
+function fixtureOperation(path: string, mode: "private" | "foreign-write" | "null-dacl" | "full-store" | "owner-path" | "directory-alias-path"): string {
   if (!(typeof __WACW_FIXTURE__ === "boolean" && __WACW_FIXTURE__) || isSea()) throw new Error("fixture-only native assembly required");
   const dll = assembly(), prefix = Buffer.alloc(4); prefix.writeInt32LE(dll.length);
   const platform = resolveWindowsPlatform();
   const result = spawnSync(platform.executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program(__WACW_DLL_SHA__, true)],
     { input: Buffer.concat([prefix, dll]), env: { ...fixedWindowsEnvironment(platform.systemRoot), WACW_FIXTURE_PATH: path, WACW_FIXTURE_MODE: mode }, shell: false, windowsHide: true, timeout: 10_000, maxBuffer: 32768 });
   if (result.error || result.status !== 0 || result.signal || result.stderr.length) throw new Error("native synthetic fixture creation failed");
-  return result.stdout.toString("utf8");
+  const value = result.stdout.toString("utf8");
+  if (!Buffer.from(value).equals(result.stdout)) throw new Error("invalid synthetic fixture output");
+  return value;
 }
 export function createSyntheticFixture(path: string, mode: "private" | "foreign-write" | "null-dacl" | "full-store"): void { if (fixtureOperation(path, mode) !== "") throw new Error("unexpected fixture output"); }
 export function foreignOwnerPath(): string { const path = fixtureOperation("", "owner-path"); if (!/^[A-Za-z]:\\/u.test(path) || path.includes("\0")) throw new Error("native owner fixture path missing"); return path; }
+
+/** Source fixture only: no retry/fallback or fabricated alias when proof is unavailable. */
+export function directoryAliasPath(path: string): string {
+  let alias: string;
+  try { alias = fixtureOperation(path, "directory-alias-path"); }
+  catch { throw new Error("genuine directory alias proof was not established"); }
+  if (!/^[A-Za-z]:\\/u.test(alias) || alias.includes("\0")) throw new Error("genuine directory alias proof was not established");
+  return alias;
+}

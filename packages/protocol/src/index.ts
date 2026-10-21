@@ -703,7 +703,16 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `review_session_update`. The control plane sends a run's history only to a v228+ runner,
 //      which plans the round, scopes delta and rebase reviews and validates every attempt against
 //      the review contract; an older runner keeps reviewing full and unvalidated.
-export const PROTOCOL_VERSION = 228;
+// 229: Owner/Admin recovery of a stale provider-HOME lease (#3241): `inspect_provider_home_lease`
+//      and `recover_provider_home_lease` with their results. The control plane sends them only to
+//      a v229+ runner, and a runner answers them only for a v229+ control plane.
+// 230: Full Control worktree containment (#2940): runner filesystem evidence carries
+//      `filesystem.containment` (version 1) only after canonicalizing every target, the cwd and the
+//      session's worktree root. The control plane makes a tool request approvable only with it, so
+//      evidence from an older runner is unresolved and gets the standing decline. A v230 runner also
+//      keeps an accepted Dismiss Recovery durable until the provider turn settles, so only then does
+//      the control plane fence its standing sign-in dismissal permanently.
+export const PROTOCOL_VERSION = 230;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -954,6 +963,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeRefDeletion: 227,
   /** v228 runner plans review rounds and validates review attempts (#3369). */
   reviewRuns: 228,
+  /** v229 runner inspects a provider HOME's lease and recovers one exact stale lease on an Owner or
+   * Admin's authorization (#3241). */
+  providerHomeLeaseRecovery: 229,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -999,6 +1011,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   fullControlAuthority: 215,
   /** Bounded Full Control issue lineage, publication admission and verified closure. */
   fullControlIssueAuthority: 217,
+  /** Runner evidence attests that every resolved target lies inside the session's worktree (#2940). */
+  campaignWorktreeContainment: 230,
+  /** An accepted Dismiss Recovery is durable on the runner and waits for the provider turn instead
+   * of being refused, so the control plane may fence its standing dismissal permanently (#2940). */
+  durableAuthDismissal: 230,
   campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
@@ -2714,6 +2731,9 @@ export interface OrchestratorCampaignProjection {
    * cannot. Absent from servers without video review and from Custom campaigns; each gate still
    * rechecks its own child, source and audience. */
   videoEvidenceReview?: { status: "available" | "unavailable"; reason: string };
+  /** Full Control only: the request classes that still come to the Human for this campaign
+   * (#2940), today at most `human_required_rules` while such a rule exists. */
+  fullControlHumanRequired?: import("./campaign-authority.js").FullControlRequestClass[];
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;
@@ -3938,7 +3958,16 @@ export interface ApprovalContext {
   operation?: ({ kind: "command"; input: string; cwd?: string } | { kind: "file"; path: string } |
     { kind: "permission_grant"; lifetime: "session" }) & {
       /** Runner-derived physical targets. Provider-authored claims never populate this evidence. */
-      filesystem?: { cwd?: string; targets: Array<{ path: string; resolvedPath: string }> };
+      filesystem?: { cwd?: string; targets: Array<{ path: string; resolvedPath: string;
+        /** Runner-attested: the real path is inside a directory the runner knows holds credentials. */
+        credentialStore?: true;
+        /** v230: the runner-observed `dev:ino` (of the parent for a file to be created), so a recheck
+         * rejects a swapped inode. Opaque to the control plane. */
+        identity?: string }>;
+        /** v230 (#2940): present only when the runner canonicalized the session's worktree root and
+         * every target and the cwd resolved inside it. `sessionRoot` is the root as the session was
+         * launched with it; `root` is its real path. Absence makes the effect unresolved. */
+        containment?: { version: 1; root: string; sessionRoot: string } };
     };
   toolName?: string;
   /** Human-readable input rendering (command text, file path + content excerpt, JSON), bounded
@@ -4538,6 +4567,15 @@ export type CampaignIssueScopeMessage = {
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
      { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl });
 
+/** Bounded host-placement diagnostic; never carries configuration values or runner output. */
+export type HostExecutionTargetRefusalReason =
+  | "runner_mismatch"
+  | "unsupported_adapter"
+  | "workspace_mismatch"
+  | "filesystem_mismatch"
+  | "stale_network_policy"
+  | "unsupported_host_boundaries";
+
 export interface CampaignIssueScopeResultMessage {
   type: "campaign_issue_scope_result";
   requestId: string;
@@ -4545,6 +4583,8 @@ export interface CampaignIssueScopeResultMessage {
   ok: boolean;
   /** Fixed refusal classification; older runners omit it. Never surface raw runner error text. */
   failure?: "unsupported_execution_target";
+  /** Optional refinement; old peers keep the generic failure classification. */
+  targetFailureReason?: HostExecutionTargetRefusalReason;
   repository?: string;
   revision?: number;
   candidates?: CampaignIssueScopeView["candidates"];
@@ -7265,6 +7305,8 @@ export interface SessionView {
   kind?: import("./review-session.js").SessionKind;
   /** v226: present on a review session (#3368): what it reviews and for whom. */
   review?: import("./review-session.js").ReviewSessionLink;
+  /** #3369: the review sessions this session requested, summarized. Omitted when it has none. */
+  reviewRuns?: import("./review-session.js").ReviewRunsSummary;
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
@@ -8892,6 +8934,10 @@ export interface AgentsUpdatedMessage {
   editors?: EditorInfo[];
   /** Protocol v176: target-local harness probes refreshed without replacing the target template. */
   executionTargets?: ExecutionTargetDefinition[];
+  /** #3369: the review-session capability, which depends on discovered agents. A registration made
+   * before discovery advertised it stale; each discovery pass replaces it (null: none). Older
+   * control planes ignore it. */
+  reviewSession?: import("./review-session.js").ReviewSessionCapability | null;
 }
 
 /** Authoritative replacement of one runner's active/recent provider-login cards. */
@@ -9212,6 +9258,8 @@ export type RunnerToControlPlane =
   | RemoveProviderAccountResultMessage
   | AdoptProviderProfileResultMessage
   | RevokeProviderProfileGrantResultMessage
+  | InspectProviderHomeLeaseResultMessage
+  | RecoverProviderHomeLeaseResultMessage
   | RunnerCapacityStatusMessage
   | SubscriptionUsageUpdatedMessage
   | SubscriptionUsageInventoryMessage
@@ -10151,6 +10199,70 @@ export interface RevokeProviderProfileGrantResultMessage {
   ok: boolean;
   /** True when this grant was found in a configured HOME's marker and taken out of it. */
   markerUpdated: boolean;
+  error?: string;
+}
+
+/**
+ * Protocol v229 (#3241): why recovering a stale provider-HOME lease is refused.
+ * - `TIP_CHANGED`: the lease is no longer the record the authorization named (released, replaced, or none).
+ * - `NO_REBOOT_PROOF`: the record carries no process evidence and was written during the current boot.
+ * - `HOME_IN_USE`: the recorded runner, or a process it launched, is still running.
+ * - `FOREIGN_HOST`: the lease was recorded on another host.
+ * - `PROFILE_REFUSED`: the HOME's provider profile does not admit this control plane.
+ * - `UNSUPPORTED_HOME`: the account's context or platform has no verified lease to recover.
+ * - `UNVERIFIABLE`: anything else the runner cannot prove; nothing was changed.
+ */
+export type ProviderHomeLeaseRecoveryCode =
+  | "TIP_CHANGED" | "NO_REBOOT_PROOF" | "HOME_IN_USE" | "FOREIGN_HOST" | "PROFILE_REFUSED" | "UNSUPPORTED_HOME" | "UNVERIFIABLE";
+
+/** Protocol v229 (#3241): one account HOME's lease state, as an Owner or Admin sees it. */
+export interface ProviderHomeLeaseInspection {
+  /** `none`: no lease journal; `released`: free; `held`: held by this runner; `stale`: an unreleased
+   * lease of another runner process; `unverifiable`: the journal cannot be verified. */
+  state: "none" | "released" | "held" | "stale" | "unverifiable";
+  /** For `stale`: the exact record a recovery authorization must name (SHA-256, hex). */
+  tipHash?: string;
+  /** For `stale`: when the stale record says it was written (the old runner's clock). */
+  createdAt?: string;
+  sameHost?: boolean;
+  /** For `stale`: whether the record carries process evidence (#3241 part 1). */
+  hasEvidence?: boolean;
+  /** For `stale`: why a recovery would be refused now, or null when it would proceed. */
+  refusal?: ProviderHomeLeaseRecoveryCode | null;
+}
+
+/** Protocol v229 (#3241): read one account HOME's lease state. Creates nothing. */
+export interface InspectProviderHomeLeaseMessage {
+  type: "inspect_provider_home_lease";
+  requestId: string;
+  accountId: string;
+}
+
+export interface InspectProviderHomeLeaseResultMessage {
+  type: "inspect_provider_home_lease_result";
+  requestId: string;
+  ok: boolean;
+  inspection?: ProviderHomeLeaseInspection;
+  code?: "UNSUPPORTED_HOME";
+  error?: string;
+}
+
+/** Protocol v229 (#3241): succeed exactly the stale lease record `staleTipHash` of one account HOME
+ * and release the HOME again. Sent only after an Owner or Admin authorized it; the authorization id
+ * is the control plane's audited authorization row and is recorded in the lease journal. */
+export interface RecoverProviderHomeLeaseMessage {
+  type: "recover_provider_home_lease";
+  requestId: string;
+  accountId: string;
+  staleTipHash: string;
+  authorizationId: string;
+}
+
+export interface RecoverProviderHomeLeaseResultMessage {
+  type: "recover_provider_home_lease_result";
+  requestId: string;
+  ok: boolean;
+  code?: ProviderHomeLeaseRecoveryCode;
   error?: string;
 }
 
@@ -11099,6 +11211,8 @@ export type ControlPlaneToRunner =
   | RemoveProviderAccountMessage
   | AdoptProviderProfileMessage
   | RevokeProviderProfileGrantMessage
+  | InspectProviderHomeLeaseMessage
+  | RecoverProviderHomeLeaseMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
   | SkillSnapshotMessage

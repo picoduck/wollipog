@@ -19,6 +19,7 @@ import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { SessionsService } from "./sessions.js";
+import { shortVideoDecoderAvailable } from "./video-frame-decode.js";
 
 const REPOSITORY = "fixture-owner/full-control-acceptance";
 const question: WorkflowDecisionResourceSnapshot = {
@@ -59,6 +60,8 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
   create("root"); create("worker", "root"); create("sibling", "root");
   const sent: ControlPlaneToRunner[] = [];
   let observeLaunch: ((message: ControlPlaneToRunner) => void) | undefined;
+  /** Operator-enabled frame review, optionally confined to one controlling Session. */
+  let frameReview: { enabled: boolean; controller?: string } = { enabled: false };
   const service = () => {
     const hub = new Hub(db);
     hub.isRunnerOnline = () => true;
@@ -70,7 +73,8 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
         sessionId: message.sessionId, ok: true, repository: REPOSITORY, candidates: [] };
       throw new Error("Unexpected synthetic runner request");
     };
-    if (!hostingVideo) return new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+    if (!hostingVideo) return new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined,
+      undefined, undefined, undefined, undefined, frameReview.enabled, frameReview.controller);
     const video = composeHostingVideoEvidence(db);
     const disclosures = hostingEvidenceAuthorityDisclosures({
       organizationExists: (organizationId) => db.listOrganizationIds().includes(organizationId), listRunners: () => db.listRunners() });
@@ -78,13 +82,13 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
       undefined, false, undefined, undefined, video.workflowVideoApprovals, disclosures, undefined, video.preparedMediaActiveStops);
   };
   let svc = service();
-  const enable = (budgetAuthority?: CampaignBudgetAuthority) => svc.setCampaignControl("root", {
+  const enable = (budgetAuthority?: CampaignBudgetAuthority, expectedRevision = 1) => svc.setCampaignControl("root", {
     mode: "full_control", objective: "Implement the fixture button interaction for issue 1",
     operations: ["implementation_question", "question", "tool_approval", "pr_merge", "merged_branch_deletion",
       "ui_evidence_approval", "follow_up_issue_publication", "campaign_issue_scope", "issue_closure"],
     delegatablePolicyIds: [],
     ...(budgetAuthority ? { budgetAuthority } : {}),
-  }, 1, human);
+  }, expectedRevision, human);
   const ask = (sessionId: string, requestId: string) => svc.createWorkflowDecision(sessionId,
     { requestId, resourceKey: requestId, resourceSnapshot: question });
   const approve = (sessionId: string, occurrenceId: string) => svc.resolveDescendantRequest("root", sessionId,
@@ -94,7 +98,8 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
     title: "Inspect Fixture", context: {
       toolName: driver === "claude-code" ? "Bash" : "commandExecution", input: "cat implementation.ts",
       operation: { kind: "command", input: "cat implementation.ts", cwd: directory,
-        filesystem: { cwd: directory, targets: [{ path: "implementation.ts", resolvedPath: join(directory, "implementation.ts") }] } },
+        filesystem: { cwd: directory, targets: [{ path: "implementation.ts", resolvedPath: join(directory, "implementation.ts") }],
+          containment: { version: 1, root: directory, sessionRoot: directory } } },
     }, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
   });
   return {
@@ -106,6 +111,8 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
       undefined, undefined, false, false, false, { parentSessionId: "root" });
     },
     reopen() { db.close(); db = ControlPlaneDb.open(path); svc = service(); },
+    /** Rebuild the service on the same database with frame review switched on or off. */
+    setFrameReview(enabled: boolean, controller?: string) { frameReview = { enabled, controller }; svc = service(); },
     close() { db.close(); rmSync(directory, { recursive: true, force: true }); },
   };
 }
@@ -204,8 +211,11 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
           input: "git status --short", operation: { kind: "command", input: "git status --short",
             cwd: "/fixture/repository", filesystem: { cwd: "/fixture/repository", targets: [] } } },
         options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
-      assert.equal(h.db.getSession("root")!.pendingRequestOwners!.human, 1,
-        "Git inspection is not delegated by a code-only standing boundary");
+      // Git is never a bounded effect, and a parked root cannot judge it: it declines its own once
+      // and nobody is asked (#2940).
+      assert.equal(h.db.getSession("root")!.pendingApproval, null);
+      const settled = h.sent.filter((m) => m.type === "resolve_permission") as Array<{ requestId: string; optionId: string | null }>;
+      assert.deepEqual(settled.filter((m) => m.requestId === "git-inspection").map((m) => m.optionId), [null]);
       assert.equal(h.svc.resolveDescendantRequest("root", "root", "git-inspection",
         { action: "approve", optionId: "once" }, () => true).ok, false);
     } finally { h.close(); }
@@ -262,7 +272,7 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
     } finally { h.close(); }
   });
 
-  test(`${driver}: one actionable credential exception remains while unrelated authorized work consumes once; restart revokes stale grants`, async () => {
+  test(`${driver}: one blocked credential decline remains while unrelated authorized work consumes once; restart revokes stale grants`, async () => {
     const h = stack(driver);
     try {
       assert.ok(h.enable().ok);
@@ -272,8 +282,14 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       for (let index = 0; index < 3; index++) h.svc.onSessionEvent("worker", event);
       const humanRequests = h.svc.descendantRequests("root", () => true, "human");
       assert.ok(humanRequests.ok);
-      assert.equal(humanRequests.data!.requests.length, 1, "replay retains one exception, not repeated override requests");
-      assert.equal(humanRequests.data!.requests[0]!.authorityEvaluation!.reason, "protected_request");
+      assert.equal(humanRequests.data!.requests.filter((r) => r.responseOwner === "human").length, 0, "Full Control asks nobody (#2940)");
+      assert.ok(!h.sent.some((m) => m.type === "answer_question" && (m as { action?: string }).action !== "dismiss"),
+        "the credential question is only ever dismissed, never answered");
+      const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
+      assert.equal(blocked.length, 1, "redelivery retains one blocked record, not repeated requests");
+      assert.equal(blocked[0]!.state, "blocked");
+      assert.deepEqual(h.db.campaignRecovery.declines("root", h.db.getSession("root")!.parentControlPolicy!.revision)
+        .map((decline) => [decline.sessionId, decline.requestClass, decline.count]), [["worker", "secrets_and_sign_in", 1]]);
       assert.equal(h.svc.resolveDescendantRequest("root", "worker", event.occurrenceId,
         { action: "answer", answers: { secret: "A" } }, () => true).ok, false);
       const unrelated = h.ask("sibling", "sibling-placement").data!;
@@ -285,12 +301,14 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       h.reopen();
       assert.equal(h.db.workflowDecisionByOccurrence(stale.occurrenceId)!.status, "revoked");
       assert.equal((await h.svc.consumeWorkflowDecision("sibling", stale.occurrenceId, { resourceSnapshot: question })).ok, false);
-      assert.equal(h.svc.descendantRequests("root", () => true, "human").data!.requests.length, 1);
+      assert.equal(h.svc.descendantRequests("root", () => true, "human").data!.requests.filter((r) => r.responseOwner === "human").length, 0);
+      assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 1,
+        "the decline stays visible as blocked work across reopen");
     } finally { h.close(); }
   });
 }
 
-for (const hostingVideo of [false, true]) test("foundation scope and attached video remain genuine human exceptions rather than a synthetic complete positive campaign" +
+for (const hostingVideo of [false, true]) test("foundation scope stays human and uncertified video can only be denied by the Orchestrator, never a synthetic complete positive campaign" +
   (hostingVideo ? " under the hosting video composition" : ""), async () => {
   const h = stack("codex-app-server", PROTOCOL_VERSION, hostingVideo);
   try {
@@ -312,13 +330,125 @@ for (const hostingVideo of [false, true]) test("foundation scope and attached vi
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: "video", artifactId: video.data!.artifactId,
         mediaType: "video/webm", sha256: video.data!.sha256 }] } });
     assert.ok(decision.ok, decision.error ?? "video request failed");
-    assert.equal(decision.data!.authority, "human");
-    assert.equal(decision.data!.humanFallback?.code, "media_video_unsupported");
-    assert.equal(h.svc.reviewDescendantUiEvidence("root", "worker", decision.data!.occurrenceId, "video", () => true).ok, false);
+    // Full Control never routes evidence to the Human (#2940). The Orchestrator owns the gate but
+    // can neither receive the raw video nor approve it without a receipt: it can only deny.
+    assert.equal(decision.data!.authority, "orchestrator");
+    assert.equal(decision.data!.humanFallback, undefined);
+    const delivery = h.svc.reviewDescendantUiEvidence("root", "worker", decision.data!.occurrenceId, "video", () => true);
+    assert.equal(delivery.ok, false);
+    assert.match(delivery.error!, /Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven\./u);
     assert.equal(h.svc.resolveDescendantRequest("root", "worker", decision.data!.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["video"] }, () => true).ok, false);
     assert.notEqual(h.db.campaignProjection("root")!.status, "verified_complete");
+    assert.ok(h.svc.resolveDescendantRequest("root", "worker", decision.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Attach screenshots as Session artifacts." }, () => true).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data!.occurrenceId)!.status, "denied");
   } finally { h.close(); }
+});
+
+test("a Full Control frame-review approval needs the frame route at resolution and at consumption (#2940 CR-8.2)", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = stack("claude-code");
+  try {
+    h.setFrameReview(true);
+    // Frame derivation reads the root's own UI evidence owner, which the boundary does not change.
+    const delegated = h.svc.setParentControlPolicy("root", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, ui_evidence_approval: "orchestrator" },
+      h.db.getSession("root")!.parentControlPolicy?.revision);
+    assert.ok(delegated.ok, delegated.error ?? "delegation refused");
+    const enabled = h.enable(undefined, h.db.getSession("root")!.parentControlPolicy!.revision); assert.ok(enabled.ok, enabled.error ?? "admission failed");
+    const bytes = readFileSync(fileURLToPath(new URL("../test-fixtures/video-review-one-frame-transient.webm", import.meta.url)));
+    const video = h.svc.attachSessionVideo("worker", { name: "motion.webm",
+      mimeType: "video/webm", data: bytes.toString("base64") }, { kind: "agent", id: "worker" });
+    assert.ok(video.ok && video.data, video.error ?? "video attachment failed");
+    const item = { evidenceId: "motion", artifactId: video.data.artifactId, mediaType: "video/webm", sha256: video.data.sha256 };
+    const request = async (id: string) => {
+      const decision = await h.svc.createWorkflowDecisionWithVideo("worker", { requestId: id, resourceKey: id,
+        resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] } });
+      assert.ok(decision.ok && decision.data, decision.error ?? "video request failed");
+      assert.equal(decision.data.authority, "orchestrator");
+      return decision.data;
+    };
+    /** Every derived frame delivered in order and acknowledged, as the paced reviewer does. */
+    const reviewAll = (decision: Awaited<ReturnType<typeof request>>) => {
+      const snapshot = decision.resourceSnapshot;
+      assert.ok(snapshot.category === "ui_evidence_approval" && snapshot.videoReview, "frame review derived the manifest");
+      for (const frame of snapshot.videoReview.frames) {
+        const delivered = h.svc.reviewDescendantUiEvidence("root", "worker", decision.occurrenceId, frame.evidenceId, () => true);
+        assert.ok(delivered.ok && delivered.data, delivered.error ?? "frame delivery refused");
+        assert.ok(h.svc.acknowledgeDescendantUiEvidence("root", delivered.data.receipt.receiptId, delivered.data.receipt.sha256).ok);
+      }
+      return snapshot.videoReview.frames.map((frame) => frame.evidenceId);
+    };
+    const approve = (decision: Awaited<ReturnType<typeof request>>, evidenceReviewed: string[]) =>
+      h.svc.resolveDescendantRequest("root", "worker", decision.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed }, () => true);
+    const consume = (decision: Awaited<ReturnType<typeof request>>) =>
+      h.svc.consumeWorkflowDecision("worker", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot });
+    const status = (decision: Awaited<ReturnType<typeof request>>) => h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status;
+
+    // Control: with the route current, a complete frame review approves and is consumed.
+    const control = await request("frames-control");
+    assert.ok(approve(control, reviewAll(control)).ok);
+    assert.equal((await consume(control)).data?.status, "consumed");
+
+    // Frame review is switched off after approval: the approval can no longer be consumed.
+    const disabled = await request("frames-disabled-before-consume");
+    assert.ok(approve(disabled, reviewAll(disabled)).ok);
+    h.setFrameReview(false);
+    assert.equal((await consume(disabled)).ok, false);
+    assert.equal(status(disabled), "revoked");
+
+    // Frame review moves to another controlling Session: the same.
+    h.setFrameReview(true);
+    const moved = await request("frames-moved-before-consume");
+    assert.ok(approve(moved, reviewAll(moved)).ok);
+    h.setFrameReview(true, "s_000000000000");
+    assert.equal((await consume(moved)).ok, false);
+    assert.equal(status(moved), "revoked");
+
+    // Switched off after every receipt is acknowledged but before resolution: approval is refused,
+    // while the Orchestrator still owns the decision and can deny it, so nobody is prompted.
+    h.setFrameReview(true);
+    const pending = await request("frames-disabled-before-resolve");
+    const reviewed = reviewAll(pending);
+    h.setFrameReview(false);
+    const late = approve(pending, reviewed);
+    assert.equal(late.ok, false);
+    assert.match(late.error ?? "", /Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven\./u);
+    assert.equal(status(pending), "pending");
+    assert.ok(h.svc.resolveDescendantRequest("root", "worker", pending.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Attach screenshots as Session artifacts." }, () => true).ok);
+    assert.equal(status(pending), "denied");
+  } finally { h.close(); }
+});
+
+test("Full Control owns evidence it cannot inspect, yet never delivers another Session's artifact; Custom still routes it to the Human", () => {
+  for (const full of [true, false]) {
+    const h = stack("codex-app-server");
+    try {
+      if (full) assert.ok(h.enable().ok);
+      else assert.ok(h.svc.setParentControlPolicy("root", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, ui_evidence_approval: "orchestrator" },
+        h.db.getSession("root")!.parentControlPolicy?.revision).ok);
+      const bytes = readFileSync(fileURLToPath(new URL("../../web/public/icons/icon-192.png", import.meta.url)));
+      const foreign = h.svc.createWorkflowArtifact({ sessionId: "sibling", kind: "screenshot", name: "sibling.png",
+        mimeType: "image/png", encoding: "base64", data: bytes.toString("base64") }, { kind: "agent", id: "sibling" });
+      assert.ok(foreign.ok, foreign.error ?? "attachment failed");
+      const decision = h.svc.createWorkflowDecision("worker", { requestId: "foreign", resourceKey: "foreign", resourceSnapshot: {
+        category: "ui_evidence_approval", evidence: [{ evidenceId: "foreign", artifactId: foreign.data!.artifactId,
+          mediaType: "image/png", sha256: foreign.data!.sha256 }] } });
+      assert.ok(decision.ok, decision.error ?? "request failed");
+      assert.equal(decision.data!.authority, full ? "orchestrator" : "human");
+      if (full) assert.equal(decision.data!.humanFallback, undefined);
+      else assert.equal(decision.data!.humanFallback?.code, "artifact_unavailable");
+      const delivered = h.svc.reviewDescendantUiEvidence("root", "worker", decision.data!.occurrenceId, "foreign", () => true);
+      assert.equal(delivered.ok, false, "another Session's bytes are never delivered");
+      assert.equal(h.svc.resolveDescendantRequest("root", "worker", decision.data!.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["foreign"] }, () => true).ok, false);
+    } finally { h.close(); }
+  }
 });
 
 test("older peers cannot admit the foundation even with fixture image capability", () => {

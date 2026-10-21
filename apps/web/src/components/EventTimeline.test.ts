@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
-import type { SessionEventPayload, SessionView } from "@wollipog/protocol";
+import type { PermissionOption, SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { renderToStaticMarkup } from "react-dom/server";
 import { deriveTimeline, groupTimeline, publishTimelineSnapshotDelta, SubagentTreeProjector, TimelineBuilder, type TimelineItem } from "../timeline.js";
 import {
@@ -26,7 +26,8 @@ import {
   userRewindTurns,
   type TimelineRenderRow,
 } from "./EventTimeline.js";
-import { permissionResolutionLabel } from "../decision-record.js";
+import { permissionDecisionRecord } from "../decision-record.js";
+import { statusMeta } from "../status-meta.js";
 import { reanchorAtLogicalIndex } from "./MeasuredVirtualList.js";
 import type { EditInForkAvailability } from "../session-actions.js";
 
@@ -1736,22 +1737,30 @@ test("an unusable Edit as a New Turn stays listed on every user message, disable
   assert.equal((usable.match(/aria-label="Edit as a New Turn"/g) ?? []).length, 2);
 });
 
-test("a chosen option reads as its past-tense outcome, never as its id (#2204)", () => {
-  assert.equal(permissionResolutionLabel([], "auth:select-account"), "Another Account Selected");
-  assert.equal(permissionResolutionLabel([], "auth:automatic-retry"), "Rechecked Automatically");
-  assert.equal(permissionResolutionLabel([{ optionId: "reject", kind: "reject_once" }], "reject"), "Rejected");
-  assert.equal(permissionResolutionLabel([{ optionId: "trust", kind: "allow_always" }], "trust"), "Allowed");
-  assert.equal(permissionResolutionLabel([{ optionId: "skip", kind: "reject_once" }], "skip"), "Rejected");
-  assert.equal(permissionResolutionLabel([{ optionId: "cancel", kind: "cancel" }], "cancel"), "Ended Early");
-  assert.equal(permissionResolutionLabel([{ optionId: "trust" }], "trust"), "Resolved",
-    "an option with no kind and no common id is Resolved, not its raw id");
-  assert.equal(permissionResolutionLabel([{ optionId: "allow" }], "allow"), "Allowed");
-  assert.equal(permissionResolutionLabel([{ optionId: "deny" }], "deny"), "Rejected");
-  assert.equal(permissionResolutionLabel([{ optionId: "auth:select-account", kind: "allow_once" }], "auth:select-account"),
-    "Allowed", "a provider option that reuses a runner id is decided by its kind");
-  assert.equal(permissionResolutionLabel([], "toString"), "Resolved",
-    "an id matching an inherited property is never replaced by it");
-  assert.equal(permissionResolutionLabel([], null), "Dismissed");
+test("a chosen option reads as its past-tense outcome on the live decision record (#2204)", () => {
+  const cases: [options: Pick<PermissionOption, "optionId" | "kind">[], chosen: string | null, label: string][] = [
+    [[], "auth:select-account", "Another Account Selected"],
+    [[], "auth:automatic-retry", "Rechecked Automatically"],
+    [[{ optionId: "reject", kind: "reject_once" }], "reject", "Rejected"],
+    [[{ optionId: "trust", kind: "allow_always" }], "trust", "Allowed"],
+    [[{ optionId: "skip", kind: "reject_once" }], "skip", "Rejected"],
+    [[{ optionId: "cancel", kind: "cancel" }], "cancel", "Ended Early"],
+    [[{ optionId: "trust" }], "trust", "Resolved"],
+    [[{ optionId: "allow" }], "allow", "Allowed"],
+    [[{ optionId: "deny" }], "deny", "Rejected"],
+    // A provider option's kind wins when it reuses a runner resolution id.
+    [[{ optionId: "auth:select-account", kind: "allow_once" }], "auth:select-account", "Allowed"],
+    // An inherited property must never become an outcome.
+    [[], "toString", "Resolved"],
+    [[], null, "Dismissed"],
+  ];
+  for (const [options, resolvedOptionId, expected] of cases) {
+    const record = permissionDecisionRecord({
+      kind: "permission", id: 1, requestId: "request", title: "Run Command",
+      options: options.map((option) => ({ ...option, label: "Choose" })), resolvedOptionId,
+    });
+    assert.equal(statusMeta("requestDecision", record.outcome).label, expected, String(resolvedOptionId));
+  }
 });
 
 /** Every incremental projection must equal a from-scratch one: folding retries may only ever cost

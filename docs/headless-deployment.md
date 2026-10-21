@@ -53,6 +53,12 @@ To prune the transcripts of long-archived sessions, add
 It is off by default, takes effect 24 hours after it is first seen, and an organization's own saved
 setting overrides it. See [archived-history retention](./archived-history-retention.md).
 
+To bound the separate mutation audit archive, the host operator can set
+`CONTROL_PLANE_MUTATION_AUDIT_ARCHIVE_RETENTION_DAYS=<days>` (7–3650, suggested 90).
+It is off by default, has no API or organization override, and waits 24 hours on enable or shorten.
+See [mutation audit archive retention](./archived-history-retention.md#mutation-audit-archive-retention)
+for the exact kept set and restart behavior.
+
 The generated units state the account and the data locations they use; read them before enabling
 in an environment with its own conventions.
 
@@ -424,7 +430,7 @@ pins the staging directories, inspects again, and refuses unless all of the foll
   declared size, or, only when the attempt selected the web archive, the extracted `web/`
   directory (preserved without traversal);
 - the updater process recorded for the attempt is not running, and no inspectable process
-  has its working directory, root, or a descriptor inside the staging parent (a live updater
+  has its working directory, root, executable, or a descriptor inside the staging parent (a live updater
   holds both open for its whole attempt; this also catches a concurrent recovery);
 - `<data-dir>/upgrade-recovery/` is absent or a private directory on the same filesystem.
 
@@ -445,9 +451,50 @@ before the rename, the slot stays in place and a later run can use the same toke
 interrupted after the rename, the attempt is already preserved and only its record is marked
 incomplete. Inspection lists both cases.
 
-Recovery refuses, and changes nothing, for incomplete, legacy, or unverifiable owner records;
-unknown, substituted, hard-linked, or symlinked objects; foreign entries such as legacy
-release-tag directories; an active or possibly active attempt; and an unavailable process
+Legacy per-release staging from v0.23–v0.29 is also inspectable. Inspection lists every
+release-tag candidate, including when many interrupted releases have accumulated. Each recognized
+`upgrades/vX.Y.Z[-pre]` candidate has its own `legacy[]` inventory and preservation command in
+JSON output; text output labels it `Legacy` and `Preservation`. Its `sl1-…` token is separate
+from current-slot `sa1-…` tokens. For example, after reviewing the exact token from inspection:
+
+```bash
+wollipog service staging inspect --user
+wollipog service staging recover --user --attempt sl1-<token-from-inspect> --yes
+```
+
+Legacy preservation requires a real updater-owned 0700 directory on the staging filesystem.
+Top-level contents must be single-link regular files named `SHA256SUMS`,
+`wollipog-{runner,control-plane}-{aarch64,x86_64}-unknown-linux-gnu`, or
+`wollipog-web.tar.gz`, with mode 0600 (0755 is also allowed for executables), and an optional
+extracted `web/` tree. Incomplete downloads are allowed: legacy downloads used these final
+names directly. Web directories must be updater-owned 0700 or 0755, and web files must be
+updater-owned single-link regular files with mode 0600, 0644, or 0755. Symlinks, hard links,
+special files, unknown top-level names, other owners and cross-filesystem entries refuse.
+The web tree is inventoried through no-follow pinned directory descriptors, bounded to 4096
+entries, 32 directory levels, and 2 MiB of inventory metadata; exceeding a bound refuses.
+No archive is opened and no staged executable is run.
+
+The legacy token binds the data-directory and parent identities, directory identity, and every
+inventoried entry's identity, size, permissions, link count and modification/change times.
+Recovery pins the source and destination, repeats those checks immediately before the atomic
+move, and retains the directory as `upgrade-recovery/<time>-<nonce>-<random>/<tag>/` with a
+`recovery.json` record. Legacy staging has no updater identity or reliable phase history:
+preservation makes no claim about what was installed. A process with its working directory, root, executable or a descriptor inside the staging
+parent blocks preservation, including a concurrent update or recovery. Uninspectable
+processes always require explicit `--accept-uninspectable-processes` attestation for legacy
+staging; an unavailable process table refuses even with that flag.
+
+An occupied current slot or another legacy directory may coexist: preserve each legacy candidate
+individually, inspect again, then recover the current slot if eligible. Unknown siblings remain
+protected. Ordinary updates, retries and `--force` never preserve or clear legacy staging.
+The next update is admitted only after every blocking entry is recovered. Interruption before
+the move retains the source and its token; interruption after it retains the moved directory
+with an incomplete recovery record, both reported by inspection. Preserved legacy directories
+are retained indefinitely, just like current-slot recoveries.
+
+Recovery refuses for incomplete, legacy, or unverifiable owner records in the current slot;
+unknown, substituted, hard-linked, or symlinked objects; foreign entries without a recognized
+legacy inventory; an active or possibly active attempt; and an unavailable process
 table. Those cases still need an operator's manual review. Preserve installed and previous
 generations, configuration, credentials, databases, artifacts, and uncertain evidence; this
 guide supplies no deletion recipe.

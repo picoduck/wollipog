@@ -253,23 +253,28 @@ test("a descendant displays the current root mode after revoke and does not trea
   assert.match(legacy.dialog().textContent ?? "", /Effective Mode: Current Root State Not Reported/);
 });
 
-/** A server preflight in the shape the enable route returns; only readiness differs between states. */
-function enablePreflight(ready: boolean): CampaignLaunchPreflight {
+/** A server preflight in the shape the enable route returns. Not ready means a true blocker; `budget`
+ * is the ceiling the server derived, none by default. */
+function enablePreflight(ready: boolean, budget: { costUsd: number; toolCalls: number } | null = ready ? { costUsd: 30, toolCalls: 300 } : null): CampaignLaunchPreflight {
   const verified = (id: CampaignLaunchPreflight["capabilities"][number]["id"], capability: string) => ({ id, capability, state: "verified" as const, mandatory: true, reason: `${capability} is verified.` });
   return { ready, digest: (ready ? "b" : "a").repeat(64), inspectionCancellation: "supported",
     summary: { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
       root: { agentId: "claude", driver: "claude-code", model: "claude-opus-5-5", effort: null, isolation: { mode: "provider", network: "inherit" },
         strictProjectIsolation: false, integrationIsolation: false, completion: "retain" },
-      budget: { costUsd: ready ? 30 : null, toolCalls: ready ? 300 : null, concurrency: 4, acceptedFollowUps: 0, source: ready ? "override" : "unset", reviewIncluded: true },
+      budget: { costUsd: budget?.costUsd ?? null, toolCalls: budget?.toolCalls ?? null, concurrency: 4, acceptedFollowUps: 0, source: budget ? "override" : "unset", reviewIncluded: false },
+      review: { controlled: false, statement: "The regular cross-model review workflow, because controlled review is unavailable." },
       followUps: { policy: "recommend_only", relatedFollowUps: false, maxIssues: 1, closureReasons: ["completed"] },
       evidence: { statement: "The Orchestrator reviews screenshots. Video and external evidence need your review.",
         destination: { kind: "private_session_artifacts", configurationId: "session_artifacts:org", disclosureRevision: 1 }, provider: null, envelope: false },
       humanRequired: [{ exception: "Secrets and Sign-In", reason: "Always decided by the Human under Full Control." }],
-      blockers: ready ? [] : [{ capability: "Campaign Accounting and Budget", reason: "No campaign budget yet: enter a cost limit and a tool-call limit." }] },
-    capabilities: [verified("repository_scope", "Repository and Issue Scope"), verified("authority_contract", "Full Control Authority"),
-      ready ? verified("accounting_budget", "Campaign Accounting and Budget")
-        : { id: "accounting_budget", capability: "Campaign Accounting and Budget", state: "unsupported", mandatory: true, reason: "No campaign budget yet: enter a cost limit and a tool-call limit." },
-      verified("native_review", "Controlled Cross-Model Review"), verified("execution_isolation", "Execution Isolation")],
+      blockers: ready ? [] : [{ capability: "Full Control Authority", reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." }] },
+    capabilities: [verified("repository_scope", "Repository and Issue Scope"),
+      ready ? verified("authority_contract", "Full Control Authority")
+        : { id: "authority_contract", capability: "Full Control Authority", state: "unsupported", mandatory: true, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." },
+      { ...verified("accounting_budget", "Campaign Accounting and Budget"), mandatory: budget !== null },
+      { id: "native_review", capability: "Controlled Cross-Model Review", state: "informational", mandatory: false,
+        reason: "This runner does not offer the controlled reviewer; the campaign uses the regular cross-model review workflow." },
+      { ...verified("execution_isolation", "Execution Isolation"), mandatory: false }],
     advanced: { proposal: null, plan: {} as never, humanRequiredRequests: [] } };
 }
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
@@ -278,23 +283,44 @@ const settings = (campaignBudget?: { costUsd: number; toolCalls: number }) => as
   defaults: { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), ...(campaignBudget ? { campaignBudget } : {}) },
   source: "user_default" as const, capabilities: {} as never, controlModeSupported: true });
 
-test("choosing Full Control on a live campaign checks readiness at once and asks only for a missing budget", async () => {
+test("choosing Full Control on a live campaign enables in one action with no limit; gaps are rows, not warnings", async () => {
   const preflights: unknown[] = [];
   const enables: unknown[] = [];
   const harness = await open(orchestrator(), {
     orchestratorSettings: settings(),
-    fullControlEnablePreflight: async (id, body) => { preflights.push([id, body]); return { preflight: enablePreflight(false), expectedRevision: 2 }; },
+    fullControlEnablePreflight: async (id, body) => { preflights.push([id, body]); return { preflight: enablePreflight(true, null), expectedRevision: 2 }; },
     enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
   });
   const dialog = harness.dialog();
   await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
   await settle();
   assert.deepEqual(preflights, [["orch", {}]], "readiness is checked as soon as Full Control is chosen");
+  assert.match(dialog.textContent ?? "", /Ready to Enable/);
+  assert.match(dialog.textContent ?? "", /BudgetNo Limit · 4 at a time/);
+  assert.match(dialog.textContent ?? "", /ReviewThe regular cross-model review workflow, because controlled review is unavailable\./);
+  assertNoDomNode(dialog.querySelector('section[aria-label="Enable Full Control"] .notice.t-warning'),
+    "an unavailable reviewer is never a warning");
+  assert.equal([...dialog.querySelectorAll("label span")].some((node) => node.textContent === "Cost Limit (USD)" && !node.closest("details")), false,
+    "no limit is asked for outside Advanced");
+  assert.doesNotMatch(dialog.textContent ?? "", /Save Limits as Default/, "no default is offered until both limits are entered");
+  const enable = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Enable Full Control")!;
+  assert.equal(enable.disabled, false);
+  await act(async () => enable.click());
+  assert.deepEqual(enables, [["orch", { expectedRevision: 2, preflightDigest: "b".repeat(64) }]]);
+});
+
+test("a true blocker on a live campaign keeps Enable disabled and says why", async () => {
+  const enables: unknown[] = [];
+  const harness = await open(orchestrator(), {
+    orchestratorSettings: settings(),
+    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(false), expectedRevision: 2 }),
+    enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
+  });
+  const dialog = harness.dialog();
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  await settle();
   assert.match(dialog.textContent ?? "", /Can't Enable Yet/);
-  assert.match(dialog.textContent ?? "", /No campaign budget yet: enter a cost limit and a tool-call limit\./);
-  const labels = [...dialog.querySelectorAll("label span")].map((node) => node.textContent);
-  assert.ok(labels.includes("Cost Limit (USD)") && labels.includes("Tool Call Limit"), "the missing budget is entered right in the summary");
-  assert.match(dialog.textContent ?? "", /Save as Default/);
+  assert.match(dialog.textContent ?? "", /cannot enforce the Full Control authority contract/);
   const enable = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Enable Full Control")!;
   assert.equal(enable.disabled, true);
   await act(async () => enable.click());
@@ -435,16 +461,32 @@ test("under Full Control the dialog shows the server's effective owners read-onl
   assert.equal(fact("One-Time Approvals"), "Human");
   assert.match(text, /Your Custom choice, Questions and Approvals, applies again only after you revoke Full Control\./);
   assert.match(text, /Your per-gate choices apply again only after you revoke to Custom\./);
-  assert.match(text, /Video Evidence Review: Video evidence needs your review until production video review is available\./);
-  assert.match(text, /External Evidence Review: Evidence stored outside private Session artifacts \(links only\) needs your review\./);
-  assert.match(text, /Secrets and Sign-In: Always decided by the Human under Full Control\./);
-  assert.match(text, /Relative Shell Commands Without a Verified Directory/, "a Claude Code root keeps its driver's protection");
+  // Only what truly remains comes to the Human (#2940): evidence this authorization keeps human,
+  // and the person's own Human Required rules. An older server's absent list still discloses those.
+  assert.match(text, /UI Evidence Review: No image reader\./);
+  assert.match(text, /Human Required Governance Rules: Asks from rules you marked Human Required still come to you under Full Control\./);
+  assert.doesNotMatch(text, /Secrets and Sign-In|Relative Shell Commands|Git Commands|Persistent Permission Grants/);
+  assert.match(text, /Requests for credentials, sign-in, wider provider access or a lasting permission grant are declined automatically and shown as blocked work in Campaign Status\. You are not asked\./);
+  assert.match(text, /credentials, sign-in or wider access are declined as blocked work/);
   assert.ok([...dialog.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"));
 });
 
-test("under Full Control the video exception follows the server's campaign fact, and external evidence always stays", async () => {
-  const humanRequired = (dialog: Element) => [...dialog.querySelectorAll("section")]
-    .find((section) => section.querySelector(".section-title")?.textContent === "Human Required")?.textContent ?? "";
+test("under Full Control with no Human Required rule and delegated evidence, nothing comes to the Human", async () => {
+  const view = fullControlProjection();
+  const harness = await open({ ...view, orchestratorCampaign: { ...view.orchestratorCampaign!, fullControlHumanRequired: [],
+    decisionOwners: { ...view.orchestratorCampaign!.decisionOwners, ui_evidence_approval: "orchestrator" as const },
+    uiEvidenceReview: { status: "available" as const, effectiveOwner: "orchestrator" as const } } } as SessionView, {});
+  const section = [...harness.dialog().querySelectorAll("section")]
+    .find((candidate) => candidate.querySelector(".section-title")?.textContent === "Human Required")!;
+  assert.match(section.textContent ?? "", /^Human RequiredNothing comes to you under Full Control\.Requests for credentials/);
+  assertNoDomNode(section.querySelector("ul"));
+});
+
+test("under Full Control the video line follows the server's campaign fact, and neither video nor external evidence reaches the Human", async () => {
+  const section = (dialog: Element, title: string) => [...dialog.querySelectorAll("section")]
+    .find((candidate) => candidate.querySelector(".section-title")?.textContent === title)?.textContent ?? "";
+  const humanRequired = (dialog: Element) => section(dialog, "Human Required");
+  const uninspectable = (dialog: Element) => section(dialog, "Evidence the Orchestrator Can't Inspect");
   const withVideo = (videoEvidenceReview?: { status: "available" | "unavailable"; reason: string }) => {
     const view = fullControlProjection();
     return { ...view, orchestratorCampaign: { ...view.orchestratorCampaign!,
@@ -459,35 +501,38 @@ test("under Full Control the video exception follows the server's campaign fact,
   // So does Campaign Behavior's evidence notice.
   const behaviorNotice = (dialog: Element) => [...dialog.querySelectorAll(".notice")]
     .find((node) => node.textContent?.includes("reviews image evidence attached as Session artifacts"))?.textContent ?? "";
+  const external = /External Evidence Review: The Orchestrator can't open evidence stored outside private Session artifacts \(links only\), so it asks for screenshots or denies the claim as unproven\./;
   let harness = await open(withVideo({ status: "available", reason: certified }), {});
   let dialog = harness.dialog();
   assert.match(disclosure(dialog), /In this campaign, video evidence attached as a Session artifact goes to the certified media-only reviewer instead/);
   assert.doesNotMatch(disclosure(dialog), /requires human review/, "a certified campaign's disclosure does not send video to a person");
   assert.match(behaviorNotice(dialog), /Video goes to this campaign's certified media-only reviewer\./);
-  assert.doesNotMatch(behaviorNotice(dialog), /normally goes to a person/);
-  assert.doesNotMatch(humanRequired(dialog), /Video Evidence Review/, "a certified campaign does not list video as Human Required");
-  assert.match(humanRequired(dialog), /External Evidence Review: Evidence stored outside private Session artifacts \(links only\) needs your review\./);
+  assert.match(behaviorNotice(dialog), /Under Full Control, externally stored evidence never goes to a person either\./);
+  assert.doesNotMatch(humanRequired(dialog), /Video Evidence Review|External Evidence Review/);
+  assert.doesNotMatch(uninspectable(dialog), /Video Evidence Review/, "certified video is inspectable");
+  assert.match(uninspectable(dialog), external);
   assert.ok([...dialog.querySelectorAll(".orchestrator-gate-helper")].some((node) =>
     node.textContent === `Video Evidence Review: ${certified}`), "the delegation is stated where the gates are");
   await harness.unmount();
 
-  const uncertified = "Video evidence comes to you because no current live proof certifies the media-only reviewer on the Orchestrator's machine.";
+  const uncertified = "The Orchestrator can't watch video because no current live proof certifies the media-only reviewer on the Orchestrator's machine. It asks for screenshots or denies the claim as unproven.";
   harness = await open(withVideo({ status: "unavailable", reason: uncertified }), {});
   dialog = harness.dialog();
-  assert.ok(humanRequired(dialog).includes(`Video Evidence Review: ${uncertified}`), "the server's reason is shown");
-  assert.match(disclosure(dialog), /In this campaign, video evidence requires human review, including video attached as a Session artifact\./);
-  assert.doesNotMatch(disclosure(dialog), /certified media-only reviewer/);
-  assert.match(behaviorNotice(dialog), /Video normally goes to a person; one operator-enabled short-frame validation campaign may delegate it\./);
-  assert.match(humanRequired(dialog), /External Evidence Review:/);
+  assert.ok(uninspectable(dialog).includes(`Video Evidence Review: ${uncertified}`), "the server's reason is shown");
+  assert.doesNotMatch(humanRequired(dialog), /Video Evidence Review|External Evidence Review/);
+  assert.match(disclosure(dialog), /In this campaign, video evidence is never sent to a person: the Orchestrator asks for screenshots instead or denies the claim as unproven\./);
+  assert.doesNotMatch(disclosure(dialog), /certified media-only reviewer|requires human review/);
+  assert.match(behaviorNotice(dialog), /It asks for screenshots instead of video it can't watch, or denies the claim as unproven\./);
+  assert.doesNotMatch(behaviorNotice(dialog), /normally goes to a person|Externally stored evidence goes to a person/);
   assert.ok(![...dialog.querySelectorAll(".orchestrator-gate-helper")].some((node) => node.textContent?.startsWith("Video Evidence Review")));
   await harness.unmount();
 
   harness = await open(withVideo(), {});
   dialog = harness.dialog();
-  assert.match(humanRequired(dialog), /Video Evidence Review: Video evidence needs your review until production video review is available\./,
-    "an older server without the fact keeps video with the Human");
-  assert.match(disclosure(dialog), /In this campaign, video evidence requires human review/, "and so does its disclosure");
-  assert.match(humanRequired(dialog), /External Evidence Review:/);
+  assert.match(uninspectable(dialog), /Video Evidence Review: The Orchestrator can't watch video yet, so it asks for screenshots or denies the claim as unproven\./,
+    "an older server without the fact still never routes video to the Human under Full Control");
+  assert.match(disclosure(dialog), /video evidence is never sent to a person/, "and neither does its disclosure");
+  assert.match(uninspectable(dialog), external);
 });
 
 test("under Full Control without a reported projection, owners are Not Reported rather than guessed", async () => {

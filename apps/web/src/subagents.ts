@@ -574,28 +574,6 @@ function publishFilteredTimelineDelta(
   publishTimelineSnapshotDelta(current, { previous, dirtyFrom, dirtyIndexes, dirtyHasParentItems });
 }
 
-export function selectedSubagentId(
-  descriptors: SubagentDescriptor[],
-  requested?: string | null,
-  retainedAutomatic?: string | null,
-): string | null {
-  if (requested != null) {
-    return descriptors.some((descriptor) => descriptor.id === requested) ? requested : null;
-  }
-  if (retainedAutomatic && descriptors.some((descriptor) => descriptor.id === retainedAutomatic)) {
-    return retainedAutomatic;
-  }
-  const mostRecent = (candidates: SubagentDescriptor[]): string | null => [...candidates]
-    .sort((left, right) =>
-      (right.lastActivityAt ?? right.startedAt ?? right.sourceIndex) -
-      (left.lastActivityAt ?? left.startedAt ?? left.sourceIndex))
-    .at(0)?.id ?? null;
-  return mostRecent(descriptors.filter((descriptor) =>
-    descriptor.lifecycle === "starting" || descriptor.lifecycle === "running" || descriptor.lifecycle === "waiting"))
-    ?? mostRecent(descriptors.filter((descriptor) => descriptor.lifecycle === "failed"))
-    ?? mostRecent(descriptors);
-}
-
 /** Selected output includes the whole subtree, in original event order, but no parent/sibling work. */
 export function filterSubagentTimeline(
   items: TimelineItem[],
@@ -614,9 +592,4 @@ export function filterSubagentTimeline(
     const parentId = parentIdOf(item);
     return parentId != null && includedParents.has(parentId);
   });
-}
-
-export function subagentTokenTotal(usage: SubagentRollup | undefined): number | undefined {
-  if (usage?.inputTokens == null && usage?.outputTokens == null) return undefined;
-  return (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
 }

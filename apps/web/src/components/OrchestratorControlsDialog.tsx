@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNod
 import {
   FULL_CONTROL_EVIDENCE_EXCEPTIONS,
   FULL_CONTROL_HUMAN_REQUIRED_LABELS,
+  FULL_CONTROL_DECLINED_NOTE,
   FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON,
   WORKFLOW_DECISION_CATEGORIES,
   fullControlStandingHumanRequired,
@@ -399,7 +400,7 @@ export function OrchestratorControlsDialog({
 
       {policy && control?.mode === "full_control" && (
         <FullControlDecisions control={control} campaign={projectedControl ? session.orchestratorCampaign : undefined}
-          driver={session.parentSessionId ? null : session.driver} titleId={`${ids}-decisions`} />
+          titleId={`${ids}-decisions`} />
       )}
 
       {policy && effectiveMode === "unknown" && (
@@ -478,9 +479,10 @@ const FULL_CONTROL_REQUEST_OPERATIONS: ReadonlyArray<{ operation: CampaignAuthor
 function FullControlRequests({ control, customChoice }: { control: Extract<CampaignControl, { mode: "full_control" }>; customChoice: string }) {
   return <>
     <p className="section-note">
-      Full Control decides these. Inside the authorized boundary the Orchestrator answers; protected requests, Human
-      Required exceptions and anything outside the boundary come to you. Your Custom choice, {customChoice}, applies
-      again only after you revoke Full Control.
+      Full Control decides these. Inside the authorized boundary the Orchestrator answers once; requests for
+      credentials, sign-in or wider access are declined as blocked work. Only your Human Required rules and anything
+      outside the boundary come to you. Your Custom choice, {customChoice}, applies again only after you revoke Full
+      Control.
     </p>
     <dl className="facts orchestrator-facts">
       {FULL_CONTROL_REQUEST_OPERATIONS.map(({ operation, label }) => <div key={operation}>
@@ -493,14 +495,16 @@ function FullControlRequests({ control, customChoice }: { control: Extract<Campa
 
 /** Under Full Control each gate's owner is the server's effective owner for this campaign, read-only:
  * the saved per-gate choices have no effect until Revoke. */
-function FullControlDecisions({ control, campaign, driver, titleId }: {
+function FullControlDecisions({ control, campaign, titleId }: {
   control: Extract<CampaignControl, { mode: "full_control" }>; campaign: OrchestratorCampaignProjection | undefined;
-  /** The root's driver; a descendant does not know it, so it sees every standing protection. */
-  driver: string | null; titleId: string;
+  titleId: string;
 }) {
-  const standing = fullControlStandingHumanRequired(driver ?? "claude-code");
-  // Video is the one evidence exception a certified media-only reviewer can lift (#1321). Only the
-  // server's campaign fact lifts it; without one (an older server) it stays with the Human.
+  // The server's list for this campaign (#2940); an older server's absence still discloses the rules.
+  const standing = campaign?.fullControlHumanRequired ?? fullControlStandingHumanRequired(true);
+  // Only an authorization that leaves UI Evidence Approval out (or cannot enforce it) keeps evidence human.
+  const evidenceToHuman = campaign?.decisionOwners.ui_evidence_approval === "human";
+  // Evidence never comes to the Human under Full Control. Video is the one item a certified
+  // media-only reviewer lets the Orchestrator inspect (#1321); only the server's campaign fact says so.
   const video = campaign?.videoEvidenceReview;
   const exceptions = FULL_CONTROL_EVIDENCE_EXCEPTIONS
     .filter((item) => item.id !== "video_evidence" || video?.status !== "available")
@@ -524,12 +528,21 @@ function FullControlDecisions({ control, campaign, driver, titleId }: {
       <div className="section-head">
         <h3 className="section-title" id={`${titleId}-human-required`}>Human Required</h3>
       </div>
-      <p className="section-note">These always come to you under Full Control.</p>
-      <ul>
-        {exceptions.map((item) => <li key={item.id}><strong>{item.exception}:</strong> {item.reason}</li>)}
+      {standing.length || evidenceToHuman ? <ul>
+        {evidenceToHuman && <li><strong>UI Evidence Review:</strong> {reasonFor("ui_evidence_approval")}</li>}
         {standing.map((id) => <li key={id}><strong>{FULL_CONTROL_HUMAN_REQUIRED_LABELS[id] ?? id}:</strong> {FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON}</li>)}
-      </ul>
+      </ul> : <p className="section-note">Nothing comes to you under Full Control.</p>}
+      <p className="section-note">{FULL_CONTROL_DECLINED_NOTE}</p>
     </section>
+    {campaign?.decisionOwners.ui_evidence_approval === "orchestrator" && exceptions.length > 0 &&
+      <section className="section" aria-labelledby={`${titleId}-uninspectable`}>
+        <div className="section-head">
+          <h3 className="section-title" id={`${titleId}-uninspectable`}>Evidence the Orchestrator Can't Inspect</h3>
+        </div>
+        <ul>
+          {exceptions.map((item) => <li key={item.id}><strong>{item.exception}:</strong> {item.reason}</li>)}
+        </ul>
+      </section>}
   </>;
 }
 
@@ -563,13 +576,16 @@ function EffectiveOwnerFacts({ campaign, reasonFor }: {
           <dt>{WORKFLOW_DECISION_LABELS[category]}</dt>
           <dd>
             {owner === undefined ? "Not Reported" : owner === "orchestrator" ? "Orchestrator" : "Human"}
-            {owner === "human" && <small className="orchestrator-fact-source">{reasonFor(category)}</small>}
+            {/* Under Full Control an Orchestrator that can't view images still owns the gate (#2940). */}
+            {(owner === "human" || (owner === "orchestrator" && category === "ui_evidence_approval" &&
+              campaign?.uiEvidenceReview.status === "unavailable")) &&
+              <small className="orchestrator-fact-source">{reasonFor(category)}</small>}
           </dd>
         </div>;
       })}
     </dl>
     {campaign?.decisionOwners.ui_evidence_approval === "orchestrator" &&
-      <p className="orchestrator-gate-helper">{uiEvidenceRetentionDisclosure(campaign.videoEvidenceReview)}</p>}
+      <p className="orchestrator-gate-helper">{uiEvidenceRetentionDisclosure(campaign.videoEvidenceReview, campaign.control?.mode === "full_control")}</p>}
     {/* Only the server's campaign fact states video as delegated (#1321). */}
     {campaign?.videoEvidenceReview?.status === "available" &&
       <p className="orchestrator-gate-helper"><strong>Video Evidence Review:</strong> {campaign.videoEvidenceReview.reason}</p>}
@@ -678,8 +694,11 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
           {/* The same server fact as the Video Evidence Review line (#1321). */}
           {campaign.videoEvidenceReview?.status === "available"
             ? "Video goes to this campaign's certified media-only reviewer."
+            : policy.control?.mode === "full_control" ? "It asks for screenshots instead of video it can't watch, or denies the claim as unproven."
             : "Video normally goes to a person; one operator-enabled short-frame validation campaign may delegate it."}{" "}
-          Externally stored evidence goes to a person.
+          {policy.control?.mode === "full_control"
+            ? "Under Full Control, externally stored evidence never goes to a person either."
+            : "Externally stored evidence goes to a person."}
         </Notice>
       )}
     </section>

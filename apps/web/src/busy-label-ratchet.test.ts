@@ -35,7 +35,7 @@ export const LABEL_SWAP = new RegExp(
 
 /** The inventory, exact: production file → label-swapping sites it still has. */
 const BASELINE: Readonly<Record<string, number>> = {
-  "components/AutomationsView.tsx": 2,
+  "components/AutomationsView.tsx": 1,
   "components/Board.tsx": 1,
   "components/InstancesPanel.tsx": 1,
   "components/NewRunDialog.tsx": 1,
@@ -46,7 +46,6 @@ const BASELINE: Readonly<Record<string, number>> = {
   "components/PendingPromptBubbles.tsx": 3,
   "components/PeopleDevicesPanel.tsx": 4,
   "components/PodsView.tsx": 9,
-  "components/ProviderLoginCard.tsx": 1,
   "components/RunsView.tsx": 1,
   "components/UsageView.tsx": 4,
 };

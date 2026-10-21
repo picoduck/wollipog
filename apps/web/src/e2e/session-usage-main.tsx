@@ -373,6 +373,8 @@ if (composerFixture) {
         operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [] } };
       session.orchestratorCampaign.control = session.orchestratorPolicy.control;
       session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(session.orchestratorPolicy.control);
+      // `humanRules=1` (#2940): the server reports a person-marked Human Required rule; otherwise none.
+      session.orchestratorCampaign.fullControlHumanRequired = params.get("humanRules") === "1" ? ["human_required_rules"] : [];
       // `video=certified|uncertified` (#1321): the server's campaign fact for delegated video review,
       // with UI evidence delegated to an image-capable Orchestrator. Source UI fixture only.
       const videoFixture = params.get("video");
@@ -381,9 +383,9 @@ if (composerFixture) {
         session.orchestratorCampaign.uiEvidenceReview = { status: "available", effectiveOwner: "orchestrator" };
         session.orchestratorCampaign.videoEvidenceReview = videoFixture === "certified"
           ? { status: "available", reason: "The Orchestrator hands video evidence to the certified media-only reviewer and decides " +
-            "from its verdict. A child's video stays with you unless that child also runs on an attested agent." }
+            "from its verdict. A child not running on an attested agent is asked for screenshots instead, or its claim is denied as unproven." }
           : { status: "unavailable",
-            reason: "Video evidence comes to you because no current live proof certifies the media-only reviewer on the Orchestrator's machine." };
+            reason: "The Orchestrator can't watch video because no current live proof certifies the media-only reviewer on the Orchestrator's machine. It asks for screenshots or denies the claim as unproven." };
       }
       if (fullFixture === "enable") {
         // A live Custom root with a Human-established scope, ready to enable through the server preflight.

@@ -58,8 +58,15 @@ Publishing and admitting follow-up work still require their own authority contra
 
 Only managed Claude Code and Codex App Server workers can enter a protected campaign. Session cost
 protection requires an available rate for the exact selected model. Native TUI, adopted/unmetered
-launches, Codex Exec and unadmitted external reviewer subprocesses are unsupported. Mixed priced and unpriced
-records stop further protected admission, rather than displaying unknown cost as zero. An
+launches, Codex Exec and unadmitted external reviewer subprocesses are unsupported. Under a cost
+ceiling, mixed priced and unpriced records stop further protected admission, rather than displaying
+unknown cost as zero. Without a cost ceiling (#2940) unpriced usage, live or settled, stops nothing:
+the campaign keeps counting tool calls, any tool-call ceiling stays enforced, final usage settles at
+its recorded cost, and the projection reports `costAccounting: "unavailable"`. That availability is
+durable: the campaign records the first unpriced record, settled or live, and never clears it, so
+deleting an unpriced member cannot make the total read as priced. Controlled and media
+review jobs keep refusing unpriced settlement, because each reserves its own cost bound. Cost
+checkpoints need a cost ceiling; a launch naming checkpoints without one is refused. An
 exhausted, revoked or accounting-unavailable envelope cannot be reset by toggling mode or restart.
 
 Production reviewer adapters call `SessionsService.campaignBudgetWorkerPreflight(campaignId, worker)`.
@@ -76,7 +83,9 @@ parent total is not billed twice; independently reported managed sessions count 
 The optional human-minted `budgetAuthority.controlledReview` binds the exact
 `native_opus_5_5_high_read_only` profile, audited installed controller SHA-256, native executable
 SHA-256, Claude CLI 2.1.296, existing runner-default Claude account, and provider admission agent
-identity. It requires finite campaign cost, tool and concurrency ceilings. Numeric protocol218
+identity. It requires a campaign concurrency ceiling; cost and tool-call ceilings are optional,
+because every review job reserves its own finite cost and tool-call bound, which is metered and
+charged to the campaign whether or not the campaign has a ceiling (#2940). Numeric protocol218
 alone does not establish this capability; the runner must advertise the matching `campaignReview`
 descriptor. Other versions, execution-isolation contexts and unknown pricing fail closed. No
 installed skill, account, hosting setting or permission is edited by this adapter.

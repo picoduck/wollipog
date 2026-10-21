@@ -2702,12 +2702,6 @@ test("resolvePermission writes accept on allow, decline on deny (command approva
   assert.deepEqual(seen[1], { decision: "decline" });
 });
 
-test("resolvePermission for an unknown id is a no-op", () => {
-  const h = makeHarness();
-  h.driver.resolvePermission("nope", "allow"); // must not throw
-  assert.ok(true);
-});
-
 test("a newer provider request cancels the previous parked approval and keeps unique fallback ids", async () => {
   const h = makeHarness();
   const requests = new Map<string, (params: any) => Promise<any>>();
@@ -4272,12 +4266,18 @@ test("App Server approval reasons stay display-only and command identity require
 });
 
 test("approvalContext exposes bounded Codex tool/path/network/branch selectors", () => {
-  assert.deepEqual(approvalContext("item/fileChange/requestApproval", {
+  const selected = approvalContext("item/fileChange/requestApproval", {
     changes: [{ path: "/repo/a.ts" }],
     permissions: { network: true },
     branchName: "feature/x",
     reason: "apply patch",
-  }, true), {
+  }, true);
+  // The runner-observed `dev:ino` (of the nearest existing ancestor for a file to be created) is
+  // host-specific; its shape is checked, then the rest of the context compared exactly.
+  const target = selected.operation?.filesystem?.targets[0];
+  assert.match(target?.identity ?? "", /^\d+:\d+(?::missing)?$/u);
+  delete target?.identity;
+  assert.deepEqual(selected, {
     toolName: "fileChange",
     providerPermissionExpansion: true,
     input: "apply patch",

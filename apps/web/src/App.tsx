@@ -124,6 +124,7 @@ const NewPodDialog = lazy(() => import("./components/NewPodDialog.js").then((mod
 const PodDetail = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodDetail })));
 const PodsView = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodsView })));
 const AutomationsView = lazy(() => import("./components/AutomationsView.js").then((module) => ({ default: module.AutomationsView })));
+const AutomationEditor = lazy(() => import("./components/AutomationEditor.js").then((module) => ({ default: module.AutomationEditor })));
 const SkillsView = lazy(() => import("./components/SkillsView.js").then((module) => ({ default: module.SkillsView })));
 const UsageView = lazy(() => import("./components/UsageView.js").then((module) => ({ default: module.UsageView })));
 const ShellDock = lazy(() => import("./components/ShellDock.js").then((module) => ({ default: module.ShellDock })));
@@ -937,7 +938,7 @@ export function Shell() {
               removing the branch entirely would make a bookmarked /runs a silent Inbox redirect. */}
           {(view.name === "runs" || view.name === "run") && (
             <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view, entityTitle)} onOpenSettings={openExperimentalSettings}>
-              {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} />}
+              {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} member={view.member} />}
             </ExperimentGate>
           )}
           {(view.name === "pods" || view.name === "pod") && (
@@ -945,7 +946,7 @@ export function Shell() {
               {view.name === "pods" ? <PodsView onNewPod={() => setDialog({ kind: "pod" })} /> : <PodDetail podId={view.id} />}
             </ExperimentGate>
           )}
-          {view.name === "automations" && <AutomationsView />}
+          {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
           {view.name === "skills" && <SkillsView route={view} />}
           {view.name === "usage" && <UsageView />}
           {view.name === "archived" && <ArchivedSessionsView />}

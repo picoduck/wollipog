@@ -19,7 +19,7 @@ import { PROJECT_CREATION_REQUEST_WINDOW_MS } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
-import { validCampaignControl, validOrchestratorCampaignBudgetDefault, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
+import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
@@ -193,6 +193,7 @@ import {
   type PodOrchestrationView,
   type PodReconciliation,
   type PodView,
+  type ReviewSessionCapability,
   type RunnerMetadata,
   type RunnerCapacityBlocker,
   type RunnerCapacityConfiguration,
@@ -296,7 +297,7 @@ const OUTBOUND_EVENT_KINDS = new Set<OutboundEventKind>([
   "cost.budget_exhausted",
 ]);
 import { DEFAULT_POD_ORCHESTRATION_POLICY, type PodContextSelectionWindow } from "./pod-orchestration.js";
-import { evaluateUiEvidenceReviewClient, type UiEvidenceReviewClient } from "./ui-evidence-review.js";
+import { evaluateUiEvidenceReviewClient, type UiEvidenceReviewClient, type UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
 import {
   LOCAL_OWNER_USER_ID,
   PERSONAL_ORGANIZATION_ID,
@@ -2347,6 +2348,30 @@ CREATE INDEX IF NOT EXISTS idx_provider_profile_grants_scope
   ON provider_profile_grants(control_plane_instance_id, organization_id, owner_kind, owner_id, scope)
   WHERE status IN ('pending','active');
 
+-- #3241: an Owner or Admin's one-time authorization to recover one exact stale provider-HOME lease
+-- record (stale_tip_hash) of one runner account. The runner records authorization_id in the lease
+-- journal; the row records who authorized it and how the runner answered.
+CREATE TABLE IF NOT EXISTS provider_home_lease_recoveries (
+  authorization_id    TEXT PRIMARY KEY,
+  organization_id     TEXT NOT NULL,
+  owner_kind          TEXT NOT NULL CHECK (owner_kind IN ('organization','user','team')),
+  owner_id            TEXT NOT NULL,
+  runner_id           TEXT NOT NULL,
+  provider_account_id TEXT NOT NULL,
+  stale_tip_hash      TEXT NOT NULL CHECK (length(stale_tip_hash) = 64),
+  status              TEXT NOT NULL CHECK (status IN ('pending','recovered','refused','unknown')),
+  result_code         TEXT,
+  authorized_by       TEXT NOT NULL,
+  authorized_role     TEXT NOT NULL CHECK (authorized_role IN ('owner','admin')),
+  created_at          INTEGER NOT NULL,
+  completed_at        INTEGER,
+  CHECK (status = 'pending' OR completed_at IS NOT NULL),
+  CHECK (status = 'refused' OR result_code IS NULL),
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_provider_home_lease_recoveries_account
+  ON provider_home_lease_recoveries(runner_id, provider_account_id, created_at);
+
 CREATE TABLE IF NOT EXISTS workspace_ownership (
   runner_id       TEXT NOT NULL,
   workspace_id    TEXT NOT NULL,
@@ -2432,7 +2457,8 @@ CREATE TABLE IF NOT EXISTS mutation_audit (
 CREATE INDEX IF NOT EXISTS idx_mutation_audit_org
   ON mutation_audit(organization_id, created_at DESC, row_id DESC);
 
--- Completed mutation rows age out of the hot attribution window into this append-only archive.
+-- Completed rows age out of the hot window; the archive is retained forever unless the host
+-- operator explicitly enables mutation-audit archive retention.
 -- The archive deliberately has no foreign keys: actor/resource deletion must not erase provenance.
 CREATE TABLE IF NOT EXISTS mutation_audit_archive (
   row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2451,6 +2477,18 @@ CREATE TABLE IF NOT EXISTS mutation_audit_archive (
 );
 CREATE INDEX IF NOT EXISTS idx_mutation_audit_archive_org
   ON mutation_audit_archive(organization_id, created_at DESC, row_id DESC);
+CREATE INDEX IF NOT EXISTS idx_mutation_audit_archive_age
+  ON mutation_audit_archive(created_at, row_id);
+CREATE TABLE IF NOT EXISTS mutation_audit_archive_retention (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  retention_days INTEGER,
+  prunes_from INTEGER,
+  removed_total INTEGER NOT NULL DEFAULT 0,
+  last_finished_at INTEGER,
+  last_cutoff INTEGER,
+  last_removed INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO mutation_audit_archive_retention(singleton) VALUES (1);
 
 -- Scope transitions need enough content-safe evidence to reconstruct the exact privacy change.
 -- No names, request bodies, credentials, paths, or confirmation tokens are retained.
@@ -3297,6 +3335,20 @@ export interface ProviderProfileGrantRecord {
   revokedAt: number | null;
   revokedBy: string | null;
   revokedRole: string | null;
+}
+
+/** #3241: one Owner/Admin authorization to recover a stale provider-HOME lease record. */
+export interface ProviderHomeLeaseRecoveryRecord {
+  authorizationId: string;
+  runnerId: string;
+  providerAccountId: string;
+  staleTipHash: string;
+  status: "pending" | "recovered" | "refused" | "unknown";
+  resultCode: string | null;
+  authorizedBy: string;
+  authorizedRole: "owner" | "admin";
+  createdAt: number;
+  completedAt: number | null;
 }
 
 /** Bound on the grants one runner registration lists: at most one active grant per reported
@@ -5346,10 +5398,13 @@ export class ControlPlaneDb {
   readonly campaignReviewJobs: CampaignReviewJobs;
   readonly sessionReviewJobs: SessionReviewJobs;
   readonly reviewSessions: ReviewSessions;
-  /** A review session's immutable kind and what it reviews (#3368); nothing for ordinary sessions. */
-  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review"> {
+  /** A review session's immutable kind and what it reviews (#3368); for a session that requested
+   * reviews, their summary (#3369); nothing else for ordinary sessions. */
+  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review" | "reviewRuns"> {
     const review = this.reviewSessions.link(sessionId);
-    return review ? { kind: "review", review } : {};
+    if (review) return { kind: "review", review };
+    const reviewRuns = this.reviewSessions.summaryFor(sessionId);
+    return reviewRuns ? { reviewRuns } : {};
   }
 
   private constructor(
@@ -7849,6 +7904,27 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw err;
     }
+  }
+
+  /**
+   * Replace a runner's review-session capability (#3369) from a discovery result: the registration
+   * frame's was derived before discovery and can name no reviewer. A malformed value is dropped
+   * rather than stored, so a review is refused as unavailable instead of launched on a bad entry.
+   */
+  updateRunnerReviewSessionCapability(runnerId: string, capability: ReviewSessionCapability | null): void {
+    const row = this.stmt("SELECT runtime FROM runners WHERE runner_id=?").get(runnerId) as { runtime: string | null } | undefined;
+    if (!row?.runtime) return;
+    let runtime: Record<string, unknown>;
+    try { runtime = JSON.parse(row.runtime) as Record<string, unknown>; } catch { return; }
+    const valid = capability !== null && typeof capability === "object" && Array.isArray(capability.reviewers) &&
+      capability.reviewers.length <= 2 && capability.reviewers.every((reviewer) =>
+        (reviewer?.harness === "codex" || reviewer?.harness === "claude-code") &&
+        typeof reviewer.agentId === "string" && reviewer.agentId.length > 0 && reviewer.agentId.length <= 128) &&
+      (capability.unavailable === undefined || (typeof capability.unavailable === "object" && capability.unavailable !== null &&
+        Object.values(capability.unavailable).every((reason) => typeof reason === "string" && reason.length <= 500)));
+    const { reviewSession: _previous, ...rest } = runtime;
+    const next = valid ? { ...rest, reviewSession: capability } : rest;
+    this.stmt("UPDATE runners SET runtime=? WHERE runner_id=?").run(JSON.stringify(next), runnerId);
   }
 
   updateRunnerProviderLogins(runnerId: string, logins: ProviderLoginView[], now: number): void {
@@ -10845,6 +10921,43 @@ export class ControlPlaneDb {
       .run(teamId, organizationId).changes) > 0;
   }
 
+  getMutationAuditArchiveRetention(): {
+    retentionDays: number | null; prunesFrom: number | null; removedTotal: number;
+    lastFinishedAt: number | null; lastCutoff: number | null; lastRemoved: number;
+  } {
+    return this.stmt(`SELECT retention_days AS retentionDays, prunes_from AS prunesFrom,
+      removed_total AS removedTotal, last_finished_at AS lastFinishedAt,
+      last_cutoff AS lastCutoff, last_removed AS lastRemoved
+      FROM mutation_audit_archive_retention WHERE singleton=1`).get() as ReturnType<ControlPlaneDb["getMutationAuditArchiveRetention"]>;
+  }
+
+  saveMutationAuditArchiveRetentionPolicy(retentionDays: number | null, prunesFrom: number | null): void {
+    this.stmt(`UPDATE mutation_audit_archive_retention SET retention_days=?, prunes_from=? WHERE singleton=1`)
+      .run(retentionDays, prunesFrom);
+  }
+
+  /** Only archive rows can be deleted. Delete and cumulative count commit together; a power-loss
+   * rollback is retried next pass. NORMAL avoids a disk flush per batch, like history retention. */
+  pruneMutationAuditArchiveBatch(cutoff: number, limit: number): number {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500 || !Number.isSafeInteger(cutoff)) {
+      throw new Error("invalid mutation audit archive batch bounds");
+    }
+    return this.relaxedCommit(() => this.atomic(() => {
+      const removed = Number(this.stmt(`DELETE FROM mutation_audit_archive WHERE row_id IN
+        (SELECT row_id FROM mutation_audit_archive WHERE created_at < ?
+         ORDER BY created_at, row_id LIMIT ?)`).run(cutoff, limit).changes);
+      if (removed) this.stmt(`UPDATE mutation_audit_archive_retention
+        SET removed_total=removed_total+? WHERE singleton=1`).run(removed);
+      return removed;
+    }));
+  }
+
+  /** One bounded summary, with a normal durable write after the removal batches. */
+  recordMutationAuditArchiveRetentionPass(finishedAt: number, cutoff: number, removed: number): void {
+    this.stmt(`UPDATE mutation_audit_archive_retention
+      SET last_finished_at=?, last_cutoff=?, last_removed=? WHERE singleton=1`).run(finishedAt, cutoff, removed);
+  }
+
   private archiveMutationAudit(now: number): void {
     this.db.exec("BEGIN");
     try {
@@ -13140,6 +13253,55 @@ export class ControlPlaneDb {
   }
 
   /**
+   * #3241: record an Owner/Admin authorization to recover the stale lease record `staleTipHash` of
+   * one runner account, in the runner's organization/owner scope. Each authorization is used once.
+   * Returns null when the runner has no recorded scope.
+   */
+  authorizeProviderHomeLeaseRecovery(input: {
+    authorizationId: string;
+    runnerId: string;
+    providerAccountId: string;
+    staleTipHash: string;
+    authorizedBy: string;
+    authorizedRole: "owner" | "admin";
+    now: number;
+  }): ProviderHomeLeaseRecoveryRecord | null {
+    return this.atomic(() => {
+      const ownership = this.stmt(
+        "SELECT organization_id, owner_kind, owner_id FROM runner_ownership WHERE runner_id=?",
+      ).get(input.runnerId) as { organization_id: string; owner_kind: string; owner_id: string } | undefined;
+      if (!ownership) return null;
+      this.stmt(
+        `INSERT INTO provider_home_lease_recoveries
+           (authorization_id, organization_id, owner_kind, owner_id, runner_id, provider_account_id, stale_tip_hash,
+            status, authorized_by, authorized_role, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      ).run(input.authorizationId, ownership.organization_id, ownership.owner_kind, ownership.owner_id, input.runnerId,
+        input.providerAccountId, input.staleTipHash, input.authorizedBy, input.authorizedRole, input.now);
+      return this.getProviderHomeLeaseRecovery(input.authorizationId);
+    });
+  }
+
+  /** Record how the runner answered a pending recovery authorization. False when it was not pending. */
+  settleProviderHomeLeaseRecovery(authorizationId: string, status: "recovered" | "refused" | "unknown", resultCode: string | null, now: number): boolean {
+    return this.stmt(
+      `UPDATE provider_home_lease_recoveries SET status=?, result_code=?, completed_at=?
+        WHERE authorization_id=? AND status='pending'`,
+    ).run(status, status === "refused" ? resultCode : null, now, authorizationId).changes === 1;
+  }
+
+  getProviderHomeLeaseRecovery(authorizationId: string): ProviderHomeLeaseRecoveryRecord | null {
+    const row = this.stmt("SELECT * FROM provider_home_lease_recoveries WHERE authorization_id=?").get(authorizationId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      authorizationId: row.authorization_id as string, runnerId: row.runner_id as string, providerAccountId: row.provider_account_id as string,
+      staleTipHash: row.stale_tip_hash as string, status: row.status as ProviderHomeLeaseRecoveryRecord["status"],
+      resultCode: (row.result_code as string | null) ?? null, authorizedBy: row.authorized_by as string,
+      authorizedRole: row.authorized_role as "owner" | "admin", createdAt: row.created_at as number, completedAt: (row.completed_at as number | null) ?? null,
+    };
+  }
+
+  /**
    * This control plane's live (active and pending) provider-home grants in exactly one
    * organization/owner scope. Unbounded and never sent to a runner as a whole; registration uses
    * `providerProfileGrantsForRunnerProfiles`.
@@ -13258,6 +13420,7 @@ export class ControlPlaneDb {
         for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(row.runner_id);
+      this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(row.runner_id); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(row.runner_id); // cascades members
       this.stmt("DELETE FROM boxes WHERE box_id=?").run(boxId);
@@ -13316,6 +13479,7 @@ export class ControlPlaneDb {
         for (const sessionId of sessionIds) this.deleteSessionSearchRows(sessionId);
       }
       this.stmt("DELETE FROM artifacts WHERE run_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE runner_id=?)").run(runnerId);
+      this.campaignBudgets.noteUnpriced(); // before the usage rows the deletion cascades away (#2940)
       this.stmt("DELETE FROM sessions WHERE runner_id=?").run(runnerId); // cascades session_events
       this.stmt("DELETE FROM multi_agent_runs WHERE runner_id=?").run(runnerId); // cascades members
       this.stmt("DELETE FROM boxes WHERE runner_id=?").run(runnerId); // if it was a box
@@ -15564,7 +15728,6 @@ export class ControlPlaneDb {
         !boundary.issueAuthority || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
         scope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(scope.issueNumbers).size !== scope.issueNumbers.length ||
         JSON.stringify(policy?.issueNumbers) !== JSON.stringify(scope.issueNumbers) ||
-        boundary.budgetAuthority.costUsd === undefined || boundary.budgetAuthority.toolCalls === undefined ||
         boundary.budgetAuthority.concurrency === undefined || boundary.budgetAuthority.acceptedFollowUps === undefined ||
         !input.parentControlPolicy || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) || !/^[a-f0-9]{64}$/.test(digest)) {
       throw new Error("Human campaign launch admission is invalid");
@@ -19388,13 +19551,18 @@ export class ControlPlaneDb {
     // Orchestrator's runner, harness, or model cannot inspect evidence bytes. A supported client
     // can still see one decision fall back when that decision's own evidence is unreviewable.
     // Read the row directly: a full SessionView embeds this projection and would recurse.
-    const uiEvidenceReview = evaluateUiEvidenceReviewClient(this.uiEvidenceReviewClient({
+    const directEvidenceReview = evaluateUiEvidenceReviewClient(this.uiEvidenceReviewClient({
       runnerId: campaign.runner_id,
       agentId: campaign.agent_id,
       driver: campaign.driver,
       model: campaign.model,
       agentCapabilities: parseJson<SessionCapabilities>(campaign.agent_capabilities) ?? undefined,
     }, effectiveOwners.ui_evidence_approval));
+    // Full Control never hands evidence back to the Human (#2940): an Orchestrator that cannot view
+    // images keeps the gate and can only ask for inspectable evidence or deny.
+    const uiEvidenceReview: UiEvidenceReviewEvaluation = policy.control?.mode === "full_control" &&
+      effectiveOwners.ui_evidence_approval === "orchestrator" && directEvidenceReview.effectiveOwner === "human" && directEvidenceReview.fallback
+      ? { effectiveOwner: "orchestrator", limitation: directEvidenceReview.fallback } : directEvidenceReview;
     effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
     // Campaign Elapsed ends when the campaign first reaches verified completion and resumes if it
     // reopens. Completion is derived, never written, so the projection records what it observes.
@@ -19414,6 +19582,7 @@ export class ControlPlaneDb {
         scope?.owner.kind==="user" && this.getUsageDailyBudget(scope.organizationId).perUserUsd===null;
       budget.requiredNativeReview={supported,reason:supported?
         "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
+        !profile?"Controlled review is not part of this campaign; it uses the regular cross-model review workflow.":
         "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
     }
     const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;
@@ -19435,6 +19604,8 @@ export class ControlPlaneDb {
           ? this.campaignVideoReview(resolvedCampaignId, effectiveOwners.ui_evidence_approval) : null;
         return video ? { videoEvidenceReview: video } : {};
       })(),
+      ...(policy.control?.mode === "full_control"
+        ? { fullControlHumanRequired: fullControlStandingHumanRequired(humanRequiredRulesExist(this.listGovernancePolicies())) } : {}),
       limits: {
         maximumConcurrentChildren: limit,
         occupied,
@@ -19443,7 +19614,10 @@ export class ControlPlaneDb {
         maxToolCalls: campaign.max_tool_calls ?? null,
       },
       uiEvidenceReview: uiEvidenceReview.effectiveOwner === "orchestrator"
-        ? { status: "available", effectiveOwner: "orchestrator" }
+        ? uiEvidenceReview.limitation
+          ? { status: "unavailable", effectiveOwner: "orchestrator", reasonCode: uiEvidenceReview.limitation.code,
+              reason: `${uiEvidenceReview.limitation.reason} It asks for inspectable evidence or denies the claim as unproven.` }
+          : { status: "available", effectiveOwner: "orchestrator" }
         : uiEvidenceReview.fallback
           ? {
               status: "unavailable",
@@ -21838,6 +22012,9 @@ export class ControlPlaneDb {
     // session id as provenance and live until their durable workflow run is deleted.
     this.stmt("DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL").run(id);
     this.deleteSessionSearchRows(id);
+    // A campaign member's unpriced usage stays known after its usage rows cascade away (#2940).
+    const campaignRoot = this.campaignBudgets.root(id);
+    if (campaignRoot) this.campaignBudgets.noteUnpriced(campaignRoot);
     this.stmt("DELETE FROM sessions WHERE id=?").run(id);
   }
 
@@ -24404,8 +24581,10 @@ export class ControlPlaneDb {
     }, status: row.status as SessionStatus, costUsd: row.cost_usd,
       toolCallCount: rules.some((rule) => rule.enabled && (rule.conditions?.minToolCalls !== undefined || rule.conditions?.maxToolCalls !== undefined)) ? this.countToolCalls(sessionId) : 0,
       escalated: Boolean(request.context?.escalatedBy) }, rules);
+    // Only rules the person marked Human Required, and built-ins, stay theirs. An ordinary ask
+    // left out of delegatablePolicyIds becomes a one-time Orchestrator decision (#2940).
     const mandatory = withdrawn || current.effect === "deny" || current.effect === "ask" && current.policy &&
-      (current.policy.builtin || current.policy.conditions?.humanRequired || !control.boundary.delegatablePolicyIds.includes(current.policy.policyId));
+      (current.policy.builtin || current.policy.conditions?.humanRequired);
     return mandatory ? { ...request, humanRequired: true } : request;
   }
 

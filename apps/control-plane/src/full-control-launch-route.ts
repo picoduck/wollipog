@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
-  supportsPacedVideoReviewPeer,
+  supportsPacedVideoReviewPeer, humanRequiredRulesExist,
   type CampaignLaunchInspectionResult, type CampaignIssueScope, type PreparedCampaignLaunch, type RunnerView,
 } from "@wollipog/protocol";
 import { randomUUID } from "node:crypto";
@@ -150,12 +150,13 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const { preflight, proposal } = campaignLaunchPreflight({
       request: body, plan, runner: runnerNow, inspection, organizationId: principal.organizationId,
       projectDefaults: plan.projectId ? db.projectChildSessionDefaults(plan.projectId) : null,
-      accountingError: db.campaignBudgetAccountingError(plan.driver, plan.config.model, true),
+      accountingError: (costProtected) => db.campaignBudgetAccountingError(plan.driver, plan.config.model, costProtected),
       dailyLimit: db.getUsageDailyBudget(plan.scope.organizationId).perUserUsd !== null,
       invalidPolicyIds: policyIds.filter((id) => !sessions.governancePolicies().some((rule) =>
         rule.policyId === id && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),
       imageReview: evaluateUiEvidenceReviewClient(db.uiEvidenceReviewClient({ runnerId: plan.runnerId, agentId: plan.agentId,
         driver: plan.driver, model: plan.config.model ?? null }, "orchestrator")),
+      humanRequiredRules: humanRequiredRulesExist(sessions.governancePolicies()),
       pacedVideoPeer: supportsPacedVideoReviewPeer(runnerNow.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
       disclosuresAvailable: dependencies.evidenceDisclosures !== undefined,
       videoCertification: dependencies.videoCertification?.(runnerNow.runnerId) ?? null,
@@ -250,12 +251,13 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         return Boolean(child && !["completed", "failed", "stopped"].includes(child.status) && ceiling(limits(childId)));
       }),
       projectDefaults: session.projectId ? db.projectChildSessionDefaults(session.projectId) : null,
-      accountingError: db.campaignBudgetAccountingError(session.driver, plan.config.model, true),
+      accountingError: (costProtected) => db.campaignBudgetAccountingError(session.driver, plan.config.model, costProtected),
       dailyLimit: db.getUsageDailyBudget(scope.organizationId).perUserUsd !== null,
       invalidPolicyIds: (body.overrides?.delegatablePolicyIds ?? []).filter((policyId) => !sessions.governancePolicies().some((rule) =>
         rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),
       imageReview: evaluateUiEvidenceReviewClient(db.uiEvidenceReviewClient({ runnerId: session.runnerId, agentId: session.agentId,
         driver: session.driver, model: plan.config.model ?? null }, "orchestrator")),
+      humanRequiredRules: humanRequiredRulesExist(sessions.governancePolicies()),
       pacedVideoPeer: supportsPacedVideoReviewPeer(runner.protocolVersion, agent?.capabilities?.pacedVideoReviewContract),
       disclosuresAvailable: dependencies.evidenceDisclosures !== undefined,
       videoCertification: dependencies.videoCertification?.(runner.runnerId) ?? null,

@@ -10,7 +10,7 @@ import type { RunnerProviderAccount } from "./config.js";
 import type { AccountConfigPreimage } from "./provider-account-config-publication.js";
 declare const __WACW_ENGINE_SHA__: string;
 export const WINDOWS_ENGINE_ASSET = "wollipog/account-config-windows-engine-wacw1";
-export interface WindowsPreimage { readonly captured: NativeCapture; readonly source: string; }
+export interface WindowsPreimage { readonly captured: NativeCapture; readonly source: string; readonly requestedPath: string; }
 interface Engine { capture(path: string): NativeCapture; publish(request: Omit<NativeRequest, "operation">): void; }
 function call<T>(operation: 1 | 2, action: () => T): T {
   try { return action(); } catch (error) {
@@ -48,14 +48,16 @@ export function captureWindowsAccountConfig(path: string, expected: readonly Run
   const frozen = Object.freeze(accounts.map(a => Object.freeze({ ...a })));
   return Object.freeze({ backend: "windows-wacw1" as const, path: captured.path, configIdentity: captured.configIdentity, configDigest: captured.configDigest,
     accountsDigest: hash(JSON.stringify(frozen)), accounts: frozen, parentIdentity: captured.parentIdentity, storeEpoch: captured.storeEpoch || null,
-    storeIdentity: captured.storeIdentity || null, revision: captured.revision, windows: Object.freeze({ captured: Object.freeze({ ...captured, raw: Buffer.alloc(0) }), source }) });
+    storeIdentity: captured.storeIdentity || null, revision: captured.revision, windows: Object.freeze({ captured: Object.freeze({ ...captured, raw: Buffer.alloc(0) }), source, requestedPath: path }) });
 }
 export function publishWindowsAccountConfig(preimage: AccountConfigPreimage, accounts: RunnerProviderAccount[], normalize: (v: unknown) => RunnerProviderAccount[]): void {
   if (preimage.backend !== "windows-wacw1" || !preimage.windows) throw new WindowsAccountConfigError("not_published", "SOURCE_CHANGED");
   const next = normalize(accounts), payload = preimage.windows;
+  // Retain the original raw witness across asynchronous work; canonical strings alone do not pin aliases.
+  if (typeof payload.requestedPath !== "string" || !payload.requestedPath || preimage.path !== payload.captured.path) throw new WindowsAccountConfigError("not_published", "SOURCE_CHANGED");
   if (hash(payload.source) !== preimage.configDigest || hash(JSON.stringify(preimage.accounts)) !== preimage.accountsDigest) throw new WindowsAccountConfigError("not_published", "SOURCE_CHANGED");
   const parsed = JSON.parse(payload.source) as Record<string, unknown>;
   const bindings = [...preimage.accounts, ...next].map(a => hash(JSON.stringify(["account-binding-v1", a.id, a.provider, a.directory, a.profileId ?? null])));
-  const fixed = engine(); call(2, () => fixed.publish({ path: preimage.path, stamp: payload.captured.stamp, parentBirth: payload.captured.parentBirth, beforeAccounts: preimage.accountsDigest,
+  const fixed = engine(); call(2, () => fixed.publish({ path: payload.requestedPath, stamp: payload.captured.stamp, parentBirth: payload.captured.parentBirth, beforeAccounts: preimage.accountsDigest,
     afterAccounts: hash(JSON.stringify(next)), bindings, next: Buffer.from(`${JSON.stringify({ ...parsed, providerAccounts: next }, null, 2)}\n`) }));
 }

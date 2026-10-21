@@ -218,6 +218,7 @@ import {
 } from "./session-naming-settings.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { ArchivedHistoryRetention } from "./archived-history-retention.js";
+import { MutationAuditArchiveRetention } from "./mutation-audit-archive-retention.js";
 import { registerArchivedHistoryRetentionRoutes } from "./archived-history-retention-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
@@ -1018,6 +1019,7 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log });
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
+const mutationAuditArchiveRetention = new MutationAuditArchiveRetention(db, { env: process.env, log: app.log });
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
 registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures,
@@ -1587,6 +1589,10 @@ app.register(async (instance) => {
       case "agents_updated":
         if (runnerId === msg.runnerId) {
           db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors, msg.providerAccounts, msg.executionTargets);
+          // The review-session capability follows the agents it was derived from (#3369).
+          if (msg.reviewSession !== undefined && runnerSupportsProtocol(db.getRunner(msg.runnerId)?.protocolVersion, "reviewSession")) {
+            db.updateRunnerReviewSessionCapability(msg.runnerId, msg.reviewSession);
+          }
           if (runnerSupportsProtocol(db.getRunner(msg.runnerId)?.protocolVersion, "providerProfiles")) {
             reconcileProviderProfileGrants(db, msg.runnerId, db.getRunner(msg.runnerId)?.providerAccounts, Date.now());
             // A reported grant with no live row here was revoked while the runner adopted it.
@@ -1797,6 +1803,8 @@ app.register(async (instance) => {
       case "remove_provider_account_result":
       case "adopt_provider_profile_result":
       case "revoke_provider_profile_grant_result":
+      case "inspect_provider_home_lease_result":
+      case "recover_provider_home_lease_result":
         hub.resolveRunnerRequest(msg, runnerId!);
         break;
       case "skills_state": {
@@ -6788,6 +6796,7 @@ const artifactMaintenanceTimer = setInterval(() => {
 }, 60_000);
 artifactMaintenanceTimer.unref();
 archivedHistoryRetention.start();
+mutationAuditArchiveRetention.start();
 // Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
 // rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
 // and its sessions 'running' forever, and prompts written to the dead socket are lost. The app-level
@@ -6847,6 +6856,7 @@ app.addHook("onClose", async () => {
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
   archivedHistoryRetention.stop();
+  mutationAuditArchiveRetention.stop();
   clearInterval(runnerLivenessTimer);
   try {
     await outboundEvents.close();

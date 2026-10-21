@@ -37,6 +37,9 @@ const routes: Array<[View, string]> = [
   [{ name: "runs" }, "/runs"],
   [{ name: "pods" }, "/pods"],
   [{ name: "automations" }, "/automations"],
+  [{ name: "automations", editor: { kind: "new" } }, "/automations/new"],
+  [{ name: "automations", editor: { kind: "edit", automationId: "automation / ✅" } },
+    `/automations/~${encodeResourceId("automation / ✅")}/edit`],
   [{ name: "skills" }, "/skills"],
   [{ name: "skills", id: "skill_abc" }, `/skills/~${encodeResourceId("skill_abc")}`],
   [{ name: "skills", pane: "orphans" }, "/skills/orphans"],
@@ -66,6 +69,22 @@ test("attention routes retain exact opaque request identity and epoch through re
     assert.equal(viewFromPath(path, query), null);
   }
   assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/attention/~!`, "?epoch=0"), null);
+});
+
+test("a run's phone member is in its URL, so a reload and a shared link keep it (#2975)", () => {
+  const path = `/runs/~${encodeResourceId("run_abc")}`;
+  for (const member of ["s_claude", "member / ✅ &?#"]) {
+    const view: View = { name: "run", id: "run_abc", member };
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.equal(url.pathname, path);
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+  }
+  assert.equal(viewPath({ name: "run", id: "run_abc", member: "s_claude" }), `${path}?member=s_claude`);
+  assert.equal(sameView({ name: "run", id: "run_abc", member: "a" }, { name: "run", id: "run_abc", member: "b" }), false);
+  // A query that is not one member keeps the run open, without a member.
+  for (const query of ["", "?member=", "?member=%20", "?member=a&member=b", "?member=a&tab=b", "?tab=a", `?member=${"x".repeat(5000)}`]) {
+    assert.deepEqual(viewFromPath(path, query), { name: "run", id: "run_abc" }, query);
+  }
 });
 
 test("Agent Skills panes have their own routes, and a skill id wins over a pane", () => {
@@ -193,6 +212,12 @@ test("an entity page is titled by its entity once it has loaded", () => {
   assert.equal(viewTitle({ name: "pod", id: "pod-1" }), "Pod");
   assert.equal(viewTitle({ name: "pod", id: "pod-1" }, ""), "Pod");
   assert.equal(viewTitle({ name: "session", id: "s-1" }), "Session");
+  // The Automation editor is titled by what it edits (#2967).
+  assert.equal(viewTitle({ name: "automations", editor: { kind: "new" } }), "New Automation");
+  assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }, "Nightly"), "Edit Nightly");
+  assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }), "Edit Automation");
+  assert.equal(viewFromPath("/automations/~!/edit"), null);
+  assert.equal(viewFromPath(`/automations/~${encodeResourceId("a")}`), null, "the automation page itself is #2968's");
 });
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");

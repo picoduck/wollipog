@@ -35,6 +35,10 @@ import "../styles.css";
  *   the choice (`account_unavailable`), and the dashboard has not heard yet;
  * - `none`: no other account is added to the Machine.
  * `?emailLabels=1` names two of the other accounts with an email, as people often do.
+ * `?deviceCode=1` makes the `signing-in` sign-in a device-code one: the provider shows a code to
+ * enter on its page, and nothing is pasted back.
+ * `?chooserSignIn=1` has a sign-in running for the signed-out Team account, started from Choose
+ * Another Account, so the dialog shows its steps (#2996).
  * `__WOLLIPOG_AUTH_RECOVERY_E2E__.removeAccount(id)` removes an account from the Machine, as the
  * runner reports it, while the page is open.
  * `?theme=light|dark`, `?width=`, `?height=`. */
@@ -43,6 +47,8 @@ const scenario = params.get("scenario") ?? "email";
 const frameWidth = Number(params.get("width") ?? "1100");
 const frameHeight = Number(params.get("height") ?? "760");
 const emailLabels = params.get("emailLabels") === "1";
+const deviceCode = params.get("deviceCode") === "1";
+const chooserSignIn = params.get("chooserSignIn") === "1";
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 
 declare global {
@@ -128,10 +134,19 @@ const runner = {
     accountId: "claude-work",
     label: "Work Subscription",
     provider: "claude",
+    ...deviceCode
+      ? { status: "waiting_for_provider", verificationUrl: "https://auth.example.com/device", userCode: "WOLL-IPOGS", expectsCode: false }
+      : { status: "awaiting_code", verificationUrl: "https://claude.ai/oauth/authorize?code=true", expectsCode: true },
+    sessionId: SESSION_ID,
+    startedAt: Date.now() - 30_000,
+  }] : chooserSignIn ? [{
+    operationId: "login-chooser",
+    accountId: "claude-team",
+    label: emailLabels ? "team.pilot@example.org" : "Team Pilot",
+    provider: "claude",
     status: "awaiting_code",
     verificationUrl: "https://claude.ai/oauth/authorize?code=true",
     expectsCode: true,
-    sessionId: SESSION_ID,
     startedAt: Date.now() - 30_000,
   }] : [],
 } as unknown as RunnerView;

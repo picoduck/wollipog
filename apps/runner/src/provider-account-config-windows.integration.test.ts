@@ -16,6 +16,7 @@ function fixtureEngine(): {
   publish(request: object): void;
   createSyntheticFixture(path: string, mode: "private" | "foreign-write" | "null-dacl" | "full-store"): void;
   foreignOwnerPath(): string;
+  directoryAliasPath(path: string): string;
 } {
   const file = join(dirname(__filename), "provider-account-config-windows-fixture-engine.cjs");
   assert.equal(sha(readFileSync(file)), __WACW_FIXTURE_ENGINE_SHA__);
@@ -31,7 +32,23 @@ function refused(action: () => unknown) { assert.throws(action, (e: unknown) => 
 
 test("native Windows account-config default dispatch enrolls add and remove without changing HOME strings", onlyWindows, () => {
   const f = fixture(), keep = { id: "work", label: "Work", provider: "claude" as const, directory: "C:\\canonical\\HOME" };
-  const before = readFileSync(f.path); const pre = captureProviderAccountsConfigPreimage(f.path, []);
+  // Require a genuine directory alias from the fixed fixture helper; no fake alias or skip if unavailable.
+  const before = readFileSync(f.path), alias = fixtureEngine().directoryAliasPath(f.path);
+  const pre = captureProviderAccountsConfigPreimage(alias, []), canonical = captureProviderAccountsConfigPreimage(pre.path, []);
+  assert.ok(pre.windows && pre.windows.requestedPath === alias && Object.isFrozen(pre.windows), "raw witness must be immutable");
+  assert.ok(alias.toLowerCase() !== pre.path.toLowerCase(), "genuine directory alias required");
+  assert.ok(pre.path === canonical.path && pre.configIdentity === canonical.configIdentity && pre.parentIdentity === canonical.parentIdentity, "alias and canonical captures must bind the same objects");
+  assert.ok(pre.windows && canonical.windows && pre.windows.captured.stamp === canonical.windows.captured.stamp, "aliases must coalesce to one canonical preimage");
+  refused(() => captureProviderAccountsConfigPreimage(dirname(alias) + "\\.\\runner.json", []));
+  assert.deepEqual(readFileSync(f.path), before);
+  const entries = readdirSync(f.root).sort(), { requestedPath, ...withoutWitness } = pre.windows;
+  assert.equal(requestedPath, alias);
+  for (const windows of [Object.freeze({ ...pre.windows, requestedPath: dirname(alias) + "\\.\\runner.json" }), Object.freeze(withoutWitness)]) {
+    // Copy a malformed witness; retain valid canonical capture, bytes, accounts and stamp.
+    const invalid = Object.freeze({ ...pre, windows }) as unknown as typeof pre;
+    refused(() => writeProviderAccountsConfig(f.path, [keep], invalid));
+    assert.deepEqual(readFileSync(f.path), before); assert.deepEqual(readdirSync(f.root).sort(), entries);
+  }
   assert.equal(pre.backend, "windows-wacw1"); assert.equal(readdirSync(f.root).length, 1, "capture creates no producers");
   writeProviderAccountsConfig(f.path, [keep], pre);
   const saved = JSON.parse(readFileSync(f.path, "utf8")); assert.equal(saved.untouched, true); assert.equal(saved.providerAccounts[0].directory, keep.directory);

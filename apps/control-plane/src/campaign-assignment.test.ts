@@ -58,6 +58,19 @@ test("Full Control describes the exact boundary and effective owners without cre
   assert.match(text, /merge-group CI passes and the forge reports actual MERGED state/);
 });
 
+test("a metered Full Control campaign without the controlled reviewer is told to use the regular review workflow", () => {
+  const budgetAuthority = { version: 1 as const, concurrency: 2, acceptedFollowUps: 0, accounting: "managed_workers_only" as const, unpriced: "stop" as const };
+  const regular: CampaignControl = { mode: "full_control", boundary: { ...full.boundary, budgetAuthority } };
+  const text = formatCampaignAssignment(fixture(regular), humanProjection, campaignAuthorityPreflight(regular, "claude-code", PROTOCOL_VERSION), "");
+  assert.match(text, /Cross-Model Review: controlled review is not part of this campaign, so run the regular installed cross-model review workflow/);
+  assert.match(text, /report its actual cost/);
+  assert.doesNotMatch(text, /unsupported mandatory path/);
+  const review = { profile: "native_opus_5_5_high_read_only" as const, controllerSha256: "a".repeat(64), executableSha256: "b".repeat(64),
+    cliVersion: "2.1.296" as const, accounting: "provider_list_estimate" as const, account: "runner_default_claude" as const, agentId: "claude" };
+  const controlled: CampaignControl = { mode: "full_control", boundary: { ...full.boundary, budgetAuthority: { ...budgetAuthority, controlledReview: review } } };
+  assert.match(formatCampaignAssignment(fixture(controlled), humanProjection, { supported: true }, ""), /Required Reviewer Admission/);
+});
+
 test("Custom assignments retain their independently authorized issue scope and revision", () => {
   const campaign = fixture({ mode: "custom" });
   campaign.orchestratorPolicy.issueScope = { repository: "owner/repo", issueNumbers: [123, 456],

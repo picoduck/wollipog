@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, constants, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -52,9 +52,14 @@ function fake(t: { after(fn: () => void): void }, options: {
   // Synthetic system-mode identities cover the real staging helper without root/chown. Every
   // path and descriptor is mapped consistently; the syscall behavior remains real and private.
   const opened = new Map<number, string>();
-  const identity = (stat: ReturnType<typeof stagingFilesystem.lstat>, path: string) => options.system && path.startsWith(root)
-    ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: BigInt(path === layout.dataDir ? options.accountUid ?? MY_UID : 0) }) as typeof stat
-    : stat;
+  const identity = (stat: ReturnType<typeof stagingFilesystem.lstat>, path: string) => {
+    // Recovery addresses children through pinned descriptors. Resolve just that descriptor
+    // prefix for the synthetic UID mapping, preserving the final object's no-follow identity.
+    const named = path.replace(/^\/proc\/self\/fd\/\d+/u, (prefix) => readlinkSync(prefix));
+    return options.system && named.startsWith(root)
+      ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: BigInt(named === layout.dataDir ? options.accountUid ?? MY_UID : 0) }) as typeof stat
+      : stat;
+  };
   const stagingFs = {
     ...stagingFilesystem,
     euid: () => options.system ? 0 : MY_UID,
@@ -1205,5 +1210,68 @@ test("upgrade close errors preserve pre-swap bytes or healthy installed generati
       assert.equal(readFileSync(`${installed}.previous`, "utf8"), "#!/bin/sh\n");
       assert.equal(f.execs.slice(before).filter((line) => line.includes("restart")).length, 2, "final close error does not trigger rollback");
     }
+  });
+});
+
+test("staging CLI exposes legacy preservation, requires confirmation, and admits the next update", { skip: process.platform !== "linux" }, async (t) => {
+  for (const system of [false, true]) await t.test(system ? "system" : "user", async (t) => {
+    const f = fake(t, { system, ...(system ? { uid: 0, accountUid: MY_UID } : {}) });
+    assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+    const fixture = releaseFixture(f, { webBundle: false });
+    const working: ServiceHost = {
+      ...fixture.host,
+      exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options),
+      fetch: async (url, init) => {
+        const response = await fixture.host.fetch(url, init);
+        if (!url.endsWith("/api/admin/status")) return response;
+        const body = JSON.parse(await response.text());
+        return { ...response, text: async () => JSON.stringify({ ...body, appVersion: fixture.version }) };
+      },
+    };
+    const path = join(f.layout.dataDir, "upgrades", "v0.28.0");
+    mkdirSync(path, { recursive: true, mode: 0o700 });
+    writeFileSync(join(path, "SHA256SUMS"), "interrupted", { mode: 0o600 });
+    for (const force of [false, true]) {
+      const refused = makeIo();
+      assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json", ...(force ? ["--force"] : [])], working, refused.io), 1);
+      assert.equal(fixture.downloads.length, 0);
+    }
+    const inspected = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "inspect", "--json"], working, inspected.io), 1);
+    const report = JSON.parse(inspected.stdout());
+    assert.equal(report.legacy[0].path, path);
+    assert.equal(report.legacy[0].recovery.eligible, true);
+    assert.match(report.legacy[0].next.recover, /staging recover --(?:user|system) --attempt sl1-[a-f0-9]{32}$/u);
+    const token = report.legacy[0].recovery.token;
+    const text = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "inspect"], working, text.io), 1);
+    assert.match(text.stdout(), /Legacy:.*v0\.28\.0/u);
+    assert.match(text.stdout(), /Preservation: eligible/u);
+    assert.match(text.stdout(), /SHA256SUMS \(file, 11 B, 0600, 1 links\)/u);
+    const missingConfirmation = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", token], working, missingConfirmation.io), 2);
+    let question = "";
+    const declined = makeIo({ stdinIsTTY: true, confirm: async (value) => { question = value; return false; } });
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", token], working, declined.io), 1);
+    assert.ok(question.includes(path));
+    assert.ok(existsSync(path));
+    let stalePrompt = false;
+    const stale = makeIo({ stdinIsTTY: true, confirm: async () => { stalePrompt = true; return false; } });
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", `sl1-${"0".repeat(32)}`], working, stale.io), 1);
+    assert.equal(stalePrompt, false, "an unmatched legacy token must refuse before asking to move the wrong directory");
+    assert.ok(existsSync(path));
+    const staleJson = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", `sl1-${"0".repeat(32)}`, "--yes", "--json"], working, staleJson.io), 1);
+    assert.equal(JSON.parse(staleJson.stdout()).recovery.refused, true);
+    assert.match(JSON.parse(staleJson.stdout()).recovery.next.inspect, /staging inspect/u);
+    const recovered = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", token, "--yes", "--json"], working, recovered.io), 0, recovered.stdout());
+    const result = JSON.parse(recovered.stdout());
+    assert.equal(result.admissible, true);
+    assert.equal(readFileSync(join(result.preservedPath, "SHA256SUMS"), "utf8"), "interrupted");
+    const update = makeIo();
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], working, update.io), 0, update.stdout());
+    assert.ok(fixture.downloads.length > 0);
+    assert.equal(readFileSync(join(result.preservedPath, "SHA256SUMS"), "utf8"), "interrupted", "update retains the preserved legacy evidence");
   });
 });

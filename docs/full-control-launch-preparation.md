@@ -3,11 +3,14 @@
 Issue #2940 offers Custom and Full Control in Orchestrator defaults, New Session, and active
 Orchestrator Controls. Choosing Full Control in New Session or on a live root campaign runs the
 server preflight at once (debounced; a newer input aborts the older request). It shows a concise
-summary: scope, budget, follow-ups, evidence with the provider retention disclosure, and Human
-Required exceptions. Specific blockers and the operator fix come first. Detailed limits, the full
-capability list and the behavior and execution settings sit under a collapsed Advanced
-disclosure; changing an override checks readiness again. When no campaign budget is saved, the
-summary asks for the cost and tool-call limits inline, with Save as Default.
+summary: scope, budget, follow-ups, review, isolation, evidence with the provider retention
+disclosure, and Human Required exceptions. Launch is one click: only genuine impossibilities block
+it, and they come first with the operator fix; infrastructure gaps are neutral summary rows, never
+warnings. Detailed limits, the full capability list and the behavior and execution settings sit
+under a collapsed Advanced disclosure; changing an override checks readiness again. With no saved
+campaign budget the summary says No Limit. An optional cost and/or tool-call ceiling can be entered
+under Advanced; once both are entered, Save Limits as Default (off by default) saves them after the
+campaign is admitted.
 
 New Session's one footer action, Authorize and Start, admits the exact reviewed preflight.
 Ordinary Create Session never runs for Full Control. A live root campaign's one action, Enable
@@ -55,27 +58,49 @@ numbers, and optional overrides (`FullControlLaunchRequest` in
   Code installation, else the first available native Claude Code or Codex App Server one, and
   the root joins the workspace's Project.
 - Concurrency from `behavior.maximumConcurrentChildren`; accepted follow-ups from the saved
-  follow-up policy (none for Recommend Only); closure reasons default to completed. The cost and
-  tool-call envelope is the Human's saved Full Control campaign budget (`campaignBudget` in
-  Orchestrator defaults; omitted by older clients, cleared by `null`), unless this request
-  overrides it. With neither, the summary asks for one. Saved per-session limits (root ceilings,
-  Project child-session defaults) are tighter ceilings, never the envelope: controlled review
-  refuses to run under them, so they block readiness.
-- `controlledReview` from the runner's discovered `campaignReview` profile.
+  follow-up policy (none for Recommend Only); closure reasons default to completed. Each of the
+  cost and tool-call ceilings is this request's override, else the Human's saved Full Control
+  campaign budget (`campaignBudget` in Orchestrator defaults; omitted by older clients, cleared by
+  `null`), else absent. An absent ceiling is a first-class "no limit" state, never a fake large
+  amount: the campaign runs unbounded on that axis while managed workers are still metered and
+  priced and Campaign Status shows the usage. Any ceiling that is set is fully enforced. Saved
+  per-session limits (root ceilings, Project child-session defaults) are tighter ceilings, never
+  the envelope.
+- `controlledReview` from the runner's discovered `campaignReview` profile, only when controlled
+  review can actually run: a protocol-v218 runner, a user-owned campaign, no organization per-user
+  daily limit, and no root, Project or participant per-session ceiling. Otherwise the boundary has
+  no controlled reviewer, the summary says the campaign uses the regular cross-model review
+  workflow, and the campaign policy tells participants to run that workflow and report its cost.
 
 The preflight returns `ready`, a digest, a concise `summary` (scope, budget, follow-up policy,
-evidence destination/provider with the verbatim retention disclosure, Human Required exceptions,
-blockers), per-capability readiness and an `advanced` block with the derived proposal and plan.
-Each capability is `verified`, `unsupported` (blocks launch, with an actionable reason) or
-`human_required` (a disclosed exception routing that decision class to the Human). Repository
-scope, the authority contract, accounting/budget, controlled review and the runner's enforced
-execution isolation are mandatory. Screenshot review is delegated when the Orchestrator can review
-images. External evidence is always Human Required. Video is Human Required exactly as before
-unless a current Human-recorded live proof certifies an attested media-only reviewer on the root's
-runner (#1321). With one, video is `verified` only when the launch also mints the evidence envelope
-for that exact reviewer: UI Evidence Approval is delegated, the root is an attested Claude Code agent
-that declares the paced video contract, at the certified model, with provider disclosures and the
-video review adapters attached and no blocker. Otherwise the row names the first missing condition.
+review, evidence destination/provider with the verbatim retention disclosure, Human Required
+exceptions, blockers), per-capability readiness and an `advanced` block with the derived proposal
+and plan. Each capability is `verified`, `unsupported` (blocks launch, with an actionable reason),
+`human_required` (a disclosed exception routing that decision class to the Human),
+`informational` (an infrastructure gap the campaign works around with the best available path) or
+`orchestrator_decides` (the Orchestrator owns that class without being able to inspect it, so it
+asks for inspectable evidence or denies the claim as unproven).
+Only genuine impossibilities are mandatory: repository scope that can be verified, and a provider
+path that enforces the authority contract. Accounting is mandatory only when the Human set a
+ceiling (an unpriced model cannot enforce a cost ceiling) or the derived limits are invalid, such
+as a paused campaign's zero concurrency; with no ceiling, an unpriced model only means tool calls
+are counted without a cost. Controlled review and an unreported execution isolation are
+informational. Full Control never routes evidence to the Human (#2940): with UI Evidence Approval
+in the authorization, screenshot review is `verified` when the Orchestrator can view images and
+`orchestrator_decides` otherwise, and external evidence is `orchestrator_decides`. Video is
+`orchestrator_decides` unless a current Human-recorded live proof certifies an attested media-only
+reviewer on the root's runner (#1321). With one, video is `verified` only when the launch also mints
+the evidence envelope for that exact reviewer: UI Evidence Approval is delegated, the root is an
+attested Claude Code agent that declares the paced video contract, at the certified model, with
+provider disclosures and the video review adapters attached and no blocker. Otherwise the row names
+the first missing condition. Only an authorization that leaves UI Evidence Approval out makes the
+three evidence rows `human_required`.
+
+The summary's Human Required list holds only what still reaches the Human: those evidence rows, and
+"Human Required Governance Rules" while an enabled ask rule is marked Human Required. Its
+`declinedNote` states that credential, sign-in, provider-access and lasting-grant requests are
+declined automatically and shown as blocked work. See
+[Full Control Without Prompts](campaign-authority.md#full-control-without-prompts).
 
 Admission requires request identity and the exact reviewed digest. The preflight is computed
 from facts re-read after the runner inspection, and admission creates the root synchronously from
@@ -95,7 +120,8 @@ An existing live root campaign enables Full Control through
 `POST /api/sessions/:id/orchestrator-campaign/full-control`. These are Human-only and the session
 owner's. The preflight reuses the launch evaluation, with the campaign's own Human-established
 issue scope in place of the workspace inspection. Only the person who established that scope can
-enable it, and live participants holding their own cost or tool limits block controlled review.
+enable it. Live participants holding their own cost or tool limits keep controlled review out of
+the boundary, so the campaign uses the regular cross-model review workflow.
 Enabling requires the exact reviewed digest, which also binds the campaign and its current policy
 revision. It then runs the existing `setCampaignControl` operation. Revoke keeps using the ordinary
 control endpoint.

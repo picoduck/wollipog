@@ -6,6 +6,7 @@ import {
   type AddBoxRequest,
   type BoxView,
   type ControlPlaneToUi,
+  type ProviderHomeLeaseInspection,
   type RunnerView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -134,6 +135,38 @@ if (new URLSearchParams(window.location.search).has("signingIn")) {
     userCode: "WOLL-IPOGS", startedAt: Date.now(),
   }];
 }
+// A provider sign-in in each state (#2996), with `?signIn=`: `device` (Codex Team's device code),
+// `code` (Work's pasted code), `rejected` (the same, and the runner rejects any code), `failed`,
+// `timed-out` (both Work's), and `duplicate` (a new account, Work 2, that is already on the
+// machine). With `?emailLabels` the signing-in accounts are named by email. `?theme=light|dark`.
+const signInFixture = new URLSearchParams(window.location.search).get("signIn");
+const theme = new URLSearchParams(window.location.search).get("theme");
+if (theme === "light" || theme === "dark") document.documentElement.setAttribute("data-theme", theme);
+if (signInFixture && runner.providerAccounts) {
+  const emailLabels = new URLSearchParams(window.location.search).has("emailLabels");
+  const team = runner.providerAccounts.find((account) => account.id === "codex-team")!;
+  if (emailLabels) team.label = "team@example.com";
+  const work = runner.providerAccounts.find((account) => account.id === "claude-work")!;
+  const claude = {
+    operationId: "login_fixture_work", accountId: work.id, label: work.label, provider: "claude" as const, startedAt: Date.now(),
+  };
+  runner.providerLogins = [
+    signInFixture === "device" ? {
+      operationId: "login_fixture_team", accountId: team.id, label: team.label, provider: "codex", status: "waiting_for_provider",
+      expectsCode: false, verificationUrl: "https://auth.openai.com/device", userCode: "WOLL-IPOGS", startedAt: Date.now(),
+    } : signInFixture === "code" || signInFixture === "rejected" ? {
+      ...claude, status: "awaiting_code", expectsCode: true, verificationUrl: "https://claude.ai/oauth/authorize?fixture=machine",
+    } : signInFixture === "failed" ? {
+      ...claude, status: "failed", error: "The provider did not confirm authentication.",
+    } : signInFixture === "timed-out" ? {
+      ...claude, status: "timed_out", error: "Sign-in timed out before the provider confirmed authentication.",
+    } : {
+      operationId: "login_fixture_duplicate", accountId: "work-2-1a2b3c4d", label: emailLabels ? "work.two@example.com" : "Work 2",
+      provider: "claude", status: "failed", startedAt: Date.now(),
+      error: "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+    },
+  ];
+}
 // Provider profiles (#3239): one account in each access state, and Codex Solo left a legacy HOME.
 if (new URLSearchParams(window.location.search).has("profiles") && runner.providerAccounts) {
   const access = { "claude-work": "granted", "claude-personal": "pending", "codex-team": "not_granted" } as const;
@@ -141,6 +174,17 @@ if (new URLSearchParams(window.location.search).has("profiles") && runner.provid
     const state = access[account.id as keyof typeof access];
     if (state) account.profile = { id: `profile-${account.id}`, access: state };
   }
+}
+// Stale lease recovery (#3241), with `?leases`: Personal's HOME holds a stale lease that can be
+// recovered, and Codex Team's one was recorded during the current boot without process evidence.
+const leases: Record<string, ProviderHomeLeaseInspection> = new URLSearchParams(window.location.search).has("leases") ? {
+  "claude-personal": { state: "stale", tipHash: "c".repeat(64), createdAt: "2026-10-14T16:20:00.000Z", sameHost: true, hasEvidence: false, refusal: null },
+  "codex-team": { state: "stale", tipHash: "d".repeat(64), createdAt: "2026-10-18T09:05:00.000Z", sameHost: true, hasEvidence: false, refusal: "NO_REBOOT_PROOF" },
+} : {};
+// A Windows runner answers no lease inspection, so the lease scenario is a Linux Machine.
+if (Object.keys(leases).length && runner) {
+  runner.os = "linux";
+  runner.workspaces = [{ id: "home", name: "Home", path: "/home/misko" }];
 }
 const fixtureParams = new URLSearchParams(window.location.search);
 // `machines=0` opens on the empty Machines tab (#2984).
@@ -543,6 +587,9 @@ const client = {
   },
   submitProviderLoginCode: async (_runnerId: string, operationId: string) => {
     if (!runner) throw new Error("runner not found");
+    if (signInFixture === "rejected") {
+      throw new ApiError("The provider rejected this code. Copy the whole code from the sign-in page and paste it again.", 409);
+    }
     const login = runner.providerLogins?.find((candidate) => candidate.operationId === operationId);
     if (!login) throw new Error("login not found");
     const completed = { ...login, status: "succeeded" as const, expectsCode: false };
@@ -558,6 +605,13 @@ const client = {
     runner.providerLogins = [cancelled];
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { login: cancelled };
+  },
+  // The control plane leaves a dismissed sign-in out of this person's snapshots (#2487).
+  dismissProviderLoginNotice: async (_runnerId: string, operationId: string) => {
+    if (!runner) throw new Error("runner not found");
+    runner.providerLogins = runner.providerLogins?.filter((candidate) => candidate.operationId !== operationId);
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { dismissed: true as const };
   },
   // Removal (#2995): Codex Solo is Custom ACP's default, so the runner refuses it; Work's credentials
   // are kept because a session still uses them; any other account is simply removed.
@@ -595,6 +649,12 @@ const client = {
     delete account.profile;
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { revoked: true as const, grantIds: [`grant-${accountId}`], markerUpdated: true, runnerNotified: true, forced: force };
+  },
+  inspectProviderHomeLease: async (_runnerId: string, accountId: string) => leases[accountId] ?? { state: "released" },
+  recoverProviderHomeLease: async (_runnerId: string, accountId: string, staleTipHash: string) => {
+    if (leases[accountId]?.tipHash !== staleTipHash) throw new ApiError("lease changed", 409, "TIP_CHANGED");
+    leases[accountId] = { state: "released" };
+    return { status: "recovered" as const, authorizationId: "authorization-1" };
   },
   removeRunner: async () => {
     if (!runner) throw new Error("runner not found");

@@ -169,6 +169,18 @@ export function formatClock(
   return timestampFormatter("clock", locale, timeZone).format(date);
 }
 
+/** A local day in words: "Today", "Yesterday", then the date ("Oct 3, 2026"). */
+export function localDayLabel(at: number, now: number): string {
+  const startOfDay = (time: number) => new Date(time).setHours(0, 0, 0, 0);
+  const today = startOfDay(now);
+  const day = startOfDay(at);
+  if (day === today) return "Today";
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (day === yesterday.getTime()) return "Yesterday";
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(at));
+}
+
 /** Session event time means recorded by the runner; adopted history may not retain provider time. */
 export function formatRecordedTimestamp(
   timestamp: number | undefined,

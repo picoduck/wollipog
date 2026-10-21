@@ -3204,9 +3204,9 @@ export class ClaudeCodeDriver implements Driver {
             // The trust surface: the card shows WHAT it authorizes, not just the tool name.
             context: {
               ...(req.tool_name === "Bash" && typeof req.input?.command === "string" && req.input.command.length <= 2000
-                ? { operation: campaignOperationEvidence("Bash", { kind: "command", input: req.input.command }) }
+                ? { operation: campaignOperationEvidence("Bash", { kind: "command", input: req.input.command }, this.cwd) }
                 : ["Read", "Edit", "Write"].includes(req.tool_name ?? "") && typeof req.input?.file_path === "string" && req.input.file_path.length <= 1024
-                  ? { operation: campaignOperationEvidence(req.tool_name, { kind: "file", path: req.input.file_path }) } : {}),
+                  ? { operation: campaignOperationEvidence(req.tool_name, { kind: "file", path: req.input.file_path }, this.cwd) } : {}),
               toolName: req.tool_name ? truncate(String(req.tool_name), 256) : undefined,
               input: renderApprovalInput(req.tool_name, req.input),
               ...approvalScopeContext(req.input),

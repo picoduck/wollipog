@@ -118,6 +118,28 @@ test("roster rows carry a group, an activity sentence and a parent, and keep the
   assert.equal(rows.filter(isCurrentWorker).length, 4);
 });
 
+test("subagent roster token totals distinguish reported zero from unavailable usage", () => {
+  const cases: [usage: SubagentDescriptor["directUsage"], expected: number | undefined][] = [
+    [undefined, undefined],
+    [{}, undefined],
+    [{ inputTokens: 0, outputTokens: 0 }, 0],
+    [{ inputTokens: 0 }, 0],
+    [{ outputTokens: 0 }, 0],
+    [{ inputTokens: 3 }, 3],
+    [{ outputTokens: 2 }, 2],
+    [{ inputTokens: 3, outputTokens: 2 }, 5],
+  ];
+  for (const [usage, expected] of cases) {
+    for (const field of ["directUsage", "inclusiveUsage"] as const) {
+      const row = workerRoster(session, [{ ...child, [field]: usage }], [], () => true)[0]!;
+      const tokenField = field === "directUsage" ? "tokens" : "inclusiveTokens";
+      assert.equal(row[tokenField], expected, `${field}: ${JSON.stringify(usage)}`);
+      assert.equal(Object.hasOwn(row, tokenField), expected !== undefined,
+        "unavailable usage is omitted rather than fabricated as zero");
+    }
+  }
+});
+
 test("a worker's tokens say whether its provider counts cached input (#3086)", () => {
   const claudeParent = { ...session, driver: "claude-code" } as SessionView;
   const codexMember = { ...session, id: "codex", title: "Codex", driver: "codex-app-server", pendingApproval: null,

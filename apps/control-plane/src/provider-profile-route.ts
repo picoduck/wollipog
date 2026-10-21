@@ -19,6 +19,7 @@ const ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const TERMINAL_SESSION_STATUSES = new Set<SessionStatus>(TERMINAL_STATUSES);
 const CAPABILITY_LABEL = "provider profiles";
+const LEASE_CAPABILITY_LABEL = "provider HOME lease recovery";
 
 /** Only an organization Owner or Admin may grant or revoke a control plane's profile access. */
 export function canAuthorizeProviderProfileGrant(
@@ -35,6 +36,17 @@ export function parseProviderProfileAdoption(body: unknown): { ok: true } | { ok
     return { ok: false, error: "acknowledgeProfileAdoption must be true: after adoption only control planes granted this profile can use its HOME" };
   }
   return { ok: true };
+}
+
+/** #3241: a lease recovery is explicit and names the exact stale record the Owner or Admin saw. */
+export function parseProviderHomeLeaseRecovery(body: unknown): { ok: true; staleTipHash: string } | { ok: false; error: string } {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return { ok: false, error: "request body must be an object" };
+  const { staleTipHash, acknowledgeLeaseRecovery } = body as { staleTipHash?: unknown; acknowledgeLeaseRecovery?: unknown };
+  if (acknowledgeLeaseRecovery !== true) {
+    return { ok: false, error: "acknowledgeLeaseRecovery must be true: the stale lease's runner and anything it started must no longer use this HOME" };
+  }
+  if (typeof staleTipHash !== "string" || !/^[a-f0-9]{64}$/u.test(staleTipHash)) return { ok: false, error: "staleTipHash must be the inspected lease record's hash" };
+  return { ok: true, staleTipHash };
 }
 
 export const PROVIDER_PROFILE_REVOKED_FOR_SESSION = "Access to this provider profile was revoked for this control plane.";
@@ -448,6 +460,90 @@ export function registerProviderProfileRoutes(
     }
     deps.hub.runnerChanged(id);
     return { status: "active", profileId: result.profileId, grantId };
+  });
+
+  /** The online v229+ runner and configured account a lease route acts on, or the reply already sent. */
+  function leaseTarget(id: string, accountId: string, runner: NonNullable<ReturnType<ControlPlaneDb["getRunner"]>>,
+    reply: { code(status: number): { send(body: unknown): unknown } }) {
+    if (!runnerSupportsProtocol(runner.protocolVersion, "providerHomeLeaseRecovery")) {
+      return { error: reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "providerHomeLeaseRecovery", LEASE_CAPABILITY_LABEL)) };
+    }
+    if (!deps.hub.isRunnerOnline(id)) return { error: reply.code(409).send({ error: "runner is offline" }) };
+    if (!runner.providerAccounts?.some((candidate) => candidate.id === accountId)) {
+      return { error: reply.code(404).send({ error: "The provider account is not available on this Machine." }) };
+    }
+    return { ok: true as const };
+  }
+
+  /** #3241: the account HOME's lease state an Owner or Admin decides a recovery from. */
+  app.get("/api/runners/:id/provider-accounts/:accountId/home-lease", async (req, reply) => {
+    const checked = authorize(req, reply);
+    if ("error" in checked) return checked.error;
+    const { id, accountId, runner } = checked;
+    const target = leaseTarget(id, accountId, runner, reply);
+    if ("error" in target) return target.error;
+    const requestId = `provider_home_lease_inspect_${randomUUID()}`;
+    let result;
+    try {
+      result = await deps.hub.requestFromRunner(id, requestId, { type: "inspect_provider_home_lease", requestId, accountId });
+    } catch (error) {
+      return reply.code(504).send({ error: (error as Error).message });
+    }
+    if (result.type !== "inspect_provider_home_lease_result") return reply.code(502).send({ error: "unexpected runner reply" });
+    if (!result.ok) {
+      return reply.code(409).send({ error: result.error ?? "The provider HOME's lease could not be read.", code: result.code ?? "PROVIDER_HOME_LEASE_INSPECTION_FAILED" });
+    }
+    if (!result.inspection) return reply.code(502).send({ error: "unexpected runner reply" });
+    return result.inspection;
+  });
+
+  /**
+   * #3241: an Owner or Admin authorizes recovering the exact stale lease record they inspected.
+   * The authorization is recorded first and used once; the runner still requires the record to be
+   * provably abandoned (its process evidence, or a host boot after it was written).
+   */
+  app.post("/api/runners/:id/provider-accounts/:accountId/recover-lease", async (req, reply) => {
+    const checked = authorize(req, reply);
+    if ("error" in checked) return checked.error;
+    const { id, accountId, principal, runner } = checked;
+    const parsed = parseProviderHomeLeaseRecovery(req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    const target = leaseTarget(id, accountId, runner, reply);
+    if ("error" in target) return target.error;
+    const authorization = deps.db.authorizeProviderHomeLeaseRecovery({
+      authorizationId: randomUUID(), runnerId: id, providerAccountId: accountId, staleTipHash: parsed.staleTipHash,
+      authorizedBy: principal.userId, authorizedRole: principal.role, now: now(),
+    });
+    if (!authorization) return reply.code(404).send({ error: "runner not found" });
+    const { authorizationId } = authorization;
+    const requestId = `provider_home_lease_recover_${randomUUID()}`;
+    let result;
+    try {
+      result = await deps.hub.requestFromRunner(id, requestId, {
+        type: "recover_provider_home_lease", requestId, accountId, staleTipHash: parsed.staleTipHash, authorizationId,
+      });
+    } catch (error) {
+      // The runner may have recovered the lease; its journal records this authorization either way.
+      deps.db.settleProviderHomeLeaseRecovery(authorizationId, "unknown", null, now());
+      return reply.code(504).send({ error: (error as Error).message, status: "unknown", authorizationId });
+    }
+    if (result.type !== "recover_provider_home_lease_result") {
+      deps.db.settleProviderHomeLeaseRecovery(authorizationId, "unknown", null, now());
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    if (!result.ok) {
+      if (result.code) {
+        deps.db.settleProviderHomeLeaseRecovery(authorizationId, "refused", result.code, now());
+        return reply.code(409).send({ error: result.error ?? "The provider HOME's lease could not be recovered.", code: result.code });
+      }
+      deps.db.settleProviderHomeLeaseRecovery(authorizationId, "unknown", null, now());
+      return reply.code(409).send({
+        error: result.error ?? "The provider HOME's lease could not be recovered.", code: "PROVIDER_HOME_LEASE_RECOVERY_FAILED", status: "unknown", authorizationId,
+      });
+    }
+    deps.db.settleProviderHomeLeaseRecovery(authorizationId, "recovered", null, now());
+    deps.hub.runnerChanged(id);
+    return { status: "recovered", authorizationId };
   });
 
   app.post("/api/runners/:id/provider-accounts/:accountId/revoke-profile-access", async (req, reply) => {

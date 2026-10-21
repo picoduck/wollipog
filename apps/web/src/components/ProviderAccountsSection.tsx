@@ -1,5 +1,7 @@
-import React, { Fragment, useId, useState, type ReactNode } from "react";
-import { runnerSupportsProtocol, type ProviderAccountDefinition, type ProviderLoginView, type RunnerView } from "@wollipog/protocol";
+import React, { Fragment, useEffect, useId, useState, type ReactNode } from "react";
+import {
+  runnerSupportsProtocol, type ProviderAccountDefinition, type ProviderHomeLeaseInspection, type ProviderLoginView, type RunnerView,
+} from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
@@ -15,7 +17,7 @@ import { MoreHorizontalIcon, SignInIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
-import { ProviderLoginCard } from "./ProviderLoginCard.js";
+import { ProviderSignIn, providerSignInAlreadyOnMachine, providerSignInHiddenTitle } from "./ProviderLoginCard.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
@@ -30,9 +32,30 @@ const ADOPTION_REFUSALS: Readonly<Record<string, string>> = {
 
 const ADOPTION_FAILED_DEFAULT = "The provider profile could not be adopted.";
 
-/** The sentence-case message for a failed Adopt as Profile or Revoke Access request. */
-export function providerProfileErrorMessage(cause: unknown, action: "adopt" | "revoke"): string {
+/** Why a stale lease cannot be recovered (#3241), as the disabled menu item's reason and the
+ * refusal notice. */
+export const LEASE_RECOVERY_REFUSALS: Readonly<Record<string, string>> = {
+  TIP_CHANGED: "The lease changed after it was checked. Reopen this machine to check it again.",
+  NO_REBOOT_PROOF: "This lease was recorded since the machine last started and has no process evidence. Restart the machine, then recover it.",
+  HOME_IN_USE: "The runner that holds this lease, or a process it started, is still running.",
+  FOREIGN_HOST: "This lease belongs to a runner on another host.",
+  PROFILE_REFUSED: "This account's provider profile does not grant this control plane access.",
+  UNSUPPORTED_HOME: "This account's HOME has no lease that can be recovered here.",
+  UNVERIFIABLE: "The lease could not be verified, so it was left unchanged.",
+};
+
+/** The sentence-case message for a failed Adopt as Profile, Revoke Access or Recover Lease request. */
+export function providerProfileErrorMessage(cause: unknown, action: "adopt" | "revoke" | "recover"): string {
   if (!(cause instanceof ApiError)) return cause instanceof Error ? cause.message : String(cause);
+  if (action === "recover") {
+    if (cause.status === 504) return "The machine did not confirm the recovery in time. Reopen this machine to check the lease before retrying.";
+    if (cause.status === 409 && cause.message === "runner is offline") return "The machine is offline. Recovering a lease needs the machine to be online.";
+    if (cause.status === 409 && cause.code && LEASE_RECOVERY_REFUSALS[cause.code]) return LEASE_RECOVERY_REFUSALS[cause.code]!;
+    if (cause.status === 409 && cause.code === "PROVIDER_HOME_LEASE_RECOVERY_FAILED") {
+      return "The machine could not confirm the recovery. Reopen this machine to check the lease before retrying.";
+    }
+    return cause.message;
+  }
   if (action === "adopt" && cause.status === 504) {
     return "The Machine did not confirm the adoption in time. It completes when the Machine reports the account again.";
   }
@@ -92,7 +115,7 @@ export function accountLogin(logins: readonly ProviderLoginView[], accountId: st
   return newest(mine.filter(providerLoginRunning)) ?? newest(mine);
 }
 
-type AccountStatus ="signed_in" | "sign_in_required" | "status_unknown" | "signing_in";
+type AccountStatus = "signed_in" | "sign_in_required" | "status_unknown" | "signing_in" | "not_added";
 
 function accountStatus(account: ProviderAccountDefinition, signingIn: boolean): AccountStatus {
   if (signingIn) return "signing_in";
@@ -107,7 +130,7 @@ const PROFILE_ACCESS: Readonly<Record<NonNullable<ProviderAccountDefinition["pro
   not_granted: "Not Granted",
 };
 
-type BusyAction = "sign_in" | "remove" | "adopt" | "revoke";
+type BusyAction = "sign_in" | "cancel" | "remove" | "adopt" | "revoke" | "recover";
 
 interface RowMenuItem {
   label: string;
@@ -192,13 +215,17 @@ function AccountMenu({ name, heading, busy, items }: {
 /**
  * One account (§5.2): a key icon, the label (masked under Hide Account Emails), the provider and its
  * profile access as line 2, the one status badge, then the row's actions. `children` is the row's
- * expansion under it, where its running sign-in shows (#2996 turns it into the in-row steps).
+ * expansion under it: its sign-in's steps or ending (#2996). While a sign-in runs for a label that is
+ * a hidden email, `hiddenTitle` ("Signing In to Codex") replaces the mask, with "Email hidden" as line 2.
  */
-function ProviderAccountRow({ identity, label, provider, profile, status, actions, children }: {
+function ProviderAccountRow({ identity, label, hiddenTitle, provider, profile, lease, status, actions, children }: {
   identity: string;
   label: string;
+  hiddenTitle?: string | null;
   provider: ProviderAccountDefinition["provider"];
   profile?: string;
+  /** A stale HOME lease (#3241), with why it cannot be recovered now, if it cannot. */
+  lease?: { label: string; title?: string };
   status: AccountStatus | null;
   actions?: ReactNode;
   children?: ReactNode;
@@ -206,16 +233,22 @@ function ProviderAccountRow({ identity, label, provider, profile, status, action
   const meta = status ? statusMeta("provider_account", status) : null;
   return (
     <>
-      <div className="row row-2" data-account-status={status ?? undefined}>
+      <div className={`row row-2${hiddenTitle ? " provider-account-hidden-title" : ""}`} data-account-status={status ?? undefined}>
         <span className="row-icon" aria-hidden="true"><SignInIcon /></span>
         <span className="row-body">
           <span className="row-line">
-            <AccountIdentifier identity={identity} className="row-title" value={label} label="Account Email" />
+            {hiddenTitle ? <span className="row-title provider-account-signing-title">{hiddenTitle}</span>
+              : <AccountIdentifier identity={identity} className="row-title" value={label} label="Account Email" />}
             {meta && <StatusBadge meta={meta} inline={status === "signed_in"} />}
           </span>
           <span className="row-sub provider-account-sub">
-            <span>{providerName(provider)}</span>
-            {profile && <span>{profile}</span>}
+            {hiddenTitle ? <span>Email hidden</span> : (
+              <>
+                <span>{providerName(provider)}</span>
+                {profile && <span>{profile}</span>}
+              </>
+            )}
+            {lease && <span className="provider-account-lease" title={lease.title}>{lease.label}</span>}
           </span>
         </span>
         {actions && <span className="provider-account-actions">{actions}</span>}
@@ -258,6 +291,23 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const logins = (runner.providerLogins ?? []).filter((login) =>
     login.status !== "succeeded" && login.status !== "cancelled");
   const accountIds = new Set(accounts.map((account) => account.id));
+  // Stale lease recovery (#3241): an Owner or Admin sees each account's lease on an online v229 machine.
+  const leaseActions = canManageProfiles && canManage && online && runnerSupportsProtocol(runner.protocolVersion, "providerHomeLeaseRecovery");
+  const [leases, setLeases] = useState<Readonly<Record<string, ProviderHomeLeaseInspection>>>({});
+  const accountKey = accounts.map((account) => account.id).join("\n");
+  const inspectLease = (accountId: string, isCurrent: () => boolean = () => true) =>
+    api.inspectProviderHomeLease(runner.runnerId, accountId).then(
+      (inspection) => { if (isCurrent()) setLeases((current) => ({ ...current, [accountId]: inspection })); },
+      // A failed inspection shows nothing: Recover Lease is offered only for a known stale lease.
+      () => { if (isCurrent()) setLeases(({ [accountId]: _dropped, ...rest }) => rest); },
+    );
+  useEffect(() => {
+    if (!leaseActions) return;
+    let current = true;
+    for (const account of accounts) void inspectLease(account.id, () => current);
+    return () => { current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-inspect when the account list, runner or access changes
+  }, [leaseActions, runner.runnerId, accountKey]);
   // A sign-in for a new account has no account row yet: it shows as a row of its own until it lands.
   const newLogins = [...new Set(logins.map((login) => login.accountId))]
     .filter((accountId) => !accountIds.has(accountId))
@@ -284,6 +334,15 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       await api.startProviderLogin(runner.runnerId, { accountId: account.id });
     } catch (cause) {
       setNotice({ title: <>Couldn't Sign In to {identifier(account)}</>, body: (cause as Error).message });
+    }
+  });
+
+  const cancel = (login: ProviderLoginView) => void track(login.accountId, "cancel", async () => {
+    setNotice(null);
+    try {
+      await api.cancelProviderLogin(runner.runnerId, login.operationId);
+    } catch (cause) {
+      setNotice({ title: <>Couldn't Cancel Signing In to {identifier({ id: login.accountId, label: login.label })}</>, body: (cause as Error).message });
     }
   });
 
@@ -317,14 +376,16 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     });
   };
 
-  const runProfileAction = (account: ProviderAccountDefinition, action: "adopt" | "revoke", run: () => Promise<void>) =>
+  const runProfileAction = (account: ProviderAccountDefinition, action: "adopt" | "revoke" | "recover", run: () => Promise<void>) =>
     track(account.id, action, async () => {
       setNotice(null);
       try {
         await run();
       } catch (cause) {
         setNotice({
-          title: action === "adopt" ? <>Couldn't Adopt {identifier(account)}</> : <>Couldn't Revoke Access to {identifier(account)}</>,
+          title: action === "adopt" ? <>Couldn't Adopt {identifier(account)}</>
+            : action === "revoke" ? <>Couldn't Revoke Access to {identifier(account)}</>
+            : <>Couldn't Recover the Lease for {identifier(account)}</>,
           body: providerProfileErrorMessage(cause, action),
         });
       }
@@ -388,6 +449,30 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     });
   };
 
+  const recover = async (account: ProviderAccountDefinition, lease: ProviderHomeLeaseInspection, reopen: () => void) => {
+    const recorded = lease.createdAt ? new Date(lease.createdAt) : null;
+    const when = recorded && !Number.isNaN(recorded.getTime()) ? `Lease recorded ${recorded.toLocaleString()}` : undefined;
+    const approved = await confirm({
+      title: "Recover Lease",
+      message: "Another runner left this account's HOME leased and no longer holds it. Recovering hands the HOME back to this machine " +
+        "once it confirms that runner and every process it started have stopped, or that the machine restarted since.",
+      // The record's time is a row of its own, so neither it nor the account's label is truncated.
+      detailRows: [...accountRows(account), ...(when ? [{ label: when }] : [])],
+      confirmLabel: "Recover Lease",
+      tone: "danger",
+      back: backToMenu(reopen),
+    });
+    if (!approved || !lease.tipHash) return;
+    await runProfileAction(account, "recover", async () => {
+      try {
+        await api.recoverProviderHomeLease(runner.runnerId, account.id, lease.tipHash!);
+        showToast("Lease recovered.", { tone: "success" });
+      } finally {
+        void inspectLease(account.id);
+      }
+    });
+  };
+
   const menuItems = (account: ProviderAccountDefinition, signingIn: boolean): RowMenuItem[] => {
     if (!canManage) return [];
     const offline = online ? {} : { disabled: true, description: OFFLINE };
@@ -401,6 +486,16 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     if (profileActions && (account.profile?.access === "granted" || account.profile?.access === "pending")) {
       items.push({ label: "Revoke Access…", danger: true, onClick: (reopen) => void revoke(account, reopen) });
     }
+    const lease = leases[account.id];
+    if (leaseActions && lease?.state === "stale") {
+      const refusal = lease.refusal ? LEASE_RECOVERY_REFUSALS[lease.refusal] ?? LEASE_RECOVERY_REFUSALS.UNVERIFIABLE : undefined;
+      items.push({
+        label: "Recover Lease…",
+        danger: true,
+        ...(refusal ? { disabled: true, description: refusal } : {}),
+        onClick: (reopen) => void recover(account, lease, reopen),
+      });
+    }
     if (removalSupported) {
       items.push({
         label: "Remove Account…",
@@ -413,8 +508,19 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   };
 
   const loginFor = (accountId: string) => accountLogin(logins, accountId);
-  const loginCard = (login: ProviderLoginView | undefined) =>
-    login && <ProviderLoginCard runnerId={runner.runnerId} login={login} />;
+  // The row's expansion: the sign-in's steps, or its ending, whose Try Again starts the same sign-in.
+  const signInSteps = (login: ProviderLoginView | undefined, existing: boolean) => login && (
+    <ProviderSignIn key={login.operationId} runnerId={runner.runnerId} login={login}
+      {...(supported && canManage && online
+        ? { restart: existing ? { accountId: login.accountId } : { provider: login.provider, label: login.label } } : {})} />
+  );
+  const cancelButton = (login: ProviderLoginView) => (
+    <BusyButton className="btn sm ghost" busy={busy[login.accountId] === "cancel"} progress="Canceling the sign-in…"
+      disabled={!online || (busy[login.accountId] !== undefined && busy[login.accountId] !== "cancel")}
+      onClick={() => cancel(login)}>
+      Cancel
+    </BusyButton>
+  );
 
   if (!supported && accounts.length === 0) return null;
   const canAdd = supported && canManage;
@@ -454,17 +560,24 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
             const signingIn = login !== undefined && providerLoginRunning(login);
             const status = accountStatus(account, signingIn);
             const action = busy[account.id];
-            const showSignIn = supported && canManage && status === "sign_in_required";
+            // An ending offers Try Again itself, so Sign In waits until it is dismissed.
+            const showSignIn = supported && canManage && status === "sign_in_required" && login === undefined;
             return (
               <ProviderAccountRow
                 key={account.id}
                 identity={`${runner.runnerId}:${account.id}`}
                 label={account.label}
+                hiddenTitle={login && providerSignInHiddenTitle(login, privacy.hide)}
                 provider={account.provider}
                 profile={account.profile ? PROFILE_ACCESS[account.profile.access] : undefined}
+                lease={leaseActions && leases[account.id]?.state === "stale" ? {
+                  label: "Stale Lease",
+                  title: leases[account.id]!.refusal ? LEASE_RECOVERY_REFUSALS[leases[account.id]!.refusal!] : undefined,
+                } : undefined}
                 status={status}
                 actions={canManage && (
                   <>
+                    {signingIn && cancelButton(login)}
                     {showSignIn && (
                       <BusyButton className="btn sm" busy={action === "sign_in"} progress="Starting the sign-in…"
                         disabled={!online || (action !== undefined && action !== "sign_in")}
@@ -481,21 +594,26 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                   </>
                 )}
               >
-                {loginCard(login)}
+                {signInSteps(login, true)}
               </ProviderAccountRow>
             );
           })}
-          {newLogins.map((login) => (
-            <ProviderAccountRow
-              key={login.operationId}
-              identity={`${runner.runnerId}:${login.accountId}`}
-              label={login.label}
-              provider={login.provider}
-              status={providerLoginRunning(login) ? "signing_in" : null}
-            >
-              {loginCard(login)}
-            </ProviderAccountRow>
-          ))}
+          {newLogins.map((login) => {
+            const running = providerLoginRunning(login);
+            return (
+              <ProviderAccountRow
+                key={login.operationId}
+                identity={`${runner.runnerId}:${login.accountId}`}
+                label={login.label}
+                hiddenTitle={providerSignInHiddenTitle(login, privacy.hide)}
+                provider={login.provider}
+                status={running ? "signing_in" : providerSignInAlreadyOnMachine(login) ? "not_added" : null}
+                actions={running && canManage ? cancelButton(login) : undefined}
+              >
+                {signInSteps(login, false)}
+              </ProviderAccountRow>
+            );
+          })}
         </div>
       )}
       {adding && (

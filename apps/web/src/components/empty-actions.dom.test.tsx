@@ -7,13 +7,14 @@ import { Window } from "happy-dom";
 import type {
   AutomationSchedule, AutomationSpec, RunnerView, SessionView, UiSnapshotMessage,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
-import type { ViewNavigation } from "../navigation.js";
+import { viewPath, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { AutomationsView } from "./AutomationsView.js";
+import { AutomationEditor } from "./AutomationEditor.js";
 import { Board } from "./Board.js";
 import { BoardFilterTools } from "./BoardFilters.js";
 import { RunnersView } from "./RunnersView.js";
@@ -193,36 +194,48 @@ const automation = (id: string, name: string): AutomationSchedule => ({
   createdAt: 1, updatedAt: 1,
 } as unknown as AutomationSchedule);
 
+/** The Automations list, or the editor route its New Automation and Edit open, as App routes them. */
+function AutomationsRoute() {
+  const view = useStoreSelector((state) => state.view);
+  return view.name === "automations" && view.editor
+    ? <AutomationEditor key={viewPath(view)} route={view.editor} />
+    : <AutomationsView />;
+}
+
+const automationsNavigation: ViewNavigation = { current: () => ({ name: "automations" }), push() {}, listen: () => () => {} };
+
 test("the empty state's New Automation creates, even after an edit was cancelled", async () => {
-  // The reported sequence, exactly: edit an automation, cancel, let it be deleted, then take the
-  // empty state's way out. Cancel used to leave `editingId` set, and the empty-state action only
-  // flipped `showForm` — so the editor reopened titled "Edit Automation" over the old form, and
-  // Save sent `updateAutomation` for an ID the control plane no longer had.
+  // The reported sequence, exactly: edit an automation, leave the edit, let it be deleted, then take
+  // the empty state's way out. The editor was once a card in the list sharing its `editingId`, and
+  // the empty state reopened it as "Edit Automation" over the old form (#2967 made it a route).
   let items = [automation("automation-1", "Nightly")];
   const created: AutomationSpec[] = [];
   const updated: string[] = [];
-  const { container, unmount } = await mount({
+  const { container, socket, unmount } = await mount({
     automations: async () => ({ automations: items }),
-    automation: async () => ({ executions: [] }),
+    automation: async (id: string) => ({ automation: items.find((item) => item.automationId === id), executions: [] }),
     automationTriggers: async () => ({ triggers: [] }),
     workflowDefinitions: async () => [],
     createAutomation: async (spec: AutomationSpec) => { created.push(structuredClone(spec)); return {} as never; },
     updateAutomation: async (id: string) => { updated.push(id); return {} as never; },
     deleteAutomation: async (id: string) => { items = items.filter((item) => item.automationId !== id); return {} as never; },
-  } as unknown as Partial<ApiClient>, <AutomationsView />);
+  } as unknown as Partial<ApiClient>, <AutomationsRoute />, undefined, automationsNavigation);
+  await act(async () => { socket.push(snapshot()); });
 
   await act(async () => { await Promise.resolve(); });
   await expandAllCards(container);
   const edit = buttonLabelled(container, "Edit");
   assert.ok(edit, "the seeded automation renders with an Edit button");
   await act(async () => { fireDomEvent.click(edit!); });
-  assert.match(container.querySelector(".automation-editor h3")?.textContent ?? "", /Edit Automation/);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  assert.equal(container.querySelector(".detail-bar-title")?.textContent, "Edit Nightly");
 
-  const cancel = buttonLabelled(container, "Cancel");
-  await act(async () => { fireDomEvent.click(cancel!); });
+  await act(async () => { fireDomEvent.click(container.querySelector('button[aria-label="Back to Automations"]')!); });
+  await act(async () => { await Promise.resolve(); });
 
   // Delete it the way a user would, through the confirmation, so the refresh that empties the list
   // is the app's own rather than one the test staged.
+  await expandAllCards(container);
   const remove = buttonLabelled(container, "Delete");
   await act(async () => { fireDomEvent.click(remove!); });
   const confirmDelete = buttonLabelled(container, "Delete Automation");
@@ -238,10 +251,10 @@ test("the empty state's New Automation creates, even after an edit was cancelled
   assert.ok(wayOut, "the empty state offers a way out");
   await act(async () => { fireDomEvent.click(wayOut as never); });
 
-  const heading = container.querySelector(".automation-editor h3")?.textContent ?? "";
-  assert.match(heading, /New Automation/, `the empty state's action opened "${heading}"`);
+  const heading = container.querySelector(".detail-bar-title")?.textContent ?? "";
+  assert.equal(heading, "New Automation", `the empty state's action opened "${heading}"`);
 
-  const save = buttonLabelled(container, "Save Automation");
+  const save = buttonLabelled(container, "Create Automation");
   await act(async () => { fireDomEvent.click(save!); });
   await act(async () => { await Promise.resolve(); });
 
@@ -250,31 +263,27 @@ test("the empty state's New Automation creates, even after an edit was cancelled
   await unmount();
 });
 
-test("deleting the automation being edited closes the editor", async () => {
-  // The other route to the same corrupt state, without a Cancel in it: leave the editor open and
-  // delete what it points at. Save would then send `updateAutomation` for an ID that is gone.
-  let items = [automation("automation-1", "Nightly")];
+test("an edit route for a deleted automation offers nothing to save", async () => {
+  // The other route to the same corrupt state: an editor pointed at an automation that is gone.
+  // The editor loads what it edits, so a deleted automation is Not Found, with no form to save.
   const updated: string[] = [];
-  const { container, unmount } = await mount({
-    automations: async () => ({ automations: items }),
-    automation: async () => ({ executions: [] }),
+  const { container, socket, unmount } = await mount({
+    automations: async () => ({ automations: [] }),
+    automation: async () => { throw new ApiError("automation not found", 404); },
     automationTriggers: async () => ({ triggers: [] }),
     workflowDefinitions: async () => [],
     updateAutomation: async (id: string) => { updated.push(id); return {} as never; },
-    deleteAutomation: async (id: string) => { items = items.filter((item) => item.automationId !== id); return {} as never; },
-  } as unknown as Partial<ApiClient>, <AutomationsView />);
-
-  await act(async () => { await Promise.resolve(); });
-  await expandAllCards(container);
-  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Edit")!); });
-  assert.ok(container.querySelector(".automation-editor"), "the editor is open on the automation");
-
-  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete")!); });
-  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
+  } as unknown as Partial<ApiClient>, <AutomationsRoute />, undefined, {
+    ...automationsNavigation,
+    current: () => ({ name: "automations", editor: { kind: "edit", automationId: "automation-1" } }),
+  });
+  await act(async () => { socket.push(snapshot()); });
   await act(async () => { await Promise.resolve(); });
 
-  assertNoDomNode(container.querySelector(".automation-editor"),
+  assert.equal(container.querySelector(".state-title")?.textContent, "Automation Not Found");
+  assertNoDomNode(container.querySelector(".automation-editor-form"),
     "an editor pointed at a deleted automation has nothing left to save");
+  assert.equal(buttonLabelled(container, "Save Changes"), undefined);
   assert.deepEqual(updated, []);
   await unmount();
 });
@@ -355,9 +364,10 @@ test("a genuinely empty board still offers to create", async () => {
   await unmount();
 });
 
-test("serialized polling preserves an editor for a newly discovered automation", async () => {
-  // Serialization prevents a slow older list from landing after a newer one and discarding an
-  // unsaved editor. Exercise the real interval callbacks without requiring overlapping reads.
+test("serialized polling lists a newly discovered automation that Edit can then open", async () => {
+  // Serialization prevents a slow older list from landing after a newer one. Exercise the real
+  // interval callbacks without requiring overlapping reads. The editor is its own route (#2967), so
+  // polling the list can no longer discard an unsaved draft; Edit opens the newer automation's.
   const held: Array<() => void> = [];
   const polls = new Map<number, () => void>();
   let nextTimerId = 1;
@@ -367,7 +377,7 @@ test("serialized polling preserves an editor for a newly discovered automation",
     setInterval: (poll: () => void) => { const id = nextTimerId++; polls.set(id, poll); return id; },
     clearInterval: (id: number) => { polls.delete(id); },
   }, async () => {
-    const { container, unmount } = await mount({
+    const { container, socket, unmount } = await mount({
       automations: async () => {
         calls += 1;
         const snapshot = items;
@@ -375,11 +385,12 @@ test("serialized polling preserves an editor for a newly discovered automation",
         if (calls === 1) await new Promise<void>((resolve) => held.push(resolve));
         return { automations: snapshot };
       },
-      automation: async () => ({ executions: [] }),
+      automation: async (id: string) => ({ automation: items.find((item) => item.automationId === id), executions: [] }),
       automationTriggers: async () => ({ triggers: [] }),
       workflowDefinitions: async () => [],
       outboundEventSubscriptions: async () => [],
-    } as unknown as Partial<ApiClient>, <AutomationsView />);
+    } as unknown as Partial<ApiClient>, <AutomationsRoute />, undefined, automationsNavigation);
+    await act(async () => { socket.push(snapshot()); });
     try {
       items = [automation("automation-1", "Nightly"), automation("automation-2", "Weekly")];
       await act(async () => { for (const poll of polls.values()) poll(); });
@@ -394,12 +405,10 @@ test("serialized polling preserves an editor for a newly discovered automation",
       const edits = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Edit");
       assert.equal(edits.length, 2, "both automations render after the serialized fresh read");
       await act(async () => { fireDomEvent.click(edits[1]!); });
-      assert.ok(container.querySelector(".automation-editor"), "the newer automation is open for editing");
-
-      await act(async () => { for (const poll of polls.values()) poll(); });
-      assert.equal(calls, 3);
-      assert.ok(container.querySelector(".automation-editor"),
-        "subsequent polling preserves the newly discovered automation's unsaved editor");
+      await act(async () => { await Promise.resolve(); });
+      assert.equal(container.querySelector(".detail-bar-title")?.textContent, "Edit Weekly",
+        "the newer automation is open for editing");
+      assert.equal(polls.size, 0, "the list stops polling while the editor has the page");
     } finally {
       for (const release of held) release();
       await unmount();

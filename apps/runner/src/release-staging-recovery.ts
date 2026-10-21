@@ -5,7 +5,8 @@
  * a private preservation directory beside the data, which empties the staging parent so the next
  * update is admitted. Authority comes from all of these together, never from any one alone:
  * an explicit operator token bound to the exact inspected identities and contents, a valid owner
- * record whose pinned identities still match, an inventory of only recognized attempt objects,
+ * record whose pinned identities still match (or a strictly inventoried legacy release directory),
+ * an inventory of only recognized attempt objects,
  * and inactivity evidence from `/proc`: the recorded updater process (PID, start time, boot ID)
  * is gone and no inspectable process holds the staging directories open. Same-user processes
  * whose descriptors cannot be read (non-dumpable agents, other namespaces) are tolerated only
@@ -38,7 +39,7 @@ export interface StagingProcesses {
   list(): number[];
   /** Real, effective, saved and filesystem UIDs, or null when the process has exited. */
   uids(pid: number): number[] | null;
-  /** cwd, root and every descriptor target, or null when the process has exited. Throws when unreadable. */
+  /** cwd, root, executable and every descriptor target, or null when the process has exited. Throws when unreadable. */
   links(pid: number): string[] | null;
   /** Start time and boot ID of a running process, or null when it is not running. */
   identity(pid: number): ProcessIdentity | null;
@@ -66,7 +67,7 @@ export function procProcesses(root = "/proc"): StagingProcesses {
       const base = join(root, String(pid));
       const links: string[] = [];
       try {
-        for (const name of ["cwd", "root"]) {
+        for (const name of ["cwd", "root", "exe"]) {
           try { links.push(readlinkSync(join(base, name))); }
           catch (error) { if (!gone(error)) throw error; }
         }
@@ -104,7 +105,7 @@ export interface Holders {
 }
 
 /**
- * Find processes whose cwd, root or descriptors are inside `target`. A live updater pins the
+ * Find processes whose cwd, root, executable or descriptors are inside `target`. A live updater pins the
  * staging parent and slot for its whole attempt, so a holder means the attempt may be active.
  * Only processes running as `uid` can open the private slot (all processes when root).
  */
@@ -171,9 +172,11 @@ export interface StagingInspection {
    */
   recovery: { eligible: boolean; reasons: string[]; token: string | null; acknowledgement: string | null; destination: string };
   preserved: PreservedAttempt[];
+  /** Release-tag candidates; names alone confer no authority. */
+  legacy: Array<{ tag: string; path: string; entries: StagingEntry[] | null; recovery: StagingInspection["recovery"]; holders: Holders }>;
 }
 
-/** Bounded, no-follow inventory; `truncated` when more names exist than the bound. */
+/** No-follow inventory; `truncated` beyond the bound, or complete when the bound is Infinity. */
 function list(path: string, fs: StagingFilesystem, bound: number): { observed: Observed[]; truncated: boolean } {
   const observed: Observed[] = [];
   const dir = fs.directory(path);
@@ -266,10 +269,11 @@ function listPreserved(dataDir: string, uid: bigint, fs: StagingFilesystem): Pre
   return observed.filter(({ stat }) => stat.isDirectory() && !stat.isSymbolicLink()).map(({ entry }) => {
     const path = join(root, entry.name);
     let moved = false;
-    try { moved = fs.lstat(join(path, STAGING_SLOT)).isDirectory(); } catch { /* not moved */ }
     try {
-      const bytes = readPrivateRecord(join(path, RECOVERY_RECORD), uid, MAX_OWNER_BYTES, fs);
-      const record = bytes ? JSON.parse(bytes.toString("utf8")) as { state?: string; tag?: string } : null;
+      const bytes = readPrivateRecord(join(path, RECOVERY_RECORD), uid, 4 * 1024 * 1024, fs);
+      const record = bytes ? JSON.parse(bytes.toString("utf8")) as { state?: string; tag?: string; sourceKind?: string; sourceName?: string } : null;
+      const sourceName = record?.sourceKind === "legacy" && TAG_RE.test(record.sourceName ?? "") ? record!.sourceName! : STAGING_SLOT;
+      try { const stat = fs.lstat(join(path, sourceName)); moved = stat.isDirectory() && !stat.isSymbolicLink(); } catch { /* not moved */ }
       if (record?.state === "preserved" && moved) return { name: entry.name, path, state: "preserved" as const, detail: `${record.tag ?? "unknown release"} attempt preserved` };
       return { name: entry.name, path, state: "incomplete" as const, detail: moved ? "the attempt was moved here, but recovery stopped before its record was finalized" : "recovery stopped before moving the attempt; the staging slot was not changed by it" };
     } catch (error) {
@@ -286,19 +290,19 @@ interface Evidence {
 }
 
 /** Any unexpected I/O error makes the inspection unavailable rather than escaping the caller. */
-function examine(dataDir: string, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions): Evidence {
+function examine(dataDir: string, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions, legacyTag?: string): Evidence {
   const parent = join(dataDir, STAGING_PARENT);
   const inspection: StagingInspection = {
-    mode: context.mode, dataDir, parent, slot: join(parent, STAGING_SLOT), state: "clear", problem: null, parentEntries: [], slotEntries: null,
+    mode: context.mode, dataDir, parent, slot: join(parent, legacyTag ?? STAGING_SLOT), state: "clear", problem: null, parentEntries: [], slotEntries: null,
     owner: { state: "absent", reason: "no attempt slot", nonce: null, tag: null, assets: [] },
     journal: describeJournal(readJournal(dataDir, null, fs)),
     holders: { state: "none", pids: [], uninspectable: [], reason: null },
     recovery: { eligible: false, reasons: [], token: null, acknowledgement: null, destination: join(dataDir, RECOVERY_DIR) },
-    preserved: [],
+    preserved: [], legacy: [],
   };
   const evidence: Evidence = { inspection, parentStat: null, slotStat: null, uid: null };
   try {
-    return gather(evidence, context, fs, procs, options);
+    return gather(evidence, context, fs, procs, options, legacyTag);
   } catch (error) {
     inspection.state = "unavailable";
     inspection.problem = redactDetail((error as Error).message);
@@ -307,7 +311,7 @@ function examine(dataDir: string, context: StagingContext, fs: StagingFilesystem
   }
 }
 
-function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions): Evidence {
+function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions, legacyTag?: string): Evidence {
   const { inspection } = evidence;
   const { dataDir, parent, slot } = inspection;
   const refuse = (reason: string) => { inspection.recovery.reasons.push(reason); };
@@ -339,14 +343,20 @@ function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesyst
     return evidence;
   }
   evidence.parentStat = parentStat;
-  const parentList = list(parent, fs, MAX_ENTRIES);
+  // Legacy releases each have their own parent entry. The single-slot content bound
+  // must not hide candidates when many interrupted releases have accumulated.
+  const parentList = list(parent, fs, Infinity);
   inspection.parentEntries = parentList.observed.map(({ entry }) => ({ name: entry.name, kind: entry.kind }));
   if (parentList.observed.length === 0) { refuse("staging is clear; there is nothing to recover"); return evidence; }
   inspection.state = "blocked";
   const foreign = parentList.observed.filter(({ entry }) => entry.name !== STAGING_SLOT).map(({ entry }) => entry.name);
-  if (foreign.length || parentList.truncated) refuse(`${parent} holds entries other than the attempt slot (${foreign.join(", ")}${parentList.truncated ? ", and more" : ""}); unknown entries are protected and would still block updates`);
+  if (!legacyTag && (foreign.length || parentList.truncated)) refuse(`${parent} holds entries other than the attempt slot (${foreign.join(", ")}${parentList.truncated ? ", and more" : ""}); current-slot recovery is unavailable until those entries are preserved or reviewed; unknown entries remain protected`);
   inspection.holders = findHolders(parent, uid, procs);
   if (inspection.holders.reason) refuse(inspection.holders.reason);
+  if (legacyTag) {
+    gatherLegacy(evidence, legacyTag, root, fs, options);
+    return evidence;
+  }
   const slotObserved = parentList.observed.find(({ entry }) => entry.name === STAGING_SLOT);
   if (!slotObserved) return evidence;
   const slotStat = slotObserved.stat;
@@ -412,6 +422,77 @@ function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesyst
   return evidence;
 }
 
+/** Legacy downloads had no owner record: prove a bounded, link-free inventory instead. */
+function gatherLegacy(evidence: Evidence, tag: string, root: BigIntStats, fs: StagingFilesystem, options: RecoveryOptions): void {
+  const { inspection, uid, parentStat } = evidence;
+  const { slot, recovery } = inspection;
+  const refuse = (reason: string) => { recovery.reasons.push(reason); };
+  if (!TAG_RE.test(tag)) { refuse("the parent entry is not a release tag"); return; }
+  inspection.owner.tag = tag;
+  inspection.owner.reason = "legacy staging records no owner or updater identity; installation outcome is unknown";
+  const stat = fs.lstat(slot);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o7777n) !== 0o700n || stat.dev !== parentStat!.dev || !isLocalStagingFilesystem(fs, slot)) {
+    refuse(`${slot} is not a real private local directory owned by the updater; it is protected`);
+    return;
+  }
+  evidence.slotStat = stat;
+  const observed: Observed[] = [];
+  inspection.slotEntries = [];
+  const stamp = (value: BigIntStats) => [String(value.dev), String(value.ino), String(value.uid), String(value.mode), String(value.size), String(value.nlink), String(value.mtimeNs), String(value.ctimeNs)];
+  const executable = /^wollipog-(?:runner|control-plane)-(?:aarch64|x86_64)-unknown-linux-gnu$/u;
+  const visit = (path: string, relative: string, expected: BigIntStats, depth: number): void => {
+    if (depth > 32) throw new Error("legacy web inventory exceeds 32 directory levels");
+    const fd = fs.open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+      if (JSON.stringify(stamp(fs.fstat(fd))) !== JSON.stringify(stamp(expected))) throw new Error("legacy directory changed while it was opened");
+      const base = `/proc/self/fd/${fd}`;
+      const children = list(base, fs, 4096 - observed.length);
+      if (children.truncated) throw new Error("legacy inventory exceeds 4096 entries");
+      for (const child of children.observed) {
+        if (observed.length === 4096) throw new Error("legacy inventory exceeds 4096 entries");
+        const name = relative ? `${relative}/${child.entry.name}` : child.entry.name;
+        const item = { ...child, entry: { ...child.entry, name } };
+        observed.push(item);
+        inspection.slotEntries!.push(item.entry);
+        try {
+          const current = child.stat;
+          const mode = current.mode & 0o7777n;
+          if (current.uid !== uid || current.dev !== stat.dev) throw new Error(`${name} has unexpected ownership or filesystem`);
+          if (current.isSymbolicLink()) throw new Error(`${name} is a symlink`);
+          if (current.isDirectory()) {
+            if ((!relative && name !== "web") || (mode !== 0o700n && mode !== 0o755n)) throw new Error(`${name} is not a recognized web directory`);
+            visit(join(base, child.entry.name), name, current, depth + 1);
+          } else {
+            const selected = executable.test(name);
+            if (!relative && name !== "SHA256SUMS" && name !== "wollipog-web.tar.gz" && !selected) throw new Error(`${name} is not a legacy updater filename`);
+            if (!current.isFile() || current.nlink !== 1n) throw new Error(`${name} is not a single-link regular file`);
+            if (relative ? mode !== 0o600n && mode !== 0o644n && mode !== 0o755n : mode !== 0o600n && !(selected && mode === 0o755n)) throw new Error(`${name} has unexpected permissions ${octal(current.mode)}`);
+          }
+          if (JSON.stringify(stamp(fs.lstat(join(base, child.entry.name)))) !== JSON.stringify(stamp(current))) throw new Error(`${name} changed during inventory`);
+        } catch (error) { refuse(`${redactDetail((error as Error).message)}; unproven objects are protected`); }
+      }
+      if (JSON.stringify(stamp(fs.fstat(fd))) !== JSON.stringify(stamp(expected)) || !sameIdentity(expected, fs.lstat(path))) throw new Error("legacy directory changed during inventory");
+    } finally { fs.close(fd); }
+  };
+  try { visit(slot, "", stat, 0); }
+  catch (error) { refuse(`${redactDetail((error as Error).message)}; unproven objects are protected`); }
+  const destination = recovery.destination;
+  try {
+    const target = fs.lstat(destination);
+    if (!target.isDirectory() || target.isSymbolicLink() || target.uid !== uid || (target.mode & 0o7777n) !== 0o700n || target.dev !== parentStat!.dev) refuse(`${destination} is not a private directory on the staging filesystem`);
+  } catch (error) { if (!gone(error)) refuse(`${destination} cannot be inspected`); }
+  if (Buffer.byteLength(JSON.stringify(inspection.slotEntries)) > 2 * 1024 * 1024) refuse("legacy inventory exceeds 2 MiB of metadata");
+  if (recovery.reasons.length) return;
+  observed.sort((a, b) => a.entry.name < b.entry.name ? -1 : 1);
+  recovery.token = `sl1-${createHash("sha256").update(JSON.stringify({ slot, root: identityOf(root), parent: identityOf(parentStat!), directory: stamp(stat), entries: observed.map(({ entry, stat }) => [entry.name, ...stamp(stat)]) })).digest("hex").slice(0, 32)}`;
+  const unreadable = inspection.holders.uninspectable;
+  recovery.acknowledgement = unreadable.length
+    ? `${unreadable.length} process(es) could not be inspected (${describeProcesses(unreadable)}); legacy staging records no updater identity, so confirm that none is updating this layout`
+    : null;
+  if (recovery.acknowledgement && !options.acceptUninspectable) refuse(`${recovery.acknowledgement}; pass --accept-uninspectable-processes only after checking`);
+  recovery.eligible = recovery.reasons.length === 0;
+}
+
 export interface RecoveryOptions {
   /** Operator attests that same-user processes that cannot be inspected are not updating this layout. */
   acceptUninspectable?: boolean;
@@ -419,7 +500,12 @@ export interface RecoveryOptions {
 
 /** Read-only: lists directories and reads small records, never creates, moves or deletes. */
 export function inspectStaging(dataDir: string, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions = {}): StagingInspection {
-  return examine(dataDir, context, fs, procs, options).inspection;
+  const inspection = examine(dataDir, context, fs, procs, options).inspection;
+  inspection.legacy = inspection.parentEntries.filter(({ name }) => TAG_RE.test(name)).map(({ name }) => {
+    const legacy = examine(dataDir, context, fs, procs, options, name).inspection;
+    return { tag: name, path: legacy.slot, entries: legacy.slotEntries, recovery: legacy.recovery, holders: legacy.holders };
+  });
+  return inspection;
 }
 
 export class RecoveryRefusedError extends Error {
@@ -430,7 +516,8 @@ export interface RecoveryResult {
   preservedPath: string;
   container: string;
   tag: string;
-  nonce: string;
+  /** Legacy directories have no recorded attempt nonce. */
+  nonce: string | null;
   /** True when the staging parent was empty after the move, so the next update is admitted. */
   admissible: boolean;
   warnings: string[];
@@ -449,9 +536,14 @@ export function recoverStaging(
   dataDir: string, context: StagingContext, token: string, fs: StagingFilesystem, procs: StagingProcesses, now: () => string,
   options: RecoveryOptions = {},
 ): RecoveryResult {
-  if (!/^sa1-[0-9a-f]{32}$/u.test(token)) throw new RecoveryRefusedError("the attempt token is malformed; copy it from `wollipog service staging inspect`", null);
+  if (!/^(?:sa1|sl1)-[0-9a-f]{32}$/u.test(token)) throw new RecoveryRefusedError("the attempt token is malformed; copy it from `wollipog service staging inspect`", null);
   const parent = join(dataDir, STAGING_PARENT);
-  const slot = join(parent, STAGING_SLOT);
+  const legacy = token.startsWith("sl1-")
+    ? inspectStaging(dataDir, context, fs, procs, options).legacy.find((entry) => entry.recovery.token === token)
+    : undefined;
+  if (token.startsWith("sl1-") && !legacy) throw new RecoveryRefusedError("recovery refused: the token does not match a current legacy directory; inspect again", null);
+  const sourceName = legacy?.tag ?? STAGING_SLOT;
+  const slot = join(parent, sourceName);
   // Every mutation below is addressed through a pinned directory descriptor, so replacing a path
   // (for example by a service account that owns the data directory) cannot redirect it.
   const pins: number[] = [];
@@ -476,7 +568,7 @@ export function recoverStaging(
       const inspection = inspectStaging(dataDir, context, fs, procs, options);
       throw new RecoveryRefusedError(`the staging slot cannot be opened (${redactDetail((error as Error).message)}); inspect again`, inspection);
     }
-    const first = examine(dataDir, context, fs, procs, options);
+    const first = examine(dataDir, context, fs, procs, options, legacy?.tag);
     const inspection = first.inspection;
     if (!inspection.recovery.eligible) throw new RecoveryRefusedError(`recovery refused: ${inspection.recovery.reasons.join("; ")}`, inspection);
     if (inspection.recovery.token !== token) {
@@ -490,7 +582,8 @@ export function recoverStaging(
     try { destinationDir = pinPrivate(destination, uid, true); }
     catch (error) { throw new RecoveryRefusedError(`recovery refused: ${redactDetail((error as Error).message)}`, inspection); }
     if (destinationDir.dev !== first.parentStat!.dev) throw new RecoveryRefusedError(`recovery refused: ${destination} is not on the staging filesystem`, inspection);
-    const name = `${compactTime(at)}-${inspection.owner.nonce!.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
+    const preservationNonce = inspection.owner.nonce ?? randomUUID();
+    const name = `${compactTime(at)}-${preservationNonce.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
     const container = join(destination, name);
     fs.mkdir(join(destinationDir.base, name), { mode: 0o700 });
     let containerDir: PinnedDirectory;
@@ -498,15 +591,15 @@ export function recoverStaging(
     catch (error) { throw new RecoveryRefusedError(`recovery refused: ${container} was not created as a private directory (${redactDetail((error as Error).message)})`, inspection); }
     const parentBase = `/proc/self/fd/${pinnedParent.fd}`;
     const record = {
-      schema: 1, state: "moving", token, requestedAt: at, source: slot, mode: context.mode,
+      schema: 1, state: "moving", sourceKind: legacy ? "legacy" : "slot", sourceName, token, requestedAt: at, source: slot, mode: context.mode,
       acknowledged: inspection.recovery.acknowledgement,
-      tag: inspection.owner.tag, nonce: inspection.owner.nonce, entries: inspection.slotEntries,
+      tag: inspection.owner.tag, nonce: inspection.owner.nonce, sourceIdentity: identityOf(pinnedSlot), entries: inspection.slotEntries,
       phase: { outcome: inspection.journal.outcome, conclusion: inspection.journal.conclusion, events: inspection.journal.events },
     };
     writePrivateRecord(containerDir, RECOVERY_RECORD, Buffer.from(`${JSON.stringify(record)}\n`), fs);
     // Revalidate immediately before the move: same pinned slot, same evidence, still no holder.
-    const second = examine(dataDir, context, fs, procs, options).inspection;
-    const source = join(parentBase, STAGING_SLOT);
+    const second = examine(dataDir, context, fs, procs, options, legacy?.tag).inspection;
+    const source = join(parentBase, sourceName);
     // The descriptors decide where bytes go; the reported paths must still name those directories.
     const named = (path: string, dir: PinnedDirectory) => {
       try { const stat = fs.lstat(path); return !stat.isSymbolicLink() && stat.dev === dir.dev && stat.ino === dir.ino; }
@@ -518,9 +611,9 @@ export function recoverStaging(
     if (!named(destination, destinationDir) || !named(container, containerDir)) {
       throw new RecoveryRefusedError(`recovery refused: ${destination} or ${container} was moved or replaced while recovery was preparing; nothing was moved`, second);
     }
-    let preservedPath = join(container, STAGING_SLOT);
+    let preservedPath = join(container, sourceName);
     let preservedContainer = container;
-    const target = join(containerDir.base, STAGING_SLOT);
+    const target = join(containerDir.base, sourceName);
     fs.rename(source, target);
     if (!sameIdentity(fs.lstat(target), pinnedSlot)) {
       let restored = false;
@@ -532,7 +625,7 @@ export function recoverStaging(
       // Renamed in the instant after the check: report where the pinned directory actually is.
       let actual: string | null = null;
       try { actual = readlinkSync(containerDir.base); } catch { /* unknown */ }
-      if (actual) { preservedContainer = actual; preservedPath = join(actual, STAGING_SLOT); }
+      if (actual) { preservedContainer = actual; preservedPath = join(actual, sourceName); }
       warnings.push(`the preservation directory was moved during recovery; the attempt is now at ${actual ? preservedPath : "an unknown path (inspect the data directory)"}`);
     }
     for (const [path, fd] of [[parent, pinnedParent.fd], [container, containerDir.fd], [destination, destinationDir.fd]] as const) {
@@ -544,11 +637,11 @@ export function recoverStaging(
     } catch (error) {
       warnings.push(`the attempt was preserved, but its recovery record could not be finalized: ${redactDetail((error as Error).message)}`);
     }
-    const journalProblem = appendJournalEvent(dataDir, inspection.owner.nonce!, { phase: "recovered", at: now(), detail: `preserved at ${preservedPath}` }, fs);
+    const journalProblem = legacy ? null : appendJournalEvent(dataDir, inspection.owner.nonce!, { phase: "recovered", at: now(), detail: `preserved at ${preservedPath}` }, fs);
     if (journalProblem && inspection.journal.evidence === "recorded") warnings.push(`the phase journal was not updated: ${journalProblem}`);
     let admissible = false;
     try { admissible = list(parent, fs, 1).observed.length === 0; } catch { /* reported as not admissible */ }
-    return { preservedPath, container: preservedContainer, tag: inspection.owner.tag!, nonce: inspection.owner.nonce!, admissible, warnings };
+    return { preservedPath, container: preservedContainer, tag: inspection.owner.tag!, nonce: inspection.owner.nonce, admissible, warnings };
   } finally {
     for (const fd of pins) { try { fs.close(fd); } catch { /* descriptor authority is retired either way */ } }
   }

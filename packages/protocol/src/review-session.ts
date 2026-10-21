@@ -90,6 +90,16 @@ export interface ReviewSessionView {
 
 export interface ReviewSessionsPage { reviews: ReviewSessionView[]; nextAfterReviewSessionId: string | null }
 
+/** #3369: on a requester's own view, what its review sessions add up to, so a client reads them only
+ * when there are any and again whenever one changes. Omitted for a session that requested none. */
+export interface ReviewRunsSummary {
+  count: number;
+  /** Requested or running. */
+  active: number;
+  /** The newest change to any of them. */
+  updatedAt: number;
+}
+
 /** Where an attempt sits in its review run, as the runner planned it. */
 export interface ReviewAttemptRound {
   epoch: number;
@@ -147,6 +157,8 @@ const REVIEW_SESSION_REASONS = new Set([
   "the requested head is not the pull request's pushed head",
   "the review snapshot could not be prepared",
   "the runner cannot launch this reviewer",
+  "the reviewer command is not trusted: install it where sessions cannot write, outside provider homes and caches",
+  "the runner is missing a trusted git or gh for reviews",
   "the review session could not be launched",
   "the review was cancelled",
   "the review ended without a result",

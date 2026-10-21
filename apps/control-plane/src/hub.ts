@@ -386,7 +386,9 @@ export type RunnerRequestResult =
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
   | import("@wollipog/protocol").AdoptProviderProfileResultMessage
-  | import("@wollipog/protocol").RevokeProviderProfileGrantResultMessage;
+  | import("@wollipog/protocol").RevokeProviderProfileGrantResultMessage
+  | import("@wollipog/protocol").InspectProviderHomeLeaseResultMessage
+  | import("@wollipog/protocol").RecoverProviderHomeLeaseResultMessage;
 
 interface PendingRequest {
   runnerId: string;

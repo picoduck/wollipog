@@ -145,6 +145,41 @@ The scan shares the ledger's known limit: a descendant that scrubs its environme
 non-dumpable process launched after the recorded runner started and that this runner did not launch,
 cannot be told apart, and the second blocks recovery. A reboot always proves abandonment.
 
+### Owner/Admin Recovery Authorization
+
+A lease the rules above cannot recover automatically (one without evidence, from an older runner or
+macOS, or one on a HOME without a profile grant for this control plane) can be recovered on an Owner
+or Admin's one-time authorization (#3241 part 2, protocol v229):
+
+1. `lease_inspect` reads the journal without creating anything and reports the state (`none`,
+   `released`, `held`, `stale` or `unverifiable`). For a stale record it reports the exact hash a
+   successor would link to, the record's `createdAt`, whether it is on this host and carries
+   evidence, and why an authorized recovery would be refused now (or `null`).
+2. The control plane records the authorization (`provider_home_lease_recoveries`: who, with which
+   role, and the exact stale record hash) and sends its id with that hash.
+3. `lease_recover` succeeds exactly that record and releases the HOME again before replying, so
+   later launches acquire it through the ordinary handoff. Its successor carries the note
+   `{ proof: "authorized", authorizationId, basis, profileId? }`.
+
+The authorization replaces only the profile grant requirement, never the proof:
+
+- The record must still be this host's (`foreign_host` otherwise).
+- A HOME whose marker exists must still grant this control plane.
+- A record with evidence still needs that evidence (`basis` is `reboot` or `process_scan`); a later
+  boot time never overrides surviving evidence.
+- A record without evidence (including a v1 lease, of any owner, including this one) needs the
+  current boot to have started at least a minute after its `createdAt` (`basis: "booted_after"`);
+  otherwise `no_reboot_proof`. The record's PID is not consulted, since a later boot may reuse it.
+  Linux reads the boot time from `/proc/stat`, macOS from `kern.boottime`. The runner offers no
+  recovery for a Windows or non-POSIX HOME.
+- Any other tip (released, replaced, missing, held by this runner, or a partial in-lock journal) is
+  `stale_tip_changed`, and nothing is created or published. The exclusive successor name makes each
+  authorization usable once.
+
+Readers accept an `authorized` note only on an active successor on the same host, with a basis that
+matches whether its predecessor carried evidence. Part 1 readers refuse the note's shape and fail
+closed.
+
 ### Provider Profile Identity
 
 A provider HOME can carry a stable host-local profile identity (#3239) in

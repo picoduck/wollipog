@@ -20,6 +20,8 @@ import {
 } from "../interactions.js";
 import { MOBILE_BREAKPOINT_PX } from "../useIsMobile.js";
 import { FieldError } from "../FieldError.js";
+import { StatusBadge } from "../StatusBadge.js";
+import type { StatusMeta } from "../../status-meta.js";
 
 /** An option's label and the second lines under it: its description and, when unavailable, why. */
 interface ListboxOptionText {
@@ -501,6 +503,12 @@ export interface ChoiceRowOption<T extends string> {
   /** `data-*` attributes for the row's input, for a caller that finds its controls again (the
    * question card restores focus to the same choice when it moves, #2196). */
   inputData?: Readonly<Record<`data-${string}`, string>>;
+  /**
+   * The id of a sentence the caller renders outside the group that is about this option alone,
+   * joined to its input's description: the Automation editor's note under its action choices that
+   * Run a Workflow is kept while its experiment is off (#2967).
+   */
+  describedBy?: string;
 }
 
 /**
@@ -541,6 +549,7 @@ export function ChoiceRow({
   error,
   action,
   inputData,
+  describedBy: externalDescribedBy,
   compact,
   show,
 }: Omit<ChoiceRowOption<string>, "value"> & {
@@ -579,6 +588,7 @@ export function ChoiceRow({
   const describedBy = error ? errorId : [
     description ? descriptionId : null,
     showReason ? reasonId : null,
+    externalDescribedBy ?? null,
   ].filter(Boolean).join(" ") || undefined;
   const select = () => { if (!disabled) onSelect(); };
   const mark = (
@@ -732,6 +742,7 @@ export function ChoiceRows<T extends string>({
           error={option.error}
           action={option.action}
           inputData={option.inputData}
+          describedBy={option.describedBy}
           show={show && { current: show.value === option.value, onShow: () => show.onShow(option.value), controls: show.controls }}
         />
       ))}
@@ -1508,6 +1519,12 @@ export interface SelectOption<T extends string> {
   disabled?: boolean;
   /** Rendered in the option, not a tooltip — §11.3: never hide a setting that could exist. */
   disabledReason?: string;
+  /**
+   * One status badge after the label, in the list and in the trigger once chosen: an Offline
+   * machine (#2967). Its words join the option's name, as a choice row's status does, so a
+   * screen-reader user hears "Studio Mac, Offline" where a sighted one sees the badge.
+   */
+  status?: StatusMeta;
 }
 
 /** Split a list into runs of consecutive options that share a `group`, keeping each option's index
@@ -2089,6 +2106,7 @@ export function Select<T extends string>({
       description: option.description,
       reason: option.disabled ? option.disabledReason : undefined,
     });
+    const statusId = `${id}-status`;
     const button = (
       <button
         key={option.value}
@@ -2097,7 +2115,7 @@ export function Select<T extends string>({
         role="option"
         aria-selected={option.value === value}
         aria-disabled={option.disabled || undefined}
-        aria-labelledby={text.labelledBy}
+        aria-labelledby={option.status ? `${text.labelledBy} ${statusId}` : text.labelledBy}
         aria-describedby={text.describedBy}
         tabIndex={-1}
         className={`ui-select-option${option.value === value ? " is-selected" : ""}`
@@ -2107,6 +2125,9 @@ export function Select<T extends string>({
       >
         {option.swatch}
         {text.body}
+        {option.status && (
+          <span className="ui-select-option-status" id={statusId}><StatusBadge inline meta={option.status} /></span>
+        )}
         {option.value === value && <CheckIcon size={14} />}
       </button>
     );
@@ -2201,7 +2222,8 @@ export function Select<T extends string>({
         // The trigger's accessible name is the LABEL AND THE VALUE. `aria-label` alone replaced the
         // content, so the chosen option was never announced — the control read as "Project" whether
         // it said Alpha or nothing at all.
-        aria-label={`${label}: ${selected?.selectedLabel ?? selected?.label ?? placeholder}`}
+        aria-label={`${label}: ${selected?.selectedLabel ?? selected?.label ?? placeholder}${
+          selected?.status ? `, ${selected.status.label}` : ""}`}
         aria-describedby={describedBy}
         aria-disabled={disabled || undefined}
         aria-invalid={invalid || undefined}
@@ -2222,6 +2244,7 @@ export function Select<T extends string>({
         <span className={`ui-select-value${selected ? "" : " is-placeholder"}`}>
           {selected?.selectedLabel ?? selected?.label ?? placeholder}
         </span>
+        {selected?.status && <StatusBadge inline meta={selected.status} className="ui-select-status" />}
         <ChevronDownIcon size={14} className="ui-select-caret" />
       </button>
       {open && !searchable && (

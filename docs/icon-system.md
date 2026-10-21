@@ -47,7 +47,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210), and the Sessions No Snoozed Sessions and No Active Sessions states (#2220). |
 | `DismissReminderIcon` | Lucide | `AlarmClockOff` | Dismiss Reminder in the Sessions context menu (#2214). |
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
-| `RunsIcon` | Lucide | `Workflow` | Generic workflow runs. |
+| `RunsIcon` | Lucide | `Workflow` | Generic workflow runs, and a workflow run's row in Multi-Agent Runs (#2974). |
+| `CompareIcon` | Lucide | `Columns2` | A comparison run's row in Multi-Agent Runs: several agents side by side on one task (#2974). `Columns3` is the Board. |
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |

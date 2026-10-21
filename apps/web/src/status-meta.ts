@@ -230,6 +230,19 @@ const VOCABULARY = {
     failing: danger("Checks Failing"),
     pending: info("Checks Running", { pulse: true }),
   },
+  /** A cross-model review in Review's Cross-Model Reviews (#3369): where it is, then its verdict once
+   * it ends. Only a valid report votes; Stale is a separate fact, not one of these. */
+  reviewRun: {
+    requested: neutral("Requested"),
+    running: info("Reviewing", { pulse: true }),
+    upvote: success("Upvote"),
+    downvote: warning("Downvote"),
+    /** Completed on a runner that does not check reports against the review contract. */
+    unvalidated: neutral("Not Validated"),
+    invalid: danger("Invalid"),
+    failed: danger("Failed"),
+    canceled: neutral("Canceled"),
+  },
   /** A background result's push notification receipt. */
   notification: {
     pending: neutral("Push Pending"),
@@ -281,6 +294,14 @@ const VOCABULARY = {
     failed: danger("Failed"),
     stopped: neutral("Stopped"),
   },
+  /** A Multi-Agent Run's one row badge (`runStatus()`, #2974). A run whose members are all idle has
+   * none. */
+  run: {
+    awaiting_decision: warning("Awaiting Decision"),
+    approval_required: warning("Approval Required"),
+    running: info("Running", { pulse: true }),
+    failed: danger("Failed"),
+  },
   pod: {
     active: info("Active"),
     paused: neutral("Paused"),
@@ -317,6 +338,8 @@ const VOCABULARY = {
     signed_out: neutral("Signed Out"),
     /** The machine could not confirm the account's sign-in; using it rechecks first (#2208). */
     status_unknown: neutral("Status Unknown"),
+    /** A new account's sign-in ended because the account is already on the machine (#2996). */
+    not_added: neutral("Not Added", { hollow: true }),
   },
   /** A terminal tab's shell (#2864). A running shell carries no status; its tab is the fact. */
   shell: {

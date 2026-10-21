@@ -886,7 +886,7 @@ export function captureProviderAccountsConfigPreimage(configPath: string, accoun
 /** Publish only providerAccounts against an immutable source revision; retain ambiguous evidence. */
 export function writeProviderAccountsConfig(configPath: string, accounts: RunnerProviderAccount[], preimage: AccountConfigPreimage): void {
   const validated = validateProviderAccounts(accounts);
-  if (resolve(configPath) !== preimage.path && resolve(realpathSync(resolve(configPath))) !== preimage.path) {
+  if (resolve(configPath) !== preimage.path && resolve(process.platform === "win32" ? realpathSync.native(resolve(configPath)) : realpathSync(resolve(configPath))) !== preimage.path) {
     throw new Error("runner configuration preimage belongs to another path");
   }
   publishAccountConfig(preimage, validated, validateProviderAccounts);

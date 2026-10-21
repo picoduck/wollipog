@@ -1,4 +1,4 @@
-import { builtInAgentHarnessName, campaignWorkflowOwner, WORKFLOW_DECISION_CATEGORIES,
+import { builtInAgentHarnessName, campaignWorkflowOwner, fullControlStandingHumanRequired, WORKFLOW_DECISION_CATEGORIES,
   type OrchestratorCampaignPolicy, type OrchestratorCampaignProjection, type SessionView } from "@wollipog/protocol";
 
 /** A harness-matched Child Harness names the harness, not a Machine-local agent id (#3247). */
@@ -14,8 +14,8 @@ function childHarnessText(policy: OrchestratorCampaignPolicy): string {
 /** Describe server-derived authority; formatting never admits or resolves an operation. */
 export function formatCampaignAssignment(
   campaign: Pick<SessionView, "id" | "orchestratorPolicy">,
-  projection: Pick<OrchestratorCampaignProjection, "policyRevision" | "decisionOwners" | "uiEvidenceReview">,
-  preflight: { supported: boolean; reason?: string; humanRequiredRequests?: string[] },
+  projection: Pick<OrchestratorCampaignProjection, "policyRevision" | "decisionOwners" | "uiEvidenceReview" | "fullControlHumanRequired">,
+  preflight: { supported: boolean; reason?: string },
   task: string,
 ): string {
   const policy = campaign.orchestratorPolicy!;
@@ -24,6 +24,8 @@ export function formatCampaignAssignment(
     `${category}=${projection.decisionOwners[category]}`).join(", ");
   const issueOwners = (["campaign_issue_scope", "issue_closure"] as const).map((category) =>
     `${category}=${campaignWorkflowOwner(control, projection.decisionOwners, category, preflight.supported)}`).join(", ");
+  const full = control?.mode === "full_control" && preflight.supported;
+  const humanRequired = full ? projection.fullControlHumanRequired ?? fullControlStandingHumanRequired(true) : [];
   const obligation = [
     `[Wollipog Campaign Policy — server-derived, revision ${projection.policyRevision}]`,
     `Campaign ${campaign.id}; Child Harness ${childHarnessText(policy)}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
@@ -32,12 +34,18 @@ export function formatCampaignAssignment(
     `Authority Preflight: ${preflight.supported ? "supported" : `unsupported; ${preflight.reason ?? "human review required"}`}. Scope and Closure Category Owners: ${issueOwners}. Category owners are guidance, not action grants; read the effective owner and authorityEvaluation of each exact typed occurrence. Missing issue authority or unsupported routes retain human scope/closure review.`,
     `Typed decision owners: ${owners}. This is not blanket approval. For implementation questions, PR merge, merged-branch deletion, follow-up issue publication, and UI evidence approval, create the exact typed request and consume an approval immediately before the matching action. For PR merge, pass and then execute the exact canonical gh pr merge URL --squash --match-head-commit SHA command; its matching one-shot runner permission completes consumption. Ordinary prompts cannot satisfy a typed gate.`,
     "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance changes, budget increases, and tool guardrails remain human-only. Bounded allocations require separate server-established budget authority; policy prose grants none.",
-    `Human Required Exceptions: ${(preflight.humanRequiredRequests ?? []).join(", ") || "the current policy's human-owned requests"}. Preflight must also name unresolved mandatory human gates in external or user-authored instructions; never silently rewrite them or bypass them with Full Control.`,
-    "Required Reviewer Admission: authority transport support is not Full Control campaign readiness. Before dispatch, verify all mandatory review work has trusted admission and accountable reservations/cost reporting. An installed native reviewer subprocess outside Session accounting is an unsupported mandatory path, not zero cost; disclose it and preserve its exact harness/model/effort, read-only snapshot and review-attempt limits. Controlled native support requires the actual registered audited profile, separate human-established budget authority and current admission; merged feature code and a protocol number do not prove live readiness.",
+    `Human Required Exceptions: ${full ? humanRequired.join(", ") || "none" : "the current policy's human-owned requests"}. Preflight must also name unresolved mandatory human gates in external or user-authored instructions; never silently rewrite them or bypass them with Full Control.`,
+    ...(full ? ["Full Control never prompts the person for this campaign. The Orchestrator decides other requests once, as one-time allows or denials. Requests for credentials, sign-in, wider provider access or a lasting permission grant are declined automatically and recorded as blocked work; continue without them and do not ask anyone for them. A tool request is approvable only when every file it touches resolves to a real path inside your own worktree; anything else (a file outside it, a symlink leading out, a glob, a script, an interpreter, a Git command) is declined too, because it could read a credential store. Retry with explicit file paths inside your worktree."] : []),
+    // A metered Full Control boundary without the controlled reviewer was authorized to use the
+    // regular workflow, so that workflow is its review path rather than an unsupported one.
+    control?.mode === "full_control" && control.boundary.budgetAuthority && !control.boundary.budgetAuthority.controlledReview
+      ? "Cross-Model Review: controlled review is not part of this campaign, so run the regular installed cross-model review workflow with its exact harness/model/effort, read-only snapshot and review-attempt limits, and report its actual cost; it is not charged to the campaign's metered usage."
+      : "Required Reviewer Admission: authority transport support is not Full Control campaign readiness. Before dispatch, verify all mandatory review work has trusted admission and accountable reservations/cost reporting. An installed native reviewer subprocess outside Session accounting is an unsupported mandatory path, not zero cost; disclose it and preserve its exact harness/model/effort, read-only snapshot and review-attempt limits. Controlled native support requires the actual registered audited profile, separate human-established budget authority and current admission; merged feature code and a protocol number do not prove live readiness.",
     "Leave any helper session you spawn idle once it has posted its final report, so the Orchestrator can verify it before verifying you; do not stop or archive one yourself, and never leave it working when you finish.",
     projection.uiEvidenceReview.effectiveOwner === "orchestrator"
-      ? "The controlling Orchestrator can inspect artifact-backed image evidence and must review every item before approving. Children attach each capture from disk with attach_session_artifact (or `wollipog artifact attach --file`), never as base64 in a tool argument, and cite the returned artifactId, mediaType, sizeBytes, and sha256. Approval requires exact-byte delivery receipts and a verdict; attachment alone is not inspection. Production video requires a supported complete-frame delivery and temporal verdict contract; otherwise video routes to a human, except for an exact operator-enabled short-frame validation campaign, which does not prove production readiness. Externally stored evidence routes to a human."
-      : `UI evidence remains human-owned: ${projection.uiEvidenceReview.reason ?? "the human owns UI Evidence Approval under this policy."}`,
+      ? "The controlling Orchestrator can inspect artifact-backed image evidence and must review every item before approving. Children attach each capture from disk with attach_session_artifact (or `wollipog artifact attach --file`), never as base64 in a tool argument, and cite the returned artifactId, mediaType, sizeBytes, and sha256. Approval requires exact-byte delivery receipts and a verdict; attachment alone is not inspection. Production video requires a supported complete-frame delivery and temporal verdict contract; otherwise video routes to a human, except for an exact operator-enabled short-frame validation campaign, which does not prove production readiness. Externally stored evidence routes to a human." +
+        (full ? " Under Full Control neither ever routes to a human: the Orchestrator approves only evidence it inspected, and otherwise asks for screenshots attached as Session artifacts or denies the claim as unproven." : "")
+      :`UI evidence remains human-owned: ${projection.uiEvidenceReview.reason ?? "the human owns UI Evidence Approval under this policy."}`,
     "Evidence Upload and Provider Disclosure: honor the human-authorized task, destination, retention and reviewer provider/model boundary and current Artifact Uploads preference. Full Control alone does not authorize uploads, arbitrary filesystem transfer, new hosting, or disclosure to an unapproved provider. Missing evidence authority retains existing upload rules; missing review delivery or cost proof is a blocker, never a successful production review.",
     "Never update or restart the hosting stack, including through detached helpers. Deployment needs a separately authorized operator proven to be outside that stack.",
     // Name no parent-only tool: children do not share the Orchestrator's toolset.

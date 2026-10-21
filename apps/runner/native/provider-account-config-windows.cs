@@ -24,7 +24,7 @@ public static class WollipogAccountConfigWindowsV1 {
  sealed class Tip { internal string Epoch="",Identity="",Digest="",Config=""; internal int Revision,Records; internal long Bytes; }
  sealed class Observation { internal string Path,Parent,ConfigId,Digest,Stamp,Birth; internal byte[] Raw; internal Tip Tip; }
  sealed class Context:IDisposable {
-  internal string Path,Parent,Prefix,Sid,Birth; internal SafeFileHandle ParentProcess; internal readonly List<SafeFileHandle> Pins=new List<SafeFileHandle>();
+  internal string Path,Parent,Prefix,Sid,Birth,RawConfigId; internal SafeFileHandle ParentProcess; internal readonly List<SafeFileHandle> Pins=new List<SafeFileHandle>();
   internal SafeFileHandle ParentHandle;
   internal string Slot(string name){return System.IO.Path.Combine(Parent,Prefix+name);}
   internal void Alive(){Need(WaitForSingleObject(ParentProcess,0)==258,"SOURCE_CHANGED");}
@@ -41,6 +41,9 @@ public static class WollipogAccountConfigWindowsV1 {
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle h,out Info info);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandleEx(SafeFileHandle h,int cls,out Basic info,uint size);
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFinalPathNameByHandleW(SafeFileHandle h,StringBuilder name,uint size,uint flags);
+#if WACW_FIXTURE
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetShortPathNameW(string path,StringBuilder name,uint size);
+#endif
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool GetVolumeInformationByHandleW(SafeFileHandle h,StringBuilder volume,uint size,out uint serial,out uint max,out uint flags,StringBuilder fs,uint fsSize);
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] static extern uint GetDriveTypeW(string root);
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFileAttributesW(string path);
@@ -114,19 +117,36 @@ public static class WollipogAccountConfigWindowsV1 {
   try{for(int i=0;i<off+name.Length;i++)Marshal.WriteByte(p,i,0);Marshal.WriteByte(p,0,(byte)(replace?1:0));Marshal.WriteIntPtr(p,root,c.ParentHandle.DangerousGetHandle());Marshal.WriteInt32(p,count,name.Length);Marshal.Copy(name,0,IntPtr.Add(p,off),name.Length);Need(SetFileInformationByHandle(h,3,p,(uint)(off+name.Length)),"IO");}finally{Marshal.FreeHGlobal(p);}
  }
  static void ReleaseGuard(SafeFileHandle h){IntPtr p=Marshal.AllocHGlobal(1);try{Marshal.WriteByte(p,1);Need(SetFileInformationByHandle(h,4,p,1),"IO");}finally{Marshal.FreeHGlobal(p);}}
+ // Directory short names are data, never a reason to skip the ORIGINAL raw ancestor walk.
+ static string[] RawParts(string path){
+  Need(path.Length>3&&path.Length<32768&&((path[0]>='A'&&path[0]<='Z')||(path[0]>='a'&&path[0]<='z'))&&path[1]==':'&&path[2]=='\\',"STORE_UNVERIFIABLE","ContextPathShape");
+  Need(path.IndexOf(':',2)<0,"STORE_UNVERIFIABLE","ContextPathColon");var parts=path.Substring(3).Split('\\');
+  foreach(string part in parts){
+   Need(part.Length>0&&part.Length<=255&&part!="."&&part!=".."&&!part.EndsWith(".")&&!part.EndsWith(" "),"STORE_UNVERIFIABLE","ContextPathShape");
+   foreach(char ch in part)Need(ch>=32&&ch!='/'&&ch!='<'&&ch!='>'&&ch!=':'&&ch!='"'&&ch!='|'&&ch!='?'&&ch!='*',"STORE_UNVERIFIABLE","ContextPathShape");
+   string stem=part.Split('.')[0].TrimEnd(' ').ToUpperInvariant();
+   Need(stem!="CON"&&stem!="PRN"&&stem!="AUX"&&stem!="NUL"&&stem!="CLOCK$"&&stem!="CONIN$"&&stem!="CONOUT$"&&
+    !(stem.Length==4&&(stem.StartsWith("COM",StringComparison.Ordinal)||stem.StartsWith("LPT",StringComparison.Ordinal))&&
+      (stem[3]>='1'&&stem[3]<='9'||stem[3]=='\u00b9'||stem[3]=='\u00b2'||stem[3]=='\u00b3')),"STORE_UNVERIFIABLE","ContextPathShape");
+  }return parts;
+ }
  static Context ContextFor(Request r){
-  Need(r.Path.Length>3&&r.Path.Length<32768&&Char.IsLetter(r.Path[0])&&r.Path[1]==':'&&r.Path[2]=='\\',"STORE_UNVERIFIABLE","ContextPathShape");Need(r.Path.IndexOf(':',2)<0,"STORE_UNVERIFIABLE","ContextPathColon");string full=System.IO.Path.GetFullPath(r.Path);Need(String.Equals(full,r.Path,StringComparison.OrdinalIgnoreCase),"STORE_UNVERIFIABLE","ContextPathExact");
+  var rawParts=RawParts(r.Path);string full=System.IO.Path.GetFullPath(r.Path);RawParts(full);
   var c=new Context{Path=full,Parent=System.IO.Path.GetDirectoryName(full),Sid=WindowsIdentity.GetCurrent().User.Value};
   try{
-   Need(IntPtr.Size==8,"STORE_UNVERIFIABLE","ContextArchitecture");string name=System.IO.Path.GetFileName(full);Need(name.Length<=100&&!name.EndsWith(".")&&!name.EndsWith(" "),"STORE_UNVERIFIABLE","ContextBasename");c.Prefix="."+name+".account-publications-win-v1.";
+   Need(IntPtr.Size==8,"STORE_UNVERIFIABLE","ContextArchitecture");string name=System.IO.Path.GetFileName(full);Need(name.Length<=100&&!name.EndsWith(".")&&!name.EndsWith(" "),"STORE_UNVERIFIABLE","ContextBasename");Need(String.Equals(name,rawParts[rawParts.Length-1],StringComparison.OrdinalIgnoreCase),"STORE_UNVERIFIABLE","ContextBasename");c.Prefix="."+name+".account-publications-win-v1.";
    PBI pi;int returned;Need(NtQueryInformationProcess(GetCurrentProcess(),0,out pi,Marshal.SizeOf(typeof(PBI)),out returned)==0,"STORE_UNVERIFIABLE","ContextParentQuery");Need(pi.ParentPid.ToInt64()==r.Pid,"STORE_UNVERIFIABLE","ContextParentPid");
    c.ParentProcess=OpenProcess(0x101000,false,r.Pid);Need(!c.ParentProcess.IsInvalid,"STORE_UNVERIFIABLE","ContextParentOpen");long creation,exit,kernel,user;Need(GetProcessTimes(c.ParentProcess,out creation,out exit,out kernel,out user),"STORE_UNVERIFIABLE","ContextParentTimes");c.Birth=creation.ToString();Need(r.Birth==""||r.Birth==c.Birth,"SOURCE_CHANGED","ContextParentBirth");c.Alive();
    string root=System.IO.Path.GetPathRoot(full);Need(GetDriveTypeW(root)==3,"STORE_UNVERIFIABLE","ContextDriveType");uint sectors,bytes,free,total;Need(GetDiskFreeSpaceW(root,out sectors,out bytes,out free,out total),"STORE_UNVERIFIABLE","ContextGeometryQuery");Need(sectors>0&&bytes>0,"STORE_UNVERIFIABLE","ContextGeometryValues");Need((long)sectors*bytes<=4096,"STORE_UNVERIFIABLE","ContextCluster");
-   string part=root;var dirs=c.Parent.Substring(root.Length).Split(new char[]{'\\'},StringSplitOptions.RemoveEmptyEntries);c.Pins.Add(Open(part,c.Sid,true,false,Attr,ReadShare|WriteShare));
-   foreach(string next in dirs){part=System.IO.Path.Combine(part,next);c.Pins.Add(Open(part,c.Sid,true,false,Attr,ReadShare|WriteShare));}
-   c.ParentHandle=Open(c.Parent,c.Sid,true,false,Attr|2,ReadShare|WriteShare,true);c.Pins.Add(c.ParentHandle);
+   Need(String.Equals(root,r.Path.Substring(0,3),StringComparison.OrdinalIgnoreCase),"STORE_UNVERIFIABLE","ContextPathExact");
+   string part=r.Path.Substring(0,3);c.Pins.Add(Open(part,c.Sid,true,false,Attr,ReadShare|WriteShare));
+   for(int i=0;i<rawParts.Length-1;i++){part+=(part.EndsWith("\\")?"":"\\")+rawParts[i];c.Pins.Add(Open(part,c.Sid,true,false,Attr,ReadShare|WriteShare));}
+   c.ParentHandle=Open(part,c.Sid,true,false,Attr|2,ReadShare|WriteShare,true);c.Pins.Add(c.ParentHandle);
+   Need(String.Equals(Canonical(c.ParentHandle),c.Parent,StringComparison.OrdinalIgnoreCase),"STORE_UNVERIFIABLE","ContextPathExact");
    uint serial,max,flags;var fs=new StringBuilder(32);Need(GetVolumeInformationByHandleW(c.ParentHandle,null,0,out serial,out max,out flags,fs,(uint)fs.Capacity),"STORE_UNVERIFIABLE","ContextVolumeQuery");Need(fs.ToString()=="NTFS","STORE_UNVERIFIABLE","ContextVolumeType");
-   foreach(string legacy in new string[]{"."+name+".account-publications-v1","."+name+".account-publications-anchor-v1"}){uint attr=GetFileAttributesW(System.IO.Path.Combine(c.Parent,legacy));int error=Marshal.GetLastWin32Error();Need(attr==0xffffffff&&(error==2||error==3),"STORE_UNVERIFIABLE","ContextLegacy");}return c;
+   foreach(string legacy in new string[]{"."+name+".account-publications-v1","."+name+".account-publications-anchor-v1"}){uint attr=GetFileAttributesW(System.IO.Path.Combine(c.Parent,legacy));int error=Marshal.GetLastWin32Error();Need(attr==0xffffffff&&(error==2||error==3),"STORE_UNVERIFIABLE","ContextLegacy");}
+   var raw=Open(r.Path,c.Sid,false,false,R,ReadShare|DeleteShare);c.Pins.Add(raw);
+   Need(String.Equals(Canonical(raw),full,StringComparison.OrdinalIgnoreCase),"STORE_UNVERIFIABLE","ContextPathExact");c.RawConfigId=Id(raw);return c;
   }catch{c.Dispose();throw;}
  }
  static HashSet<string> Entries(Context c,bool ownGuard){
@@ -157,7 +177,7 @@ public static class WollipogAccountConfigWindowsV1 {
  }
  static byte[] ReadCount(SafeFileHandle h,int n){byte[] all=new byte[n];int at=0;while(at<n){byte[] b=new byte[n-at];int done;Need(ReadFile(h,b,b.Length,out done,IntPtr.Zero)&&done>0);Buffer.BlockCopy(b,0,all,at,done);at+=done;}return all;}
  static Observation Observe(Context c,bool ownGuard){c.Alive();var first=TipFor(c,ownGuard);using(var f=Open(c.Path,c.Sid,false,false,R,ReadShare|DeleteShare)){
-  var raw=Read(f,ConfigMax);var second=TipFor(c,ownGuard);Need(first.Epoch==second.Epoch&&first.Identity==second.Identity&&first.Digest==second.Digest,"SOURCE_CHANGED");string digest=Digest(raw);if(first.Epoch!="")Need(digest==first.Config,"SOURCE_CHANGED");
+  Need(Id(f)==c.RawConfigId,"SOURCE_CHANGED");var raw=Read(f,ConfigMax);var second=TipFor(c,ownGuard);Need(first.Epoch==second.Epoch&&first.Identity==second.Identity&&first.Digest==second.Digest,"SOURCE_CHANGED");string digest=Digest(raw);if(first.Epoch!="")Need(digest==first.Config,"SOURCE_CHANGED");
   var o=new Observation{Path=Canonical(f),Parent=Id(c.ParentHandle),ConfigId=Identity(f),Digest=digest,Raw=raw,Tip=second,Birth=c.Birth};o.Stamp=Digest(Bytes(o.Path+"|"+o.Parent+"|"+o.ConfigId+"|"+o.Digest+"|"+second.Epoch+"|"+second.Identity+"|"+second.Revision+"|"+second.Digest+"|"+o.Birth));return o;
  }}
  static void Bootstrap(Context c,Observation old){
@@ -224,6 +244,17 @@ public static class WollipogAccountConfigWindowsV1 {
   if(mode=="owner-path"){
    string os=System.IO.Path.Combine(Environment.SystemDirectory,"kernel32.dll");using(var h=CreateFileW(os,RC|Attr,ReadShare|WriteShare|DeleteShare,IntPtr.Zero,3,Reparse,IntPtr.Zero)){
     Need(!h.IsInvalid);IntPtr owner,group,dacl,sacl,ownerDescriptor;Need(GetSecurityInfo(h,1,1,out owner,out group,out dacl,out sacl,out ownerDescriptor)==0);try{Need(new SecurityIdentifier(owner).Value!=WindowsIdentity.GetCurrent().User.Value);return Canonical(h);}finally{LocalFree(ownerDescriptor);}
+   }
+  }
+  if(mode=="directory-alias-path"){
+   PBI aliasPeer;int aliasReturned;Need(NtQueryInformationProcess(GetCurrentProcess(),0,out aliasPeer,Marshal.SizeOf(typeof(PBI)),out aliasReturned)==0);
+   using(var aliasContext=ContextFor(new Request{Path=path,Pid=aliasPeer.ParentPid.ToInt32(),Birth=""})){
+    Need(System.IO.Path.GetFileName(aliasContext.Parent).StartsWith("wollipog-account-config-",StringComparison.Ordinal)&&System.IO.Path.GetFileName(aliasContext.Path)=="runner.json");
+    Need(Entries(aliasContext,false).Count==0);aliasContext.Alive();var aliasBuffer=new StringBuilder(32768);uint aliasLength=GetShortPathNameW(aliasContext.Parent,aliasBuffer,(uint)aliasBuffer.Capacity);Need(aliasLength>0&&aliasLength<aliasBuffer.Capacity);
+    string aliasParent=aliasBuffer.ToString(),aliasPath=System.IO.Path.Combine(aliasParent,System.IO.Path.GetFileName(aliasContext.Path));Need(!String.Equals(aliasParent,aliasContext.Parent,StringComparison.OrdinalIgnoreCase));
+    using(var aliasParentHandle=Open(aliasParent,aliasContext.Sid,true,false,Attr,ReadShare|WriteShare,true)){Need(Id(aliasParentHandle)==Id(aliasContext.ParentHandle)&&String.Equals(Canonical(aliasParentHandle),aliasContext.Parent,StringComparison.OrdinalIgnoreCase));}
+    using(var aliasConfigHandle=Open(aliasPath,aliasContext.Sid,false,false,R,ReadShare|DeleteShare)){Need(Id(aliasConfigHandle)==aliasContext.RawConfigId&&String.Equals(Canonical(aliasConfigHandle),aliasContext.Path,StringComparison.OrdinalIgnoreCase));}
+    Need(Bytes(aliasPath).Length<=32768);return aliasPath;
    }
   }
   Need(System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(path)).StartsWith("wollipog-account-config-",StringComparison.Ordinal));Need(!File.Exists(path));

@@ -47,7 +47,7 @@ export function OrchestratorControlChoice({ mode, onChange, disabled = false, su
 }
 
 const STATE_LABELS: Record<CampaignLaunchPreflight["capabilities"][number]["state"], string> = {
-  verified: "Verified", unsupported: "Blocks Launch", human_required: "Human Required",
+  verified: "Verified", unsupported: "Blocks Launch", human_required: "Human Required", informational: "Information", orchestrator_decides: "Orchestrator Decides",
 };
 const DEBOUNCE_MS = 400;
 
@@ -144,43 +144,55 @@ function mergeOverrides(budget: BudgetDraft, limits: LimitDrafts): Pick<FullCont
   return { ...(Object.keys(merged).length ? { budget: merged } : {}), ...(limit.issues ? { issues: limit.issues } : {}) };
 }
 
-/** The capability exceptions by name; the standing protections every campaign has are counted. */
+/** Everything that still comes to the Human by name, which under Full Control is at most their own
+ * Human Required rules and any evidence they kept out of the authorization (#2940). */
 function humanRequiredSummary(preflight: CampaignLaunchPreflight): string {
-  const exceptions = preflight.capabilities.filter((item) => item.state === "human_required").map((item) => item.capability);
-  const standing = preflight.summary.humanRequired.length - exceptions.length;
-  const protections = standing > 0 ? `${standing} standing ${standing === 1 ? "protection" : "protections"}, such as secrets and sign-in` : "";
-  return [exceptions.join(", "), protections].filter(Boolean).join(" · ") || "None";
+  return preflight.summary.humanRequired.map((item) => item.exception).join(", ") || "None";
 }
 
 function money(value: number): string {
   return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
 }
 
-/** The concise readiness summary shared by launch and enable. Details live under Advanced. */
-export function FullControlSummary({ preflight, loading, error, scopeLabel, budgetEntry, advanced, action }: {
+/** No ceiling is stated as such, never as a missing entry: the campaign runs without a limit. */
+function budgetLabel(budget: CampaignLaunchPreflight["summary"]["budget"]): string {
+  const limits = [budget.costUsd !== null ? money(budget.costUsd) : null,
+    budget.toolCalls !== null ? `${budget.toolCalls} tool calls` : null].filter(Boolean);
+  return `${limits.length ? limits.join(" · ") : "No Limit"} · ${budget.concurrency} at a time${budget.source === "saved_defaults" ? " · Saved Default" : ""}`;
+}
+
+/** The concise readiness summary shared by launch and enable. Details live under Advanced. Only a
+ * true blocker shows a notice; an infrastructure gap is a neutral row the campaign works around. */
+export function FullControlSummary({ preflight, loading, error, scopeLabel, advanced, action, pending = null }: {
   preflight: CampaignLaunchPreflight | null; loading: boolean; error: string | null; action: "start" | "enable";
   scopeLabel: (preflight: CampaignLaunchPreflight) => string;
-  budgetEntry?: ReactNode; advanced?: ReactNode;
+  advanced?: ReactNode;
+  /** What the person still has to enter before the action is available, stated instead of Ready. */
+  pending?: string | null;
 }) {
   const ready = preflightReady(preflight);
   const budget = preflight?.summary.budget;
+  const isolation = preflight?.summary.root.isolation;
   return <div aria-busy={loading}>
     {error ? <Notice tone="danger" role="alert">{error}</Notice>
       : !preflight ? <Notice tone="neutral" role="status">Checking Full Control Readiness…</Notice>
+      : ready && pending ? <Notice tone="neutral" role="status">{pending}</Notice>
       : ready ? <Notice tone="success" role="status">{action === "start" ? "Ready to Authorize and Start" : "Ready to Enable"}</Notice>
       : <Notice tone="warning" role="status" title={action === "start" ? "Can't Start Yet" : "Can't Enable Yet"}>
         <ul>{preflight.summary.blockers.map((item) => <li key={item.capability}><strong>{item.capability}:</strong> {item.reason}</li>)}</ul>
       </Notice>}
     {preflight && <dl className="facts orchestrator-facts">
       <div><dt>Scope</dt><dd>{scopeLabel(preflight)}</dd></div>
-      <div><dt>Budget</dt><dd>{budget && budget.costUsd !== null && budget.toolCalls !== null
-        ? `${money(budget.costUsd)} · ${budget.toolCalls} tool calls · ${budget.concurrency} at a time${budget.source === "saved_defaults" ? " · Saved Default" : ""}`
-        : "Not Set"}</dd></div>
+      <div><dt>Budget</dt><dd>{budget && budgetLabel(budget)}</dd></div>
       <div><dt>Follow-Ups</dt><dd>{`${titleCaseLabel(preflight.summary.followUps.policy.replaceAll("_", " "))} · up to ${preflight.summary.followUps.maxIssues} ${preflight.summary.followUps.maxIssues === 1 ? "issue" : "issues"}`}</dd></div>
+      <div><dt>Review</dt><dd>{preflight.summary.review.statement}</dd></div>
+      <div><dt>Isolation</dt><dd>{isolation
+        ? `The runner enforces ${isolation.mode} isolation with network ${isolation.network}.`
+        : "Not reported by this runner."}</dd></div>
       <div><dt>Evidence</dt><dd>{preflight.summary.evidence.statement}</dd></div>
       <div><dt>Human Required</dt><dd>{humanRequiredSummary(preflight)}</dd></div>
     </dl>}
-    {budgetEntry}
+    {preflight?.summary.declinedNote && <p className="section-note">{preflight.summary.declinedNote}</p>}
     {preflight?.summary.evidence.provider && <p className="section-note">{preflight.summary.evidence.provider.retentionDisclosure}</p>}
     <details className="disclosure">
       <summary><ChevronRightIcon size={14} className="disclosure-chevron" />Advanced</summary>
@@ -188,7 +200,9 @@ export function FullControlSummary({ preflight, loading, error, scopeLabel, budg
         {advanced}
         {preflight && <>
           <h4 className="section-title">Human Required</h4>
-          <ul>{preflight.summary.humanRequired.map((item) => <li key={item.exception}>{item.exception}</li>)}</ul>
+          {preflight.summary.humanRequired.length
+            ? <ul>{preflight.summary.humanRequired.map((item) => <li key={item.exception}>{item.exception}</li>)}</ul>
+            : <p className="section-note">Nothing comes to you under Full Control.</p>}
           <h4 className="section-title">Capabilities</h4>
           <ul>{preflight.capabilities.map((item) => <li key={item.id}>{item.capability} ({STATE_LABELS[item.state]}): {item.reason}</li>)}</ul>
         </>}
@@ -213,24 +227,6 @@ function LimitInput({ label, value, onChange, mode, error, disabled, placeholder
   </>;
 }
 
-function BudgetEntry({ draft, onChange, errors, disabled }: {
-  draft: BudgetDraft; onChange: (draft: BudgetDraft) => void; errors: DraftErrors; disabled: boolean;
-}) {
-  const id = useId();
-  return <fieldset className="full-control-limits">
-    <legend>Campaign Budget</legend>
-    <p className="muted">Choose the most this campaign may spend. The Orchestrator stops admitting new work at either limit.</p>
-    <LimitInput label="Cost Limit (USD)" value={draft.cost} mode="decimal" error={errors.cost} disabled={disabled}
-      onChange={(cost) => onChange({ ...draft, cost })} />
-    <LimitInput label="Tool Call Limit" value={draft.tools} mode="numeric" error={errors.tools} disabled={disabled}
-      onChange={(tools) => onChange({ ...draft, tools })} />
-    <div className="field"><span id={`${id}-save`}>Save as Default</span>
-      <Switch labelledBy={`${id}-save`} checked={draft.save} disabled={disabled}
-        onChange={(save) => onChange({ ...draft, save })} />
-    </div>
-  </fieldset>;
-}
-
 function LimitFields({ budget, onBudget, limits, onLimits, errors, derivedRelated, disabled, savedBudget, concurrency = true, fixedConcurrency }: {
   budget: BudgetDraft; onBudget: (draft: BudgetDraft) => void; limits: LimitDrafts; onLimits: (limits: LimitDrafts) => void;
   errors: DraftErrors;
@@ -245,13 +241,22 @@ function LimitFields({ budget, onBudget, limits, onLimits, errors, derivedRelate
   disabled: boolean; savedBudget: boolean;
 }) {
   const id = useId();
-  const field = (label: string, value: string, change: (value: string) => void, mode: "decimal" | "numeric", error?: string) =>
-    <LimitInput label={label} value={value} onChange={change} mode={mode} error={error} disabled={disabled} placeholder="Use Default" />;
+  const field = (label: string, value: string, change: (value: string) => void, mode: "decimal" | "numeric", error?: string,
+    placeholder = "Use Default") =>
+    <LimitInput label={label} value={value} onChange={change} mode={mode} error={error} disabled={disabled} placeholder={placeholder} />;
+  // Without a saved default an empty amount has no ceiling, so the field says so.
+  const amountPlaceholder = savedBudget ? "Use Default" : "No Limit";
+  // A saved default holds both amounts, so only a complete pair can become one.
+  const canSave = !savedBudget && budgetValue(budget).costUsd !== undefined && budgetValue(budget).toolCalls !== undefined;
   return <fieldset className="full-control-limits">
     <legend>Campaign Limits</legend>
-    <p className="muted">Leave a field empty to use the derived value. Changes check readiness again.</p>
-    {savedBudget && field("Cost Limit (USD)", budget.cost, (cost) => onBudget({ ...budget, cost }), "decimal", errors.cost)}
-    {savedBudget && field("Tool Call Limit", budget.tools, (tools) => onBudget({ ...budget, tools }), "numeric", errors.tools)}
+    <p className="muted">Leave a field empty to use the default. With no cost or tool-call limit, the campaign has no limit and its usage is still metered. Changes check readiness again.</p>
+    {field("Cost Limit (USD)", budget.cost, (cost) => onBudget({ ...budget, cost }), "decimal", errors.cost, amountPlaceholder)}
+    {field("Tool Call Limit", budget.tools, (tools) => onBudget({ ...budget, tools }), "numeric", errors.tools, amountPlaceholder)}
+    {canSave && <div className="field"><span id={`${id}-save`}>Save Limits as Default</span>
+      <Switch labelledBy={`${id}-save`} checked={budget.save} disabled={disabled}
+        onChange={(save) => onBudget({ ...budget, save })} />
+    </div>}
     {concurrency && field("Concurrent Children", limits.concurrency, (concurrency) => onLimits({ ...limits, concurrency }), "numeric", errors.concurrency)}
     {fixedConcurrency !== undefined && <dl className="facts orchestrator-facts">
       <div><dt>Concurrent Children</dt><dd>
@@ -271,13 +276,13 @@ function LimitFields({ budget, onBudget, limits, onLimits, errors, derivedRelate
   </fieldset>;
 }
 
-/** Saves a first budget as the Human's default, only after the authorization succeeded, so saving can
- * never change the preflight that was reviewed. An existing default is never replaced from here:
- * entries under Advanced override one campaign only. */
+/** Saves a first budget as the Human's default when they asked to, only after the authorization
+ * succeeded, so saving can never change the preflight that was reviewed. An existing default is never
+ * replaced from here: entries under Advanced override one campaign only. */
 async function saveFirstBudgetDefault(api: ReturnType<typeof useApi>, defaults: OrchestratorDefaults | null, draft: BudgetDraft): Promise<void> {
   const amounts = budgetValue(draft);
   if (!draft.save || !defaults || defaults.campaignBudget || amounts.costUsd === undefined || amounts.toolCalls === undefined) return;
-  // The campaign is already authorized; a failed save only means the next launch asks again.
+  // The campaign is already authorized; a failed save only leaves the next launch without a default.
   await api.updateOrchestratorSettings({ defaults: { ...defaults, campaignBudget: { costUsd: amounts.costUsd, toolCalls: amounts.toolCalls } } })
     .catch(() => undefined);
 }
@@ -295,7 +300,7 @@ export function FullControlLaunchPanel({ request, selectionValid, disabled, save
   const api = useApi();
   const [task, setTask] = useState("");
   const [issues, setIssues] = useState("");
-  const [budget, setBudget] = useState<BudgetDraft>({ cost: "", tools: "", save: true });
+  const [budget, setBudget] = useState<BudgetDraft>({ cost: "", tools: "", save: false });
   const [limits, setLimits] = useState<LimitDrafts>({ concurrency: "", followUps: "", maxIssues: "", related: null });
   const numbers = issues.trim() ? issues.trim().split(/[,\s]+/).map((value) => Number(value.replace(/^#/, ""))) : [];
   const issuesValid = numbers.length <= 100 && numbers.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(numbers).size === numbers.length;
@@ -353,13 +358,12 @@ export function FullControlLaunchPanel({ request, selectionValid, disabled, save
         aria-invalid={!issuesValid} onChange={(event) => setIssues(event.currentTarget.value)} /></label>
     {!issuesValid && <span className="form-error" role="alert">Enter up to 100 distinct issue numbers.</span>}
     <FullControlSummary preflight={value} loading={loading} error={draftsValid ? error : INVALID_DRAFTS} scopeLabel={scopeLabel} action="start"
-      budgetEntry={!savedBudget ? <BudgetEntry draft={budget} onChange={setBudget} errors={errors} disabled={disabled} /> : undefined}
+      pending={hasWork ? null : "Describe the task or enter issue numbers to start."}
       advanced={<>
         <LimitFields budget={budget} onBudget={setBudget} limits={limits} onLimits={setLimits} errors={errors}
           derivedRelated={derivedRelated.current} disabled={disabled} savedBudget={savedBudget} concurrency={false} />
         {advanced}
       </>} />
-    {!hasWork && <p className="muted">Describe the task or enter issue numbers to authorize.</p>}
     {authorizeError && <Notice tone="danger" role="alert">{authorizeError}</Notice>}
   </section>;
 }
@@ -374,7 +378,7 @@ export function FullControlEnablePanel({ session, disabled, savedDefaults, onEna
   onAction: (action: FullControlEnableAction | null) => void;
 }) {
   const api = useApi();
-  const [budget, setBudget] = useState<BudgetDraft>({ cost: "", tools: "", save: true });
+  const [budget, setBudget] = useState<BudgetDraft>({ cost: "", tools: "", save: false });
   const [limits, setLimits] = useState<LimitDrafts>({ concurrency: "", followUps: "", maxIssues: "", related: null });
   const [busy, setBusy] = useState(false);
   const [enableError, setEnableError] = useState<string | null>(null);
@@ -407,7 +411,6 @@ export function FullControlEnablePanel({ session, disabled, savedDefaults, onEna
     preflight.summary.issueNumbers.length ? preflight.summary.issueNumbers.map((n) => `#${n}`).join(", ") : "No Issues"}`;
   return <section className="section" aria-label="Enable Full Control">
     <FullControlSummary preflight={value?.preflight ?? null} loading={loading} error={draftsValid ? error : INVALID_DRAFTS} scopeLabel={scopeLabel} action="enable"
-      budgetEntry={!savedBudget ? <BudgetEntry draft={budget} onChange={setBudget} errors={errors} disabled={disabled || busy} /> : undefined}
       advanced={<LimitFields budget={budget} onBudget={setBudget} limits={limits} onLimits={setLimits} errors={errors}
         derivedRelated={derivedRelated.current} disabled={disabled || busy} savedBudget={savedBudget}
         concurrency={false} fixedConcurrency={session.orchestratorPolicy?.behavior.maximumConcurrentChildren} />} />

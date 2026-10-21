@@ -2,7 +2,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, supportsPacedVideoReviewPeer } from ".
 import { campaignEvidenceAuthorityBound, type CampaignEvidenceAuthority } from "./campaign-evidence-authority.js";
 import { parentControlRequestEligible } from "./index.js";
 import { validCampaignBudgetAuthority, type CampaignBudgetAuthority } from "./campaign-budget.js";
-import type { ApprovalContext, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
+import type { ApprovalContext, GovernancePolicy, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
 
 export type CampaignControlMode = "custom" | "full_control";
 export type CampaignAuthorityOperation = WorkflowDecisionCategory | "question" | "tool_approval" | "policy_ask";
@@ -36,13 +36,31 @@ export interface CampaignAuthorityBoundary {
 
 export type CampaignControl = { mode: "custom" } | { mode: "full_control"; boundary: CampaignAuthorityBoundary };
 export type CampaignRequestSource = "provider_question" | "provider_tool" | "provider_elicitation";
+/** Request classes Full Control once routed to the Human. Each now has a fixed owner: the
+ * Orchestrator decides it, the server declines it, or (rules only) the Human keeps it. */
+export type FullControlRequestClass = "secrets_and_sign_in" | "persistent_permissions" | "provider_access_expansion" |
+  "external_elicitation" | "root_forms_without_suggested_answers" | "unverified_tool_effects" |
+  "git_execution_without_bounded_effect_proof" | "script_execution_without_bounded_effect_proof" |
+  "human_required_rules" | "undelegated_policy_asks" | "relative_shell_commands_without_verified_cwd";
+
+/** Classes the Orchestrator cannot supply. Under Full Control the server declines each occurrence
+ * once and records content-safe blocked work; nobody is asked and nothing is approved. */
+export const FULL_CONTROL_DECLINED_CLASSES: ReadonlySet<FullControlRequestClass> =
+  new Set(["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion"]);
+
 export interface CampaignAuthorityEvaluation {
   owner: "human" | "orchestrator";
-  basis: "human_required" | "custom_policy" | "campaign_delegation" | "standing_authorization";
+  basis: "human_required" | "custom_policy" | "campaign_delegation" | "standing_authorization" | "standing_decline";
   reason: "custom_owner" | "authorized_operation" | "outside_boundary" | "protected_request" |
-    "unverified_intent" | "unsupported_provider" | "human_required_rule" | "evidence_review_unavailable" | "provider_delivery_unavailable";
+    "unverified_intent" | "unsupported_provider" | "human_required_rule" | "evidence_review_unavailable" | "provider_delivery_unavailable" |
+    "declined_request" | "unresolved_effects";
   operation: CampaignAuthorityOperation;
   boundaryRevision?: number;
+  /** Full Control only: which formerly human class this occurrence belongs to. Content-safe. */
+  requestClass?: FullControlRequestClass;
+  /** The server answers this occurrence itself with its one-time reject or dismissal. A
+   * declined occurrence can never be approved or answered by anyone acting for the campaign. */
+  disposition?: "decline";
 }
 
 const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
@@ -96,6 +114,60 @@ const credentialIdentity = /(?:\b(?:your|my|real|production|existing)\b.{0,50}\b
 // Selecting a credential value is not implementation planning. A missing secret marker or a
 // trailing "for the implementation" cannot turn a value-selection form into trusted code intent.
 const credentialValueChoice = /\b(?:passwords?|passphrases?|secrets?|credentials?|tokens?|api[ _-]?keys?|access[ _-]?tokens?|private[ _-]?keys?|cookies?)\b\s+(?:values?\s+)?(?:should|shall|will|can|do|does|may)\s+(?:I|we|you|(?:the|our)\s+(?:app|application|client|provider))\s+(?:use|enter|provide|supply|send|paste|choose|select)\b/iu;
+// Credential stores by path segment, matched against lexical and runner-resolved targets.
+const protectedPath = new RegExp(String.raw`(?:^|[\\/\s"'=:])(?:` + [
+  String.raw`\.env[^\\/\s"']*`, String.raw`\.ssh`, String.raw`\.aws`, String.raw`\.azure`, String.raw`\.codex`, String.raw`\.claude`,
+  String.raw`\.netrc`, String.raw`\.npmrc`, String.raw`\.pypirc`, String.raw`\.pgpass`, String.raw`\.git-credentials`, String.raw`\.docker`,
+  String.raw`\.kube`, String.raw`\.gnupg`, String.raw`\.password-store`,
+  String.raw`\.config[\\/](?:gh|hub|gcloud|op|github-copilot|containers[\\/]auth\.json)`,
+  String.raw`\.terraform\.d[\\/]credentials[^\\/\s"']*`, String.raw`\.local[\\/]share[\\/]keyrings`,
+  String.raw`Library[\\/]Keychains`, String.raw`credentials`, String.raw`id_(?:rsa|ed25519|ecdsa|dsa)`,
+  // Provider credential files by name, wherever a home or account directory places them.
+  String.raw`auth\.json`, String.raw`\.credentials\.json`, String.raw`\.claude\.json`,
+].join("|") + String.raw`)(?:[\\/\s"']|$)`, "iu");
+
+/** The runner-resolved targets of an operation, only when they are complete: every lexical target
+ * the effect can touch has a runner-derived physical path, relative ones under a verified cwd.
+ * Null for globs, scripts, interpreters, unparsed commands and missing evidence. Never a grant. */
+export function campaignResolvedOperationTargets(request: PendingApproval): string[] | null {
+  const operation = request.context?.operation;
+  const selectors = campaignCodeOperationTargets(request.context?.toolName, operation);
+  const evidence = operation?.filesystem;
+  if (!selectors || !selectors.paths.length || !evidence || !Array.isArray(evidence.targets) ||
+      evidence.targets.length !== selectors.paths.length) return null;
+  // `jump/..` resolves after the symlink before it; a lexical reading would name another file.
+  const parentSegment = (path: string | undefined) => Boolean(path?.split(/[\\/]+/u).includes(".."));
+  if (selectors.paths.some(parentSegment) || parentSegment(selectors.cwd)) return null;
+  const normalize = (value: string | undefined) => value?.replaceAll("\\", "/").replace(/\/+$/u, "");
+  const absolute = (path: string) => path.startsWith("/") || /^[a-z]:[\\/]/iu.test(path);
+  if (selectors.paths.some((path) => !absolute(path)) &&
+      (!selectors.cwd || !evidence.cwd || normalize(selectors.cwd) !== normalize(evidence.cwd))) return null;
+  const resolved = selectors.paths.map((path, index) => {
+    const target = evidence.targets[index];
+    return target?.path === path && typeof target.resolvedPath === "string" && absolute(target.resolvedPath) ? target.resolvedPath : null;
+  });
+  return resolved.every((path): path is string => path !== null) ? resolved : null;
+}
+
+/** The worktree allowlist (#2940): an effect is approvable only when the runner's evidence is
+ * complete and attests (v230 `containment`) that every resolved real target, and the resolved cwd,
+ * lies inside this session's own canonical worktree root, the root the server knows for it. Outside
+ * targets, escaping symlinks, partial or older evidence all fail. Never a grant by itself. */
+export function campaignContainedOperation(request: PendingApproval, repositoryRoot: string | undefined): boolean {
+  const resolved = campaignResolvedOperationTargets(request);
+  const evidence = request.context?.operation?.filesystem;
+  const containment = evidence?.containment;
+  const normalize = (value: string | undefined) => value?.replaceAll("\\", "/").replace(/\/+$/u, "");
+  if (!resolved || !containment || containment.version !== 1 || typeof containment.root !== "string" ||
+      typeof containment.sessionRoot !== "string" || !repositoryRoot ||
+      normalize(containment.sessionRoot) !== normalize(repositoryRoot)) return false;
+  const root = normalize(containment.root)!;
+  const inside = (path: string | undefined) => {
+    const value = normalize(path);
+    return Boolean(value && (value === root || value.startsWith(`${root}/`)) && !/(?:^|\/)\.\.(?:\/|$)/u.test(value));
+  };
+  return resolved.every(inside) && (evidence!.cwd === undefined || inside(evidence!.cwd));
+}
 const sensitiveSubject = /\b(?:auth(?:entication)?|passwords?|secrets?|credentials?|tokens?|api[ _-]?key|oauth|identity|login|account|permission|access)\b/iu;
 const planningIntent = /\b(?:implement(?:ation)?|design|approach|schema|library|framework|test|mock|fixture|component|feature|architecture|provider|flow|validation|review|tradeoff|format|should)\b/iu;
 
@@ -164,24 +236,56 @@ export function standingRootQuestionAnswers(request: PendingApproval): Record<st
   return answers;
 }
 
+/** Why a request fails the protected screen. Credential, sign-in and access-expansion classes are
+ * declined under Full Control; runner guardrails stay with the Human; the rest are decidable. */
+type ProtectedRequestClass = "secrets_and_sign_in" | "provider_access_expansion" | "persistent_permissions" |
+  "guardrail" | "escalation" | "unverified_form";
+
 /** Trusted is a caller-side fact derived from the normalized provider bridge or typed route,
- * not a field taken from a child-authored snapshot. Unknown sensitive forms fail closed. */
-export function campaignRequestProtected(request: PendingApproval, verifiedPlanning: boolean, verifiedCodeOperation = false): boolean {
-  if (request.kind === "authentication" || request.context?.escalatedBy || request.runnerGuardrail) return true;
-  if (request.context?.network || request.context?.providerPermissionExpansion) return true;
-  if (request.context?.operation?.kind === "permission_grant") return true;
+ * not a field taken from a child-authored snapshot. Unknown sensitive forms fail closed.
+ * Credential text is screened before every other class, so it always wins the classification. */
+function protectedRequestClass(request: PendingApproval, verifiedPlanning: boolean, verifiedCodeOperation: boolean): ProtectedRequestClass | null {
+  if (request.kind === "authentication") return "secrets_and_sign_in";
+  if (request.runnerGuardrail) return "guardrail";
   if (request.kind === "question") {
-    if (!request.questions?.length) return true;
-    return request.questions.some((q) => {
+    if (request.questions?.some((q) => {
       if (q.secret || q.inputFormat === "email") return true;
       const text = [q.id, q.header, q.question, q.context, ...q.options.flatMap((o) => [o.label, o.description])].join(" ");
       return protectedAction.test(text) || credentialIdentity.test(text) || credentialValueChoice.test(text) || (sensitiveSubject.test(text) && (!verifiedPlanning || !planningIntent.test(text)));
-    });
+    })) return "secrets_and_sign_in";
+  } else {
+    // Arbitrary tool text cannot attest that reading credentials is implementation work.
+    const text = [request.title, request.context?.toolName, request.context?.input, request.context?.path, request.context?.network].join(" ");
+    if (!verifiedCodeOperation && (protectedAction.test(text) || credentialIdentity.test(text) || sensitiveSubject.test(text))) return "secrets_and_sign_in";
   }
-  if (verifiedCodeOperation) return false;
-  const text = [request.title, request.context?.toolName, request.context?.input, request.context?.path, request.context?.network].join(" ");
-  // Arbitrary tool text cannot attest that reading credentials is implementation work.
-  return protectedAction.test(text) || credentialIdentity.test(text) || sensitiveSubject.test(text);
+  // A benign-looking path can still resolve into a credential store, for example through a
+  // repository symlink. The runner-resolved targets decide, not the name the command used.
+  const operation = request.context?.operation;
+  if ((operation?.kind === "file" && protectedPath.test(operation.path)) || (operation?.kind === "command" && protectedPath.test(operation.input)) ||
+      operation?.filesystem?.targets?.some((target) => target.credentialStore === true ||
+        protectedPath.test(target.path) || protectedPath.test(target.resolvedPath))) return "secrets_and_sign_in";
+  // Envelope facts apply to every request kind, so no form can carry access or a grant past them.
+  if (request.context?.network || request.context?.providerPermissionExpansion) return "provider_access_expansion";
+  if (operation?.kind === "permission_grant") return "persistent_permissions";
+  if (request.context?.escalatedBy) return "escalation";
+  if (request.kind === "question" && !request.questions?.length) return "unverified_form";
+  return null;
+}
+
+export function campaignRequestProtected(request: PendingApproval, verifiedPlanning: boolean, verifiedCodeOperation = false): boolean {
+  return protectedRequestClass(request, verifiedPlanning, verifiedCodeOperation) !== null;
+}
+
+/** Which unproven-effect class a tool approval belongs to. Informational only: each class is
+ * decided once by the Orchestrator, and none is evidence of a bounded effect. */
+function toolEffectClass(request: PendingApproval): FullControlRequestClass {
+  const operation = request.context?.operation;
+  if (operation?.kind !== "command") return "unverified_tool_effects";
+  const words = operation.input.trim().split(/\s+/u);
+  const program = (words[0] === "env" ? words.find((word, index) => index > 0 && !word.includes("=")) : words[0]) ?? "";
+  if (/(?:^|\/)git$/u.test(program)) return "git_execution_without_bounded_effect_proof";
+  if (operation.cwd === undefined) return "relative_shell_commands_without_verified_cwd";
+  return "script_execution_without_bounded_effect_proof";
 }
 
 export function resolveCampaignAuthority(input: {
@@ -201,11 +305,16 @@ export function resolveCampaignAuthority(input: {
   const request = input.request;
   const category = input.snapshot?.category;
   const operation: CampaignAuthorityOperation = category ?? (request?.kind === "question" ? "question" : request?.governancePolicyId ? "policy_ask" : "tool_approval");
-  const result = (owner: "human" | "orchestrator", basis: CampaignAuthorityEvaluation["basis"], reason: CampaignAuthorityEvaluation["reason"]): CampaignAuthorityEvaluation => ({ owner, basis, reason, operation,
-    ...(input.control?.mode === "full_control" && validCampaignControl(input.control) ? { boundaryRevision: input.control.boundary.revision } : {}) });
+  const result = (owner: "human" | "orchestrator", basis: CampaignAuthorityEvaluation["basis"], reason: CampaignAuthorityEvaluation["reason"],
+    extra: Pick<CampaignAuthorityEvaluation, "requestClass" | "disposition"> = {}): CampaignAuthorityEvaluation => ({ owner, basis, reason, operation,
+    ...(input.control?.mode === "full_control" && validCampaignControl(input.control) ? { boundaryRevision: input.control.boundary.revision } : {}), ...extra });
+  // The server answers a declined occurrence itself; owning it never lets the Orchestrator approve it.
+  const declined = (requestClass: FullControlRequestClass) => result("orchestrator", "standing_decline", "declined_request", { requestClass, disposition: "decline" });
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
   if (!input.supported) return result("human", "human_required", "unsupported_provider");
-  if (input.humanRequired) return result("human", "human_required", "human_required_rule");
+  // Rules a person marked Human Required, and built-in safety rules, stay theirs in every mode.
+  if (input.humanRequired) return result("human", "human_required", "human_required_rule",
+    input.control?.mode === "full_control" ? { requestClass: "human_required_rules" } : {});
   // These categories need a separate server-derived bounded issue admission. Custom retains
   // human ownership, and a boundary operation alone cannot make a proposal eligible.
   if ((category === "issue_closure" || category === "campaign_issue_scope") &&
@@ -222,31 +331,67 @@ export function resolveCampaignAuthority(input: {
       !(input.snapshot && "issueAdmission" in input.snapshot && input.snapshot.issueAdmission)) return result("human", "human_required", "unverified_intent");
   if (!boundary.operations.includes(operation) || (input.snapshot && "repository" in input.snapshot &&
       input.snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase())) return result("human", "human_required", "outside_boundary");
-  if (!input.trustedSource || input.trustedSource === "provider_elicitation") return result("human", "human_required", "unverified_intent");
-  if ((category && input.trustedSource !== "workflow_route") ||
-      (request?.kind === "question" && input.trustedSource !== "provider_question") ||
-      (request && request.kind !== "question" && input.trustedSource !== "provider_tool")) return result("human", "human_required", "unverified_intent");
-  if (category === "implementation_question") {
-    const snapshot = input.snapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "implementation_question" }>;
-    if (campaignRequestProtected({ requestId: "", title: "", options: [], kind: "question", questions: [{ id: "", question: snapshot.question, options: snapshot.options }] }, true)) return result("human", "human_required", "protected_request");
-  } else if (request) {
-    if (request.kind && !["question", "permission", "policy_hook"].includes(request.kind)) return result("human", "human_required", "protected_request");
-    if (campaignRequestProtected(request, input.trustedSource === "provider_question",
-        input.trustedSource === "provider_tool" && repositoryCodeToolIntent(request, input.repositoryRoot))) return result("human", "human_required", "protected_request");
-    if (request.kind !== "question" && !repositoryCodeToolIntent(request, input.repositoryRoot)) {
-      return result("human", "human_required", request.context?.operation ? "outside_boundary" : "unverified_intent");
+  if (category) {
+    if (input.trustedSource !== "workflow_route") return result("human", "human_required", "unverified_intent");
+    if (category === "implementation_question") {
+      const snapshot = input.snapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "implementation_question" }>;
+      if (campaignRequestProtected({ requestId: "", title: "", options: [], kind: "question", questions: [{ id: "", question: snapshot.question, options: snapshot.options }] }, true)) return declined("secrets_and_sign_in");
     }
-    if (input.root && request.kind === "question" && !standingRootQuestionAnswers(request)) return result("human", "human_required", "unverified_intent");
-    if (request.governancePolicyId && !boundary.delegatablePolicyIds.includes(request.governancePolicyId)) return result("human", "human_required", "human_required_rule");
-    if (request.kind !== "question" && !request.options.some((option) => option.kind === "allow_once")) return result("human", "human_required", "protected_request");
+    return result("orchestrator", input.root ? "standing_authorization" : "campaign_delegation", "authorized_operation");
   }
-  return result("orchestrator", input.root ? "standing_authorization" : "campaign_delegation", "authorized_operation");
+  const generic = request!;
+  const question = generic.kind === "question";
+  const verifiedCode = input.trustedSource === "provider_tool" && repositoryCodeToolIntent(generic, input.repositoryRoot);
+  const screened = protectedRequestClass(generic, input.trustedSource === "provider_question", verifiedCode);
+  if (screened === "secrets_and_sign_in" || screened === "provider_access_expansion" || screened === "persistent_permissions") return declined(screened);
+  // Runner guardrails and cost or limit pauses belong to budget and guardrail authority: human-only.
+  if (screened === "guardrail" || (generic.kind && !["question", "permission", "policy_hook"].includes(generic.kind))) return result("human", "human_required", "protected_request");
+  // Only a one-time allow is ever delivered. A grant offering no such option is never converted.
+  if (!question && !generic.options.some((option) => option.kind === "allow_once")) return declined("persistent_permissions");
+  // Hook asks are minted by the server's own authenticated hook route, not a provider bridge.
+  const provenanceVerified = question ? input.trustedSource === "provider_question"
+    : input.trustedSource === "provider_tool" || (generic.kind === "policy_hook" && input.trustedSource === undefined);
+  let requestClass: FullControlRequestClass | undefined;
+  if (!provenanceVerified) {
+    requestClass = input.trustedSource === "provider_elicitation" ? "external_elicitation" : "unverified_tool_effects";
+  } else if (screened === "escalation" || screened === "unverified_form") {
+    requestClass = "unverified_tool_effects";
+  } else if (!question && !repositoryCodeToolIntent(generic, input.repositoryRoot)) {
+    requestClass = toolEffectClass(generic);
+  } else if (input.root && question && !standingRootQuestionAnswers(generic)) {
+    requestClass = "root_forms_without_suggested_answers";
+  }
+  if (generic.governancePolicyId && !boundary.delegatablePolicyIds.includes(generic.governancePolicyId)) requestClass ??= "undelegated_policy_asks";
+  const classified = requestClass ? { requestClass } : {};
+  // The worktree allowlist: absent evidence is not evidence of absence, and no denylist can name
+  // every credential store. No runner isolation mode hides those stores from the child (bwrap binds
+  // `/` read-only, Seatbelt allows file reads, provider mode has no sandbox), so an effect is
+  // approvable only when every resolved target is inside the session's own worktree. Anything else
+  // (outside targets, escaping symlinks, globs, scripts, Git, older evidence) is declined for all.
+  if (!question && !campaignContainedOperation(generic, input.repositoryRoot)) {
+    return result("orchestrator", "standing_decline", "unresolved_effects", { ...classified, disposition: "decline" });
+  }
+  // A parked root cannot judge its own request, and text never proves an effect is safe. It allows
+  // once only a verified bounded effect outside any undelegated ask rule (or answers with its own
+  // suggestion) and declines the rest, so an unverified root effect can never reach a secret and an
+  // ask a person wanted checked is never self-approved. A child's goes to the Orchestrator.
+  if (input.root && requestClass) {
+    return result("orchestrator", "standing_decline", "authorized_operation", { ...classified, disposition: "decline" });
+  }
+  return result("orchestrator", input.root ? "standing_authorization" : "campaign_delegation", "authorized_operation", classified);
 }
 
-/** Request classes every Full Control boundary keeps with the Human, by the root's driver. */
-export function fullControlStandingHumanRequired(driver: string): string[] {
-  return ["secrets_and_sign_in", "persistent_permissions", "provider_access_expansion", "external_elicitation", "root_forms_without_suggested_answers", "unverified_tool_effects", "git_execution_without_bounded_effect_proof", "script_execution_without_bounded_effect_proof", "human_required_rules",
-    ...(driver === "claude-code" ? ["relative_shell_commands_without_verified_cwd"] : [])];
+/** What still comes to the Human under Full Control: only asks from governance rules the person
+ * marked Human Required, and only while such a rule exists. Every other class is decided by the
+ * Orchestrator or declined as blocked work (`FULL_CONTROL_DECLINED_CLASSES`). */
+export function fullControlStandingHumanRequired(humanRequiredRules: boolean): FullControlRequestClass[] {
+  return humanRequiredRules ? ["human_required_rules"] : [];
+}
+
+/** Whether any enabled ask rule is one a person marked Human Required. Built-in safety rules are
+ * code-owned and fire only in their own narrow scopes, so they are not counted here. */
+export function humanRequiredRulesExist(policies: readonly GovernancePolicy[]): boolean {
+  return policies.some((rule) => rule.enabled && rule.effect === "ask" && !rule.builtin && rule.conditions?.humanRequired === true);
 }
 
 export const FULL_CONTROL_HUMAN_REQUIRED_LABELS: Record<string, string> = {
@@ -259,24 +404,37 @@ export const FULL_CONTROL_HUMAN_REQUIRED_LABELS: Record<string, string> = {
   git_execution_without_bounded_effect_proof: "Git Commands Without Bounded Effect Proof",
   script_execution_without_bounded_effect_proof: "Scripts Without Bounded Effect Proof",
   human_required_rules: "Human Required Governance Rules",
+  undelegated_policy_asks: "Ask Rules Not Named for the Orchestrator",
   relative_shell_commands_without_verified_cwd: "Relative Shell Commands Without a Verified Directory",
 };
 
-export const FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON = "Always decided by the Human under Full Control.";
+export const FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON = "Asks from rules you marked Human Required still come to you under Full Control.";
 
-/** Evidence every Full Control campaign routes to the Human, whatever its boundary. */
+/** Delivered once to a child whose tool request was declined because the runner could not resolve
+ * every target it touches. Content-safe: it never repeats the command, path or tool input. */
+export const FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE = "[Wollipog Full Control] A tool request in this session was declined " +
+  "because the runner could not resolve every file it would touch to a real path inside this session's worktree (for example " +
+  "a file outside the worktree, a symlink leading out of it, a glob, a script, an interpreter with inline code, or a Git " +
+  "command), so it could not rule out credential access. Nobody was asked and the request will not be replayed. Retry with " +
+  "explicit file paths inside your worktree, such as reading or editing named files, or continue without it.";
+
+/** Shown beside the Human Required list: the classes the Orchestrator cannot supply. */
+export const FULL_CONTROL_DECLINED_NOTE = "Requests for credentials, sign-in, wider provider access or a lasting permission grant are declined automatically and shown as blocked work in Campaign Status. You are not asked.";
+
+/** Evidence the Orchestrator cannot inspect directly. Under Full Control it never routes to the
+ * Human: the Orchestrator approves only what it inspected, asks for screenshots, or denies. */
 export const FULL_CONTROL_EVIDENCE_EXCEPTIONS: ReadonlyArray<{ id: "video_evidence" | "external_evidence"; exception: string; reason: string }> = [
-  { id: "video_evidence", exception: "Video Evidence Review", reason: "Video evidence needs your review until production video review is available." },
-  { id: "external_evidence", exception: "External Evidence Review", reason: "Evidence stored outside private Session artifacts (links only) needs your review." },
+  { id: "video_evidence", exception: "Video Evidence Review", reason: "The Orchestrator can't watch video yet, so it asks for screenshots or denies the claim as unproven." },
+  { id: "external_evidence", exception: "External Evidence Review", reason: "The Orchestrator can't open evidence stored outside private Session artifacts (links only), so it asks for screenshots or denies the claim as unproven." },
 ];
 
 export function campaignAuthorityPreflight(control: CampaignControl | undefined, driver: string, protocolVersion: number | null | undefined,
-  peerContract?: unknown): { supported: boolean; reason?: string; humanRequiredRequests?: string[] } {
+  peerContract?: unknown): { supported: boolean; reason?: string } {
   if (!control || control.mode === "custom") return { supported: true };
   if (!validCampaignControl(control)) return { supported: false, reason: "Full Control requires a valid human-authorized boundary." };
   if (control.boundary.evidenceAuthority && !supportsPacedVideoReviewPeer(protocolVersion, peerContract)) return { supported: false,
     reason: `Production evidence authority requires protocol v${PACED_VIDEO_REVIEW_MIN_PROTOCOL} and the exact private media contract; compatibility metadata does not establish runtime readiness.` };
   if (control.boundary.budgetAuthority && (protocolVersion ?? 0) < 218) return { supported: false, reason: "Campaign limits require a protocol-v218 runner; unsupported peers cannot admit protected work." };
   if ((protocolVersion ?? 0) < (control.boundary.issueAuthority ? 217 : 215) || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
-  return { supported: true, humanRequiredRequests: fullControlStandingHumanRequired(driver) };
+  return { supported: true };
 }

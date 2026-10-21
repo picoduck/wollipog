@@ -431,7 +431,27 @@ not replace native success, architecture, death, sharing or durability evidence.
 Inside that trusted engine, all actual config/store file and parent owner SID, DACL, reparse,
 hardlink, alternate-stream, fixed-local-NTFS, canonical-path and identity checks remain mandatory
 before a config producer begins. No POSIX check is faked or bypassed and no legacy writer is a
-fallback. Config payloads are bounded at 2 MiB, assemblies/engine at 1 MiB and IPC at 8 MiB.
+fallback.
+
+Config-directory short names require native handle proof. The engine validates ordinary raw DOS
+components, pins ORIGINAL raw ancestors with existing reparse/SID/DACL/share checks, and binds
+raw parent/config handles to canonical names and file IDs before producers. Config-leaf short
+aliases stay unsupported because replacement can invalidate them. Canonical preimage, stamp
+and store namespace coalesce directory aliases; immutable Windows-private requestedPath retains
+the original witness across asynchronous work. Publication revalidates that raw chain. The
+Windows-only native-realpath caller comparison is preliminary, never admission proof, and its
+metadata duration is outside child termination controls. No hard total-call bound is claimed.
+One extra read pin permits delete sharing for replacement, not write sharing, and closes with
+the command. No producer, global map/cache/history, HOME canonicalization or ACL repair is added.
+
+The source regression queries a genuine directory alias once through the fixed fixture-only
+helper, then checks parent/file identity, canonical coalescing and default publication. Alias
+absence fails proof without a fake, skip, fallback or OS setting change. The query is absent from
+production/SEA admission. Raw dot refusal reuses that owned fixture. The 13 names, assertions,
+HOME strings and all root/entry/byte/process/time limits remain; runtime/SEA/durability proof
+still requires actual receipts.
+
+Config payloads are bounded at 2 MiB, assemblies/engine at 1 MiB and IPC at 8 MiB.
 Eight fixed store/control/pending names are reserved before growth; no unknown prefix entry,
 partial store or coexisting POSIX store is adopted. The retained 4096-intent/8192-record,
 32768-byte-record/256 MiB logical limits and 64 KiB control reservation remain, with no reset.

@@ -17,10 +17,21 @@ test("launch proposals preserve finite Human intent and reject injected provenan
   for (const field of ["authorizedByUserId", "authorizedAt", "revision", "ready", "executionProfile", "evidenceAuthority"]) {
     assert.equal(parseCampaignLaunchProposal({ ...proposal, [field]: "injected" }), null);
   }
-  for (const field of ["costUsd", "toolCalls", "concurrency", "acceptedFollowUps"]) {
+  for (const field of ["concurrency", "acceptedFollowUps"]) {
     const budget = { ...proposal.budgetAuthority } as Record<string, unknown>;
     delete budget[field];
     assert.equal(parseCampaignLaunchProposal({ ...proposal, budgetAuthority: budget }), null);
+  }
+  // A cost or tool-call ceiling is optional: an absent one has no limit, and each present one stays.
+  for (const omitted of [["costUsd"], ["toolCalls"], ["costUsd", "toolCalls"]]) {
+    const budget = { ...proposal.budgetAuthority } as Record<string, unknown>;
+    for (const field of omitted) delete budget[field];
+    const unbounded = parseCampaignLaunchProposal({ ...proposal, budgetAuthority: budget as unknown as CampaignLaunchProposal["budgetAuthority"] })!;
+    assert.ok(unbounded, omitted.join(","));
+    for (const field of omitted) assert.equal(field in unbounded.budgetAuthority, false, field);
+  }
+  for (const invalid of [{ costUsd: 0 }, { costUsd: Number.POSITIVE_INFINITY }, { toolCalls: 0 }, { toolCalls: 1.5 }]) {
+    assert.equal(parseCampaignLaunchProposal({ ...proposal, budgetAuthority: { ...proposal.budgetAuthority, ...invalid } }), null, JSON.stringify(invalid));
   }
   assert.equal(parseCampaignLaunchProposal({ ...proposal, issueAuthority: { epics: "not-an-array" } }), null);
 });

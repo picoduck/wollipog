@@ -16,11 +16,11 @@ import type { HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
-import { CampaignRecoveryService } from "./campaign-recovery.js";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
+import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
+import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
@@ -2432,7 +2432,7 @@ export class SessionsService {
         stored = this.db.getPolicyHookApproval(sessionId, requestId)!;
       }
       if (stored.status === "queued") {
-        this.db.promoteNextPolicyHookApproval(sessionId, now);
+        this.promotePolicyHookApproval(sessionId, now);
         stored = this.db.getPolicyHookApproval(sessionId, requestId)!;
       }
       if (stored.status === "queued") {
@@ -2449,7 +2449,7 @@ export class SessionsService {
         if (current?.pendingApproval?.kind !== "policy_hook" ||
             current.pendingApproval.requestId !== requestId) {
           this.db.requeuePolicyHookApproval(sessionId, requestId);
-          this.db.promoteNextPolicyHookApproval(sessionId, now);
+          this.promotePolicyHookApproval(sessionId, now);
           stored = this.db.getPolicyHookApproval(sessionId, requestId)!;
           this.hub.sessionChangedById(sessionId);
           return ok({
@@ -2518,6 +2518,8 @@ export class SessionsService {
 
     const auditRequest: PendingApproval = {
       requestId,
+      // The request id is unique to this tool use, so the ask is one exact decidable occurrence.
+      occurrenceId: `policy_hook_${requestId}`,
       title: `${parsed.value.context?.toolName ?? "Tool"} requires approval.`,
       kind: "policy_hook",
       options: [
@@ -2684,7 +2686,11 @@ export class SessionsService {
     }
     if (begun.kind === "created") {
       if (begun.approval.status === "pending") {
-        this.notifyTransition(session, sessionId);
+        // A Full Control root decides its own hook ask from its standing authorization. The hook
+        // keeps polling and observes the settled approval; nothing changes for anyone else.
+        const parked = pendingRequests(this.db.getSession(sessionId)?.pendingApproval)
+          .find((candidate) => candidate.requestId === requestId);
+        if (!parked || !this.executeStandingRootRequest(sessionId, parked)) this.notifyTransition(session, sessionId);
         this.hub.sessionChangedById(sessionId);
       }
     }
@@ -2894,7 +2900,7 @@ export class SessionsService {
     }
     for (const id of affected) {
       const beforePromotion = this.db.getSession(id);
-      const promoted = this.db.promoteNextPolicyHookApproval(id, now);
+      const promoted = this.promotePolicyHookApproval(id, now);
       if (promoted && beforePromotion) {
         this.notifyTransition(beforePromotion, id);
         this.hub.sessionChangedById(id);
@@ -3539,7 +3545,7 @@ export class SessionsService {
         return fail("child session creation was rejected or its approval expired", 403);
       }
       this.db.touchPolicyHookApproval(parentSessionId, requestId, now);
-      this.db.promoteNextPolicyHookApproval(parentSessionId, now);
+      this.promotePolicyHookApproval(parentSessionId, now);
       this.hub.sessionChangedById(parentSessionId);
       return fail(`Child creation requires approval in parent session ${parentSessionId} (request ${requestId}). Retry the same request after approval.`, 428);
     }
@@ -4703,7 +4709,9 @@ export class SessionsService {
       const authoritySupport = campaignAuthorityPreflight(control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
       if (!authoritySupport.supported) return fail(authoritySupport.reason ?? "campaign authority is unsupported", 409);
-      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, true);
+      // A launch with no cost ceiling still meters cost, but only an explicit ceiling needs it priced.
+      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model,
+        control.boundary.budgetAuthority?.costUsd !== undefined);
       if (accountingError) return fail(accountingError, 409);
       const nativeReview = control.boundary.budgetAuthority?.controlledReview;
       if (nativeReview && (!runner.runtime?.campaignReview || controlledReviewCapabilityKey(nativeReview) !== controlledReviewCapabilityKey(runner.runtime.campaignReview))) {
@@ -8136,26 +8144,38 @@ export class SessionsService {
   }
 
   /** Synchronous provider requests park the root model. Settle only eligible exact occurrences
-   * from its existing human authorization; never wait for the root to grant itself permission. */
-  private executeStandingRootRequest(sessionId: string, request: PendingApproval): boolean {
+   * from its existing human authorization; never wait for the root to grant itself permission.
+   * Under Full Control the server also declines, for any participant, each occurrence the
+   * campaign cannot supply (#2940), so neither the Human nor the Orchestrator is asked. */
+  private executeStandingRootRequest(sessionId: string, request: PendingApproval, declineOnly = false): boolean {
     const session = this.db.getSession(sessionId);
-    if (!session || !request.occurrenceId || pendingRequests(session.pendingApproval).some(isPolicyApproval)) return false;
+    if (!session) return false;
     const controller = this.orchestratorCampaignController(session);
-    if (controller && controller !== "refused" && controller.orchestratorPolicy?.control?.mode === "full_control") {
-      this.campaignRecovery.synchronize(controller, Date.now());
-    }
-    if (!controller || controller === "refused" || controller.id !== sessionId) return false;
+    const full = Boolean(controller && controller !== "refused" && controller.orchestratorPolicy?.control?.mode === "full_control");
+    if (full) this.campaignRecovery.synchronize(controller as SessionView, Date.now());
+    if (!controller || controller === "refused" || (!full && controller.id !== sessionId)) return false;
     const evaluation = this.genericCampaignAuthority(controller, session, request);
+    // A decline grants nothing, so it may settle a request whose provider gave no exact occurrence,
+    // even while another card (a guardrail pause, a Human Required ask) is also pending.
+    if (full && evaluation.owner === "orchestrator" && evaluation.disposition === "decline") {
+      return this.declineStandingRequest(controller, session, request, evaluation);
+    }
+    if (declineOnly || controller.id !== sessionId || !request.occurrenceId ||
+        pendingRequests(session.pendingApproval).some((candidate) =>
+          isPolicyApproval(candidate) && candidate.requestId !== request.requestId)) return false;
     if (evaluation.owner !== "orchestrator" || evaluation.basis !== "standing_authorization") return false;
     const actor: GovernanceActor = { kind: "system", id: "campaign-standing-authorization" };
     const answers = request.kind === "question" ? standingRootQuestionAnswers(request) : null;
     const optionId = request.options.find((option) => option.kind === "allow_once")?.optionId;
+    if (!(request.kind === "question" ? answers : optionId)) return false;
+    // At most once per exact occurrence: a card a snapshot restores is never answered again.
+    const fence = this.standingResponseFence(controller, session, request);
+    if (!fence.claimed) return true;
     const result = request.kind === "question" && answers
       ? this.answerQuestion(sessionId, request.requestId, answers, actor, "submit", sessionId, request.occurrenceId)
-      : request.kind !== "question" && optionId
-        ? this.approve(sessionId, request.requestId, optionId, actor, sessionId)
-        : null;
+      : this.approve(sessionId, request.requestId, optionId!, actor, sessionId);
     if (!result?.ok) {
+      fence.release();
       const pending = this.db.getSession(sessionId)?.pendingApproval;
       if (pendingRequests(pending).some((candidate) => candidate.requestId === request.requestId && candidate.occurrenceId === request.occurrenceId)) {
         this.db.setPendingApproval(sessionId, replacePendingApproval(pending, { ...request, standingAdmissionFailure: "provider_delivery_unavailable" }));
@@ -8165,6 +8185,86 @@ export class SessionsService {
     this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "root_provider_admission",
       sessionId, requestId: request.requestId, occurrenceId: request.occurrenceId,
       policyRevision: session.parentControlPolicy?.revision, ...evaluation }));
+    return true;
+  }
+
+  /** Promote the next queued hook ask, then give the promoted card its standing response (#2940):
+   * every path that makes a hook ask pending (approval, timeout reconciliation, polling, the spawn
+   * gate) settles it the same way as one created pending. */
+  private promotePolicyHookApproval(sessionId: string, now: number): ReturnType<ControlPlaneDb["promoteNextPolicyHookApproval"]> {
+    const promoted = this.db.promoteNextPolicyHookApproval(sessionId, now);
+    if (promoted?.status === "pending") {
+      const parked = pendingRequests(this.db.getSession(sessionId)?.pendingApproval)
+        .find((candidate) => candidate.requestId === promoted.requestId);
+      if (parked && this.executeStandingRootRequest(sessionId, parked)) {
+        return this.db.getPolicyHookApproval(sessionId, promoted.requestId) ?? promoted;
+      }
+    }
+    return promoted;
+  }
+
+  /** Answer one exact occurrence with its one-time reject (a dismissal for a question or sign-in)
+   * and nothing else. Credential, sign-in, access and lasting-grant classes become content-safe
+   * blocked work. An undelivered decline stays pending for the Orchestrator, which can only
+   * decline it too; it is not retried here, so a delivered decline is never replayed. */
+  /** Claim the durable at-most-once fence for one exact occurrence's standing response. A failed
+   * call proved nothing was sent (the runner socket refused it or validation stopped it first), so
+   * only then is the claim released for a later attempt. */
+  private standingResponseFence(controller: SessionView, session: SessionView, request: PendingApproval): { claimed: boolean; release: () => void } {
+    // A sign-in card is rebuilt at runner startup with a fresh occurrence id; its request id carries
+    // the stable recovery identity (credential scope and recovery), so it fences across restarts.
+    const occurrence = request.kind === "authentication" ? `authentication:${request.requestId}`
+      : request.occurrenceId ?? `request:${request.requestId}`;
+    const claimed = this.db.campaignRecovery.claimStandingResponse(controller.id, session.id, occurrence, Date.now());
+    return { claimed, release: () => { if (claimed) this.db.campaignRecovery.releaseStandingResponse(controller.id, session.id, occurrence); } };
+  }
+
+  private declineStandingRequest(controller: SessionView, session: SessionView, request: PendingApproval,
+    evaluation: CampaignAuthorityEvaluation, explicit = false): boolean {
+    const actor: GovernanceActor = { kind: "system", id: "campaign-standing-decline" };
+    // A sign-in card is dismissed with the runner's own Dismiss Recovery action: cancelling it
+    // (or a null option) re-emits the card, which would be declined again in a loop.
+    const reject = (request.kind === "authentication" ? request.options.find((option) => option.optionId === "auth:dismiss") : undefined)?.optionId ??
+      request.options.find((option) => option.kind === "reject_once")?.optionId ?? null;
+    // The server's own decline is sent at most once per occurrence, however often a snapshot or
+    // reconnect restores the card. An Orchestrator's explicit decline is its own single action.
+    const fence = explicit ? { claimed: true, release: () => {} } : this.standingResponseFence(controller, session, request);
+    if (!fence.claimed) return true;
+    const result = request.kind === "question"
+      ? this.answerQuestion(session.id, request.requestId, {}, actor, "dismiss", controller.id, request.occurrenceId)
+      : this.approve(session.id, request.requestId, reject, actor, controller.id);
+    if (!result.ok) { fence.release(); return false; }
+    if (request.kind === "authentication" &&
+        !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "durableAuthDismissal")) {
+      // A pre-v230 runner refuses a dismissal while the provider turn settles and keeps the card.
+      // It is never re-sent: the sign-in stays content-safe blocked work (recorded below) until the
+      // runner is updated, and nobody is prompted.
+      this.log.warn(JSON.stringify({ event: "campaign_auth_dismissal_runner_upgrade_required", sessionId: session.id,
+        controllingSessionId: controller.id, requestId: request.requestId }));
+    }
+    const now = Date.now();
+    const revision = controller.parentControlPolicy?.revision ?? 0;
+    const occurrence = recoveryCoordinate(request.occurrenceId ?? `request:${session.id}:${request.requestId}`);
+    if (evaluation.requestClass && FULL_CONTROL_DECLINED_CLASSES.has(evaluation.requestClass)) {
+      this.db.campaignRecovery.recordDecline(controller.id, session.id, evaluation.requestClass, occurrence, revision, now);
+      this.campaignRecovery.synchronize(this.db.getSession(controller.id) ?? controller, now);
+    } else if (evaluation.reason === "unresolved_effects" &&
+        this.db.campaignRecovery.recordDecline(controller.id, session.id, "unresolved_effects", occurrence, revision, now).firstForClass &&
+        session.id !== controller.id) {
+      // Tell a child once per revision how to retry, after this event settles. A parked root reads
+      // the same rule in its campaign policy rather than being woken for its own decline.
+      setImmediate(() => {
+        try {
+          const delivered = this.prompt(session.id, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE);
+          if (!delivered.ok) this.log.warn(`unresolved-effect decline guidance not delivered to ${session.id}: ${delivered.error}`);
+        } catch (error) {
+          this.log.warn(`unresolved-effect decline guidance failed for ${session.id}: ${(error as Error).message}`);
+        }
+      });
+    }
+    this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "standing_decline",
+      sessionId: session.id, controllingSessionId: controller.id, requestId: request.requestId,
+      occurrenceId: request.occurrenceId, policyRevision: controller.parentControlPolicy?.revision, ...evaluation }));
     return true;
   }
 
@@ -8244,8 +8344,12 @@ export class SessionsService {
       this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
     }
     if (control.mode === "full_control") {
-      for (const pending of pendingRequests(this.db.getSession(sessionId)?.pendingApproval)) {
-        if (pending.kind !== "workflow_decision") this.executeStandingRootRequest(sessionId, pending);
+      // Requests parked before enablement are settled now: the root's standing decisions, and
+      // each participant's declines, which would otherwise wait for a Human who is never asked.
+      for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) {
+        for (const pending of pendingRequests(this.db.getSession(id)?.pendingApproval)) {
+          if (pending.kind !== "workflow_decision") this.executeStandingRootRequest(id, pending);
+        }
       }
     }
     this.publishCampaignAttentionTransition(session);
@@ -8684,7 +8788,7 @@ export class SessionsService {
       workspaceId: session.workspaceId ?? "",
       ...(workspacePath ? { workspacePath } : {}),
       agentId: reviewer.agentId,
-      title: `${label} Review of ${pullRequest.repository}#${pullRequest.number}`,
+      title: `${harness === "codex" ? "Codex" : "Claude"} Review of ${pullRequest.repository}#${pullRequest.number}`,
       prompt: request.brief,
       useWorktree: false,
       config: {
@@ -8819,7 +8923,8 @@ export class SessionsService {
     const rootId = this.db.campaignBudgets.root(sessionId);
     if (!rootId) return false;
     let view = this.db.campaignBudgets.view(rootId)!;
-    if (this.db.campaignBudgets.members(rootId).some((id) => this.db.campaignUsageHasUnpriced(id))) {
+    // Unpriced usage stops only a campaign whose cost ceiling depends on pricing (#2940).
+    if (view.authority.costUsd !== undefined && this.db.campaignBudgets.members(rootId).some((id) => this.db.campaignUsageHasUnpriced(id))) {
       this.db.campaignBudgets.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
       view = this.db.campaignBudgets.view(rootId)!;
     }
@@ -9154,7 +9259,7 @@ export class SessionsService {
       }
       if (response.type === "campaign_issue_scope_result" && response.sessionId === root.id && !response.ok &&
           response.failure === "unsupported_execution_target") {
-        return fail("Campaign scope requires a valid local or SSH host execution target belonging to its runner. Container and cloud targets are not supported.", 409);
+        return fail(campaignScopeTargetFailureMessage(response.targetFailureReason), 409);
       }
       if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id || !response.ok ||
           !response.repository || !/^[\w.-]+\/[\w.-]+$/u.test(response.repository) ||
@@ -9483,6 +9588,20 @@ export class SessionsService {
     const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
       this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
       this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id));
+    // Full Control cannot supply credentials or sign-in, so it declines such a question once,
+    // records it as blocked work, and creates no decision for anyone to answer (#2940).
+    if (authorityEvaluation.disposition === "decline") {
+      const root = this.orchestratorCampaignController(child);
+      if (root && root !== "refused" && authorityEvaluation.requestClass) {
+        const now = Date.now();
+        this.db.campaignRecovery.recordDecline(root.id, sessionId, authorityEvaluation.requestClass,
+          recoveryCoordinate(`workflow:${sessionId}:${request.requestId}`), root.parentControlPolicy?.revision ?? 0, now);
+        this.campaignRecovery.synchronize(root, now);
+      }
+      this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "workflow_request_declined",
+        sessionId, controllingSessionId: controller.session.id, requestId: request.requestId, ...authorityEvaluation }));
+      return fail("Full Control declined this question: the campaign cannot supply credentials or sign-in. Continue without them; the request is recorded as blocked work.", 403);
+    }
     if (authorityEvaluation.owner !== authority) {
       authorityEvaluation.owner = authority;
       authorityEvaluation.basis = "human_required";
@@ -9618,6 +9737,10 @@ export class SessionsService {
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
     if (!checked.ok || !checked.data) return failAs(checked);
     const normalizedResolution = checked.data;
+    if (this.uiEvidenceApprovalNeedsDirectRoute(decision, normalizedResolution.outcome) &&
+        !this.uiEvidenceDirectRouteCurrent(currentParent, currentPolicy, decision)) {
+      return fail("Approving UI evidence needs every evidence route to be directly available to the Orchestrator now. Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven.", 403);
+    }
     const now = Date.now();
     // Repeating evidence identifiers proves nothing. An Orchestrator approval is backed only by
     // receipts the server itself recorded when it delivered each exact artifact to this reviewer.
@@ -10293,6 +10416,25 @@ export class SessionsService {
     childSessionId: string,
     snapshot: WorkflowDecisionResourceSnapshot,
   ): UiEvidenceReviewEvaluation {
+    const direct = this.directWorkflowDecisionAuthority(controller, policy, childSessionId, snapshot);
+    if (direct.effectiveOwner === "orchestrator" || !direct.fallback || snapshot.category !== "ui_evidence_approval" ||
+        controller.orchestratorPolicy?.control?.mode !== "full_control") return direct;
+    // Full Control never routes evidence to the Human (#2940). The Orchestrator keeps a decision it
+    // cannot fully inspect only while the current boundary gives it UI Evidence Approval.
+    const requester = this.db.getSession(childSessionId);
+    const owner = requester ? evaluateCampaignAuthority(controller, requester,
+      this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
+      this.campaignPeerContracts(controller, requester.id)).owner : "human";
+    return owner === "orchestrator" ? { effectiveOwner: "orchestrator", limitation: direct.fallback } : direct;
+  }
+
+  /** Whether the Orchestrator can inspect every evidence item itself, before Full Control routing. */
+  private directWorkflowDecisionAuthority(
+    controller: SessionView,
+    policy: ParentControlPolicy,
+    childSessionId: string,
+    snapshot: WorkflowDecisionResourceSnapshot,
+  ): UiEvidenceReviewEvaluation {
     const requester = this.db.getSession(childSessionId);
     const authority = requester ? evaluateCampaignAuthority(controller, requester,
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
@@ -10342,8 +10484,11 @@ export class SessionsService {
     // root's Session view here: that view embeds the projection this fact is part of.
     const control = controller.orchestratorPolicy?.control;
     if (control?.mode !== "full_control" || !this.workflowVideoApprovals) return null;
-    const human = (reason: string) => ({ status: "unavailable" as const, reason: `Video evidence comes to you because ${reason}` });
-    if (uiEvidenceOwner !== "orchestrator") return human("UI evidence approval is not delegated to the Orchestrator.");
+    if (uiEvidenceOwner !== "orchestrator") return { status: "unavailable",
+      reason: "Video evidence comes to you because UI evidence approval is not delegated to the Orchestrator." };
+    // Full Control never hands video to the Human (#2940); the Orchestrator asks or denies.
+    const human = (reason: string) => ({ status: "unavailable" as const,
+      reason: `The Orchestrator can't watch video because ${reason} It asks for screenshots or denies the claim as unproven.` });
     if (!control.boundary.evidenceAuthority) return human("this campaign has no evidence envelope for a media-only reviewer.");
     if (!campaignEvidenceDisclosuresCurrent(control.boundary.evidenceAuthority, this.evidenceAuthorityDisclosures) ||
       !campaignBoundaryCurrent(controller)) return human("this campaign's evidence disclosures or boundary changed.");
@@ -10351,7 +10496,7 @@ export class SessionsService {
     const readiness = this.workflowVideoApprovals.campaignReadiness(controller);
     if (!readiness.available) return human(readiness.reason);
     return { status: "available", reason: "The Orchestrator hands video evidence to the certified media-only reviewer and decides " +
-      "from its verdict. A child's video stays with you unless that child also runs on an attested agent." };
+      "from its verdict. A child not running on an attested agent is asked for screenshots instead, or its claim is denied as unproven." };
   }
 
   private productionVideoReviewAvailable(controller: SessionView, child: SessionView,
@@ -10411,9 +10556,27 @@ export class SessionsService {
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
+    if (decision.status === "approved" && this.uiEvidenceApprovalNeedsDirectRoute(decision, "approve") &&
+        !this.uiEvidenceDirectRouteCurrent(controller, policy, decision)) return false;
     return this.evaluateWorkflowDecisionAuthority(
       controller, policy, decision.sessionId, decision.resourceSnapshot,
     ).effectiveOwner === decision.authority;
+  }
+
+  /** Under Full Control a UI evidence decision the Orchestrator cannot fully inspect stays its own,
+   * with a limitation, so nobody is prompted (#2940). That keeps it deniable, never approvable: an
+   * approval rests on a receipt or a media reviewer's verdict for every item, and each comes only
+   * through a route that needs direct Orchestrator authority (screenshot review, operator-enabled
+   * frame review, the certified media-only reviewer). So an Orchestrator approval is made, and
+   * stays consumable, only while that direct authority holds; losing any route revokes it. */
+  private uiEvidenceApprovalNeedsDirectRoute(decision: WorkflowDecisionView, outcome: string): boolean {
+    return decision.resourceSnapshot.category === "ui_evidence_approval" && decision.authority === "orchestrator" &&
+      outcome === "approve";
+  }
+
+  private uiEvidenceDirectRouteCurrent(controller: SessionView, policy: ParentControlPolicy, decision: WorkflowDecisionView): boolean {
+    return this.directWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot)
+      .effectiveOwner === "orchestrator";
   }
 
   /** Deliver one exact evidence artifact of a pending descendant decision to the Orchestrator that
@@ -10456,6 +10619,19 @@ export class SessionsService {
     if (!item?.artifactId) return fail("evidence item not found on this workflow decision", 404);
     const video = decision.resourceSnapshot.videoReview;
     const frame = video?.frames.find((candidate) => candidate.evidenceId === evidenceId);
+    // A decision Full Control routed here although some evidence is uninspectable (#2940) delivers
+    // only the child's own inspectable screenshots: never another Session's artifact, raw video or a
+    // frame outside an enabled frame review. The rest can only be asked for again or denied.
+    const direct = this.directWorkflowDecisionAuthority(parent, policy, childSessionId, decision.resourceSnapshot);
+    if (direct.effectiveOwner !== "orchestrator") {
+      const client = evaluateUiEvidenceReviewClient(this.db.uiEvidenceReviewClient(parent, "orchestrator"));
+      const single = frame || client.effectiveOwner !== "orchestrator" ? (frame ? direct : client)
+        : evaluateUiEvidenceItems(parent.driver, childSessionId, [item],
+          (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null);
+      if (single.effectiveOwner !== "orchestrator") {
+        return fail(`${single.fallback?.reason ?? "The Orchestrator cannot inspect this evidence."} Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven.`, 409);
+      }
+    }
     if (frame) {
       const acknowledged = this.db.validUiEvidenceReviewReceipts(occurrenceId, parentSessionId, Date.now());
       if (video!.frames.some((candidate) => candidate.index < frame.index &&
@@ -11413,16 +11589,26 @@ export class SessionsService {
       "delegated parent control",
     );
     if (unsupported) return unsupported;
-    if (this.genericCampaignAuthority(parent, child, pending).owner !== "orchestrator") {
+    const evaluation = this.genericCampaignAuthority(parent, child, pending);
+    if (evaluation.owner !== "orchestrator") {
       return fail("this request requires a human response", 403);
+    }
+    // Full Control declines credential, sign-in and access requests itself (#2940). Owning the
+    // occurrence lets the Orchestrator decline it too, never approve or answer it.
+    if (evaluation.disposition === "decline") {
+      if (resolution.action !== "deny" && resolution.action !== "dismiss") {
+        return fail("Full Control declines this request: the campaign cannot supply credentials, sign-in, wider access or a lasting grant", 403);
+      }
+      // The same one-time reject or dismissal the server sends, even for a sign-in card with none.
+      return this.declineStandingRequest(parent, child, pending, evaluation, true)
+        ? ok(this.db.getSession(childSessionId)!) : fail("the decline could not be delivered; retry when the runner is online", 409);
     }
     if (parent.orchestratorPolicy?.control?.mode === "full_control" && pending.kind !== "question") {
       const currentRule = evaluateApprovalPolicies({ scope: approvalScope(child, pending), status: child.status,
         costUsd: child.costUsd, toolCallCount: this.db.countToolCalls(child.id), escalated: Boolean(pending.context?.escalatedBy) },
       this.governancePolicies());
       if (currentRule.effect === "deny" || (currentRule.policy && currentRule.effect === "ask" &&
-          (currentRule.policy.builtin || currentRule.policy.conditions?.humanRequired ||
-            !parent.orchestratorPolicy.control.boundary.delegatablePolicyIds.includes(currentRule.policy.policyId)))) {
+          (currentRule.policy.builtin || currentRule.policy.conditions?.humanRequired))) {
         return fail("current policy requires a human or denies this operation", 403);
       }
     }
@@ -11746,7 +11932,7 @@ export class SessionsService {
         return fail("policy hook approval is stale or already resolved", 409);
       }
       const beforePromotion = this.db.getSession(sessionId);
-      const promoted = this.db.promoteNextPolicyHookApproval(sessionId, now);
+      const promoted = this.promotePolicyHookApproval(sessionId, now);
       if (promoted && beforePromotion) this.notifyTransition(beforePromotion, sessionId);
       if (!promoted) {
         const settled = this.db.getSession(sessionId);
@@ -15254,6 +15440,9 @@ export class SessionsService {
         // it. Preserve both instead of dismissing a non-blocking question at the turn barrier.
         this.hub.sessionEvent(ev, { suppressReminderWake: true });
         this.db.setPendingApproval(sessionId, appendPendingApproval(occupiedHook, approval));
+        const stored = pendingRequests(this.db.getSession(sessionId)?.pendingApproval)
+          .find((candidate) => candidate.requestId === approval.requestId);
+        if (stored) this.executeStandingRootRequest(sessionId, stored, true);
         this.hub.sessionChangedById(sessionId);
         return;
       }
@@ -15316,6 +15505,12 @@ export class SessionsService {
         this.db.updateSessionStatus(sessionId, "input_required", now);
         if (this.executeStandingRootRequest(sessionId, approval)) return;
         this.notifyTransition(session(), sessionId);
+      } else {
+        // An async question does not park the provider, but its standing response is the same:
+        // Full Control declines it at once rather than leaving it for anyone to answer.
+        const stored = pendingRequests(this.db.getSession(sessionId)?.pendingApproval)
+          .find((candidate) => candidate.requestId === approval.requestId);
+        if (stored) this.executeStandingRootRequest(sessionId, stored, true);
       }
     }
 
@@ -15726,6 +15921,8 @@ export class SessionsService {
         this.restorePendingWorkflowDecisionCards(snap.id);
         this.deliverHeldWorkflowDecisionResumes(snap.id, now);
         this.deliverHeldRestartNotices(snap.id, now);
+        // A card the runner restores at registration gets its standing response, once (#2940).
+        this.applyStandingCampaignResponses(snap.id);
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
@@ -15874,8 +16071,19 @@ export class SessionsService {
     this.restorePendingWorkflowDecisionCards(snapshot.id);
     this.deliverHeldWorkflowDecisionResumes(snapshot.id, now);
     this.deliverHeldRestartNotices(snapshot.id, now);
+    this.applyStandingCampaignResponses(snapshot.id);
     this.hub.sessionChangedById(snapshot.id);
     this.publishCampaignAttentionTransition(campaignBefore, batch);
+  }
+
+  /** A request a runner restores (a reconnect snapshot, hydrated history) gets the same standing
+   * response as one that arrived live (#2940): otherwise a request parked while the runner was away
+   * would wait for a response nobody owes it. Outside Full Control this settles nothing new. */
+  private applyStandingCampaignResponses(sessionId: string): void {
+    for (const request of pendingRequests(this.db.getSession(sessionId)?.pendingApproval)) {
+      if (request.kind === "workflow_decision" || isGuardrailApproval(request)) continue;
+      this.executeStandingRootRequest(sessionId, request, Boolean(request.async));
+    }
   }
 
   private unsupportedCostReconciliation(runnerId: string, snapshot: SessionSnapshot): boolean {
@@ -16018,6 +16226,7 @@ export class SessionsService {
     if (cur && !isTerminal(cur.status) &&
         (cur.status === "input_required" || trailingAsk.async) && !cur.pendingApproval) {
       this.db.setPendingApproval(sessionId, trailingAsk);
+      this.applyStandingCampaignResponses(sessionId);
       this.hub.sessionChangedById(sessionId);
     }
   }

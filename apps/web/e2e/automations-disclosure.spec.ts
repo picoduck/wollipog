@@ -161,19 +161,19 @@ for (const { label, viewport } of [
         await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound&inherited-alternate-pins`);
         await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
         await page.getByRole("button", { name: "Edit", exact: true }).click();
-        await expect(page.getByRole("button", { name: "Alternate Agent-1 Agent: Claude Code" })).toBeVisible();
-        await expect(page.getByRole("button", { name: "Alternate Orchestrator Agent: Claude Code" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Other Auditor Agent: Claude Code" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Other Orchestrator Agent: Claude Code" })).toBeVisible();
         const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-inherited-pins-before-${label}-${theme}.png`), fullPage: true,
         });
 
-        await page.getByRole("button", { name: "Agent-1 Agent: Claude Code", exact: true }).click();
+        await page.getByRole("button", { name: "Auditor Agent: Claude Code", exact: true }).click();
         await page.getByRole("option", { name: "Codex App Server" }).click();
         await page.getByRole("button", { name: "Orchestrator Agent: Claude Code", exact: true }).click();
         await page.getByRole("option", { name: "Codex App Server" }).click();
-        await expect(page.getByRole("button", { name: "Alternate Agent-1 Agent: Codex App Server" })).toBeVisible();
-        await expect(page.getByRole("button", { name: "Alternate Orchestrator Agent: Codex App Server" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Other Auditor Agent: Codex App Server" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Other Orchestrator Agent: Codex App Server" })).toBeVisible();
         await expect(page.getByText(/The saved installation of (this role's|the Orchestrator's) agent isn't available on the other machine\./)).toHaveCount(0);
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-inherited-pins-after-${label}-${theme}.png`), fullPage: true,
@@ -238,8 +238,9 @@ for (const { label, viewport } of [
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-machine-before-${label}-${theme}.png`), fullPage: true,
         });
-        await page.getByRole("combobox", { name: "Machine", exact: true }).selectOption("runner-2");
-        await expect(page.getByRole("button", { name: "Agent-1 Agent: Configured Agent" })).toBeVisible();
+        await page.getByRole("button", { name: "Machine: runner-1", exact: true }).click();
+        await page.getByRole("option", { name: "runner-2" }).click();
+        await expect(page.getByRole("button", { name: "Auditor Agent: Configured Agent" })).toBeVisible();
         await expect(page.getByText(/The saved installation of this role's agent isn't available\./)).toHaveCount(0);
         if (evidenceDir) await page.screenshot({
           path: join(evidenceDir, `automation-machine-after-${label}-${theme}.png`), fullPage: true,
@@ -328,7 +329,7 @@ for (const { label, viewport } of [
         if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `${name}-${label}-${theme}.png`), fullPage: true });
       };
       const card = (page: Page) => page.getByRole("button", { name: /Nightly Dependency Sweep/ });
-      const saveError = (page: Page, text: string) => page.getByRole("alert").filter({ hasText: text });
+      const saveError = (page: Page, text: string) => page.locator(".field-error").filter({ hasText: text });
 
       test("names both waiting reasons in the card and the expired run", async ({ page }) => {
         for (const [variant, reason] of [
@@ -362,7 +363,7 @@ for (const { label, viewport } of [
           await capture(page, `automation-wording-${alternate ? "alternate" : "primary"}-warning`);
           await page.getByRole("button", { name: "Use Current Installation" }).click();
           await page.evaluate(() => (window as unknown as { automationsRediscover: () => void }).automationsRediscover());
-          await page.getByRole("button", { name: "Save Automation" }).click();
+          await page.getByRole("button", { name: "Save Changes" }).click();
           await expect(saveError(page, alternate
             ? "Choose an available installation of this agent on the other machine."
             : "Choose an available installation of this agent on this machine.")).toBeVisible();
@@ -376,7 +377,7 @@ for (const { label, viewport } of [
             "&inherited-alternate-pins&unavailable-pins&rediscover");
           await card(page).click();
           await page.getByRole("button", { name: "Edit", exact: true }).click();
-          const warning = (text: string) => page.getByRole("alert").filter({ hasText: text });
+          const warning = (text: string) => page.locator(".notice.t-warning").filter({ hasText: text });
           for (const text of [
             "The saved installation of this role's agent isn't available.Use",
             "The saved installation of the Orchestrator's agent isn't available.Use",
@@ -389,8 +390,8 @@ for (const { label, viewport } of [
             : "The saved installation of this role's agent isn't available.Use",
           ).getByRole("button", { name: "Use Current Installation" }).click();
           await page.evaluate(() => (window as unknown as { automationsRediscover: () => void }).automationsRediscover());
-          await page.getByRole("button", { name: "Save Automation" }).click();
-          await expect(saveError(page, `Choose an available installation of the agent for Agent-1 on ${
+          await page.getByRole("button", { name: "Save Changes" }).click();
+          await expect(saveError(page, `Choose an available installation of the agent for Auditor on ${
             alternate ? "the other" : "this"} machine.`)).toBeVisible();
           await capture(page, `automation-wording-workflow-${alternate ? "alternate" : "primary"}-save-error`);
         }

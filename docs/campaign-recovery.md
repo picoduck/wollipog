@@ -95,7 +95,9 @@ Recovery metadata grants no authority. Every effect still passes the existing ex
 provider permissions, policy rules, scope, budget, fixed-worker configuration and evidence contracts.
 The recovery layer cannot enlarge scope, reset budgets, acquire credentials, change preferences or
 override Human Required rules. Missing human information/access, boundary enlargement, protected
-rules and unsupported capabilities each expose an actionable exception. Stale forge data is retained
+rules and unsupported capabilities each expose an actionable exception; under Full Control a declined
+credential, sign-in, access or lasting-grant request is instead blocked work (`request_declined`) that
+asks nobody and is never dispatched. Stale forge data is retained
 as unresolved until the background reader obtains a fresh fact; it cannot prove repair, passing
 checks or merge. Routine stale/transient reads do not wake the parent or spend recovery attempts.
 Actual access/capability failures still expose human exceptions.

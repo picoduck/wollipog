@@ -327,7 +327,7 @@ test("Full Control cannot deliver a legacy queued continuation without its autho
   } finally { h.db.close(); }
 });
 
-test("human exceptions retain exact resource, owner and smallest input without duplicate requests or content leakage", () => {
+test("a parked sign-in is never a human exception under Full Control: the Orchestrator may only decline it, as content-safe blocked work", () => {
   const h = fixture();
   try {
     const secret = "https://private.example/token?bearer=secret";
@@ -336,23 +336,49 @@ test("human exceptions retain exact resource, owner and smallest input without d
     h.db.updateSessionStatus("child", "input_required", 3);
     h.recovery.maintain(100);
     const before = h.db.campaignProjection("root")!.recovery!;
-    assert.equal(before.waitingHuman, 1); assert.equal(before.unattendedReady, false);
+    assert.equal(before.waitingHuman, 0, "nobody is asked to sign in (#2940)");
     const record = before.records[0]!;
     assert.equal(record.resource.occurrenceId, recoveryCoordinate(secret));
-    assert.equal(record.reason, "missing_access");
-    assert.equal(record.requiredInput, "restore_existing_access");
-    assert.equal(record.effectiveOwner, "human");
+    assert.equal(record.effectiveOwner, "orchestrator");
     assert.equal(JSON.stringify(before).includes("private.example"), false);
-    assert.equal(h.db.getSession("child")!.pendingApproval!.campaignRecovery?.id, record.id);
-    const requests = h.svc.descendantRequests("root", () => true, "human").data!.requests;
-    assert.equal(requests.length, 1); assert.equal(requests[0]!.request.campaignRecovery!.id, record.id);
-    h.recovery.maintain(200); h.recovery.maintain(300);
-    assert.deepEqual(h.db.campaignProjection("root")!.recovery, before);
-    assert.equal(h.sent.length, 0);
+    assert.equal(h.svc.descendantRequests("root", () => true, "human").data!.requests.filter((r) => r.responseOwner === "human").length, 0);
+    const owned = h.svc.descendantRequests("root", () => true).data!.requests.find((r) => r.sessionId === "child")!;
+    assert.equal(owned.authorityEvaluation!.disposition, "decline");
+    assert.equal(h.svc.resolveDescendantRequest("root", "child", secret, { action: "approve", optionId: "any" }, () => true).ok, false);
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", secret, { action: "dismiss" }, () => true).ok);
+    assert.deepEqual(h.sent.filter((m) => (m as { type: string }).type === "resolve_permission").map((m) => (m as { optionId: string | null }).optionId), [null]);
     h.db.setPendingApproval("child", null);
     h.db.updateSessionStatus("child", "idle", 400);
     h.recovery.maintain(400);
-    assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0);
+    const after = h.db.campaignProjection("root")!.recovery!;
+    assert.equal(after.waitingHuman, 0);
+    const blocked = after.records.filter((candidate) => candidate.reason === "request_declined");
+    assert.deepEqual(blocked.map((candidate) => [candidate.state, candidate.action, candidate.requiredInput]), [["blocked", "continue_without_request", "none"]]);
+    assert.equal(after.unattendedReady, false, "blocked work is visible, never silently ready");
+    h.recovery.maintain(500); h.recovery.maintain(600);
+    assert.deepEqual(h.db.campaignProjection("root")!.recovery, after, "repeated sweeps never duplicate or re-dispatch it");
+    assert.equal(JSON.stringify(after).includes("private.example"), false);
+  } finally { h.db.close(); }
+});
+
+test("a delivered decline is recorded once per session and class, and revocation cancels the blocked work", () => {
+  const h = fixture();
+  try {
+    h.db.updateSessionStatus("child", "running", 3);
+    for (const occurrenceId of ["first", "first", "second"]) {
+      h.svc.onSessionEvent("child", { kind: "question_request", requestId: occurrenceId, occurrenceId, requestSource: "provider_question",
+        questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] });
+    }
+    const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
+    assert.deepEqual(h.db.campaignRecovery.declines("root", revision).map((decline) => [decline.sessionId, decline.requestClass, decline.count]),
+      [["child", "secrets_and_sign_in", 2]], "two distinct occurrences, one record; a redelivery counts once");
+    const records = () => h.db.campaignProjection("root")!.recovery?.records.filter((record) => record.reason === "request_declined") ?? [];
+    assert.equal(records().length, 1);
+    assert.equal(records()[0]!.state, "blocked");
+    const principal = { ...h.identity, kind: "human" as const, actorId: h.identity.userId };
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, revision, principal).ok);
+    h.recovery.maintain(1000);
+    assert.equal(records().length, 0, "revocation restores Custom: no Full Control blocked work remains active");
   } finally { h.db.close(); }
 });
 
@@ -363,6 +389,103 @@ function childSnapshot(extra: Partial<SessionSnapshot>): SessionSnapshot {
     worktreePath: "/repos/test/.agent-worktrees/child", preview: null, pendingApproval: null, seq: 0, historyEpoch: 0,
     createdAt: 1, updatedAt: 3, ...extra };
 }
+
+test("a request a reconnecting runner restores gets the same standing decline as a live one", () => {
+  const h = fixture();
+  try {
+    // The runner was away when the request was parked, so nothing could deliver a response.
+    h.hub.sendToRunner = () => false;
+    const pending: PendingApproval = { requestId: "restored", occurrenceId: "restored", kind: "question", title: "Credential",
+      options: [], requestSource: "provider_question",
+      questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] };
+    h.svc.onSessionEvent("child", { kind: "question_request", requestId: pending.requestId, occurrenceId: pending.occurrenceId,
+      requestSource: "provider_question", questions: pending.questions! });
+    assert.ok(h.db.getSession("child")!.pendingApproval, "undeliverable while the runner is away");
+    assert.equal(h.sent.length, 0);
+    // The runner reconnects and reports the same pending request in its snapshot.
+    h.hub.sendToRunner = (_id, message) => { h.sent.push(message); return true; };
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ pendingApproval: pending, updatedAt: 6 }));
+    const dismissed = h.sent.filter((message) => (message as { type: string }).type === "answer_question") as Array<{ requestId: string; action: string }>;
+    assert.deepEqual(dismissed.map((message) => [message.requestId, message.action]), [["restored", "dismiss"]]);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 1);
+  } finally { h.db.close(); }
+});
+
+const credentialQuestion: PendingApproval = { requestId: "secret-q", occurrenceId: "secret-q", kind: "question", title: "Credential",
+  options: [], requestSource: "provider_question",
+  questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] };
+const sentOf = (sent: unknown[], type: string) => sent.filter((message) => (message as { type: string }).type === type) as
+  Array<{ sessionId: string; requestId: string; action?: string; optionId?: string | null }>;
+
+test("a card restored only by runner registration gets its standing decline, once (#2940 CR-2.2)", () => {
+  const h = fixture();
+  try {
+    h.svc.hydrateRunnerSessions("r", [
+      childSnapshot({ id: "root", title: "root", status: "running" }),
+      childSnapshot({ pendingApproval: credentialQuestion }),
+      childSnapshot({ id: "unaffected", title: "unaffected", status: "running" }),
+    ]);
+    assert.deepEqual(sentOf(h.sent, "answer_question").map((message) => [message.sessionId, message.requestId, message.action]),
+      [["child", "secret-q", "dismiss"]], "one dismissal with no later runtime update");
+    assert.equal(h.db.getSession("child")!.pendingApproval, null, "no pending card remains");
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 1);
+  } finally { h.db.close(); }
+});
+
+test("a repeated snapshot never answers the same occurrence twice (#2940 CR-2.3)", () => {
+  // A credential decline, a root standing answer, and a sign-in dismissal whose runner resolution
+  // is still pending: each restored card is answered exactly once across repeated snapshots.
+  const rootQuestion: PendingApproval = { requestId: "root-q", occurrenceId: "root-q", kind: "question", title: "Placement",
+    options: [], requestSource: "provider_question",
+    questions: [{ id: "placement", question: "Which placement?", options: [{ label: "Inline (Recommended)" }, { label: "Footer" }] }] };
+  const signIn: PendingApproval = { requestId: "provider-auth:1", occurrenceId: "auth-occurrence", kind: "authentication", title: "Authentication Required",
+    options: [{ optionId: "auth:revalidate", name: "Retry", kind: "allow_once" }, { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" }] };
+  for (const [sessionId, pending, type] of [["child", credentialQuestion, "answer_question"], ["root", rootQuestion, "answer_question"],
+    ["child", signIn, "resolve_permission"]] as const) {
+    const h = fixture();
+    try {
+      for (let index = 0; index < 3; index += 1) {
+        h.svc.applySessionRuntimeUpdate("r", childSnapshot({ id: sessionId, title: sessionId, pendingApproval: pending, updatedAt: 10 + index }));
+      }
+      const answered = sentOf(h.sent, type).filter((message) => message.requestId === pending.requestId);
+      assert.equal(answered.length, 1, `${pending.requestId}: answered exactly once`);
+      if (sessionId === "root") assert.equal(answered[0]!.action, "submit", "the root's own suggested answer");
+      if (pending.kind === "authentication") assert.equal(answered[0]!.optionId, "auth:dismiss");
+    } finally { h.db.close(); }
+  }
+});
+
+test("a sign-in card rebuilt after a runner restart with a fresh occurrence is not dismissed again (CR-3.4)", () => {
+  const h = fixture();
+  try {
+    const card = (occurrenceId: string): PendingApproval => ({ requestId: "provider-auth:recovery-1", occurrenceId, kind: "authentication",
+      title: "Authentication Required", options: [{ optionId: "auth:revalidate", name: "Retry", kind: "allow_once" },
+        { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" }] });
+    // The standing dismissal is sent; the runner restarts before completing it.
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ pendingApproval: card("occurrence-before-restart"), updatedAt: 10 }));
+    h.svc.failRunnerSessions("r");
+    // Startup rebuilds the same recovery card, which mints a fresh occurrence id.
+    h.svc.hydrateRunnerSessions("r", [
+      childSnapshot({ id: "root", title: "root", status: "running", updatedAt: 20 }),
+      childSnapshot({ pendingApproval: card("occurrence-after-restart"), updatedAt: 20 }),
+      childSnapshot({ id: "unaffected", title: "unaffected", status: "running", updatedAt: 20 }),
+    ]);
+    const dismissals = sentOf(h.sent, "resolve_permission").filter((message) => message.requestId === "provider-auth:recovery-1");
+    assert.deepEqual(dismissals.map((message) => message.optionId), ["auth:dismiss"], "exactly one dismissal across the restart");
+  } finally { h.db.close(); }
+});
+
+test("a standing response the runner socket refused is retried by the next snapshot, still only once", () => {
+  const h = fixture();
+  try {
+    h.hub.sendToRunner = () => false;
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ pendingApproval: credentialQuestion, updatedAt: 10 }));
+    assert.equal(sentOf(h.sent, "answer_question").length, 0);
+    h.hub.sendToRunner = (_id, message) => { h.sent.push(message); return true; };
+    for (let index = 0; index < 2; index += 1) h.svc.applySessionRuntimeUpdate("r", childSnapshot({ pendingApproval: credentialQuestion, updatedAt: 11 + index }));
+    assert.equal(sentOf(h.sent, "answer_question").length, 1, "a refused send released its claim; the delivered one is fenced");
+  } finally { h.db.close(); }
+});
 
 test("a held child is recovered through the real recovery wake, and clearing the hold resolves it (#2938 AC2)", () => {
   const h = fixture();

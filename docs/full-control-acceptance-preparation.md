@@ -220,7 +220,7 @@ synthetic receipt, blind-answer claim or advertised image capability does not pr
 | 2 | Concurrent approve/consume and stale snapshot | One winner; old head/artifact/revision cannot consume; no reset by replacement worker identity |
 | 3 | Transient evidence/decode failure | Bounded queue/retry/recapture; unchanged exact gate binding; complete coverage retained; unrelated authorized work continues |
 | 4 | Uncertain steering, follow-up publication or merge response | Inspect exact durable submission/payload/head/forge object before replay; unknown stays fenced; no duplicate issue or merge |
-| 5 | Auth, unknown human information, foreign scope and Human Required ask | One actionable owned exception with reason/resource/input; no agent issuer or sign-in workaround; sibling work proceeds |
+| 5 | Auth, unknown human information, foreign scope and Human Required ask | Sign-in and credential requests are declined once as content-safe blocked work (#2940); foreign scope and the Human Required ask are one actionable owned exception with reason/resource/input; no agent issuer or sign-in workaround; sibling work proceeds |
 | 6 | Hard denial, exhausted/unpriced allowance and unsupported peer | Stop admission, preserve usage/reservations and failed attempt accounting; no repeated override prompt or substituted profile |
 
 Use the original bound for all faults. No interactive authentication, unavailable human information,
