@@ -731,6 +731,14 @@ async function sessionPath(
   return context.kind === "wsl" ? `${parent}/${sessionId}` : join(parent, sessionId);
 }
 
+/** Check the automatic launch coordinate without creating directories or allocating storage. */
+export async function isAutomaticSessionWorktree(
+  repoPath: string, sessionId: string, path: string, options: WorktreeOptions = {},
+): Promise<boolean> {
+  return sameWorktreePath(options.context ?? nativeContext, path,
+    await sessionPath(repoPath, sessionId, options, false));
+}
+
 function requestedSlot(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
@@ -971,7 +979,7 @@ interface ListedWorktree {
   bare: boolean;
 }
 
-function parseWorktreePorcelain(value: string): ListedWorktree[] {
+export function parseWorktreePorcelain(value: string): ListedWorktree[] {
   return value.split("\0\0").flatMap((block, index) => {
     const fields = block.split("\0");
     const path = fields.find((field) => field.startsWith("worktree "))?.slice(9);

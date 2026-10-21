@@ -278,6 +278,7 @@ import {
   isLegacyWslSessionWorktreePath,
   registeredSessionWorktree,
   sessionWorktreeBranch,
+  isAutomaticSessionWorktree,
   isGitRepo,
   nativeRepositoryPathIsUnavailable,
   pathWithin,
@@ -6715,6 +6716,7 @@ export class SessionManager {
       worktreeBranch: priorMatchesWorkspace ? prior?.worktreeBranch : undefined,
       worktreeRecovery: priorMatchesWorkspace ? prior?.worktreeRecovery : undefined,
       worktrees: priorMatchesWorkspace ? prior?.worktrees : undefined,
+      launchWorktreeProof: priorMatchesWorkspace ? prior?.launchWorktreeProof : undefined,
       worktreeHooks: priorMatchesWorkspace ? prior?.worktreeHooks : undefined,
       worktreeProcessMarkers: priorMatchesWorkspace ? prior?.worktreeProcessMarkers : undefined,
       executionTarget,
@@ -8485,6 +8487,32 @@ export class SessionManager {
   ): Promise<boolean> {
     const detail = await this.persistedWorktreeFailure(meta, worktree.path, meta.worktreeBranch);
     if (!detail) {
+      // Every provider launch/resume crosses here, including old sessions after a runner restart.
+      // Registration alone must not upgrade an arbitrary legacy selection: only the automatic
+      // coordinate on this session's expected branch can gain launch provenance. Reconciliation
+      // deliberately never writes this proof. Keep source=legacy for its existing semantics.
+      if (meta.context.kind === "native" &&
+          (!meta.executionTarget?.adapter || meta.executionTarget.adapter === "host") &&
+          worktree.branch === `agent/${meta.sessionId}`) {
+        await this.runWorktreeOperation(meta.sessionId, async () => {
+          const latest = this.store.readMeta(meta.sessionId);
+          if (!latest || !this.launchIsCurrent(meta.sessionId, launchGeneration) ||
+              latest.repoPath !== meta.repoPath || latest.context.kind !== "native" ||
+              latest.worktreePath !== worktree.path ||
+              this.attributedWorktreeForPath(latest, worktree.path)?.source !== "legacy" ||
+              !(await isAutomaticSessionWorktree(meta.repoPath, meta.sessionId, worktree.path, {
+                context: meta.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash,
+              })) || !this.launchIsCurrent(meta.sessionId, launchGeneration)) return;
+          const proof = { sessionId: meta.sessionId, repoPath: meta.repoPath,
+            path: worktree.path, branch: worktree.branch };
+          const worktrees = this.attributedWorktrees(latest);
+          this.store.patchMeta(meta.sessionId, { launchWorktreeProof: proof,
+            worktreeBranch: worktree.branch, worktrees });
+          meta.launchWorktreeProof = proof;
+          meta.worktreeBranch = worktree.branch;
+          meta.worktrees = worktrees;
+        });
+      }
       // A user may restore the exact selected path and branch instead of choosing a replacement.
       // The positive proof is authoritative: retire the matching incident before launch so a
       // restart cannot succeed and then re-park the healthy session from stale recovery metadata.

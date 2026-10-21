@@ -167,6 +167,9 @@ export interface SessionMeta {
   worktreePath: string | null;
   /** Exact active worktree branch. Absent on metadata created before requested worktrees. */
   worktreeBranch?: string;
+  /** Runner-private proof established at an automatic worktree's validated provider launch.
+   * Separate from source=legacy, whose pinned-branch/setup/cleanup semantics must survive. */
+  launchWorktreeProof?: { sessionId: string; repoPath: string; path: string; branch: string };
   /** Every attributed worktree; worktreePath/worktreeBranch select the active member. */
   worktrees?: SessionWorktreeView[];
   /** Runner-private exact approved teardown/environment snapshots keyed by stable worktree id. */

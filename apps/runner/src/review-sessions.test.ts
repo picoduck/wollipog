@@ -113,6 +113,49 @@ async function refusal(promise: Promise<unknown>): Promise<string> {
   assert.fail("expected the review to be refused");
 }
 
+function automaticFixture(t: { after(fn: () => void): void }): Fixture {
+  const f = fixture(t);
+  const branch = `agent/${f.requester.sessionId}`;
+  git(f.worktree, "branch", "-m", branch);
+  f.requester.worktrees = [{ id: "legacy", path: f.worktree, branch, source: "legacy" }];
+  f.requester.worktreeBranch = branch;
+  f.requester.launchWorktreeProof = {
+    sessionId: f.requester.sessionId, repoPath: f.repo, path: f.worktree, branch,
+  };
+  f.facts.headRef = branch;
+  return f;
+}
+
+test("an automatic launch worktree with durable proof can request a review session", async (t) => {
+  const f = automaticFixture(t);
+  const prepared = await f.launcher.prepare("s_review", f.policy(), CODEX, "Intent and checks.");
+  assert.ok(existsSync(prepared.checkout));
+});
+
+for (const key of ["sessionId", "repoPath", "path", "branch", "missing"] as const) {
+  test(`automatic review sessions refuse ${key} launch proof mismatch`, async (t) => {
+    const f = automaticFixture(t);
+    if (key === "missing") f.requester.launchWorktreeProof = undefined;
+    else f.requester.launchWorktreeProof![key] = "foreign";
+    assert.match(await refusal(f.launcher.prepare("s_review", f.policy(), CODEX, "b")), /resume this session once/);
+  });
+}
+
+test("automatic review sessions refuse attached worktrees even with launch proof", async (t) => {
+  const f = automaticFixture(t);
+  f.requester.worktrees![0]!.source = "attached";
+  assert.match(await refusal(f.launcher.prepare("s_review", f.policy(), CODEX, "b")), /own native managed worktree/);
+});
+
+for (const removed of [false, true]) {
+  test(`automatic review sessions refuse a ${removed ? "removed registration" : "branch switch"}`, async (t) => {
+    const f = automaticFixture(t);
+    if (removed) git(f.repo, "worktree", "remove", "--force", f.worktree);
+    else git(f.worktree, "branch", "-m", "foreign-branch");
+    assert.match(await refusal(f.launcher.prepare("s_review", f.policy(), CODEX, "b")), /no longer registered.*expected branch/);
+  });
+}
+
 test("the Claude review preset is read-only, loads no project configuration and enforces the review schema", () => {
   const args = reviewLaunchArgs("claude-code", "/data/review-snapshots/checkouts/s_review");
   const value = (flag: string) => args[args.indexOf(flag) + 1];
@@ -255,7 +298,7 @@ test("prepare refuses every request outside the requester's own pull request at 
   }
   const attached = fixture(t, { requester: { worktrees: undefined } });
   assert.equal(await refusal(attached.launcher.prepare("s_review", attached.policy(), CODEX, "b")),
-    "the review must cover the session's own native managed worktree");
+    "resume this session once so the runner can verify its automatic worktree before requesting a review");
   // A review session never requests a review of its own.
   const review = fixture(t, { requester: { review: { requesterSessionId: "s_x" } as SessionMeta["review"] } });
   assert.equal(await refusal(review.launcher.prepare("s_review", review.policy(), CODEX, "b")),

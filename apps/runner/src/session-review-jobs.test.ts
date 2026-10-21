@@ -312,6 +312,31 @@ test("a completed review returns the controller's summary, report and ledger", p
   assert.equal(existsSync(args[args.indexOf("--repo") + 1]!), false, "the snapshot is removed when the job ends");
 });
 
+for (const scenario of ["owned", "missing", "foreign", "attached", "switched", "unregistered"] as const) {
+  test(`automatic worktree bridge admission: ${scenario}`, posixOnly, async (t) => {
+    const branch = "agent/s_review";
+    const h = harness(t, { pr: { headRef: branch } });
+    h.meta.worktreeBranch = branch;
+    h.meta.worktrees = [{ id: "legacy", path: h.meta.worktreePath!, branch,
+      source: scenario === "attached" ? "attached" : "legacy" }];
+    h.meta.launchWorktreeProof = scenario === "missing" ? undefined : {
+      sessionId: scenario === "foreign" ? "s_other" : h.meta.sessionId,
+      repoPath: h.meta.repoPath, path: h.meta.worktreePath!, branch,
+    };
+    const exec = h.deps.exec;
+    h.deps.exec = async (command, args, options) => args.includes("list")
+      ? `worktree ${h.meta.repoPath}\0HEAD ${BASE}\0branch refs/heads/main\0\0` +
+        (scenario === "unregistered" ? "" : `worktree ${h.meta.worktreePath}\0HEAD ${HEAD}\0branch refs/heads/${scenario === "switched" ? "other" : branch}\0\0`)
+      : exec(command, args, options);
+    await h.jobs.dispatch(h.command());
+    const done = await settled(h, "srj_00000001");
+    assert.equal(done.state, scenario === "owned" ? "completed" : "not_launched");
+    assert.equal(h.spawned.length, scenario === "owned" ? 1 : 0);
+    if (scenario === "missing" || scenario === "foreign") assert.match(done.reason!, /resume this session once/);
+    if (scenario === "switched" || scenario === "unregistered") assert.match(done.reason!, /no longer registered.*expected branch/);
+  });
+}
+
 test("the snapshot comes from a runner-owned mirror, never from session-controlled git state", posixOnly, async (t) => {
   const h = harness(t, { missing: new Set([HEAD]) });
   await h.jobs.dispatch(h.command());
