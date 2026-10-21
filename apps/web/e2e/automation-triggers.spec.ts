@@ -136,6 +136,24 @@ test.describe("at 390×844", () => {
     const [howToCall] = await verticalHitAreas(sheet.getByRole("button", { name: "How to Call" }));
     expect(howToCall.bottom - howToCall.top, "drawn at --control-h-sm").toBeCloseTo(36, 0);
     expect(howToCall.hitBottom - howToCall.hitTop, "a 44px target").toBeGreaterThanOrEqual(44);
+    // The borrowed 4px above and below covers no other control in the sheet, closed or open.
+    const trigger = sheet.getByRole("button", { name: "How to Call" });
+    for (const expanded of ["false", "true"]) {
+      if ((await trigger.getAttribute("aria-expanded")) !== expanded) await trigger.click();
+      await expect(trigger).toHaveAttribute("aria-expanded", expanded);
+      const overlaps = await trigger.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const bands = [[box.top - 4, box.top], [box.bottom, box.bottom + 4]] as const;
+        const controls = element.closest('[role="dialog"]')!.querySelectorAll(
+          'button, input, textarea, select, a[href], label, [role="switch"], [tabindex]:not([tabindex="-1"])');
+        return [...controls].filter((control) => control !== element && !control.contains(element)).filter((control) => {
+          const rect = control.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0 || rect.right <= box.left || rect.left >= box.right) return false;
+          return bands.some(([top, bottom]) => rect.bottom > top && rect.top < bottom);
+        }).map((control) => control.getAttribute("aria-label") || control.textContent?.trim() || control.tagName);
+      });
+      expect(overlaps, `How to Call's borrowed band with the disclosure ${expanded === "true" ? "open" : "closed"}`).toEqual([]);
+    }
     await sheet.getByRole("button", { name: "Cancel" }).click();
 
     for (const [item, title, sentence] of [

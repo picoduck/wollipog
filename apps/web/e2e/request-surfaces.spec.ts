@@ -206,6 +206,19 @@ test.describe("on a coarse pointer", () => {
       expect((await button.boundingBox())!.height).toBe(44);
     }
   });
+
+  test("More Requests sits flush on its rows, so a tap at the first row's top edge opens that row", async ({ page }) => {
+    await page.goto("/request-surfaces-e2e.html?scenario=multiple");
+    await page.getByRole("button", { name: /\+2 More Requests/u }).click();
+    const first = page.locator(".request-dock-row").first();
+    await expect(first).toBeVisible();
+    const hit = await first.evaluate((row) => {
+      const box = row.getBoundingClientRect();
+      const target = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
+      return target !== null && (target === row || row.contains(target));
+    });
+    expect(hit, "2px inside the first waiting row is that row, not the disclosure above it").toBe(true);
+  });
 });
 
 for (const variant of [
