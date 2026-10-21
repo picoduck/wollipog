@@ -294,12 +294,19 @@ that limit; it does not claim the Linux containment standard.
 
 The runner resolves its current cgroup through `/proc/self/cgroup` and `/proc/self/mountinfo`.
 Write permission alone never proves delegation. Before creating anything, the fixed helper checks
-systemd's documented `user.delegate=1` xattr on the nearest containing service/scope. It never
-inherits the user manager's delegation across a non-delegated child scope. A unit hidden above a
-namespaced mount cannot be attested. Non-systemd trees also require an explicit delegation marker
-on the current cgroup; arbitrary writable trees are unsupported. The marker requires systemd 251+
-and kernel 5.6+; absent or unreadable evidence reports `cgroup-not-delegated` and performs no cgroup
-writes. See [systemd's delegation contract](https://systemd.io/CGROUP_DELEGATION/).
+systemd's documented `user.delegate=1` xattr on the nearest containing service/scope. Systemd's
+user manager (including version 255) does not set this marker on its units. When it is absent, a
+bounded, read-only `/usr/bin/systemctl --user show` query must report a loaded unit with
+`Delegate=yes` and a `ControlGroup` exactly matching that nearest unit's hierarchy path. The query
+uses the runner user's runtime bus and never enables delegation. It cannot substitute an ancestor
+or a same-named unit elsewhere. The runner never inherits the user manager's delegation across a
+non-delegated child scope. A unit hidden above a namespaced mount cannot be attested. Non-systemd
+trees require an explicit delegation marker on the current cgroup; arbitrary writable trees are
+unsupported. The marker requires systemd 251+ and kernel 5.6+; the user-manager query also supports
+delegated user units without that marker. Absent or unreadable evidence (including an unavailable
+user bus or systemctl) reports `cgroup-not-delegated` and performs no cgroup writes. See
+[systemd's delegation contract](https://systemd.io/CGROUP_DELEGATION/) and its
+[unit properties](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html).
 
 Inside that declared delegation, the runner creates one randomly named instance parent below its
 current cgroup and one leaf per native provider launch. It never moves the runner, changes
@@ -314,7 +321,9 @@ instead of silently weakening that instance's containment claim.
 The statically linked native launcher inherits an already-open cgroup directory as fd 3, verifies
 its filesystem, writes itself into `cgroup.procs`, acknowledges admission on a private fd 4 pipe,
 closes those descriptors, and only then executes the provider. A separate close-on-exec fd 5
-reports exec errno so callers still receive `ChildProcess` errors such as `ENOENT` and `EACCES`.
+reports exec errno so callers still receive `ChildProcess` errors such as `ENOENT` and `EACCES`
+before `close`. The launcher really spawns, so its `pid`, `spawn` and `exit` remain observable even
+on provider exec failure; consumers must settle failure once across `error` and `close`.
 No shell startup or provider code can
 fork before joining. A join failure exits without executing the provider. Cleanup waits for the
 admission acknowledgement, so an empty leaf while the launcher is still waiting to join never
@@ -377,9 +386,10 @@ real delegated-cgroup cases re-exec with an empty environment (clearenv alone do
 leave an unrelated process alive. A six-second blocked-loop case covers queued admission.
 Those cases explicitly skip where delegation is unavailable. Set `WOLLIPOG_TEST_REQUIRE_CGROUP=1`
 for validation on a delegated Linux host to make unavailable containment fail instead of skipping.
-The required Linux CI job also launches this suite as the ordinary test user in a transient
-`Delegate=yes` service with this flag set. The service has a bounded runtime and is collected on
-completion, so CI exercises real containment without relying on the job's original unit delegation.
+The required Linux CI job launches this suite as the ordinary test user in two transient
+`Delegate=yes` services, one owned by the system manager and one by the user manager, with this
+flag set. Both have bounded runtimes and are collected on completion. CI therefore exercises the
+marker and user-manager evidence paths without relying on the job's original unit delegation.
 
 A surviving, unknown or unprobeable descendant keeps the reference until shutdown. So does a spawn without a POSIX boundary, where only the root's exit is observable: native Windows (whose kill-on-close Job is not verified), WSL, and remote spawns.
 

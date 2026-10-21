@@ -174,8 +174,8 @@ export interface LinuxCgroupLaunch {
 
 interface CgroupLocation { directory: string; mountRoot: string; mountPoint: string }
 
-/** Never inherit user@.service's delegation across a non-delegated child scope/service. The
- * documented systemd user.delegate marker must be on the nearest containing unit. */
+/** Never inherit user@.service's delegation across a non-delegated child scope/service.
+ * Evidence must identify the nearest containing unit, even when the runner is in a subgroup. */
 export function cgroupDelegationDirectory(mount: CgroupLocation): string | undefined {
   const hierarchy = posix.join(mount.mountRoot, posix.relative(mount.mountPoint, mount.directory));
   const parts = hierarchy.split("/").filter(Boolean);
@@ -187,13 +187,39 @@ export function cgroupDelegationDirectory(mount: CgroupLocation): string | undef
   return posix.join(mount.mountPoint, relative);
 }
 
+/** systemctl show is a bounded machine-readable query. Reject duplicate properties and require
+ * the manager's exact hierarchy path, so a same-named or ancestor unit cannot attest this one. */
+export function systemdUserDelegationReply(output: string, hierarchy: string): boolean {
+  const properties = new Map<string, string>();
+  for (const line of output.trim().split("\n")) {
+    const separator = line.indexOf("=");
+    if (separator < 1) return false;
+    const key = line.slice(0, separator);
+    if (properties.has(key)) return false;
+    properties.set(key, line.slice(separator + 1));
+  }
+  return properties.get("LoadState") === "loaded" && properties.get("Delegate") === "yes" &&
+    properties.get("ControlGroup") === hierarchy;
+}
+
 function hasDelegation(mount: CgroupLocation, helper: string): boolean {
   const directory = cgroupDelegationDirectory(mount);
   if (!directory) return false;
   const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
-    return spawnSync(helper, ["--delegation-probe"], { env: {}, timeout: 2_000,
-      stdio: ["ignore", "ignore", "ignore", fd] }).status === 0;
+    if (spawnSync(helper, ["--delegation-probe"], { env: {}, timeout: 2_000,
+      stdio: ["ignore", "ignore", "ignore", fd] }).status === 0) return true;
+    // systemd's user manager (including v255) does not set user.delegate on its units.
+    // Ask that manager about this exact unit instead; write access alone is never evidence.
+    const hierarchy = posix.join(mount.mountRoot, posix.relative(mount.mountPoint, directory));
+    const unit = posix.basename(hierarchy);
+    if (!/^[a-zA-Z0-9:_.@\\-]+\.(?:service|scope)$/u.test(unit)) return false;
+    const result = spawnSync("/usr/bin/systemctl", ["--user", "show", "--property=LoadState",
+      "--property=Delegate", "--property=ControlGroup", "--", unit], {
+      env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid!()}` },
+      timeout: 2_000, maxBuffer: 8_192, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    });
+    return result.status === 0 && systemdUserDelegationReply(result.stdout, hierarchy);
   } finally { closeSync(fd); }
 }
 

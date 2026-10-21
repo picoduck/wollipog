@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentIdentity, providerContainmentStatus, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
+import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentIdentity, providerContainmentStatus, systemdUserDelegationReply, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
 import { linuxCgroupHelper, stageLinuxCgroupHelper } from "./linux-cgroup-helper.js";
 import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { provenProcessTreeExit, ProviderProcessLedger, spawnAgent, waitForPendingKills } from "./spawn.js";
@@ -52,6 +52,17 @@ test("delegation must belong to the nearest service/scope, never an ancestor use
   assert.equal(cgroupDelegationDirectory({ directory: mountPoint + "/worker", mountRoot: scope, mountPoint }), mountPoint);
   assert.equal(cgroupDelegationDirectory({ directory: mountPoint, mountRoot: scope + "/worker", mountPoint }), undefined,
     "a hidden ancestor unit cannot be attested through a namespaced mount");
+});
+
+test("user-manager evidence requires a loaded delegated unit at the exact cgroup path", () => {
+  const hierarchy = "/user.slice/user-1000.slice/user@1000.service/app.slice/runner.scope";
+  const reply = `LoadState=loaded\nDelegate=yes\nControlGroup=${hierarchy}\n`;
+  assert.equal(systemdUserDelegationReply(reply, hierarchy), true);
+  for (const invalid of [reply.replace("yes", "no"), reply.replace("loaded", "not-found"),
+    reply.replace(hierarchy, hierarchy + "/child"), reply.replace(hierarchy, "/user.slice"),
+    reply.replace("Delegate=yes\n", ""), reply + "Delegate=yes\n", ""]) {
+    assert.equal(systemdUserDelegationReply(invalid, hierarchy), false, invalid);
+  }
 });
 
 test("an empty cgroup before admission is never an early-release proof", async () => {
@@ -125,30 +136,59 @@ test("an admission timeout does not discard a late acknowledgement or disable ke
   assert.equal(state.closed, 1);
 });
 
-for (const reason of ["cgroup-unavailable", "cgroup-not-delegated"]) {
-test(`${reason} retains the marker/parent-link API and reports fallback before unsafe writes`, { skip: process.platform !== "linux" }, () => {
+for (const scenario of ["no-mount", "marked", "unmarked", "user-delegated", "user-namespaced", "user-not-delegated", "user-wrong-cgroup", "user-query-failed"] as const) {
+test(`${scenario} retains the marker/parent-link API and reports fallback before unsafe writes`, { skip: process.platform !== "linux" }, () => {
+  const delegated = scenario === "marked" || scenario === "user-delegated" || scenario === "user-namespaced";
+  const reason = delegated || scenario === "no-mount" ? "cgroup-unavailable" : "cgroup-not-delegated";
   const module = new URL("./linux-cgroup.ts", import.meta.url).href;
   const helperModule = new URL("./linux-cgroup-helper.ts", import.meta.url).href;
   const spawnModule = new URL("./spawn.ts", import.meta.url).href;
   const code = `
     import fs from 'node:fs';
     import cp from 'node:child_process';
+    import os from 'node:os';
+    import path from 'node:path';
     import { syncBuiltinESMExports } from 'node:module';
     import assert from 'node:assert/strict';
     const cgroup = await import(${JSON.stringify(module)});
     const {linuxCgroupHelper} = await import(${JSON.stringify(helperModule)});
     linuxCgroupHelper();
-    const original = fs.mkdirSync;
+    const original = {mkdirSync:fs.mkdirSync,readFileSync:fs.readFileSync,statfsSync:fs.statfsSync};
     const originalSpawn = cp.spawnSync;
-    cp.spawnSync = (file,args,options) => args[0] === '--delegation-probe' ? {status:${reason === "cgroup-not-delegated" ? 3 : 0}} : originalSpawn(file,args,options);
+    const mount = fs.mkdtempSync(path.join(os.tmpdir(),'wollipog-delegation-mock-'));
+    fs.mkdirSync(path.join(mount,'runner.scope'));
+    fs.mkdirSync(path.join(mount,'runner.scope','worker'));
+    fs.mkdirSync(path.join(mount,'worker'));
+    const userUnit = ${scenario.startsWith("user-")};
+    const membership = userUnit ? '/runner.scope/worker' : '/';
+    let queries = 0;
+    cp.spawnSync = (file,args,options) => {
+      if (args[0] === '--delegation-probe') return {status:${scenario === "marked" ? 0 : 3}};
+      if (file === '/usr/bin/systemctl') {
+        queries++;
+        assert.equal(args.at(-1),'runner.scope','query the nearest unit, not an ancestor');
+        assert.equal(args[0],'--user');
+        return {status:${scenario === "user-query-failed" ? 1 : 0},stdout:'LoadState=loaded\\nDelegate=${scenario === "user-not-delegated" ? "no" : "yes"}\\nControlGroup=${scenario === "user-wrong-cgroup" ? "/ancestor/runner.scope" : "/runner.scope"}\\n'};
+      }
+      return originalSpawn(file,args,options);
+    };
+    fs.readFileSync = (file,...args) => {
+      if (file === '/proc/self/mountinfo') return ${scenario === "no-mount" ? "''" : "'30 20 0:30 " + (scenario === "user-namespaced" ? "/runner.scope" : "/") + " ' + mount + ' rw - cgroup2 cgroup rw\\n'"};
+      if (file === '/proc/self/cgroup') return '0::' + membership + '\\n';
+      if (file === '/proc/sys/kernel/random/boot_id') return '00000000-0000-0000-0000-000000000001';
+      return original.readFileSync(file,...args);
+    };
+    fs.statfsSync = (file,...args) => file.startsWith(mount) ? {type:0x63677270} : original.statfsSync(file,...args);
     let writes = 0;
     fs.mkdirSync = () => { writes++; throw Object.assign(new Error('unavailable delegation'), {code:'EROFS'}); };
     syncBuiltinESMExports();
     assert.equal(cgroup.providerContainmentIdentity(), undefined);
-    fs.mkdirSync = original;
+    Object.assign(fs,original);
     cp.spawnSync = originalSpawn;
     syncBuiltinESMExports();
-    assert.equal(writes, ${reason === "cgroup-not-delegated" ? 0 : 1});
+    fs.rmSync(mount,{recursive:true,force:true});
+    assert.equal(writes, ${delegated ? 1 : 0});
+    assert.equal(queries, ${scenario.startsWith("user-") ? 1 : 0});
     assert.deepEqual(cgroup.providerContainmentStatus(), {proofStandard:'marker-parent-links',reason:${JSON.stringify(reason)}});
     const {spawnAgent,provenProcessTreeExit} = await import(${JSON.stringify(spawnModule)});
     const child = spawnAgent({command:process.execPath,args:['-e',''],cwd:process.cwd()});
@@ -210,11 +250,22 @@ test("successful preparation clears a transient boundary-creation failure", { sk
 test("a missing provider executable still emits its ENOENT ChildProcess error", { skip: process.platform !== "linux" }, async () => {
   const child = spawnAgent({ command: "/nonexistent-wollipog-cgroup-test-provider", args: [], cwd: process.cwd() });
   let error: NodeJS.ErrnoException | undefined;
-  child.once("error", (value: NodeJS.ErrnoException) => { error = value; });
+  const events: string[] = [];
+  child.on("spawn", () => events.push("spawn"));
+  child.on("exit", () => events.push("exit"));
+  child.on("error", (value: NodeJS.ErrnoException) => { events.push("error"); error = value; });
   child.stderr.resume();
-  await new Promise<void>((resolve) => child.once("close", () => resolve()));
+  await new Promise<void>((resolve) => child.once("close", () => { events.push("close"); resolve(); }));
   assert.equal(error?.code, "ENOENT");
   assert.equal((error as { path?: string })?.path, "/nonexistent-wollipog-cgroup-test-provider");
+  assert.equal(events.filter((event) => event === "error").length, 1);
+  assert.ok(events.indexOf("error") < events.indexOf("close"), events.join(","));
+  if (child.posixBoundary?.proofStandard === "linux-cgroup-v2") {
+    assert.equal(await provenProcessTreeExit(child), true, "wrapper exec failure still settles its tree proof");
+  }
+  // The containment launcher really spawned and must remain observable for root reaping.
+  assert.deepEqual(events.filter((event) => event !== "error"),
+    child.posixBoundary?.proofStandard === "linux-cgroup-v2" ? ["spawn", "exit", "close"] : ["close"]);
 });
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
