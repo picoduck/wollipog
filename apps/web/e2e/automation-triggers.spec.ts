@@ -70,6 +70,24 @@ test.describe("at 390×844", () => {
   test("New Webhook Trigger is a bottom sheet with 44px targets, Copy URL lives in ⋯, and both confirmations replace the ⋯ sheet", async ({ page }) => {
     await open(page, "dark");
     await expect(row(page, "atr_issue_intake").getByRole("button", { name: "Copy URL" })).toHaveCount(0);
+    // No meta fact is clipped: a fact that does not fit moves to the next line whole, inside the row.
+    const facts = await triggers(page).locator(".automation-trigger-meta > span").evaluateAll((spans) => spans.map((span) => {
+      const meta = span.parentElement!.getBoundingClientRect();
+      const box = span.getBoundingClientRect();
+      return {
+        text: span.textContent,
+        clipped: span.scrollWidth > span.clientWidth + 1 || getComputedStyle(span).textOverflow === "ellipsis",
+        inside: box.left >= meta.left - 0.5 && box.right <= meta.right + 0.5 && box.bottom <= meta.bottom + 0.5,
+        lines: Math.round(box.height / parseFloat(getComputedStyle(span).lineHeight)),
+      };
+    }));
+    expect(facts.map((fact) => fact.text)).toContain("Accepts prompt text and issue, priority");
+    for (const fact of facts) {
+      expect(fact, `${fact.text} is whole`).toMatchObject({ clipped: false, inside: true, lines: 1 });
+    }
+    const metaLines = await row(page, "atr_issue_intake").locator(".automation-trigger-meta").evaluate((meta) =>
+      Math.round(meta.getBoundingClientRect().height / parseFloat(getComputedStyle(meta).lineHeight)));
+    expect(metaLines, "the facts wrap onto a second line rather than clip").toBeGreaterThan(1);
 
     const sheet = await openNewWebhookTrigger(page);
     const box = await sheet.evaluate((element) => {

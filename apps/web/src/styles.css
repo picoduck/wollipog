@@ -17000,16 +17000,27 @@ button.review-finding-location {
 /* An automation's Triggers (#2972; docs/design-system.md §5.2, §7, §11.7, §13.2): one surface of
    two-line rows with Copy URL and ⋯, and the dialogs that add a trigger, show its secret once and
    say how to call it. */
-.automation-trigger-row { gap: var(--space-2); padding: 0 var(--space-2) 0 var(--space-3); }
-.automation-trigger-meta { display: flex; gap: var(--space-3); }
+/* A row is --row-h-2 while its facts fit on one line. A narrow row (a phone) wraps the facts
+   instead of clipping one: each fact moves to the next line whole, and the row grows to hold it. */
+.automation-trigger-row {
+  gap: var(--space-2);
+  height: auto;
+  min-height: var(--row-h-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+}
+.automation-trigger-meta.row-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  overflow: visible;
+  white-space: normal;
+}
+/* A fact breaks inside only when it alone is wider than the row (a long list of named values). */
 .automation-trigger-meta > span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
-/* The kind and the use stay whole; what the trigger accepts gives way first. */
-.automation-trigger-meta > span:not(:last-child) { flex: none; }
 .automation-trigger-details,
 .automation-trigger-reference {
   display: grid;
