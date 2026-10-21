@@ -80,6 +80,14 @@ test.describe("at 1440×900", () => {
     const color = (title: string) => row(page, title).locator(".list-row-fill > span").evaluate((element) => getComputedStyle(element).color);
     expect(await color(NO_OBJECTIVE)).not.toBe(await color(IDLE));
   });
+
+  test("the meta keeps the issue's order, with the mode before the turn", async ({ page }) => {
+    await open(page, "loaded");
+    const order = await row(page, RUNNING).locator(".list-row-meta > span").evaluateAll((items) =>
+      items.map((item) => ({ text: item.textContent, left: item.getBoundingClientRect().left }))
+        .sort((left, right) => left.left - right.left).map((item) => item.text));
+    expect(order).toEqual(["3 members", "Round robin", "turn 3 of 12", "Move every call site to the shared retry helper and delete the old one"]);
+  });
 });
 
 test.describe("at 390×844", () => {
@@ -116,7 +124,8 @@ test.describe("at 390×844", () => {
     }));
     expect(rows).toHaveLength(5);
     for (const row of rows) {
-      const shown = row.items.filter((item) => item.visible);
+      // In view order: phones move the turn ahead of the mode.
+      const shown = row.items.filter((item) => item.visible).sort((left, right) => left.left - right.left);
       expect(shown[0]?.text, `${row.title}: the members lead line 2`).toMatch(/^\d+ members$/u);
       for (const item of row.items) {
         expect(item.visible || item.hidden, `${row.title}: "${item.text}" is either in view or folded away whole`).toBe(true);
@@ -127,6 +136,10 @@ test.describe("at 390×844", () => {
         expect(Math.abs(shown[index]!.left - shown[index - 1]!.right - 12), `${row.title}: items sit 12px apart`).toBeLessThanOrEqual(1);
       }
     }
+    // A running pod keeps its progress in view: the turn follows the members, ahead of the mode.
+    const running = rows.find((row) => row.title === RUNNING)!;
+    expect(running.items.filter((item) => item.visible).sort((left, right) => left.left - right.left).map((item) => item.text).slice(0, 2))
+      .toEqual(["3 members", "turn 3 of 12"]);
   });
 
   test("a row without a badge starts its meta under the title", async ({ page }) => {

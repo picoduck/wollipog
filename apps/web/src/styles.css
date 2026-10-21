@@ -11097,6 +11097,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     margin-left: 0;
   }
   .list-row-meta { grid-area: 2 / 2; }
+  /* A pod's line 2 folds by priority: members, the turn while automatic turns run, then the mode
+     and the objective, so the narrow line keeps a running pod's progress (#2979). */
+  .pod-row-meta > :is(.pod-row-mode, .list-row-fill) { order: 1; }
 }
 /* A pod without an objective says so quietly, so it never reads as content (#2979). */
 .pod-row-no-objective { color: var(--text-faint); }

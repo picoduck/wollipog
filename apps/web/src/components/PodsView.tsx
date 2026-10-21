@@ -543,7 +543,8 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
  * One pod (§5.2), on the Runs list's row recipe: a two-line row that opens the pod. Line 1 is the
  * title and a badge only while something is happening (`podRowStatus()`); line 2 is meta 12px
  * apart: the members, how turns pass, the turn while automatic turns run, and the objective, or
- * "No objective". The last update trails. On phones the badge leads line 2.
+ * "No objective". The last update trails. On phones the badge leads line 2, and the turn moves
+ * ahead of the mode, so the line keeps a running pod's progress when it folds facts away.
  */
 export function PodRow({ pod, sessions, now, onOpen }: {
   pod: PodView;
@@ -563,9 +564,9 @@ export function PodRow({ pod, sessions, now, onOpen }: {
       <span className="row-body list-row-body">
         <span className="row-title" title={pod.title}>{pod.title}</span>
         {status && <StatusBadge meta={statusMeta("pod", status)} className="list-row-status" />}
-        <span className="row-sub list-row-meta">
+        <span className="row-sub list-row-meta pod-row-meta">
           <span>{pod.members.length === 1 ? "1 member" : `${pod.members.length} members`}</span>
-          <span>{podModeLabel(orchestration?.policy.mode)}</span>
+          <span className="pod-row-mode">{podModeLabel(orchestration?.policy.mode)}</span>
           {turnsRunning && <span>{`turn ${orchestration.state.turnsUsed} of ${orchestration.policy.maxTurns}`}</span>}
           <span className="list-row-fill">
             <span className={objective ? undefined : "pod-row-no-objective"} title={objective || undefined}>{objective || "No objective"}</span>
