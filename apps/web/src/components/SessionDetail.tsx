@@ -4739,6 +4739,7 @@ function SessionDetailLoaded({
     runnerOnline,
     runnerProtocolVersion: runner?.protocolVersion,
     hasWorktree: Boolean(session.worktreePath),
+    hasWorktreeHistory: latestKnownTurn !== undefined || !!session.worktrees?.length,
     status: session.status,
     queuedPrompts: pendingQueuedPrompts,
     busy,

@@ -95,6 +95,7 @@ for (const [query, reason] of [
   ["unfinishedTurn=1", "This turn didn't finish, so it can't be handed off yet."],
   ["partialHistory=1", "Load earlier messages to hand off this session."],
   ["busyTurn=1", "The source session is busy."],
+  ["removedWorktree=1", "This session's worktree is unavailable. Choose or create a worktree before handing it off."],
 ]) {
   test(`in-place handoff fails visibly closed for ${query}`, async ({ page }) => {
     await page.goto(`/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1&${query}`);
@@ -141,8 +142,12 @@ for (const query of ["interrupted=1", "guardrail=1"]) {
   });
 }
 
-test("a legacy in-place runner refusal remains visible in the handoff dialog", async ({ page }) => {
-  await page.goto("/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1&legacyHandoff=1");
+for (const [query, reason] of [
+  ["legacyHandoff=1", "Update the runner to support handoffs from in-place sessions."],
+  ["unsupportedRepository=1", "Handoff needs a Git repository with at least one readable commit."],
+  ["savedHistoryIncomplete=1", "This session's saved history is incomplete, so it can't be handed off."],
+]) test(`an in-place runner refusal remains visible in the handoff dialog for ${query}`, async ({ page }) => {
+  await page.goto(`/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1&${query}`);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   await waitForSessionPreview(page);
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
@@ -150,8 +155,8 @@ test("a legacy in-place runner refusal remains visible in the handoff dialog", a
   await page.locator(".tl-turn-footer").getByRole("button", { name: "More Turn Actions" }).click();
   await page.getByRole("menuitem", { name: "Hand Off After This Turn…" }).click();
   await page.getByRole("button", { name: "Create Handoff", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("Update the runner to support handoffs from in-place sessions.");
-  await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-legacy-runner-refusal.png") });
+  await expect(page.getByRole("alert")).toContainText(reason!);
+  await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-runner-refusal.png") });
 });
 
 for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {

@@ -219,6 +219,9 @@ test("checkpoint handoff keeps its gates and their order, and ignores settled re
   };
   assert.equal(checkpointHandoffUnavailableReason(ready), undefined);
   assert.equal(checkpointHandoffUnavailableReason({ ...ready, hasWorktree: false }), undefined);
+  assert.equal(checkpointHandoffUnavailableReason({ ...ready, hasWorktreeHistory: true }), undefined);
+  assert.equal(checkpointHandoffUnavailableReason({ ...ready, hasWorktree: false, hasWorktreeHistory: true }),
+    "This session's worktree is unavailable. Choose or create a worktree before handing it off.");
   assert.equal(
     checkpointHandoffUnavailableReason({ ...ready, queuedPrompts: pendingQueuedPromptCount([failedReceipt, uncertainReceipt]) }),
     undefined,

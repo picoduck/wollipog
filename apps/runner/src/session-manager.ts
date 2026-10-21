@@ -14893,6 +14893,13 @@ export class SessionManager {
     }
     if (!source.worktreePath && !handoff) return { ok: false, error: "conversation fork requires a worktree session" };
     const inPlace = !source.worktreePath;
+    const inPlaceEvents = inPlace ? this.store.readEvents(sourceSessionId) : undefined;
+    // Clearing a removed/reaped worktree's active path does not turn its checkpoint history into
+    // in-place history. Never silently replace that worktree's files with the primary checkout.
+    if (inPlace && (source.worktreeBranch || source.worktrees?.length || Object.keys(source.forkPoints ?? {}).length ||
+        inPlaceEvents?.some((event) => event.payload.kind === "checkpoint" || event.payload.kind === "conversation_checkpoint"))) {
+      return { ok: false, error: "This session's worktree is unavailable. Choose or create a worktree before handing it off." };
+    }
     if (this.hasCheckpointRefCleanupForSession(targetSessionId)) {
       try {
         await this.awaitCheckpointRefCleanupForSession(targetSessionId);
@@ -14903,9 +14910,12 @@ export class SessionManager {
     if (this.store.has(targetSessionId) || this.forkingTargets.has(targetSessionId)) {
       return { ok: false, error: "target session already exists or is being created" };
     }
-    const inPlacePoint = inPlace
-      ? inPlaceHandoffTurns(this.store.readEvents(sourceSessionId), { status: source.status, throughSeq: source.seq }).turns.find((point) => point.turn === turn)
-      : undefined;
+    const inPlaceProjection = inPlaceEvents
+      ? inPlaceHandoffTurns(inPlaceEvents, { status: source.status, throughSeq: source.seq }) : undefined;
+    if (inPlaceProjection?.reason) {
+      return { ok: false, error: "This session's saved history is incomplete, so it can't be handed off." };
+    }
+    const inPlacePoint = inPlaceProjection?.turns.find((point) => point.turn === turn);
     if (inPlace && !inPlacePoint?.eventSeq) return { ok: false, error: inPlacePoint?.reason ?? "This turn didn't finish, so it can't be handed off yet." };
     const point = source.forkPoints?.[String(turn)];
     if (!inPlace && source.worktreePath) {
@@ -15013,7 +15023,9 @@ export class SessionManager {
             ...Object.values(source.forkPoints ?? {}).map((checkpoint) => checkpoint.agentTurnId)].filter((value): value is string => typeof value === "string" && value.length > 0),
         });
         const worktreeOptions = { context: source.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
-        const baseCommit = inPlace ? await worktreeHead(source.repoPath, worktreeOptions) : point?.baseCommit;
+        const baseCommit = inPlace ? await worktreeHead(source.repoPath, worktreeOptions).catch(() => {
+          throw new Error("Handoff needs a Git repository with at least one readable commit.");
+        }) : point?.baseCommit;
         if (!baseCommit) throw new Error("checkpoint has no historical commit base");
         const tree = inPlace
           ? await withGitExecutionContext(source.context, () => captureWorktreeTree(source.repoPath))

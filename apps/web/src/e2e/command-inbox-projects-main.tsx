@@ -1195,7 +1195,7 @@ if (SCENARIO === "conversation-handoff") {
     { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "conversation_checkpoint", turn: 1 } },
   ]);
-  if (FIXTURE_QUERY.has("inPlace")) {
+  if (FIXTURE_QUERY.has("inPlace") && !FIXTURE_QUERY.has("removedWorktree")) {
     const history: SessionEvent[] = [
       { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
       { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "The current files preserve the accessible layout.", final: true } },
@@ -2787,6 +2787,8 @@ const client = {
   handoff: async (id: string, turn: number, agentId: string, config: SessionConfig) => {
     handoffRequests.push({ id, turn, agentId, config: structuredClone(config) });
     if (FIXTURE_QUERY.has("legacyHandoff")) throw new ApiError("Update the runner to support handoffs from in-place sessions.", 409);
+    if (FIXTURE_QUERY.has("unsupportedRepository")) throw new ApiError("Handoff needs a Git repository with at least one readable commit.", 409);
+    if (FIXTURE_QUERY.has("savedHistoryIncomplete")) throw new ApiError("This session's saved history is incomplete, so it can't be handed off.", 409);
     const source = model.sessions.find((candidate) => candidate.id === id)!;
     const agent = runner.agents.find((candidate) => candidate.id === agentId)!;
     const history = sessionEvents.get(id) ?? [];

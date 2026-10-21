@@ -166,6 +166,71 @@ for (const needsSetupTrust of [false, true]) {
   });
 }
 
+for (const scenario of ["non-git", "no-commit", "fork-points", "file-checkpoint", "conversation-checkpoint", "reaped-branch", "trimmed-history"] as const) {
+  test(`in-place handoff visibly refuses ${scenario} without changing the source`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-refusal-"));
+    const repo = mkdtempSync(join(root, "repo-"));
+    if (scenario !== "non-git") {
+      git(repo, ["init", "-q"]);
+      isolateFromAmbientIgnores(repo);
+      git(repo, ["config", "user.email", "test@example.com"]);
+      git(repo, ["config", "user.name", "Test"]);
+    }
+    writeFileSync(join(repo, "file.txt"), "source files");
+    if (scenario !== "non-git" && scenario !== "no-commit") {
+      git(repo, ["add", "."]); git(repo, ["commit", "-qm", "base"]);
+    }
+    const store = new SessionStore(join(root, "sessions"));
+    const source: SessionMeta = {
+      sessionId: "s_refusal", agentId: "codex", workspaceId: "workspace", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "source", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "source-thread", status: "idle", title: "Source",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      turnCount: 0, seq: 0, createdAt: 1, updatedAt: 1,
+      ...(scenario === "fork-points" ? { forkPoints: { "1": { agentTurnId: "old-turn", tree: "old-tree", baseCommit: "old-base", eventSeq: 4 } } } : {}),
+      ...(scenario === "reaped-branch" ? { worktreeBranch: "agent/removed-worktree" } : {}),
+    };
+    store.create(source);
+    store.appendEvent(source.sessionId, { kind: "status", status: "running" });
+    store.appendEvent(source.sessionId, { kind: "user_message", text: "Task", final: true });
+    store.appendEvent(source.sessionId, { kind: "agent_message", text: "Answer", final: true });
+    store.appendEvent(source.sessionId, { kind: "agent_response_completed" });
+    if (scenario === "file-checkpoint") store.appendEvent(source.sessionId, { kind: "checkpoint", turn: 1, tree: "old-tree" });
+    if (scenario === "conversation-checkpoint") store.appendEvent(source.sessionId, { kind: "conversation_checkpoint", turn: 1 });
+    store.flush(source.sessionId);
+    const logPath = join(store.sessionPath(source.sessionId), "events.ndjson");
+    if (scenario === "trimmed-history") {
+      writeFileSync(logPath, store.readEvents(source.sessionId).slice(1).map((event) => JSON.stringify(event)).join("\n") + "\n");
+      assert.equal(store.readEvents(source.sessionId)[0]?.seq, 2);
+    }
+    const history = readFileSync(logPath);
+    const index = existsSync(join(repo, ".git", "index")) ? readFileSync(join(repo, ".git", "index")) : undefined;
+    const branches = scenario !== "non-git" ? git(repo, ["branch", "--list"]) : undefined;
+    const destination: AgentDefinition = {
+      id: "claude", name: "Claude", command: "destination", args: [], env: {},
+      driver: "claude-code", authStatus: "authenticated", available: true,
+      capabilities: { models: [{ id: "test" }], effortLevels: [], permissionModes: [], slashCommands: [], supportsImages: true, supportsApprovals: true },
+    };
+    const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      () => { throw new Error("refused handoff must not launch a provider"); }, root);
+    try {
+      const result = await manager.forkConversation(source.sessionId, "s_refused_target", 1, "Refused", false,
+        { agent: destination, config: { model: "test" } });
+      assert.equal(result.ok, false);
+      assert.equal(result.error, scenario === "non-git" || scenario === "no-commit"
+        ? "Handoff needs a Git repository with at least one readable commit."
+        : scenario === "trimmed-history" ? "This session's saved history is incomplete, so it can't be handed off."
+          : "This session's worktree is unavailable. Choose or create a worktree before handing it off.");
+      assert.equal(store.has("s_refused_target"), false);
+      assert.deepEqual(readFileSync(logPath), history);
+      assert.equal(readFileSync(join(repo, "file.txt"), "utf8"), "source files");
+      if (index) assert.deepEqual(readFileSync(join(repo, ".git", "index")), index);
+      if (branches !== undefined) assert.equal(git(repo, ["branch", "--list"]), branches, "no destination branch is created");
+      else assert.equal(existsSync(join(repo, ".git")), false, "a non-Git source is never initialized");
+    } finally { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
 for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
   test(`${sourceDriver} checkpoint hands exact files to a fresh opposite provider only after Send`, async () => {
     const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-"));
