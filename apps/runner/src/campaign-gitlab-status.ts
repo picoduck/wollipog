@@ -258,8 +258,9 @@ export async function observeGitLabMergeRequests(
   budgetMs = GITLAB_READ_BUDGET_MS,
 ): Promise<Read[]> {
   const budget = new AbortController();
+  // Referenced on purpose: the deadline must fire even when nothing else keeps the process alive
+  // (a hung read is only a promise); `finally` clears it as soon as the reads settle.
   const timer = setTimeout(() => budget.abort(), budgetMs);
-  timer.unref?.();
   const hosts = new HostRead(glab, budget.signal);
   const results: Read[] = new Array(refs.length);
   let next = 0;
