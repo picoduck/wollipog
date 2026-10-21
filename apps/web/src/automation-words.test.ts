@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AutomationAction, RunnerView } from "@wollipog/protocol";
-import { nextCronFire } from "@wollipog/protocol/cron-schedule";
+import { nextCronFire, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import {
   actionSentence, actionText, describeSchedule, nextScheduleRun, policyCopy, SCHEDULE_FIVE_FIELDS_ERROR,
   SCHEDULE_NEVER_RUNS_ERROR, scheduleError, scheduleExamples, schedulePreview, timeZoneChoices, utcOffsetLabel,
@@ -169,7 +169,7 @@ test("the editor's next run is the scheduler's own for the scheduler's daylight-
 test("Time Zone lists each zone by city and offset over its IANA name, and keeps a stored zone the browser lacks", () => {
   const choices = timeZoneChoices("America/New_York", NOW, ["America/New_York", "Asia/Kolkata", "Europe/London"]);
   assert.deepEqual(choices, [
-    { value: "Asia/Kolkata", label: "Kolkata (UTC+5:30)", description: "Asia/Kolkata" },
+    { value: "Asia/Kolkata", label: "Kolkata (UTC+5:30)", description: "Asia/Kolkata", keywords: ["Asia/Calcutta"] },
     { value: "Europe/London", label: "London (UTC+1)", description: "Europe/London" },
     { value: "America/New_York", label: "New York (UTC−4)", description: "America/New_York" },
     { value: "UTC", label: "UTC", description: "UTC" },
@@ -191,6 +191,35 @@ test("Time Zone lists each zone by city and offset over its IANA name, and keeps
   assert.equal(utcOffsetLabel("America/St_Johns", Date.UTC(2026, 0, 1)), "UTC−3:30");
   // The browser's own list, where there is one, includes New York.
   assert.ok(timeZoneChoices("UTC", NOW).some((choice) => choice.value === "America/New_York"));
+});
+
+test("Time Zone reads a zone the browser lists by an old name as its current one, and keeps either saved name chosen", () => {
+  const listed = ["Asia/Calcutta", "Asia/Katmandu", "Asia/Saigon", "Europe/Kiev", "Europe/London"];
+  const choices = timeZoneChoices("", NOW, listed);
+  assert.deepEqual(choices.find((choice) => choice.value === "Asia/Calcutta"),
+    { value: "Asia/Calcutta", label: "Kolkata (UTC+5:30)", description: "Asia/Kolkata", keywords: ["Asia/Calcutta"] });
+  for (const [query, value] of [["kolkata", "Asia/Calcutta"], ["calcutta", "Asia/Calcutta"], ["ho chi minh", "Asia/Saigon"],
+    ["kyiv", "Europe/Kiev"], ["kathmandu", "Asia/Katmandu"]] as const) {
+    assert.deepEqual(filterSearchableComboboxOptions(choices, query).map((choice) => choice.value), [value], query);
+  }
+  // A saved old name is the listed choice itself, so it shows as chosen.
+  assert.ok(timeZoneChoices("Asia/Calcutta", NOW, listed).some((choice) => choice.value === "Asia/Calcutta"));
+  // A saved current name takes its old twin's place, once, and stays chosen as saved.
+  assert.deepEqual(timeZoneChoices("Asia/Kolkata", NOW, listed).filter((choice) => choice.description === "Asia/Kolkata"),
+    [{ value: "Asia/Kolkata", label: "Kolkata (UTC+5:30)", description: "Asia/Kolkata", keywords: ["Asia/Calcutta"] }]);
+  // The scheduler accepts both names as the same zone.
+  assert.equal(validateTimeZone("Asia/Kolkata"), validateTimeZone("Asia/Calcutta"));
+  assert.equal(validateTimeZone("Europe/Kyiv"), validateTimeZone("Europe/Kiev"));
+  // This runtime's own list finds each renamed zone once, by its current name.
+  const own = timeZoneChoices("", NOW);
+  for (const name of ["Asia/Kolkata", "Asia/Ho_Chi_Minh", "Europe/Kyiv", "Asia/Kathmandu"]) {
+    assert.equal(own.filter((choice) => choice.description === name).length, 1, name);
+  }
+  // Each old name it reads as a current one is the same zone by either name.
+  const zone = (name: string) => new Intl.DateTimeFormat("en-US", { timeZone: name }).resolvedOptions().timeZone;
+  for (const choice of own.filter((option) => option.keywords)) {
+    assert.equal(zone(choice.keywords![0]!), zone(choice.description), choice.description);
+  }
 });
 
 test("describeSchedule reads the automation's wall clock and names its next run in the viewer's zone", () => {
