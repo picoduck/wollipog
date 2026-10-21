@@ -109,8 +109,8 @@ function MemberColumn({ sessionId, label, actions, onRetry, panel }: {
     const unclaimed = () => document.activeElement === null || document.activeElement === document.body;
     const copied = await writeClipboardText(answer, () => mountedRef.current && (unclaimed() || document.activeElement === invoker));
     // A write that settles after the column has gone (the run left the page, or a phone moved to
-    // another member's tab) reports nothing: a successful write never consults the currency check.
-    if (copied === null || !mountedRef.current) return;
+    // another member's tab) resolves null and reports nothing, a late success included.
+    if (copied === null) return;
     if (unclaimed()) invoker?.focus();
     showToast(copied ? "Final answer copied as Markdown." : "Couldn't copy the final answer.", { tone: copied ? "success" : "error" });
   };
@@ -713,7 +713,7 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
     const copyStillCurrent = () => mountedRef.current && (unclaimed() || document.activeElement === invoker);
     const copied = await writeClipboardText(runLink, copyStillCurrent);
     // Nothing is reported once the run has left the page, including a write that succeeded late.
-    if (copied === null || !mountedRef.current) return;
+    if (copied === null) return;
     // The fallback's selection dropped focus; hand it back to ⋯.
     if (unclaimed()) invoker?.focus();
     showToast(copied ? "Link copied." : "Couldn't copy the link.", { tone: copied ? "success" : "error" });

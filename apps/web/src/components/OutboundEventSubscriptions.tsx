@@ -342,8 +342,8 @@ export function OutboundEventSubscriptions({
     const unclaimed = () => document.activeElement === null || document.activeElement === document.body;
     const copied = await writeClipboardText(subscription.callbackUrl,
       () => mounted.current && (unclaimed() || document.activeElement === invoker));
-    // A write that settles after the tab has gone reports nothing, a late success included.
-    if (copied === null || !mounted.current) return;
+    // A write that settles after the tab has gone resolves null, a late success included.
+    if (copied === null) return;
     if (unclaimed()) invoker?.focus();
     if (copied) showToast("Callback URL copied.", { tone: "success", detail: subscription.callbackUrl, detailStyle: "mono" });
     else showToast("Couldn't copy the callback URL.", { tone: "error" });

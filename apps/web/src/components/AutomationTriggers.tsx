@@ -503,7 +503,7 @@ export function AutomationTriggers({ automation, triggers, publicOrigin, now, di
     const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const unclaimed = () => document.activeElement === null || document.activeElement === document.body;
     const copied = await writeClipboardText(endpoint, () => mounted.current && (unclaimed() || document.activeElement === invoker));
-    if (copied === null || !mounted.current) return;
+    if (copied === null) return;
     if (unclaimed()) invoker?.focus();
     if (copied) showToast("URL copied.", { tone: "success", detail: endpoint, detailStyle: "mono" });
     else showToast("Couldn't copy the URL.", { tone: "error" });
