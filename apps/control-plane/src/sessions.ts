@@ -1,6 +1,6 @@
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
-import { supportsPacedVideoReviewPeer } from "@wollipog/protocol";
+import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
@@ -880,7 +880,9 @@ export function normalizeWorkflowDecisionSnapshot(
       reason: value.reason as string });
   }
   if (category === "merged_branch_deletion") {
-    const repo = repository();
+    // A GitLab project is named by host and full namespace, as in the campaign ledger (#3601).
+    const repo = repository() ?? (campaignRepositoryLocation(value.repository)?.forge === "gitlab"
+      ? value.repository as string : null);
     const dependency = value.dependentPullRequests && typeof value.dependentPullRequests === "object" &&
       !Array.isArray(value.dependentPullRequests)
       ? value.dependentPullRequests as Record<string, unknown> : null;

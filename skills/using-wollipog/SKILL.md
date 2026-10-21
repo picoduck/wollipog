@@ -391,6 +391,11 @@ it is waiting for. That is not a failure: report the deferred path and reason in
 and leave it alone. The runner resumes retirement after provider exit and removes the worktree only
 when its ownership, cleanliness, publication, and pull-request safety checks pass.
 
+A squash-merged branch whose upstream is missing or already deleted still retires when the forge
+reports a merged change request whose head is exactly the worktree's tip: a GitHub pull request, or
+a GitLab merge request on gitlab.com or on a self-managed host that `glab` is configured for in the
+session's context. So deleting the remote branch before or after retirement both work.
+
 If `wollipog` is not on `PATH`, use the injected executable directly on POSIX
 hosts and WSL:
 

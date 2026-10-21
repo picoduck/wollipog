@@ -35,6 +35,7 @@ import { runContextCommand } from "./context-command.js";
 import {
   captureWorktreeTree,
   isMissingGitRepositoryError,
+  parseForgeRemote,
   restoreWorktreeToTree,
   withGitExecutionContext,
 } from "./git-ops.js";
@@ -1436,9 +1437,10 @@ export type DiscoveredMergedPullRequest = {
   url: string;
   state: "merged";
   headOid: string;
-  provider: "github";
-  kind: "pull_request";
-};
+} & (
+  | { provider: "github"; kind: "pull_request" }
+  | { provider: "gitlab"; kind: "merge_request" }
+);
 
 export type MissingUpstreamPullRequestIdentity = {
   remote: string;
@@ -1552,6 +1554,73 @@ export function parseMergedWorktreePullRequestForHead(
   }
 }
 
+/** The GitLab counterpart (#3601), over `projects/:id/repository/commits/:sha/merge_requests`:
+ * proof is a merged merge request on the remote's own host whose head `sha` is exactly the local
+ * tip. GitLab keeps that head through squash, merge-commit, and merge-train merges, and the
+ * listing survives deletion of the source branch. */
+export function parseMergedGitLabMergeRequestForHead(
+  raw: string,
+  expectedHead: string,
+  host: string,
+): DiscoveredMergedPullRequest | null {
+  if (!/^[a-f0-9]{40,64}$/iu.test(expectedHead)) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    for (const value of parsed) {
+      if (!value || typeof value !== "object") continue;
+      const item = value as Record<string, unknown>;
+      if (item.state !== "merged" ||
+          typeof item.sha !== "string" || item.sha.toLowerCase() !== expectedHead.toLowerCase() ||
+          typeof item.web_url !== "string") continue;
+      const request = linkedChangeRequest(item.web_url);
+      if (request?.provider !== "gitlab" || request.host !== host.toLowerCase()) continue;
+      return {
+        url: item.web_url,
+        state: "merged",
+        headOid: item.sha.toLowerCase(),
+        provider: "gitlab",
+        kind: "merge_request",
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Which forge can prove a merged head for this remote: github.com, gitlab.com, or a self-managed
+ * host this context's glab is configured for (the same local, non-secret `api_protocol` check the
+ * forge summary uses). Anything else has no forge to ask. GitHub keeps its original host-only
+ * check, which also admits credential-bearing HTTPS remotes that `parseForgeRemote` refuses. */
+export async function mergedHeadForge(
+  context: AgentContext,
+  cwd: string,
+  remoteUrl: string,
+  run: typeof runContextCommand,
+): Promise<{ provider: "github" } | { provider: "gitlab"; host: string; project: string } | null> {
+  const githubRemote = /^git@github\.com:/iu.test(remoteUrl) || (() => {
+    try { return new URL(remoteUrl).hostname.toLowerCase() === "github.com"; }
+    catch { return false; }
+  })();
+  if (githubRemote) return { provider: "github" };
+  const parsed = parseForgeRemote(remoteUrl);
+  if (!parsed) return null;
+  if (parsed.provider === "github") return { provider: "github" };
+  if (parsed.provider !== "gitlab") {
+    try {
+      const configured = await run(
+        context, "glab", ["config", "get", "api_protocol", "--host", parsed.host, "--global"],
+        { cwd, timeoutMs: 30_000, maxBuffer: 64 * 1024 },
+      );
+      if (!new Set(["http", "https"]).has(configured.stdout.trim().toLowerCase())) return null;
+    } catch {
+      return null;
+    }
+  }
+  return { provider: "gitlab", host: parsed.host, project: parsed.project };
+}
+
 /** Read one exact linked GitHub pull request. Network/auth/shape failures are deliberately
  * indistinguishable from unavailable state: absence of proof is never permission to delete. */
 export async function worktreePullRequestState(
@@ -1629,22 +1698,37 @@ export async function mergedWorktreePullRequestForBranch(
     const identity: MissingUpstreamPullRequestIdentity = {
       remote, merge, headOid: head, ...(liveUpstream ? { liveUpstream: true as const } : {}),
     };
-    if (!options.runForgeCommand) {
-      const remoteUrl = (await command(
+    const run = options.runForgeCommand ?? runContextCommand;
+    let remoteUrl = "";
+    try {
+      remoteUrl = (await command(
         context, worktreePath, ["remote", "get-url", remote || "origin"], preflightTimeoutMs,
       )).trim();
-      const githubRemote = /^git@github\.com:/iu.test(remoteUrl) || (() => {
-        try { return new URL(remoteUrl).hostname.toLowerCase() === "github.com"; }
-        catch { return false; }
-      })();
-      if (!githubRemote) {
-        options.onIneligible?.();
-        return null;
-      }
+    } catch (error) {
+      if (!options.runForgeCommand) throw error;
+    }
+    // The test seam keeps its GitHub default for fixture remotes that name no forge (local paths).
+    const forge = await mergedHeadForge(context, worktreePath, remoteUrl, run) ??
+      (options.runForgeCommand && !parseForgeRemote(remoteUrl) ? { provider: "github" as const } : null);
+    if (!forge) {
+      options.onIneligible?.();
+      return null;
     }
     if (options.onForgeAttempt && !options.onForgeAttempt(identity)) return null;
     try {
-      const result = await (options.runForgeCommand ?? runContextCommand)(
+      if (forge.provider === "gitlab") {
+        const result = await run(
+          context,
+          "glab",
+          [
+            "api", `projects/${encodeURIComponent(forge.project)}/repository/commits/${head}/merge_requests?per_page=100`,
+            "--hostname", forge.host,
+          ],
+          { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+        );
+        return parseMergedGitLabMergeRequestForHead(result.stdout, head, forge.host);
+      }
+      const result = await run(
         context,
         "gh",
         [
