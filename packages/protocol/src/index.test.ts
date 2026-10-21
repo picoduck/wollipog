@@ -112,7 +112,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 235);
+  assert.equal(PROTOCOL_VERSION, 236);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -293,8 +293,11 @@ test("a provider-HOME launch refusal is accepted only when well formed and conte
   ]) assert.equal(validProviderHomeLaunchRefusal(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 235", () => {
-  assert.equal(PROTOCOL_VERSION, 235);
+test("PROTOCOL_VERSION is 236", () => {
+  assert.equal(PROTOCOL_VERSION, 236);
+  // A v235 runner cannot answer the GitLab merge preflight (#3602).
+  assert.equal(runnerSupportsProtocol(235, "gitlabMergeDecisions"), false);
+  assert.equal(runnerSupportsProtocol(236, "gitlabMergeDecisions"), true);
   // A v229 runner cannot attest Full Control worktree containment (#2940).
   assert.equal(runnerSupportsProtocol(229, "campaignWorktreeContainment"), false);
   assert.equal(runnerSupportsProtocol(230, "campaignWorktreeContainment"), true);

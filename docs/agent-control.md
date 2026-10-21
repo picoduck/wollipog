@@ -1299,6 +1299,30 @@ arms that exact command while the decision remains approved. The matching one-sh
 command permission is then admitted and the decision is marked consumed only after the allow
 response is delivered to the runner. A changed command, failed delivery, stale policy, changed
 ancestry, ambiguous match, persistent grant, or unsupported provider cannot consume the grant.
+
+Protocol v236 (#3602) adds GitLab merge requests. The snapshot's `repository` is the project with
+its host and full namespace (`<gitlab-host>/group/subgroup/project`), `pullRequest` is the merge
+request IID, and three fields exist only for GitLab and are then required: `mergeMethod`
+(`merge_train` or `merge`), `squash`, and `removeSourceBranch`. GitHub snapshots and their digests
+are unchanged. The canonical command is one `glab api` call pinned to the approved head with `sha=`
+and always naming the host:
+
+- `merge_train`: `glab api --method POST projects/<url-encoded project>/merge_trains/merge_requests/<iid>
+  --hostname <host> -f sha=<approved-head-sha> -F squash=<true|false>`. It omits
+  `when_pipeline_succeeds`, which GitLab 17.7 rejects for a merge request that is already mergeable.
+- `merge`: `glab api --method PUT projects/<url-encoded project>/merge_requests/<iid>/merge --hostname
+  <host> -f sha=<approved-head-sha> -F squash=<true|false> -F should_remove_source_branch=<true|false>`.
+
+Before arming it, the control plane asks the child's runner (v236) for `gitlab_merge_preflight`,
+which reads GitLab through the child's own `glab` login and context. A merge request that is not
+open or is a draft, a head that moved since approval, a direct merge on a project that runs merge
+trains (GitLab would merge it straight past the train), a train merge on a project without them or
+on an instance older than the merge-train API (15.11), squash outside the project's squash option,
+or a train whose merge request deletes its source branch differently from the approval revokes the
+decision. GitLab being unreadable proves nothing, so nothing is armed and the child may try again.
+The forge proof reads the merge request's own URL through `glab`. A failed train pipeline is not
+retried: `wait_pull_request` reports it as `queue_failed`, and the child requests a new decision.
+
 Other categories retain immediate consumption. Consumption records that the external action may
 have started. A UI-evidence approval gates a later action rather than authorizing one, so campaign
 child verification settles an approved evidence decision as consumed instead of requiring the child

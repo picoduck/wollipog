@@ -1480,6 +1480,12 @@ type LinkedChangeRequest = {
   number: number;
 };
 
+/** Which forge a change-request URL names (a GitLab `/-/merge_requests/N` URL, or GitHub), for
+ * reads that must pick `glab` or `gh` from the URL alone (#3602). */
+export function changeRequestProvider(url: string): ForgeProvider {
+  return linkedChangeRequest(url)?.provider ?? "github";
+}
+
 function linkedChangeRequest(value: string): LinkedChangeRequest | null {
   try {
     const url = new URL(value);

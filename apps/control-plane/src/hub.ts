@@ -58,6 +58,7 @@ import type {
   ProviderLoginResultMessage,
   RemoveProviderAccountResultMessage,
   WorkflowActionAdmissionRecordedMessage,
+  GitLabMergePreflightResultMessage,
   WorkflowActionReconciliationResultMessage,
   GithubIssueClosureResultMessage,
   CampaignForgeObserveResultMessage,
@@ -380,6 +381,7 @@ export type RunnerRequestResult =
   | WorkspaceWorktreeSetupResultMessage
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
+  | GitLabMergePreflightResultMessage
   | WorkflowActionReconciliationResultMessage
   | import("@wollipog/protocol").CampaignIssueScopeResultMessage
   | GithubIssueClosureResultMessage
