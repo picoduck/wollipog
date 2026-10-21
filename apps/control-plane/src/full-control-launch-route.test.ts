@@ -1547,3 +1547,26 @@ test("recovery settles only on this delivery, never on identical earlier text (C
     f.hub.sendToRunner = send;
   } finally { await server.close(); f.db.close(); }
 });
+
+test("reauthorizing a waiting root never ends its wait, even with retained queued work (security review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    // Retained work that is not the owner's, queued for the waiting root.
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text: "Automation: take #14" });
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const reauthorized = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(reauthorized.statusCode, 200, reauthorized.body);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING, "the fence stays");
+    f.sessions.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(durableSends(f, id), 0, "and the retained work stays held");
+    assert.equal((await f.sessions.promptOrSteer(id, "Orchestrate issues 14 and 15")).status, 409);
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "only the owner's message sets scope");
+  } finally { await server.close(); f.db.close(); }
+});

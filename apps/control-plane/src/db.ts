@@ -18599,10 +18599,11 @@ export class ControlPlaneDb {
         campaign.firstMessageScope = { state: "pending" };
       }
     }
+    // An authorization never ends an existing wait (only a revoke to Custom lifts its fence): it
+    // records its own limit provenance, and the queue keeps holding any retained work until the
+    // owner's first message.
     if (control.mode === "full_control" && campaign.firstMessageScope?.state === "pending") {
-      // Only a fresh root waits for its first message: one with any history never does.
-      if (this.sessionHasConversationHistory(id)) delete campaign.firstMessageScope;
-      else campaign.firstMessageScope = { state: "pending", ...(derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
+      campaign.firstMessageScope = { state: "pending", ...(derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
     }
     campaign.control = structuredClone(control);
     this.db.exec("BEGIN");
