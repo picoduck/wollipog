@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { hostname as osHostname, homedir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { CliError, flag, option } from "./cli-args.js";
 import { execCapture } from "./exec-capture.js";
 import type { McpFetch } from "./session-management-mcp.js";
 import { runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
@@ -181,33 +182,6 @@ export function defaultServiceHost(fetchImpl: McpFetch = globalThis.fetch): Serv
     copyTree: (from, to) => cpSync(from, to, { recursive: true }),
     chmod: (path, mode) => chmodSync(path, mode),
   };
-}
-
-class CliError extends Error {
-  /** Extra machine-readable fields merged into the JSON error object. */
-  constructor(message: string, readonly exitCode: 1 | 2 = 1, readonly details: Record<string, unknown> = {}) {
-    super(message);
-  }
-}
-
-function option(args: string[], name: string): string | undefined {
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === name) {
-      const value = args[i + 1];
-      if (value === undefined || value.startsWith("--")) throw new CliError(`${name} requires a value`, 2);
-      return value;
-    }
-    if (args[i]?.startsWith(`${name}=`)) {
-      const value = args[i]!.slice(name.length + 1);
-      if (value === "") throw new CliError(`${name} requires a value`, 2);
-      return value;
-    }
-  }
-  return undefined;
-}
-
-function flag(args: string[], name: string): boolean {
-  return args.includes(name);
 }
 
 function positional(args: string[]): string[] {

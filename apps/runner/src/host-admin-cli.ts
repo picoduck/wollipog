@@ -36,6 +36,7 @@ import {
 } from "@wollipog/protocol";
 import { homedir, userInfo } from "node:os";
 import { readFileSync as readTextFileSync } from "node:fs";
+import { CliError, flag, option } from "./cli-args.js";
 import { execCapture, type ExecResult } from "./exec-capture.js";
 import type { McpFetch } from "./session-management-mcp.js";
 import {
@@ -115,42 +116,9 @@ export function defaultHostAdminIo(): HostAdminIo {
   };
 }
 
-class CliError extends Error {
-  constructor(message: string, readonly exitCode: 1 | 2 = 1) {
-    super(message);
-  }
-}
-
-/**
- * `--name value` or `--name=value`. An option that is present but followed by another option
- * (`--runner --yes`, `--output --json`) or by nothing has an omitted value: that is a usage error,
- * never "absent", so an optional option can never silently fall back to its default. Only the `=`
- * form can supply a value that starts with `--`.
- */
-function option(args: string[], name: string): string | undefined {
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === name) {
-      const value = args[i + 1];
-      if (value === undefined || value.startsWith("--")) throw new CliError(`${name} requires a value`, 2);
-      return value;
-    }
-    if (args[i]?.startsWith(`${name}=`)) {
-      const value = args[i]!.slice(name.length + 1);
-      // `--output="$OUT"` with OUT unset must not silently become "no --output".
-      if (value === "") throw new CliError(`${name} requires a value`, 2);
-      return value;
-    }
-  }
-  return undefined;
-}
-
 /** Single-quote a value for copy-paste into a POSIX shell; runner ids may contain metacharacters. */
 function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, "'\\''")}'`;
-}
-
-function flag(args: string[], name: string): boolean {
-  return args.includes(name);
 }
 
 function positional(args: string[]): string[] {
