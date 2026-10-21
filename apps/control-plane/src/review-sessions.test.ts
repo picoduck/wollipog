@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  PROTOCOL_VERSION, REVIEW_SESSION_BRIEF_LIMIT_BYTES, REVIEW_SESSION_OUTPUT_LIMIT_BYTES,
+  DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, REVIEW_SESSION_BRIEF_LIMIT_BYTES, REVIEW_SESSION_OUTPUT_LIMIT_BYTES,
+  type CampaignBudgetAuthority,
   type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewReportFinding, type ReviewRunHistory,
   type ReviewSessionCapability, type ReviewSessionRequest, type RunnerMetadata, type StartSessionMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 const HEAD = "a".repeat(40);
 const CAPABILITY: ReviewSessionCapability = {
@@ -21,6 +23,7 @@ function harness(options: {
   protocol?: number;
   reviewSession?: ReviewSessionCapability | null;
   driver?: "claude-code" | "codex-app-server" | "pi";
+  campaign?: boolean;
 } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
@@ -34,12 +37,32 @@ function harness(options: {
     runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
       ...(options.reviewSession === null ? {} : { reviewSession: options.reviewSession ?? CAPABILITY }) } };
   db.registerRunner(metadata, 1, options.protocol ?? PROTOCOL_VERSION);
+  if (options.campaign) {
+    for (const agent of metadata.agents.filter((agent) => agent.id !== "pi")) {
+      agent.capabilities = { models: [{ id: agent.id === "claude" ? "claude-opus-5-5" : "gpt-6.1-sol", default: true }],
+        effortLevels: ["high"], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: [agent.id === "claude" ? "dontAsk" : "read-only"] };
+    }
+    db.registerRunner(metadata, 1, options.protocol ?? PROTOCOL_VERSION);
+    db.setUsageRateTable(new Map(["claude-opus-5-5", "gpt-6.1-sol"].map((model) => [model,
+      { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }])));
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [3371], revision: 1,
+      authorizedByUserId: identity.userId, authorizedAt: 1 };
+    policy.issueNumbers = [3371];
+    db.createSession({ id: "root", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Campaign", useWorktree: false,
+      driver: "claude-code", config: { model: "claude-opus-5-5" }, now: 2, role: "orchestrator", orchestratorPolicy: policy,
+      parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+      scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } } });
+    db.updateSessionStatus("root", "running", 3);
+  }
   const driver = options.driver ?? "claude-code";
   const make = (id: string) => {
     db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: driver === "claude-code" ? "claude" : driver === "pi" ? "pi" : "codex",
       title: id, useWorktree: true, creationActor: "human",
       scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } },
-      driver, config: {}, now: 2 });
+      driver, config: options.campaign ? { model: driver === "claude-code" ? "claude-opus-5-5" : "gpt-6.1-sol" } : {}, now: 2,
+      ...(options.campaign ? { parentSessionId: "root" } : {}) });
     db.updateSessionStatus(id, "running", 3);
   };
   make("s1");
@@ -53,7 +76,15 @@ function harness(options: {
   hub.sendToRunner = (_, message) => { if (deliver) sent.push(message as { type: string }); return deliver; };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   const starts = () => sent.filter((message): message is StartSessionMessage & Record<string, unknown> => message.type === "start_session");
-  return { db, svc, sent, starts, metadata, setOnline: (value: boolean) => { online = value; },
+  const enableCampaign = (extra: Partial<CampaignBudgetAuthority> = {}) => {
+    const result = svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #3371",
+      operations: ["implementation_question"], delegatablePolicyIds: [],
+      budgetAuthority: { version: 1, accounting: "managed_workers_only", unpriced: "stop", costUsd: 140, toolCalls: 140, concurrency: 4, ...extra } },
+    1, { ...identity, kind: "human", actorId: identity.userId });
+    assert.ok(result.ok, result.error ?? "campaign authorization refused");
+    sent.length = 0;
+  };
+  return { db, svc, sent, starts, metadata, enableCampaign, setOnline: (value: boolean) => { online = value; },
     setDeliver: (value: boolean) => { deliver = value; } };
 }
 
@@ -621,6 +652,130 @@ test("a run with rounds left, or an upvote, is not extended", () => {
     };
     assert.match(h.svc.createWorkflowDecision("s1", { requestId: "a", resourceKey: "k", resourceSnapshot: snapshot }).error!,
       /used 1 of its 4 rounds; request a review instead/u);
+  } finally { h.db.close(); }
+});
+
+test("a campaign member's review reserves allowance and settles actual usage without child authority", () => {
+  for (const driver of ["claude-code", "codex-app-server"] as const) {
+    const h = harness({ campaign: true, driver });
+    try {
+      h.enableCampaign();
+      const before = h.db.campaignBudgets.view("root")!;
+      const view = requested(h);
+      const id = view.reviewSessionId;
+      const start = h.starts()[0]!;
+      const allocation = h.db.campaignBudgets.allocation(id)!;
+      assert.equal(h.db.campaignBudgets.root(id), "root");
+      assert.deepEqual(start.spec.campaignBudgetDispatch, h.db.campaignBudgets.dispatch(id));
+      assert.equal(start.spec.config?.costBudgetUsd, allocation.costUsd);
+      assert.equal(start.spec.config?.maxToolCalls, allocation.toolCalls);
+      assert.equal(allocation.costUsd, 40, "uses free campaign capacity, not the requester's reserved allocation");
+      assert.equal(h.db.campaignBudgets.view("root")!.outstanding.costUsd, before.outstanding.costUsd + 40);
+      assert.equal(h.db.campaignBudgets.view("root")!.occupied, before.occupied + 1);
+      assert.equal(h.db.getSession(id)!.parentSessionId ?? null, null, "accounting membership grants no descendant authority");
+      assert.equal(h.db.getSession("s1")!.liveChildCapacity?.occupied, 0);
+      h.db.addSessionUsage(id, { costUsd: 3 }, 7);
+      h.db.appendEvent(id, { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" }, 8);
+      assert.equal(h.db.campaignBudgets.view("root")!.actual.costUsd, 3);
+      assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
+      h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: id, state: "failed", reason: "invalid report" });
+      h.svc.onSessionStatus(id, "stopped");
+      assert.equal(h.db.campaignBudgets.active(id), true, "an outcome or terminal status alone cannot refund reservations");
+      const checkpoint = { generation: start.spec.campaignBudgetDispatch!.generation, historyEpoch: 0, throughSeq: 1, costUsd: 3 };
+      h.db.campaignBudgets.recordCheckpoint(id, checkpoint);
+      assert.equal(h.db.campaignBudgets.settleCheckpoint(id, { historyEpoch: 0, hydratedSeq: 0 }), false);
+      assert.ok(h.db.campaignBudgets.settleCheckpoint(id, { historyEpoch: 0, hydratedSeq: 1 }));
+      const settled = h.db.campaignBudgets.view("root")!;
+      assert.equal(settled.actual.costUsd, 3, "invalid attempts still cost allowance");
+      assert.equal(settled.outstanding.costUsd, before.outstanding.costUsd);
+      assert.equal(settled.occupied, before.occupied);
+      assert.ok(h.svc.requestReviewSession("s1", request()).ok, "another attempt gets a new reservation");
+      assert.equal(h.db.campaignBudgets.view("root")!.actual.costUsd, 3, "retries never erase previous spend");
+    } finally { h.db.close(); }
+  }
+});
+
+test("campaign review ceilings preserve the requester's original human budget across attempts", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.db.updateSessionCostBudget("s1", 8, 4);
+    h.enableCampaign();
+    h.db.addSessionUsage("s1", { costUsd: 3 }, 5);
+    const first = requested(h);
+    assert.equal(h.starts()[0]!.spec.config?.costBudgetUsd, 5);
+    h.db.addSessionUsage(first.reviewSessionId, { costUsd: 4 }, 6);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: first.reviewSessionId, state: "failed" });
+    assert.ok(h.svc.requestReviewSession("s1", request()).ok);
+    assert.equal(h.starts()[1]!.spec.config?.costBudgetUsd, 1, "prior attempts still spend the original ceiling");
+    const second = h.starts()[1]!.spec.sessionId;
+    h.db.addSessionUsage(second, { costUsd: 1 }, 7);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: second, state: "failed" });
+    assert.match(h.svc.requestReviewSession("s1", request()).error!, /no cost budget left/);
+  } finally { h.db.close(); }
+});
+
+test("campaign reviews without cost or tool ceilings still record actual spend", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ costUsd: undefined, toolCalls: undefined });
+    const review = requested(h);
+    assert.equal(h.starts()[0]!.spec.config?.costBudgetUsd, undefined);
+    assert.equal(h.starts()[0]!.spec.config?.maxToolCalls, undefined);
+    h.db.addSessionUsage(review.reviewSessionId, { costUsd: 7 }, 7);
+    assert.equal(h.db.campaignBudgets.view("root")!.actual.costUsd, 7);
+  } finally { h.db.close(); }
+});
+
+test("campaign reviews refuse exhausted, stopped, fully reserved and concurrency-bound allowances before launch", () => {
+  for (const scenario of ["exhausted", "stopped", "reserved", "concurrency"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      h.enableCampaign(scenario === "concurrency" ? { concurrency: 2 } : {});
+      if (scenario === "exhausted") h.db.addSessionUsage("root", { costUsd: 140 }, 7);
+      if (scenario === "stopped") h.db.campaignBudgets.stop("root", "revoked", "Human stopped the campaign allowance.");
+      if (scenario === "reserved") h.db.campaignBudgets.admit("root", { sessionId: "reserved", costUsd: 80, toolCalls: 80 }, {});
+      const members = h.db.campaignBudgets.members("root");
+      const result = h.svc.requestReviewSession("s1", request());
+      assert.equal(result.status, 409, scenario);
+      assert.match(result.error!, /allowance/, scenario);
+      assert.equal(h.starts().length, 0, scenario);
+      assert.deepEqual(h.db.campaignBudgets.members("root"), members, "refusal creates no reservation");
+      assert.equal(h.db.reviewSessions.activeFor("s1"), null);
+    } finally { h.db.close(); }
+  }
+});
+
+test("campaign reviews require accounting-aware runners and priced models, while non-campaign reviews keep older support", () => {
+  const old = harness({ campaign: true, protocol: 231 });
+  try {
+    old.enableCampaign();
+    assert.match(old.svc.requestReviewSession("s1", request()).error!, /review sessions charged to the campaign allowance/);
+    assert.equal(old.starts().length, 0);
+  } finally { old.db.close(); }
+  const unpriced = harness({ campaign: true });
+  try {
+    unpriced.enableCampaign();
+    unpriced.db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001,
+      cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]]));
+    assert.match(unpriced.svc.requestReviewSession("s1", request()).error!, /unavailable or unpriced/);
+    assert.equal(unpriced.db.campaignBudgets.members("root").length, 3);
+    assert.equal(unpriced.starts().length, 0);
+  } finally { unpriced.db.close(); }
+  const ordinary = harness({ protocol: 231 });
+  try {
+    const view = requested(ordinary);
+    assert.equal(ordinary.starts()[0]!.spec.campaignBudgetDispatch, undefined);
+    assert.equal(ordinary.db.campaignBudgets.root(view.reviewSessionId), null);
+  } finally { ordinary.db.close(); }
+});
+
+test("the legacy bridge still refuses campaign allowance members", () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign();
+    const result = h.svc.requestSessionReviewJob("s1", request());
+    assert.match(result.error!, /part of a campaign with an allowance/);
+    assert.equal(h.starts().length, 0);
   } finally { h.db.close(); }
 });
 

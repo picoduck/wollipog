@@ -172,6 +172,26 @@ test("a review session launches past full capacity, read-only in its checkout, a
   assert.deepEqual(h.manager.reviewSessionUpdates(), h.updates(), "the outcome is re-sent at registration");
 });
 
+test("a campaign review preserves its admitted generation through final usage and reconnect", async (t) => {
+  const h = harness(t, { hold: true });
+  const dispatch = { rootSessionId: "s_campaign", generation: "review-generation" };
+  assert.equal(await h.manager.start(reviewSpec({ campaignBudgetDispatch: dispatch,
+    config: { costBudgetUsd: 10, maxToolCalls: 100 } }), "brief"), true);
+  await until(() => h.drivers[0]?.prompts.length === 1, "the review turn");
+  assert.deepEqual(h.store.readMeta("s_review")!.campaignBudgetDispatch, dispatch);
+  assert.equal(h.drivers[0]!.options.config.costBudgetUsd, 10);
+  // Provider usage is persisted before its turn settles, exactly as for other managed sessions.
+  h.store.patchMeta("s_review", { costUsd: 3 });
+  h.finishTurn();
+  await until(() => h.sent.some((message) => message.type === "session_status" && !!message.campaignBudgetCheckpoint), "final campaign usage");
+  const status = [...h.sent].reverse().find((message) => message.type === "session_status" && !!message.campaignBudgetCheckpoint);
+  assert.ok(status?.type === "session_status" && status.campaignBudgetCheckpoint);
+  assert.equal(status.campaignBudgetCheckpoint.generation, dispatch.generation);
+  assert.equal(status.campaignBudgetCheckpoint.costUsd, 3);
+  assert.deepEqual(h.manager.snapshotForControlPlane(h.store.readMeta("s_review")!).campaignBudgetCheckpoint,
+    status.campaignBudgetCheckpoint, "reconnect carries the same final usage receipt");
+});
+
 test("an ordinary start never replaces a review session, and nothing else opens on it", async (t) => {
   const h = harness(t);
   assert.equal(await h.manager.start(reviewSpec(), "brief"), true);

@@ -111,7 +111,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 231);
+  assert.equal(PROTOCOL_VERSION, 232);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -264,8 +264,13 @@ test("older peers never receive display-only live Claude usage, but still accoun
   assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
 });
 
-test("PROTOCOL_VERSION is 231", () => {
-  assert.equal(PROTOCOL_VERSION, 231);
+test("campaign review sessions require accounting-aware runners", () => {
+  assert.equal(runnerSupportsProtocol(231, "campaignReviewSessions"), false);
+  assert.equal(runnerSupportsProtocol(232, "campaignReviewSessions"), true);
+});
+
+test("PROTOCOL_VERSION is 232", () => {
+  assert.equal(PROTOCOL_VERSION, 232);
   // A v229 runner cannot attest Full Control worktree containment (#2940).
   assert.equal(runnerSupportsProtocol(229, "campaignWorktreeContainment"), false);
   assert.equal(runnerSupportsProtocol(230, "campaignWorktreeContainment"), true);

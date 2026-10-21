@@ -2059,7 +2059,8 @@ export class SessionManager {
         acpSessionContext: undefined,
         projectMemory: undefined,
         artifactUploads: undefined,
-        campaignBudgetDispatch: undefined,
+        // Keep the admitted generation so normal usage checkpoints settle the review allowance.
+        campaignBudgetDispatch: spec.campaignBudgetDispatch,
       },
       prompt: prepared.prompt,
     };
