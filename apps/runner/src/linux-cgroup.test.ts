@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import cp, { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -12,6 +12,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentIdentity, providerContainmentStatus, systemdUserDelegationReply, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
 import { linuxCgroupHelper, stageLinuxCgroupHelper } from "./linux-cgroup-helper.js";
+import { installDelegationProbeFixture } from "./fixtures/linux-cgroup-delegation-fixture.js";
 import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { provenProcessTreeExit, ProviderProcessLedger, spawnAgent, waitForPendingKills } from "./spawn.js";
 
@@ -143,9 +144,10 @@ test(`${scenario} retains the marker/parent-link API and reports fallback before
   const module = new URL("./linux-cgroup.ts", import.meta.url).href;
   const helperModule = new URL("./linux-cgroup-helper.ts", import.meta.url).href;
   const spawnModule = new URL("./spawn.ts", import.meta.url).href;
+  const fixtureModule = new URL("./fixtures/linux-cgroup-delegation-fixture.ts", import.meta.url).href;
   const code = `
     import fs from 'node:fs';
-    import cp from 'node:child_process';
+    import {installDelegationProbeFixture} from ${JSON.stringify(fixtureModule)};
     import os from 'node:os';
     import path from 'node:path';
     import { syncBuiltinESMExports } from 'node:module';
@@ -154,7 +156,6 @@ test(`${scenario} retains the marker/parent-link API and reports fallback before
     const {linuxCgroupHelper} = await import(${JSON.stringify(helperModule)});
     linuxCgroupHelper();
     const original = {mkdirSync:fs.mkdirSync,readFileSync:fs.readFileSync,statfsSync:fs.statfsSync};
-    const originalSpawn = cp.spawnSync;
     const mount = fs.mkdtempSync(path.join(os.tmpdir(),'wollipog-delegation-mock-'));
     fs.mkdirSync(path.join(mount,'runner.scope'));
     fs.mkdirSync(path.join(mount,'runner.scope','worker'));
@@ -162,7 +163,7 @@ test(`${scenario} retains the marker/parent-link API and reports fallback before
     const userUnit = ${scenario.startsWith("user-")};
     const membership = userUnit ? '/runner.scope/worker' : '/';
     let queries = 0;
-    cp.spawnSync = (file,args,options) => {
+    const restoreSpawn = installDelegationProbeFixture((file,args,options) => {
       if (args[0] === '--delegation-probe') return {status:${scenario === "marked" ? 0 : 3}};
       if (file === '/usr/bin/systemctl') {
         queries++;
@@ -170,8 +171,8 @@ test(`${scenario} retains the marker/parent-link API and reports fallback before
         assert.equal(args[0],'--user');
         return {status:${scenario === "user-query-failed" ? 1 : 0},stdout:'LoadState=loaded\\nDelegate=${scenario === "user-not-delegated" ? "no" : "yes"}\\nControlGroup=${scenario === "user-wrong-cgroup" ? "/ancestor/runner.scope" : "/runner.scope"}\\n'};
       }
-      return originalSpawn(file,args,options);
-    };
+      return undefined;
+    });
     fs.readFileSync = (file,...args) => {
       if (file === '/proc/self/mountinfo') return ${scenario === "no-mount" ? "''" : "'30 20 0:30 " + (scenario === "user-namespaced" ? "/runner.scope" : "/") + " ' + mount + ' rw - cgroup2 cgroup rw\\n'"};
       if (file === '/proc/self/cgroup') return '0::' + membership + '\\n';
@@ -184,7 +185,7 @@ test(`${scenario} retains the marker/parent-link API and reports fallback before
     syncBuiltinESMExports();
     assert.equal(cgroup.providerContainmentIdentity(), undefined);
     Object.assign(fs,original);
-    cp.spawnSync = originalSpawn;
+    restoreSpawn();
     syncBuiltinESMExports();
     fs.rmSync(mount,{recursive:true,force:true});
     assert.equal(writes, ${delegated ? 1 : 0});
@@ -237,16 +238,15 @@ function requireContainment(t: { skip(message: string): void }): boolean {
 test("user-manager native validation exercises the real query even if a delegation marker exists", {
   skip: process.platform !== "linux" || process.env.WOLLIPOG_TEST_EXPECT_USER_MANAGER_QUERY !== "1",
 }, (t) => {
-  const original = cp.spawnSync;
   let queries = 0;
-  const mock = t.mock.method(cp, "spawnSync", (...args: unknown[]) => {
+  const restoreSpawn = installDelegationProbeFixture((file, args) => {
     // Only the marker's absence is simulated. The actual systemctl query, manager reply,
     // directory identity, writes and all later contained launches remain real kernel I/O.
-    if (Array.isArray(args[1]) && args[1][0] === "--delegation-probe") {
+    if (args[0] === "--delegation-probe") {
       return { pid: 0, output: [null, null, null], stdout: null, stderr: null, status: 3, signal: null };
     }
-    if (args[0] === "/usr/bin/systemctl") queries++;
-    return Reflect.apply(original, cp, args);
+    if (file === "/usr/bin/systemctl") queries++;
+    return undefined;
   });
   syncBuiltinESMExports();
   try {
@@ -254,7 +254,7 @@ test("user-manager native validation exercises the real query even if a delegati
     assert.equal(queries, 1, "containment must be initialized through the real user-manager query");
     assert.equal(providerContainmentStatus().proofStandard, "linux-cgroup-v2");
   } finally {
-    mock.mock.restore();
+    restoreSpawn();
     syncBuiltinESMExports();
   }
 });
