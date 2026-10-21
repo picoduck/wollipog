@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { awaitsFirstMessage } from "./campaign-launch-admission.js";
 import {
   CODEX_EXEC_RETIRED_REASON,
   isDurableSessionCommandErrorCode,
@@ -195,6 +196,12 @@ export class SessionPromptOutbox {
       // A prompt or answer queued for a persisted exec session before the retirement (#3259) never
       // reaches a runner that may still resume that driver. One already sent may have landed.
       const target = this.db.getSession(row.sessionId);
+      // Retained work never runs before a Full Control campaign's first owner message (#2940); it
+      // stays queued and runs once that message is established.
+      if (awaitsFirstMessage(target?.orchestratorPolicy)) {
+        this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
+        continue;
+      }
       if (target && isRetiredCodexExec(target)) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,

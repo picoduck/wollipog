@@ -19,6 +19,7 @@ import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
 import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectCampaignWorkspace, registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 
 const proposal: CampaignLaunchProposal = { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
@@ -1323,19 +1324,13 @@ test("enable never trusts issue numbers a restart backfilled from an automation'
       headers: { authorization: "Bearer human" }, payload: {} });
     const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
     assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
-    assert.equal(reviewed.summary.objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
+    assert.equal(reviewed.summary.objective, "Deliver #12", "a campaign with history keeps its existing task");
     const enabled = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
       headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
     assert.equal(enabled.statusCode, 200, enabled.body);
-    let root = f.db.getSession(id)!;
+    const root = f.db.getSession(id)!;
     assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [], "neither backfilled issue becomes scope");
-    assert.equal(root.orchestratorPolicy!.firstMessageScope!.state, "pending", "the owner's next message supplies the task");
-    assert.equal((await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 13")).status, 409, "an automation still cannot");
-
-    f.db.updateSessionStatus(id, "idle", Date.now());
-    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Take #13 only")).ok, true);
-    root = f.db.getSession(id)!;
-    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [13]);
+    assert.equal(root.orchestratorPolicy!.firstMessageScope, undefined, "a campaign with history is established at once, task-only");
     assert.equal(campaignBoundaryCurrent(root), true);
   } finally { await server.close(); f.db.close(); }
 });
@@ -1398,6 +1393,7 @@ test("a control-plane restart mid-delivery keeps the owner-only fence and never 
     await new Promise((resolve) => setTimeout(resolve, 20));
     const delivering = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
     assert.deepEqual(delivering, { state: "delivering", messageDigest: firstMessageDigest(text),
+      after: (delivering as { after: { eventSeq: number; promptRowid: number } }).after,
       derivedLimits: { acceptedFollowUps: true, maxIssues: true } }, "the wait is durably fenced before delivery");
 
     // The process dies here: nothing it still holds may deliver, and a new one starts on the same database.
@@ -1430,6 +1426,122 @@ test("a control-plane restart mid-delivery keeps the owner-only fence and never 
     f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
     new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
     assert.equal(f.db.getSession(recorded)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.hub.sendToRunner = send;
+  } finally { await server.close(); f.db.close(); }
+});
+
+/** Retained durable work, staged exactly as the service queues a prompt. */
+const outboxOf = (f: ReturnType<typeof fixture>) => (f.sessions as unknown as { promptOutbox: SessionPromptOutbox }).promptOutbox;
+const durableSends = (f: ReturnType<typeof fixture>, sessionId: string) => f.sent.filter((message) =>
+  message.type === "durable_session_command" && message.command.type === "prompt_session" && message.command.sessionId === sessionId).length;
+
+test("reauthorizing a waiting campaign stores that request's own ceilings: 0 follow-ups and 1 issue hold for the first message (CR-2.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
+    const overrides = { budget: { acceptedFollowUps: 0 }, issues: { maxIssues: 1 } };
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: { overrides } });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    const reauthorized = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { overrides, expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(reauthorized.statusCode, 200, reauthorized.body);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+      { state: "pending", derivedLimits: { acceptedFollowUps: false, maxIssues: false } }, "the newer authorization's provenance replaces the launch's");
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "at most the explicit one issue");
+    const boundary = boundaryOf(f, id);
+    assert.equal(boundary.budgetAuthority!.acceptedFollowUps, 0);
+    assert.equal(boundary.issueAuthority!.maxIssues, 1);
+    assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0, "and the campaign allowance keeps them");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("enabling a campaign with history establishes its scope at once: no wait, retained work runs, automation text is never scope (CR-2.3)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const id = customCampaign(f, "history-root");
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    delete policy.issueScope; delete policy.issueNumbers;
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+    f.db.appendEvent(id, { kind: "user_message", text: "Orchestrate issues 12 and 13" }, Date.now());
+    // Retained work an automation queued: it waits on the busy root until the queue next flushes.
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text: "Automation: also take #14" }, Date.now() + 60_000);
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    assert.equal(reviewed.summary.objective, "Deliver #12", "the campaign's existing task is the objective");
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const root = f.db.getSession(id)!;
+    assert.equal(root.orchestratorPolicy!.firstMessageScope, undefined, "a campaign with history never waits");
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [], "task-only: no transcript or queued text is scope");
+    assert.equal(boundaryOf(f, id).objective, "Deliver #12");
+    assert.equal(campaignBoundaryCurrent(root), true);
+    f.sessions.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(durableSends(f, id), 1, "the retained work runs under the established boundary");
+    assert.equal((await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 13")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("retained queued work never runs on a fresh root before its first owner message, and runs once it is established (CR-2.3)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text: "Retained: take #14" });
+    f.sessions.retryDuePrompts(Date.now());
+    outboxOf(f).flush(Date.now());
+    assert.equal(durableSends(f, id), 0, "the outbox holds it while the root waits");
+    const retried = f.sessions.retryPendingPrompt(id, "prompt_missing");
+    assert.equal(retried.status, 409);
+    assert.match(retried.error!, /owner's first message/u);
+
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    const delivering = f.sessions.promptFromHuman(f.human, id, "Ship #12");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.sessions.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(durableSends(f, id), 0, "and while it delivers");
+    release();
+    assert.equal((await delivering).ok, true);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+    f.sessions.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(durableSends(f, id), 1, "after the first message the retained work runs");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "and never becomes scope");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("recovery settles only on this delivery, never on identical earlier text (CR-2.2)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const text = "Fix #12";
+    // Identical text recorded and queued before the delivery begins is history, not this delivery.
+    f.db.appendEvent(id, { kind: "user_message", text }, Date.now());
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text });
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    void f.sessions.promptFromHuman(f.human, id, text);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const first = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+    assert.equal(first.state, "delivering");
+    const send = f.hub.sendToRunner;
+    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
+    new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING, "earlier identical text does not settle it");
     release();
     await new Promise((resolve) => setTimeout(resolve, 20));
     f.hub.sendToRunner = send;

@@ -5,7 +5,7 @@ import {
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
-  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type FullControlDerivedLimits, type CampaignLaunchCapability, type CampaignLaunchPreflight,
+  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type FullControlDerivedLimits, type OrchestratorCampaignPolicy, type CampaignLaunchCapability, type CampaignLaunchPreflight,
   type CampaignLaunchProposal, type CampaignLaunchInspectionResult, type ChildSessionDefaults,
   type OrchestratorCampaignBudgetDefault,
   type CreateSessionRequest, type FullControlEnableRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
@@ -93,6 +93,14 @@ function validOverrides(o: unknown): o is FullControlLaunchOverrides {
   if (v.budget !== undefined && (!record(v.budget) || !only(v.budget, ["costUsd", "toolCalls", "concurrency", "acceptedFollowUps", "checkpointsUsd"]))) return false;
   if (v.issues !== undefined && (!record(v.issues) || !only(v.issues, ["relatedFollowUps", "maxIssues", "closureReasons"]))) return false;
   return true;
+}
+
+/** A Full Control campaign that waits for its owner's first message, or is delivering it (#2940).
+ * Nothing else may start a provider turn for it: no prompt, command, steer, continuation or queued
+ * work. Revoking to Custom ends the wait. */
+export function awaitsFirstMessage(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope" | "control"> | undefined): boolean {
+  const state = policy?.firstMessageScope?.state;
+  return (state === "pending" || state === "delivering") && policy!.control?.mode === "full_control";
 }
 
 /** A launch that names no task, issues or objective: the owner's first message supplies them (#2940). */

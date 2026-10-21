@@ -17,7 +17,7 @@ import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
-import { firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
+import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
@@ -5071,8 +5071,7 @@ export class SessionsService {
    * and stays fenced while that message is delivered. Both states are durable, so the fence
    * survives a control-plane restart. */
   private awaitingFirstMessage(session: SessionView | null | undefined): boolean {
-    const state = session?.orchestratorPolicy?.firstMessageScope?.state;
-    return (state === "pending" || state === "delivering") && session!.orchestratorPolicy!.control?.mode === "full_control";
+    return awaitsFirstMessage(session?.orchestratorPolicy);
   }
 
   /** Every ingress that can start a provider turn refuses while the campaign waits for its owner's
@@ -5086,8 +5085,8 @@ export class SessionsService {
    * or durably queued) becomes established; otherwise the campaign waits for its first message
    * again, still fenced. It is never resent, so no duplicate turn can start. */
   private recoverFirstMessageDeliveries(now: number): void {
-    for (const { sessionId, messageDigest } of this.db.firstMessageDeliveries()) {
-      const delivered = this.db.firstMessageAdmitted(sessionId, messageDigest);
+    for (const { sessionId, messageDigest, after } of this.db.firstMessageDeliveries()) {
+      const delivered = this.db.firstMessageAdmitted(sessionId, messageDigest, after);
       if (this.db.settleFirstMessageDelivery(sessionId, messageDigest, delivered, now)) {
         this.log.warn(JSON.stringify({ event: "full_control_first_message_recovered", sessionId, delivered, messageDigest }));
       }
@@ -5178,6 +5177,8 @@ export class SessionsService {
       result = this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
     } finally { this.firstMessageDelivery = null; }
     this.db.settleFirstMessageDelivery(sessionId, messageDigest, result.ok, Date.now());
+    // A first message admitted to the durable queue was held while delivering; it runs now.
+    if (result.ok) this.promptOutbox.flush(Date.now(), session.runnerId);
     this.hub.sessionChangedById(sessionId);
     return result;
   }
@@ -5204,7 +5205,9 @@ export class SessionsService {
     const trusted = root.orchestratorPolicy.issueNumbersSource === "human_launch_request" ? root.orchestratorPolicy.issueNumbers ?? [] : [];
     const candidates = [...new Set(trusted)].sort((a, b) => a - b).slice(0, 100);
     const issueNumbers = candidates.length ? await this.verifiedMessageIssues(root, repository, candidates) : [];
-    return { repository, issueNumbers, firstMessage: issueNumbers.length === 0 };
+    // Only a fresh root waits for its owner's first message. A campaign with any history is
+    // established at once, task-only without trusted issues, and its retained work runs under it.
+    return { repository, issueNumbers, firstMessage: issueNumbers.length === 0 && !this.db.sessionHasConversationHistory(sessionId) };
   }
 
   /** The referenced issues the runner reads as issues of the campaign repository. A pull request,
@@ -6007,6 +6010,8 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const firstMessageRefusal = this.firstMessageFence(sessionId, session);
+    if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     const candidate = this.promptOutbox.retryableKnownUndeliveredPrompt(sessionId, commandId);
     if (candidate === "not_found") return fail("pending prompt not found", 404);
     if (candidate === "not_retryable") {
@@ -8536,8 +8541,9 @@ export class SessionsService {
   /** Enable only, for a campaign with no issue scope yet (#2940): the scope the server derived
    * from the runner's repository and the campaign's first message, which this Human establishes
    * with the boundary. `firstMessage` when no message has been sent: the next one is the task. */
-  derivedScope?: { repository: string; issueNumbers: number[]; firstMessage: boolean;
-    derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits }): ServiceResult<SessionView> {
+  derivedScope?: { repository: string; issueNumbers: number[]; firstMessage: boolean },
+  /** This authorization's own limit provenance, which a waiting campaign keeps (#2940). */
+  derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
@@ -8601,8 +8607,8 @@ export class SessionsService {
     const outstanding = this.db.unconsumedWorkflowDecisionsForController(sessionId);
     try {
       if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now,
-        mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage,
-          ...(derivedScope!.derivedLimits ? { derivedLimits: derivedScope!.derivedLimits } : {}) } : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
+        mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage } : undefined,
+        proposal.mode === "full_control" ? derivedLimits : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
     // The runner holds the scope it enforces issue writes against; each issue operation also
     // synchronizes again before it acts.

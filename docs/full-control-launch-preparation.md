@@ -47,24 +47,31 @@ only) establishes the boundary before the Orchestrator's first turn:
   issues are kept: a pull request, a missing issue, or an unreadable origin leaves that reference
   out. With none, the scope stays task-only.
 - The next issue-scope revision, and the boundary revision that names it, commit together in one
-  compare-and-set on the policy revision (`establishFirstMessageScope`). The launch records which
-  limits it derived (`derivedLimits`, no Human override). Only a derived Accepted Follow-Ups or
+  compare-and-set on the policy revision (`establishFirstMessageScope`). Every authorization
+  (launch, enable or a later reauthorization) records which limits it derived (`derivedLimits`, no
+  Human override), replacing any earlier record. Only a derived Accepted Follow-Ups or
   Maximum Issues grows to what a launch naming those issues derives, and never shrinks. An
   explicit ceiling never changes, and an explicit Maximum Issues bounds how many referenced issues
   enter the scope. Operations, policy asks, evidence and cost or tool ceilings are unchanged.
 - The scope and boundary are synchronized to the runner (`campaign_issue_scope synchronize`)
   before the message is delivered. A runner that misses the update keeps its older revision, which
   authorizes no issue write, and every issue operation synchronizes again before it acts.
-- Delivery is crash-safe. The commit records `delivering` with the message digest, so the fence
-  is durable, and only the admitted delivery settles it as `established`
+- Delivery is crash-safe. The commit records `delivering` with the message digest and where the
+  delivery begins (the session's last event sequence and the prompt queue's last row), so the
+  fence is durable. Only the admitted delivery settles it as `established`
   (`settleFirstMessageDelivery`). A message that is not delivered reopens the wait, and the next
   first message establishes a newer revision. On startup, a root still `delivering` is settled
-  without resending: `established` if its message was recorded or durably queued, otherwise
-  waiting again, still fenced. A first message is therefore never resent.
+  without resending: `established` only if a user message or live queued prompt recorded after
+  that point carries the digest, otherwise waiting again, still fenced. Identical earlier text
+  never counts, and a first message is never resent.
 
 While the root waits or delivers, every other ingress that can start a provider turn is refused:
-prompts from an agent or an automation, direct steering, provider command invocations and campaign
-continuations. Agent-authored text therefore can never establish or widen the scope. Later
+prompts from an agent or an automation, direct steering, provider command invocations, campaign
+continuations and the retry of a held prompt. The durable prompt queue holds any retained work for
+it until the first message is established, then runs it.
+
+Only a fresh root waits for its first message: one with no user message, durable prompt or provider
+command. A Full Control launch always starts fresh. Agent-authored text therefore can never establish or widen the scope. Later
 messages, the owner's included, never change it: scope changes go through the existing scope
 review. Revoking Full Control restores Custom: the wait applies only while the control is Full
 Control.
@@ -73,8 +80,10 @@ Enabling Full Control on an existing campaign that has no issue scope derives on
 comes from the runner's inspection of the root's checkout. The issues are only those parsed from
 the authenticated Human's own create request (`issueNumbersSource: "human_launch_request"`), as
 the runner verifies them. Transcript messages record no author, and a restart backfill reads the
-transcript, so neither is ever scope. Without such issues, the scope is task-only and the campaign
-waits for the owner's next message through the same fenced first-message path. A campaign whose scope another person established can't be enabled
+transcript, so neither is ever scope. Without such issues the scope is task-only. A campaign with
+any history is established at once in the same action, with its existing task as the objective,
+and its retained work then runs under that boundary. Only a fresh root with no trusted issues
+waits for the owner's first message through the fenced path. A campaign whose scope another person established can't be enabled
 by someone else.
 
 ## Server Evaluation

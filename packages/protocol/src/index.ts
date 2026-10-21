@@ -2711,7 +2711,9 @@ export interface FullControlDerivedLimits { acceptedFollowUps: boolean; maxIssue
 
 export type FullControlFirstMessageScope =
   | { state: "pending"; derivedLimits?: FullControlDerivedLimits }
-  | { state: "delivering"; messageDigest: string; derivedLimits?: FullControlDerivedLimits }
+  /** `after` marks where this delivery begins: only a user message or queued prompt recorded after
+   * it, with the exact digest, can be this delivery. Earlier, identical text never settles it. */
+  | { state: "delivering"; messageDigest: string; after: { eventSeq: number; promptRowid: number }; derivedLimits?: FullControlDerivedLimits }
   | { state: "established"; messageDigest: string; establishedAt: number };
 
 /** `blocked` means nothing is progressing without intervention: every unverified child failed,

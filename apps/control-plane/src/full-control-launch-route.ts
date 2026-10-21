@@ -291,7 +291,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         destinationDisclosureRevision: evidence.destination.disclosureRevision,
         providers: [{ providerId: evidence.provider.providerId, disclosureRevision: evidence.provider.disclosureRevision,
           reviewers: [{ driver: evidence.provider.reviewer.driver as "claude-code" | "codex-app-server", modelId: evidence.provider.reviewer.model }] }],
-      } } : {}) }, revision, principal, derived ? { ...derived, derivedLimits: derivedLaunchLimits(body.overrides) } : undefined);
+      } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides));
     if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
     return result.data;
   });

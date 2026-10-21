@@ -18579,8 +18579,10 @@ export class ControlPlaneDb {
    * scope and provider compatibility before calling; agent-facing APIs expose no such mutation. */
   updateSessionCampaignControl(id: string, control: CampaignControl, expectedRevision: number, now: number,
     /** Enabling a campaign with no issue scope establishes the first one with the boundary (#2940). */
-    established?: { issueScope: import("@wollipog/protocol").CampaignIssueScope; firstMessage: boolean;
-      derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits }): boolean {
+    established?: { issueScope: import("@wollipog/protocol").CampaignIssueScope; firstMessage: boolean },
+    /** This authorization's own limit provenance (#2940): a waiting campaign keeps only the limits
+     * this request left to the server, never an earlier authorization's. */
+    derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits): boolean {
     const campaign = this.sessionOrchestratorPolicy(id);
     const policy = this.parentControlPolicy(id);
     if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
@@ -18592,8 +18594,15 @@ export class ControlPlaneDb {
           scope.authorizedByUserId !== control.boundary.authorizedByUserId || scope.authorizedAt > control.boundary.authorizedAt) return false;
       campaign.issueScope = structuredClone(scope);
       campaign.issueNumbers = [...scope.issueNumbers];
-      if (established.firstMessage) campaign.firstMessageScope = { state: "pending",
-        ...(established.derivedLimits ? { derivedLimits: { ...established.derivedLimits } } : {}) };
+      if (established.firstMessage) {
+        if (this.sessionHasConversationHistory(id)) return false;
+        campaign.firstMessageScope = { state: "pending" };
+      }
+    }
+    if (control.mode === "full_control" && campaign.firstMessageScope?.state === "pending") {
+      // Only a fresh root waits for its first message: one with any history never does.
+      if (this.sessionHasConversationHistory(id)) delete campaign.firstMessageScope;
+      else campaign.firstMessageScope = { state: "pending", ...(derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
     }
     campaign.control = structuredClone(control);
     this.db.exec("BEGIN");
@@ -18638,8 +18647,13 @@ export class ControlPlaneDb {
     policy.issueScope = structuredClone(scope);
     policy.issueNumbers = [...scope.issueNumbers];
     const derivedLimits = policy.firstMessageScope.derivedLimits;
-    policy.firstMessageScope = { state: "delivering", messageDigest: input.messageDigest, ...(derivedLimits ? { derivedLimits } : {}) };
     return this.atomic(() => {
+      // This delivery starts after everything already recorded for the session.
+      const after = {
+        eventSeq: Number((this.stmt("SELECT COALESCE(MAX(seq), 0) AS n FROM session_events WHERE session_id=?").get(id) as { n: number }).n),
+        promptRowid: Number((this.stmt("SELECT COALESCE(MAX(rowid), 0) AS n FROM session_prompt_commands").get() as { n: number }).n),
+      };
+      policy.firstMessageScope = { state: "delivering", messageDigest: input.messageDigest, after, ...(derivedLimits ? { derivedLimits } : {}) };
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
         updated_at=? WHERE id=? AND parent_control_policy_revision=?`).run(JSON.stringify(policy), input.now, id, input.expectedRevision);
       if (Number(changed.changes) !== 1) return false;
@@ -18662,23 +18676,34 @@ export class ControlPlaneDb {
   }
 
   /** Roots whose first message was being delivered when this control plane last stopped. */
-  firstMessageDeliveries(): Array<{ sessionId: string; messageDigest: string }> {
+  firstMessageDeliveries(): Array<{ sessionId: string; messageDigest: string; after: { eventSeq: number; promptRowid: number } }> {
     const rows = this.stmt(`SELECT id FROM sessions WHERE CASE WHEN json_valid(orchestrator_policy)
       THEN json_extract(orchestrator_policy, '$.firstMessageScope.state') ELSE NULL END='delivering'`).all() as unknown as Array<{ id: string }>;
     return rows.flatMap((row) => {
       const first = this.sessionOrchestratorPolicy(row.id)?.firstMessageScope;
-      return first?.state === "delivering" ? [{ sessionId: row.id, messageDigest: first.messageDigest }] : [];
+      return first?.state === "delivering" ? [{ sessionId: row.id, messageDigest: first.messageDigest, after: first.after }] : [];
     });
   }
 
-  /** Whether the exact text with this digest reached the session: its first recorded user message,
-   * or a prompt command already in its durable queue, which the outbox delivers on its own. */
-  firstMessageAdmitted(sessionId: string, messageDigest: string): boolean {
+  /** Whether this delivery reached the session: a user message, or a prompt command still live in
+   * its durable queue, recorded after the delivery began with exactly this digest. Anything
+   * recorded earlier, even identical text, is history, never this delivery. */
+  firstMessageAdmitted(sessionId: string, messageDigest: string, after: { eventSeq: number; promptRowid: number }): boolean {
     const matches = (text: unknown) => typeof text === "string" && createHash("sha256").update(text, "utf8").digest("hex") === messageDigest;
-    if (matches(this.initialUserMessageText(sessionId))) return true;
+    const events = this.stmt(`SELECT substr(json_extract(payload, '$.text'), 1, 65537) AS text FROM session_events
+      WHERE session_id=? AND kind='user_message' AND seq>? ORDER BY seq LIMIT 8`).all(sessionId, after.eventSeq) as unknown as Array<{ text: unknown }>;
+    if (events.some((event) => matches(event.text))) return true;
     const queued = this.stmt(`SELECT json_extract(payload_json, '$.text') AS text FROM session_prompt_commands
-      WHERE session_id=? ORDER BY created_at, rowid LIMIT 1`).get(sessionId) as { text: unknown } | undefined;
-    return matches(queued?.text);
+      WHERE session_id=? AND rowid>? AND state NOT IN ('failed') ORDER BY rowid LIMIT 8`).all(sessionId, after.promptRowid) as unknown as Array<{ text: unknown }>;
+    return queued.some((row) => matches(row.text));
+  }
+
+  /** Any conversation the session already has: a user message, a durable prompt or a provider
+   * command. A Full Control campaign waits for its first message only without any (#2940). */
+  sessionHasConversationHistory(sessionId: string): boolean {
+    return Boolean(this.stmt(`SELECT 1 FROM session_events WHERE session_id=? AND kind='user_message'
+      UNION ALL SELECT 1 FROM session_prompt_commands WHERE session_id=?
+      UNION ALL SELECT 1 FROM session_command_invocations WHERE session_id=? LIMIT 1`).get(sessionId, sessionId, sessionId));
   }
 
   campaignDescendantIds(campaignSessionId: string): string[] {
@@ -30846,8 +30871,10 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   const digest = (v: unknown) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
   const limits = (v: unknown) => v === undefined || Boolean(v && typeof v === "object" && Object.keys(v).length === 2 &&
     typeof (v as Record<string, unknown>).acceptedFollowUps === "boolean" && typeof (v as Record<string, unknown>).maxIssues === "boolean");
+  const after = (v: unknown) => Boolean(v && typeof v === "object" && Number.isSafeInteger((v as Record<string, unknown>).eventSeq) &&
+    Number.isSafeInteger((v as Record<string, unknown>).promptRowid));
   if (first !== undefined && !(first && (first.state === "pending" && limits(first.derivedLimits) ||
-      first.state === "delivering" && digest(first.messageDigest) && limits(first.derivedLimits) ||
+      first.state === "delivering" && digest(first.messageDigest) && after(first.after) && limits(first.derivedLimits) ||
       first.state === "established" && digest(first.messageDigest) && Number.isSafeInteger(first.establishedAt)))) return null;
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   const validSources = new Set([
