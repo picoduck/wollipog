@@ -1,4 +1,4 @@
-import type { ProjectLocationView, ProjectView, RunnerView } from "@wollipog/protocol";
+import type { ProjectLocationAvailability, ProjectLocationView, ProjectView, RunnerView } from "@wollipog/protocol";
 
 export const NO_PROJECT_SELECTION = "__no_project__";
 
@@ -52,6 +52,21 @@ export function isLaunchableProjectLocation(
   const runner = runners.get(location.runnerId);
   return location.availability === "available" && runner?.status === "online" &&
     runner.workspaces.some((workspace) => workspace.id === location.workspaceId);
+}
+
+/**
+ * A location's availability as the live runner catalog sees it. The stored availability can still
+ * read Available while its machine is offline or no longer advertises the folder, and the Location
+ * field names what is actually in the way.
+ */
+export function liveLocationAvailability(
+  location: ProjectLocationView,
+  runners: ReadonlyMap<string, RunnerView>,
+): ProjectLocationAvailability {
+  if (location.availability !== "available") return location.availability;
+  const runner = runners.get(location.runnerId);
+  if (runner?.status !== "online") return "runner_offline";
+  return runner.workspaces.some((workspace) => workspace.id === location.workspaceId) ? "available" : "workspace_missing";
 }
 
 /** Preserve an exact preset when supplied. Otherwise choose an available default, or the sole

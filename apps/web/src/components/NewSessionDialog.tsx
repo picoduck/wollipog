@@ -33,6 +33,7 @@ import {
   NO_PROJECT_SELECTION,
   isLaunchableProjectLocation,
   initialProjectSelectionForPreset,
+  liveLocationAvailability,
   projectForSessionPreset,
   projectFallbacksAwaitingStore,
   projectLocationForSessionPreset,
@@ -95,21 +96,6 @@ import {
   type SelectOption,
   useTapOnlyPicker,
 } from "./ui/ChoiceControls.js";
-
-/**
- * A location's availability as the live runner catalog sees it. The stored availability can still
- * read Available while its machine is offline or no longer advertises the folder, and the Location
- * field names what is actually in the way.
- */
-function liveLocationAvailability(
-  location: ProjectLocationView,
-  runners: ReadonlyMap<string, RunnerView>,
-): ProjectLocationAvailability {
-  if (location.availability !== "available") return location.availability;
-  const runner = runners.get(location.runnerId);
-  if (runner?.status !== "online") return "runner_offline";
-  return runner.workspaces.some((workspace) => workspace.id === location.workspaceId) ? "available" : "workspace_missing";
-}
 
 /**
  * A dollar amount as people write it, "$1", "$0.40", without rounding away precision a policy limit

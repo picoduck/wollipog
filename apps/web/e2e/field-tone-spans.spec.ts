@@ -139,32 +139,18 @@ for (const theme of ["dark", "light"] as const) {
       }
     });
 
-    test("New Multi-Agent Run: Project notes are --text-faint and Location reasons keep 11px at 400", async ({ page }) => {
+    test("New Multi-Agent Run: the Project helper is --text-dim at 400, and every field keeps classed spans' looks", async ({ page }) => {
       await open(page, `theme=${theme}&dialog=run`, "New Multi-Agent Run");
-      const [faint, dim] = await Promise.all(["--text-faint", "--text-dim"].map((name) => token(page, name)));
+      const dim = await token(page, "--text-dim");
 
-      const projectNote = field(page, "Project").locator(":scope > span.muted");
-      await expect(projectNote).toHaveText(/Choose a Project/);
-      expect((await look(projectNote)).color).toBe(faint);
+      // #2978: the Project's one sentence is the field's helper (§8.1); Location reasons moved into
+      // its options and the footer.
+      await page.getByRole("button", { name: /^Project:/ }).click();
+      await page.getByRole("option", { name: "Two Locations" }).click();
+      const projectNote = field(page, "Project").locator(":scope > .field-helper");
+      await expect(projectNote).toHaveText("Wollipog can't show who can see this run.");
+      expect((await look(projectNote)).color).toBe(dim);
       expect((await look(projectNote)).weight).toBe("400");
-
-      const projectSelect = page.getByLabel("Project", { exact: true });
-      const location = field(page, "Project Location");
-      for (const [name, copy] of [
-        ["No Locations Yet", /This Project has no Locations/],
-        ["Offline Location", /No Locations are currently available/],
-      ] as const) {
-        await projectSelect.selectOption({ label: name });
-        const reason = location.locator(":scope > span.project-location-reason");
-        await expect(reason).toHaveText(copy);
-        expect(await look(reason), `${name}: Location reason`).toEqual({ color: dim, size: "11px", weight: "400" });
-      }
-
-      await projectSelect.selectOption({ label: "Two Locations" });
-      const choose = location.locator(":scope > span.muted");
-      await expect(choose).toHaveText(/Choose the exact Location/);
-      expect((await look(choose)).color).toBe(faint);
-      expect((await look(choose)).weight).toBe("400");
 
       const result = await sweep(page);
       expect(result.fields, "New Multi-Agent Run renders fields to sweep").toBeGreaterThan(2);
