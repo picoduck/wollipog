@@ -332,6 +332,29 @@ for (const kind of ["local", "ssh"] as const) {
       assert.equal(observed.ok, true);
       assert.equal(forgeCalls, 1);
       assert.equal(observed.results?.[0]?.ok, true);
+      // A GitLab merge request goes through glab only when the control plane asks (#3600).
+      const glabCalls: string[][] = [];
+      const glab = async (args: string[]) => {
+        glabCalls.push(args);
+        const path = args[1] ?? "";
+        const stdout = path.endsWith("/approvals")
+          ? JSON.stringify({ approved: true, approvals_left: 0, approved_by: [] })
+          : path.includes("merge_trains") ? ""
+            : JSON.stringify({ iid: 4, state: "merged", draft: false, sha: "b".repeat(40), target_branch: "main",
+              merge_commit_sha: "c".repeat(40), squash_commit_sha: null, head_pipeline: null });
+        return { stdout, stderr: "", code: null, timedOut: false };
+      };
+      const gitlabRef = { repository: "gitlab.com/group/sub/project", number: 4 };
+      const legacy = await f.manager().campaignForgeObserve({ type: "campaign_forge_observe", requestId: "forge-gl-0", sessionId,
+        pullRequests: [gitlabRef] }, { glab });
+      assert.deepEqual(legacy.results?.[0], { ref: gitlabRef, ok: false, failure: "forge_unsupported" });
+      assert.equal(glabCalls.length, 0, "an older control plane is never sent a GitLab observation");
+      const gitlab = await f.manager().campaignForgeObserve({ type: "campaign_forge_observe", requestId: "forge-gl", sessionId,
+        pullRequests: [gitlabRef], gitlab: true }, { glab });
+      const gitlabResult = gitlab.results?.[0];
+      assert.ok(gitlabResult?.ok && gitlabResult.observation.forge === "gitlab", JSON.stringify(gitlab));
+      assert.equal(gitlabResult.observation.mergeCommitSha, "c".repeat(40));
+      assert.ok(glabCalls.every((call) => call.at(-1) === "gitlab.com"));
       const result = await f.execute(snapshot);
       assert.equal(result.ok, true, result.error ?? "Expected a successful runner response");
       assert.equal(result.result?.outcome, "closed");

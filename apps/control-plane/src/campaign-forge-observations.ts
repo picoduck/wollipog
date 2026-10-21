@@ -1,5 +1,5 @@
 /**
- * Campaign forge status (#2417 slice 8, docs/campaign-work-ledger.md "Forge Status").
+ * Campaign forge status (#2417 slice 8, GitLab since #3600; docs/campaign-work-ledger.md "Forge Status").
  *
  * The control plane stores no forge credentials. It asks the runner hosting the root campaign
  * session to read the GitHub pull requests the campaign's work items name, through that runner's
@@ -11,10 +11,13 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   CAMPAIGN_FORGE_OBSERVATION,
+  campaignRepositoryLocation,
   runnerSupportsProtocol,
   type CampaignForgeObservationFailure,
   type CampaignForgeObserveMessage,
   type CampaignForgeObserveResultMessage,
+  type CampaignForgeChangeRequestObservation,
+  type CampaignForgeGitLabMergeRequestObservation,
   type CampaignForgePullRequestObservation,
   type CampaignObservedFact,
   type CampaignPullRequestRef,
@@ -37,7 +40,7 @@ CREATE TABLE IF NOT EXISTS campaign_forge_observations (
 );
 `;
 
-export type ForgeFact = CampaignObservedFact<CampaignForgePullRequestObservation>;
+export type ForgeFact = CampaignObservedFact<CampaignForgeChangeRequestObservation>;
 export type ForgeFactEntry = { ref: CampaignPullRequestRef; fact: ForgeFact };
 
 /** How the runner hosting the campaign stands right now. */
@@ -63,7 +66,7 @@ export function forgeRefKey(ref: CampaignPullRequestRef): string {
 
 /** Pure derivation of one fact from its stored row, the observing runner's state, and the time. */
 export function forgeFact(row: ObservationRow | undefined, observer: ForgeObserverState, now: number): ForgeFact {
-  const value = row?.value_json ? JSON.parse(row.value_json) as CampaignForgePullRequestObservation : undefined;
+  const value = row?.value_json ? JSON.parse(row.value_json) as CampaignForgeChangeRequestObservation : undefined;
   const last = value && row?.observed_at !== null && row?.observed_at !== undefined
     ? { lastValue: value, lastObservedAt: row.observed_at }
     : {};
@@ -121,7 +124,7 @@ export class CampaignForgeObservationStore {
   record(
     campaignId: string,
     runnerId: string,
-    results: ReadonlyArray<{ ref: CampaignPullRequestRef; observation?: CampaignForgePullRequestObservation; failure?: CampaignForgeObservationFailure }>,
+    results: ReadonlyArray<{ ref: CampaignPullRequestRef; observation?: CampaignForgeChangeRequestObservation; failure?: CampaignForgeObservationFailure }>,
     at: number,
   ): boolean {
     let changed = false;
@@ -160,7 +163,7 @@ export class CampaignForgeObservationStore {
     return new Map(refs.flatMap((ref) => {
       const row = this.row(campaignId, ref);
       if (!row) return [];
-      const state = row.value_json ? (JSON.parse(row.value_json) as CampaignForgePullRequestObservation).state : null;
+      const state = row.value_json ? (JSON.parse(row.value_json) as CampaignForgeChangeRequestObservation).state : null;
       return [[forgeRefKey(ref), {
         readAt: Math.max(row.observed_at ?? 0, row.failed_at ?? 0),
         finished: !row.failure_reason && (state === "merged" || state === "closed"),
@@ -324,6 +327,8 @@ export class CampaignForgeObserver {
         requestId,
         sessionId: campaignId,
         pullRequests: refs.map((ref) => ({ repository: ref.repository, number: ref.number })),
+        // This control plane validates GitLab observations, so the runner may read them (#3600).
+        gitlab: true,
       }, CAMPAIGN_FORGE_OBSERVATION.requestTimeoutMs);
     } catch (error) {
       // Disconnected or timed out: nothing was learned. The facts keep their last state, a missing
@@ -350,7 +355,7 @@ function validResults(
   response: unknown,
   campaignId: string,
   refs: readonly CampaignPullRequestRef[],
-): Array<{ ref: CampaignPullRequestRef; observation?: CampaignForgePullRequestObservation; failure?: CampaignForgeObservationFailure }> | null {
+): Array<{ ref: CampaignPullRequestRef; observation?: CampaignForgeChangeRequestObservation; failure?: CampaignForgeObservationFailure }> | null {
   const message = response as Partial<CampaignForgeObserveResultMessage> | null;
   if (!message || message.type !== "campaign_forge_observe_result" || message.sessionId !== campaignId) return null;
   if (message.ok === false) {
@@ -363,8 +368,15 @@ function validResults(
     if (!result || typeof result.ref?.repository !== "string" || result.ref.number !== ref.number ||
         result.ref.repository.toLowerCase() !== ref.repository.toLowerCase()) return null;
     if (result.ok === true) {
-      if (!validObservation(result.observation)) return null;
-      results.push({ ref, observation: sanitizedObservation(result.observation) });
+      // Each forge answers only for its own refs (#3600).
+      const gitlabRef = campaignRepositoryLocation(ref.repository)?.forge === "gitlab";
+      if (gitlabRef ? !validGitLabObservation(result.observation) : !validObservation(result.observation)) return null;
+      results.push({
+        ref,
+        observation: gitlabRef
+          ? sanitizedGitLabObservation(result.observation as CampaignForgeGitLabMergeRequestObservation)
+          : sanitizedObservation(result.observation as CampaignForgePullRequestObservation),
+      });
     } else if (result.ok === false && FAILURES.has(result.failure)) {
       results.push({ ref, failure: result.failure });
     } else {
@@ -383,10 +395,49 @@ function validRollup(value: unknown): boolean {
     ["passing", "failing", "pending"].every((key) => Number.isSafeInteger(rollup![key]) && (rollup![key] as number) >= 0);
 }
 
+const SHA = /^[0-9a-f]{40}$/u;
+const PIPELINE_STATUSES = new Set(["success", "failed", "running", "pending", "canceled", "skipped", "manual", "unknown"]);
+const TRAIN_STATUSES = new Set(["idle", "stale", "fresh", "merging", "merged", "skip_merged", "unknown"]);
+const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
+
+/** #3600: the GitLab counterpart of `validObservation`. */
+function validGitLabObservation(value: unknown): value is CampaignForgeGitLabMergeRequestObservation {
+  const mr = value as Record<string, unknown> | null;
+  if (!mr || typeof mr !== "object" || mr.forge !== "gitlab") return false;
+  const approvals = mr.approvals as Record<string, unknown> | null;
+  const pipeline = mr.pipeline as Record<string, unknown> | null;
+  const train = mr.mergeTrain as Record<string, unknown> | null;
+  return ["open", "closed", "merged"].includes(mr.state as string) && typeof mr.draft === "boolean" &&
+    typeof mr.headSha === "string" && SHA.test(mr.headSha) &&
+    typeof mr.baseRef === "string" && mr.baseRef.length > 0 && mr.baseRef.length <= 256 &&
+    Boolean(approvals) && typeof approvals === "object" && typeof approvals!.approved === "boolean" &&
+    count(approvals!.approvedBy) && (approvals!.left === null || count(approvals!.left)) &&
+    (pipeline === null || (typeof pipeline === "object" && Number.isSafeInteger(pipeline.id) && (pipeline.id as number) > 0 &&
+      PIPELINE_STATUSES.has(pipeline.status as string))) &&
+    (train === null || (typeof train === "object" && TRAIN_STATUSES.has(train.status as string) &&
+      (train.position === null || (Number.isSafeInteger(train.position) && (train.position as number) >= 1)))) &&
+    (mr.mergeCommitSha === null || (typeof mr.mergeCommitSha === "string" && SHA.test(mr.mergeCommitSha)));
+}
+
+/** Store exactly the wire fields of a validated GitLab observation. */
+export function sanitizedGitLabObservation(mr: CampaignForgeGitLabMergeRequestObservation): CampaignForgeGitLabMergeRequestObservation {
+  return {
+    forge: "gitlab",
+    state: mr.state,
+    draft: mr.draft,
+    headSha: mr.headSha,
+    baseRef: mr.baseRef,
+    approvals: { approved: mr.approvals.approved, approvedBy: mr.approvals.approvedBy, left: mr.approvals.left },
+    pipeline: mr.pipeline ? { id: mr.pipeline.id, status: mr.pipeline.status } : null,
+    mergeTrain: mr.mergeTrain ? { status: mr.mergeTrain.status, position: mr.mergeTrain.position } : null,
+    mergeCommitSha: mr.mergeCommitSha,
+  };
+}
+
 /** The runner is trusted to read, not to shape what is stored: only the wire fields survive. */
 function validObservation(value: unknown): value is CampaignForgePullRequestObservation {
   const pr = value as Record<string, unknown> | null;
-  if (!pr || typeof pr !== "object") return false;
+  if (!pr || typeof pr !== "object" || pr.forge !== undefined) return false;
   const queue = pr.mergeQueue as Record<string, unknown> | null;
   return ["open", "closed", "merged"].includes(pr.state as string) && typeof pr.draft === "boolean" &&
     typeof pr.headSha === "string" && /^[0-9a-f]{40}$/u.test(pr.headSha) &&

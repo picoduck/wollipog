@@ -5784,8 +5784,11 @@ export class ControlPlaneDb {
             if (record.resource.kind === "pull_request" && record.resource.sessionId === campaignId &&
                 record.resource.occurrenceId === fact.value.headSha &&
                 (record.action === "repair_checks" && record.reason === "failed_checks" &&
-                  (fact.value.checks.state === "failing" || fact.value.requiredChecks.state === "failing") ||
-                 record.action === "rereview" && record.reason === "reviewer_objection" && fact.value.reviewDecision === "changes_requested")) {
+                  (fact.value.forge === "gitlab"
+                    ? fact.value.pipeline?.status === "failed"
+                    : fact.value.checks.state === "failing" || fact.value.requiredChecks.state === "failing") ||
+                 record.action === "rereview" && record.reason === "reviewer_objection" &&
+                  fact.value.forge !== "gitlab" && fact.value.reviewDecision === "changes_requested")) {
               recoveryIds.add(record.id);
             } else if (record.resource.kind === "review_job" && record.action === "rereview") {
               const job = this.campaignReviewJobs.view(record.resource.occurrenceId);

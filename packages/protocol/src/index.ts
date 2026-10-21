@@ -818,6 +818,7 @@ export {
   isSlashCommandNameCharacter,
 } from "./slash-command-name.js";
 import type {
+  CampaignForgeChangeRequestObservation,
   CampaignForgePullRequestObservation,
   CampaignMembershipView,
   CampaignObservationUnavailableReason,
@@ -8832,6 +8833,10 @@ export interface CampaignForgeObserveMessage {
   /** The root campaign Orchestrator session whose repository context runs `gh`. */
   sessionId: string;
   pullRequests: CampaignPullRequestRef[];
+  /** #3600: this control plane accepts GitLab merge-request observations, so the runner may read
+   * host-qualified GitLab refs through `glab`. Without it (an older control plane, which would reject
+   * the whole answer), and on an older runner that ignores it, GitLab refs stay `forge_unsupported`. */
+  gitlab?: true;
 }
 
 /** Why a forge read failed, for the whole request or one pull request. */
@@ -8850,7 +8855,7 @@ export interface CampaignForgeObserveResultMessage {
   failure?: CampaignForgeObservationFailure;
   /** Set when `ok` is true, one entry per requested pull request. */
   results?: Array<
-    | { ref: CampaignPullRequestRef; ok: true; observation: CampaignForgePullRequestObservation }
+    | { ref: CampaignPullRequestRef; ok: true; observation: CampaignForgeChangeRequestObservation }
     | { ref: CampaignPullRequestRef; ok: false; failure: CampaignForgeObservationFailure }
   >;
 }

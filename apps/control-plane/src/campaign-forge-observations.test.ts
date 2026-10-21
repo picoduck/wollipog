@@ -11,6 +11,7 @@ import {
   CAMPAIGN_FORGE_OBSERVATION,
   PROTOCOL_VERSION,
   type CampaignForgeObserveMessage,
+  type CampaignForgeGitLabMergeRequestObservation,
   type CampaignForgeObserveResultMessage,
   type CampaignForgePullRequestObservation,
   type CampaignForgeRefreshResponse,
@@ -354,6 +355,55 @@ test("only a visible change notifies, and malformed, mismatched, or timed-out an
   }
 });
 
+test("GitLab merge requests are asked for, stored in GitLab's terms, and each forge answers only for its own refs (#3600)", async () => {
+  const MR: CampaignPullRequestRef = { repository: "gitlab.example.com/platform/agents/wollipog", number: 7 };
+  const fixture = forgeFixture(PROTOCOL_VERSION, [MR, PR]);
+  try {
+    let now = Date.now();
+    const gitlabValue: CampaignForgeGitLabMergeRequestObservation = {
+      forge: "gitlab", state: "open", draft: false, headSha: HEAD, baseRef: "main",
+      approvals: { approved: false, approvedBy: 1, left: 1 },
+      pipeline: { id: 901, status: "failed" },
+      mergeTrain: { status: "fresh", position: 2 },
+      mergeCommitSha: null,
+    };
+    let answers: (message: CampaignForgeObserveMessage) => Partial<CampaignForgeObserveResultMessage> = (message) => ({
+      ok: true,
+      results: message.pullRequests.map((ref) => ref.number === MR.number
+        ? { ref, ok: true as const, observation: { ...gitlabValue, token: "glpat-secret" } as CampaignForgeGitLabMergeRequestObservation }
+        : { ref, ok: true as const, observation: observation() }),
+    });
+    const runner = fakeRunner((message) => answers(message));
+    const forge = observer(fixture, runner, { now: () => now });
+    await forge.refresh(fixture.root, [MR, PR]);
+    assert.equal(runner.requests[0]?.gitlab, true, "this control plane asks the runner for GitLab");
+    const [gitlab, github] = detailFacts(fixture, now);
+    assert.deepEqual(gitlab?.fact, { availability: "fresh", value: gitlabValue, observedAt: now },
+      "stored in GitLab's terms, with nothing the runner added");
+    assert.deepEqual(github?.fact, { availability: "fresh", value: observation(), observedAt: now });
+
+    const stored = () => JSON.stringify(fixture.db.campaignForgeObservations.facts(fixture.root, [MR, PR], 0));
+    const before = stored();
+    for (const swap of [
+      { [MR.number]: observation(), [PR.number]: observation() },
+      { [MR.number]: gitlabValue, [PR.number]: gitlabValue },
+      { [MR.number]: { ...gitlabValue, pipeline: { id: 901, status: "green" } }, [PR.number]: observation() },
+      { [MR.number]: { ...gitlabValue, mergeTrain: { status: "fresh", position: 0 } }, [PR.number]: observation() },
+    ]) {
+      answers = (message) => ({
+        ok: true,
+        results: message.pullRequests.map((ref) => ({ ref, ok: true as const,
+          observation: (swap as Record<number, unknown>)[ref.number] as CampaignForgeGitLabMergeRequestObservation })),
+      });
+      now += CAMPAIGN_FORGE_OBSERVATION.minIntervalMs;
+      await forge.refresh(fixture.root, [MR, PR]);
+      assert.equal(stored(), before, JSON.stringify(swap));
+    }
+  } finally {
+    fixture.db.close();
+  }
+});
+
 test("the background pass reads only unfinished items' pull requests that are due, oldest first, within its bound", async () => {
   const fixture = forgeFixture(PROTOCOL_VERSION, [PR, { ...PR, number: 1 }]);
   try {
@@ -449,7 +499,7 @@ test("forge facts need campaign access and access to the observing runner, and n
     assert.equal(refreshed.body.pullRequests[0]!.fact.availability, "fresh");
     alice = await call<CampaignWorkItemDetailResponse>("alice", "GET", detailUrl);
     const fact = alice.body.item.observed.pullRequests![0]!.fact;
-    assert.ok(fact.availability === "fresh" && fact.value.reviewDecision === "approved" && fact.value.headSha === HEAD);
+    assert.ok(fact.availability === "fresh" && fact.value.forge !== "gitlab" && fact.value.reviewDecision === "approved" && fact.value.headSha === HEAD);
     // Reported and observed stay separate fields: the stage is the Orchestrator's claim.
     assert.equal(alice.body.item.stage?.stage, "merge_queued");
     assert.equal(alice.body.item.stage?.sourceSessionId, root);

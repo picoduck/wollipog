@@ -182,6 +182,14 @@ export class CampaignRecoveryService {
         if (value.state !== "open") continue;
         const resource = { kind: "pull_request" as const, sessionId: root.id, repository: ref.repository,
           pullRequest: ref.number, occurrenceId: value.headSha };
+        if (value.forge === "gitlab") {
+          // GitLab has no "changes requested" decision; a failed pipeline is the repair signal (#3600).
+          if (value.pipeline?.status === "failed") {
+            observations.push({ action: "repair_checks", resource, reason: "failed_checks", owner: "orchestrator",
+              signal: `${value.headSha}:pipeline:${value.pipeline.id}:failed` });
+          }
+          continue;
+        }
         if (value.checks.state === "failing" || value.requiredChecks.state === "failing") {
           observations.push({ action: "repair_checks", resource, reason: "failed_checks", owner: "orchestrator",
             signal: `${value.headSha}:checks:${value.checks.state}:${value.requiredChecks.state}` });

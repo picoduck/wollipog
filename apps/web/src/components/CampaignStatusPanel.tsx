@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
-  CampaignForgePullRequestObservation,
+  CampaignForgeChangeRequestObservation,
   CampaignIssueRef,
   CampaignObservedCleanup,
   CampaignObservedFact,
@@ -624,7 +624,7 @@ function ForgePullRequestFacts({
   entry,
   now,
 }: {
-  entry: { ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgePullRequestObservation> };
+  entry: { ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgeChangeRequestObservation> };
   now: number;
 }) {
   const view = forgePullRequestView(entry.fact, now, entry.ref);
@@ -637,7 +637,7 @@ function ForgePullRequestFacts({
           {UNAVAILABLE}
           <span className="campaign-status-meta">
             {view.reason}
-            {view.lastObservedAt !== null && <> Last observed on GitHub <RecordedTime at={view.lastObservedAt} now={now} />.</>}
+            {view.lastObservedAt !== null && <> Last observed on {view.forge} <RecordedTime at={view.lastObservedAt} now={now} />.</>}
           </span>
         </dd>
       </div>
@@ -651,8 +651,8 @@ function ForgePullRequestFacts({
           {view.status}
           <span className="campaign-status-meta">
             {view.current
-              ? <RecordedTime at={view.observedAt} now={now} prefix="Observed on GitHub" />
-              : <>Stale: <RecordedTime at={view.observedAt} now={now} prefix="observed on GitHub" />. It may have changed since.</>}
+              ? <RecordedTime at={view.observedAt} now={now} prefix={`Observed on ${view.forge}`} />
+              : <>Stale: <RecordedTime at={view.observedAt} now={now} prefix={`observed on ${view.forge}`} />. It may have changed since.</>}
           </span>
         </dd>
       </div>
@@ -895,7 +895,7 @@ function CampaignWorkItemDetailView({
                 <div>
                   <dt>Review and Checks</dt>
                   <dd>{detail.observed.pullRequests
-                    ? <>No Pull Request Reported<span className="campaign-status-meta">GitHub status is observed for the pull requests the Orchestrator reports.</span></>
+                    ? <>No Pull Request Reported<span className="campaign-status-meta">GitHub and GitLab status is observed for the pull requests and merge requests the Orchestrator reports.</span></>
                     : <ObservedValue fact={undefined} now={now} render={() => null} />}</dd>
                 </div>
               )}
