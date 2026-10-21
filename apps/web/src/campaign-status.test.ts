@@ -294,6 +294,10 @@ test("An observed GitLab merge request reads approvals, pipeline, and merge trai
   }
   assert.match(row(read({ pipeline: { id: 3, status: "unknown" } }), "Pipeline")?.note ?? "", /isn't shown as passing/u);
   assert.equal(row(read({ approvals: { approved: true, approvedBy: 0, left: 0 } }), "Approvals")?.text, "Not Required");
+  // Community Edition reports no rule count: unapproved is not "required" (#3606 review).
+  assert.deepEqual(row(read({ approvals: { approved: false, approvedBy: 0, left: null } }), "Approvals"),
+    { label: "Approvals", text: "Not Approved", note: null });
+  assert.equal(row(read({ approvals: { approved: false, approvedBy: 0, left: 0 } }), "Approvals")?.text, "Not Approved");
   assert.deepEqual(row(read({ approvals: { approved: true, approvedBy: 2, left: 0 } }), "Approvals"),
     { label: "Approvals", text: "Approved", note: "2 approvals." });
   assert.equal(row(read({ mergeTrain: null }), "Merge Train")?.text, "Not on a Train");

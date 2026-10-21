@@ -575,7 +575,12 @@ GitLab answer, so the runner then keeps GitLab refs `forge_unsupported`, as an o
   car and, when on a train, the train's order (100 cars). At most four merge requests are read at
   once, each `glab` call has a 15-second timeout, and a host's first call runs alone: when it fails
   as a whole (not signed in, unreachable, rate limited, or no `glab`), that host's other merge
-  requests take the same reason without another call.
+  requests take the same reason without another call. All GitLab reads of one runner request stop
+  after 35 seconds, inside the control plane's 45-second `requestTimeoutMs`; a merge request not
+  finished by then is `forge_unreachable`, and every other result still arrives.
+- **Approvals:** `left` is GitLab's remaining rule count (an Enterprise Edition field). Without it,
+  an unapproved merge request reads "Not Approved", never "Approval Required", because Community
+  Edition's `approved` only says whether anyone approved.
 - **Fail closed:** only a `success` pipeline reads as passed. Skipped, manual, canceled, running,
   pending, and unknown statuses never do, and no pipeline at all is not passing.
 - **Isolation:** GitHub and GitLab refs in one request are read side by side, and a GitHub batch

@@ -167,6 +167,28 @@ test("glab failures reduce to fixed reasons, and a host-wide failure is not retr
   assert.deepEqual(notFound, { ok: false, failure: "forge_not_found" });
 });
 
+test("GitLab reads stop at their budget, so a slow instance cannot cost the control plane the whole answer", async () => {
+  // One merge request answers at once; another never answers. Neither may hold the read past its budget.
+  const fast = detail();
+  let hung = 0;
+  const glab: GlabRunner = async (args, signal) => {
+    if (args[0] === "config") return { stdout: "https\n", stderr: "", code: null, timedOut: false };
+    const path = args[1]!;
+    if (path === mrPath(7)) return { stdout: JSON.stringify(fast), stderr: "", code: null, timedOut: false };
+    if (path === `${mrPath(7)}/approvals`) return { stdout: JSON.stringify(approvals()), stderr: "", code: null, timedOut: false };
+    if (path.includes("merge_trains")) return { stdout: "", stderr: "glab: 404 Not Found (HTTP 404)", code: 1, timedOut: false };
+    hung++;
+    // Ignores its signal, as a stuck process might: the budget must not depend on it.
+    return new Promise<GhOutcome>(() => { void signal; });
+  };
+  const started = Date.now();
+  const reads = await observeGitLabMergeRequests([REF, { repository: "gitlab.com/group/slow", number: 8 }], glab, 50);
+  assert.ok(Date.now() - started < 2_000, "the read returns at its budget");
+  assert.equal(reads[0]?.ok, true, "a merge request read in time keeps its answer");
+  assert.deepEqual(reads[1], { ok: false, failure: "forge_unreachable" });
+  assert.equal(hung, 1);
+});
+
 test("a host glab is not configured for, and a ref that is not a GitLab project, are never read", async () => {
   const unconfigured = glabStub({}, "");
   const reads = await observeGitLabMergeRequests([REF, { repository: "group/sub/project", number: 1 }], unconfigured);

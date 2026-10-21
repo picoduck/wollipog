@@ -24,6 +24,9 @@ import { runContextCommand } from "./context-command.js";
 const GLAB_TIMEOUT_MS = 15_000;
 /** Merge requests read at once within one runner request. */
 const CONCURRENT_READS = 4;
+/** All GitLab reads of one runner request, kept well inside the control plane's 45-second
+ * `requestTimeoutMs` so a slow instance never costs the request its other results. */
+export const GITLAB_READ_BUDGET_MS = 35_000;
 /** Train cars read to find a merge request's position; beyond this the position is unknown. */
 const TRAIN_CARS_READ = 100;
 
@@ -154,19 +157,35 @@ type Read =
   | { ok: true; observation: CampaignForgeGitLabMergeRequestObservation }
   | { ok: false; failure: CampaignForgeObservationFailure };
 
+const BUDGET_SPENT: GhOutcome = { stdout: "", stderr: "the read's time budget is spent", code: "ETIMEDOUT", timedOut: true };
+
 class HostRead {
   private readonly ready = new Map<string, Promise<CampaignForgeObservationFailure | null>>();
   private readonly failed = new Map<string, CampaignForgeObservationFailure>();
   private readonly firstCall = new Map<string, Promise<void>>();
+  private readonly spent: Promise<GhOutcome>;
 
-  constructor(private readonly glab: GlabRunner) {}
+  constructor(private readonly glab: GlabRunner, private readonly budget: AbortSignal) {
+    this.spent = new Promise((resolve) => {
+      if (budget.aborted) resolve(BUDGET_SPENT);
+      else budget.addEventListener("abort", () => resolve(BUDGET_SPENT), { once: true });
+    });
+  }
+
+  /** One `glab` run within the read's budget: none starts once it is spent, and one still running
+   * then is killed and reads as unreachable. */
+  private run(args: string[]): Promise<GhOutcome> {
+    if (this.budget.aborted) return Promise.resolve(BUDGET_SPENT);
+    return Promise.race([this.glab(args, this.budget), this.spent]);
+  }
 
   /** gitlab.com, or a host global `glab` configuration names; anything else is never asked. */
   private readiness(host: string): Promise<CampaignForgeObservationFailure | null> {
     let check = this.ready.get(host);
     if (!check) {
-      check = host === "gitlab.com" ? Promise.resolve(null) : this.glab(["config", "get", "api_protocol", "--host", host, "--global"])
+      check = host === "gitlab.com" ? Promise.resolve(null) : this.run(["config", "get", "api_protocol", "--host", host, "--global"])
         .then((outcome) => {
+          if (outcome === BUDGET_SPENT) return "forge_unreachable";
           if (outcome.code === null) return new Set(["http", "https"]).has(outcome.stdout.trim().toLowerCase()) ? null : "forge_unsupported";
           return classifyGlabFailure(outcome) === "forge_cli_missing" ? "forge_cli_missing" : "forge_unsupported";
         });
@@ -182,7 +201,7 @@ class HostRead {
     if (first) await first;
     const known = this.failed.get(host);
     if (known) return { ok: false, failure: known };
-    const call = this.glab(["api", path, "--hostname", host]);
+    const call = this.run(["api", path, "--hostname", host]);
     if (!first) this.firstCall.set(host, call.then(() => undefined, () => undefined));
     const outcome = await call;
     if (outcome.code !== null) {
@@ -229,13 +248,19 @@ class HostRead {
   }
 }
 
-/** Read each GitLab ref, at most `CONCURRENT_READS` at once. A ref that is not a host-qualified
- * GitLab project is `forge_unsupported` without being read. Results are in `refs` order. */
+/** Read each GitLab ref, at most `CONCURRENT_READS` at once and within `budgetMs` in all, so the
+ * answer reaches the control plane before its `requestTimeoutMs` with the GitHub results beside
+ * it. A ref not finished in time is `forge_unreachable`; a ref that is not a host-qualified GitLab
+ * project is `forge_unsupported` without being read. Results are in `refs` order. */
 export async function observeGitLabMergeRequests(
   refs: readonly CampaignPullRequestRef[],
   glab: GlabRunner,
+  budgetMs = GITLAB_READ_BUDGET_MS,
 ): Promise<Read[]> {
-  const hosts = new HostRead(glab);
+  const budget = new AbortController();
+  const timer = setTimeout(() => budget.abort(), budgetMs);
+  timer.unref?.();
+  const hosts = new HostRead(glab, budget.signal);
   const results: Read[] = new Array(refs.length);
   let next = 0;
   const worker = async () => {
@@ -248,12 +273,19 @@ export async function observeGitLabMergeRequests(
         continue;
       }
       try {
-        results[index] = await hosts.read(location.host.toLowerCase(), location.project, ref.number);
+        const read = await hosts.read(location.host.toLowerCase(), location.project, ref.number);
+        // A read the budget cut short may have stopped at a step that reads as success elsewhere
+        // (a missing train order), so anything that finished after the budget is unreachable.
+        results[index] = budget.signal.aborted && read.ok ? { ok: false, failure: "forge_unreachable" } : read;
       } catch {
         results[index] = { ok: false, failure: "forge_error" };
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENT_READS, refs.length) }, worker));
+  try {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENT_READS, refs.length) }, worker));
+  } finally {
+    clearTimeout(timer);
+  }
   return results;
 }

@@ -429,7 +429,10 @@ const MERGE_TRAIN_LABELS: Record<CampaignGitLabMergeTrainStatus, string> = {
  * Only a `success` pipeline reads as passed. */
 function gitlabRows(value: CampaignForgeGitLabMergeRequestObservation, seen: (text: string) => string): ForgeFactRow[] {
   const { approved, approvedBy, left } = value.approvals;
-  const approvals = approved ? approvedBy > 0 ? "Approved" : "Not Required" : "Approval Required";
+  // Only GitLab's rule count (`approvals_left`, an Enterprise Edition field) establishes that
+  // approval is required; on Community Edition `approved` only says whether anyone approved.
+  const approvals = approved ? approvedBy > 0 ? "Approved" : "Not Required"
+    : left !== null && left > 0 ? "Approval Required" : "Not Approved";
   const approvalNote = !approved && left !== null && left > 0
     ? `${left} more approval${left === 1 ? "" : "s"} needed.`
     : approvedBy > 0 ? `${approvedBy} approval${approvedBy === 1 ? "" : "s"}.` : null;
