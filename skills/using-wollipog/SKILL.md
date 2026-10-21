@@ -262,8 +262,8 @@ reuse it for later requests. Preserve your workflow's reviewer, isolation and ad
   minute or two until `terminal` is true. `get_session_events` exposes the reviewer's transcript.
 - Only a validated, valid report's vote and findings count. After an invalid attempt, request the
   same head again to retry that round within its attempt limit; `verdict.consumed: false` does not
-  use an attempt. Preserve
-  invalid attempts and costs. Older runners that return no verdict have not supplied a validated
+  use an attempt. Preserve invalid attempts and costs. Older runners that return no verdict have
+  not supplied a validated
   review. Prove every finding yourself, record its adjudication as your workflow requires, fix only
   verified defects, then commit and push before requesting the next round. Check the actual head:
   `stale` flags a newer review of another head, not every intervening push.
@@ -284,10 +284,12 @@ reuse it for later requests. Preserve your workflow's reviewer, isolation and ad
   the matching review request; the next review request also consumes an approved extension.
   An extension adds rounds to that epoch; it does not raise the per-round attempt or cost limits.
   Missing typed support or an exhausted attempt limit is a blocker, not a reason to switch routes.
-- Campaign members request their own review sessions through the same interface. Reviews are
-  charged to the campaign allowance when one exists and remain subject to its admission and
-  remaining budget. They take no session or child slot. Report an admission or budget refusal;
-  never use a native subprocess or the bridge to bypass it.
+- Campaign members request their own review sessions through the same interface. Campaign
+  charging requires a compatible runner (protocol 232 or later): the server reserves allowance
+  before launch and records actual Session usage against the campaign allowance when one exists.
+  Exhausted, stopped or unavailable allowances refuse admission with a reason. Original human
+  cost ceilings still apply across review attempts. Reviews take no session or child slot.
+  Report admission or budget refusals; never use a native subprocess or the bridge to bypass them.
 - One review session is active per requester at a time; `review session list` lists them and
   `review session cancel` stops one. A review session takes no messages; request a new one after
   pushing a new head. An upvote grants no merge authority or exemption from exact-head CI.

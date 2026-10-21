@@ -52,8 +52,10 @@ cross-model review, including from an isolated campaign child. Follow the shippe
 skill: provide the brief, let the completion continuation arrive when idle, read the full verdict
 and report, adjudicate findings, and push fixes before delta rounds. A rewritten head starts a new
 review epoch. Exhausted rounds require the exact `review_round_extension` decision; its default
-owner is human and Full Control does not delegate it. Review sessions spend the campaign allowance
-when one exists and remain subject to admission and budget limits. Use the older runner bridge
+owner is human and Full Control does not delegate it. With protocol 232 or later, campaign review
+sessions reserve allowance before launch and record actual Session usage against it. Exhausted,
+stopped or unavailable allowances refuse admission with a reason; original human cost ceilings
+still apply across attempts. Use the older runner bridge
 only for an unavailable version, never to bypass those limits or a missing reviewer. An explicit
 human-approved native review exception must remain disclosed as such.
 

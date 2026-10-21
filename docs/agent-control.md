@@ -343,10 +343,12 @@ review contract and output schema (version 2) are ported from the cross-model-re
 
 A review session is exempt from every session limit: it takes no runner slot, per-agent limit or
 active turn, and it is not a child, so it takes no delegation slot or charge and gives the requester
-no descendant authority. The requester's remaining cost budget, if it has one, bounds the review.
-Campaign members use this same interface, with reviews charged to the campaign allowance when
-present and subject to its admission and remaining budget; admission failures cannot be bypassed
-through the bridge.
+no descendant authority. The requester's original human cost ceiling, if it has one, bounds its
+own spending and review attempts together. Campaign members use this same interface: the server
+reserves allowance before launch and records actual Session usage against the campaign allowance
+when present. Exhausted, stopped or unavailable allowances refuse admission with a reason;
+admission failures cannot be bypassed through the bridge. A worker's campaign allocation does
+not cap its reviews, which reserve allowance separately.
 A requester has one active review session at a time. A review session runs one turn: it takes no
 further messages, steering, configuration or commands, cannot be restarted, relaunched, forked or
 converted to another role, and has no worktree, terminal, Native TUI, side chat or children. It is never
