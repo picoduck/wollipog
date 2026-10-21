@@ -97,8 +97,10 @@ export function retryNeighbours(container: readonly TimelineItem[], index: numbe
 
 /** What one work ledger line says about its run of work. */
 export interface WorkLedger {
-  /** Tool steps, a folded retry counting once. */
+  /** Tool steps of every kind, a folded retry counting once. */
   tools: number;
+  /** The tool steps that ran a shell command (`execute`): reads, searches and edits are not commands. */
+  commands: number;
   edits: number;
   thoughts: number;
   /** Tool steps whose latest attempt failed. */
@@ -137,11 +139,12 @@ function itemTimes(item: TimelineItem): Array<number | undefined> {
 
 /** The ledger for a run of work's top-level items. Nested subagent work is the agent's own. */
 export function summarizeWork(items: readonly TimelineItem[]): WorkLedger {
-  const ledger: WorkLedger = { tools: 0, edits: 0, thoughts: 0, failed: 0, autoApproved: 0 };
+  const ledger: WorkLedger = { tools: 0, commands: 0, edits: 0, thoughts: 0, failed: 0, autoApproved: 0 };
   for (const step of foldRetries(items)) {
     const item = step.item;
     if (item.kind === "tool_call") {
       ledger.tools += 1;
+      if (item.toolKind === "execute") ledger.commands += 1;
       if (item.status === "failed") ledger.failed += 1;
     } else if (item.kind === "file_edit") ledger.edits += 1;
     else if (item.kind === "agent_thought") ledger.thoughts += 1;
@@ -168,6 +171,7 @@ export function mergeWork(left: WorkLedger, right: WorkLedger): WorkLedger {
   const risk = higherReviewRisk(left.highestReviewRisk, right.highestReviewRisk);
   return {
     tools: left.tools + right.tools,
+    commands: left.commands + right.commands,
     edits: left.edits + right.edits,
     thoughts: left.thoughts + right.thoughts,
     failed: left.failed + right.failed,
@@ -179,7 +183,7 @@ export function mergeWork(left: WorkLedger, right: WorkLedger): WorkLedger {
 }
 
 export function sameWork(left: WorkLedger, right: WorkLedger): boolean {
-  return left.tools === right.tools && left.edits === right.edits && left.thoughts === right.thoughts &&
+  return left.tools === right.tools && left.commands === right.commands && left.edits === right.edits && left.thoughts === right.thoughts &&
     left.failed === right.failed && left.autoApproved === right.autoApproved &&
     left.highestReviewRisk === right.highestReviewRisk && left.startedAt === right.startedAt &&
     left.finishedAt === right.finishedAt;

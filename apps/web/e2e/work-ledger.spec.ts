@@ -37,7 +37,7 @@ for (const width of [1440, 390]) {
   test(`the ledger line is one line with every count, and its steps sit on a rule under its chevron at ${width}px`, async ({ page }) => {
     await open(page, width, "dark");
     const settled = ledger(page, 1);
-    await expect(settled).toHaveAccessibleName(/^Worked for 25s\s*4 Commands\s*1 Edit\s*1 Failed$/);
+    await expect(settled).toHaveAccessibleName(/^Worked for 25s\s*3 Commands\s*1 Edit\s*1 Failed$/);
     const line = await settled.evaluate((trigger) => {
       const meta = trigger.querySelector<HTMLElement>(".tl-work-meta")!;
       const failed = trigger.querySelector<HTMLElement>(".tl-work-failed")!;
