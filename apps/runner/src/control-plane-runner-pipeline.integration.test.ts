@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -17,6 +18,7 @@ import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../..
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const MOCK_AGENT = fileURLToPath(new URL("../../mock-agent/index.mjs", import.meta.url));
+const LEASE_AGENT = fileURLToPath(new URL("./fixtures/pipeline-lease-agent.mjs", import.meta.url));
 const RUNNER_ID = "e2e-pipeline-runner";
 const CONTROL_PLANE_TOKEN = "e2e-pipeline-control-plane-token";
 
@@ -26,7 +28,7 @@ const CONTROL_PLANE_TOKEN = "e2e-pipeline-control-plane-token";
 function hermeticEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
-    if (/^(RUNNER_|CONTROL_PLANE_)/u.test(key)) delete env[key];
+    if (/^(RUNNER_|CONTROL_PLANE_|WOLLIPOG_)/u.test(key)) delete env[key];
   }
   return env;
 }
@@ -110,8 +112,8 @@ class JsonInbox {
   }
 }
 
-function eventPayload(message: JsonObject): { sessionId?: string; payload?: { kind?: string; text?: string } } {
-  return (message.event as { sessionId?: string; payload?: { kind?: string; text?: string } } | undefined) ?? {};
+function eventPayload(message: JsonObject): { sessionId?: string; payload?: { kind?: string; text?: string; message?: string } } {
+  return (message.event as { sessionId?: string; payload?: { kind?: string; text?: string; message?: string } } | undefined) ?? {};
 }
 
 function isTerminalTurnMessage(message: JsonObject, sessionId: string): boolean {
@@ -149,57 +151,98 @@ async function waitForHealth(baseUrl: string, child: ChildProcess, logs: () => s
   throw new Error(`control plane did not become healthy\n${logs()}`);
 }
 
-test(
-  "a session created over the control plane drives a mock-agent turn to /ui and survives a runner restart",
-  { timeout: 120_000 },
-  async (t) => {
-    const port = await reservePort();
-    const httpBase = `http://127.0.0.1:${port}`;
-    const wsBase = `ws://127.0.0.1:${port}`;
-    const temp = mkdtempSync(join(tmpdir(), "wollipog-e2e-pipeline-"));
-    const databasePath = join(temp, "control-plane.db");
-    const workspaceDir = join(temp, "workspace");
-    const runnerDataDir = join(temp, "runner-data");
-    const runnerHome = join(temp, "home");
-    const configPath = join(temp, "runner.config.json");
-    mkdirSync(workspaceDir, { recursive: true });
-    mkdirSync(runnerHome, { recursive: true });
+type LeaseRecord = {
+  version: number; state: "active" | "released"; pid: number; leaseId: string;
+  previousLeaseId: string | null; previousRecordHash: string | null;
+  process?: { bootId: string; startTime: string; marker: string };
+};
 
-    // The control plane loads-or-creates its local device (owner) token beside the DB. Materialize it
-    // first so the test can authenticate owner HTTP calls and the /ui route with a known secret.
-    const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+// Read canonical records without changing the private registry. Check links against exact bytes,
+// not timestamps or runner health; the journal may contain duplicate initialization mirrors.
+function journal(home: string): Array<{ record: LeaseRecord; raw: string; hash: string }> {
+  const root = join(home, ".agent-manager/provider-home-leases-v1");
+  const unique = new Map<string, { record: LeaseRecord; raw: string; hash: string }>();
+  for (const dir of [root, join(root, "mutable-home.lock")]) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir).filter((name) => name.endsWith(".json"))) {
+      const raw = readFileSync(join(dir, name), "utf8");
+      const record = JSON.parse(raw) as LeaseRecord;
+      if (record.state !== "active" && record.state !== "released") continue;
+      const hash = createHash("sha256").update(raw).digest("hex");
+      unique.set(hash, { record, raw, hash });
+    }
+  }
+  const entries = [...unique.values()];
+  const successors = new Set(entries.map(({ record }) => record.previousLeaseId));
+  const tip = entries.filter(({ record }) => !successors.has(record.leaseId));
+  assert.equal(tip.length, 1, "the canonical journal has exactly one tip");
+  const ordered = [tip[0]!];
+  while (ordered[0]!.record.previousLeaseId) {
+    const current = ordered[0]!;
+    const previous = entries.find(({ record }) => record.leaseId === current.record.previousLeaseId);
+    assert.ok(previous, "every predecessor remains in the journal");
+    assert.equal(current.record.previousRecordHash, previous.hash, "successor hashes exact predecessor bytes");
+    assert.ok(!ordered.includes(previous), "the journal is acyclic");
+    ordered.unshift(previous);
+  }
+  assert.equal(ordered.length, entries.length, "every canonical record belongs to the chain");
+  return ordered;
+}
 
-    let cpOutput = "";
-    const controlPlane = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
-      cwd: REPO_ROOT,
-      env: {
-        ...hermeticEnv(),
-        CONTROL_PLANE_HOST: "127.0.0.1",
-        CONTROL_PLANE_PORT: String(port),
-        CONTROL_PLANE_DB: databasePath,
-        CONTROL_PLANE_TOKEN,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    const captureCp = (chunk: unknown) => {
-      cpOutput = (cpOutput + String(chunk)).slice(-65_536);
-    };
-    controlPlane.stdout?.on("data", captureCp);
-    controlPlane.stderr?.on("data", captureCp);
+async function until(predicate: () => boolean | Promise<boolean>, description: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!await predicate()) {
+    assert.ok(Date.now() < deadline, description);
+    await delay(50);
+  }
+}
 
-    let runner: ChildProcess | null = null;
-    let runnerOutput = "";
-    const captureRunner = (chunk: unknown) => {
-      runnerOutput = (runnerOutput + String(chunk)).slice(-65_536);
-    };
-    const uiSockets = new Set<WebSocket>();
+function liveFixtureProcess(pid: number, startedAt: string): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)!.split(" ");
+    return stat[19] === startedAt && stat[0] !== "Z";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
 
-    const spawnRunner = (): ChildProcess => {
-      const child = spawn(process.execPath, ["--import", "tsx", "apps/runner/src/cli.ts", "--config", configPath], {
+for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "second-signal", "supervisor-stop"] as const) {
+  test(
+    stopMode === "smoke" ? "a session created over the control plane drives a mock-agent turn to /ui and survives a runner restart"
+      : `provider-HOME pipeline handoff after ${stopMode}: journal ownership and completed turns`,
+    { timeout: 120_000, skip: stopMode !== "smoke" && process.platform !== "linux" ? "lease process evidence uses Linux procfs" : false },
+    async (t) => {
+      const port = await reservePort();
+      const httpBase = `http://127.0.0.1:${port}`;
+      const wsBase = `ws://127.0.0.1:${port}`;
+      const temp = mkdtempSync(join(tmpdir(), "wollipog-e2e-pipeline-"));
+      const databasePath = join(temp, "control-plane.db");
+      const workspaceDir = join(temp, "workspace");
+      const runnerDataDir = join(temp, "runner-data");
+      const runnerHome = join(temp, "home");
+      const configPath = join(temp, "runner.config.json");
+      const fixtureProcesses = join(temp, "provider-processes.jsonl");
+      const supervisedRunner = join(temp, "supervised-runner.json");
+      const descendants = () => existsSync(fixtureProcesses)
+        ? readFileSync(fixtureProcesses, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { pid: number; startedAt: string; kind: string })
+        : [];
+      const killFixtureProcesses = async () => {
+        for (const entry of descendants()) {
+          if (liveFixtureProcess(entry.pid, entry.startedAt)) process.kill(entry.pid, "SIGKILL");
+        }
+        await until(() => descendants().every((entry) => !liveFixtureProcess(entry.pid, entry.startedAt)), "only this fixture's provider processes should be gone");
+      };
+      mkdirSync(workspaceDir, { recursive: true });
+      mkdirSync(runnerHome, { recursive: true });
+
+      // The control plane loads-or-creates its local device (owner) token beside the DB. Materialize it
+      // first so the test can authenticate owner HTTP calls and the /ui route with a known secret.
+      const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+
+      let cpOutput = "";
+      const controlPlane = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
         cwd: REPO_ROOT,
-        // Isolate HOME so the runner's native provider-home lease targets this temp dir instead of the
-        // shared user home — otherwise it collides with any real runner (e.g. a dev stack) on this box.
         env: {
           ...hermeticEnv(),
           HOME: runnerHome,
@@ -208,167 +251,278 @@ test(
           XDG_DATA_HOME: join(runnerHome, ".local", "share"),
           XDG_STATE_HOME: join(runnerHome, ".local", "state"),
           XDG_CACHE_HOME: join(runnerHome, ".cache"),
+          CONTROL_PLANE_HOST: "127.0.0.1",
+          CONTROL_PLANE_PORT: String(port),
+          CONTROL_PLANE_DB: databasePath,
+          CONTROL_PLANE_TOKEN,
         },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
-      child.stdout?.on("data", captureRunner);
-      child.stderr?.on("data", captureRunner);
-      return child;
-    };
+      const captureCp = (chunk: unknown) => {
+        cpOutput = (cpOutput + String(chunk)).slice(-65_536);
+      };
+      controlPlane.stdout?.on("data", captureCp);
+      controlPlane.stderr?.on("data", captureCp);
 
-    t.after(async () => {
-      for (const socket of uiSockets) {
-        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
-      }
-      if (runner) await stopChild(runner);
-      await stopChild(controlPlane);
-      rmSync(temp, { recursive: true, force: true });
-    });
+      let runner: ChildProcess | null = null;
+      let runnerOutput = "";
+      const captureRunner = (chunk: unknown) => {
+        runnerOutput = (runnerOutput + String(chunk)).slice(-65_536);
+      };
+      const uiSockets = new Set<WebSocket>();
 
-    await waitForHealth(httpBase, controlPlane, () => cpOutput);
-
-    // Issue a runner credential the way an operator would: an owner POST for a brand-new runner id.
-    const credentialResponse = await fetch(`${httpBase}/api/runner-credentials`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ runnerId: RUNNER_ID, label: "E2E pipeline" }),
-    });
-    assert.equal(credentialResponse.status, 201, `credential issue failed\n${cpOutput}`);
-    const runnerToken = (await credentialResponse.json() as { token: string }).token;
-    assert.match(runnerToken, /^wollipogr_[A-Za-z0-9_-]{43}$/u);
-
-    // Point the runner daemon at the real control plane with the mock ACP agent as its only agent.
-    writeFileSync(
-      configPath,
-      JSON.stringify({
-        runnerId: RUNNER_ID,
-        controlPlaneUrl: `${wsBase}/runner`,
-        token: runnerToken,
-        dataDir: runnerDataDir,
-        workspaces: [{ id: "repo", name: "Repo", path: workspaceDir }],
-        agents: [
-          {
-            id: "mock",
-            name: "Mock",
-            command: process.execPath,
-            args: [MOCK_AGENT],
-            driver: "acp",
-            context: { kind: "native" },
-            // Advertise ACP session resume so the persisted session can be continued (rather than
-            // going read-only) after the runner daemon restarts and re-attaches to it.
-            env: { WOLLIPOG_MOCK_SESSION_LIFECYCLE: "resume" },
+      let runnerStarts = 0;
+      const spawnRunner = (): ChildProcess => {
+        const supervised = stopMode === "supervisor-stop" && runnerStarts++ === 0;
+        const args = supervised
+          ? [fileURLToPath(new URL("./fixtures/pipeline-lease-supervisor.mjs", import.meta.url)), configPath, supervisedRunner]
+          : ["--import", "tsx", "apps/runner/src/cli.ts", "--config", configPath];
+        const child = spawn(process.execPath, args, {
+          cwd: REPO_ROOT,
+          // Isolate HOME so the runner's native provider-home lease targets this temp dir instead of the
+          // shared user home — otherwise it collides with any real runner (e.g. a dev stack) on this box.
+          env: {
+            ...hermeticEnv(),
+            HOME: runnerHome,
+            USERPROFILE: runnerHome,
+            XDG_CONFIG_HOME: join(runnerHome, ".config"),
+            XDG_DATA_HOME: join(runnerHome, ".local", "share"),
+            XDG_STATE_HOME: join(runnerHome, ".local", "state"),
+            XDG_CACHE_HOME: join(runnerHome, ".cache"),
           },
-        ],
-      }),
-    );
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+        });
+        child.stdout?.on("data", captureRunner);
+        child.stderr?.on("data", captureRunner);
+        return child;
+      };
 
-    runner = spawnRunner();
+      t.after(async () => {
+        for (const socket of uiSockets) {
+          if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
+        }
+        if (runner) await stopChild(runner);
+        if (existsSync(supervisedRunner)) {
+          const entry = JSON.parse(readFileSync(supervisedRunner, "utf8")) as { pid: number; startedAt: string };
+          if (liveFixtureProcess(entry.pid, entry.startedAt)) process.kill(entry.pid, "SIGKILL");
+        }
+        await killFixtureProcesses();
+        await stopChild(controlPlane);
+        rmSync(temp, { recursive: true, force: true });
+      });
 
-    // Subscribe a real /ui client before we create the session, then target the session so live
-    // events are delivered (the /ui route drops events for sessions a client has not subscribed to).
-    const { socket: ui, inbox: uiInbox } = await openUiSocket(wsBase, ownerToken);
-    uiSockets.add(ui);
-    await uiInbox.take((m) => m.type === "snapshot");
+      await waitForHealth(httpBase, controlPlane, () => cpOutput);
 
-    // Poll session creation until the runner has registered and is advertising its mock agent.
-    let sessionId = "";
-    for (let attempt = 0; attempt < 300; attempt++) {
-      assert.equal(runner.exitCode, null, `runner exited before registering\n${runnerOutput}`);
-      const created = await fetch(`${httpBase}/api/sessions`, {
+      // Issue a runner credential the way an operator would: an owner POST for a brand-new runner id.
+      const credentialResponse = await fetch(`${httpBase}/api/runner-credentials`, {
         method: "POST",
         headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
-        body: JSON.stringify({ runnerId: RUNNER_ID, workspaceId: "repo", agentId: "mock", useWorktree: false, prompt: "Please jot a quick note about the pipeline" }),
+        body: JSON.stringify({ runnerId: RUNNER_ID, label: "E2E pipeline" }),
       });
-      if (created.status === 201) {
-        sessionId = (await created.json() as { id: string }).id;
-        break;
-      }
-      await delay(100);
-    }
-    assert.ok(sessionId, `session was never created (runner never registered)\n${runnerOutput}`);
+      assert.equal(credentialResponse.status, 201, `credential issue failed\n${cpOutput}`);
+      const runnerToken = (await credentialResponse.json() as { token: string }).token;
+      assert.match(runnerToken, /^wollipogr_[A-Za-z0-9_-]{43}$/u);
 
-    ui.send(JSON.stringify({ type: "session_subscriptions", revision: 1, sessionIds: [sessionId], podIds: [] }));
-    await uiInbox.take(
-      (m) => m.type === "session_subscriptions_applied" && (m.revision as number) === 1,
-    );
+      // Point the runner daemon at the real control plane with the mock ACP agent as its only agent.
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          runnerId: RUNNER_ID,
+          controlPlaneUrl: `${wsBase}/runner`,
+          token: runnerToken,
+          dataDir: runnerDataDir,
+          workspaces: [{ id: "repo", name: "Repo", path: workspaceDir }],
+          agents: [
+            {
+              id: "mock",
+              name: "Mock",
+              command: process.execPath,
+              args: [stopMode === "smoke" ? MOCK_AGENT : LEASE_AGENT],
+              driver: "acp",
+              context: { kind: "native" },
+              // Advertise ACP session resume so the persisted session can be continued (rather than
+              // going read-only) after the runner daemon restarts and re-attaches to it.
+              env: { HOME: runnerHome, WOLLIPOG_MOCK_SESSION_LIFECYCLE: "resume", WOLLIPOG_PIPELINE_PROCESSES: fixtureProcesses },
+            },
+          ],
+        }),
+      );
 
-    const sessionStatus = async (): Promise<string> => {
-      const response = await fetch(`${httpBase}/api/sessions/${sessionId}`, {
-        headers: { authorization: `Bearer ${ownerToken}` },
-      });
-      assert.equal(response.status, 200);
-      return ((await response.json()) as { session: { status: string } }).session.status;
-    };
+      runner = spawnRunner();
 
-    const waitForIdle = async (): Promise<void> => {
+      // Subscribe a real /ui client before we create the session, then target the session so live
+      // events are delivered (the /ui route drops events for sessions a client has not subscribed to).
+      const { socket: ui, inbox: uiInbox } = await openUiSocket(wsBase, ownerToken);
+      uiSockets.add(ui);
+      await uiInbox.take((m) => m.type === "snapshot");
+
+      // Poll session creation until the runner has registered and is advertising its mock agent.
+      let sessionId = "";
       for (let attempt = 0; attempt < 300; attempt++) {
-        if ((await sessionStatus()) === "idle") return;
+        assert.equal(runner.exitCode, null, `runner exited before registering\n${runnerOutput}`);
+        const created = await fetch(`${httpBase}/api/sessions`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ runnerId: RUNNER_ID, workspaceId: "repo", agentId: "mock", useWorktree: false, prompt: "Please jot a quick note about the pipeline" }),
+        });
+        if (created.status === 201) {
+          sessionId = (await created.json() as { id: string }).id;
+          break;
+        }
         await delay(100);
       }
-      throw new Error(`session never returned to idle\n${runnerOutput}`);
-    };
+      assert.ok(sessionId, `session was never created (runner never registered)\n${runnerOutput}`);
 
-    // Turn 1: the session was created with an initial prompt, so the runner drives a full mock-agent
-    // turn. Its terminal agent message ("… wrote MOCK_NOTES.md …") must arrive on the /ui subscription.
-    const firstTurn = await uiInbox
-      .take((m) => isTerminalTurnMessage(m, sessionId))
-      .catch((error) => {
-        throw new Error(`${(error as Error).message}\n=== RUNNER OUTPUT ===\n${runnerOutput}`);
-      });
-    assert.match(
-      eventPayload(firstTurn).payload?.text ?? "",
-      /MOCK_NOTES\.md/,
-      "the first turn's terminal agent message reached /ui",
-    );
-    await waitForIdle();
+      ui.send(JSON.stringify({ type: "session_subscriptions", revision: 1, sessionIds: [sessionId], podIds: [] }));
+      await uiInbox.take(
+        (m) => m.type === "session_subscriptions_applied" && (m.revision as number) === 1,
+      );
 
-    // Restart the runner daemon. The session (persisted in the runner's store and the control plane
-    // DB) must survive the restart: after the daemon reconnects and resumes it, a fresh prompt must
-    // drive another full turn whose terminal message again reaches the /ui subscription.
-    await stopChild(runner);
+      const sessionStatus = async (): Promise<string> => {
+        const response = await fetch(`${httpBase}/api/sessions/${sessionId}`, {
+          headers: { authorization: `Bearer ${ownerToken}` },
+        });
+        assert.equal(response.status, 200);
+        return ((await response.json()) as { session: { status: string } }).session.status;
+      };
 
-    // Wait until the control plane has fully processed the old socket's close (onGone -> offline)
-    // BEFORE spawning the replacement. Otherwise the resume prompt below could be routed to the
-    // still-mapped dead socket (hub.sendToRunner buffers into a closed socket and returns 200), be
-    // lost, and time out the second turn. With no replacement running yet, the runner cannot flip
-    // back online in the meantime, so this poll is race-free.
-    let sawOffline = false;
-    for (let attempt = 0; attempt < 300 && !sawOffline; attempt++) {
-      const response = await fetch(`${httpBase}/api/runners`, { headers: { authorization: `Bearer ${ownerToken}` } });
-      assert.equal(response.status, 200);
-      const runners = (await response.json() as { runners: { runnerId: string; status: string }[] }).runners;
-      sawOffline = runners.find((r) => r.runnerId === RUNNER_ID)?.status === "offline";
-      if (!sawOffline) await delay(100);
-    }
-    assert.ok(sawOffline, `control plane never observed the old runner go offline after restart\n${runnerOutput}`);
+      const waitForIdle = async (): Promise<void> => {
+        for (let attempt = 0; attempt < 300; attempt++) {
+          if ((await sessionStatus()) === "idle") return;
+          await delay(100);
+        }
+        throw new Error(`session never returned to idle\n${runnerOutput}`);
+      };
 
-    runner = spawnRunner();
+      // Turn 1: the session was created with an initial prompt, so the runner drives a full mock-agent
+      // turn. Its terminal agent message ("… wrote MOCK_NOTES.md …") must arrive on the /ui subscription.
+      const firstTurn = await uiInbox
+        .take((m) => isTerminalTurnMessage(m, sessionId))
+        .catch((error) => {
+          throw new Error(`${(error as Error).message}\n=== RUNNER OUTPUT ===\n${runnerOutput}`);
+        });
+      assert.match(
+        eventPayload(firstTurn).payload?.text ?? "",
+        /MOCK_NOTES\.md/,
+        "the first turn's terminal agent message reached /ui",
+      );
+      await waitForIdle();
 
-    // The prompt can only be routed once the restarted daemon has re-registered; poll until accepted.
-    let resumedPromptSent = false;
-    for (let attempt = 0; attempt < 300 && !resumedPromptSent; attempt++) {
-      assert.equal(runner.exitCode, null, `restarted runner exited before reconnecting\n${runnerOutput}`);
-      const response = await fetch(`${httpBase}/api/sessions/${sessionId}/prompt`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
-        body: JSON.stringify({ text: "Note again after the runner restart" }),
-      });
-      if (response.status === 200) resumedPromptSent = true;
-      else await delay(100);
-    }
-    assert.ok(resumedPromptSent, `restarted runner never accepted a prompt\n${runnerOutput}`);
+      // Restart the runner daemon. The session (persisted in the runner's store and the control plane
+      // DB) must survive the restart: after the daemon reconnects and resumes it, a fresh prompt must
+      // drive another full turn whose terminal message again reaches the /ui subscription.
+      let before: ReturnType<typeof journal> = [];
+      const abrupt = stopMode === "SIGKILL" || stopMode === "second-signal";
+      if (stopMode === "smoke") {
+        await stopChild(runner);
+      } else {
+        await until(() => descendants().some((entry) => entry.kind === "descendant" && liveFixtureProcess(entry.pid, entry.startedAt)), "provider descendant is alive before shutdown");
+        before = journal(runnerHome);
+        const held = before.at(-1)!;
+        assert.equal(held.record.state, "active");
+        const originalPid = stopMode === "supervisor-stop"
+          ? (JSON.parse(readFileSync(supervisedRunner, "utf8")) as { pid: number }).pid : runner.pid;
+        assert.equal(held.record.pid, originalPid, "the real daemon acquired this provider HOME");
+        assert.ok(held.record.process, "the active record contains actual runner lifecycle evidence");
+        const exited = new Promise<void>((resolvePromise) => runner!.once("exit", () => resolvePromise()));
+        const shutdownOutputStart = runnerOutput.length;
+        assert.ok(runner.kill(stopMode === "second-signal" || stopMode === "supervisor-stop" ? "SIGTERM" : stopMode));
+        if (stopMode === "second-signal") {
+          await until(() => runnerOutput.slice(shutdownOutputStart).includes("shutting down"), "the first signal entered the pending-kill drain");
+          assert.ok(runner.kill("SIGINT"));
+        }
+        assert.ok(await exitedWithin(exited, 20_000), "runner shutdown finishes without test SIGKILL fallback");
+        if (abrupt) {
+          assert.deepEqual(journal(runnerHome), before, "forced exit preserves exact active journal evidence");
+          assert.ok(descendants().some((entry) => liveFixtureProcess(entry.pid, entry.startedAt)), "a provider descendant survives the forced exit");
+        } else {
+          assert.equal(runner.exitCode, 0);
+          assert.ok(descendants().every((entry) => !liveFixtureProcess(entry.pid, entry.startedAt)), "graceful shutdown drained detached TERM-ignoring descendants");
+          const released = journal(runnerHome);
+          assert.equal(released.at(-1)!.record.state, "released", "shutdown publishes release after draining descendants");
+          assert.equal(released.at(-1)!.record.previousLeaseId, held.record.leaseId);
+          assert.deepEqual(released.slice(0, before.length), before, "shutdown preserves predecessor bytes");
+        }
 
-    const secondTurn = await uiInbox
-      .take((m) => isTerminalTurnMessage(m, sessionId))
-      .catch((error) => {
-        throw new Error(`${(error as Error).message}\n=== RUNNER OUTPUT ===\n${runnerOutput}`);
-      });
-    assert.match(
-      eventPayload(secondTurn).payload?.text ?? "",
-      /MOCK_NOTES\.md/,
-      "a full turn completes and reaches /ui after the runner restarts",
-    );
-    await waitForIdle();
-  },
-);
+      }
+
+      // Wait until the control plane has fully processed the old socket's close (onGone -> offline)
+      // BEFORE spawning the replacement. Otherwise the resume prompt below could be routed to the
+      // still-mapped dead socket (hub.sendToRunner buffers into a closed socket and returns 200), be
+      // lost, and time out the second turn. With no replacement running yet, the runner cannot flip
+      // back online in the meantime, so this poll is race-free.
+      let sawOffline = false;
+      for (let attempt = 0; attempt < 300 && !sawOffline; attempt++) {
+        const response = await fetch(`${httpBase}/api/runners`, { headers: { authorization: `Bearer ${ownerToken}` } });
+        assert.equal(response.status, 200);
+        const runners = (await response.json() as { runners: { runnerId: string; status: string }[] }).runners;
+        sawOffline = runners.find((r) => r.runnerId === RUNNER_ID)?.status === "offline";
+        if (!sawOffline) await delay(100);
+      }
+      assert.ok(sawOffline, `control plane never observed the old runner go offline after restart\n${runnerOutput}`);
+
+      runner = spawnRunner();
+
+      // HTTP acceptance alone is not success: a failed launch also acknowledges a prompt.
+      const sendPrompt = async (text: string): Promise<void> => {
+        await until(async () => {
+          assert.equal(runner!.exitCode, null, `replacement exited before reconnecting\n${runnerOutput}`);
+          const response = await fetch(`${httpBase}/api/sessions/${sessionId}/prompt`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          if (response.status === 200) return true;
+          assert.ok([409, 503].includes(response.status), `unexpected prompt response: ${response.status}`);
+          return false;
+        }, `replacement never accepted a prompt\n${runnerOutput}`);
+      };
+
+      if (abrupt) {
+        await sendPrompt("Try while the old provider descendant is still alive");
+        const refusal = await uiInbox.take((message) => {
+          const event = eventPayload(message);
+          return message.type === "session_event" && event.sessionId === sessionId &&
+            event.payload?.kind === "error" && event.payload.message?.includes("Provider HOME is already in use") === true;
+        });
+        assert.match(eventPayload(refusal).payload?.message ?? "", /Provider HOME is already in use/);
+        assert.deepEqual(journal(runnerHome), before, "a refused replacement cannot append or release ownership");
+        assert.ok(descendants().some((entry) => liveFixtureProcess(entry.pid, entry.startedAt)), "the refusal was observed while the old provider survived");
+        assert.equal(descendants().filter((entry) => entry.kind === "provider").length, 1, "refusal did not start a second provider");
+        await killFixtureProcesses();
+      }
+
+      await sendPrompt("Note again after the runner restart");
+
+      const secondTurn = await uiInbox
+        .take((m) => isTerminalTurnMessage(m, sessionId))
+        .catch((error) => {
+          throw new Error(`${(error as Error).message}\n=== RUNNER OUTPUT ===\n${runnerOutput}`);
+        });
+      assert.match(
+        eventPayload(secondTurn).payload?.text ?? "",
+        /MOCK_NOTES\.md/,
+        "a full turn completes and reaches /ui after the runner restarts",
+      );
+      await waitForIdle();
+      assert.match(readFileSync(join(workspaceDir, "MOCK_NOTES.md"), "utf8"), /Note again after the runner restart/,
+        "the replacement completed the new prompt, not a replay of the old turn");
+      if (stopMode !== "smoke") {
+        const succeeded = journal(runnerHome);
+        assert.equal(succeeded.at(-1)!.record.state, "active");
+        assert.equal(succeeded.at(-1)!.record.pid, runner.pid, "replacement owns the HOME and completed a provider turn");
+        assert.deepEqual(succeeded.slice(0, before.length), before, "handoff keeps every predecessor byte");
+        if (abrupt) {
+          assert.equal(succeeded[before.length]!.record.state, "active", "recovery succeeds the abandoned record without forging a release");
+          assert.equal(succeeded[before.length]!.record.previousLeaseId, before.at(-1)!.record.leaseId);
+        }
+      }
+    },
+  );
+}
+
+// Phase 2 must exercise a real non-dumpable unrelated same-user process throughout restart.
+// Current main's whole-user scan cannot prove this case; enable only after #3584 lands.
+test.todo("provider-HOME recovery with an unrelated unreadable process left alive (blocked by #3584)");
