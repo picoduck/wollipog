@@ -452,7 +452,7 @@ test("a busy account offers Restart Session, which restarts the session (#3240)"
     await act(async () => { fixture.button("Restart Session")!.click(); });
     await flush();
     assert.deepEqual(restarts, [current.id]);
-    assert.equal(fixture.container.querySelector('[aria-label="Account In Use"]'), null,
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Account In Use"]'),
       "a session starting again no longer shows the refusal");
   } finally {
     await fixture.unmount();
@@ -485,7 +485,7 @@ test("with the runner offline, the refusal's Restart Session says why it is disa
 test("a running session never shows a refusal a summary kept (#3240)", async () => {
   const fixture = await mount(sessionView({ status: "running", providerHomeRefusal: launchRefusal("busy") }));
   try {
-    assert.equal(fixture.container.querySelector('[aria-label="Account In Use"]'), null);
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Account In Use"]'));
   } finally {
     await fixture.unmount();
   }
