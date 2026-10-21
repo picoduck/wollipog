@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -99,6 +99,100 @@ test("merged head discovery requires the exact head whatever the PR branch is na
   assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([{ ...exact, url: "https://example.test/pull/983" }]), head), null);
   assert.equal(parseMergedWorktreePullRequestForHead("{}", head), null);
   assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([exact]), "a".repeat(39)), null);
+});
+
+test("GitLab merged head discovery requires a merged merge request on the remote's host with the exact head (#3601)", () => {
+  const head = "c".repeat(40);
+  const host = "gitlab.example.test";
+  const exact = { iid: 19, state: "merged", sha: head.toUpperCase(), web_url: `https://${host}/team/sub/repo/-/merge_requests/19` };
+  const proof = { url: exact.web_url, state: "merged", headOid: head, provider: "gitlab", kind: "merge_request" };
+  assert.deepEqual(parseMergedGitLabMergeRequestForHead(JSON.stringify([exact]), head, host), proof);
+  assert.deepEqual(parseMergedGitLabMergeRequestForHead(JSON.stringify([{ ...exact, state: "opened" }, exact]), head, host), proof,
+    "an open merge request carrying the same commit is skipped, not fatal");
+  assert.deepEqual(parseMergedGitLabMergeRequestForHead(JSON.stringify([exact]), head, "GitLab.Example.Test"), proof);
+  for (const rejected of [
+    { ...exact, state: "closed" },
+    { ...exact, state: "MERGED" },
+    { ...exact, sha: "d".repeat(40) },
+    { ...exact, web_url: `https://elsewhere.test/team/sub/repo/-/merge_requests/19` },
+    { ...exact, web_url: `https://${host}/team/sub/repo/-/issues/19` },
+    { ...exact, web_url: `https://token@${host}/team/sub/repo/-/merge_requests/19` },
+    { ...exact, sha: undefined },
+  ]) {
+    assert.equal(parseMergedGitLabMergeRequestForHead(JSON.stringify([rejected]), head, host), null, JSON.stringify(rejected));
+  }
+  assert.equal(parseMergedGitLabMergeRequestForHead("{}", head, host), null);
+  assert.equal(parseMergedGitLabMergeRequestForHead("not json", head, host), null);
+  assert.equal(parseMergedGitLabMergeRequestForHead(JSON.stringify([exact]), "c".repeat(39), host), null);
+});
+
+test("missing-upstream discovery asks GitLab for a GitLab remote, including a configured self-managed host (#3601)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-gitlab-discovery-"));
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const branch = "fix/gitlab-squash-merged";
+    execFileSync("git", ["-C", repo, "switch", "-c", branch]);
+    const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    let configuredProtocol: string | Error = "https\n";
+    let forgeOutput: string | Error = "[]";
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runForgeCommand: typeof runContextCommand = async (_context, command, args) => {
+      calls.push({ command, args });
+      if (command === "glab" && args[0] === "config") {
+        if (configuredProtocol instanceof Error) throw configuredProtocol;
+        return { stdout: configuredProtocol, stderr: "" };
+      }
+      if (forgeOutput instanceof Error) throw forgeOutput;
+      return { stdout: forgeOutput, stderr: "" };
+    };
+    const discover = (options: Parameters<typeof mergedWorktreePullRequestForBranch>[2] = {}) =>
+      mergedWorktreePullRequestForBranch(repo, branch, { ...options, runForgeCommand });
+    const merged = (host: string, project: string) => JSON.stringify([
+      { iid: 7, state: "merged", sha: head, web_url: `https://${host}/${project}/-/merge_requests/7` },
+    ]);
+
+    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", "git@gitlab.com:team/sub/repo.git"]);
+    forgeOutput = merged("gitlab.com", "team/sub/repo");
+    assert.deepEqual(await discover(), {
+      url: "https://gitlab.com/team/sub/repo/-/merge_requests/7", state: "merged", headOid: head,
+      provider: "gitlab", kind: "merge_request",
+    }, "a squash-merged GitLab merge request proves the exact local head after its branch is gone");
+    assert.deepEqual(calls.at(-1), {
+      command: "glab",
+      args: ["api", `projects/${encodeURIComponent("team/sub/repo")}/repository/commits/${head}/merge_requests?per_page=100`,
+        "--hostname", "gitlab.com"],
+    }, "gitlab.com needs no configuration probe, and the host is always explicit");
+    assert.equal(calls.some((call) => call.command === "gh"), false);
+
+    calls.length = 0;
+    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", "https://gitlab.example.test/team/sub/repo.git"]);
+    forgeOutput = merged("gitlab.example.test", "team/sub/repo");
+    assert.equal((await discover())?.provider, "gitlab", "a self-managed host configured for glab is asked");
+    assert.deepEqual(calls[0], {
+      command: "glab", args: ["config", "get", "api_protocol", "--host", "gitlab.example.test", "--global"],
+    });
+    assert.equal(calls[1]?.args.at(-1), "gitlab.example.test");
+
+    forgeOutput = merged("gitlab.com", "team/sub/repo");
+    assert.equal(await discover(), null, "a merge request on another host proves nothing");
+    forgeOutput = JSON.stringify([{ iid: 7, state: "merged", sha: "d".repeat(40),
+      web_url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/7" }]);
+    assert.equal(await discover(), null, "a different merged head proves nothing");
+
+    let forgeUnavailable = 0;
+    forgeOutput = new Error("401 Unauthorized");
+    assert.equal(await discover({ onForgeUnavailable: () => { forgeUnavailable++; } }), null);
+    assert.equal(forgeUnavailable, 1, "an unauthenticated GitLab is unavailable evidence, not a negative");
+
+    let ineligible = 0;
+    calls.length = 0;
+    configuredProtocol = new Error("not configured");
+    assert.equal(await discover({ onIneligible: () => { ineligible++; } }), null);
+    assert.equal(ineligible, 1, "an unconfigured self-managed host has no forge to ask");
+    assert.deepEqual(calls.map((call) => call.args[0]), ["config"], "no API call is made for an unconfigured host");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("missing-upstream discovery exercises every production Git gate before the forge", { skip: !haveGit() }, async () => {
@@ -853,6 +947,69 @@ test("a renamed no-upstream push retires only by exact squash-merged head proof 
     await assert.rejects(manager.discardWorktree("s_renamed_push", unrelated.worktree.path),
       /the branch has no upstream/);
     assert.equal(existsSync(unrelated.worktree.path), true);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a squash-merged GitLab merge request whose branch was deleted first still retires its worktree (#3601)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-gitlab-retire-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo, remote } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_gitlab_retire", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "gitlab retire",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const created = await manager.requestWorktree("s_gitlab_retire", { baseRef: "HEAD", branch: "agent/s_gitlab_retire" });
+    const path = created.worktree.path;
+    writeFileSync(join(path, "gitlab.txt"), "gitlab\n");
+    execFileSync("git", ["-C", path, "add", "gitlab.txt"]);
+    execFileSync("git", ["-C", path, "commit", "-m", "gitlab"]);
+    const head = execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    // Pushed with tracking, squash-merged into main, then the source branch was deleted before
+    // anyone retired the worktree: the configured upstream's tracking ref is gone.
+    execFileSync("git", ["-C", path, "push", "-u", "origin", `HEAD:${created.worktree.branch}`]);
+    execFileSync("git", ["-C", repo, "merge", "--squash", created.worktree.branch]);
+    execFileSync("git", ["-C", repo, "commit", "-m", "gitlab (!7)"]);
+    execFileSync("git", ["-C", repo, "push", "origin", "main"]);
+    execFileSync("git", ["-C", path, "push", "origin", "--delete", created.worktree.branch]);
+    // The project lives on a self-managed GitLab; pushes still reach the fixture remote.
+    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", "https://gitlab.example.test/team/sub/repo.git"]);
+    execFileSync("git", ["-C", repo, "remote", "set-url", "--push", "origin", remote]);
+
+    const mergeRequests: unknown[] = [];
+    const asked: string[] = [];
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+    }).discoverMergedWorktreePullRequest = (worktreePath, branch, options) =>
+      mergedWorktreePullRequestForBranch(worktreePath, branch, {
+        ...options,
+        runForgeCommand: async (_context, command, args) => {
+          asked.push(`${command} ${args[0]}`);
+          if (args[0] === "config") return { stdout: "https\n", stderr: "" };
+          return { stdout: JSON.stringify(mergeRequests), stderr: "" };
+        },
+      });
+
+    await assert.rejects(manager.discardWorktree("s_gitlab_retire", path), /no upstream|not delivered|unpushed/u,
+      "without a merged merge request for this head the worktree is kept");
+    assert.equal(existsSync(path), true);
+    mergeRequests.push({ iid: 7, state: "merged", sha: head,
+      web_url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/7" });
+    assert.equal((await manager.discardWorktree("s_gitlab_retire", path)).retirement.status, "removed",
+      "the exact merged head proves delivery after the branch was deleted");
+    assert.equal(existsSync(path), false);
+    assert.ok(asked.includes("glab api"), "GitLab, not GitHub, was asked");
+    assert.equal(asked.some((call) => call.startsWith("gh ")), false);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

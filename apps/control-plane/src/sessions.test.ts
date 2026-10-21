@@ -1620,6 +1620,27 @@ test("approved UI evidence and implementation-question decisions do not block ca
     const deletionVerified = verify(deletionChild);
     assert.ok(deletionVerified.ok, deletionVerified.error);
 
+    // A GitLab project in a nested namespace requests, reads, and consumes the same gate (#3601).
+    const gitlabChild = spawn();
+    const gitlabSnapshot = { ...deletionSnapshot, repository: "gitlab.example.com/group/subgroup/project", branch: "fix/gitlab" };
+    const gitlab = svc.createWorkflowDecision(gitlabChild, {
+      requestId: "gitlab-deletion", resourceKey: "gitlab-deletion", resourceSnapshot: gitlabSnapshot,
+    });
+    assert.ok(gitlab.ok && gitlab.data, gitlab.error);
+    approveAsHuman(gitlabChild, gitlab.data.occurrenceId, {});
+    assert.equal((svc.workflowDecision(gitlabChild, gitlab.data.occurrenceId).data?.resourceSnapshot as { repository?: string })
+      ?.repository, "gitlab.example.com/group/subgroup/project");
+    db.updateSessionStatus(gitlabChild, "running", Date.now());
+    const gitlabConsumed = await svc.consumeWorkflowDecision(gitlabChild, gitlab.data.occurrenceId,
+      { resourceSnapshot: gitlabSnapshot });
+    assert.ok(gitlabConsumed.ok, gitlabConsumed.error);
+    for (const repository of ["group/subgroup/project", "github.com/picoduck/wollipog", "gitlab.example.com/group/project.git"]) {
+      assert.equal(svc.createWorkflowDecision(gitlabChild, {
+        requestId: `refused-${repository}`, resourceKey: repository,
+        resourceSnapshot: { ...deletionSnapshot, repository },
+      }).status, 400, `${repository} is not a repository the gate accepts`);
+    }
+
     // A revoked grant is terminal too, whatever revoked it.
     const revokedChild = spawn();
     const revoked = svc.createWorkflowDecision(revokedChild, {
