@@ -2120,8 +2120,10 @@ button.status { cursor: pointer; }
 }
 /* Show Details leading the row (the notice's only action) bleeds its ghost inset and edge, so its
    label lines up with the sentence above it, as a bordered resolving action's edge already does
-   (#3511). A compact notice or page banner keeps the row beside the sentence, at its gap. */
-.notice:not(.compact, .page-banner) > .notice-content > .notice-actions > .notice-details-toggle:first-child {
+   (#3511). A compact notice's sentence grows into the bleed while the row sits beside it, so the
+   toggle stays at the trailing edge until the row wraps under the sentence. A page banner's
+   sentence does not grow, so its row keeps its gap. */
+.notice:not(.page-banner) > .notice-content > .notice-actions > .notice-details-toggle:first-child {
   margin-inline-start: calc(-1 * (var(--space-2) + 1px));
 }
 .notice-dismiss { margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1) 0 0; }

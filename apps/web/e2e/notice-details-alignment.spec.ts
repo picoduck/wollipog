@@ -4,8 +4,9 @@ import { expectGeometry } from "./geometry-margins.js";
 /**
  * #3511 (docs/design-system.md §13.2): when Show Details leads a notice's action row, its label
  * starts where the notice's sentence starts, open or closed. A row led by a bordered resolving
- * action keeps that button's edge at the sentence and the toggle 8px after it, and a compact
- * notice keeps its row beside the sentence. The shapes come from the primitives harness's
+ * action keeps that button's edge at the sentence and the toggle 8px after it. A compact notice
+ * keeps the toggle at its trailing edge while the row fits beside the sentence and lines it up
+ * once the row wraps under it. The shapes come from the primitives harness's
  * `?view=notices`; the Automation editor's save failure is the notice #3501 aligned on its own.
  */
 
@@ -61,11 +62,23 @@ for (const theme of ["dark", "light"]) {
           .toBeLessThanOrEqual(1);
       });
 
-      test("a compact notice keeps Show Details clear of its sentence", async ({ page }) => {
+      test(`a compact notice keeps Show Details ${viewport.width === 1440 ? "at its trailing edge" : "under its sentence, lined up"}`, async ({ page }) => {
         await openNotices(page, theme);
         const notice = page.locator('.notice[data-state="compact"]');
-        const toggle = notice.locator(".notice-details-toggle");
-        expect(await toggle.evaluate((element) => getComputedStyle(element).marginInlineStart)).toBe("0px");
+        const body = (await notice.locator(".notice-body").boundingBox())!;
+        const content = (await notice.locator(".notice-content").boundingBox())!;
+        const toggle = (await notice.locator(".notice-details-toggle").boundingBox())!;
+        if (viewport.width === 1440) {
+          expectGeometry(Math.abs(toggle.y + toggle.height / 2 - (body.y + body.height / 2)), "the row sits beside the sentence")
+            .toBeLessThanOrEqual(1);
+          expectGeometry(Math.abs(content.x + content.width - (toggle.x + toggle.width)), "Show Details stays at the trailing edge")
+            .toBeLessThanOrEqual(1);
+          expectGeometry(toggle.x - (body.x + body.width), "Show Details stays clear of the sentence's box")
+            .toBeGreaterThanOrEqual(0);
+        } else {
+          expectGeometry(toggle.y - (body.y + body.height), "the row wraps under the sentence").toBeGreaterThanOrEqual(0);
+          await expectToggleAligned(notice);
+        }
       });
     });
   }
