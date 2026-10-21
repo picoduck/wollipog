@@ -2998,6 +2998,27 @@ test("Time Zone finds New York by typing \"york\", and a stored zone the browser
   });
 });
 
+test("an enabled automation whose stored zone has spaces around it previews its next run and stays editable (CR-1.1)", async () => {
+  await atFixedNow(FRIDAY_EVENING, async () => {
+    // The control plane trims a zone to check it and stores it as written, so this spec is valid.
+    const stored = { ...schedule("automation-1", "Nightly"), cron: "0 9 * * 1-5", timezone: " America/Chicago " };
+    const fixture = await mountAt(editRoute("automation-1"), [stored]);
+    try {
+      assert.equal(editorTitle(fixture.container), "Edit Nightly", "the editor renders");
+      assert.match(schedulePreviewLine(fixture.container).textContent ?? "",
+        new RegExp(`^Weekdays at 9:00 AM · Next Mon, 9:00 AM${PREVIEW_ZONE}$`));
+      assert.equal(timeZoneField(fixture.container).value, "Chicago (UTC−5)", "the stored zone shows as the zone it is");
+
+      await setLabeledInput(fixture.container, "Name", "Nightly Renamed");
+      await saveChanges(fixture);
+      assert.equal(fixture.updates.length, 1);
+      assert.equal(fixture.updates[0]!.spec.timezone, " America/Chicago ", "the stored zone saves as it was written");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
 test("the daylight-saving rules appear only in the About Time Zones popover", async () => {
   const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners);
   try {

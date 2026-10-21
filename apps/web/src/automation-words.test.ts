@@ -124,6 +124,10 @@ test("schedulePreview words the schedule and its next run in the chosen zone, na
   assert.equal(preview("0 9 * * 1-5", { enabled: false }), "Weekdays at 9:00 AM · Paused");
   assert.equal(preview("0 9 * *"), null);
   assert.equal(preview("0 0 31 2 *"), "Custom schedule");
+  // A stored zone keeps the person's spelling, which the scheduler trims and Intl refuses as
+  // written: the preview formats in the scheduler's zone, and it is the viewer's (CR-1.1).
+  assert.equal(preview("0 9 * * 1-5", { timezone: " America/Chicago " }), "Weekdays at 9:00 AM · Next Today, 9:00 AM");
+  assert.equal(preview("0 9 * * 1-5", { timezone: "Mars/Olympus" }), "Weekdays at 9:00 AM");
 });
 
 test("scheduleError says what the scheduler refuses, in one sentence that says how to fix it", () => {
@@ -175,6 +179,12 @@ test("Time Zone lists each zone by city and offset over its IANA name, and keeps
   // An alias the browser does not list stays a choice, as does UTC when the browser lists nothing.
   assert.deepEqual(timeZoneChoices("US/Eastern", NOW, []).map((choice) => [choice.value, choice.label]),
     [["US/Eastern", "Eastern (UTC−4)"], ["UTC", "UTC"]]);
+  // A stored zone spelled with spaces takes its listed twin's place and reads as that zone (CR-1.1).
+  assert.deepEqual(timeZoneChoices(" America/Chicago ", NOW, ["America/Chicago", "Europe/London"]), [
+    { value: " America/Chicago ", label: "Chicago (UTC−5)", description: "America/Chicago" },
+    { value: "Europe/London", label: "London (UTC+1)", description: "Europe/London" },
+    { value: "UTC", label: "UTC", description: "UTC" },
+  ]);
   // A stored zone no runtime knows keeps its name, without an offset.
   assert.deepEqual(timeZoneChoices("Mars/Olympus", NOW, []).map((choice) => choice.label), ["Olympus", "UTC"]);
   assert.equal(utcOffsetLabel("Asia/Kathmandu", NOW), "UTC+5:45");

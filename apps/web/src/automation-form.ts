@@ -531,14 +531,22 @@ export function scheduleError(cron: string, options: { timezone: string; enabled
   return nextScheduleRun(cron, options.timezone, options.now) === null ? SCHEDULE_NEVER_RUNS_ERROR : null;
 }
 
+/**
+ * The zone the scheduler runs `timezone` in: its own trimmed, canonical identity, or null for a zone
+ * it refuses. A stored zone keeps the person's spelling (" America/Chicago " saves), which `Intl`
+ * refuses as written, so anything that formats a time in it uses this instead (CR-1.1).
+ */
+export function schedulerTimeZone(timezone: string): string | null {
+  try {
+    return validateTimeZone(timezone);
+  } catch {
+    return null;
+  }
+}
+
 /** Whether the scheduler accepts `timezone`, by its own check. */
 export function validTimeZone(timezone: string): boolean {
-  try {
-    validateTimeZone(timezone);
-    return true;
-  } catch {
-    return false;
-  }
+  return schedulerTimeZone(timezone) !== null;
 }
 
 /**
@@ -561,10 +569,11 @@ export function schedulePreview(cron: string, options: {
   }
   const words = scheduleWords(cron, options.locale) ?? "Custom schedule";
   if (!options.enabled) return `${words} · Paused`;
-  const next = nextScheduleRun(cron, options.timezone, options.now);
-  if (next === null) return words;
-  const zone = options.viewerTimeZone === options.timezone ? "" : ` (${timeZoneDisplayName(options.timezone, options.now)})`;
-  return `${words} · Next ${formatCalendarTime(next, options.now, options.timezone, options.locale)}${zone}`;
+  const timeZone = schedulerTimeZone(options.timezone);
+  const next = timeZone === null ? null : nextScheduleRun(cron, timeZone, options.now);
+  if (timeZone === null || next === null) return words;
+  const zone = options.viewerTimeZone === timeZone ? "" : ` (${timeZoneDisplayName(timeZone, options.now)})`;
+  return `${words} · Next ${formatCalendarTime(next, options.now, timeZone, options.locale)}${zone}`;
 }
 
 /** One Time Zone choice (#2971): "New York (UTC−4)", over its IANA name. */
@@ -610,16 +619,22 @@ function zoneCity(timeZone: string): string {
  * The Time Zone field's choices (#2971): every zone the browser lists, labelled by city and current
  * offset, with the IANA name as the second line, in alphabetical order. UTC and the stored zone are
  * always among them, so a zone this browser does not list (or an alias) stays chosen, and a browser
- * with no list still offers the stored zone and UTC.
+ * with no list still offers the stored zone and UTC. A stored zone spelled with spaces around a
+ * listed one takes that one's place, so it stays chosen and reads as the zone it is.
  */
 export function timeZoneChoices(stored: string, now: number, zones: readonly string[] = browserTimeZones()): TimeZoneChoice[] {
   const values = new Set(zones);
   values.add("UTC");
-  if (stored.trim()) values.add(stored);
+  const storedName = stored.trim();
+  if (storedName) {
+    values.delete(storedName);
+    values.add(stored);
+  }
   return [...values].map((value) => {
-    const offset = utcOffsetLabel(value, now);
-    const city = value === "UTC" ? "UTC" : zoneCity(value);
-    return { value, label: offset && value !== "UTC" ? `${city} (${offset})` : city, description: value };
+    const name = value.trim();
+    const offset = utcOffsetLabel(name, now);
+    const city = name === "UTC" ? "UTC" : zoneCity(name);
+    return { value, label: offset && name !== "UTC" ? `${city} (${offset})` : city, description: name };
   }).sort((a, b) => a.label.localeCompare(b.label, "en") || a.value.localeCompare(b.value, "en"));
 }
 
