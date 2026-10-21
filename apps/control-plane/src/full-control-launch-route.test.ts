@@ -1165,7 +1165,7 @@ test("revoking a campaign that waits for its first message restores Custom: no m
   } finally { await server.close(); f.db.close(); }
 });
 
-test("enabling Full Control on a campaign with no issue scope derives it from its repository and first message, or waits for one", async () => {
+test("enabling Full Control on a campaign with no issue scope derives it from its repository and recorded request, or waits for a first message", async () => {
   const f = fixture();
   const { server } = await app(f);
   const enable = async (id: string) => {
@@ -1187,7 +1187,12 @@ test("enabling Full Control on a campaign with no issue scope derives it from it
   try {
     const messaged = customCampaign(f, "messaged-root");
     unscoped(messaged);
-    f.db.appendEvent(messaged, { kind: "user_message", text: "Fix #12 and #44 in this repository." }, Date.now());
+    // The launch request recorded #12 and #44; #44 is not an issue. The transcript records no
+    // author, so its references (here #7, as an agent could have sent) are never scope.
+    const recorded = f.db.getSession(messaged)!.orchestratorPolicy!;
+    recorded.issueNumbers = [12, 44];
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(recorded), messaged);
+    f.db.appendEvent(messaged, { kind: "user_message", text: "Fix #7 in this repository." }, Date.now());
     f.issues.notIssues.add(44);
     const reviewed = await enable(messaged);
     assert.equal(reviewed.capabilities.find((item) => item.id === "repository_scope")!.reason,
@@ -1219,5 +1224,49 @@ test("enabling Full Control on a campaign with no issue scope derives it from it
       headers: { authorization: "Bearer human" }, payload: {} })).json().preflight as CampaignLaunchPreflight;
     assert.equal(blocked.ready, false);
     assert.match(blocked.summary.blockers[0]!.reason, /could not verify this campaign's repository/u);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("Full Control never inherits Custom per-decision owners: with every toggle Human, launch and enable both give the Orchestrator all five", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  const FIVE = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval"] as const;
+  const humanToggles = Object.fromEntries(FIVE.map((category) => [category, "human" as const]));
+  const assertOrchestratorOwnsFive = (id: string) => {
+    const root = f.db.getSession(id)!;
+    for (const category of FIVE) {
+      assert.equal(root.parentControlPolicy!.decisions[category], "human", `${category}'s Custom toggle is Human`);
+      assert.equal(f.db.campaignProjection(id)!.decisionOwners[category], "orchestrator", `${category} is the boundary's`);
+    }
+    const asked = f.sessions.createWorkflowDecision(id, { requestId: `q-${id}`, resourceKey: `q-${id}`, resourceSnapshot: {
+      category: "implementation_question", question: "Which parser should the campaign use?",
+      options: [{ optionId: "a", label: "The existing one" }, { optionId: "b", label: "A new one" }] } });
+    assert.equal(asked.ok, true, asked.error ?? "the decision was requested");
+    assert.equal(asked.data!.authority, "orchestrator");
+  };
+  try {
+    // Launch: the session's Custom toggles say Human for every gate.
+    const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
+      config: { model: "claude-opus-5-5", permissionMode: "orchestrator" },
+      orchestrator: { delegation: { decisions: humanToggles } } } } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "human-toggles", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const launched = admitted.json().id as string;
+    f.db.updateSessionStatus(launched, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, launched, "Deliver #12")).ok, true);
+    assertOrchestratorOwnsFive(launched);
+
+    // Enable: a Custom campaign whose saved owners are all Human.
+    const custom = customCampaign(f, "human-toggle-root");
+    const { preflight: reviewed, expectedRevision } = (await server.inject({ method: "POST",
+      url: `/api/sessions/${custom}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload: {} })).json() as
+      { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${custom}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assertOrchestratorOwnsFive(custom);
   } finally { await server.close(); f.db.close(); }
 });

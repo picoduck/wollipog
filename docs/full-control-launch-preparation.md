@@ -18,6 +18,14 @@ route; Revoke is unchanged. Orchestrator defaults save the preferred mode and a 
 campaign budget. Neither grants authority, and older settings APIs refuse saving the mode. With
 no saved campaign budget, the campaign has no limit.
 
+The Full Control boundary owns every operation it lists, so the Custom per-decision owners never
+apply under it, whatever their toggles say (Review Round Extensions follow Parent Control, #3369).
+When Full Control is chosen or in effect, Orchestrator Controls shows only the mode, its line, any
+inline blocker, and Enable Full Control or Revoke. Child Session Requests, Workflow Decisions, the
+evidence and retention notes, and Campaign Behavior return when Custom is chosen. On the
+Customize… Decisions tab, Full Control likewise hides Descendant Requests and the per-gate owners.
+A row that has a problem blocking the launch stays visible.
+
 ## The First Message Is the Task
 
 A launch that names no task, issue numbers or objective (`FullControlLaunchRequest` with only a
@@ -48,17 +56,17 @@ only) establishes the boundary before the Orchestrator's first turn:
 - If the message is not delivered, the wait reopens (`reopenFirstMessageScope`, digest-bound), and
   the next first message establishes a newer revision.
 
-While the root waits, every other prompt is refused, whether from an agent, an automation or a
-steering lane. Agent-authored text therefore can never establish or widen the scope. Later
+While the root waits, every other prompt is refused, whether from an agent, an automation, a
+steering lane or a campaign continuation. Agent-authored text therefore can never establish or widen the scope. Later
 messages, the owner's included, never change it: scope changes go through the existing scope
 review. Revoking Full Control restores Custom: the wait applies only while the control is Full
 Control.
 
-Enabling Full Control on an existing campaign that has no issue scope derives one the same way.
-The repository comes from the runner's inspection of the root's checkout. The issues are those
-the campaign's first message references, together with any that the initial request already
-scoped, as the runner verifies them. If no message was sent yet, the campaign waits for its first
-message exactly like a launch. A campaign whose scope another person established can't be enabled
+Enabling Full Control on an existing campaign that has no issue scope derives one. The repository
+comes from the runner's inspection of the root's checkout. The issues are only those the server
+recorded from the owner's launch request, as the runner verifies them. Transcript messages record
+no author, and an agent may have messaged the root first, so their text is never scope. If no
+message was sent yet, the campaign waits for its first message exactly like a launch. A campaign whose scope another person established can't be enabled
 by someone else.
 
 ## Server Evaluation

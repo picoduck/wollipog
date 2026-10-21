@@ -1832,6 +1832,28 @@ test("a genuine impossibility stops Full Control with one inline error where lau
   } finally { await unmountFixture(fixture); }
 });
 
+test("Orchestrator Policy shows only the control choice under Full Control, and the Custom owners again under Custom", async () => {
+  const fixture = await mountFixture({ runners: [fullControlRunner()] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    const dialog = await openPolicy(fixture.container, "decisions");
+    const custom = (dialog: HTMLElement) => ({
+      gates: [...dialog.querySelectorAll("h4")].some((node) => node.textContent === "Who Decides at Each Gate"),
+      prMerge: dialog.querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]') !== null,
+      descendants: [...dialog.querySelectorAll(".setting-row-title")].some((node) => node.textContent?.startsWith("Descendant Requests")),
+      humanOnly: dialog.querySelector(".orchestrator-human-only") !== null,
+    });
+    assert.deepEqual(custom(dialog), { gates: true, prMerge: true, descendants: true, humanOnly: true });
+    await chooseSegment(dialog, "Orchestrator Control", "Full Control");
+    assert.deepEqual(custom(dialog), { gates: false, prMerge: false, descendants: false, humanOnly: false },
+      "the boundary owns every gate, so no Custom owner is shown");
+    assert.match(dialog.textContent ?? "", /The Orchestrator runs this campaign end to end\./);
+    await chooseSegment(dialog, "Orchestrator Control", "Custom");
+    assert.deepEqual(custom(dialog), { gates: true, prMerge: true, descendants: true, humanOnly: true });
+  } finally { await unmountFixture(fixture); }
+});
+
 test("new Orchestrator sessions send only explicit overrides after showing effective defaults", async () => {
   const enabledRunner: RunnerView = {
     ...runner,

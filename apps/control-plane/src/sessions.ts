@@ -5150,10 +5150,10 @@ export class SessionsService {
     return result;
   }
 
-  /** Enabling Full Control on a campaign with no issue scope derives one as a launch does (#2940):
-   * the runner's repository, and the issues its owner's first message references, with any the
-   * initial request already scoped, that the runner verifies. With no message yet, the scope is
-   * task-only and the next message is the task. Null when the repository cannot be verified. */
+  /** Enabling Full Control on a campaign with no issue scope derives one (#2940): the runner's
+   * repository and the issues the server recorded from the owner's launch request, as the runner
+   * verifies them. With no message yet, the scope is task-only and the owner's next message is the
+   * task. Null when the repository cannot be verified. */
   async campaignScopeFromFirstMessage(sessionId: string): Promise<{ repository: string; issueNumbers: number[]; firstMessage: boolean } | null> {
     const root = this.db.getSession(sessionId);
     if (!root?.orchestratorPolicy || root.orchestratorPolicy.issueScope || !this.hub.isRunnerOnline(root.runnerId)) return null;
@@ -5166,11 +5166,13 @@ export class SessionsService {
           typeof response.repository === "string" && /^[\w.-]+\/[\w.-]+$/u.test(response.repository)) repository = response.repository.toLowerCase();
     } catch { /* An unreachable runner verifies no repository. */ }
     if (!repository) return null;
-    const message = this.db.initialUserMessageText(sessionId);
-    const candidates = [...new Set([...(message ? issueReferencesInMessage(message, repository) : []),
-      ...(root.orchestratorPolicy.issueNumbers ?? [])])].sort((a, b) => a - b).slice(0, 100);
+    // Transcript messages record no author, and an agent may have messaged a Custom root before its
+    // owner did, so their text is never scope here. Only the issues the server recorded from the
+    // Human's own launch request count; with no message yet, the owner's first one is the task,
+    // and only the Human-only first-message path can establish it.
+    const candidates = [...new Set(root.orchestratorPolicy.issueNumbers ?? [])].sort((a, b) => a - b).slice(0, 100);
     const issueNumbers = candidates.length ? await this.verifiedMessageIssues(root, repository, candidates) : [];
-    return { repository, issueNumbers, firstMessage: message === null };
+    return { repository, issueNumbers, firstMessage: this.db.initialUserMessageText(sessionId) === null };
   }
 
   /** The referenced issues the runner reads as issues of the campaign repository. A pull request,
@@ -5712,6 +5714,8 @@ export class SessionsService {
       if (active) continue;
       const campaign = this.db.campaignContinuationLifecycle(campaignSessionId);
       if (!campaign || campaign.archived || campaign.status !== "idle" || campaign.hasPendingApproval) continue;
+      // Only its owner's first message may start a Full Control campaign launched without a task (#2940).
+      if (this.awaitingFirstMessage(this.db.getSession(campaignSessionId)) || this.firstMessagesInFlight.has(campaignSessionId)) continue;
       if (this.db.campaignContinuationAdmission(campaignSessionId).state !== "available") continue;
       if (!this.db.hasPendingCampaignContinuationEvents(campaignSessionId)) continue;
       const projection = this.db.campaignProjection(campaignSessionId);

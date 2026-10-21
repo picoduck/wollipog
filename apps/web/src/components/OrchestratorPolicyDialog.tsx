@@ -300,12 +300,13 @@ export function OrchestratorPolicyDialog({
     </SettingsGroup>
   );
 
+  // Full Control launches like any Orchestrator (#2940): its boundary owns every gate, so the Custom
+  // owners below would have no effect and are not shown. A row whose problem blocks the launch stays.
+  const fullControl = draft.controlMode === "full_control";
   const decisionsPanel = (
     <SettingsGroup
-      foot={<p className="orchestrator-human-only"><LockIcon size={14} aria-hidden="true" />{HUMAN_ONLY_DECISIONS}</p>}
+      foot={fullControl ? undefined : <p className="orchestrator-human-only"><LockIcon size={14} aria-hidden="true" />{HUMAN_ONLY_DECISIONS}</p>}
     >
-      {/* Full Control launches like any Orchestrator: the session's Create Session starts it, and
-          the person's first message is its task (#2940). */}
       <SegmentedRow
         title="Orchestrator Control"
         badge={mark("controlMode", resetLabels.controlMode)}
@@ -313,7 +314,7 @@ export function OrchestratorPolicyDialog({
         value={draft.controlMode}
         onChange={(value) => setDraft((current) => ({ ...current, controlMode: value as OrchestratorPolicyDraft["controlMode"] }))}
       />
-      <SelectRow
+      {(!fullControl || problemFor("delegation.parentControl") !== null) && <SelectRow
         title="Descendant Requests"
         description={PARENT_CONTROL_OPTIONS.find((option) => option.value === evaluation.parentControl.value)?.description}
         badge={mark("delegation.parentControl", resetLabels.parentControl)}
@@ -324,10 +325,11 @@ export function OrchestratorPolicyDialog({
           ...current,
           values: { ...current.values, delegation: { ...current.values.delegation, parentControl: value as typeof delegation.parentControl } },
         }))}
-      />
-      <h4 className="orchestrator-gates-label">Who Decides at Each Gate</h4>
+      />}
+      {!fullControl && <h4 className="orchestrator-gates-label">Who Decides at Each Gate</h4>}
       {WORKFLOW_DECISION_CATEGORIES.map((category) => {
         const path = `delegation.decisions.${category}` as const;
+        if (fullControl && problemFor(path) === null) return null;
         return (
           <SegmentedRow
             key={category}
