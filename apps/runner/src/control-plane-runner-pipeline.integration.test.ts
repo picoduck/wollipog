@@ -424,6 +424,9 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
       // DB) must survive the restart: after the daemon reconnects and resumes it, a fresh prompt must
       // drive another full turn whose terminal message again reaches the /ui subscription.
       let before: ReturnType<typeof journal> = [];
+      const counts = () => Object.fromEntries(["process", "session", "provider"].map((kind) =>
+        [kind, descendants().filter((entry) => entry.kind === kind).length]));
+      const beforeCounts = counts();
       const abrupt = stopMode === "SIGKILL" || stopMode === "second-signal";
       if (stopMode === "smoke") {
         await stopChild(runner);
@@ -503,7 +506,12 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
         assert.match(eventPayload(refusal).payload?.message ?? "", /Provider HOME is already in use/);
         assert.deepEqual(journal(runnerHome), before, "a refused replacement cannot append or release ownership");
         assert.ok(descendants().some((entry) => liveFixtureProcess(entry.pid, entry.startedAt)), "the refusal was observed while the old provider survived");
-        assert.equal(descendants().filter((entry) => entry.kind === "provider").length, 1, "refusal did not start another provider turn");
+        const refusedCounts = counts();
+        // Discovery independently invokes this executable for initialize-only probes. Preserve
+        // that observation instead of claiming a lease refusal prevents every executable launch.
+        t.diagnostic(`ACP executable/session/turn counts: before restart=${JSON.stringify(beforeCounts)}, at refusal=${JSON.stringify(refusedCounts)}`);
+        assert.equal(refusedCounts.session, beforeCounts.session, "refusal did not initialize another provider session");
+        assert.equal(refusedCounts.provider, beforeCounts.provider, "refusal did not start another provider turn");
         await killFixtureProcesses();
       }
 

@@ -18,6 +18,7 @@ if (descendant) {
   // prompt should create retained background work or count as a provider turn.
   let input = "";
   let started = false;
+  let sessionStarted = false;
   process.stdin.on("data", (chunk) => {
     input += String(chunk);
     for (;;) {
@@ -27,6 +28,10 @@ if (descendant) {
       input = input.slice(newline + 1);
       if (!line) continue;
       const message = JSON.parse(line);
+      if (!sessionStarted && ["session/new", "session/load", "session/resume"].includes(message.method)) {
+        sessionStarted = true;
+        appendFileSync(output, JSON.stringify({ pid: process.pid, startedAt: stat[19], kind: "session" }) + "\n");
+      }
       if (started || message.method !== "session/prompt") continue;
       started = true;
       appendFileSync(output, JSON.stringify({ pid: process.pid, startedAt: stat[19], kind: "provider" }) + "\n");
