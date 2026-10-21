@@ -482,6 +482,23 @@ test("with the runner offline, the refusal's Restart Session says why it is disa
   }
 });
 
+test("an archived session's refusal offers no ordinary restart, and says to unarchive (#3240)", async () => {
+  const restarts: string[] = [];
+  const fixture = await mount(sessionView({ status: "failed", archived: true, providerHomeRefusal: launchRefusal("busy") }), {
+    client: { restart: async (id: string) => { restarts.push(id); throw new Error("must not restart"); } } as Partial<ApiClient>,
+  });
+  try {
+    const restart = fixture.button("Restart Session")!;
+    assert.equal(restart.disabled, true);
+    assert.deepEqual(describedText(fixture.container, restart), ["Unarchive the session to restart it."]);
+    await act(async () => { restart.click(); });
+    await flush();
+    assert.deepEqual(restarts, []);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a running session never shows a refusal a summary kept (#3240)", async () => {
   const fixture = await mount(sessionView({ status: "running", providerHomeRefusal: launchRefusal("busy") }));
   try {

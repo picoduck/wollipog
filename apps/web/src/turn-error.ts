@@ -12,7 +12,7 @@ const TURN_ERROR_SHAPES: ReadonlyArray<{ pattern: RegExp; sentence: string }> = 
   {
     // The runner's provider-HOME lease refusals (#3240). A v233 runner also reports the code, and the
     // session's notice says what to do; this sentence covers every runner.
-    pattern: /\bProvider[- ]HOME\b|\bprovider account unavailable:|\bThis provider profile\b/,
+    pattern: /\b[Pp]rovider[- ]HOME\b|\bprovider account unavailable:|\bThis provider profile\b/,
     sentence: "The runner couldn't use this session's provider account, so the agent didn't start.",
   },
   {

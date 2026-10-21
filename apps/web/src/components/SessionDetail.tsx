@@ -4585,7 +4585,8 @@ function SessionDetailLoaded({
   // The launch refusal notice's Restart Session (#3240): the same restart as the header's, for the
   // failed or stopped session the refusal left.
   const restartFromRefusal = useCallback(async () => {
-    if (!runnerOnline || busy || restartPending || restartRefusal !== null || turnRetryInFlightRef.current) return;
+    if (!runnerOnline || busy || restartPending || restartRefusal !== null || session.archived ||
+        turnRetryInFlightRef.current) return;
     const generation = viewGenerationRef.current;
     setError(null);
     setBusy(true);
@@ -4600,7 +4601,7 @@ function SessionDetailLoaded({
         setBusy(false);
       }
     }
-  }, [api, busy, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
+  }, [api, busy, loadSession, restartPending, restartRefusal, runnerOnline, session.archived, session.id]);
   // Retry Turn on a failed turn's notice (#2169): the turn's prompt again, as a new turn. A failed
   // or stopped session restarts first, since the control plane admits no prompt to it until then,
   // but only where the restart resumes the provider conversation.
@@ -5087,7 +5088,10 @@ function SessionDetailLoaded({
     const switchReason = !accountSwitchSupported
       ? runnerCapabilityRequirement(runner?.protocolVersion, "sessionProviderAccountSwitch", "session account switching")
       : runnerOfflineReason;
-    const restartReason = runnerOfflineReason ?? restartRefusal;
+    // The control plane refuses to restart an archived session; Session Archived's Unarchive is the
+    // way back (#2301).
+    const restartReason = runnerOfflineReason ?? restartRefusal ??
+      (session.archived ? "Unarchive the session to restart it." : null);
     const actions = copy.actions.filter((action) => action !== "switch_account" || accountSwitchApplicable);
     const buttonClass = (index: number) => index === 0 ? "btn primary sm" : "btn sm";
     // Each disabled action's reason is visible under the body, once even when both share it.

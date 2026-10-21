@@ -18,6 +18,8 @@ test("describeTurnError says known failures in plain words", () => {
       "The runner couldn't use this session's provider account, so the agent didn't start."],
     ["Provider-HOME lease helper unavailable; preserve all evidence and restore the fixed helper and executable staging directory before retrying.",
       "The runner couldn't use this session's provider account, so the agent didn't start."],
+    ["agent process could not be created: This provider HOME no longer holds the profile that this account or session recorded, so it was not used. Restore the original directory or adopt the replacement explicitly.",
+      "The runner couldn't use this session's provider account, so the agent didn't start."],
     ["provider account unavailable: This provider profile is not granted to this control plane. An Owner or Admin must grant access on this Machine before it can be used.",
       "The runner couldn't use this session's provider account, so the agent didn't start."],
   ];
