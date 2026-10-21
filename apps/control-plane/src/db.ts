@@ -18602,8 +18602,10 @@ export class ControlPlaneDb {
     // An authorization never ends an existing wait (only a revoke to Custom lifts its fence): it
     // records its own limit provenance, and the queue keeps holding any retained work until the
     // owner's first message.
-    if (control.mode === "full_control" && campaign.firstMessageScope?.state === "pending") {
-      campaign.firstMessageScope = { state: "pending", ...(derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
+    const waiting = campaign.firstMessageScope;
+    if (control.mode === "full_control" && (waiting?.state === "pending" || waiting?.state === "delivering")) {
+      const { derivedLimits: _stale, ...rest } = waiting;
+      campaign.firstMessageScope = { ...rest, ...(derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) } as typeof waiting;
     }
     campaign.control = structuredClone(control);
     this.db.exec("BEGIN");
@@ -18631,7 +18633,7 @@ export class ControlPlaneDb {
    * never lets another message reach it first. Only the service's authenticated Human
    * first-message path calls this; the boundary's own author is the only accepted Human. */
   establishFirstMessageScope(id: string, input: { control: CampaignControl; scope: import("@wollipog/protocol").CampaignIssueScope; messageDigest: string;
-    expectedRevision: number; now: number }): boolean {
+    deliveryId: string; expectedRevision: number; now: number }): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
     const previous = policy?.control?.mode === "full_control" ? policy.control.boundary : null;
     const { control, scope } = input;
@@ -18643,18 +18645,14 @@ export class ControlPlaneDb {
         boundary.repository !== previous.repository || scope.revision !== policy.issueScope.revision + 1 ||
         boundary.issueScopeRevision !== scope.revision || scope.authorizedAt > boundary.authorizedAt ||
         JSON.stringify(boundary.issueAuthority?.epics ?? []) !== JSON.stringify(scope.issueNumbers) ||
-        !/^[a-f0-9]{64}$/.test(input.messageDigest)) return false;
+        !/^[a-f0-9]{64}$/.test(input.messageDigest) || !/^first_message_[a-f0-9-]{36}$/.test(input.deliveryId)) return false;
     policy.control = structuredClone(control);
     policy.issueScope = structuredClone(scope);
     policy.issueNumbers = [...scope.issueNumbers];
     const derivedLimits = policy.firstMessageScope.derivedLimits;
+    policy.firstMessageScope = { state: "delivering", messageDigest: input.messageDigest, deliveryId: input.deliveryId,
+      ...(derivedLimits ? { derivedLimits } : {}) };
     return this.atomic(() => {
-      // This delivery starts after everything already recorded for the session.
-      const after = {
-        eventSeq: Number((this.stmt("SELECT COALESCE(MAX(seq), 0) AS n FROM session_events WHERE session_id=?").get(id) as { n: number }).n),
-        promptRowid: Number((this.stmt("SELECT COALESCE(MAX(rowid), 0) AS n FROM session_prompt_commands").get() as { n: number }).n),
-      };
-      policy.firstMessageScope = { state: "delivering", messageDigest: input.messageDigest, after, ...(derivedLimits ? { derivedLimits } : {}) };
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
         updated_at=? WHERE id=? AND parent_control_policy_revision=?`).run(JSON.stringify(policy), input.now, id, input.expectedRevision);
       if (Number(changed.changes) !== 1) return false;
@@ -18677,26 +18675,23 @@ export class ControlPlaneDb {
   }
 
   /** Roots whose first message was being delivered when this control plane last stopped. */
-  firstMessageDeliveries(): Array<{ sessionId: string; messageDigest: string; after: { eventSeq: number; promptRowid: number } }> {
+  firstMessageDeliveries(): Array<{ sessionId: string; messageDigest: string; deliveryId: string }> {
     const rows = this.stmt(`SELECT id FROM sessions WHERE CASE WHEN json_valid(orchestrator_policy)
       THEN json_extract(orchestrator_policy, '$.firstMessageScope.state') ELSE NULL END='delivering'`).all() as unknown as Array<{ id: string }>;
     return rows.flatMap((row) => {
       const first = this.sessionOrchestratorPolicy(row.id)?.firstMessageScope;
-      return first?.state === "delivering" ? [{ sessionId: row.id, messageDigest: first.messageDigest, after: first.after }] : [];
+      return first?.state === "delivering" ? [{ sessionId: row.id, messageDigest: first.messageDigest, deliveryId: first.deliveryId }] : [];
     });
   }
 
-  /** Whether this delivery reached the session: a user message, or a prompt command still live in
-   * its durable queue, recorded after the delivery began with exactly this digest. Anything
-   * recorded earlier, even identical text, is history, never this delivery. */
-  firstMessageAdmitted(sessionId: string, messageDigest: string, after: { eventSeq: number; promptRowid: number }): boolean {
-    const matches = (text: unknown) => typeof text === "string" && createHash("sha256").update(text, "utf8").digest("hex") === messageDigest;
-    const events = this.stmt(`SELECT substr(json_extract(payload, '$.text'), 1, 65537) AS text FROM session_events
-      WHERE session_id=? AND kind='user_message' AND seq>? ORDER BY seq LIMIT 8`).all(sessionId, after.eventSeq) as unknown as Array<{ text: unknown }>;
-    if (events.some((event) => matches(event.text))) return true;
-    const queued = this.stmt(`SELECT json_extract(payload_json, '$.text') AS text FROM session_prompt_commands
-      WHERE session_id=? AND rowid>? AND state NOT IN ('failed') ORDER BY rowid LIMIT 8`).all(sessionId, after.promptRowid) as unknown as Array<{ text: unknown }>;
-    return queued.some((row) => matches(row.text));
+  /** Whether this exact delivery was admitted: the durable prompt command with its delivery id,
+   * for this session, carrying exactly this digest and not known to have failed. The queue then
+   * delivers it once on its own. No other row or text, however identical, ever counts. */
+  firstMessageAdmitted(sessionId: string, messageDigest: string, deliveryId: string): boolean {
+    const row = this.stmt(`SELECT json_extract(payload_json, '$.text') AS text, state FROM session_prompt_commands
+      WHERE command_id=? AND session_id=?`).get(deliveryId, sessionId) as { text: unknown; state: string } | undefined;
+    return Boolean(row && row.state !== "failed" && typeof row.text === "string" &&
+      createHash("sha256").update(row.text, "utf8").digest("hex") === messageDigest);
   }
 
   /** Any conversation the session already has: a user message, a durable prompt or a provider
@@ -30872,10 +30867,9 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   const digest = (v: unknown) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
   const limits = (v: unknown) => v === undefined || Boolean(v && typeof v === "object" && Object.keys(v).length === 2 &&
     typeof (v as Record<string, unknown>).acceptedFollowUps === "boolean" && typeof (v as Record<string, unknown>).maxIssues === "boolean");
-  const after = (v: unknown) => Boolean(v && typeof v === "object" && Number.isSafeInteger((v as Record<string, unknown>).eventSeq) &&
-    Number.isSafeInteger((v as Record<string, unknown>).promptRowid));
   if (first !== undefined && !(first && (first.state === "pending" && limits(first.derivedLimits) ||
-      first.state === "delivering" && digest(first.messageDigest) && after(first.after) && limits(first.derivedLimits) ||
+      first.state === "delivering" && digest(first.messageDigest) && typeof first.deliveryId === "string" &&
+        /^first_message_[a-f0-9-]{36}$/.test(first.deliveryId) && limits(first.derivedLimits) ||
       first.state === "established" && digest(first.messageDigest) && Number.isSafeInteger(first.establishedAt)))) return null;
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   const validSources = new Set([

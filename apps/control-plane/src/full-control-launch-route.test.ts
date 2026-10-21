@@ -1074,7 +1074,7 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
     assert.equal(agent.status, 409);
     assert.match(agent.error!, /owner's first message/u);
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
-    assert.equal(f.sent.filter((message) => message.type === "prompt_session").length, 0);
+    assert.equal(f.sent.filter((message) => message.type === "prompt_session" || message.type === "durable_session_command").length, 0);
 
     f.issues.notIssues.add(3); // A pull request: GitHub does not read it as an issue.
     const text = "Ship #12 and owner/repo#7.\nAlso https://github.com/owner/repo/issues/9, but not other/repo#5,\n" +
@@ -1104,12 +1104,16 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
     // The runner holds the new scope and boundary before the message reaches the Orchestrator.
     const after = f.sent.slice(before);
     const sync = after.findIndex((message) => message.type === "campaign_issue_scope" && message.operation === "synchronize");
-    const prompt = after.findIndex((message) => message.type === "prompt_session");
+    // The first message is admitted through the durable queue under its own delivery id.
+    const prompt = after.findIndex((message) => message.type === "durable_session_command" && message.command.type === "prompt_session");
     assert.ok(sync >= 0 && prompt > sync, after.map((message) => message.type).join(","));
     const synced = after[sync] as Extract<ControlPlaneToRunner, { type: "campaign_issue_scope"; operation: "synchronize" }>;
     assert.equal(synced.scope.revision, 2);
     assert.deepEqual(synced.control, policy.control);
-    assert.equal((after[prompt] as Extract<ControlPlaneToRunner, { type: "prompt_session" }>).text, text);
+    const durable = after[prompt] as Extract<ControlPlaneToRunner, { type: "durable_session_command" }>;
+    assert.equal((durable.command as Extract<typeof durable.command, { type: "prompt_session" }>).text, text);
+    assert.equal(durable.commandId, (policy.firstMessageScope as { deliveryId?: string }).deliveryId ?? durable.commandId);
+    assert.match(durable.commandId, /^first_message_/u);
 
     // Later messages, the owner's or an agent's, never change the scope the first one set.
     f.db.updateSessionStatus(id, "idle", Date.now());
@@ -1131,13 +1135,13 @@ test("only the launching person's text message establishes the boundary; no refe
     assert.equal((await f.sessions.promptFromHuman(f.human, id, "", [], "compact")).status, 409, "a slash command is not the task");
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
 
-    // The runner drops the message: the boundary it set waits for the next first message.
-    const send = f.hub.sendToRunner;
-    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
+    // The message cannot be admitted: the boundary it set waits for the next first message.
+    const stage = outboxOf(f).stage.bind(outboxOf(f));
+    outboxOf(f).stage = () => { throw new Error("not persisted"); };
     const dropped = await f.sessions.promptFromHuman(f.human, id, "Tidy the docs");
     assert.equal(dropped.ok, false);
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
-    f.hub.sendToRunner = send;
+    outboxOf(f).stage = stage;
     f.db.updateSessionStatus(id, "idle", Date.now());
 
     // An unreadable origin verifies no reference, so the scope stays task-only.
@@ -1392,50 +1396,104 @@ test("a control-plane restart mid-delivery keeps the owner-only fence and never 
     void f.sessions.promptFromHuman(f.human, id, text);
     await new Promise((resolve) => setTimeout(resolve, 20));
     const delivering = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
-    assert.deepEqual(delivering, { state: "delivering", messageDigest: firstMessageDigest(text),
-      after: (delivering as { after: { eventSeq: number; promptRowid: number } }).after,
-      derivedLimits: { acceptedFollowUps: true, maxIssues: true } }, "the wait is durably fenced before delivery");
+    assert.equal(delivering.state, "delivering", "the wait is durably fenced before admission");
+    if (delivering.state !== "delivering") throw new Error("delivering expected");
+    assert.equal(delivering.messageDigest, firstMessageDigest(text));
+    assert.match(delivering.deliveryId, /^first_message_[a-f0-9-]{36}$/u);
 
-    // The process dies here: nothing it still holds may deliver, and a new one starts on the same database.
-    const send = f.hub.sendToRunner;
-    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
+    // The process dies before admission; nothing it still holds can admit the message.
+    outboxOf(f).stage = () => { throw new Error("this process is gone"); };
     const restarted = new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
-    const recovered = f.db.getSession(id)!.orchestratorPolicy!;
-    assert.deepEqual(recovered.firstMessageScope, PENDING, "an unrecorded message reopens the wait, still fenced");
-    f.hub.sendToRunner = send;
-    const automation = await restarted.promptOrSteer(id, "Orchestrate issues 40 and 41");
-    assert.equal(automation.status, 409, "an automation prompt is still refused after the restart");
-    assert.equal(f.sent.filter((message) => message.type === "prompt_session").length, 0, "the first message was never resent");
-    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING, "an unadmitted message reopens the wait, still fenced");
+    assert.equal((await restarted.promptOrSteer(id, "Orchestrate issues 40 and 41")).status, 409, "an automation prompt is still refused");
     release();
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING, "the dead process cannot settle it");
-    f.hub.sendToRunner = send;
+    assert.equal(durableSends(f, id), 0, "the first message was never resent");
     f.issues.holdSync = null;
     f.db.updateSessionStatus(id, "idle", Date.now());
     assert.equal((await restarted.promptFromHuman(f.human, id, text)).ok, true, "the owner sends it again");
     assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
-    assert.equal(f.sent.filter((message) => message.type === "prompt_session").length, 1, "delivered exactly once");
+    assert.equal(durableSends(f, id), 1, "delivered exactly once");
+  } finally { await server.close(); f.db.close(); }
+});
 
-    // A message the old process did deliver (recorded before the crash) is recognized, not resent.
-    const { id: recorded } = await firstMessageLaunch(f, server);
+test("recovery settles on the delivery's exact command, whatever happened to other queue rows (CR-3.2)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // Another session owns the highest queue row, which is then removed, so row ids can be reused.
+    const { id: other } = await firstMessageLaunch(f, server);
+    outboxOf(f).stage(other, "r", { type: "prompt_session", sessionId: other, text: "Elsewhere" });
+    f.db.raw().prepare("DELETE FROM session_prompt_commands WHERE session_id=?").run(other);
+
+    const { id } = await firstMessageLaunch(f, server);
+    let release: () => void = () => undefined;
     f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
-    void f.sessions.promptFromHuman(f.human, recorded, "Fix #12");
+    const text = "Fix #12";
+    void f.sessions.promptFromHuman(f.human, id, text);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    f.db.appendEvent(recorded, { kind: "user_message", text: "Fix #12" }, Date.now());
-    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
-    new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
-    assert.equal(f.db.getSession(recorded)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+    const delivering = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+    if (delivering.state !== "delivering") throw new Error("delivering expected");
+    // Admission commits the exact command, then the process dies before settling.
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text }, Date.now(), delivering.deliveryId);
+    outboxOf(f).stage = () => { throw new Error("this process is gone"); };
+    const restarted = new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "settled from that exact command");
+    restarted.retryDuePrompts(Date.now());
+    const sends = f.sent.filter((message) => message.type === "durable_session_command" && message.commandId === delivering.deliveryId);
+    assert.equal(sends.length, 1, "and the queue delivers it once");
     release();
     await new Promise((resolve) => setTimeout(resolve, 20));
-    f.hub.sendToRunner = send;
+    restarted.retryDuePrompts(Date.now());
+    assert.equal(f.sent.filter((message) => message.type === "durable_session_command" && message.commandId === delivering.deliveryId).length, 1,
+      "never twice");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("reauthorizing while the first message is being delivered is refused; the next authorization's ceilings bound the retry (CR-3.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  const reauthorize = async (id: string, payload: object) => {
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    return server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { ...payload, expectedRevision, preflightDigest: reviewed.digest } });
+  };
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const overrides = { budget: { acceptedFollowUps: 0 }, issues: { maxIssues: 1 } };
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    const delivering = f.sessions.promptFromHuman(f.human, id, "Tidy the docs");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const refused = await reauthorize(id, { overrides });
+    assert.equal(refused.statusCode, 409);
+    assert.match(refused.json().error, /first message is being delivered; try again in a moment/u);
+    // The delivery then fails: the wait reopens with the launch's own provenance, unchanged.
+    const stage = outboxOf(f).stage.bind(outboxOf(f));
+    outboxOf(f).stage = () => { throw new Error("not persisted"); };
+    release();
+    assert.equal((await delivering).ok, false);
+    outboxOf(f).stage = stage;
+    f.issues.holdSync = null;
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
+    assert.equal((await reauthorize(id, { overrides })).statusCode, 200);
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "at most one issue");
+    assert.equal(boundaryOf(f, id).budgetAuthority!.acceptedFollowUps, 0);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 1);
   } finally { await server.close(); f.db.close(); }
 });
 
 /** Retained durable work, staged exactly as the service queues a prompt. */
 const outboxOf = (f: ReturnType<typeof fixture>) => (f.sessions as unknown as { promptOutbox: SessionPromptOutbox }).promptOutbox;
-const durableSends = (f: ReturnType<typeof fixture>, sessionId: string) => f.sent.filter((message) =>
-  message.type === "durable_session_command" && message.command.type === "prompt_session" && message.command.sessionId === sessionId).length;
+const durableSends = (f: ReturnType<typeof fixture>, sessionId: string, text?: string) => f.sent.filter((message) =>
+  message.type === "durable_session_command" && message.command.type === "prompt_session" && message.command.sessionId === sessionId &&
+  (text === undefined || message.command.text === text)).length;
 
 test("reauthorizing a waiting campaign stores that request's own ceilings: 0 follow-ups and 1 issue hold for the first message (CR-2.1)", async () => {
   const f = fixture();
@@ -1513,12 +1571,13 @@ test("retained queued work never runs on a fresh root before its first owner mes
     const delivering = f.sessions.promptFromHuman(f.human, id, "Ship #12");
     await new Promise((resolve) => setTimeout(resolve, 20));
     f.sessions.retryDuePrompts(Date.now() + 60_000);
-    assert.equal(durableSends(f, id), 0, "and while it delivers");
+    assert.equal(durableSends(f, id, "Retained: take #14"), 0, "and while it delivers");
     release();
     assert.equal((await delivering).ok, true);
     assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+    assert.equal(durableSends(f, id, "Ship #12"), 1, "the first message is delivered at once");
     f.sessions.retryDuePrompts(Date.now() + 120_000);
-    assert.equal(durableSends(f, id), 1, "after the first message the retained work runs");
+    assert.equal(durableSends(f, id, "Retained: take #14"), 1, "after the first message the retained work runs");
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "and never becomes scope");
   } finally { await server.close(); f.db.close(); }
 });

@@ -5035,6 +5035,8 @@ export class SessionsService {
     slashCommand?: string,
     config?: SessionConfig,
     reviewedResultRevision?: string,
+    /** Internal: a Full Control first message's own durable identity (#2940). */
+    binding?: Parameters<SessionsService["prompt"]>[8],
   ): ServiceResult<PromptAdmissionView> {
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
@@ -5051,6 +5053,7 @@ export class SessionsService {
       undefined,
       "session",
       true,
+      binding,
     );
     if (!result.ok) return result;
     if (reviewedResultRevision && this.db.acknowledgeSessionResult(sessionId, userId, reviewedResultRevision)) {
@@ -5085,8 +5088,8 @@ export class SessionsService {
    * or durably queued) becomes established; otherwise the campaign waits for its first message
    * again, still fenced. It is never resent, so no duplicate turn can start. */
   private recoverFirstMessageDeliveries(now: number): void {
-    for (const { sessionId, messageDigest, after } of this.db.firstMessageDeliveries()) {
-      const delivered = this.db.firstMessageAdmitted(sessionId, messageDigest, after);
+    for (const { sessionId, messageDigest, deliveryId } of this.db.firstMessageDeliveries()) {
+      const delivered = this.db.firstMessageAdmitted(sessionId, messageDigest, deliveryId);
       if (this.db.settleFirstMessageDelivery(sessionId, messageDigest, delivered, now)) {
         this.log.warn(JSON.stringify({ event: "full_control_first_message_recovered", sessionId, delivered, messageDigest }));
       }
@@ -5155,6 +5158,8 @@ export class SessionsService {
     }
     const now = Date.now();
     const messageDigest = firstMessageDigest(text);
+    // The durable prompt command the message is admitted as: its exact identity, chosen up front.
+    const deliveryId = `first_message_${randomUUID()}`;
     const scoped = firstMessageIssues(currentControl.boundary, issueNumbers, pending.derivedLimits);
     const nextScope: CampaignIssueScope = { repository: scope.repository, issueNumbers: scoped, revision: scope.revision + 1,
       authorizedByUserId: principal.userId, authorizedAt: now };
@@ -5163,7 +5168,8 @@ export class SessionsService {
       pending.derivedLimits) };
     let established: boolean;
     try {
-      established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, messageDigest, expectedRevision: revision, now });
+      established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, messageDigest, deliveryId,
+        expectedRevision: revision, now });
     } catch (error) { return fail((error as Error).message, 409); }
     if (!established) return fail("This campaign's authorization changed; send the message again.", 409);
     this.log.info(JSON.stringify({ event: "full_control_first_message_scope", sessionId, policyRevision: revision + 1,
@@ -5174,10 +5180,15 @@ export class SessionsService {
     this.firstMessageDelivery = sessionId;
     let result: ServiceResult<PromptAdmissionView>;
     try {
-      result = this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+      // Admitted to the durable queue under its delivery id, where it stays held until established.
+      result = this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision, {
+        durable: true,
+        stage: (runnerId, command, at) => this.promptOutbox.stage(sessionId, runnerId, command, at, deliveryId),
+        claimImmediate: () => true,
+      });
     } finally { this.firstMessageDelivery = null; }
     this.db.settleFirstMessageDelivery(sessionId, messageDigest, result.ok, Date.now());
-    // A first message admitted to the durable queue was held while delivering; it runs now.
+    // Retained work the queue held while the campaign waited runs now.
     if (result.ok) this.promptOutbox.flush(Date.now(), session.runnerId);
     this.hub.sessionChangedById(sessionId);
     return result;
@@ -5383,6 +5394,8 @@ export class SessionsService {
       stage: (runnerId: string, command: DurableSessionCommand, now: number) => SessionPromptCommandRecord;
       claimImmediate: () => boolean;
       admitAs?: "queued";
+      /** Always admit through the durable queue when the runner supports its identity. */
+      durable?: boolean;
     },
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
@@ -5637,7 +5650,8 @@ export class SessionsService {
       runnerSupportsProtocol(
         this.db.getRunner(session.runnerId)?.protocolVersion,
         "worktreeRecovery",
-      ));
+      )) || (binding?.durable === true && !delivery &&
+        runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "durablePromptQueueIdentity"));
     if (durablePrompt) {
       try {
         if (binding) binding.stage(session.runnerId, command, now);
@@ -8551,6 +8565,11 @@ export class SessionsService {
     if (!proposal || typeof proposal !== "object" || Array.isArray(proposal) || !["custom", "full_control"].includes(proposal.mode)) return fail("invalid campaign control mode", 400);
     if (proposal.mode === "custom" && Object.keys(proposal).some((key) => key !== "mode")) return fail("Custom has no authority boundary", 400);
     if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
+    // A reauthorization cannot race the first message it would bound (#2940).
+    if (proposal.mode === "full_control" && (this.firstMessagesInFlight.has(sessionId) ||
+        session.orchestratorPolicy?.firstMessageScope?.state === "delivering")) {
+      return fail("The first message is being delivered; try again in a moment.", 409);
+    }
     const now = Date.now();
     const storedScope = session.orchestratorPolicy?.issueScope;
     if (derivedScope && (storedScope || proposal.mode !== "full_control")) return fail("the campaign's issue scope changed; refresh and retry", 409);

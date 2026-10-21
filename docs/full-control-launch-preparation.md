@@ -56,14 +56,17 @@ only) establishes the boundary before the Orchestrator's first turn:
 - The scope and boundary are synchronized to the runner (`campaign_issue_scope synchronize`)
   before the message is delivered. A runner that misses the update keeps its older revision, which
   authorizes no issue write, and every issue operation synchronizes again before it acts.
-- Delivery is crash-safe. The commit records `delivering` with the message digest and where the
-  delivery begins (the session's last event sequence and the prompt queue's last row), so the
-  fence is durable. Only the admitted delivery settles it as `established`
-  (`settleFirstMessageDelivery`). A message that is not delivered reopens the wait, and the next
-  first message establishes a newer revision. On startup, a root still `delivering` is settled
-  without resending: `established` only if a user message or live queued prompt recorded after
-  that point carries the digest, otherwise waiting again, still fenced. Identical earlier text
-  never counts, and a first message is never resent.
+- Delivery is crash-safe. Before admission the server chooses the message's delivery id, and the
+  commit records `delivering` with the digest and that id, so the fence is durable. The message is
+  admitted to the durable prompt queue as exactly that command, which the queue delivers once. Only
+  the admitted delivery settles it as `established` (`settleFirstMessageDelivery`). A message that
+  is not admitted reopens the wait, and the next first message establishes a newer revision. On
+  startup, a root still `delivering` is settled without resending: `established` only if the queue
+  holds that exact command with the digest, otherwise waiting again, still fenced. No other row or
+  text, however identical, counts, and a first message is never resent. A reauthorization that
+  arrives while a first message is in flight is refused ("The first message is being delivered;
+  try again in a moment."); otherwise every authorization replaces the waiting record of derived
+  limits.
 
 While the root waits or delivers, every other ingress that can start a provider turn is refused:
 prompts from an agent or an automation, direct steering, provider command invocations, campaign
