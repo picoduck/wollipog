@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
 import { dialogMotionSettled } from "./dialog-motion.js";
+import { verticalHitAreas } from "./hit-area.js";
 
 /**
  * An automation's Triggers (#2972; docs/design-system.md §5.2, §7.1–§7.5, §8.4, §9.1, §11.7, §13.2)
@@ -130,10 +131,11 @@ test.describe("at 390×844", () => {
       expect(height, await target.evaluate((element) => element.textContent || element.getAttribute("aria-label") || element.id))
         .toBeGreaterThanOrEqual(44);
     }
-    // How to Call is the shared §5.5 disclosure trigger, which every disclosure draws at the touch
-    // --control-h-sm (36px), like a small button but without its borrowed hit area.
-    expect(await sheet.getByRole("button", { name: "How to Call" }).evaluate((element) => element.getBoundingClientRect().height))
-      .toBeGreaterThanOrEqual(36);
+    // How to Call is an inline §5.5 disclosure: 36px to look, like a small button, and a 44px target
+    // from the 4px it borrows above and below.
+    const [howToCall] = await verticalHitAreas(sheet.getByRole("button", { name: "How to Call" }));
+    expect(howToCall.bottom - howToCall.top, "drawn at --control-h-sm").toBeCloseTo(36, 0);
+    expect(howToCall.hitBottom - howToCall.hitTop, "a 44px target").toBeGreaterThanOrEqual(44);
     await sheet.getByRole("button", { name: "Cancel" }).click();
 
     for (const [item, title, sentence] of [

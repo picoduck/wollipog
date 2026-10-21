@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { join } from "node:path";
 import { dialogMotionSettled } from "./dialog-motion.js";
+import { verticalHitAreas, type VerticalHitArea } from "./hit-area.js";
 
 /**
  * Outbound Events, the second tab of Automations (#2973; docs/design-system.md §5.2, §5.5, §7, §8.5,
@@ -139,6 +140,22 @@ test.describe("at 390×844", () => {
     await expect(menu).toHaveCount(0);
     await confirmation.getByRole("button", { name: "Back to More Actions" }).click();
     await expect(menu).toBeVisible();
+  });
+});
+
+test.describe("at 390×844 on touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("a subscription row's disclosure fills its row and borrows no hit area from the next row", async ({ page }) => {
+    await open(page, "dark");
+    const rows = await verticalHitAreas(page.locator(".outbound-subscription-open"));
+    expect(rows).toHaveLength(2);
+    const [first, second] = rows as [VerticalHitArea, VerticalHitArea];
+    expect(first.bottom - first.top, "the row is a touch target itself").toBeGreaterThanOrEqual(44);
+    // The rows touch, so a tap just inside the next row belongs to the next row, and the reverse.
+    expect(second.top - first.bottom).toBeLessThan(2);
+    expect(first.hitBottom, "the first row stops where the second starts").toBeLessThanOrEqual(second.top + 0.5);
+    expect(second.hitTop, "the second row starts where the first stops").toBeGreaterThanOrEqual(first.bottom - 0.5);
   });
 });
 

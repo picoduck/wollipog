@@ -19293,6 +19293,26 @@ a.tab { text-decoration: none; }
     position: absolute;
     inset: -11px -3px;
   }
+  /* An inline disclosure's trigger (§5.5), such as How to Call in a dialog, is a small control: 36px
+     to look, borrowing 4px above and below for a 44px target. Its width is already wider than 44px,
+     so it borrows nothing sideways. A trigger that fills a list row is the row's own height, and
+     rows touch, so borrowing would take the next row's taps: those keep their drawn box. */
+  :where(.disclosure > summary, .disclosure-trigger):not(
+    .tl-step-head, .tl-decision-head, .skill-diff-file-head, .ps-disclosure > *, .queue-summary,
+    .tl-work > *, .tl-agent-toggle, .outbound-subscription-open, .session-options-head,
+    .dfinding-toggle
+  ) {
+    position: relative;
+  }
+  :is(.disclosure > summary, .disclosure-trigger):not(
+    .tl-step-head, .tl-decision-head, .skill-diff-file-head, .ps-disclosure > *, .queue-summary,
+    .tl-work > *, .tl-agent-toggle, .outbound-subscription-open, .session-options-head,
+    .dfinding-toggle
+  )::after {
+    content: "";
+    position: absolute;
+    inset: -4px 0;
+  }
   /* An inline link gets a 44px band centred on its line. */
   .link { position: relative; }
   .link::after {
