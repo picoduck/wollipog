@@ -27,17 +27,6 @@ const LEASE_AGENT = fileURLToPath(new URL("./fixtures/pipeline-lease-agent.mjs",
 const RUNNER_ID = "e2e-pipeline-runner";
 const CONTROL_PLANE_TOKEN = "e2e-pipeline-control-plane-token";
 
-// This dev machine exports dev-stack RUNNER_*/CONTROL_PLANE_* env that parseEnv would let override
-// the runner's config file (and would point it at the real dev control plane). Strip every such key
-// so the spawned processes are driven only by this test's explicit config/flags.
-function hermeticEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (/^(RUNNER_|CONTROL_PLANE_|WOLLIPOG_)/u.test(key)) delete env[key];
-  }
-  return env;
-}
-
 async function reservePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolvePromise, reject) => {
@@ -349,7 +338,8 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
           // Isolate HOME so the runner's native provider-home lease targets this temp dir instead of the
           // shared user home — otherwise it collides with any real runner (e.g. a dev stack) on this box.
           env: {
-            ...hermeticEnv(),
+            ...transportRunnerEnvironment(temp),
+            RUNNER_DATA_DIR: runnerDataDir,
             // Keep developer-specific provider installations out of PATH (#3208). The current
             // Node remains available to generated helper scripts; native tools use system bins.
             ...(process.platform === "linux" ? { PATH: [runnerBin, "/usr/bin", "/bin"].join(":") } : {}),
