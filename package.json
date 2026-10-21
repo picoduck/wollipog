@@ -31,6 +31,8 @@
     "desktop:smoke:build": "pnpm --filter @wollipog/desktop tauri build --debug --no-bundle --config src-tauri/tauri.e2e.conf.json",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
+    "release": "node scripts/release.mjs",
+    "release:timings": "node scripts/release-timings.mjs",
     "test": "node --import tsx --test --test-timeout=300000 \"apps/**/src/**/*.test.ts\" \"apps/**/src/**/*.test.tsx\" \"apps/**/scripts/**/*.test.mjs\" \"packages/**/src/**/*.test.ts\" \"packages/**/src/**/*.test.tsx\" \"scripts/**/*.test.mjs\"",
     "test:e2e": "playwright test",
     "test:e2e:production": "playwright test --config playwright.production.config.ts",

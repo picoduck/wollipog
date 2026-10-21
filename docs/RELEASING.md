@@ -1,5 +1,9 @@
 # Releasing
 
+For resumable preparation and supervision, including release-stage timing reports, see
+[Resumable Releases and Scheduling Evidence](release-automation.md). The review and release gates
+below still apply.
+
 Desktop bundles are built by CI, not by hand. The [`Release`](../.github/workflows/release.yml)
 workflow builds the per-platform control-plane and local-runner **sidecars** plus the **Tauri bundle** on a native
 runner for each OS/arch, then uploads them all to a single **draft** GitHub release.
