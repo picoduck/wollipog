@@ -41,15 +41,48 @@ export const CAMPAIGN_WORK_LEDGER_LIMITS = {
   pageSizeMax: 100,
 } as const;
 
-/** `owner/repo` plus issue number. The repository is compared case-insensitively. */
+/** A repository (see `campaignRepositoryLocation`) plus issue number. The repository is compared
+ * case-insensitively. */
 export interface CampaignIssueRef {
   repository: string;
   number: number;
 }
 
+/** A pull request, or a GitLab merge request by its project-scoped IID. */
 export interface CampaignPullRequestRef {
   repository: string;
   number: number;
+}
+
+/** Where a ref's `repository` lives (#3539): a github.com `owner/repo`, or a GitLab project named by
+ * its host and full namespace path, `<gitlab-host>/group[/subgroup…]/project`. */
+export type CampaignRepositoryLocation =
+  | { forge: "github"; repository: string }
+  | { forge: "gitlab"; host: string; project: string };
+
+const GITHUB_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
+const HOST_LABEL = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?";
+const GITLAB_HOST = new RegExp(`^${HOST_LABEL}(?:\\.${HOST_LABEL})+(?::([0-9]{1,5}))?$`, "u");
+const GITLAB_PATH_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/u;
+/** A top-level group, at most 20 nested subgroups, and the project. */
+const GITLAB_MAX_PATH_SEGMENTS = 22;
+
+/**
+ * Classifies a ref's repository, or returns null for one the ledger does not accept. Two segments
+ * are a GitHub slug, as before. A GitLab project must name its host: a bare `group/sub/project`
+ * cannot be told apart from other paths, and `glab -R` would resolve it against gitlab.com.
+ */
+export function campaignRepositoryLocation(repository: unknown): CampaignRepositoryLocation | null {
+  if (typeof repository !== "string" || repository.length > 256) return null;
+  if (GITHUB_REPOSITORY.test(repository)) return { forge: "github", repository };
+  const [host = "", ...path] = repository.split("/");
+  const hostMatch = GITLAB_HOST.exec(host);
+  if (!hostMatch || path.length < 2 || path.length > GITLAB_MAX_PATH_SEGMENTS) return null;
+  if (hostMatch[1] !== undefined && (Number(hostMatch[1]) < 1 || Number(hostMatch[1]) > 65_535)) return null;
+  // GitHub repositories are never host-qualified, so one ref has one spelling.
+  if (/^(?:www\.)?github\.com(?::|$)/iu.test(host)) return null;
+  if (!path.every((segment) => GITLAB_PATH_SEGMENT.test(segment) && !/\.(?:git|atom)$/iu.test(segment))) return null;
+  return { forge: "gitlab", host, project: path.join("/") };
 }
 
 /* ------------------------------ Work items ------------------------------ */

@@ -17,6 +17,7 @@ import {
   CAMPAIGN_WORK_LEDGER_LIMITS,
   CAMPAIGN_WORK_REVISION_CHANGED,
   CAMPAIGN_WORK_VERIFICATION_ID_PREFIX,
+  campaignRepositoryLocation,
   type AdjudicateCampaignRecommendationRequest,
   type AgentHarnessIdentity,
   type CampaignAttempt,
@@ -413,7 +414,8 @@ interface LedgerSnapshot {
 }
 
 const L = CAMPAIGN_WORK_LEDGER_LIMITS;
-const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
+/** The accepted ref shape, named in every refusal of one. */
+const REF_SHAPE = `{repository: "owner/repo" or "<gitlab-host>/group/project", number}`;
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
 
 function boundedText(value: unknown, max: number): value is string {
@@ -423,7 +425,7 @@ function boundedText(value: unknown, max: number): value is string {
 function validIssue(value: unknown): value is CampaignIssueRef {
   const issue = value as CampaignIssueRef | null;
   return typeof issue === "object" && issue !== null && typeof issue.repository === "string" &&
-    issue.repository.length <= 256 && REPOSITORY.test(issue.repository) &&
+    campaignRepositoryLocation(issue.repository) !== null &&
     Number.isSafeInteger(issue.number) && issue.number >= 1;
 }
 
@@ -807,7 +809,7 @@ export class CampaignWorkLedgerStore {
         return fail(`${at}.title must be at most ${L.titleLength} characters`);
       }
       if (input.issue !== undefined && input.issue !== null && !validIssue(input.issue)) {
-        return fail(`${at}.issue must be {repository: "owner/repo", number}`);
+        return fail(`${at}.issue must be ${REF_SHAPE}`);
       }
       if (input.origin !== undefined && input.origin !== "original" && input.origin !== "follow_up") {
         return fail(`${at}.origin must be original or follow_up`);
@@ -929,7 +931,7 @@ export class CampaignWorkLedgerStore {
       return fail(`title must be at most ${L.titleLength} characters`);
     }
     if (request.issue !== undefined && request.issue !== null && !validIssue(request.issue)) {
-      return fail("issue must be {repository: \"owner/repo\", number}");
+      return fail(`issue must be ${REF_SHAPE}`);
     }
     if (request.dispatchState !== undefined && request.dispatchState !== "planned" && request.dispatchState !== "queued") {
       return fail("dispatchState must be planned or queued");
@@ -961,7 +963,7 @@ export class CampaignWorkLedgerStore {
       }
       if (stage.note !== undefined && !boundedText(stage.note, L.textLength)) return fail("stage.note is too long");
       if (stage.pullRequests !== undefined && !validPullRequests(stage.pullRequests)) {
-        return fail(`stage.pullRequests must list at most ${L.pullRequestsPerStage} {repository, number} refs`);
+        return fail(`stage.pullRequests must list at most ${L.pullRequestsPerStage} refs, each ${REF_SHAPE}`);
       }
     }
     const blocker = request.blocker;
@@ -1232,7 +1234,7 @@ export class CampaignWorkLedgerStore {
       return fail("resultingWorkItemKey must be bounded");
     }
     if (request.resultingIssue !== undefined && !validIssue(request.resultingIssue)) {
-      return fail("resultingIssue must be {repository: \"owner/repo\", number}");
+      return fail(`resultingIssue must be ${REF_SHAPE}`);
     }
     if (request.publicationRequired !== undefined && typeof request.publicationRequired !== "boolean") {
       return fail("publicationRequired must be a boolean");

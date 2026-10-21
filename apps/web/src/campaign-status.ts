@@ -10,6 +10,7 @@ import {
   CAMPAIGN_FORGE_OBSERVATION,
   CAMPAIGN_WORK_ITEM_PRIMARY_STATES,
   CAMPAIGN_WORK_ITEM_UNFINISHED_STATES,
+  campaignRepositoryLocation,
   type CampaignCostValue,
   type CampaignElapsed,
   type CampaignForgeCheckRollup,
@@ -20,6 +21,7 @@ import {
   type CampaignMetricGapReason,
   type CampaignObservationUnavailableReason,
   type CampaignObservedFact,
+  type CampaignPullRequestRef,
   type CampaignReportedStageKind,
   type CampaignResponsibleActor,
   type CampaignWorkItemOrigin,
@@ -235,16 +237,27 @@ export function workItemTimeView(
  * Labels
  * ---------------------------------------------------------------------------------------------- */
 
-export function issueRefLabel(issue: CampaignIssueRef): string {
-  return `${issue.repository}#${issue.number}`;
+function isGitLabRef(ref: CampaignIssueRef): boolean {
+  return campaignRepositoryLocation(ref.repository)?.forge === "gitlab";
 }
 
-/** A GitHub link for an `owner/name` reference; anything else stays text rather than a guessed URL. */
+/** `owner/repo#7`; a GitLab merge request reads `host/group/project!7`, as GitLab writes it. */
+export function issueRefLabel(issue: CampaignIssueRef, kind: "issues" | "pull" = "issues"): string {
+  return `${issue.repository}${kind === "pull" && isGitLabRef(issue) ? "!" : "#"}${issue.number}`;
+}
+
+/** `PR #7`, or `MR !7` for a GitLab merge request. */
+export function pullRequestShortLabel(ref: CampaignPullRequestRef): string {
+  return isGitLabRef(ref) ? `MR !${ref.number}` : `PR #${ref.number}`;
+}
+
+/** A forge link for a reference the ledger accepts (GitHub `owner/name`, or a host-qualified GitLab
+ * project); anything else stays text rather than a guessed URL. */
 export function issueRefHref(issue: CampaignIssueRef, kind: "issues" | "pull" = "issues"): string | null {
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(issue.repository) || !Number.isSafeInteger(issue.number) || issue.number < 1) {
-    return null;
-  }
-  return `https://github.com/${issue.repository}/${kind}/${issue.number}`;
+  const location = campaignRepositoryLocation(issue.repository);
+  if (!location || !Number.isSafeInteger(issue.number) || issue.number < 1) return null;
+  if (location.forge === "github") return `https://github.com/${location.repository}/${kind}/${issue.number}`;
+  return `https://${location.host}/${location.project}/-/${kind === "pull" ? "merge_requests" : "issues"}/${issue.number}`;
 }
 
 export function workItemTitle(item: { title: string | null; issue?: CampaignIssueRef | null; key: string }): string {
@@ -395,9 +408,15 @@ function checkNote(rollup: CampaignForgeCheckRollup, required: boolean): string 
 export function forgePullRequestView(
   fact: CampaignObservedFact<CampaignForgePullRequestObservation>,
   now: number,
+  ref?: CampaignPullRequestRef,
 ): ForgePullRequestView {
   if (fact.availability === "unavailable") {
-    return { kind: "unavailable", reason: observationUnavailableText(fact.reason), lastObservedAt: fact.lastObservedAt ?? null };
+    // Nothing reads GitLab yet, so every reason (including GitHub-worded ones such as not_observed)
+    // would misexplain a merge request.
+    const reason = ref && isGitLabRef(ref)
+      ? "GitLab merge request status isn't observed yet. Open the merge request on GitLab to see its pipeline."
+      : observationUnavailableText(fact.reason);
+    return { kind: "unavailable", reason, lastObservedAt: fact.lastObservedAt ?? null };
   }
   const current = fact.availability === "fresh" && now - fact.observedAt <= CAMPAIGN_FORGE_OBSERVATION.staleAfterMs;
   const value = fact.value;

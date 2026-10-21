@@ -20,8 +20,10 @@ import {
   elapsedMs,
   forgePullRequestView,
   issueRefHref,
+  issueRefLabel,
   observationUnavailableText,
   measuredDuration,
+  pullRequestShortLabel,
   workItemOriginLabel,
   workItemTimeView,
   workItemTitle,
@@ -224,6 +226,31 @@ test("Rows name the issue when there is no title, and origins carry their genera
   assert.equal(issueRefHref({ repository: "picoduck/wollipog", number: 7 }, "pull"), "https://github.com/picoduck/wollipog/pull/7");
   assert.equal(issueRefHref({ repository: "javascript:alert(1)//x", number: 7 }), null);
   assert.equal(issueRefHref({ repository: "a/b", number: 0 }), null);
+});
+
+test("GitLab refs link to their own host and read as GitLab writes them (#3539)", () => {
+  const project = "gitlab.example.com/group/subgroup/project";
+  assert.equal(issueRefHref({ repository: project, number: 4 }), "https://gitlab.example.com/group/subgroup/project/-/issues/4");
+  assert.equal(issueRefHref({ repository: project, number: 9 }, "pull"),
+    "https://gitlab.example.com/group/subgroup/project/-/merge_requests/9");
+  assert.equal(issueRefHref({ repository: "gitlab.example.com:8443/group/project", number: 9 }, "pull"),
+    "https://gitlab.example.com:8443/group/project/-/merge_requests/9");
+  assert.equal(issueRefLabel({ repository: project, number: 4 }), `${project}#4`);
+  assert.equal(issueRefLabel({ repository: project, number: 9 }, "pull"), `${project}!9`);
+  assert.equal(issueRefLabel({ repository: "picoduck/wollipog", number: 9 }, "pull"), "picoduck/wollipog#9");
+  assert.equal(pullRequestShortLabel({ repository: project, number: 9 }), "MR !9");
+  assert.equal(pullRequestShortLabel({ repository: "picoduck/wollipog", number: 9 }), "PR #9");
+  // A bare nested path names no host, so it is never guessed to be gitlab.com.
+  assert.equal(issueRefHref({ repository: "group/subgroup/project", number: 4 }), null);
+  assert.equal(issueRefHref({ repository: "github.com/picoduck/wollipog", number: 4 }), null);
+  // Unobserved GitLab merge requests say so instead of blaming the repository or naming GitHub,
+  // including before the runner's first read.
+  for (const reason of ["forge_unsupported", "not_observed", "runner_disconnected"] as const) {
+    const view = forgePullRequestView({ availability: "unavailable", reason }, NOW, { repository: project, number: 9 });
+    assert.match(view.kind === "unavailable" ? view.reason : "", /^GitLab merge request status isn't observed yet\./u, reason);
+  }
+  const github = forgePullRequestView({ availability: "unavailable", reason: "not_observed" }, NOW, { repository: "picoduck/wollipog", number: 9 });
+  assert.equal(github.kind === "unavailable" ? github.reason : "", observationUnavailableText("not_observed"));
 });
 
 test("The list defaults to unfinished work in queue order, and every filter and sort is honored", () => {

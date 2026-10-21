@@ -165,6 +165,37 @@ for (const theme of ["dark", "light"] as const) {
   }
 }
 
+// UI evidence for #3539: set CAMPAIGN_GITLAB_EVIDENCE_DIR to capture the GitLab refs.
+const GITLAB_EVIDENCE_DIR = process.env.CAMPAIGN_GITLAB_EVIDENCE_DIR;
+test("GitLab issue and merge request refs link to their host and say GitLab is not observed yet", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&forge=gitlab");
+  const project = "gitlab.example.com/platform/agents/wollipog";
+  const row = workRows(page).filter({ hasText: "Campaign Status Panel" });
+  await expect(row).toContainText(`${project}#2417`);
+  if (GITLAB_EVIDENCE_DIR) await page.screenshot({ path: `${GITLAB_EVIDENCE_DIR}/gitlab-list-desktop.png` });
+  await row.click();
+  await expect(page.locator("h3.campaign-detail-title")).toHaveText("Campaign Status Panel");
+  await expect(page.getByRole("link", { name: `${project}#2417` }))
+    .toHaveAttribute("href", `https://${project}/-/issues/2417`);
+  await expect(page.getByRole("link", { name: `${project}!2440` }))
+    .toHaveAttribute("href", `https://${project}/-/merge_requests/2440`);
+  await expect(page.getByRole("link", { name: `${project}!2436` }))
+    .toHaveAttribute("href", `https://${project}/-/merge_requests/2436`);
+  const facts = await deliveryFacts(page);
+  for (const number of [2440, 2436]) {
+    expect(facts).toContain(`MR !${number}: UnavailableGitLab merge request status isn't observed yet. Open the merge request on GitLab to see its pipeline.`);
+  }
+  expect(facts.join("\n")).not.toMatch(/PR #|on GitHub/);
+  await assertNoHorizontalOverflow(page, ".campaign-status");
+  if (GITLAB_EVIDENCE_DIR) {
+    await page.locator("section.campaign-detail-section", { has: page.locator("h4", { hasText: /^Links$/ }) }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${GITLAB_EVIDENCE_DIR}/gitlab-links-desktop.png` });
+    await page.locator("section.campaign-detail-section", { has: page.locator("h4", { hasText: /^Delivery$/ }) }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${GITLAB_EVIDENCE_DIR}/gitlab-delivery-desktop.png` });
+  }
+});
+
 test("a member sees its assignment, and leaving the campaign returns the open panel to the launcher", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=member");
   await expect(page.locator(".campaign-status-context")).toContainText("#2417 Campaign Orchestrator");

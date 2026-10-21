@@ -9,6 +9,7 @@
  * - `legacy`: a campaign on a server without the ledger (no `work` on its projection);
  * - `unrelated`: a session outside any campaign.
  * `theme=light` switches the palette; `open=launcher` starts on the launcher instead of the mode.
+ * `forge=gitlab` moves the Campaign Status Panel item to a GitLab project in a nested namespace.
  * `scope=outdated-runner` or `scope=issue-limits` makes issue scope unavailable because a participating
  * Orchestrator's runner is older than the scope-change or Full Control issue-limit floor.
  */
@@ -178,6 +179,21 @@ details.cwi_3 = itemDetail(items[2]!, {
     cleanup: { availability: "fresh", value: { sessionId: "s_child_3", worktrees: [{ path: "/w/3", status: "pending", reason: null }] }, observedAt: NOW - 6 * MINUTE },
   },
 });
+if (params.get("forge") === "gitlab") {
+  // The panel item tracked in a GitLab project in a nested namespace (#3539): its issue and merge
+  // requests are recorded and linked, but GitLab is not observed yet.
+  const repository = "gitlab.example.com/platform/agents/wollipog";
+  const refs = [2440, 2436].map((number) => ({ repository, number }));
+  const stage = { ...items[1]!.stage!, pullRequests: refs };
+  items[1] = { ...items[1]!, issue: { repository, number: 2417 }, stage };
+  details.cwi_2 = {
+    ...details.cwi_2!, issue: { repository, number: 2417 }, stage,
+    observed: {
+      ...details.cwi_2!.observed,
+      pullRequests: refs.map((ref) => ({ ref, fact: { availability: "unavailable", reason: "forge_unsupported" } })),
+    },
+  };
+}
 
 const ROOT_TITLE = "#2417 Campaign Orchestrator";
 const recordedWork = (revision: number) => workSummary(NOW, {
