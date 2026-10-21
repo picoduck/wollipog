@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
 import type { CampaignLaunchProposal } from "@wollipog/protocol";
-import { campaignLaunchDigest, firstMessageBoundary, firstMessageDigest, firstMessageLaunch, firstMessageObjective, issueReferencesInMessage,
+import { campaignLaunchDigest, derivedLaunchLimits, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageLaunch, firstMessageObjective, issueReferencesInMessage,
   parseCampaignLaunchProposal, parseFullControlLaunchRequest } from "./campaign-launch-admission.js";
 
 const proposal: CampaignLaunchProposal = { repository: "Owner/Repo", issueNumbers: [12], objective: "Deliver #12",
@@ -90,11 +90,29 @@ test("the first message's boundary keeps every authority and only grows follow-u
     authorizedByUserId: "u", authorizedAt: 1, operations: ["pr_merge" as const], delegatablePolicyIds: ["p"],
     issueAuthority: { epics: [], relatedFollowUps: true, maxIssues: 1, closureReasons: ["completed" as const] },
     budgetAuthority: { version: 1 as const, costUsd: 5, concurrency: 2, acceptedFollowUps: 1, accounting: "managed_workers_only" as const, unpriced: "stop" as const } };
-  const next = firstMessageBoundary(boundary, "execute_approved", [3, 4, 5], "Ship #3 #4 #5", 2, 2, 9);
+  const derived = { acceptedFollowUps: true, maxIssues: true };
+  const next = firstMessageBoundary(boundary, "execute_approved", [3, 4, 5], "Ship #3 #4 #5", 2, 2, 9, derived);
   assert.deepEqual(next, { ...boundary, objective: "Ship #3 #4 #5", revision: 2, issueScopeRevision: 2, authorizedAt: 9,
     issueAuthority: { ...boundary.issueAuthority, epics: [3, 4, 5], maxIssues: 6 },
     budgetAuthority: { ...boundary.budgetAuthority, acceptedFollowUps: 3 } });
-  const recommendOnly = firstMessageBoundary(boundary, "recommend_only", [], "Tidy", 2, 2, 9);
+  const recommendOnly = firstMessageBoundary(boundary, "recommend_only", [], "Tidy", 2, 2, 9, derived);
   assert.equal(recommendOnly.budgetAuthority!.acceptedFollowUps, 1, "never below what the launch authorized");
   assert.equal(recommendOnly.issueAuthority!.maxIssues, 1);
+});
+
+test("explicit follow-up and issue ceilings never grow, and an explicit Maximum Issues bounds the scope (CR-1.1)", () => {
+  const boundary = { version: 1 as const, revision: 1, issueScopeRevision: 1, repository: "owner/repo", objective: "pending",
+    authorizedByUserId: "u", authorizedAt: 1, operations: ["pr_merge" as const], delegatablePolicyIds: [],
+    issueAuthority: { epics: [], relatedFollowUps: true, maxIssues: 1, closureReasons: ["completed" as const] },
+    budgetAuthority: { version: 1 as const, concurrency: 1, acceptedFollowUps: 0, accounting: "managed_workers_only" as const, unpriced: "stop" as const } };
+  const explicit = { acceptedFollowUps: false, maxIssues: false };
+  const next = firstMessageBoundary(boundary, "execute_approved", [12], "Fix #12", 2, 2, 2, explicit);
+  assert.equal(next.budgetAuthority!.acceptedFollowUps, 0);
+  assert.equal(next.issueAuthority!.maxIssues, 1);
+  assert.equal(firstMessageBoundary(boundary, "execute_approved", [12], "Fix #12", 2, 2, 2).issueAuthority!.maxIssues, 1,
+    "with no record of which limits were derived, every limit counts as explicit");
+  assert.deepEqual(firstMessageIssues(boundary, [12, 13, 14], explicit), [12]);
+  assert.deepEqual(firstMessageIssues(boundary, [12, 13, 14], { acceptedFollowUps: true, maxIssues: true }), [12, 13, 14]);
+  assert.deepEqual(derivedLaunchLimits({ budget: { acceptedFollowUps: 0 }, issues: { maxIssues: 1 } }), explicit);
+  assert.deepEqual(derivedLaunchLimits(undefined), { acceptedFollowUps: true, maxIssues: true });
 });

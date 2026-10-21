@@ -65,7 +65,7 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   };
   // Issue reads answer as the runner does: one number that is not an issue of the origin refuses
   // the whole read. Synchronization echoes the revision it persisted.
-  const issues = { repository: "owner/repo" as string | null, notIssues: new Set<number>() };
+  const issues = { repository: "owner/repo" as string | null, notIssues: new Set<number>(), holdSync: null as Promise<void> | null };
   hub.sendToRunner = (_, message) => {
     sent.push(message);
     if (message.type === "start_session") starts.push(message);
@@ -80,8 +80,10 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
           ? { ok: true, repository: issues.repository, candidates: requested.map((n) => ({ issue: { repository: issues.repository!, number: n },
             title: `Issue ${n}`, source: "member_checklist" as const })) }
           : { ok: false };
-      queueMicrotask(() => hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId,
-        sessionId: message.sessionId, ...answer }, "r"));
+      const respond = () => hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId,
+        sessionId: message.sessionId, ...answer }, "r");
+      if (message.operation === "synchronize" && issues.holdSync) void issues.holdSync.then(respond);
+      else queueMicrotask(respond);
     }
     return true;
   };
@@ -1026,10 +1028,14 @@ test("enabling an existing campaign is blocked only by another person's scope; p
   } finally { await server.close(); f.db.close(); }
 });
 
+/** A launch's first-message wait when every limit was derived (no Human override). */
+const PENDING = { state: "pending", derivedLimits: { acceptedFollowUps: true, maxIssues: true } };
+
 /** A launch with no task, as New Session sends it: the root starts idle like any Orchestrator. */
-async function firstMessageLaunch(f: ReturnType<typeof fixture>, server: Awaited<ReturnType<typeof app>>["server"]) {
+async function firstMessageLaunch(f: ReturnType<typeof fixture>, server: Awaited<ReturnType<typeof app>>["server"],
+  limits: Pick<NonNullable<FullControlLaunchRequest["overrides"]>, "budget" | "issues"> = {}) {
   const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
-    config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, orchestrator: { behavior: { followUps: "execute_approved" } } } } };
+    config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, orchestrator: { behavior: { followUps: "execute_approved" } } }, ...limits } };
   const { preflight: checked } = await preflight(server, body);
   assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
   const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
@@ -1057,7 +1063,7 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
     const start = f.starts[0] as Extract<ControlPlaneToRunner, { type: "start_session" }>;
     assert.equal(start.initialPrompt, undefined, "no turn starts before the person's first message");
     let root = f.db.getSession(id)!;
-    assert.deepEqual(root.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+    assert.deepEqual(root.orchestratorPolicy!.firstMessageScope, PENDING);
     assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.equal(boundaryOf(f, id).objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
 
@@ -1066,7 +1072,7 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
     assert.equal(agent.ok, false);
     assert.equal(agent.status, 409);
     assert.match(agent.error!, /owner's first message/u);
-    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
     assert.equal(f.sent.filter((message) => message.type === "prompt_session").length, 0);
 
     f.issues.notIssues.add(3); // A pull request: GitHub does not read it as an issue.
@@ -1122,14 +1128,14 @@ test("only the launching person's text message establishes the boundary; no refe
     const other: HumanPrincipal = { ...f.human, userId: "someone-else", actorId: "someone-else" };
     assert.equal((await f.sessions.promptFromHuman(other, id, "Ship #12")).status, 403);
     assert.equal((await f.sessions.promptFromHuman(f.human, id, "", [], "compact")).status, 409, "a slash command is not the task");
-    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
 
     // The runner drops the message: the boundary it set waits for the next first message.
     const send = f.hub.sendToRunner;
     f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
     const dropped = await f.sessions.promptFromHuman(f.human, id, "Tidy the docs");
     assert.equal(dropped.ok, false);
-    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
     f.hub.sendToRunner = send;
     f.db.updateSessionStatus(id, "idle", Date.now());
 
@@ -1187,10 +1193,11 @@ test("enabling Full Control on a campaign with no issue scope derives it from it
   try {
     const messaged = customCampaign(f, "messaged-root");
     unscoped(messaged);
-    // The launch request recorded #12 and #44; #44 is not an issue. The transcript records no
-    // author, so its references (here #7, as an agent could have sent) are never scope.
+    // The owner's launch request recorded #12 and #44 (#44 is not an issue). The transcript records
+    // no author, so its references (here #7, as an agent could have sent) are never scope.
     const recorded = f.db.getSession(messaged)!.orchestratorPolicy!;
     recorded.issueNumbers = [12, 44];
+    recorded.issueNumbersSource = "human_launch_request";
     f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(recorded), messaged);
     f.db.appendEvent(messaged, { kind: "user_message", text: "Fix #7 in this repository." }, Date.now());
     f.issues.notIssues.add(44);
@@ -1208,7 +1215,7 @@ test("enabling Full Control on a campaign with no issue scope derives it from it
     unscoped(silent);
     await enable(silent);
     root = f.db.getSession(silent)!;
-    assert.deepEqual(root.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+    assert.deepEqual(root.orchestratorPolicy!.firstMessageScope, PENDING);
     assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.equal(boundaryOf(f, silent).objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
     f.db.updateSessionStatus(silent, "idle", Date.now());
@@ -1268,5 +1275,163 @@ test("Full Control never inherits Custom per-decision owners: with every toggle 
       headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
     assert.equal(enabled.statusCode, 200, enabled.body);
     assertOrchestratorOwnsFive(custom);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("explicit launch ceilings survive the first message: 0 follow-ups and 1 issue stay 0 and 1 (CR-1.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server, { budget: { acceptedFollowUps: 0 }, issues: { maxIssues: 1 } });
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+      { state: "pending", derivedLimits: { acceptedFollowUps: false, maxIssues: false } });
+    const before = boundaryOf(f, id);
+    assert.equal(before.budgetAuthority!.acceptedFollowUps, 0);
+    assert.equal(before.issueAuthority!.maxIssues, 1);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12")).ok, true);
+    const after = boundaryOf(f, id);
+    assert.equal(after.budgetAuthority!.acceptedFollowUps, 0, "an explicit follow-up ceiling never grows");
+    assert.equal(after.issueAuthority!.maxIssues, 1, "an explicit issue ceiling never grows");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0, "the campaign allowance keeps the ceiling");
+
+    // More references than the explicit Maximum Issues: the scope keeps only what the ceiling allows.
+    const { id: capped } = await firstMessageLaunch(f, server, { issues: { maxIssues: 1 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, capped, "Fix #12 and #13")).ok, true);
+    assert.deepEqual(f.db.getSession(capped)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(boundaryOf(f, capped).issueAuthority!.maxIssues, 1);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("enable never trusts issue numbers a restart backfilled from an automation's first message (CR-1.2)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // An unscoped Human-created Custom root whose first transcript message an automation wrote.
+    const id = customCampaign(f, "backfilled-root");
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    delete policy.issueScope; delete policy.issueNumbers;
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+    f.db.appendEvent(id, { kind: "user_message", text: "Orchestrate issues 12 and 13" }, Date.now());
+    f.sessions.restart(id);
+    const backfilled = f.db.getSession(id)!.orchestratorPolicy!;
+    assert.deepEqual(backfilled.issueNumbers, [12, 13], "the restart backfill read the transcript");
+    assert.equal(backfilled.issueNumbersSource, undefined, "and recorded no Human launch provenance");
+    f.db.updateSessionStatus(id, "running", Date.now());
+
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    assert.equal(reviewed.summary.objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    let root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [], "neither backfilled issue becomes scope");
+    assert.equal(root.orchestratorPolicy!.firstMessageScope!.state, "pending", "the owner's next message supplies the task");
+    assert.equal((await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 13")).status, 409, "an automation still cannot");
+
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Take #13 only")).ok, true);
+    root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [13]);
+    assert.equal(campaignBoundaryCurrent(root), true);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a Human create request marks its parsed issues as launch provenance; an agent-created root's never are (CR-1.2)", () => {
+  const f = fixture();
+  try {
+    const human = f.sessions.createSession({ ...request, config: { model: "claude-opus-5-5", permissionMode: "orchestrator" },
+      prompt: "Orchestrate issues 12 and 7" }, undefined, f.scope, false, false, false, { defaultOwnerUserId: f.human.userId });
+    assert.equal(human.ok, true, human.error ?? "the Human root was created");
+    assert.deepEqual(human.data!.orchestratorPolicy!.issueNumbers, [12, 7]);
+    assert.equal(human.data!.orchestratorPolicy!.issueNumbersSource, "human_launch_request");
+    const system = f.sessions.createSession({ ...request, config: { model: "claude-opus-5-5", permissionMode: "orchestrator" },
+      prompt: "Orchestrate issues 12 and 7" }, undefined, f.scope);
+    assert.equal(system.ok, true, system.error ?? "the system root was created");
+    assert.equal(system.data!.orchestratorPolicy!.issueNumbersSource, undefined);
+  } finally { f.db.close(); }
+});
+
+test("provider commands and direct steering wait for the owner's first message, including while it is being delivered (CR-1.3)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const command = { submissionId: "cmd-1", providerCommandId: "claude:review", catalogRevision: "rev-1", argumentText: "the repo" };
+    const refused = (result: { ok: boolean; status?: number; error?: string }) => {
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 409);
+      assert.match(result.error!, /owner's first message/u);
+    };
+    const sentBefore = f.sent.length;
+    refused(f.sessions.invokeSessionCommand(id, command));
+    refused(await f.sessions.steer(id, { submissionId: "steer-1", turnId: "turn-1", text: "Do this instead" }));
+    assert.equal(f.sent.length, sentBefore, "nothing reaches the runner");
+    assert.equal(f.db.getSessionCommandInvocationBySubmission(id, "cmd-1"), null, "and nothing is staged");
+
+    // While the first message is being delivered (its runner synchronization held), the fence stays.
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    const delivering = f.sessions.promptFromHuman(f.human, id, "Ship #12");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "delivering");
+    refused(f.sessions.invokeSessionCommand(id, { ...command, submissionId: "cmd-2" }));
+    refused(await f.sessions.promptOrSteer(id, "Orchestrate issues 40 and 41"));
+    release();
+    assert.equal((await delivering).ok, true);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a control-plane restart mid-delivery keeps the owner-only fence and never resends the first message (CR-1.4)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    const text = "Ship #12 end to end";
+    void f.sessions.promptFromHuman(f.human, id, text);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const delivering = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+    assert.deepEqual(delivering, { state: "delivering", messageDigest: firstMessageDigest(text),
+      derivedLimits: { acceptedFollowUps: true, maxIssues: true } }, "the wait is durably fenced before delivery");
+
+    // The process dies here: nothing it still holds may deliver, and a new one starts on the same database.
+    const send = f.hub.sendToRunner;
+    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
+    const restarted = new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    const recovered = f.db.getSession(id)!.orchestratorPolicy!;
+    assert.deepEqual(recovered.firstMessageScope, PENDING, "an unrecorded message reopens the wait, still fenced");
+    f.hub.sendToRunner = send;
+    const automation = await restarted.promptOrSteer(id, "Orchestrate issues 40 and 41");
+    assert.equal(automation.status, 409, "an automation prompt is still refused after the restart");
+    assert.equal(f.sent.filter((message) => message.type === "prompt_session").length, 0, "the first message was never resent");
+    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING, "the dead process cannot settle it");
+    f.hub.sendToRunner = send;
+    f.issues.holdSync = null;
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await restarted.promptFromHuman(f.human, id, text)).ok, true, "the owner sends it again");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+    assert.equal(f.sent.filter((message) => message.type === "prompt_session").length, 1, "delivered exactly once");
+
+    // A message the old process did deliver (recorded before the crash) is recognized, not resent.
+    const { id: recorded } = await firstMessageLaunch(f, server);
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    void f.sessions.promptFromHuman(f.human, recorded, "Fix #12");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.db.appendEvent(recorded, { kind: "user_message", text: "Fix #12" }, Date.now());
+    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
+    new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.equal(f.db.getSession(recorded)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.hub.sendToRunner = send;
   } finally { await server.close(); f.db.close(); }
 });

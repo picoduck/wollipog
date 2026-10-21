@@ -5,7 +5,7 @@ import {
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
-  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignLaunchCapability, type CampaignLaunchPreflight,
+  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type FullControlDerivedLimits, type CampaignLaunchCapability, type CampaignLaunchPreflight,
   type CampaignLaunchProposal, type CampaignLaunchInspectionResult, type ChildSessionDefaults,
   type OrchestratorCampaignBudgetDefault,
   type CreateSessionRequest, type FullControlEnableRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
@@ -135,20 +135,34 @@ export function firstMessageDigest(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+/** Which of a launch's limits the server derived rather than the Human set (#2940). */
+export function derivedLaunchLimits(overrides: FullControlLaunchOverrides | undefined): FullControlDerivedLimits {
+  return { acceptedFollowUps: overrides?.budget?.acceptedFollowUps === undefined, maxIssues: overrides?.issues?.maxIssues === undefined };
+}
+
+/** The issues a first message can scope: all verified ones, unless the Human set Maximum Issues,
+ * which an explicit ceiling bounds. */
+export function firstMessageIssues(boundary: CampaignAuthorityBoundary, issueNumbers: number[], derived: FullControlDerivedLimits | undefined): number[] {
+  const max = boundary.issueAuthority?.maxIssues;
+  return derived?.maxIssues || max === undefined ? [...issueNumbers] : issueNumbers.slice(0, max);
+}
+
 /** The boundary the owner's first message establishes from the launch's task-only one: the same
  * operations, policy asks, evidence and ceilings, with the message as objective and its verified
- * issues as scope. Follow-up and issue limits grow to what a launch naming those issues derives,
- * never shrink below what was authorized. */
+ * issues as scope. Only a limit the launch derived (no Human override) grows to what a launch
+ * naming those issues derives, never below what was authorized; an explicit ceiling never
+ * changes, and a missing record counts as explicit. */
 export function firstMessageBoundary(boundary: CampaignAuthorityBoundary, followUps: "recommend_only" | "execute_approved",
-  issueNumbers: number[], objective: string, revision: number, issueScopeRevision: number, now: number): CampaignAuthorityBoundary {
+  issueNumbers: number[], objective: string, revision: number, issueScopeRevision: number, now: number,
+  derived: FullControlDerivedLimits = { acceptedFollowUps: false, maxIssues: false }): CampaignAuthorityBoundary {
   const derivedFollowUps = followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0;
   const budget = boundary.budgetAuthority;
-  const acceptedFollowUps = Math.max(budget?.acceptedFollowUps ?? 0, derivedFollowUps);
+  const acceptedFollowUps = derived.acceptedFollowUps ? Math.max(budget?.acceptedFollowUps ?? 0, derivedFollowUps) : budget?.acceptedFollowUps ?? 0;
   const issues = boundary.issueAuthority;
+  const maxIssues = issues && (derived.maxIssues ? Math.min(100, Math.max(issues.maxIssues, issueNumbers.length + acceptedFollowUps)) : issues.maxIssues);
   return structuredClone({ ...boundary, objective, revision, issueScopeRevision, authorizedAt: now,
     ...(budget ? { budgetAuthority: { ...budget, acceptedFollowUps } } : {}),
-    ...(issues ? { issueAuthority: { ...issues, epics: [...issueNumbers],
-      maxIssues: Math.min(100, Math.max(issues.maxIssues, issueNumbers.length + acceptedFollowUps)) } } : {}) });
+    ...(issues ? { issueAuthority: { ...issues, epics: [...issueNumbers], maxIssues: maxIssues! } } : {}) });
 }
 
 /** Default root harness: the first available native installation that can enforce Full Control,

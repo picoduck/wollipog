@@ -47,26 +47,34 @@ only) establishes the boundary before the Orchestrator's first turn:
   issues are kept: a pull request, a missing issue, or an unreadable origin leaves that reference
   out. With none, the scope stays task-only.
 - The next issue-scope revision, and the boundary revision that names it, commit together in one
-  compare-and-set on the policy revision (`establishFirstMessageScope`). Accepted follow-ups and
-  Maximum Issues grow to what a launch naming those issues derives, and never shrink. Operations,
-  policy asks, evidence and ceilings are unchanged.
+  compare-and-set on the policy revision (`establishFirstMessageScope`). The launch records which
+  limits it derived (`derivedLimits`, no Human override). Only a derived Accepted Follow-Ups or
+  Maximum Issues grows to what a launch naming those issues derives, and never shrinks. An
+  explicit ceiling never changes, and an explicit Maximum Issues bounds how many referenced issues
+  enter the scope. Operations, policy asks, evidence and cost or tool ceilings are unchanged.
 - The scope and boundary are synchronized to the runner (`campaign_issue_scope synchronize`)
   before the message is delivered. A runner that misses the update keeps its older revision, which
   authorizes no issue write, and every issue operation synchronizes again before it acts.
-- If the message is not delivered, the wait reopens (`reopenFirstMessageScope`, digest-bound), and
-  the next first message establishes a newer revision.
+- Delivery is crash-safe. The commit records `delivering` with the message digest, so the fence
+  is durable, and only the admitted delivery settles it as `established`
+  (`settleFirstMessageDelivery`). A message that is not delivered reopens the wait, and the next
+  first message establishes a newer revision. On startup, a root still `delivering` is settled
+  without resending: `established` if its message was recorded or durably queued, otherwise
+  waiting again, still fenced. A first message is therefore never resent.
 
-While the root waits, every other prompt is refused, whether from an agent, an automation, a
-steering lane or a campaign continuation. Agent-authored text therefore can never establish or widen the scope. Later
+While the root waits or delivers, every other ingress that can start a provider turn is refused:
+prompts from an agent or an automation, direct steering, provider command invocations and campaign
+continuations. Agent-authored text therefore can never establish or widen the scope. Later
 messages, the owner's included, never change it: scope changes go through the existing scope
 review. Revoking Full Control restores Custom: the wait applies only while the control is Full
 Control.
 
 Enabling Full Control on an existing campaign that has no issue scope derives one. The repository
-comes from the runner's inspection of the root's checkout. The issues are only those the server
-recorded from the owner's launch request, as the runner verifies them. Transcript messages record
-no author, and an agent may have messaged the root first, so their text is never scope. If no
-message was sent yet, the campaign waits for its first message exactly like a launch. A campaign whose scope another person established can't be enabled
+comes from the runner's inspection of the root's checkout. The issues are only those parsed from
+the authenticated Human's own create request (`issueNumbersSource: "human_launch_request"`), as
+the runner verifies them. Transcript messages record no author, and a restart backfill reads the
+transcript, so neither is ever scope. Without such issues, the scope is task-only and the campaign
+waits for the owner's next message through the same fenced first-message path. A campaign whose scope another person established can't be enabled
 by someone else.
 
 ## Server Evaluation

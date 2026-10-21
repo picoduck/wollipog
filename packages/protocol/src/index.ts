@@ -2694,15 +2694,24 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
+  /** Set only when `issueNumbers` came from the authenticated Human's own launch request at
+   * creation. A restart backfill, a child or a transcript never sets it (#2940). */
+  issueNumbersSource?: "human_launch_request";
   /** A Full Control boundary whose objective and issue scope come from its owner's first message
-   * (#2940). `pending` until that message is delivered; `established` keeps the digest of the
-   * exact message. Server-owned: never accepted from a request, a child or an agent. */
+   * (#2940). `pending` until that message arrives, `delivering` (durably fenced) while it is being
+   * delivered, then `established`, keeping the digest of the exact message. Server-owned: never
+   * accepted from a request, a child or an agent. */
   firstMessageScope?: FullControlFirstMessageScope;
   sources: OrchestratorPolicySources;
 }
 
+/** Which launch limits were derived defaults rather than explicit Human ceilings. Only a derived
+ * limit grows to fit the first message's issues; an explicit ceiling never changes. */
+export interface FullControlDerivedLimits { acceptedFollowUps: boolean; maxIssues: boolean }
+
 export type FullControlFirstMessageScope =
-  | { state: "pending" }
+  | { state: "pending"; derivedLimits?: FullControlDerivedLimits }
+  | { state: "delivering"; messageDigest: string; derivedLimits?: FullControlDerivedLimits }
   | { state: "established"; messageDigest: string; establishedAt: number };
 
 /** `blocked` means nothing is progressing without intervention: every unverified child failed,

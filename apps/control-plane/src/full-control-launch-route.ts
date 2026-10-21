@@ -13,7 +13,7 @@ import type { EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { authorizeFullControl } from "./campaign-authority.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
-import { campaignLaunchDigest, campaignLaunchPreflight, firstMessageLaunch, launchSessionRequest, parseFullControlEnableRequest,
+import { campaignLaunchDigest, campaignLaunchPreflight, derivedLaunchLimits, firstMessageLaunch, launchSessionRequest, parseFullControlEnableRequest,
   parseFullControlLaunchRequest, type VideoLaunchCertification } from "./campaign-launch-admission.js";
 
 export const CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS = 60_000;
@@ -183,7 +183,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const created = sessions.createSession(ownership.body, undefined, scope, false, false, false, {
       ...creationContext,
       humanCampaignLaunch: { principal, requestId: body.requestId!, digest: preflight.digest, control, issueScope,
-        ...(firstMessageLaunch(body) ? { firstMessage: true } : {}),
+        ...(firstMessageLaunch(body) ? { firstMessage: { derivedLimits: derivedLaunchLimits(body.overrides) } } : {}),
         ...(evidence.envelope && evidence.provider?.reviewer.model ? { evidenceAuthority: {
           destinationConfigurationId: evidence.destination.configurationId,
           destinationDisclosureRevision: evidence.destination.disclosureRevision,
@@ -291,7 +291,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         destinationDisclosureRevision: evidence.destination.disclosureRevision,
         providers: [{ providerId: evidence.provider.providerId, disclosureRevision: evidence.provider.disclosureRevision,
           reviewers: [{ driver: evidence.provider.reviewer.driver as "claude-code" | "codex-app-server", modelId: evidence.provider.reviewer.model }] }],
-      } } : {}) }, revision, principal, derived ?? undefined);
+      } } : {}) }, revision, principal, derived ? { ...derived, derivedLimits: derivedLaunchLimits(body.overrides) } : undefined);
     if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
     return result.data;
   });

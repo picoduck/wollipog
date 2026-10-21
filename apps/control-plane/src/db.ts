@@ -15630,6 +15630,8 @@ export class ControlPlaneDb {
     if (policy.issueScope || policy.issueNumbers?.length) return [...(policy.issueNumbers ?? [])];
     const previous = JSON.stringify(policy);
     policy.issueNumbers = unique;
+    // Transcript-derived: never the Human launch request provenance Full Control enable trusts (#2940).
+    delete policy.issueNumbersSource;
     const result = this.stmt(
       "UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?",
     ).run(JSON.stringify(policy), now, id, previous);
@@ -18577,7 +18579,8 @@ export class ControlPlaneDb {
    * scope and provider compatibility before calling; agent-facing APIs expose no such mutation. */
   updateSessionCampaignControl(id: string, control: CampaignControl, expectedRevision: number, now: number,
     /** Enabling a campaign with no issue scope establishes the first one with the boundary (#2940). */
-    established?: { issueScope: import("@wollipog/protocol").CampaignIssueScope; firstMessage: boolean }): boolean {
+    established?: { issueScope: import("@wollipog/protocol").CampaignIssueScope; firstMessage: boolean;
+      derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits }): boolean {
     const campaign = this.sessionOrchestratorPolicy(id);
     const policy = this.parentControlPolicy(id);
     if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
@@ -18589,7 +18592,8 @@ export class ControlPlaneDb {
           scope.authorizedByUserId !== control.boundary.authorizedByUserId || scope.authorizedAt > control.boundary.authorizedAt) return false;
       campaign.issueScope = structuredClone(scope);
       campaign.issueNumbers = [...scope.issueNumbers];
-      if (established.firstMessage) campaign.firstMessageScope = { state: "pending" };
+      if (established.firstMessage) campaign.firstMessageScope = { state: "pending",
+        ...(established.derivedLimits ? { derivedLimits: { ...established.derivedLimits } } : {}) };
     }
     campaign.control = structuredClone(control);
     this.db.exec("BEGIN");
@@ -18612,8 +18616,10 @@ export class ControlPlaneDb {
 
   /** The owner's first message establishes a pending Full Control campaign's objective and issue
    * scope (#2940): the next scope revision, the boundary that names it and the message digest
-   * commit together, compare-and-set on the policy revision. Only the service's authenticated
-   * Human first-message path calls this; the boundary's own author is the only accepted Human. */
+   * commit together, compare-and-set on the policy revision. The campaign stays durably fenced as
+   * `delivering` until `settleFirstMessageDelivery` records the delivery, so a restart in between
+   * never lets another message reach it first. Only the service's authenticated Human
+   * first-message path calls this; the boundary's own author is the only accepted Human. */
   establishFirstMessageScope(id: string, input: { control: CampaignControl; scope: import("@wollipog/protocol").CampaignIssueScope; messageDigest: string;
     expectedRevision: number; now: number }): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
@@ -18631,7 +18637,8 @@ export class ControlPlaneDb {
     policy.control = structuredClone(control);
     policy.issueScope = structuredClone(scope);
     policy.issueNumbers = [...scope.issueNumbers];
-    policy.firstMessageScope = { state: "established", messageDigest: input.messageDigest, establishedAt: input.now };
+    const derivedLimits = policy.firstMessageScope.derivedLimits;
+    policy.firstMessageScope = { state: "delivering", messageDigest: input.messageDigest, ...(derivedLimits ? { derivedLimits } : {}) };
     return this.atomic(() => {
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
         updated_at=? WHERE id=? AND parent_control_policy_revision=?`).run(JSON.stringify(policy), input.now, id, input.expectedRevision);
@@ -18641,14 +18648,37 @@ export class ControlPlaneDb {
     });
   }
 
-  /** A first message that was not delivered leaves the campaign waiting for its first message
-   * again; the next one establishes a newer revision. Only the exact undelivered digest reopens. */
-  reopenFirstMessageScope(id: string, messageDigest: string, now: number): boolean {
+  /** Ends the exact `delivering` first message: admitted becomes `established`; otherwise the
+   * campaign waits for its first message again, still fenced, and the next one establishes a newer
+   * revision. Only the exact digest being delivered settles. */
+  settleFirstMessageDelivery(id: string, messageDigest: string, delivered: boolean, now: number): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
-    if (policy?.firstMessageScope?.state !== "established" || policy.firstMessageScope.messageDigest !== messageDigest) return false;
-    policy.firstMessageScope = { state: "pending" };
+    const first = policy?.firstMessageScope;
+    if (!policy || first?.state !== "delivering" || first.messageDigest !== messageDigest) return false;
+    policy.firstMessageScope = delivered ? { state: "established", messageDigest, establishedAt: now }
+      : { state: "pending", ...(first.derivedLimits ? { derivedLimits: first.derivedLimits } : {}) };
     return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?")
       .run(JSON.stringify(policy), now, id).changes) === 1;
+  }
+
+  /** Roots whose first message was being delivered when this control plane last stopped. */
+  firstMessageDeliveries(): Array<{ sessionId: string; messageDigest: string }> {
+    const rows = this.stmt(`SELECT id FROM sessions WHERE CASE WHEN json_valid(orchestrator_policy)
+      THEN json_extract(orchestrator_policy, '$.firstMessageScope.state') ELSE NULL END='delivering'`).all() as unknown as Array<{ id: string }>;
+    return rows.flatMap((row) => {
+      const first = this.sessionOrchestratorPolicy(row.id)?.firstMessageScope;
+      return first?.state === "delivering" ? [{ sessionId: row.id, messageDigest: first.messageDigest }] : [];
+    });
+  }
+
+  /** Whether the exact text with this digest reached the session: its first recorded user message,
+   * or a prompt command already in its durable queue, which the outbox delivers on its own. */
+  firstMessageAdmitted(sessionId: string, messageDigest: string): boolean {
+    const matches = (text: unknown) => typeof text === "string" && createHash("sha256").update(text, "utf8").digest("hex") === messageDigest;
+    if (matches(this.initialUserMessageText(sessionId))) return true;
+    const queued = this.stmt(`SELECT json_extract(payload_json, '$.text') AS text FROM session_prompt_commands
+      WHERE session_id=? ORDER BY created_at, rowid LIMIT 1`).get(sessionId) as { text: unknown } | undefined;
+    return matches(queued?.text);
   }
 
   campaignDescendantIds(campaignSessionId: string): string[] {
@@ -30813,9 +30843,13 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       JSON.stringify(value.issueScope.issueNumbers) !== JSON.stringify(value.issueNumbers ?? []))) return null;
   if (value.issueNumbers) value.issueNumbers = [...new Set(value.issueNumbers)];
   const first = value.firstMessageScope as unknown as Record<string, unknown> | undefined;
-  if (first !== undefined && !(first && (first.state === "pending" && Object.keys(first).length === 1 ||
-      first.state === "established" && typeof first.messageDigest === "string" && /^[a-f0-9]{64}$/.test(first.messageDigest) &&
-      Number.isSafeInteger(first.establishedAt)))) return null;
+  const digest = (v: unknown) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
+  const limits = (v: unknown) => v === undefined || Boolean(v && typeof v === "object" && Object.keys(v).length === 2 &&
+    typeof (v as Record<string, unknown>).acceptedFollowUps === "boolean" && typeof (v as Record<string, unknown>).maxIssues === "boolean");
+  if (first !== undefined && !(first && (first.state === "pending" && limits(first.derivedLimits) ||
+      first.state === "delivering" && digest(first.messageDigest) && limits(first.derivedLimits) ||
+      first.state === "established" && digest(first.messageDigest) && Number.isSafeInteger(first.establishedAt)))) return null;
+  if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);
