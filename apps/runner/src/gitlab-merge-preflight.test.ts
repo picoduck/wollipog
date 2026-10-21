@@ -7,6 +7,19 @@ import { test } from "node:test";
 import type { GhOutcome } from "./campaign-forge-status.js";
 import type { GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
+import { forgeProofOptions } from "./session-manager.js";
+import type { SessionMeta } from "./session-store.js";
+
+test("a GitLab merge's forge proof reads with the child agent's environment; GitHub keeps the runner's (#3608 review)", () => {
+  const meta = { context: { kind: "native" } } as SessionMeta;
+  const agentEnv = () => ({ GITLAB_TOKEN: "from-agent", GLAB_CONFIG_DIR: "/agent/glab" });
+  assert.deepEqual(forgeProofOptions(meta, "https://gitlab.example.com/group/project/-/merge_requests/7", agentEnv),
+    { context: { kind: "native" }, provider: "gitlab", env: agentEnv() });
+  assert.deepEqual(forgeProofOptions(meta, "https://github.com/picoduck/wollipog/pull/7", agentEnv),
+    { context: { kind: "native" }, provider: "github" });
+  assert.deepEqual(forgeProofOptions(meta, "https://gitlab.example.com/group/project/-/merge_requests/7"),
+    { context: { kind: "native" }, provider: "gitlab" });
+});
 
 const HOST = "gitlab.example.com";
 const ENCODED = encodeURIComponent("platform/agents/wollipog");
@@ -24,7 +37,9 @@ function fake(overrides: { version?: GhOutcome; project?: Record<string, unknown
   const glab: GlabRunner = async (args) => {
     calls.push(args);
     if (args[1] === "version") return overrides.version ?? ok({ version: "17.7.1-ee", revision: "abc" });
-    if (args[1] === `projects/${ENCODED}`) return answer(overrides.project, { merge_trains_enabled: true, squash_option: "default_off" });
+    if (args[1] === `projects/${ENCODED}`) {
+      return answer(overrides.project, { path_with_namespace: "platform/agents/wollipog", merge_trains_enabled: true, squash_option: "default_off" });
+    }
     if (args[1] === `projects/${ENCODED}/merge_requests/7`) {
       return answer(overrides.mr, { iid: 7, state: "opened", draft: false, sha: HEAD, force_remove_source_branch: false });
     }
@@ -77,6 +92,39 @@ test("a moved head is stale; a closed, merged, or draft merge request and settin
   assert.match(never.ok ? "" : never.reason, /never squashes/u);
   const always = await gitlabMergePreflight(REQUEST, fake({ project: { squash_option: "always" } }).glab);
   assert.match(always.ok ? "" : always.reason, /always squashes/u);
+});
+
+test("a train merge checks the merge request's effective source-branch deletion (#3608 review)", async () => {
+  // should_remove_source_branch, when set, is what GitLab applies; force_remove_source_branch otherwise.
+  const keep = { ...REQUEST, removeSourceBranch: false };
+  const deletes = await gitlabMergePreflight(keep,
+    fake({ mr: { should_remove_source_branch: true, force_remove_source_branch: false } }).glab);
+  assert.equal(deletes.ok === false && deletes.refusal, "mismatch", "an approved keep never deletes the branch");
+  assert.deepEqual(await gitlabMergePreflight(keep,
+    fake({ mr: { should_remove_source_branch: false, force_remove_source_branch: true } }).glab), { ok: true });
+  assert.deepEqual(await gitlabMergePreflight({ ...REQUEST, removeSourceBranch: true },
+    fake({ mr: { should_remove_source_branch: null, force_remove_source_branch: true } }).glab), { ok: true });
+  const odd = await gitlabMergePreflight(keep, fake({ mr: { should_remove_source_branch: "yes" } }).glab);
+  assert.equal(odd.ok === false && odd.refusal, "unavailable");
+});
+
+test("an unexpected project or merge request answer is unreadable, never no trains, and is never echoed (#3608 review)", async () => {
+  for (const project of [
+    { path_with_namespace: undefined },
+    { path_with_namespace: "someone/else" },
+    { squash_option: undefined },
+    { squash_option: "sometimes" },
+    { merge_trains_enabled: "true" },
+  ]) {
+    const result = await gitlabMergePreflight({ ...REQUEST, mergeMethod: "merge" }, fake({ project }).glab);
+    assert.equal(result.ok === false && result.refusal, "unavailable", `${JSON.stringify(project)} proves nothing about trains`);
+  }
+  assert.deepEqual(await gitlabMergePreflight({ ...REQUEST, mergeMethod: "merge" },
+    fake({ project: { merge_trains_enabled: undefined } }).glab), { ok: true }, "a genuine answer without trains has none");
+  const strange = await gitlabMergePreflight(REQUEST, fake({ mr: { state: "<script>reopened</script>" } }).glab);
+  assert.deepEqual(strange, { ok: false, refusal: "unavailable", reason: "GitLab returned an unexpected answer for the merge request." });
+  const locked = await gitlabMergePreflight(REQUEST, fake({ mr: { state: "locked" } }).glab);
+  assert.deepEqual(locked, { ok: false, refusal: "mismatch", reason: "The merge request is being merged already." });
 });
 
 test("GitLab being unreadable proves nothing, and nothing glab prints crosses", async () => {

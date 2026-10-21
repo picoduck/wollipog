@@ -46,6 +46,8 @@ const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "orch
 /** Default cap on one CP round-trip. Without it, a half-open connection (the documented
  * box-tunnel blip) would stall an ordinary call for undici's ~300s header/body timeouts. */
 const CP_TIMEOUT_MS = 30_000;
+/** The control plane's GitLab merge preflight (50 s) plus the Codex admission fence (5 s) and margin. */
+const GITLAB_MERGE_CONSUME_TIMEOUT_MS = 75_000;
 const MAX_WAIT_SESSION_INTERVAL_MS = 10_000;
 /** Every status `wait_session` can wait for. A Record so a new SessionStatus fails to compile here
  * until it is listed; the handler refuses anything else (#3269). */
@@ -2082,11 +2084,15 @@ export const TOOLS: McpTool[] = [
         const compatibilityError = await workflowDecisionActionCompatibilityError(deps);
         if (compatibilityError) return compatibilityError;
       }
+      // A GitLab merge is checked against GitLab before it is armed (up to 50 seconds, #3602), so
+      // its consume must outlast that check; otherwise the server could arm after the call gave up.
+      const gitlabMerge = args?.resourceSnapshot?.category === "pr_merge" && args.resourceSnapshot.mergeMethod !== undefined;
       const r = await cpFetch(
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/consume`,
         { resourceSnapshot: args?.resourceSnapshot, ...(args?.action ? { action: args.action } : {}) },
+        gitlabMerge ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, GITLAB_MERGE_CONSUME_TIMEOUT_MS) : undefined,
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },
