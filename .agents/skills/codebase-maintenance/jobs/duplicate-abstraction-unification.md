@@ -11,7 +11,9 @@ Start mechanically with the symbol inventory as the primary pass, then run `jscp
 secondary wide-net pass. Both passes run every time: the order reflects observed yield, not
 optionality or a presumption that `jscpd` hits are false positives. They cover disjoint classes
 that the other pass cannot see: the export-only inventory is blind to module-private code, while
-`jscpd` is blind to units shorter than its `--min-lines` threshold. One run
+`jscpd` is blind to units shorter than its `--min-lines` threshold. Their overall coverage is
+not disjoint or exhaustive: both can see long exported units, neither sees short module-private
+units, and `jscpd` also requires `--min-tokens 120`. One run
 ([#430, September 17](https://github.com/picoduck/wollipog/issues/430#issuecomment-5720428711))
 produced its only finding through `jscpd`: module-private CLI helpers tracked in #1220.
 
