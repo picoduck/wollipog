@@ -3,22 +3,25 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { currentCgroupDirectory, LinuxCgroupBoundary, providerContainmentIdentity, providerContainmentStatus, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
-import { linuxCgroupHelper } from "./linux-cgroup-helper.js";
+import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentIdentity, providerContainmentStatus, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
+import { linuxCgroupHelper, stageLinuxCgroupHelper } from "./linux-cgroup-helper.js";
 import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { provenProcessTreeExit, ProviderProcessLedger, spawnAgent, waitForPendingKills } from "./spawn.js";
 
 const identity = Object.freeze({ kind: "linux-cgroup-v2" as const, bootId: "boot", mountRoot: "/", cgroupPath: "test/leaf", inode: "42" });
 
 function controlledBoundary() {
-  const state = { populated: true, kills: 0, closed: 0, removed: 0, reads: 0, now: 0, unreadable: false, killFails: false, stuck: false };
+  const state = { populated: true, terms: 0, kills: 0, closed: 0, removed: 0, reads: 0, now: 0, unreadable: false, killFails: false, stuck: false };
   const io: LinuxCgroupBoundaryIo = {
     populated() { state.reads++; if (state.unreadable) throw new Error("identity changed"); return state.populated; },
+    async term() { state.terms++; },
     kill() { state.kills++; if (state.killFails) throw new Error("denied"); if (!state.stuck) state.populated = false; },
     remove() { state.removed++; },
     close() { state.closed++; },
@@ -42,6 +45,15 @@ test("cgroup mount resolution uses the current delegation and decodes mount path
   assert.equal(currentCgroupDirectory("30 20 0:30 / /cgroup rw - cgroup cgroup rw", "0::/runner\n"), undefined);
 });
 
+test("delegation must belong to the nearest service/scope, never an ancestor user manager", () => {
+  const mountPoint = "/sys/fs/cgroup";
+  const scope = "/user.slice/user-1000.slice/user@1000.service/app.slice/runner.scope";
+  assert.equal(cgroupDelegationDirectory({ directory: mountPoint + scope + "/worker", mountRoot: "/", mountPoint }), mountPoint + scope);
+  assert.equal(cgroupDelegationDirectory({ directory: mountPoint + "/worker", mountRoot: scope, mountPoint }), mountPoint);
+  assert.equal(cgroupDelegationDirectory({ directory: mountPoint, mountRoot: scope + "/worker", mountPoint }), undefined,
+    "a hidden ancestor unit cannot be attested through a namespaced mount");
+});
+
 test("an empty cgroup before admission is never an early-release proof", async () => {
   const { boundary, state, pipe } = controlledBoundary();
   state.populated = false;
@@ -56,6 +68,7 @@ test("an empty cgroup before admission is never an early-release proof", async (
   assert.equal(state.kills, 0, "non-killing release leaves retained background work alive");
   assert.equal(await boundary.terminate(), true);
   assert.equal(state.kills, 1);
+  assert.equal(state.terms, 1, "retained descendants receive grace even after their root exits");
   assert.equal(state.closed, 1);
 });
 
@@ -95,25 +108,48 @@ test("a failed admission cannot authorize release even if the unused cgroup is e
   pipe.end();
   assert.equal(await boundary.releaseIfEmpty(), false);
   assert.equal(await boundary.terminate(), false);
-  assert.equal(state.kills, 0);
+  assert.equal(state.kills, 1, "uncertain admission cannot disable cleanup of our own cgroup");
   boundary.cancelSpawn();
 });
 
-test("unavailable containment retains the marker/parent-link launch API and reports fallback", { skip: process.platform !== "linux" }, () => {
+test("an admission timeout does not discard a late acknowledgement or disable kernel cleanup", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { boundary, state, pipe } = controlledBoundary();
+  const first = boundary.terminate();
+  t.mock.timers.tick(5_000);
+  assert.equal(await first, false);
+  assert.equal(state.kills, 1);
+  assert.equal(state.closed, 0, "uncertain emptiness still retains the lease proof");
+  pipe.end("1");
+  assert.equal(await boundary.terminate(), true, "late admission can be consumed by the next proof");
+  assert.equal(state.closed, 1);
+});
+
+for (const reason of ["cgroup-unavailable", "cgroup-not-delegated"]) {
+test(`${reason} retains the marker/parent-link API and reports fallback before unsafe writes`, { skip: process.platform !== "linux" }, () => {
   const module = new URL("./linux-cgroup.ts", import.meta.url).href;
+  const helperModule = new URL("./linux-cgroup-helper.ts", import.meta.url).href;
   const spawnModule = new URL("./spawn.ts", import.meta.url).href;
   const code = `
     import fs from 'node:fs';
+    import cp from 'node:child_process';
     import { syncBuiltinESMExports } from 'node:module';
     import assert from 'node:assert/strict';
     const cgroup = await import(${JSON.stringify(module)});
+    const {linuxCgroupHelper} = await import(${JSON.stringify(helperModule)});
+    linuxCgroupHelper();
     const original = fs.mkdirSync;
-    fs.mkdirSync = () => { throw Object.assign(new Error('unavailable delegation'), {code:'EROFS'}); };
+    const originalSpawn = cp.spawnSync;
+    cp.spawnSync = (file,args,options) => args[0] === '--delegation-probe' ? {status:${reason === "cgroup-not-delegated" ? 3 : 0}} : originalSpawn(file,args,options);
+    let writes = 0;
+    fs.mkdirSync = () => { writes++; throw Object.assign(new Error('unavailable delegation'), {code:'EROFS'}); };
     syncBuiltinESMExports();
     assert.equal(cgroup.providerContainmentIdentity(), undefined);
     fs.mkdirSync = original;
+    cp.spawnSync = originalSpawn;
     syncBuiltinESMExports();
-    assert.deepEqual(cgroup.providerContainmentStatus(), {proofStandard:'marker-parent-links',reason:'cgroup-unavailable'});
+    assert.equal(writes, ${reason === "cgroup-not-delegated" ? 0 : 1});
+    assert.deepEqual(cgroup.providerContainmentStatus(), {proofStandard:'marker-parent-links',reason:${JSON.stringify(reason)}});
     const {spawnAgent,provenProcessTreeExit} = await import(${JSON.stringify(spawnModule)});
     const child = spawnAgent({command:process.execPath,args:['-e',''],cwd:process.cwd()});
     assert.equal(child.posixBoundary.proofStandard,'marker-parent-links');
@@ -122,16 +158,63 @@ test("unavailable containment retains the marker/parent-link launch API and repo
   `;
   const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { timeout: 20_000, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stderr, /proofStandard=marker-parent-links reason=cgroup-unavailable/u);
+  assert.ok(result.stderr.includes('proofStandard=marker-parent-links reason=' + reason));
 });
+}
 
 test("native launcher refuses a non-cgroup descriptor before executing provider code", { skip: process.platform !== "linux" }, () => {
-  const result = spawnSync(linuxCgroupHelper(), ["/bin/sh", "-c", "echo provider-was-executed"], {
+  const result = spawnSync(linuxCgroupHelper(), ["--exec", "/bin/sh", "-c", "echo provider-was-executed"], {
     encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
   assert.equal(result.status, 125);
   assert.equal(result.stdout, "");
   assert.match(result.stderr, /provider was not executed/u);
+});
+
+test("a removed temporary helper is safely restaged; an unexecutable root can fall back to data", { skip: process.platform !== "linux" }, (t) => {
+  const initial = linuxCgroupHelper();
+  rmSync(dirname(initial), { recursive: true, force: true });
+  const replacement = linuxCgroupHelper();
+  assert.notEqual(replacement, initial);
+  assert.equal(spawnSync(replacement, [], { timeout: 5_000 }).status, 125);
+  const directory = mkdtempSync(join(tmpdir(), "wollipog-cgroup-staging-test-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const temporary = join(directory, "temporary");
+  const data = join(directory, "data");
+  fs.mkdirSync(temporary); fs.mkdirSync(data);
+  const staged = stageLinuxCgroupHelper([temporary, data], (path) => path.startsWith(data + "/"));
+  assert.ok(staged.path.startsWith(data + "/"));
+  staged.verify();
+});
+
+function requireContainment(t: { skip(message: string): void }): boolean {
+  if (providerContainmentIdentity()) return true;
+  assert.notEqual(process.env.WOLLIPOG_TEST_REQUIRE_CGROUP, "1", "real delegated cgroup containment was required");
+  t.skip(`containment unavailable: ${providerContainmentStatus().reason}`);
+  return false;
+}
+
+test("successful preparation clears a transient boundary-creation failure", { skip: process.platform !== "linux" }, (t) => {
+  if (!requireContainment(t)) return;
+  const original = fs.mkdirSync;
+  fs.mkdirSync = () => { throw Object.assign(new Error("transient descriptor failure"), { code: "EMFILE" }); };
+  syncBuiltinESMExports();
+  try { assert.throws(() => prepareLinuxCgroupLaunch(), /provider was not executed/u); }
+  finally { fs.mkdirSync = original; syncBuiltinESMExports(); }
+  assert.equal(providerContainmentStatus().reason, "boundary-creation-failed");
+  const launch = prepareLinuxCgroupLaunch();
+  assert.equal(providerContainmentStatus().reason, "available");
+  launch!.boundary.cancelSpawn();
+});
+
+test("a missing provider executable still emits its ENOENT ChildProcess error", { skip: process.platform !== "linux" }, async () => {
+  const child = spawnAgent({ command: "/nonexistent-wollipog-cgroup-test-provider", args: [], cwd: process.cwd() });
+  let error: NodeJS.ErrnoException | undefined;
+  child.once("error", (value: NodeJS.ErrnoException) => { error = value; });
+  child.stderr.resume();
+  await new Promise<void>((resolve) => child.once("close", () => resolve()));
+  assert.equal(error?.code, "ENOENT");
+  assert.equal((error as { path?: string })?.path, "/nonexistent-wollipog-cgroup-test-provider");
 });
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
@@ -147,14 +230,10 @@ function alive(pid: number): boolean {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 
-for (const mode of ["detached", "nondumpable"]) {
+for (const mode of ["detached", "nondumpable", "term", "delayed-admission"]) {
   test(`Linux cgroup contains and reaps a ${mode} setsid helper before lease-release proof`, { skip: process.platform !== "linux" }, async (t) => {
-    const parentIdentity = providerContainmentIdentity();
-    if (!parentIdentity) {
-      assert.notEqual(process.env.WOLLIPOG_TEST_REQUIRE_CGROUP, "1", "real delegated cgroup containment was required");
-      t.skip(`containment unavailable: ${providerContainmentStatus().reason}`);
-      return;
-    }
+    if (!requireContainment(t)) return;
+    const parentIdentity = providerContainmentIdentity()!;
     const directory = mkdtempSync(join(tmpdir(), "wollipog-cgroup-test-"));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const helper = join(directory, "descendant");
@@ -165,8 +244,12 @@ for (const mode of ["detached", "nondumpable"]) {
     t.after(() => unrelated.kill("SIGKILL"));
     const ledger = new ProviderProcessLedger();
     const pidfile = join(directory, "helper.pid");
-    const child = ledger.record(spawnAgent({ command: helper, args: [mode, pidfile], cwd: directory, descendantOwner: ledger.owner }));
+    const child = ledger.record(spawnAgent({ command: helper, args: [mode === "delayed-admission" ? "detached" : mode, pidfile], cwd: directory, descendantOwner: ledger.owner }));
     t.after(async () => { await child.posixBoundary?.terminate(); });
+    if (mode === "delayed-admission") {
+      const unblockAt = performance.now() + 6_000;
+      while (performance.now() < unblockAt) { /* queue the admission ack behind an event-loop stall */ }
+    }
     await new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
     await waitUntil(() => { try { return readFileSync(pidfile, "utf8").trim().length > 0; } catch { return false; } });
     const pid = Number(readFileSync(pidfile, "utf8").trim());
@@ -177,12 +260,13 @@ for (const mode of ["detached", "nondumpable"]) {
     assert.ok(leaf.cgroupPath.startsWith(parentIdentity.cgroupPath + "/"));
     assert.notEqual(leaf.inode, parentIdentity.inode);
     assert.match(readFileSync(`/proc/${pid}/cgroup`, "utf8"), new RegExp(`/${leaf.cgroupPath}\\n`, "u"));
-    if (mode === "detached") assert.equal(readFileSync(`/proc/${pid}/environ`).length, 0, "the escaped helper scrubbed all markers");
+    if (mode !== "nondumpable") assert.equal(readFileSync(`/proc/${pid}/environ`).length, 0, "the escaped helper scrubbed all markers");
     else if (process.getuid?.() !== 0) assert.throws(() => readFileSync(`/proc/${pid}/environ`), { code: "EACCES" });
     assert.equal(await ledger.prove({ terminate: false }), false, "early non-killing proof retains the lease while the helper lives");
     if (mode === "detached") assert.equal(await provenProcessTreeExit(child), true, "early per-process proof reaps the same boundary");
     else assert.deepEqual(await Promise.all(terminatePosixProcessBoundaries(ledger.owner)), [true], "shutdown uses the same boundary proof");
     assert.equal(alive(pid), false, "proof cannot precede the helper's death");
+    if (mode === "term") assert.equal(readFileSync(pidfile + ".term", "utf8"), "term", "a retained setsid descendant receives TERM before forced cleanup");
     assert.equal(await ledger.prove({ terminate: true }), true);
     assert.equal(unrelated.exitCode, null, "unrelated same-user processes are untouched");
     assert.equal(await waitForPendingKills(10_000), true);

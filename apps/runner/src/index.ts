@@ -201,6 +201,7 @@ import {
   terminateDescendantBoundariesAfterPendingKills,
   waitForPendingKills,
 } from "./spawn.js";
+import { providerContainmentIdentity } from "./linux-cgroup.js";
 import {
   cleanupPiExternalSession,
   findExternalSession,
@@ -434,6 +435,9 @@ if (resolve(requestedDataDir) !== resolve(dataDirLease.dataDir)) {
   log(`using isolated runner state at ${dataDirLease.dataDir}; prior owner state remains untouched`);
 }
 config.dataDir = dataDirLease.dataDir;
+// Runtime containment is selected before provider-HOME acquisitions; staging can use the owned
+// runner data directory when the temporary filesystem is noexec. This never moves the runner.
+providerContainmentIdentity(config.dataDir);
 process.once("exit", dataDirLease.release);
 if (dataDirLease.migratedLegacyDataDir) {
   log(`claimed legacy data directory ${config.dataDir} after explicit --adopt-legacy-data-dir authorization`);

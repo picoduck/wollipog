@@ -9,9 +9,43 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 let staged: { path: string; verify(): void } | undefined;
 
 /** Fixed join-before-exec worker. A shipped runner uses the exact build-time static binary. */
-export function linuxCgroupHelper(): string {
-  if (staged) { staged.verify(); return staged.path; }
-  const directory = mkdtempSync(join(tmpdir(), "wollipog-cgroup-launch-"));
+export function linuxCgroupHelper(dataDirectory?: string): string {
+  if (staged) {
+    try { staged.verify(); return staged.path; }
+    catch (error) {
+      // A temporary-file cleaner may remove a perfectly valid copy. Restage the fixed asset in
+      // a new private directory; a changed or substituted existing copy still fails closed.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      staged = undefined;
+    }
+  }
+  staged = stageLinuxCgroupHelper([...new Set([tmpdir(), ...(dataDirectory ? [dataDirectory] : [])])]);
+  return staged.path;
+}
+
+/** The test callback may reject a working root, but cannot accept an unexecutable helper. */
+export function stageLinuxCgroupHelper(roots: string[], acceptRootForTest: (path: string) => boolean = () => true): {
+  path: string; verify(): void;
+} {
+  let cause: unknown;
+  for (const root of roots) {
+    let directory: string | undefined;
+    try {
+      directory = mkdtempSync(join(root, "wollipog-cgroup-launch-"));
+      const helper = stageInDirectory(directory);
+      if (!acceptRootForTest(helper.path)) throw new Error("cgroup helper root rejected");
+      const retained = directory;
+      process.once("exit", () => rmSync(retained, { recursive: true, force: true }));
+      return helper;
+    } catch (error) {
+      cause = error;
+      if (directory) rmSync(directory, { recursive: true, force: true });
+    }
+  }
+  throw new Error("cgroup launch worker cannot execute in temporary or runner data directory", { cause });
+}
+
+function stageInDirectory(directory: string): { path: string; verify(): void } {
   const path = join(directory, "launch");
   try {
     chmodSync(directory, 0o700);
@@ -43,9 +77,7 @@ export function linuxCgroupHelper(): string {
     verify();
     const probe = spawnSync(path, [], { env: {}, timeout: 5_000, maxBuffer: 1024 });
     if (probe.error || probe.status !== 125) throw new Error("cgroup launch worker cannot execute");
-    staged = { path, verify };
-    process.once("exit", () => rmSync(directory, { recursive: true, force: true }));
-    return path;
+    return { path, verify };
   } catch (error) {
     rmSync(directory, { recursive: true, force: true });
     throw error;

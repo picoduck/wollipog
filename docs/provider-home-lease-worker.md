@@ -292,29 +292,49 @@ that limit; it does not claim the Linux containment standard.
 
 ### Linux Process Containment
 
-The runner discovers its own cgroup v2 delegation through `/proc/self/cgroup` and the cgroup2 entry
-in `/proc/self/mountinfo`. It creates one randomly named instance parent below its current cgroup
-and one leaf per native provider launch. It never moves the runner, changes controllers, or walks
-up to another delegation. Cgroup v2 with writable `cgroup.procs`, `cgroup.kill` (Linux 5.14+) and
-readable `cgroup.events`, plus an executable fixed helper, is required. A read-only mount, missing
-delegation, unsupported kernel or unavailable helper chooses the existing marker/parent-link proof
+The runner resolves its current cgroup through `/proc/self/cgroup` and `/proc/self/mountinfo`.
+Write permission alone never proves delegation. Before creating anything, the fixed helper checks
+systemd's documented `user.delegate=1` xattr on the nearest containing service/scope. It never
+inherits the user manager's delegation across a non-delegated child scope. A unit hidden above a
+namespaced mount cannot be attested. Non-systemd trees also require an explicit delegation marker
+on the current cgroup; arbitrary writable trees are unsupported. The marker requires systemd 251+
+and kernel 5.6+; absent or unreadable evidence reports `cgroup-not-delegated` and performs no cgroup
+writes. See [systemd's delegation contract](https://systemd.io/CGROUP_DELEGATION/).
+
+Inside that declared delegation, the runner creates one randomly named instance parent below its
+current cgroup and one leaf per native provider launch. It never moves the runner, changes
+controllers, enables delegation, or creates a service/scope for itself. An operator must start it
+in an appropriately delegated unit; changing the hosting installation is a separate operation.
+Cgroup v2 with writable `cgroup.procs`, `cgroup.kill` (Linux 5.14+) and readable `cgroup.events`,
+plus an executable fixed helper, is required. A read-only mount, missing delegation, unsupported
+kernel or unavailable helper chooses the existing marker/parent-link proof
 for that runner instance. Once cgroups are chosen, subsequent preparation failures refuse launch
 instead of silently weakening that instance's containment claim.
 
 The statically linked native launcher inherits an already-open cgroup directory as fd 3, verifies
 its filesystem, writes itself into `cgroup.procs`, acknowledges admission on a private fd 4 pipe,
-closes both descriptors, and only then executes the provider. No shell startup or provider code can
+closes those descriptors, and only then executes the provider. A separate close-on-exec fd 5
+reports exec errno so callers still receive `ChildProcess` errors such as `ENOENT` and `EACCES`.
+No shell startup or provider code can
 fork before joining. A join failure exits without executing the provider. Cleanup waits for the
 admission acknowledgement, so an empty leaf while the launcher is still waiting to join never
-counts as a tree-gone proof. An admission failure retains an unproved result.
+counts as a tree-gone proof. A waiter's timeout never erases a late acknowledgement. Uncertain
+admission retains an unproved result but still ends the unreaped launcher and kills its own cgroup.
+The helper is staged under temporary storage with a runner-data-directory fallback for noexec
+mounts. A removed temporary copy is safely restaged from the fixed asset; changed existing copies
+still fail verification.
 
 Both `PosixProcessBoundary.releaseIfEmpty()` and `terminate()` use the same open-descriptor-backed
 cgroup identity. Non-killing release requires recursive `cgroup.events` `populated=0`. Termination
-uses recursive `cgroup.kill`, then waits for that same empty state; successful signal delivery alone
-is insufficient. It signals no numeric descendant PID and reads no environment, so setsid,
+first sends TERM/CONT to cgroup members using pidfds, including retained setsid work after the root
+exits. It gives them two seconds, then uses recursive `cgroup.kill` for survivors and waits for the
+same empty state; successful signal delivery alone is insufficient. The bounded TERM helper checks
+membership after opening each pidfd, so PID reuse cannot authorize an unrelated signal; missing
+or unreadable membership skips grace for that process, never final kernel cleanup. It reads no
+environment or unrelated process listing, so setsid,
 double-forking, environment scrubbing, non-dumpability and PID reuse cannot hide ordinary descendants
-or implicate unrelated same-user processes. Node's unreaped root retains its TERM/CONT grace;
-kernel survivor termination is SIGKILL. Drivers' existing EOF grace happens before this cleanup.
+or implicate unrelated same-user processes. Kernel survivor termination is SIGKILL; drivers'
+existing EOF grace happens before this cleanup.
 A missing, replaced or unreadable boundary retains the
 lease. Empty leaves are removed where possible; populated boundaries survive runner exit.
 
@@ -352,9 +372,14 @@ the abandoned-lease process scan or resolve an unreadable unrelated SSH process 
 `linux-cgroup.test.ts` covers admission races, fallback diagnostics/API compatibility, failed or
 unverifiable cleanup and the shared early-release/shutdown proof without process scans. Its native
 fixtures double-fork, call setsid, clear their environment and optionally become non-dumpable; the
-real delegated-cgroup cases assert they are dead before proof and leave an unrelated process alive.
+real delegated-cgroup cases re-exec with an empty environment (clearenv alone does not change
+`/proc/pid/environ`), assert they are dead before proof, verify a retained helper's TERM handler, and
+leave an unrelated process alive. A six-second blocked-loop case covers queued admission.
 Those cases explicitly skip where delegation is unavailable. Set `WOLLIPOG_TEST_REQUIRE_CGROUP=1`
 for validation on a delegated Linux host to make unavailable containment fail instead of skipping.
+The required Linux CI job also launches this suite as the ordinary test user in a transient
+`Delegate=yes` service with this flag set. The service has a bounded runtime and is collected on
+completion, so CI exercises real containment without relying on the job's original unit delegation.
 
 A surviving, unknown or unprobeable descendant keeps the reference until shutdown. So does a spawn without a POSIX boundary, where only the root's exit is observable: native Windows (whose kill-on-close Job is not verified), WSL, and remote spawns.
 

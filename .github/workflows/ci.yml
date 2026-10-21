@@ -234,6 +234,23 @@ jobs:
       - name: Unit Tests
         run: pnpm test
 
+      - name: Verify Delegated Linux Provider Containment
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          containment_root="$(mktemp -d "$RUNNER_TEMP/wollipog-cgroup.XXXXXX")"
+          trap 'rm -rf "$containment_root"' EXIT
+          mkdir -p "$containment_root/home" "$containment_root/tmp" "$containment_root/cache"
+          # A transient test service explicitly delegates its subtree to the ordinary test user.
+          # RuntimeMaxSec also cleans up if the client or CI step is cancelled.
+          sudo systemd-run --wait --collect --pipe \
+            --property=Delegate=yes --property=RuntimeMaxSec=120 --property=TimeoutStopSec=5 \
+            --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" \
+            /usr/bin/env PATH="$PATH" HOME="$containment_root/home" TMPDIR="$containment_root/tmp" \
+            XDG_CACHE_HOME="$containment_root/cache" WOLLIPOG_TEST_REQUIRE_CGROUP=1 \
+            "$(command -v node)" --import tsx --test --test-timeout=90000 apps/runner/src/linux-cgroup.test.ts
+
       - name: Validate Web Production Build
         run: pnpm --filter @wollipog/web build
 
