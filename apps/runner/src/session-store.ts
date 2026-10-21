@@ -208,6 +208,8 @@ export interface SessionMeta {
   review?: import("@wollipog/protocol").ReviewLaunchPolicy & {
     checkout: string;
     launchOwner: string;
+    /** Accounting-only snapshot preparation record; no provider session has been launched. */
+    preparing?: true;
     /** v228 (#3369): the attempt's planned place in its review run. */
     round?: import("@wollipog/protocol").ReviewAttemptRound;
     update?: import("@wollipog/protocol").ReviewSessionUpdate;

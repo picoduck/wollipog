@@ -58,6 +58,7 @@ function harness(t: { after(fn: () => void): void }, options: {
   evaluate?: ReviewSessionHooks["evaluate"];
   /** Permission denials the fake Claude driver reports for the turn. */
   denials?: number;
+  providerAccount?: boolean;
 } = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-session-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -124,6 +125,8 @@ function harness(t: { after(fn: () => void): void }, options: {
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const internals = manager as any;
+  if (options.providerAccount) internals.resolveProviderAccount = () => ({ id: "account", label: "Reviewer Account",
+    provider: "claude", credentialHome: join(root, "provider-account"), profileId: "profile" });
   assert.equal(internals.boxAdmission.acquire({ sessionId: "holder", agentId: "claude", weight: 1, agentLimit: 1 }), true);
   assert.equal(internals.activeTurnAdmission.acquire({ sessionId: "holder", agentId: "claude", weight: 1 }), true);
   return {
@@ -170,6 +173,85 @@ test("a review session launches past full capacity, read-only in its checkout, a
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   assert.equal((h.manager as any).admitted.has("s_review"), false, "no runner slot was taken");
   assert.deepEqual(h.manager.reviewSessionUpdates(), h.updates(), "the outcome is re-sent at registration");
+});
+
+test("a campaign review preserves its admitted generation through final usage and reconnect", async (t) => {
+  const h = harness(t, { hold: true });
+  const dispatch = { rootSessionId: "s_campaign", generation: "review-generation" };
+  assert.equal(await h.manager.start(reviewSpec({ campaignBudgetDispatch: dispatch,
+    config: { costBudgetUsd: 10, maxToolCalls: 100 } }), "brief"), true);
+  await until(() => h.drivers[0]?.prompts.length === 1, "the review turn");
+  assert.deepEqual(h.store.readMeta("s_review")!.campaignBudgetDispatch, dispatch);
+  assert.equal(h.store.readMeta("s_review")!.campaignBudgetCheckpoint, undefined, "the preparation receipt is cleared before provider work");
+  assert.equal(h.drivers[0]!.options.config.costBudgetUsd, 10);
+  // Provider usage is persisted before its turn settles, exactly as for other managed sessions.
+  h.store.patchMeta("s_review", { costUsd: 3 });
+  h.finishTurn();
+  await until(() => h.sent.some((message) => message.type === "session_status" && !!message.campaignBudgetCheckpoint), "final campaign usage");
+  const status = [...h.sent].reverse().find((message) => message.type === "session_status" && !!message.campaignBudgetCheckpoint);
+  assert.ok(status?.type === "session_status" && status.campaignBudgetCheckpoint);
+  assert.equal(status.campaignBudgetCheckpoint.generation, dispatch.generation);
+  assert.equal(status.campaignBudgetCheckpoint.costUsd, 3);
+  assert.deepEqual(h.manager.snapshotForControlPlane(h.store.readMeta("s_review")!).campaignBudgetCheckpoint,
+    status.campaignBudgetCheckpoint, "reconnect carries the same final usage receipt");
+});
+
+test("campaign reviews keep fresh provider-account binding and state defaults", async (t) => {
+  for (const campaign of [false, true]) {
+    const h = harness(t, { hold: true, providerAccount: true });
+    const dispatch = { rootSessionId: "s_campaign", generation: "account-generation" };
+    assert.equal(await h.manager.start(reviewSpec(campaign ? { campaignBudgetDispatch: dispatch } : {}), "brief"), true);
+    await until(() => h.drivers[0]?.prompts.length === 1, "review account launch");
+    const meta = h.store.readMeta("s_review")!;
+    assert.equal(meta.providerAccountId, "account", `campaign=${campaign}`);
+    assert.equal(meta.providerCredentialHome, join(h.root, "provider-account"));
+    assert.equal(meta.providerStateVersion, 2, `campaign=${campaign}`);
+    assert.equal(meta.review?.preparing, undefined, "the real launch replaces the accounting-only record");
+    h.finishTurn();
+  }
+});
+
+test("a campaign review refused during preparation durably attests zero usage", async (t) => {
+  const dispatch = { rootSessionId: "s_campaign", generation: "refused-generation" };
+  const h = harness(t, { prepare: async () => { throw new ReviewScopeRefusal("the requested head is not the pull request's pushed head"); } });
+  assert.equal(await h.manager.start(reviewSpec({ campaignBudgetDispatch: dispatch }), "brief"), false);
+  assert.equal(h.drivers.length, 0);
+  const status = h.sent.find((message) => message.type === "session_status" && message.status === "failed");
+  assert.ok(status?.type === "session_status" && status.campaignBudgetCheckpoint, "a never-launched review must return its reservation");
+  assert.deepEqual(status.campaignBudgetCheckpoint, { generation: dispatch.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+  assert.deepEqual(h.manager.snapshotForControlPlane(h.store.readMeta("s_review")!).campaignBudgetCheckpoint,
+    status.campaignBudgetCheckpoint, "lost terminal delivery is recovered from durable metadata");
+});
+
+test("campaign review cancellation and runner restart during preparation retain zero-spend evidence", async (t) => {
+  for (const ending of ["cancel", "restart"] as const) {
+    let release!: () => void;
+    const h = harness(t, { prepare: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      if (ending === "cancel") return { checkout: "/never", prompt: "P", baseSha: "b".repeat(40), round: ROUND };
+      throw new Error("preparation ended");
+    } });
+    const dispatch = { rootSessionId: "s_campaign", generation: `${ending}-generation` };
+    const pending = h.manager.start(reviewSpec({ campaignBudgetDispatch: dispatch }), "brief");
+    await until(() => release !== undefined, "blocked preparation");
+    const checkpoint = h.store.readMeta("s_review")!.campaignBudgetCheckpoint;
+    assert.deepEqual(checkpoint, { generation: dispatch.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    if (ending === "cancel") h.manager.stop("s_review");
+    else {
+      const restarted = new SessionManager(() => {}, () => {}, h.store, "runner", undefined, undefined, h.root);
+      t.after(() => restarted.shutdownAll());
+      restarted.reconcileStore();
+      const snapshot = restarted.snapshotForControlPlane(h.store.readMeta("s_review")!);
+      assert.equal(snapshot.status, "stopped");
+      assert.deepEqual(snapshot.campaignBudgetCheckpoint, checkpoint);
+      assert.equal(restarted.reviewSessionUpdates()[0]?.state, "failed");
+    }
+    release();
+    assert.equal(await pending, false);
+    assert.equal(h.drivers.length, 0);
+    assert.deepEqual(h.store.readMeta("s_review")!.campaignBudgetCheckpoint, checkpoint);
+    if (ending === "cancel") assert.equal(h.updates()[0]?.state, "cancelled");
+  }
 });
 
 test("an ordinary start never replaces a review session, and nothing else opens on it", async (t) => {

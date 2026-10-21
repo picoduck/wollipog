@@ -133,14 +133,14 @@ test("an unsupported runner, a missing installation or an unavailable reviewer i
   } finally { offline.db.close(); }
 });
 
-test("a session under a campaign allowance is refused and pointed at the campaign review job", () => {
+test("a session under a campaign allowance is refused and pointed at review sessions", () => {
   const h = harness();
   try {
     h.db.campaignBudgets.database.prepare(`INSERT INTO campaign_budget_members(session_id,root_id,cost,tools,active)
       VALUES ('s1','root',0,0,1)`).run();
     const refused = h.svc.requestSessionReviewJob("s1", request());
     assert.equal(refused.status, 409);
-    assert.match(refused.error!, /run_campaign_review_job/u);
+    assert.match(refused.error!, /request_review_session/u);
     assert.equal(h.sent.length, 0);
     assert.ok(h.svc.requestSessionReviewJob("s2", request()).ok, "a session outside the campaign is unaffected");
   } finally { h.db.close(); }

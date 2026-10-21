@@ -2068,22 +2068,45 @@ export class SessionManager {
     brief: string,
     authorizationError: string | undefined,
   ): Promise<{ spec: SessionLaunchSpec; prompt: string } | { error: string }> {
-    // Nothing is persisted for a refused review session: its status and outcome go up directly.
-    // The outcome is persisted before it is sent (nothing else records a review refused before its
-    // session exists), and goes up before the terminal status, which would otherwise settle it
-    // generically.
+    // Accounted reviews have a durable zero-usage preparation record. A refusal/cancellation
+    // returns that reservation through the ordinary final checkpoint; no provider has run yet.
+    // Other reviews retain their existing outcome-only record. Outcome always precedes status.
+    const endBeforeLaunch = (update: ReviewSessionUpdate, status: "failed" | "stopped") => {
+      const meta = this.store.readMeta(spec.sessionId);
+      const checkpoint = spec.campaignBudgetDispatch && meta?.campaignBudgetCheckpoint;
+      if (checkpoint && meta?.review) {
+        this.store.patchMeta(spec.sessionId, { status, review: { ...meta.review, update } });
+        this.reviewSessions?.release(spec.sessionId);
+      } else this.reviewSessions?.recordOutcome(update);
+      this.send(update);
+      this.send({ type: "session_status", sessionId: spec.sessionId, status, detail: update.reason,
+        ...(checkpoint ? { campaignBudgetCheckpoint: checkpoint } : {}) });
+    };
     const refuse = (reason: string) => {
       const sanitized = sanitizedReviewSessionReason(reason);
       const update: ReviewSessionUpdate = { type: "review_session_update", sessionId: spec.sessionId, state: "failed", reason: sanitized };
-      this.reviewSessions?.recordOutcome(update);
-      this.send(update);
-      this.send({ type: "session_status", sessionId: spec.sessionId, status: "failed", detail: sanitized });
+      endBeforeLaunch(update, "failed");
       return { error: sanitized };
     };
     // A review session launches once; a relaunch leaves its recorded status and outcome alone, and a
     // duplicate start while the first still prepares leaves that preparation's resources alone.
     if (this.store.has(spec.sessionId) || this.reviewsPreparing.has(spec.sessionId)) {
       return { error: "a review session runs once and cannot be relaunched" };
+    }
+    if (spec.campaignBudgetDispatch) {
+      const now = Date.now();
+      // Persist before asynchronous preparation so a runner crash can return zero-spend capacity
+      // on reconnect too. startGeneration replaces this record and clears the checkpoint before
+      // any provider can start, so a paid or ambiguous launch cannot replay the zero-spend receipt.
+      this.store.create({ sessionId: spec.sessionId, agentId: spec.agentId, workspaceId: spec.workspaceId,
+        repoPath: spec.workspacePath, worktreePath: null, driver: spec.driver ?? "acp", command: spec.command,
+        args: [], env: {}, context: { kind: "native" }, agentSessionId: null, status: "starting",
+        title: spec.title ?? "", config: spec.config ?? {}, tokensIn: 0, tokensOut: 0, costUsd: 0,
+        preview: null, pendingApproval: null, seq: 0, createdAt: now, updatedAt: now,
+        campaignBudgetDispatch: spec.campaignBudgetDispatch,
+        campaignBudgetCheckpoint: { generation: spec.campaignBudgetDispatch.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 },
+        review: { ...spec.review!, checkout: spec.workspacePath, launchOwner: this.lockOwner, preparing: true },
+      });
     }
     const driver = spec.driver;
     if (!this.reviewSessions || authorizationError || spec.useWorktree || (spec.context && spec.context.kind !== "native") ||
@@ -2107,9 +2130,7 @@ export class SessionManager {
     if (this.reviewsStoppedBeforeLaunch.delete(spec.sessionId)) {
       const reason = sanitizedReviewSessionReason("the review was cancelled");
       const update: ReviewSessionUpdate = { type: "review_session_update", sessionId: spec.sessionId, state: "cancelled", reason };
-      this.reviewSessions.recordOutcome(update);
-      this.send(update);
-      this.send({ type: "session_status", sessionId: spec.sessionId, status: "stopped", detail: reason });
+      endBeforeLaunch(update, "stopped");
       return { error: reason };
     }
     this.preparedReviewRounds.set(spec.sessionId, prepared.round);
@@ -2126,7 +2147,8 @@ export class SessionManager {
         acpSessionContext: undefined,
         projectMemory: undefined,
         artifactUploads: undefined,
-        campaignBudgetDispatch: undefined,
+        // Keep the admitted generation so normal usage checkpoints settle the review allowance.
+        campaignBudgetDispatch: spec.campaignBudgetDispatch,
       },
       prompt: prepared.prompt,
     };
@@ -6429,6 +6451,11 @@ export class SessionManager {
       if (reviewLaunch && !started) {
         this.settleReviewSession(spec.sessionId, { state: "failed", reason: "the review session could not be launched" });
         this.reviewSessions?.release(spec.sessionId);
+        // Failure before startGeneration replaced the preparation record means no provider ran.
+        // Return its reservation immediately; a later launch failure keeps normal usage fencing.
+        if (this.store.readMeta(spec.sessionId)?.campaignBudgetCheckpoint) {
+          this.emitStatus(spec.sessionId, "failed", undefined, undefined, undefined, true);
+        }
       }
       reportMaterialized(false);
       this.releaseResumeLock(spec.sessionId, launchGeneration);
@@ -6590,6 +6617,9 @@ export class SessionManager {
       acpSessionContext = undefined;
     }
     let prior = this.store.readMeta(spec.sessionId);
+    // This is still the first provider launch. The accounting-only preparation record must not
+    // select legacy credentials or suppress any other defaults reserved for a fresh session.
+    if (spec.review && prior?.review?.preparing) prior = null;
     const driver = spec.driver ?? "acp";
     let providerAccount: ReturnType<NonNullable<ProviderAccountResolver>>;
     try {
@@ -15789,9 +15819,13 @@ export class SessionManager {
       this.log(`review session ${sessionId} stop deferred until its attempt is judged`);
       return;
     }
+    // Preparation has no provider to stop. Its completion reports the cancellation before its
+    // terminal status and returns any campaign reservation using the persisted zero-usage receipt.
+    if (this.reviewsPreparing.has(sessionId)) {
+      this.reviewsStoppedBeforeLaunch.add(sessionId);
+      return;
+    }
     this.settleReviewSession(sessionId, { state: "cancelled", reason: "the review was cancelled" });
-    // A review session still preparing its snapshot has nothing persisted yet; its launch checks this.
-    if (this.reviewsPreparing.has(sessionId)) this.reviewsStoppedBeforeLaunch.add(sessionId);
     // Stop is a terminal lifecycle boundary even while launch is suspended in an asynchronous
     // provider-authentication probe. Fence that generation before the probe can persist a new
     // recovery block or publish a non-terminal status for the stopped session.

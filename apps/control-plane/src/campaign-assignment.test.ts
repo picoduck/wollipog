@@ -27,6 +27,7 @@ test("absent/Custom mode retains configured owners and discloses external human 
     assert.match(text, /campaign_issue_scope=human, issue_closure=human/);
     assert.match(text, /UI evidence remains human-owned: Unsupported reviewer/);
     assert.match(text, /unresolved mandatory human gates in external or user-authored instructions/);
+    assert.match(text, /request_review_session or `wollipog review session run` without asking for admission/);
     assert.match(text, /\[End Wollipog Campaign Policy\]\n\nOriginal task$/);
   }
 });
@@ -50,21 +51,23 @@ test("Full Control describes the exact boundary and effective owners without cre
   assert.match(text, /missing review delivery or cost proof is a blocker/);
   assert.match(text, /never as base64 in a tool argument/);
   assert.match(text, /Full Control alone does not authorize uploads/);
-  assert.match(text, /native reviewer subprocess outside Session accounting is an unsupported mandatory path/);
-  assert.match(text, /authority transport support is not Full Control campaign readiness/);
+  assert.match(text, /native reviewer subprocess outside Session accounting/);
+  assert.match(text, /not charged to that allowance/);
+  assert.match(text, /actual raw cost, including invalid attempts/);
   assert.match(text, /actual registered audited profile/);
   assert.match(text, /Never update or restart the hosting stack/);
   assert.match(text, /one-shot runner permission completes consumption/);
   assert.match(text, /merge-group CI passes and the forge reports actual MERGED state/);
 });
 
-test("a metered Full Control campaign without the controlled reviewer is told to use the regular review workflow", () => {
+test("campaigns use review sessions without asking for admission, including without the native adapter", () => {
   const budgetAuthority = { version: 1 as const, concurrency: 2, acceptedFollowUps: 0, accounting: "managed_workers_only" as const, unpriced: "stop" as const };
   const regular: CampaignControl = { mode: "full_control", boundary: { ...full.boundary, budgetAuthority } };
   const text = formatCampaignAssignment(fixture(regular), humanProjection, campaignAuthorityPreflight(regular, "claude-code", PROTOCOL_VERSION), "");
-  assert.match(text, /Cross-Model Review: controlled review is not part of this campaign, so run the regular installed cross-model review workflow/);
-  assert.match(text, /report its actual cost/);
-  assert.doesNotMatch(text, /unsupported mandatory path/);
+  assert.match(text, /review sessions are the controlled, accounted route/);
+  assert.match(text, /request_review_session or `wollipog review session run` without asking for admission/);
+  assert.match(text, /reserves allowance before launch and records actual Session usage against the campaign allowance/);
+  assert.match(text, /exhausted, stopped or unavailable allowance refuses the review with a reason/);
   const review = { profile: "native_opus_5_5_high_read_only" as const, controllerSha256: "a".repeat(64), executableSha256: "b".repeat(64),
     cliVersion: "2.1.296" as const, accounting: "provider_list_estimate" as const, account: "runner_default_claude" as const, agentId: "claude" };
   const controlled: CampaignControl = { mode: "full_control", boundary: { ...full.boundary, budgetAuthority: { ...budgetAuthority, controlledReview: review } } };

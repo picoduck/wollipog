@@ -4528,6 +4528,8 @@ export class HourlyUsageUnavailableError extends RangeError {
 export interface NewSessionInput {
   /** Trusted pre-allocation session ceilings, never from request JSON. */
   campaignBudgetUserLimits?: { costUsd?: number; toolCalls?: number };
+  /** Internal review attribution: share an allowance without granting child-session authority. */
+  reviewRequesterSessionId?: string;
   id: string;
   /** Trusted creator attribution, derived from the authenticated session credential. */
   parentSessionId?: string;
@@ -15784,7 +15786,8 @@ export class ControlPlaneDb {
   }
 
   createSession(input: NewSessionInput): SessionView {
-    const budgetRoot = input.parentSessionId ? this.campaignBudgets.root(input.parentSessionId) : null;
+    const budgetSource = input.reviewRequesterSessionId ?? input.parentSessionId;
+    const budgetRoot = budgetSource ? this.campaignBudgets.root(budgetSource) : null;
     const budgetView = budgetRoot ? this.campaignBudgets.view(budgetRoot) : undefined;
     const userLimits = input.campaignBudgetUserLimits ?? { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls };
     const allocation = budgetRoot ? this.campaignBudgets.prepare(budgetRoot, input.id, { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls }) : null;

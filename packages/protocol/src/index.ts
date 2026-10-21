@@ -713,7 +713,9 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      keeps an accepted Dismiss Recovery durable until the provider turn settles, so only then does
 //      the control plane fence its standing sign-in dismissal permanently.
 // 231: runner archived-history retention: bounded trim request/result, gated by capability.
-export const PROTOCOL_VERSION = 231;
+// 232: campaign review sessions (#3371): review launches preserve campaignBudgetDispatch and
+//      report final usage checkpoints. Older runners drop it, so campaign reviews require v232.
+export const PROTOCOL_VERSION = 232;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -965,6 +967,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeRefDeletion: 227,
   /** v228 runner plans review rounds and validates review attempts (#3369). */
   reviewRuns: 228,
+  /** Review sessions preserve admitted campaign accounting through final usage settlement. */
+  campaignReviewSessions: 232,
   /** v229 runner inspects a provider HOME's lease and recovers one exact stale lease on an Owner or
    * Admin's authorization (#3241). */
   providerHomeLeaseRecovery: 229,

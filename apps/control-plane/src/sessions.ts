@@ -4670,12 +4670,13 @@ export class SessionsService {
     // Cloned so the clamp below never mutates the caller's request object.
     const config = { ...requestedConfig };
     const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
-    const budgetRoot = parentSessionId ? this.db.campaignBudgets.root(parentSessionId) : null;
+    const budgetSource = creationContext?.review?.policy.requesterSessionId ?? parentSessionId;
+    const budgetRoot = budgetSource ? this.db.campaignBudgets.root(budgetSource) : null;
     if (budgetRoot) {
       if (delivery) return fail("Campaign budget admission for pre-staged automation dispatch is unsupported.", 409);
       const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
       if (ceilingError) return fail(ceilingError, 409);
-      const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
+      const parentError=this.campaignBudgetConfigError(this.db.getSession(budgetSource!)!);
       if(parentError) return fail(parentError,409);
       const view = this.db.campaignBudgets.view(budgetRoot)!;
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
@@ -4866,6 +4867,7 @@ export class SessionsService {
     let session: SessionView;
     const sessionInput: Parameters<ControlPlaneDb["createSession"]>[0] = {
       campaignBudgetUserLimits,
+      reviewRequesterSessionId: creationContext?.review?.policy.requesterSessionId,
       id,
       parentSessionId,
       creationActor: creationContext?.defaultOwnerUserId
@@ -8659,10 +8661,9 @@ export class SessionsService {
       return fail("fullReason (up to 500 characters) is accepted only with scope full", 400);
     }
     if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
-    // Decision for #3306: a campaign's allowance accounts for its reviews through the campaign's
-    // controlled review job, so no session under a campaign allowance can bypass it here.
+    // The legacy bridge has no campaign accounting. Review sessions use the managed allowance.
     if (this.db.campaignBudgets.root(session.id) !== null) {
-      return fail("This session is part of a campaign with an allowance, so its cross-model reviews run through the campaign's controlled review job (run_campaign_review_job, dispatched by the campaign's Orchestrator), which accounts for their cost. Ask the Orchestrator for that review.", 409);
+      return fail("This session is part of a campaign with an allowance, which the legacy review bridge cannot account for. Request a review session with request_review_session or `wollipog review session run` to reserve allowance and account for its cost.", 409);
     }
     const runner = this.db.getRunner(session.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionReviewJob")) {
@@ -8800,16 +8801,15 @@ export class SessionsService {
       return fail(`fullReason, when given, says in at most ${REVIEW_FULL_REASON_LIMIT} characters why the whole pull request needs review again`, 400);
     }
     if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
-    // As with the #3330 bridge: a campaign allowance accounts for its reviews through the campaign's
-    // controlled review job until review sessions are charged to campaigns (#3371).
-    if (this.db.campaignBudgets.root(session.id) !== null) {
-      return fail("This session is part of a campaign with an allowance, so its cross-model reviews run through the campaign's controlled review job (run_campaign_review_job, dispatched by the campaign's Orchestrator), which accounts for their cost. Ask the Orchestrator for that review.", 409);
-    }
     const runner = this.db.getRunner(session.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "reviewSession")) {
       return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "reviewSession", "review sessions"));
     }
     const harness = reviewerHarnessFor(session.driver);
+    const budgetRoot = this.db.campaignBudgets.root(session.id);
+    if (budgetRoot && !runnerSupportsProtocol(runner?.protocolVersion, "campaignReviewSessions")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "campaignReviewSessions", "review sessions charged to the campaign allowance"));
+    }
     if (!harness) return fail("this session's harness has no cross-model reviewer; reviews cover Claude Code and Codex sessions", 409);
     const capability = runner?.runtime?.reviewSession;
     const reviewer = capability?.reviewers.find((entry) => entry.harness === harness);
@@ -8824,8 +8824,11 @@ export class SessionsService {
     // The requester's guardrails: a review spends from what remains of its cost budget after its own
     // spending and everything its earlier reviews spent, so repeated reviews cannot exceed it.
     let costBudgetUsd: number | undefined;
-    if (session.costBudgetUsd != null && session.costBudgetUsd > 0) {
-      costBudgetUsd = session.costBudgetUsd - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id);
+    // Campaign allocations reserve this worker's own spend; reviews reserve separately. Only
+    // an original human session ceiling also limits its reviews, never the worker allocation.
+    const requesterCeiling = budgetRoot ? this.db.campaignBudgets.userLimits(session.id)?.costBudgetUsd : session.costBudgetUsd;
+    if (requesterCeiling != null && requesterCeiling > 0) {
+      costBudgetUsd = requesterCeiling - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id);
       if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
     }
     const policy: ReviewLaunchPolicy = {
@@ -8865,6 +8868,7 @@ export class SessionsService {
     if (!created.ok || !created.data) return failAs(created, "the review session could not be created");
     this.hub.sessionChangedById(session.id);
     this.log.info(JSON.stringify({ event: "review_session_requested", sessionId: session.id, reviewSessionId: created.data.id,
+      ...(budgetRoot ? { campaignRootSessionId: budgetRoot, allocation: this.db.campaignBudgets.allocation(created.data.id) } : {}),
       reviewer: harness, repository: pullRequest.repository, number: pullRequest.number, headSha: request.headSha }));
     return ok(this.db.reviewSessions.view(created.data.id)!, 201);
   }
