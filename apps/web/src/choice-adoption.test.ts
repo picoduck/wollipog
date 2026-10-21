@@ -91,8 +91,6 @@ type Pattern = keyof typeof PATTERNS;
 const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
-  // Role and Context in each member column, until the member menu replaces them (#2983).
-  ["components/PodsView.tsx", "native-select", 2],
   // A fenced block's Wrap Lines button (#2152): one on/off toggle per block, not one of N options.
   ["components/Markdown.tsx", "aria-pressed", 1],
   ["components/SessionDetail.tsx", "aria-pressed", 2],

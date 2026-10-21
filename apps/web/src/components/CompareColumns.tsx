@@ -49,24 +49,37 @@ export function CompareRow({ label, children }: { label: string; children: React
 }
 
 /**
- * A column's head, on one line: the agent (ending in an ellipsis), its status at its full width, a
- * visible Open Session and ⋯. On a phone it is the member bar under the member tabs.
+ * A column's head, one row that never wraps: the agent (ending in an ellipsis), with an optional dim
+ * sub-line under it, its status at its full width, a visible Open Session when the column offers
+ * one, and ⋯. On a phone it is the member bar under the member tabs.
  */
-export function CompareMemberHead({ agent, session, runnerOnline, onOpenSession, menu }: {
+export function CompareMemberHead({ agent, sub, session, runnerOnline, onOpenSession, menu }: {
   agent: string;
+  /** What the member is for, after the agent: a pod member's "<Role> · <task>" (#2983). */
+  sub?: string;
   session: SessionView;
   runnerOnline: boolean;
-  onOpenSession: () => void;
+  /** A visible Open Session button; without it, Open Session is the first item in ⋯. */
+  onOpenSession?: () => void;
   /** The member's ⋯ items. */
   menu: PageMenuAction[];
 }) {
   return (
     <div className="compare-member-head">
-      <span className="compare-member-agent" title={agent}>{agent}</span>
+      {sub ? (
+        <span className="compare-member-name">
+          <span className="compare-member-agent" title={agent}>{agent}</span>
+          <span className="compare-member-sub" title={sub}>{sub}</span>
+        </span>
+      ) : (
+        <span className="compare-member-agent" title={agent}>{agent}</span>
+      )}
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-      <button type="button" className="icon-btn sm" title="Open Session" aria-label="Open Session" onClick={onOpenSession}>
-        <ArrowUpRightIcon size={16} aria-hidden="true" />
-      </button>
+      {onOpenSession && (
+        <button type="button" className="icon-btn sm" title="Open Session" aria-label="Open Session" onClick={onOpenSession}>
+          <ArrowUpRightIcon size={16} aria-hidden="true" />
+        </button>
+      )}
       <ActionsMenu size="sm" label={`${agent} Actions`} items={menu} />
     </div>
   );

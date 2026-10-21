@@ -1,4 +1,4 @@
-import type { PodContextEntry, PodMemberRole, PodMemberView, PodOrchestrationState, PodView, SessionView } from "@wollipog/protocol";
+import type { PodContextEntry, PodMemberRole, PodMemberView, PodOrchestrationState, PodView, SessionEvent, SessionView } from "@wollipog/protocol";
 import { sessionAgentLabel } from "./components/agent-options.js";
 import { titleCaseLabel } from "./format.js";
 
@@ -20,6 +20,20 @@ export function podMemberTask(member: PodMemberView, session: SessionView | unde
   const role = podRoleLabel(member.role);
   const prefix = new RegExp(`^${role}\\s*[:·–—-]\\s*`, "iu");
   return title.replace(prefix, "").trim() || title;
+}
+
+/**
+ * Why a member's latest answer cannot go to the huddle yet (#2983): its turn is still running, or
+ * it has not answered. Null once it has a top-level answer to share.
+ */
+export function podShareReason(
+  session: Pick<SessionView, "status">,
+  events: readonly SessionEvent[] | undefined,
+  agent: string,
+): string | null {
+  if (session.status === "starting" || session.status === "running") return `Available when ${agent} finishes its turn.`;
+  const answered = events?.some((event) => event.payload.kind === "agent_message" && !event.payload.parentToolUseId && event.payload.text);
+  return answered ? null : "No answer yet.";
 }
 
 /** A member as a choice: "Worker · Codex: migrate call sites". */

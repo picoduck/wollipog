@@ -75,6 +75,52 @@ test.describe("at 1440×900 with three members", () => {
   });
 });
 
+test.describe("at 1440×900 with four members (#2983)", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  // The head is one row that never wraps (the issue's "one line"): the agent block, the status and
+  // ⋯ side by side. The block is the agent over a dim "<Role> · <task>", which keeps most of the
+  // column's width rather than the scraps beside the status (decision on #2983).
+  test("each member head is one row: the agent over Role · task, the status and ⋯", async ({ page }) => {
+    await open(page, "&members=4");
+    await expect(page.locator(".compare > .compare-member")).toHaveCount(4);
+    const heads = await page.locator(".compare-member-head").evaluateAll((elements) => elements.map((head) => {
+      const parts = [...head.children].map((child) => child.getBoundingClientRect());
+      const middle = parts[0]!.top + parts[0]!.height / 2;
+      const sub = head.querySelector<HTMLElement>(".compare-member-sub")!;
+      const agent = head.querySelector<HTMLElement>(".compare-member-agent")!;
+      return {
+        height: head.getBoundingClientRect().height,
+        offsets: parts.map((rect) => Math.abs(rect.top + rect.height / 2 - middle)),
+        stacked: sub.getBoundingClientRect().top >= agent.getBoundingClientRect().bottom - 1,
+        sub: sub.textContent,
+        subWidth: sub.getBoundingClientRect().width,
+        subHeight: sub.getBoundingClientRect().height,
+        lineHeight: Number.parseFloat(getComputedStyle(sub).lineHeight),
+        controls: head.querySelectorAll("select, input, textarea").length,
+        buttons: [...head.querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
+      };
+    }));
+    expect(heads.map((head) => head.sub)).toEqual([
+      "Lead · plan the retry migration",
+      "Worker · migrate the call sites",
+      "Reviewer · check the migrated sites",
+      "Worker · update the retry tests",
+    ]);
+    for (const head of heads) {
+      expect(head.stacked, "the sub-line sits under the agent").toBe(true);
+      expect(head.subHeight, "the sub-line never wraps").toBeLessThanOrEqual(head.lineHeight + 1);
+      // On one text row beside the badge it had 15–50px; under the agent it has the block's width
+      // (about 139px in a 320px column, beside the status and ⋯).
+      expect(head.subWidth, "the sub-line has room to be read").toBeGreaterThanOrEqual(120);
+      expect(Math.max(...head.offsets), "the head's parts share one row").toBeLessThanOrEqual(4);
+      expect(head.height, "the head never wraps into a second row").toBeLessThanOrEqual(56);
+      expect(head.controls).toBe(0);
+      expect(head.buttons).toHaveLength(1);
+    }
+  });
+});
+
 test.describe("in the compact tier at 1024×768", () => {
   test.use({ viewport: { width: 1024, height: 768 } });
 
@@ -108,5 +154,23 @@ test.describe("at 390×844", () => {
     await expect(page).toHaveURL(/[?&]tab=huddle(&|$)/u);
     await page.reload();
     await expect(page.getByRole("tablist", { name: "Pod" }).getByRole("tab").first()).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("every member action is in the member bar's ⋯, and Remove from Pod replaces the sheet with Back to More Actions (#2983)", async ({ page }) => {
+    await open(page, "&member=s-worker");
+    const more = page.getByRole("tabpanel").getByRole("button", { name: "Codex App Server Actions" });
+    const box = await more.boundingBox();
+    expect(box!.x + box!.width, "⋯ ends the member bar, on screen").toBeLessThanOrEqual(390);
+    await more.click();
+    const sheet = page.getByRole("menu", { name: "Codex App Server Actions" });
+    await expect(sheet.getByRole("menuitem")).toHaveText([
+      /^Open Session/u, /^Share Latest Answer/u, /^Member Settings…/u, /^Remove from Pod…/u,
+    ]);
+    await sheet.getByRole("menuitem", { name: "Remove from Pod…" }).click();
+    const confirmation = page.getByRole("alertdialog", { name: "Remove from Pod" }).or(page.getByRole("dialog", { name: "Remove from Pod" }));
+    await expect(confirmation).toContainText("Codex App Server leaves “Retry Helper Migration”.");
+    await expect(sheet).toHaveCount(0);
+    await confirmation.getByRole("button", { name: "Back to More Actions" }).click();
+    await expect(page.getByRole("menu", { name: "Codex App Server Actions" })).toBeVisible();
   });
 });

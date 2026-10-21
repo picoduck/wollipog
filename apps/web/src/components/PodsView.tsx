@@ -7,7 +7,6 @@ import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, us
 import { flushSync } from "react-dom";
 import type {
   PodContextEntry,
-  PodMemberRole,
   PodMemberView,
   PodRelayReceipt,
   PodView,
@@ -32,7 +31,18 @@ import { DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
 import { absoluteViewUrl, backLabel, destination, viewTitle } from "../navigation.js";
 import { useDashboardPublicOrigin } from "../remote-access-context.js";
 import { writeClipboardText } from "../clipboard.js";
-import { podBadgeStatus, podEntrySourceName, podMemberNames, podMemberShortName, podTurnsStopNotice } from "../pod-presentation.js";
+import {
+  podBadgeStatus,
+  podEntrySourceName,
+  podMemberNames,
+  podMemberShortName,
+  podMemberTask,
+  podRoleLabel,
+  podShareReason,
+  podTurnsStopNotice,
+} from "../pod-presentation.js";
+import { POD_MAX_SESSIONS } from "../pod-session-choices.js";
+import { PodAddMembersDialog, PodMemberSettingsDialog } from "./PodMemberDialogs.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { DEFAULT_POD_ORCHESTRATION_POLICY, PodAutomaticTurnsDialog } from "./PodAutomaticTurnsDialog.js";
 import { PodMergeWorkDialog, PodRecentMergesDialog } from "./PodMergeWorkDialog.js";
@@ -54,6 +64,8 @@ const MERGE_RUNNING = "Available when the merge finishes.";
 const BUSY_REASON = "Available when the current action finishes.";
 const NO_POD_LINK_REASON = "Open Wollipog in a browser to copy a link.";
 const BACK_TO_MORE_ACTIONS = "Back to More Actions";
+const TURNS_RUNNING_MEMBERS = "Stop automatic turns to change members.";
+const MIN_MEMBERS = "A pod needs at least two members.";
 const WRITE_OR_SELECT = "Write a note or select entries to relay.";
 /** The control plane composes at most this many huddle entries into one relay. */
 const MAX_RELAY_ENTRIES = 16;
@@ -71,23 +83,26 @@ interface RelayFailure {
 
 const relayedSentence = (count: number) => `Relayed to ${count} ${count === 1 ? "member" : "members"}`;
 
-/** The member's existing settings and actions, kept in the column until its menu replaces them (#2983). */
+/** What a member's ⋯ needs from the page: why each action is unavailable, and the actions. */
 interface MemberTools {
   member: PodMemberView;
-  removable: boolean;
-  settingsDisabled: boolean;
-  sharing: boolean;
-  shareDisabled: boolean;
-  onRemove: () => void;
+  /** Why the log takes no answers at all (a closed pod), which outranks the member's own reason. */
+  shareClosed: string | null;
+  /** Another action is running, after the member's own reason. */
+  busy: boolean;
+  /** Why Member Settings… is unavailable, or null. */
+  settingsReason: string | null;
+  /** Why Remove from Pod… is unavailable, or null. */
+  removeReason: string | null;
   onShare: () => void;
-  onRole: (role: PodMemberRole) => void;
-  onBudget: (budget: number | null) => void;
+  onSettings: () => void;
+  onRemove: (agent: string, reopen: () => void) => void;
 }
 
 /**
- * One member's column (#2981, #2975's recipe): the head with the agent, its status, Open Session
- * and ⋯, the member's settings, what it did, and its activity. On a phone it is the member tab's
- * panel. Its own component, so each member subscribes to its own events.
+ * One member's column (#2981, #2975's recipe): the head with the agent, "<Role> · <task>", its
+ * status and ⋯ (#2983), what it did, and its activity. On a phone it is the member tab's panel and
+ * its head the member bar. Its own component, so each member subscribes to its own events.
  */
 function PodMemberColumn({ sessionId, tools, onRetry, panel }: {
   sessionId: string;
@@ -108,12 +123,32 @@ function PodMemberColumn({ sessionId, tools, onRetry, panel }: {
   if (!session) return null;
   const presentation = transcriptPresentation({ itemCount: items.length, hasOptimistic: false, working: false, history, conn });
   const agentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
-  const openSession = () => navigate({ name: "session", id: sessionId });
   const known = presentation.body === "timeline" || presentation.body === "empty";
   const did = memberActivityLine(statusMeta("session", session.status).pulse, known ? activity : null);
-  const canShare = session.status !== "starting" && session.status !== "running" &&
-    Boolean(events?.some((event) => event.payload.kind === "agent_message" && !event.payload.parentToolUseId && event.payload.text));
-  const menu: PageMenuAction[] = [{ label: "Open Session", onClick: openSession }];
+  const shareReason = tools.shareClosed ?? podShareReason(session, events, agentLabel) ?? (tools.busy ? BUSY_REASON : null);
+  // Destructive last, after a separator (§3.3); every disabled item says why (§9.1).
+  const menu: PageMenuAction[] = [
+    { label: "Open Session", onClick: () => navigate({ name: "session", id: sessionId }) },
+    {
+      label: "Share Latest Answer",
+      disabled: Boolean(shareReason),
+      description: shareReason ?? undefined,
+      onClick: tools.onShare,
+    },
+    {
+      label: "Member Settings…",
+      disabled: Boolean(tools.settingsReason),
+      description: tools.settingsReason ?? undefined,
+      onClick: tools.onSettings,
+    },
+    {
+      label: "Remove from Pod…",
+      danger: true,
+      disabled: Boolean(tools.removeReason),
+      description: tools.removeReason ?? undefined,
+      onClick: ({ reopen }) => tools.onRemove(agentLabel, reopen),
+    },
+  ];
   return (
     <section
       className="compare-member pod-member"
@@ -122,42 +157,13 @@ function PodMemberColumn({ sessionId, tools, onRetry, panel }: {
       role={panel ? "tabpanel" : undefined}
       aria-labelledby={panel?.labelledBy}
     >
-      <CompareMemberHead agent={agentLabel} session={session} runnerOnline={runnerOnline} onOpenSession={openSession} menu={menu} />
-      <div className="pod-member-tools">
-        <label className="pod-member-setting">
-          <span>Role</span>
-          <select
-            aria-label={`Role for ${session.title}`}
-            value={tools.member.role}
-            disabled={tools.settingsDisabled}
-            onChange={(event) => tools.onRole(event.target.value as PodMemberRole)}
-          >
-            <option value="lead">Lead</option>
-            <option value="worker">Worker</option>
-            <option value="reviewer">Reviewer</option>
-          </select>
-        </label>
-        <label className="pod-member-setting">
-          <span>Context</span>
-          <select
-            aria-label={`Context budget for ${session.title}`}
-            value={tools.member.contextTokenBudget ?? ""}
-            disabled={tools.settingsDisabled}
-            onChange={(event) => tools.onBudget(event.target.value ? Number(event.target.value) : null)}
-          >
-            <option value="">Inherit</option>
-            <option value="4096">4k</option>
-            <option value="8192">8k</option>
-            <option value="16384">16k</option>
-            <option value="32768">32k</option>
-          </select>
-        </label>
-        <BusyButton className="btn ghost sm" busy={tools.sharing} progress="Sharing the latest answer…"
-          disabled={!canShare || tools.shareDisabled} onClick={tools.onShare}>
-          Share Latest
-        </BusyButton>
-        {tools.removable && <button type="button" className="btn ghost sm" onClick={tools.onRemove}>Remove</button>}
-      </div>
+      <CompareMemberHead
+        agent={agentLabel}
+        sub={`${podRoleLabel(tools.member.role)} · ${podMemberTask(tools.member, session)}`}
+        session={session}
+        runnerOnline={runnerOnline}
+        menu={menu}
+      />
       <p className="compare-member-meta">{did}</p>
       <CompareMemberBody
         agent={agentLabel}
@@ -537,15 +543,17 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
 
 /** Keyed by pod: the route renders this in place, so a direct pod-to-pod change would otherwise
  * reuse one instance and carry the previous pod's draft, errors, receipts and unsaved policy. */
-export function PodDetail({ podId, member }: {
+export function PodDetail({ podId, member, onNewSession }: {
   podId: string;
   /** The member tab the URL names (`?member=`), which a phone shows; otherwise the Huddle. */
   member?: string;
+  /** Opens New Session with its own worktree, from Add Member…'s empty state. */
+  onNewSession?: () => void;
 }) {
-  return <PodDetailContent key={podId} podId={podId} member={member} />;
+  return <PodDetailContent key={podId} podId={podId} member={member} onNewSession={onNewSession} />;
 }
 
-function PodDetailContent({ podId, member }: { podId: string; member?: string }) {
+function PodDetailContent({ podId, member, onNewSession }: { podId: string; member?: string; onNewSession?: () => void }) {
   const api = useApi();
   const phone = useIsMobile();
   const { confirm, showToast } = useFeedback();
@@ -584,7 +592,9 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
   const [historyRetry, setHistoryRetry] = useState(0);
   const retryHistory = useCallback(() => setHistoryRetry((value) => value + 1), []);
   // The dialogs own their drafts, so reopening one shows what is saved (#2980).
-  const [dialog, setDialog] = useState<"turns" | "merge" | "merges" | null>(null);
+  const [dialog, setDialog] = useState<"turns" | "merge" | "merges" | "add" | null>(null);
+  // The member whose Member Settings… is open (#2983).
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
   const [, setDismissals] = useState(0);
   const dashboardOrigin = useDashboardPublicOrigin();
   const mountedRef = useRef(true);
@@ -598,6 +608,8 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
       const retained = current.filter((id) => memberIds.includes(id));
       return retained.length ? retained : [...memberIds];
     });
+    // A member that leaves takes its Member Settings with it, so rejoining never reopens them.
+    setSettingsFor((current) => current !== null && !memberIds.includes(current) ? null : current);
   }, [memberIds]);
 
   useEffect(() => {
@@ -647,6 +659,10 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
   const reconciliationRunning = Boolean(pod?.reconciliations?.some((receipt) => receipt.status === "running"));
   const closeBlocked = useRef(false);
   closeBlocked.current = Boolean(busy) || reconciliationRunning;
+  // Whatever would disable Remove from Pod… also takes back a confirmation that is already open.
+  const removeBlocked = useRef(false);
+  removeBlocked.current = Boolean(busy) || reconciliationRunning || orchestrationRunning ||
+    pod?.status !== "active" || (pod?.members.length ?? 0) <= 2;
 
   if (!pod) {
     const placeholder = detailPlaceholder("Pod", { authoritative: snapshotLoaded, conn });
@@ -672,6 +688,11 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
     : orchestrationRunning ? "Stop automatic turns to change them." : null;
   const mergeReason = !active ? POD_CLOSED : reconciliationRunning ? MERGE_RUNNING : null;
   const closeReason = reconciliationRunning ? MERGE_RUNNING : busy ? BUSY_REASON : null;
+  // Membership and member settings wait for automatic turns and a merge, as the control plane does.
+  const membershipReason = !active ? POD_CLOSED : reconciliationRunning ? MERGE_RUNNING
+    : orchestrationRunning ? TURNS_RUNNING_MEMBERS : null;
+  const removeReason = membershipReason ?? (pod.members.length <= 2 ? MIN_MEMBERS : busy ? BUSY_REASON : null);
+  const addReason = membershipReason ?? (pod.members.length >= POD_MAX_SESSIONS ? `A pod holds at most ${POD_MAX_SESSIONS} members.` : null);
   const runningSentence = [
     "Automatic turns are running",
     `Turn ${orchestrationState?.turnsUsed ?? 0} of ${policy.maxTurns}`,
@@ -794,6 +815,8 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
   const shareLatest = (sessionId: string) => memberAction(`share:${sessionId}`, "The latest answer wasn't shared", async () => {
     const result = await api.appendPodContext(pod.id, { kind: "member_output", sessionId });
     loadPodContext(pod.id, [result.entry]);
+    // On a phone the Huddle is another tab, so the share says it landed.
+    showToast("Shared to the huddle.", { tone: "success" });
   });
 
   const loadOlder = () => {
@@ -805,14 +828,15 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
     });
   };
 
-  const removeMember = (sessionId: string) => {
-    if (reconciliationRunning) return;
-    return memberAction(`remove:${sessionId}`, "The member wasn't removed", () => api.removePodMember(pod.id, sessionId));
-  };
-
-  const updateMember = (sessionId: string, patch: { role?: PodMemberRole; contextTokenBudget?: number | null }) => {
-    if (orchestrationRunning || reconciliationRunning) return;
-    return memberAction(`member:${sessionId}`, "The member's settings weren't saved", () => api.updatePodMember(pod.id, sessionId, patch));
+  const removeMember = async (sessionId: string, agent: string, reopen: () => void) => {
+    if (!await confirmWhileAllowed(confirm, () => removeBlocked.current, {
+      title: "Remove from Pod",
+      message: `${agent} leaves “${pod.title}”. Its session keeps running, and the huddle keeps its notes.`,
+      confirmLabel: "Remove from Pod",
+      tone: "danger",
+      back: { label: BACK_TO_MORE_ACTIONS, run: reopen },
+    })) return;
+    await memberAction(`remove:${sessionId}`, "The member wasn't removed", () => api.removePodMember(pod.id, sessionId));
   };
 
   const stopOrchestration = async () => {
@@ -852,15 +876,16 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
 
   const toolsFor = (sessionId: string): MemberTools => ({
     member: pod.members.find((candidate) => candidate.sessionId === sessionId)!,
-    removable: active && !orchestrationRunning && !reconciliationRunning && pod.members.length > 2,
-    settingsDisabled: !active || orchestrationRunning || reconciliationRunning || Boolean(busy),
-    sharing: busy === `share:${sessionId}`,
-    shareDisabled: !active || (Boolean(busy) && busy !== `share:${sessionId}`),
-    onRemove: () => void removeMember(sessionId),
+    shareClosed: active ? null : POD_CLOSED,
+    busy: Boolean(busy),
+    settingsReason: membershipReason,
+    removeReason,
     onShare: () => void shareLatest(sessionId),
-    onRole: (role) => void updateMember(sessionId, { role }),
-    onBudget: (contextTokenBudget) => void updateMember(sessionId, { contextTokenBudget }),
+    onSettings: () => setSettingsFor(sessionId),
+    onRemove: (agent, reopen) => void removeMember(sessionId, agent, reopen),
   });
+  const settingsMember = settingsFor === null ? undefined : pod.members.find((candidate) => candidate.sessionId === settingsFor);
+  const settingsSession = settingsMember && sessions.get(settingsMember.sessionId);
 
   // A phone shows one tab: the member the URL names while it is still a member, else the Huddle.
   const shownMember = member !== undefined && memberIds.includes(member) ? member : null;
@@ -926,10 +951,23 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
         backLabel={backLabel("pods")}
         onBack={() => navigate({ name: "pods" })}
         status={<StatusBadge meta={statusMeta("pod", podBadgeStatus(pod, sessions))} />}
+        // Add Member… is the bar's secondary, and on a phone the first item in ⋯ (§3.3, #2983).
+        secondary={active && !phone ? {
+          label: "Add Member…",
+          disabled: Boolean(addReason),
+          title: addReason ?? undefined,
+          onClick: () => setDialog("add"),
+        } : undefined}
         // Automatic turns and merging are occasional, so they are dialogs from ⋯; closing is
         // destructive, so it comes last after a separator (§3.3, #2980). A closed pod can no longer
         // merge, so its merges stay readable from Recent Merges… (#2981).
         menu={[
+          ...(active && phone ? [{
+            label: "Add Member…",
+            disabled: Boolean(addReason),
+            description: addReason ?? undefined,
+            onClick: () => setDialog("add"),
+          }] : []),
           {
             label: "Automatic Turns…",
             disabled: Boolean(turnsReason),
@@ -1046,6 +1084,29 @@ function PodDetailContent({ podId, member }: { podId: string; member?: string })
       {dialog === "turns" && <PodAutomaticTurnsDialog pod={pod} sessions={sessions} onClose={() => setDialog(null)} />}
       {dialog === "merge" && <PodMergeWorkDialog pod={pod} sessions={sessions} runners={runners} onClose={() => setDialog(null)} />}
       {dialog === "merges" && <PodRecentMergesDialog pod={pod} sessions={sessions} onClose={() => setDialog(null)} />}
+      {dialog === "add" && (
+        <PodAddMembersDialog
+          pod={pod}
+          blockedReason={membershipReason}
+          onClose={() => setDialog(null)}
+          onNewSession={onNewSession && (() => {
+            setDialog(null);
+            onNewSession();
+          })}
+        />
+      )}
+      {settingsMember && (
+        <PodMemberSettingsDialog
+          key={settingsMember.sessionId}
+          pod={pod}
+          member={settingsMember}
+          name={settingsSession
+            ? `${sessionAgentLabel(settingsSession.agentName, settingsSession.driver, settingsSession.agentId)} · ${podMemberTask(settingsMember, settingsSession)}`
+            : podRoleLabel(settingsMember.role)}
+          blockedReason={membershipReason}
+          onClose={() => setSettingsFor(null)}
+        />
+      )}
     </div>
   );
 }
