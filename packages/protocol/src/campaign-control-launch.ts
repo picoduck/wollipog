@@ -14,6 +14,10 @@ export function campaignSessionArtifactDestinationId(organizationId: string): st
   return `session_artifacts:${organizationId}`;
 }
 
+/** The boundary objective while a Full Control campaign waits for its owner's first message (#2940).
+ * That message replaces it before the Orchestrator's first turn. */
+export const FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE = "The task its owner sends as this campaign's first message.";
+
 /** Plain Human intent. The authenticated server constructs all authority provenance. */
 export interface CampaignLaunchProposal {
   repository: string;
@@ -45,7 +49,8 @@ export interface FullControlLaunchRequest {
   workspaceId: string;
   projectId?: string | null;
   projectLocationId?: string | null;
-  /** Task description. At least one of `task` and `issueNumbers` is required. */
+  /** Task description. With neither `task` nor `issueNumbers`, the campaign starts idle with a
+   * task-only boundary, and its owner's first message sets the objective and issue scope. */
   task?: string;
   issueNumbers?: number[];
   overrides?: FullControlLaunchOverrides;

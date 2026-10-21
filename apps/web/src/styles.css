@@ -17970,19 +17970,6 @@ button.setting-row { cursor: pointer; }
   .session-options-body .setting-row-value > .setting-row-control { justify-content: flex-end; }
   .session-options-body .setting-row-number .input-affix { align-self: flex-end; }
 }
-/* Full Control's Campaign Budget and Campaign Limits (FullControlPreparation.tsx). */
-.full-control-limits {
-  display: grid;
-  gap: var(--space-3);
-  min-width: 0;
-  margin: 0;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-}
-.full-control-limits legend { padding: 0 var(--space-1); font-weight: var(--weight-semibold); }
-.facts + .full-control-limits { margin-top: var(--space-3); }
-.full-control-limits > p { margin: 0; }
 /* Orchestrator Controls (#2192): Child Session Requests, one segmented control per workflow gate,
    and the campaign's stored behavior. Below 560px the gate's control sits under its label and each
    fact reads label over value. */

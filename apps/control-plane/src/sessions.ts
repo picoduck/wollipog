@@ -16,7 +16,8 @@ import type { HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
+import { firstMessageBoundary, firstMessageDigest, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
@@ -1719,6 +1720,10 @@ export class SessionsService {
   /** Armed merge occurrences whose lifecycle-end forge read is in flight. */
   private readonly forgeMergeSettlements = new Set<string>();
   private readonly archiveWorktreeRetirements = new Set<string>();
+  /** Full Control campaigns whose first message is being established (#2940). */
+  private readonly firstMessagesInFlight = new Set<string>();
+  /** The one session whose established first message is being admitted right now. */
+  private firstMessageDelivery: string | null = null;
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -3949,6 +3954,9 @@ export class SessionsService {
         /** Minted against the new root id only when every launch peer declares the private
          * media contract; screenshot review never depends on it. */
         evidenceAuthority?: EvidenceAuthorityProposal;
+        /** The launch named no task (#2940): the root starts idle, like any Orchestrator, and its
+         * owner's first message sets the objective and issue scope before its first turn. */
+        firstMessage?: boolean;
       };
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
@@ -4790,11 +4798,15 @@ export class SessionsService {
           rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired))) {
         return fail("unknown, disabled or Human Required policy asks cannot enter the launch boundary", 400);
       }
+      if (humanLaunch.firstMessage && (requestedText || humanLaunch.issueScope.issueNumbers.length)) {
+        return fail("a first-message launch starts with a task-only scope and no initial prompt", 409);
+      }
       orchestratorPolicy.control = control;
       orchestratorPolicy.issueScope = structuredClone(humanLaunch.issueScope);
       orchestratorPolicy.issueNumbers = [...humanLaunch.issueScope.issueNumbers];
+      if (humanLaunch.firstMessage) orchestratorPolicy.firstMessageScope = { state: "pending" };
       parentControlPolicy = { decisions: structuredClone(orchestratorPolicy.delegation.decisions) };
-      text = requestedText || control.boundary.objective;
+      text = humanLaunch.firstMessage ? "" : requestedText || control.boundary.objective;
     }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
@@ -5047,6 +5059,147 @@ export class SessionsService {
     return result;
   }
 
+  /** A Full Control campaign launched without a task waits for its owner's first message (#2940). */
+  private awaitingFirstMessage(session: SessionView | null | undefined): boolean {
+    return session?.orchestratorPolicy?.firstMessageScope?.state === "pending" &&
+      session.orchestratorPolicy.control?.mode === "full_control";
+  }
+
+  /** The authenticated Human's message. To a Full Control campaign still waiting for its first
+   * message, it is the task (#2940): see `deliverFirstFullControlMessage`. */
+  async promptFromHuman(
+    principal: HumanPrincipal,
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[] = [],
+    slashCommand?: string,
+    config?: SessionConfig,
+    reviewedResultRevision?: string,
+  ): Promise<ServiceResult<PromptAdmissionView>> {
+    if (!this.awaitingFirstMessage(this.db.getSession(sessionId))) {
+      return this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+    }
+    if (this.firstMessagesInFlight.has(sessionId)) return fail("This campaign's first message is still being delivered; wait for it to appear.", 409);
+    this.firstMessagesInFlight.add(sessionId);
+    try {
+      return await this.deliverFirstFullControlMessage(principal, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+    } finally {
+      this.firstMessagesInFlight.delete(sessionId);
+    }
+  }
+
+  /** The owner's first message establishes the Full Control boundary the launch left task-only:
+   * the message is the objective, and the issue references it makes to the campaign's own
+   * repository that the runner verifies as issues become the scope. Scope and boundary commit as
+   * the next revisions, bound to the message digest, and reach the runner before the message does,
+   * so the Orchestrator's first turn already runs inside them. Only the Human who authorized the
+   * launch can do this; any other message is refused until then, so agent-authored text can never
+   * establish or widen the scope. A message that is not delivered reopens the wait. */
+  private async deliverFirstFullControlMessage(
+    principal: HumanPrincipal,
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[],
+    slashCommand: string | undefined,
+    config: SessionConfig | undefined,
+    reviewedResultRevision: string | undefined,
+  ): Promise<ServiceResult<PromptAdmissionView>> {
+    const session = this.db.getSession(sessionId)!;
+    const policy = session.orchestratorPolicy!;
+    const control = policy.control as Extract<CampaignControl, { mode: "full_control" }>;
+    if (principal.kind !== "human" || control.boundary.authorizedByUserId !== principal.userId ||
+        !this.db.isSessionOwner(principal, sessionId)) {
+      return fail("Only the person who started this Full Control campaign can send its first message.", 403);
+    }
+    if (!text.trim() || slashCommand) return fail("Send this campaign's task as its first message.", 409);
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    const repository = control.boundary.repository.toLowerCase();
+    const references = issueReferencesInMessage(text, repository);
+    const issueNumbers = references.length ? await this.verifiedMessageIssues(session, repository, references) : [];
+    const current = this.db.getSession(sessionId);
+    const revision = current?.parentControlPolicy?.revision ?? 0;
+    const scope = current?.orchestratorPolicy?.issueScope;
+    const currentControl = current?.orchestratorPolicy?.control;
+    if (!current || !this.awaitingFirstMessage(current) || !scope || currentControl?.mode !== "full_control" ||
+        currentControl.boundary.revision !== revision) {
+      return fail("This campaign's authorization changed; send the message again.", 409);
+    }
+    const now = Date.now();
+    const messageDigest = firstMessageDigest(text);
+    const nextScope: CampaignIssueScope = { repository: scope.repository, issueNumbers, revision: scope.revision + 1,
+      authorizedByUserId: principal.userId, authorizedAt: now };
+    const nextControl: CampaignControl = { mode: "full_control", boundary: firstMessageBoundary(currentControl.boundary,
+      current.orchestratorPolicy!.behavior.followUps, issueNumbers, firstMessageObjective(text), revision + 1, nextScope.revision, now) };
+    let established: boolean;
+    try {
+      established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, messageDigest, expectedRevision: revision, now });
+    } catch (error) { return fail((error as Error).message, 409); }
+    if (!established) return fail("This campaign's authorization changed; send the message again.", 409);
+    this.log.info(JSON.stringify({ event: "full_control_first_message_scope", sessionId, policyRevision: revision + 1,
+      scopeRevision: nextScope.revision, referencedIssues: references.length, scopedIssues: issueNumbers.length, messageDigest }));
+    // A runner that misses this keeps its older revision, which authorizes no issue write; every
+    // issue operation synchronizes again before it acts.
+    await this.synchronizeCampaignIssueScope(sessionId);
+    this.firstMessageDelivery = sessionId;
+    let result: ServiceResult<PromptAdmissionView>;
+    try {
+      result = this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+    } finally { this.firstMessageDelivery = null; }
+    if (!result.ok) this.db.reopenFirstMessageScope(sessionId, messageDigest, Date.now());
+    this.hub.sessionChangedById(sessionId);
+    return result;
+  }
+
+  /** Enabling Full Control on a campaign with no issue scope derives one as a launch does (#2940):
+   * the runner's repository, and the issues its owner's first message references, with any the
+   * initial request already scoped, that the runner verifies. With no message yet, the scope is
+   * task-only and the next message is the task. Null when the repository cannot be verified. */
+  async campaignScopeFromFirstMessage(sessionId: string): Promise<{ repository: string; issueNumbers: number[]; firstMessage: boolean } | null> {
+    const root = this.db.getSession(sessionId);
+    if (!root?.orchestratorPolicy || root.orchestratorPolicy.issueScope || !this.hub.isRunnerOnline(root.runnerId)) return null;
+    let repository: string | undefined;
+    try {
+      const requestId = `full_control_scope_${randomUUID()}`;
+      const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+        { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId }, 30_000);
+      if (response.type === "campaign_issue_scope_result" && response.ok && response.sessionId === sessionId &&
+          typeof response.repository === "string" && /^[\w.-]+\/[\w.-]+$/u.test(response.repository)) repository = response.repository.toLowerCase();
+    } catch { /* An unreachable runner verifies no repository. */ }
+    if (!repository) return null;
+    const message = this.db.initialUserMessageText(sessionId);
+    const candidates = [...new Set([...(message ? issueReferencesInMessage(message, repository) : []),
+      ...(root.orchestratorPolicy.issueNumbers ?? [])])].sort((a, b) => a - b).slice(0, 100);
+    const issueNumbers = candidates.length ? await this.verifiedMessageIssues(root, repository, candidates) : [];
+    return { repository, issueNumbers, firstMessage: message === null };
+  }
+
+  /** The referenced issues the runner reads as issues of the campaign repository. A pull request,
+   * a missing issue or an unreadable one is left out; an unreachable runner verifies none. */
+  private async verifiedMessageIssues(root: SessionView, repository: string, numbers: number[]): Promise<number[]> {
+    const inspect = async (issues: number[]): Promise<number[] | "refused" | "unavailable"> => {
+      const requestId = `first_message_issues_${randomUUID()}`;
+      try {
+        const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+          { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId: root.id, issues }, 30_000);
+        if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id) return "unavailable";
+        if (!response.ok || response.repository?.toLowerCase() !== repository) return "refused";
+        return issues.filter((n) => response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === repository));
+      } catch { return "unavailable"; }
+    };
+    const all = await inspect(numbers);
+    if (Array.isArray(all)) return all;
+    if (all === "unavailable" || numbers.length === 1) return [];
+    // One reference that is not an issue refuses the whole read, so read each one on its own.
+    const kept: number[] = [];
+    for (let offset = 0; offset < numbers.length; offset += 4) {
+      const batch = numbers.slice(offset, offset + 4);
+      const results = await Promise.all(batch.map((n) => inspect([n])));
+      if (results.includes("unavailable")) break;
+      results.forEach((result, index) => { if (Array.isArray(result) && result.length) kept.push(batch[index]!); });
+    }
+    return kept;
+  }
+
   /** A campaign child's assignment carries its Orchestrator's server-derived policy preamble. It
    * is applied here rather than inline so every delivery lane wraps identically — a message that
    * reaches the child by steering must not arrive stripped of the policy a queued one carries. */
@@ -5208,6 +5361,12 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    // Only its owner's first message can start a Full Control campaign launched without a task
+    // (#2940); nothing an agent or automation sends may reach it first.
+    if (this.firstMessageDelivery !== sessionId &&
+        (this.awaitingFirstMessage(session) || this.firstMessagesInFlight.has(sessionId))) {
+      return fail("This Full Control campaign starts from its owner's first message.", 409);
+    }
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     // An older runner would still resume a persisted exec session for this turn (#3259).
     if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
@@ -8334,7 +8493,11 @@ export class SessionsService {
     issueAuthority?: CampaignAuthorityBoundary["issueAuthority"];
     budgetAuthority?: CampaignAuthorityBoundary["budgetAuthority"];
     evidenceAuthority?: EvidenceAuthorityProposal;
-  }, expectedRevision: number, principal: HumanPrincipal): ServiceResult<SessionView> {
+  }, expectedRevision: number, principal: HumanPrincipal,
+  /** Enable only, for a campaign with no issue scope yet (#2940): the scope the server derived
+   * from the runner's repository and the campaign's first message, which this Human establishes
+   * with the boundary. `firstMessage` when no message has been sent: the next one is the task. */
+  derivedScope?: { repository: string; issueNumbers: number[]; firstMessage: boolean }): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
@@ -8342,8 +8505,12 @@ export class SessionsService {
     if (!proposal || typeof proposal !== "object" || Array.isArray(proposal) || !["custom", "full_control"].includes(proposal.mode)) return fail("invalid campaign control mode", 400);
     if (proposal.mode === "custom" && Object.keys(proposal).some((key) => key !== "mode")) return fail("Custom has no authority boundary", 400);
     if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
-    const scope = session.orchestratorPolicy?.issueScope;
     const now = Date.now();
+    const storedScope = session.orchestratorPolicy?.issueScope;
+    if (derivedScope && (storedScope || proposal.mode !== "full_control")) return fail("the campaign's issue scope changed; refresh and retry", 409);
+    const mintedScope: CampaignIssueScope | undefined = derivedScope ? { repository: derivedScope.repository.toLowerCase(),
+      issueNumbers: [...derivedScope.issueNumbers].sort((a, b) => a - b), revision: 1, authorizedByUserId: principal.userId, authorizedAt: now } : undefined;
+    const scope = storedScope ?? mintedScope;
     const control = proposal.mode === "custom" ? { mode: "custom" as const } : scope &&
       authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
@@ -8393,8 +8560,12 @@ export class SessionsService {
     }
     const outstanding = this.db.unconsumedWorkflowDecisionsForController(sessionId);
     try {
-      if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now)) return fail("campaign authority revision changed; refresh and retry", 409);
+      if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now,
+        mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage } : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
+    // The runner holds the scope it enforces issue writes against; each issue operation also
+    // synchronizes again before it acts.
+    if (mintedScope) void this.synchronizeCampaignIssueScope(sessionId);
     for (const id of this.db.campaignBudgets.members(sessionId)) this.syncCampaignAllocation(id);
     this.recoverCampaignReviewJobs(session.runnerId);
     if (this.db.campaignBudgets.view(sessionId)?.state !== "active") this.enforceCampaignBudget(sessionId, now);

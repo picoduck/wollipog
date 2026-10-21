@@ -10,7 +10,6 @@ import {
   type CampaignControl,
   type DelegatableWorkflowDecisionCategory,
   type OrchestratorCampaignProjection,
-  type OrchestratorDefaults,
   type ParentControlDecisionPolicy,
   type ParentControlMode,
   type SessionView,
@@ -31,7 +30,8 @@ import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import { SAVED_MS } from "./ui/SettingsRows.js";
-import { FullControlEnableButton, FullControlEnablePanel, OrchestratorControlChoice, type FullControlEnableAction } from "./FullControlPreparation.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { enableFullControlCampaign, OrchestratorControlChoice } from "./FullControlPreparation.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
  * matching each gate's Human | Orchestrator (#2192). */
@@ -328,17 +328,22 @@ export function OrchestratorControlsDialog({
     setChoiceFollows(effectiveMode);
     if (effectiveMode !== "unknown") setControlPreview(effectiveMode);
   }
-  // The saved Full Control budget is proposed when enabling; Revoke never needs it.
-  const [savedDefaults, setSavedDefaults] = useState<OrchestratorDefaults | null>(null);
   const canEnable = !fullControl && !session.parentSessionId && session.orchestratorPolicy !== undefined;
-  // The panel's Enable action, shown in the footer so it stays in view below the long summary.
-  const [enableAction, setEnableAction] = useState<FullControlEnableAction | null>(null);
-  useEffect(() => {
-    if (!canEnable || controlPreview !== "full_control") return;
-    let live = true;
-    api.orchestratorSettings().then((view) => { if (live) setSavedDefaults(view.defaults); }, () => undefined);
-    return () => { live = false; };
-  }, [api, canEnable, controlPreview]);
+  // Enabling is one action, as starting is (#2940): the server derives the boundary from the
+  // campaign's own scope or first message, and only a genuine impossibility stops it.
+  const [enabling, setEnabling] = useState(false);
+  const [enableError, setEnableError] = useState<string | null>(null);
+  useEffect(() => { setEnableError(null); }, [controlPreview]);
+  const enable = async () => {
+    if (enabling) return;
+    setEnabling(true); setEnableError(null);
+    try {
+      onSessionChanged(await enableFullControlCampaign(api, session.id));
+      showSaved("control");
+    } catch (cause) {
+      setEnableError(cause instanceof Error ? cause.message : "Full Control was not enabled.");
+    } finally { setEnabling(false); }
+  };
   const savedStatus = saved === null
     ? ""
     : `${saved === "parentControl" ? "Child Session Requests" : saved === "control" ? "Orchestrator Control" : WORKFLOW_DECISION_LABELS[saved]} saved`;
@@ -351,7 +356,9 @@ export function OrchestratorControlsDialog({
       className="orchestrator-controls"
       footer={<>
         <button type="button" className="btn" onClick={onClose}>Done</button>
-        {canEnable && controlPreview === "full_control" && enableAction && <FullControlEnableButton {...enableAction} />}
+        {canEnable && controlPreview === "full_control" && <BusyButton className="btn primary" busy={enabling}
+          progress="Enabling Full Control…" disabled={refusal !== null || Object.keys(pending).length > 0}
+          onClick={() => void enable()}>Enable Full Control</BusyButton>}
       </>}
     >
       {refusal !== null && <Notice tone="neutral" compact>{refusal}</Notice>}
@@ -362,10 +369,8 @@ export function OrchestratorControlsDialog({
         </div>
         <p className="section-note">Effective Mode: {effectiveMode === "full_control" ? "Full Control" : effectiveMode === "custom" ? "Custom" : "Current Root State Not Reported"}.</p>
         {canEnable && <>
-          <OrchestratorControlChoice surface="campaign" embedded mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null} />
-          {controlPreview === "full_control" && <FullControlEnablePanel session={session} savedDefaults={savedDefaults}
-            disabled={refusal !== null || Object.keys(pending).length > 0} onAction={setEnableAction}
-            onEnabled={(next) => { onSessionChanged(next); showSaved("control"); }} />}
+          <OrchestratorControlChoice embedded mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null || enabling} />
+          {controlPreview === "full_control" && enableError && <Notice tone="danger" role="alert" title="Couldn't Enable Full Control">{enableError}</Notice>}
         </>}
         {fullControl && <>
           <p className="section-note">Revoking Full Control updates this root campaign and its descendants and invalidates unused approvals. Your saved defaults and selected session configuration stay unchanged.</p>

@@ -12,6 +12,7 @@ import {
   AUTOMATIC_ORCHESTRATOR_VALUE,
   COMPLETION_OPTIONS,
   CONTROL_MODE_OPTIONS,
+  FULL_CONTROL_LINE,
   FOLLOW_UP_OPTIONS,
   HUMAN_ONLY_DECISIONS,
   INTEGRATION_ISOLATION_OPTIONS,
@@ -83,6 +84,7 @@ export function OrchestratorPolicySummary({
         {problem
           ? <FieldError as="span" id={problemId}>{problem.message}</FieldError>
           : <span>From your Orchestrator defaults in Settings.</span>}
+        {draft.controlMode === "full_control" && <span>{FULL_CONTROL_LINE}</span>}
       </>}
       control={(
         <button
@@ -302,8 +304,8 @@ export function OrchestratorPolicyDialog({
     <SettingsGroup
       foot={<p className="orchestrator-human-only"><LockIcon size={14} aria-hidden="true" />{HUMAN_ONLY_DECISIONS}</p>}
     >
-      {/* Choosing Full Control only shows its readiness in New Session; starting still takes one
-          explicit Authorize and Start there. */}
+      {/* Full Control launches like any Orchestrator: the session's Create Session starts it, and
+          the person's first message is its task (#2940). */}
       <SegmentedRow
         title="Orchestrator Control"
         badge={mark("controlMode", resetLabels.controlMode)}

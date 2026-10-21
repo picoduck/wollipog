@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
 import {
-  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
+  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
   campaignWorkflowOwner,
   type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
@@ -11,7 +11,8 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
-import { authorizeFullControl, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { authorizeFullControl, campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
 import { closureEvidence, publicationEvidence } from "./campaign-issue-authority.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
@@ -62,12 +63,25 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
     inspect: (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId,
       ok: true, repository: "owner/repo", issueNumbers: message.issueNumbers, digest: "d".repeat(64) }),
   };
+  // Issue reads answer as the runner does: one number that is not an issue of the origin refuses
+  // the whole read. Synchronization echoes the revision it persisted.
+  const issues = { repository: "owner/repo" as string | null, notIssues: new Set<number>() };
   hub.sendToRunner = (_, message) => {
     sent.push(message);
     if (message.type === "start_session") starts.push(message);
     if (message.type === "campaign_launch_inspect") {
       const answer = state.inspect(message);
       if (answer) queueMicrotask(() => hub.resolveRunnerRequest(answer, "r"));
+    }
+    if (message.type === "campaign_issue_scope" && (message.operation === "inspect" || message.operation === "synchronize")) {
+      const requested = message.operation === "inspect" ? message.issues ?? [] : [];
+      const answer = message.operation === "synchronize" ? { ok: true, repository: "owner/repo", revision: message.scope.revision }
+        : issues.repository && !requested.some((n) => issues.notIssues.has(n))
+          ? { ok: true, repository: issues.repository, candidates: requested.map((n) => ({ issue: { repository: issues.repository!, number: n },
+            title: `Issue ${n}`, source: "member_checklist" as const })) }
+          : { ok: false };
+      queueMicrotask(() => hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId,
+        sessionId: message.sessionId, ...answer }, "r"));
     }
     return true;
   };
@@ -81,7 +95,7 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   const settings = new OrchestratorSettings(db);
   // `videoPort` also gives the launch route hosting's certification port, as index.ts does.
   const videoCertification = video && options.videoPort ? (runnerId: string) => video.launchCertification(runnerId) : undefined;
-  return { db, hub, sent, starts, state, sessions, human, scope, settings, disclosures, reconnect, video, videoCertification };
+  return { db, hub, sent, starts, state, issues, sessions, human, scope, settings, disclosures, reconnect, video, videoCertification };
 }
 
 async function app(f: ReturnType<typeof fixture>, inspectionTimeoutMs?: number) {
@@ -363,7 +377,7 @@ test("a non-Human caller, a changed digest and a stale runner generation are ref
     assert.equal(stale.statusCode, 409);
     assert.match(stale.json().error, /preflight changed/);
     for (const payload of [{ ...launch, repository: "other/repo" }, { ...launch, overrides: { authorizedByUserId: "injected" } },
-      { runnerId: "r", workspaceId: "w" }, { ...launch, requestId: "x" }]) {
+      { runnerId: "r" }, { ...launch, requestId: "x" }]) {
       assert.equal((await preflight(server, payload as FullControlLaunchRequest)).response.statusCode, 400, JSON.stringify(payload));
     }
     assert.equal(sessionCount(f), 0);
@@ -1009,5 +1023,201 @@ test("enabling an existing campaign is blocked only by another person's scope; p
     assert.equal((await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control/preflight`,
       headers: { authorization: "Bearer human" }, payload: { overrides: { session: { agentId: "claude" } } } })).statusCode, 400,
       "an existing root's harness cannot be overridden");
+  } finally { await server.close(); f.db.close(); }
+});
+
+/** A launch with no task, as New Session sends it: the root starts idle like any Orchestrator. */
+async function firstMessageLaunch(f: ReturnType<typeof fixture>, server: Awaited<ReturnType<typeof app>>["server"]) {
+  const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
+    config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, orchestrator: { behavior: { followUps: "execute_approved" } } } } };
+  const { preflight: checked } = await preflight(server, body);
+  assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+  const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+    payload: { ...body, requestId: `first-${sessionCount(f)}`, preflightDigest: checked!.digest } });
+  assert.equal(admitted.statusCode, 201, admitted.body);
+  const id = admitted.json().id as string;
+  f.db.updateSessionStatus(id, "idle", Date.now());
+  return { id, checked: checked! };
+}
+
+const boundaryOf = (f: ReturnType<typeof fixture>, id: string) => {
+  const control = f.db.getSession(id)!.orchestratorPolicy!.control!;
+  if (control.mode !== "full_control") throw new Error("Full Control expected");
+  return control.boundary;
+};
+
+test("a Full Control launch with no task starts idle, and its owner's first message sets the objective and same-repository issues before the first turn", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id, checked } = await firstMessageLaunch(f, server);
+    assert.equal(checked.summary.objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
+    assert.deepEqual(checked.summary.issueNumbers, []);
+    assert.equal(f.starts.length, 1);
+    const start = f.starts[0] as Extract<ControlPlaneToRunner, { type: "start_session" }>;
+    assert.equal(start.initialPrompt, undefined, "no turn starts before the person's first message");
+    let root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(boundaryOf(f, id).objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
+
+    // Nothing an agent sends reaches the campaign, or sets its scope, before the owner's message.
+    const agent = await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 7");
+    assert.equal(agent.ok, false);
+    assert.equal(agent.status, 409);
+    assert.match(agent.error!, /owner's first message/u);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+    assert.equal(f.sent.filter((message) => message.type === "prompt_session").length, 0);
+
+    f.issues.notIssues.add(3); // A pull request: GitHub does not read it as an issue.
+    const text = "Ship #12 and owner/repo#7.\nAlso https://github.com/owner/repo/issues/9, but not other/repo#5,\n" +
+      "https://github.com/owner/repo/pull/8 or https://github.com/other/repo/issues/6; #3 was the earlier pull request.";
+    const before = f.sent.length;
+    const result = await f.sessions.promptFromHuman(f.human, id, text);
+    assert.equal(result.ok, true, result.error ?? "the first message was delivered");
+    root = f.db.getSession(id)!;
+    const policy = root.orchestratorPolicy!;
+    assert.deepEqual(policy.issueScope, { repository: "owner/repo", issueNumbers: [7, 9, 12], revision: 2,
+      authorizedByUserId: f.human.userId, authorizedAt: policy.issueScope!.authorizedAt });
+    assert.deepEqual(policy.issueNumbers, [7, 9, 12]);
+    assert.deepEqual(policy.firstMessageScope, { state: "established", messageDigest: firstMessageDigest(text),
+      establishedAt: (policy.firstMessageScope as { establishedAt: number }).establishedAt });
+    const boundary = boundaryOf(f, id);
+    assert.equal(boundary.objective, firstMessageObjective(text));
+    assert.doesNotMatch(boundary.objective, /\n/u);
+    assert.equal(boundary.revision, 2);
+    assert.equal(root.parentControlPolicy!.revision, 2);
+    assert.equal(boundary.issueScopeRevision, 2);
+    assert.equal(boundary.authorizedByUserId, f.human.userId);
+    assert.deepEqual(boundary.issueAuthority!.epics, [7, 9, 12]);
+    assert.equal(boundary.budgetAuthority!.acceptedFollowUps, 3);
+    assert.ok(boundary.issueAuthority!.maxIssues >= 3 + boundary.budgetAuthority!.acceptedFollowUps);
+    assert.equal(campaignBoundaryCurrent(root), true);
+    assert.equal(f.db.campaignBudgets.view(id)!.state, "active");
+    // The runner holds the new scope and boundary before the message reaches the Orchestrator.
+    const after = f.sent.slice(before);
+    const sync = after.findIndex((message) => message.type === "campaign_issue_scope" && message.operation === "synchronize");
+    const prompt = after.findIndex((message) => message.type === "prompt_session");
+    assert.ok(sync >= 0 && prompt > sync, after.map((message) => message.type).join(","));
+    const synced = after[sync] as Extract<ControlPlaneToRunner, { type: "campaign_issue_scope"; operation: "synchronize" }>;
+    assert.equal(synced.scope.revision, 2);
+    assert.deepEqual(synced.control, policy.control);
+    assert.equal((after[prompt] as Extract<ControlPlaneToRunner, { type: "prompt_session" }>).text, text);
+
+    // Later messages, the owner's or an agent's, never change the scope the first one set.
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Also take #40.")).ok, true);
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptOrSteer(id, "Orchestrate issues 41 and 42")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [7, 9, 12]);
+    assert.equal(boundaryOf(f, id).revision, 2);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("only the launching person's text message establishes the boundary; no references keep it task-only; an undelivered one reopens the wait", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const other: HumanPrincipal = { ...f.human, userId: "someone-else", actorId: "someone-else" };
+    assert.equal((await f.sessions.promptFromHuman(other, id, "Ship #12")).status, 403);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "", [], "compact")).status, 409, "a slash command is not the task");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+
+    // The runner drops the message: the boundary it set waits for the next first message.
+    const send = f.hub.sendToRunner;
+    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
+    const dropped = await f.sessions.promptFromHuman(f.human, id, "Tidy the docs");
+    assert.equal(dropped.ok, false);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+    f.hub.sendToRunner = send;
+    f.db.updateSessionStatus(id, "idle", Date.now());
+
+    // An unreadable origin verifies no reference, so the scope stays task-only.
+    f.issues.repository = null;
+    const text = "Tidy the README, as #12 asked.";
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
+    const root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(root.orchestratorPolicy!.issueScope!.revision, 3);
+    assert.equal(boundaryOf(f, id).objective, text);
+    assert.equal(boundaryOf(f, id).revision, 3);
+    assert.equal(campaignBoundaryCurrent(root), true);
+    assert.equal((root.orchestratorPolicy!.firstMessageScope as { messageDigest: string }).messageDigest, firstMessageDigest(text));
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("revoking a campaign that waits for its first message restores Custom: no message can set its scope", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const revoked = f.sessions.setCampaignControl(id, { mode: "custom" }, f.db.getSession(id)!.parentControlPolicy!.revision, f.human);
+    assert.equal(revoked.ok, true, revoked.error ?? "Revoke succeeded");
+    // Revoke stops the launch's allowance as it always has; the first-message wait no longer applies.
+    for (const sent of [await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 7"),
+      await f.sessions.promptFromHuman(f.human, id, "Orchestrate issues 12 and 7")]) {
+      assert.equal(sent.ok, false);
+      assert.match(sent.error!, /allowance was revoked/u);
+    }
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.control!.mode, "custom");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("enabling Full Control on a campaign with no issue scope derives it from its repository and first message, or waits for one", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  const enable = async (id: string) => {
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    return reviewed;
+  };
+  const unscoped = (id: string) => {
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    delete policy.issueScope; delete policy.issueNumbers;
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+  };
+  try {
+    const messaged = customCampaign(f, "messaged-root");
+    unscoped(messaged);
+    f.db.appendEvent(messaged, { kind: "user_message", text: "Fix #12 and #44 in this repository." }, Date.now());
+    f.issues.notIssues.add(44);
+    const reviewed = await enable(messaged);
+    assert.equal(reviewed.capabilities.find((item) => item.id === "repository_scope")!.reason,
+      "This campaign's Human-established scope is owner/repo with issues #12.");
+    let root = f.db.getSession(messaged)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope, { repository: "owner/repo", issueNumbers: [12], revision: 1,
+      authorizedByUserId: f.human.userId, authorizedAt: root.orchestratorPolicy!.issueScope!.authorizedAt });
+    assert.equal(boundaryOf(f, messaged).objective, "Deliver #12");
+    assert.equal(root.orchestratorPolicy!.firstMessageScope, undefined);
+    assert.equal(campaignBoundaryCurrent(root), true);
+
+    const silent = customCampaign(f, "silent-root");
+    unscoped(silent);
+    await enable(silent);
+    root = f.db.getSession(silent)!;
+    assert.deepEqual(root.orchestratorPolicy!.firstMessageScope, { state: "pending" });
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(boundaryOf(f, silent).objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
+    f.db.updateSessionStatus(silent, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, silent, "Deliver #12 end to end")).ok, true);
+    assert.deepEqual(f.db.getSession(silent)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(boundaryOf(f, silent).objective, "Deliver #12 end to end");
+
+    // An unverifiable repository is the one thing that blocks, with the fix in its reason.
+    const unverified = customCampaign(f, "unverified-root");
+    unscoped(unverified);
+    f.issues.repository = null;
+    const blocked = (await server.inject({ method: "POST", url: `/api/sessions/${unverified}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} })).json().preflight as CampaignLaunchPreflight;
+    assert.equal(blocked.ready, false);
+    assert.match(blocked.summary.blockers[0]!.reason, /could not verify this campaign's repository/u);
   } finally { await server.close(); f.db.close(); }
 });

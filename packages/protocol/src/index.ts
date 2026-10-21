@@ -737,7 +737,7 @@ export type {
 } from "./campaign-control-launch.js";
 export {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION,
-  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId,
+  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -2694,8 +2694,16 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
+  /** A Full Control boundary whose objective and issue scope come from its owner's first message
+   * (#2940). `pending` until that message is delivered; `established` keeps the digest of the
+   * exact message. Server-owned: never accepted from a request, a child or an agent. */
+  firstMessageScope?: FullControlFirstMessageScope;
   sources: OrchestratorPolicySources;
 }
+
+export type FullControlFirstMessageScope =
+  | { state: "pending" }
+  | { state: "established"; messageDigest: string; establishedAt: number };
 
 /** `blocked` means nothing is progressing without intervention: every unverified child failed,
  * stopped, or is held, or the campaign's own continuation is stalled (see

@@ -1,22 +1,67 @@
 # Full Control Launch Preparation
 
 Issue #2940 offers Custom and Full Control in Orchestrator defaults, New Session, and active
-Orchestrator Controls. Choosing Full Control in New Session or on a live root campaign runs the
-server preflight at once (debounced; a newer input aborts the older request). It shows a concise
-summary: scope, budget, follow-ups, review, isolation, evidence with the provider retention
-disclosure, and Human Required exceptions. Launch is one click: only genuine impossibilities block
-it, and they come first with the operator fix; infrastructure gaps are neutral summary rows, never
-warnings. Detailed limits, the full capability list and the behavior and execution settings sit
-under a collapsed Advanced disclosure; changing an override checks readiness again. With no saved
-campaign budget the summary says No Limit. An optional cost and/or tool-call ceiling can be entered
-under Advanced; once both are entered, Save Limits as Default (off by default) saves them after the
-campaign is admitted.
+Orchestrator Controls. Full Control launches exactly like a Custom Orchestrator session: choose
+it in Orchestrator Policy, press the same Create Session, and write the first message in the
+session once it opens. Nothing is filled in or reviewed first. There is no task or issue field,
+no readiness banner, no summary rows and no limit entry. The only addition is the Policy row's one
+line, "The Orchestrator runs this campaign end to end." The first message is the task.
 
-New Session's one footer action, Authorize and Start, admits the exact reviewed preflight.
-Ordinary Create Session never runs for Full Control. A live root campaign's one action, Enable
-Full Control, does the same through the enable route; Revoke is unchanged. Orchestrator defaults
-save the preferred mode and a Full Control campaign budget. Neither grants authority; older
-settings APIs refuse saving the mode.
+On Create Session the client runs the server preflight and admits its exact digest in one action,
+with one request identity. If the server's facts change in between (a runner reconnect, or a saved
+default), the action is retried once. Only a genuine impossibility stops the launch: an
+unverifiable repository, a provider path that cannot enforce the authority contract, or an
+explicit saved ceiling that cannot be enforced. It appears as the one inline "Couldn't Start the
+Session" error, where every launch error appears. Ordinary Create Session never runs for Full
+Control. A live root campaign's Enable Full Control is the same single action through the enable
+route; Revoke is unchanged. Orchestrator defaults save the preferred mode and a Full Control
+campaign budget. Neither grants authority, and older settings APIs refuse saving the mode. With
+no saved campaign budget, the campaign has no limit.
+
+## The First Message Is the Task
+
+A launch that names no task, issue numbers or objective (`FullControlLaunchRequest` with only a
+workspace and session overrides) is admitted through the same atomic launch admission. Its
+boundary is task-only: the inspected repository, no issues, and the placeholder objective
+`FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE`. The root starts with no initial prompt and waits, like any
+Orchestrator. Its policy carries `firstMessageScope: { state: "pending" }`.
+
+The authenticated Human's first message to that root (`POST /api/sessions/:id/prompt`, Human lane
+only) establishes the boundary before the Orchestrator's first turn:
+
+- Only the person who authorized the launch can send it; anyone else gets 403. It must contain
+  text: a slash command or image-only message is refused, so that the task is stated.
+- The objective is the message, normalized to one line and bounded to 4000 characters. The
+  boundary records the SHA-256 digest of the exact message text (`messageDigest`).
+- The issue scope is the message's references to the campaign's own repository (`#123`,
+  `owner/repo#123`, `https://github.com/owner/repo/issues/123`). References to other repositories
+  and pull request URLs are ignored. The runner then reads each reference, and only verified
+  issues are kept: a pull request, a missing issue, or an unreadable origin leaves that reference
+  out. With none, the scope stays task-only.
+- The next issue-scope revision, and the boundary revision that names it, commit together in one
+  compare-and-set on the policy revision (`establishFirstMessageScope`). Accepted follow-ups and
+  Maximum Issues grow to what a launch naming those issues derives, and never shrink. Operations,
+  policy asks, evidence and ceilings are unchanged.
+- The scope and boundary are synchronized to the runner (`campaign_issue_scope synchronize`)
+  before the message is delivered. A runner that misses the update keeps its older revision, which
+  authorizes no issue write, and every issue operation synchronizes again before it acts.
+- If the message is not delivered, the wait reopens (`reopenFirstMessageScope`, digest-bound), and
+  the next first message establishes a newer revision.
+
+While the root waits, every other prompt is refused, whether from an agent, an automation or a
+steering lane. Agent-authored text therefore can never establish or widen the scope. Later
+messages, the owner's included, never change it: scope changes go through the existing scope
+review. Revoking Full Control restores Custom: the wait applies only while the control is Full
+Control.
+
+Enabling Full Control on an existing campaign that has no issue scope derives one the same way.
+The repository comes from the runner's inspection of the root's checkout. The issues are those
+the campaign's first message references, together with any that the initial request already
+scoped, as the runner verifies them. If no message was sent yet, the campaign waits for its first
+message exactly like a launch. A campaign whose scope another person established can't be enabled
+by someone else.
+
+## Server Evaluation
 
 The owned preparation delta from PR #3069 is integrated onto main's authority, issue-scope and
 budget contracts, preserving subsequent launch UI changes. It advertises no new runner capability
@@ -30,7 +75,7 @@ the revision and revokes unused decisions, resumes and evidence receipts. Descen
 revoke separately. A conflict reloads current state without replaying the change. The hosting
 campaign remains Custom; source fixture tests do not grant an agent Human authority.
 
-The preflight shows the stored repository, objective, issue scope and revisions when available,
+The preflight reports the stored repository, objective, issue scope and revisions when available,
 bounded follow-ups and closure reasons, fixed root and child choices, isolation, completion,
 Session ceilings and authorized operations. It reads the actual campaign budget projection and
 distinguishes its envelope, original ceilings, generated allocation, spend and reservations.
@@ -43,15 +88,16 @@ and remain human-owned; command/file one-time approvals keep their existing sema
 Verification of the complete live flow on final main remains #2939. Production video review
 remains #1321.
 
-The deterministic browser fixtures test the real components and the unsupported state. Their
+The deterministic browser fixtures test the real components and the blocked state. Their
 captures prove layout and launch fencing, not unattended readiness or live provider media support.
 
 ## Atomic Launch
 
 `POST /api/full-control-campaigns/preflight` and `POST /api/full-control-campaigns` are
-Human-only. The request names a workspace (and optionally its Project), a task and/or issue
-numbers, and optional overrides (`FullControlLaunchRequest` in
-`packages/protocol/src/campaign-control-launch.ts`). The server derives everything else:
+Human-only. The request names a workspace (and optionally its Project), optionally a task and/or
+issue numbers (with neither, the first message is the task), and optional overrides
+(`FullControlLaunchRequest` in `packages/protocol/src/campaign-control-launch.ts`). The server
+derives everything else:
 
 - Repository from the runner's inspection of the registered workspace origin; objective from the
   task (or the issue list); the root installation defaults to the controlled reviewer's Claude
@@ -72,7 +118,7 @@ numbers, and optional overrides (`FullControlLaunchRequest` in
   no controlled reviewer, the summary says the campaign uses the regular cross-model review
   workflow, and the campaign policy tells participants to run that workflow and report its cost.
 
-The preflight returns `ready`, a digest, a concise `summary` (scope, budget, follow-up policy,
+The preflight returns `ready`, a digest, a `summary` for API clients and logs (scope, budget, follow-up policy,
 review, evidence destination/provider with the verbatim retention disclosure, Human Required
 exceptions, blockers), per-capability readiness and an `advanced` block with the derived proposal
 and plan. Each capability is `verified`, `unsupported` (blocks launch, with an actionable reason),
