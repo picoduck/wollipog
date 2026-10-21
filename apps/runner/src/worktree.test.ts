@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedHeadForge, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -124,6 +124,31 @@ test("GitLab merged head discovery requires a merged merge request on the remote
   assert.equal(parseMergedGitLabMergeRequestForHead("{}", head, host), null);
   assert.equal(parseMergedGitLabMergeRequestForHead("not json", head, host), null);
   assert.equal(parseMergedGitLabMergeRequestForHead(JSON.stringify([exact]), "c".repeat(39), host), null);
+});
+
+test("the production forge choice keeps every GitHub remote the original check admitted (#3601)", async () => {
+  const calls: string[][] = [];
+  const run: typeof runContextCommand = async (_context, _command, args) => {
+    calls.push(args);
+    return { stdout: "https\n", stderr: "" };
+  };
+  const forge = (remote: string) => mergedHeadForge({ kind: "native" }, "/repo", remote, run);
+  for (const github of [
+    "git@github.com:team/repo.git",
+    "https://github.com/team/repo.git",
+    "https://x-access-token:secret@github.com/team/repo.git",
+    "https://token@github.com/team/repo.git",
+    "ssh://git@github.com/team/repo.git",
+  ]) {
+    assert.deepEqual(await forge(github), { provider: "github" }, github);
+  }
+  assert.deepEqual(await forge("git@gitlab.com:team/sub/repo.git"),
+    { provider: "gitlab", host: "gitlab.com", project: "team/sub/repo" });
+  assert.equal(calls.length, 0, "neither github.com nor gitlab.com needs a configuration probe");
+  assert.deepEqual(await forge("https://gitlab.example.test/team/sub/repo.git"),
+    { provider: "gitlab", host: "gitlab.example.test", project: "team/sub/repo" });
+  assert.deepEqual(calls, [["config", "get", "api_protocol", "--host", "gitlab.example.test", "--global"]]);
+  assert.equal(await forge("/srv/git/repo.git"), null, "a local path names no forge");
 });
 
 test("missing-upstream discovery asks GitLab for a GitLab remote, including a configured self-managed host (#3601)", { skip: !haveGit() }, async () => {

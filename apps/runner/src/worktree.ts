@@ -1591,13 +1591,19 @@ export function parseMergedGitLabMergeRequestForHead(
 
 /** Which forge can prove a merged head for this remote: github.com, gitlab.com, or a self-managed
  * host this context's glab is configured for (the same local, non-secret `api_protocol` check the
- * forge summary uses). Anything else has no forge to ask. */
-async function mergedHeadForge(
+ * forge summary uses). Anything else has no forge to ask. GitHub keeps its original host-only
+ * check, which also admits credential-bearing HTTPS remotes that `parseForgeRemote` refuses. */
+export async function mergedHeadForge(
   context: AgentContext,
   cwd: string,
   remoteUrl: string,
   run: typeof runContextCommand,
 ): Promise<{ provider: "github" } | { provider: "gitlab"; host: string; project: string } | null> {
+  const githubRemote = /^git@github\.com:/iu.test(remoteUrl) || (() => {
+    try { return new URL(remoteUrl).hostname.toLowerCase() === "github.com"; }
+    catch { return false; }
+  })();
+  if (githubRemote) return { provider: "github" };
   const parsed = parseForgeRemote(remoteUrl);
   if (!parsed) return null;
   if (parsed.provider === "github") return { provider: "github" };
