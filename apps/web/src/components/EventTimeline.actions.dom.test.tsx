@@ -6,10 +6,11 @@ import { Window } from "happy-dom";
 import type { TimelineItem } from "../timeline.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
-import { readTranscriptAction } from "../dom-test-transcript-actions.js";
+import { chooseTranscriptAction, readTranscriptAction } from "../dom-test-transcript-actions.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { markdownPlainText as plainText } from "./markdown-plain-text.js";
+import { inPlaceHandoffTurns } from "@wollipog/protocol";
 
 const domWindow = new Window({ url: "http://localhost/" });
 let coarsePointer = false;
@@ -97,6 +98,36 @@ test("More Turn Actions lists Your Message then This Turn, each under its sectio
     "[This Turn]", "Copy Response", "Copy Response as Markdown", "Fork After This Turn…", "Hand Off After This Turn…",
   ]);
   assert.equal(document.activeElement, menu.querySelector("[role='menuitem']"), "the first item takes focus");
+});
+
+test("in-place turns offer Hand Off without offering a native fork and show ambiguous-history reasons", async () => {
+  const payloads = [
+    { seq: 1, payload: { kind: "user_message" as const, text: "Task", final: true } },
+    { seq: 2, payload: { kind: "agent_message" as const, text: "Answer", final: true } },
+    { seq: 3, payload: { kind: "agent_response_completed" as const } },
+  ];
+  const inPlaceItems = items.filter((item) => item.kind !== "checkpoint" && item.kind !== "conversation_checkpoint");
+  const called: number[] = [];
+  const good = inPlaceHandoffTurns(payloads);
+  const { container, unmount } = await mount({ items: inPlaceItems,
+    handoff: { open: (turn) => called.push(turn), inPlaceTurns: new Map(good.turns.map((point) => [point.promptSeq, point])) } });
+  const handoff = await readTranscriptAction(container, "More Turn Actions", "Hand Off After This Turn…");
+  assert.ok(handoff);
+  assert.equal(handoff.disabled, false);
+  assert.equal(await readTranscriptAction(container, "More Turn Actions", "Fork After This Turn…"), null);
+  await chooseTranscriptAction(container, "More Turn Actions", "Hand Off After This Turn…");
+  assert.deepEqual(called, [1]);
+  await unmount();
+  for (const history of [payloads.slice(0, 2), payloads.slice(1)]) {
+    const projection = inPlaceHandoffTurns(history);
+    const mounted = await mount({ items: inPlaceItems,
+      handoff: { open: () => assert.fail("ambiguous turn must not hand off"),
+        inPlaceTurns: new Map(projection.turns.map((point) => [point.promptSeq, point])), historyReason: projection.reason } });
+    const disabled = await readTranscriptAction(mounted.container, "More Turn Actions", "Hand Off After This Turn…");
+    assert.ok(disabled?.disabled);
+    assert.match(disabled.reason!, /no authoritative completion|Load the earlier history/);
+    await mounted.unmount();
+  }
 });
 
 test("an unavailable item is disabled with its reason as a visible second line it is described by", async () => {

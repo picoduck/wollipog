@@ -4,6 +4,7 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   buildConversationHandoff,
+  inPlaceHandoffTurns,
   removePendingRequest,
   type AccessScopeChangePreview,
   type AgentCapabilities,
@@ -662,7 +663,9 @@ function initialModel(): FixtureModel {
   }
   if (SCENARIO === "conversation-handoff") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
-      status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+      status: "idle", activeTurnId: null,
+      useWorktree: !FIXTURE_QUERY.has("inPlace"),
+      worktreePath: FIXTURE_QUERY.has("inPlace") ? null : "/repos/alpha/checkpoint",
       // A deliberate non-default tier that the destination model below does not advertise, so the
       // dialog must say so rather than substitute a default.
       serviceTier: "flex",
@@ -1191,6 +1194,16 @@ if (SCENARIO === "conversation-handoff") {
     { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "conversation_checkpoint", turn: 1 } },
   ]);
+  if (FIXTURE_QUERY.has("inPlace")) {
+    const history: SessionEvent[] = [
+      { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
+      { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "The current files preserve the accessible layout.", final: true } },
+      { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: FIXTURE_QUERY.has("interrupted")
+        ? { kind: "turn_interrupted" } : { kind: "agent_response_completed" } },
+    ];
+    sessionEvents.set("session-alpha", FIXTURE_QUERY.has("partialHistory")
+      ? history.map((event) => ({ ...event, id: event.id + 10, seq: event.seq + 10 })) : history);
+  }
 }
 if (SCENARIO === "edit-in-fork") {
   // Two completed turns, so the second message has a checkpoint to edit from and the first has none.
@@ -2761,8 +2774,11 @@ const client = {
     handoffRequests.push({ id, turn, agentId, config: structuredClone(config) });
     const source = model.sessions.find((candidate) => candidate.id === id)!;
     const agent = runner.agents.find((candidate) => candidate.id === agentId)!;
-    const handoffDraft = buildConversationHandoff(sessionEvents.get(id) ?? [], 3, agent, config);
-    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config, status: "idle" as const };
+    const history = sessionEvents.get(id) ?? [];
+    const point = source.worktreePath ? undefined : inPlaceHandoffTurns(history).turns.find((point) => point.turn === turn);
+    const handoffDraft = buildConversationHandoff(history, point?.eventSeq ?? 3, agent, config, { inPlace: !source.worktreePath });
+    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config,
+      useWorktree: true, worktreePath: "/repos/alpha/handoff-child", status: "idle" as const };
     model.sessions.push(child);
     sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 4, payload: { kind: "conversation_forked", sourceSessionId: id, turn,
       handoff: { sourceAgent: source.agentId!, destinationAgent: agentId, disclosure: handoffDraft.disclosure } } }]);

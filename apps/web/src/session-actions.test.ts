@@ -218,6 +218,7 @@ test("checkpoint handoff keeps its gates and their order, and ignores settled re
     forkInProgress: false,
   };
   assert.equal(checkpointHandoffUnavailableReason(ready), undefined);
+  assert.equal(checkpointHandoffUnavailableReason({ ...ready, hasWorktree: false }), undefined);
   assert.equal(
     checkpointHandoffUnavailableReason({ ...ready, queuedPrompts: pendingQueuedPromptCount([failedReceipt, uncertainReceipt]) }),
     undefined,
@@ -228,7 +229,6 @@ test("checkpoint handoff keeps its gates and their order, and ignores settled re
     [{ runnerOnline: false }, "The runner is offline."],
     [{ runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.conversationHandoff - 1 },
       "Update the runner to support checkpoint handoffs."],
-    [{ hasWorktree: false }, "A worktree is required."],
     [{ busy: true }, "The source session is busy."],
     [{ forkInProgress: true }, "The source session is busy."],
     [{ queuedPrompts: pendingQueuedPromptCount([failedReceipt, liveEntry]) }, "The source session is busy."],
@@ -245,7 +245,7 @@ test("checkpoint handoff keeps its gates and their order, and ignores settled re
   );
   assert.equal(
     checkpointHandoffUnavailableReason({ ...ready, hasWorktree: false, busy: true }),
-    "A worktree is required.",
+    "The source session is busy.",
   );
 });
 

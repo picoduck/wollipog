@@ -26,6 +26,96 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
   assert.fail(message);
 }
 
+test("an in-place handoff carries current HEAD and working files without changing the source checkout or history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-in-place-handoff-"));
+  const repo = join(root, "repo");
+  git(root, ["init", "-q", repo]);
+  isolateFromAmbientIgnores(repo);
+  git(repo, ["config", "user.email", "test@example.com"]);
+  git(repo, ["config", "user.name", "Test"]);
+  writeFileSync(join(repo, "tracked.txt"), "base");
+  writeFileSync(join(repo, "deleted.txt"), "base");
+  writeFileSync(join(repo, ".gitignore"), "ignored.txt\nforced.txt\n");
+  git(repo, ["add", "."]); git(repo, ["commit", "-qm", "base"]);
+  const store = new SessionStore(join(root, "sessions"));
+  const source: SessionMeta = {
+    sessionId: "s_in_place", agentId: "codex", workspaceId: "source-workspace", repoPath: repo,
+    worktreePath: null, driver: "codex-app-server", command: "source", args: [], env: {},
+    context: { kind: "native" }, agentSessionId: "source-thread", status: "idle", title: "In Place",
+    config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+    turnCount: 0, seq: 0, createdAt: 1, updatedAt: 1,
+  };
+  store.create(source);
+  store.appendEvent(source.sessionId, { kind: "user_message", text: "Selected task", final: true });
+  store.appendEvent(source.sessionId, { kind: "agent_message", text: "Preliminary answer", final: true });
+  store.appendEvent(source.sessionId, { kind: "user_message", text: "Selected steer", final: true, deliveryIntent: "steer" });
+  store.appendEvent(source.sessionId, { kind: "agent_message", text: "Selected answer", final: true });
+  store.appendEvent(source.sessionId, { kind: "agent_response_completed" });
+  store.appendEvent(source.sessionId, { kind: "user_message", text: "Later excluded dialogue", final: true });
+  store.appendEvent(source.sessionId, { kind: "agent_message", text: "Later partial answer", final: true });
+  store.appendEvent(source.sessionId, { kind: "turn_interrupted" });
+  store.flush(source.sessionId);
+  // Commits and file edits after the selected dialogue must travel, unlike a worktree checkpoint.
+  writeFileSync(join(repo, "later-commit.txt"), "committed after selected turn");
+  git(repo, ["add", "."]); git(repo, ["commit", "-qm", "later commit"]);
+  writeFileSync(join(repo, "tracked.txt"), "staged"); git(repo, ["add", "tracked.txt"]);
+  writeFileSync(join(repo, "tracked.txt"), "working copy");
+  writeFileSync(join(repo, "untracked.txt"), "carry me");
+  writeFileSync(join(repo, "ignored.txt"), "leave me");
+  writeFileSync(join(repo, "forced.txt"), "tracked despite ignore"); git(repo, ["add", "-f", "forced.txt"]);
+  rmSync(join(repo, "deleted.txt"));
+  const head = git(repo, ["rev-parse", "HEAD"]);
+  const branch = git(repo, ["symbolic-ref", "HEAD"]);
+  const index = readFileSync(join(repo, ".git", "index"));
+  const history = JSON.stringify(store.readEvents(source.sessionId));
+  const destination: AgentDefinition = {
+    id: "claude", name: "Claude", command: "destination", args: [], env: {},
+    driver: "claude-code", authStatus: "authenticated", available: true,
+    capabilities: { models: [{ id: "test" }], effortLevels: [], permissionModes: [], slashCommands: [],
+      supportsImages: true, supportsApprovals: true },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+    () => { throw new Error("handoff must not launch a provider"); }, root);
+  try {
+    const request = { agent: destination, config: { model: "test" } };
+    const native = await manager.forkConversation(source.sessionId, "s_native", 1, "Native");
+    assert.match(native.error!, /requires a worktree/);
+    const incomplete = await manager.forkConversation(source.sessionId, "s_incomplete", 2, "Incomplete", false, request);
+    assert.match(incomplete.error!, /no authoritative completion/);
+    const missing = await manager.forkConversation(source.sessionId, "s_missing", 999, "Missing", false, request);
+    assert.equal(missing.ok, false);
+    store.patchMeta(source.sessionId, { status: "running" });
+    const busy = await manager.forkConversation(source.sessionId, "s_busy", 1, "Busy", false, request);
+    assert.match(busy.error!, /busy/);
+    store.patchMeta(source.sessionId, { status: "idle" });
+    const result = await manager.forkConversation(source.sessionId, "s_current_files", 1, "Current Files", false, request);
+    assert.equal(result.ok, true, result.error);
+    const target = store.readMeta("s_current_files")!;
+    assert.equal(target.workspaceId, source.workspaceId);
+    assert.equal(target.repoPath, repo);
+    assert.notEqual(target.worktreePath, repo);
+    assert.equal(git(target.worktreePath!, ["rev-parse", "HEAD"]), head);
+    for (const [file, text] of Object.entries({ "tracked.txt": "working copy", "untracked.txt": "carry me",
+      "forced.txt": "tracked despite ignore", "later-commit.txt": "committed after selected turn" })) {
+      assert.equal(readFileSync(join(target.worktreePath!, file), "utf8"), text);
+    }
+    assert.equal(existsSync(join(target.worktreePath!, "ignored.txt")), false);
+    assert.equal(existsSync(join(target.worktreePath!, "deleted.txt")), false);
+    assert.match(result.handoffDraft!.text, /Selected task[\s\S]*Selected steer[\s\S]*Selected answer/);
+    assert.doesNotMatch(result.handoffDraft!.text, /Later excluded|Later partial/);
+    assert.match(result.handoffDraft!.disclosure, /Files reflect the repository at hand-off time, not the selected turn/);
+    assert.match(result.handoffDraft!.disclosure, /ignored untracked files are left out/);
+    assert.equal(git(repo, ["rev-parse", "HEAD"]), head);
+    assert.equal(git(repo, ["symbolic-ref", "HEAD"]), branch);
+    assert.deepEqual(readFileSync(join(repo, ".git", "index")), index);
+    assert.equal(readFileSync(join(repo, "tracked.txt"), "utf8"), "working copy");
+    assert.equal(readFileSync(join(repo, "ignored.txt"), "utf8"), "leave me");
+    assert.equal(JSON.stringify(store.readEvents(source.sessionId)), history);
+    assert.equal(store.readMeta(source.sessionId)?.forkPoints, undefined);
+    await manager.delete(target.sessionId);
+  } finally { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
 for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
   test(`${sourceDriver} checkpoint hands exact files to a fresh opposite provider only after Send`, async () => {
     const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-"));
@@ -165,7 +255,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     writeFileSync(join(repo, "a.txt"), "base\n");
     git(repo, ["add", "-A"]);
     git(repo, ["commit", "-q", "-m", "base"]);
-    const sourceWorktree = await createWorktree(repo, "s_source");
+    const sourceWorktree = await createWorktree(repo, "s_source", { dataDir: storeRoot });
     writeFileSync(join(sourceWorktree.path, "a.txt"), "after turn\n");
     writeFileSync(join(sourceWorktree.path, "new.txt"), "untracked state\n");
     const tree = await captureWorktreeTree(sourceWorktree.path);
@@ -291,7 +381,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     let claudeCatalogPreparations = 0;
     manager = new SessionManager(
       (message) => sent.push(message), () => {}, store, "runner", undefined, factory,
-      undefined, 4, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      storeRoot, 4, undefined, undefined, { agentLimits: {}, agentWeights: {} },
       { mode: "bwrap", network: "inherit" }, async (_policy, _context, _deps, state) => {
         if (state?.driver !== "claude-code") return undefined;
         claudeIsolationState.push({

@@ -41,6 +41,66 @@ const readFieldGeometry = (dialog: Locator) => dialog.evaluate((element) => {
 });
 
 for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
+  test(`in-place handoff uses current files and leaves an unsent draft at ${width}px ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const url = "/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1";
+    await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
+    await page.evaluate((theme) => document.documentElement.dataset.theme = theme, theme);
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    await waitForSessionPreview(page);
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    const more = page.locator(".tl-turn-footer").getByRole("button", { name: "More Turn Actions" });
+    await more.click();
+    const menu = page.getByRole("menu", { name: "More Turn Actions" });
+    const handoff = menu.getByRole("menuitem", { name: "Hand Off After This Turn…" });
+    await expect(handoff).toBeEnabled();
+    await expect(menu.getByRole("menuitem", { name: "Fork After This Turn…" })).toHaveCount(0);
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-enabled.png") });
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(109));
+    await more.click();
+    await expect(handoff).toBeDisabled();
+    await expect(handoff.locator(".menu-desc")).toContainText("Update the runner");
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-old-runner.png") });
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(110));
+    await more.click(); await handoff.click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("repository's current files and dialogue up to Turn 1");
+    await dialog.locator("details.disclosure summary").click();
+    await expect(dialog).toContainText("The repository at hand-off time, not the selected turn.");
+    await expect(dialog).toContainText("ignored untracked files are left out");
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-file-disclosure.png") });
+    await dialog.getByRole("button", { name: "Service Tier: Flex", exact: true }).click();
+    await page.getByRole("option", { name: "Priority", exact: true }).click();
+    await dialog.getByRole("button", { name: "Create Handoff", exact: true }).click();
+    await expect(page.locator(".composer-input")).toHaveValue(/Files reflect the repository at hand-off time, not the selected turn/);
+    await expect(page.locator(".composer-input")).toHaveValue(/Keep the interface accessible on mobile/);
+    expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([]);
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-unsent-draft.png") });
+  });
+}
+
+for (const [query, reason] of [
+  ["interrupted=1", "This turn has no authoritative completion for a handoff."],
+  ["partialHistory=1", "Load the earlier history before handing off an in-place session."],
+]) {
+  test(`in-place handoff fails visibly closed for ${query}`, async ({ page }) => {
+    await page.goto(`/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1&${query}`);
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    await waitForSessionPreview(page);
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    await page.locator(".tl-turn-footer").getByRole("button", { name: "More Turn Actions" }).click();
+    const handoff = page.getByRole("menuitem", { name: "Hand Off After This Turn…" });
+    await expect(handoff).toBeDisabled();
+    await expect(handoff.locator(".menu-desc")).toHaveText(reason!);
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-history-refusal.png") });
+  });
+}
+
+for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
   test(`checkpoint handoff remains unsent and reviewable at ${width}px ${theme}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     const url = "/command-inbox-projects-e2e.html?scenario=conversation-handoff&machineName=Studio%20Mac";

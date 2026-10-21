@@ -130,7 +130,6 @@ export function checkpointHandoffUnavailableReason(context: CheckpointHandoffCon
   if (!runnerSupportsProtocol(context.runnerProtocolVersion, "conversationHandoff")) {
     return "Update the runner to support checkpoint handoffs.";
   }
-  if (!context.hasWorktree) return "A worktree is required.";
   if (context.busy || context.forkInProgress || context.queuedPrompts > 0 ||
       ["running", "starting", "queued", "input_required"].includes(context.status)) {
     return "The source session is busy.";

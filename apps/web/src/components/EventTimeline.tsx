@@ -1,6 +1,6 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useShowAgentLogs } from "../agent-logs.js";
-import type { AgentDriverKind, WorkflowArtifactView } from "@wollipog/protocol";
+import type { AgentDriverKind, InPlaceHandoffTurn, WorkflowArtifactView } from "@wollipog/protocol";
 import { Profiler, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type PlanEntry, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
@@ -550,7 +550,14 @@ export const estimateTimelineRow = (row: TimelineRenderRow): number => {
  * keystrokes, status flips) skips the whole timeline subtree, not just the row bodies.
  * `onRewind` (when provided — session detail only) must be identity-stable (useCallback)
  * or it defeats the row memoization. */
-const HandoffContext = createContext<{ open: (turn: number) => void; reason?: string } | undefined>(undefined);
+interface HandoffControl {
+  open: (turn: number) => void;
+  reason?: string;
+  /** Only in-place handoffs use prompt ordinals from the shared durable-history projection. */
+  inPlaceTurns?: ReadonlyMap<number, InPlaceHandoffTurn>;
+  historyReason?: string;
+}
+const HandoffContext = createContext<HandoffControl | undefined>(undefined);
 
 /** Retry Turn for a failed turn's notice (#2169): re-submits the turn's prompt as a new turn. */
 export interface TurnRetryControl {
@@ -598,7 +605,7 @@ export const EventTimeline = memo(function EventTimeline({
   onInsertReply,
   subagentStatus,
 }: {
-  handoff?: { open: (turn: number) => void; reason?: string };
+  handoff?: HandoffControl;
   /** Retry Turn on a failed turn's notice; absent where a transcript cannot start a turn. */
   turnRetry?: TurnRetryControl;
   items: TimelineItem[];
@@ -2997,12 +3004,13 @@ export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt"
 
 /** The This Turn group, in menu order. Fork and Hand Off appear where the turn established a
  * conversation checkpoint, disabled with their reason when they cannot be used now. */
-export function turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff }: {
+export function turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff, handoffTurn = forkTurn }: {
   responseText: string;
   forkAvailability?: ConversationForkAvailability;
   onFork?: (turn: number) => void;
   forkTurn?: number;
-  handoff?: { open: (turn: number) => void; reason?: string };
+  handoffTurn?: number;
+  handoff?: HandoffControl;
 }): TranscriptAction[] {
   const noResponse = "This turn has no response to copy.";
   const actions: TranscriptAction[] = [
@@ -3033,13 +3041,13 @@ export function turnActions({ responseText, forkAvailability, onFork, forkTurn, 
         : { unavailableReason: forkAvailability.available ? "This action is unavailable." : forkAvailability.reason }),
     });
   }
-  if (handoff && forkTurn != null) {
+  if (handoff && handoffTurn != null) {
     actions.push({
       key: "handoff",
       label: "Hand Off After This Turn…",
       icon: <HandOffIcon size={16} />,
       unavailableReason: handoff.reason,
-      onSelect: () => handoff.open(forkTurn),
+      onSelect: () => handoff.open(handoffTurn),
     });
   }
   return actions;
@@ -3068,7 +3076,13 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, 
   const span = turnSpanDescription(summary);
   const usage = summary.usage ? turnUsageLabel(summary.usage, driver) : null;
   const responseText = useMemo(() => turnResponseText(summary), [summary.responseParts]);
-  const actions = turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff });
+  const inPlacePoint = prompt ? handoff?.inPlaceTurns?.get(prompt.id) : undefined;
+  const handoffTurn = handoff?.inPlaceTurns ? inPlacePoint?.turn ?? 0 : forkTurn;
+  const handoffReason = handoff?.reason ?? (handoff?.inPlaceTurns
+    ? handoff.historyReason ?? inPlacePoint?.reason ?? (!inPlacePoint ? "This turn has no authoritative completion for a handoff." : undefined)
+    : undefined);
+  const actions = turnActions({ responseText, forkAvailability, onFork, forkTurn, handoffTurn,
+    handoff: handoff ? { ...handoff, reason: handoffReason } : undefined });
   const fork = actions.find((action) => action.key === "fork");
   const forkUsable = fork !== undefined && transcriptActionAvailable(fork);
   const groups = [

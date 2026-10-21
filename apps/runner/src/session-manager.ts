@@ -25,7 +25,7 @@ import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-f
  * the same session at once.
  */
 
-import { buildConversationHandoff, handoffDestinationError, type ConversationHandoffDraft } from "@wollipog/protocol";
+import { buildConversationHandoff, handoffDestinationError, inPlaceHandoffTurns, type ConversationHandoffDraft } from "@wollipog/protocol";
 import { transferClaudeAccountTranscript } from "./claude-account-transcript.js";
 import { transferCodexAccountTranscript } from "./codex-account-transcript.js";
 import type { ClaudeLiveUsage } from "./drivers/claude-usage-accounting.js";
@@ -14891,7 +14891,8 @@ export class SessionManager {
       if (JSON.stringify(handoff.agent.context ?? { kind: "native" }) !== JSON.stringify(source.context) ||
           source.executionTarget && source.executionTarget.adapter !== "host") return { ok: false, error: "handoff requires the same host execution context" };
     }
-    if (!source.worktreePath) return { ok: false, error: "conversation fork requires a worktree session" };
+    if (!source.worktreePath && !handoff) return { ok: false, error: "conversation fork requires a worktree session" };
+    const inPlace = !source.worktreePath;
     if (this.hasCheckpointRefCleanupForSession(targetSessionId)) {
       try {
         await this.awaitCheckpointRefCleanupForSession(targetSessionId);
@@ -14902,16 +14903,22 @@ export class SessionManager {
     if (this.store.has(targetSessionId) || this.forkingTargets.has(targetSessionId)) {
       return { ok: false, error: "target session already exists or is being created" };
     }
+    const inPlacePoint = inPlace
+      ? inPlaceHandoffTurns(this.store.readEvents(sourceSessionId)).turns.find((point) => point.turn === turn)
+      : undefined;
+    if (inPlace && !inPlacePoint?.eventSeq) return { ok: false, error: inPlacePoint?.reason ?? "This turn has no authoritative completion for a handoff." };
     const point = source.forkPoints?.[String(turn)];
-    if (!point) return { ok: false, error: `turn ${turn} has no provider fork checkpoint` };
-    const sourceWorktree = this.attributedWorktreeForPath(source, source.worktreePath);
-    if (!sourceWorktree) return { ok: false, error: "the active worktree has no durable session identity" };
-    if (point.worktreeId) {
-      if (point.worktreeId !== sourceWorktree.id) {
-        return { ok: false, error: `turn ${turn} belongs to a different session worktree` };
+    if (!inPlace && source.worktreePath) {
+      if (!point) return { ok: false, error: `turn ${turn} has no provider fork checkpoint` };
+      const sourceWorktree = this.attributedWorktreeForPath(source, source.worktreePath);
+      if (!sourceWorktree) return { ok: false, error: "the active worktree has no durable session identity" };
+      if (point.worktreeId) {
+        if (point.worktreeId !== sourceWorktree.id) {
+          return { ok: false, error: `turn ${turn} belongs to a different session worktree` };
+        }
+      } else if (this.attributedWorktrees(source).length !== 1) {
+        return { ok: false, error: `turn ${turn} predates worktree identity and cannot be forked after a worktree switch` };
       }
-    } else if (this.attributedWorktrees(source).length !== 1) {
-      return { ok: false, error: `turn ${turn} predates worktree identity and cannot be forked after a worktree switch` };
     }
     if (!handoff && (source.driver === "claude-code" || source.driver === "pi") && turn !== source.turnCount) {
       const provider = source.driver === "pi" ? "Pi RPC" : "Claude CLI";
@@ -14998,15 +15005,24 @@ export class SessionManager {
     try {
       if (handoff) {
         const sourceEvents = this.store.readEvents(sourceSessionId);
-        const cutoff = point.eventSeq ?? sourceEvents.find((event) => event.payload.kind === "conversation_checkpoint" && event.payload.turn === turn)?.seq;
+        const cutoff = inPlacePoint?.eventSeq ?? point?.eventSeq ?? sourceEvents.find((event) => event.payload.kind === "conversation_checkpoint" && event.payload.turn === turn)?.seq;
         if (!cutoff) throw new Error("checkpoint has no durable history boundary");
         const handoffDraft = buildConversationHandoff(sourceEvents, cutoff, handoff.agent, handoff.config, {
+          ...(inPlace ? { inPlace: true } : {}),
           privateValues: [source.agentSessionId, source.repoPath, source.worktreePath, ...Object.values(source.env),
             ...Object.values(source.forkPoints ?? {}).map((checkpoint) => checkpoint.agentTurnId)].filter((value): value is string => typeof value === "string" && value.length > 0),
         });
         const worktreeOptions = { context: source.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
-        if (!point.baseCommit) throw new Error("checkpoint has no historical commit base");
-        worktree = await createWorktreeFromTree(source.repoPath, targetSessionId, point.tree, point.baseCommit, worktreeOptions);
+        const baseCommit = inPlace ? await worktreeHead(source.repoPath, worktreeOptions) : point?.baseCommit;
+        if (!baseCommit) throw new Error("checkpoint has no historical commit base");
+        const tree = inPlace
+          ? await withGitExecutionContext(source.context, () => captureWorktreeTree(source.repoPath))
+          : point?.tree;
+        if (!tree) throw new Error("checkpoint has no file tree");
+        if (inPlace && await worktreeHead(source.repoPath, worktreeOptions) !== baseCommit) {
+          throw new Error("The source repository HEAD changed during handoff. Try again when it is settled.");
+        }
+        worktree = await createWorktreeFromTree(source.repoPath, targetSessionId, tree, baseCommit, worktreeOptions);
         if (this.deleting.has(targetSessionId) || this.deleted.has(targetSessionId) || this.store.isDeleted(targetSessionId) || !this.store.has(sourceSessionId)) throw new Error("handoff was canceled");
         const ownership = this.checkpointRefOwnership.claim({ sessionId: targetSessionId, repoPath: source.repoPath,
           context: source.context, ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}) });
@@ -15030,8 +15046,8 @@ export class SessionManager {
           id: "legacy",
           path: worktree.path,
           branch: worktree.branch,
-          baseRef: point.baseCommit,
-          baseCommit: point.baseCommit,
+          baseRef: baseCommit,
+          baseCommit,
           source: "legacy",
         };
         target.worktrees = [targetWorktree];
@@ -15054,6 +15070,7 @@ export class SessionManager {
         this.store.flush(targetSessionId);
         return { ok: true, snapshot: this.snapshot(this.store.readMeta(targetSessionId)!), events: this.store.readEvents(targetSessionId), handoffDraft, ...(retainedPrompt ? { retainedPrompt } : {}) };
       }
+      if (!source.worktreePath || !point) throw new Error("conversation fork requires a worktree checkpoint");
       if (this.executionIsolation.mode === "bwrap" &&
           source.providerStateVersion !== (source.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(source);
