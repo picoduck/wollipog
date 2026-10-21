@@ -1,4 +1,4 @@
-import type { ProjectLocationView, ProjectView, RunnerView } from "@wollipog/protocol";
+import type { ProjectLocationAvailability, ProjectLocationView, ProjectView, RunnerView } from "@wollipog/protocol";
 
 export const NO_PROJECT_SELECTION = "__no_project__";
 
@@ -52,6 +52,71 @@ export function isLaunchableProjectLocation(
   const runner = runners.get(location.runnerId);
   return location.availability === "available" && runner?.status === "online" &&
     runner.workspaces.some((workspace) => workspace.id === location.workspaceId);
+}
+
+/** A path cut at its start, so the folder name and its parent stay whole: "…/repos/wollipog". */
+export function startTruncatedPath(path: string): string {
+  const separator = path.includes("\\") ? "\\" : "/";
+  const segments = path.split(/[\\/]+/u).filter(Boolean);
+  return segments.length <= 2 ? path : `…${separator}${segments.slice(-2).join(separator)}`;
+}
+
+/** The Location a project's option describes: its default, else its first. */
+export function primaryProjectLocation(project: ProjectView): ProjectLocationView | undefined {
+  return project.locations.find((location) => location.isDefault) ?? project.locations[0];
+}
+
+/**
+ * Where each project that shares its name runs, said no more precisely than its same-named projects
+ * need: the machine, then the machine and folder, then a longer path, then the whole path, and the
+ * project's id when nothing else differs. Projects with a unique name get no entry. New Session and
+ * New Multi-Agent Run both label projects with it, so two projects never read alike in either.
+ */
+export function projectNameQualifiers(
+  projects: readonly ProjectView[],
+  machineName: (runnerId: string) => string,
+): Map<string, string> {
+  const qualifiers = new Map<string, string>();
+  const sameName = new Map<string, ProjectView[]>();
+  for (const project of projects) sameName.set(project.name, [...(sameName.get(project.name) ?? []), project]);
+  for (const group of sameName.values()) {
+    if (group.length < 2) continue;
+    const levels: Array<(project: ProjectView) => string> = [
+      (project) => { const primary = primaryProjectLocation(project); return primary ? machineName(primary.runnerId) : ""; },
+      (project) => {
+        const primary = primaryProjectLocation(project);
+        return primary ? `${machineName(primary.runnerId)} · ${primary.path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? primary.path}` : "";
+      },
+      (project) => { const primary = primaryProjectLocation(project); return primary ? `${machineName(primary.runnerId)} · ${startTruncatedPath(primary.path)}` : ""; },
+      (project) => { const primary = primaryProjectLocation(project); return primary ? `${machineName(primary.runnerId)} · ${primary.path}` : ""; },
+    ];
+    const level = levels.find((qualify) => {
+      const values = group.map(qualify);
+      return values.every(Boolean) && new Set(values).size === group.length;
+    });
+    for (const project of group) {
+      const primary = primaryProjectLocation(project);
+      qualifiers.set(project.id, level
+        ? level(project)
+        : `${primary ? `${machineName(primary.runnerId)} · ` : ""}Project ${project.id.slice(-6)}`);
+    }
+  }
+  return qualifiers;
+}
+
+/**
+ * A location's availability as the live runner catalog sees it. The stored availability can still
+ * read Available while its machine is offline or no longer advertises the folder, and the Location
+ * field names what is actually in the way.
+ */
+export function liveLocationAvailability(
+  location: ProjectLocationView,
+  runners: ReadonlyMap<string, RunnerView>,
+): ProjectLocationAvailability {
+  if (location.availability !== "available") return location.availability;
+  const runner = runners.get(location.runnerId);
+  if (runner?.status !== "online") return "runner_offline";
+  return runner.workspaces.some((workspace) => workspace.id === location.workspaceId) ? "available" : "workspace_missing";
 }
 
 /** Preserve an exact preset when supplied. Otherwise choose an available default, or the sole

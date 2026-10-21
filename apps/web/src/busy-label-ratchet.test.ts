@@ -37,7 +37,6 @@ export const LABEL_SWAP = new RegExp(
 const BASELINE: Readonly<Record<string, number>> = {
   "components/Board.tsx": 1,
   "components/InstancesPanel.tsx": 1,
-  "components/NewRunDialog.tsx": 1,
   "components/OfflineBanner.tsx": 1,
   // Moved with the pairing banner from App.tsx (#2303), which kept its behaviour as it was.
   "components/PairingBanner.tsx": 2,
