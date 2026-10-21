@@ -58,13 +58,13 @@ async function exitedWithin(exited: Promise<void>, ms: number): Promise<boolean>
   }
 }
 
-async function stopChild(child: ChildProcess): Promise<void> {
+async function stopChild(child: ChildProcess, graceMs = 5_000): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill("SIGTERM");
   const exited = new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
-  if (await exitedWithin(exited, 5_000)) return;
+  child.kill("SIGTERM");
+  if (await exitedWithin(exited, graceMs)) return;
   child.kill("SIGKILL");
-  await exitedWithin(exited, 3_000);
+  assert.ok(await exitedWithin(exited, 3_000), "the test-owned child exited before its temporary state is removed");
 }
 
 // A minimal /ui inbox: buffer every JSON frame and let callers await the first one matching a
@@ -218,6 +218,30 @@ function hasFixtureAncestor(pid: number, ancestor: { pid: number; startedAt: str
   return false;
 }
 
+type FixtureIdentity = { pid: number; startedAt: string };
+
+function ownedFixtureTree(root: FixtureIdentity): FixtureIdentity[] {
+  if (!liveFixtureProcess(root.pid, root.startedAt)) return [];
+  const owned: FixtureIdentity[] = [];
+  for (const name of readdirSync("/proc")) {
+    if (!/^[1-9][0-9]*$/u.test(name)) continue;
+    const pid = Number(name);
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)!.split(" ");
+      if (hasFixtureAncestor(pid, root)) owned.push({ pid, startedAt: stat[19]! });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return owned;
+}
+
+function killFixtureIdentity(entry: FixtureIdentity): void {
+  if (!liveFixtureProcess(entry.pid, entry.startedAt)) return;
+  try { process.kill(entry.pid, "SIGKILL"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+}
+
 function abandonmentInspection(record: LeaseRecord, scannerPid: number, fixturePids: number[]) {
   assert.ok(record.process, "the recorded runner has lifecycle evidence");
   const probe = linuxLeaseProcessProbe("/proc", process.getuid?.(), scannerPid);
@@ -240,11 +264,12 @@ function abandonmentInspection(record: LeaseRecord, scannerPid: number, fixtureP
   };
 }
 
-for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGKILL-empty", "second-signal", "supervisor-stop"] as const) {
+for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGKILL-empty", "second-signal", "second-signal-empty", "supervisor-stop", "supervisor-teardown"] as const) {
   test(
     stopMode === "smoke" ? "a session created over the control plane drives a mock-agent turn to /ui and survives a runner restart"
       : stopMode === "SIGKILL" || stopMode === "second-signal"
         ? `provider-HOME pipeline refuses handoff after ${stopMode} while a descendant survives`
+      : stopMode === "supervisor-teardown" ? "provider-HOME pipeline teardown reaps the inner daemon after forced supervisor exit"
       : `provider-HOME pipeline handoff after ${stopMode}: journal ownership and completed turns`,
     { timeout: 120_000, skip: stopMode !== "smoke" && process.platform !== "linux" ? "lease process evidence uses Linux procfs" : false },
     async (t) => {
@@ -264,9 +289,7 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
         ? readFileSync(fixtureProcesses, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { pid: number; startedAt: string; kind: string })
         : [];
       const killFixtureProcesses = async () => {
-        for (const entry of descendants()) {
-          if (liveFixtureProcess(entry.pid, entry.startedAt)) process.kill(entry.pid, "SIGKILL");
-        }
+        for (const entry of descendants()) killFixtureIdentity(entry);
         await until(() => descendants().every((entry) => !liveFixtureProcess(entry.pid, entry.startedAt)), "only this fixture's provider processes should be gone");
       };
       mkdirSync(workspaceDir, { recursive: true });
@@ -312,7 +335,7 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
 
       let runnerStarts = 0;
       const spawnRunner = (): ChildProcess => {
-        const supervised = stopMode === "supervisor-stop" && runnerStarts++ === 0;
+        const supervised = (stopMode === "supervisor-stop" || stopMode === "supervisor-teardown") && runnerStarts++ === 0;
         const args = supervised
           ? [fileURLToPath(new URL("./fixtures/pipeline-lease-supervisor.mjs", import.meta.url)), configPath, supervisedRunner]
           : ["--import", "tsx", "apps/runner/src/cli.ts", "--config", configPath];
@@ -340,19 +363,29 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
         return child;
       };
 
-      t.after(async () => {
+      let cleaned = false;
+      const supervisedCleanup = new Map<string, FixtureIdentity>();
+      const cleanup = async (graceMs = 20_000): Promise<void> => {
+        if (cleaned) return;
         for (const socket of uiSockets) {
           if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
         }
-        if (runner) await stopChild(runner);
+        // Capture BEFORE stopping either supervisor: parent links disappear when tsx/cli dies.
+        // Keep PID/start-time identities so forced teardown reaches its real inner daemon too.
         if (existsSync(supervisedRunner)) {
-          const entry = JSON.parse(readFileSync(supervisedRunner, "utf8")) as { pid: number; startedAt: string };
-          if (liveFixtureProcess(entry.pid, entry.startedAt)) process.kill(entry.pid, "SIGKILL");
+          const launcher = JSON.parse(readFileSync(supervisedRunner, "utf8")) as FixtureIdentity;
+          for (const entry of ownedFixtureTree(launcher)) supervisedCleanup.set(`${entry.pid}:${entry.startedAt}`, entry);
         }
+        if (runner) await stopChild(runner, graceMs);
+        for (const entry of supervisedCleanup.values()) killFixtureIdentity(entry);
+        await until(() => [...supervisedCleanup.values()].every((entry) => !liveFixtureProcess(entry.pid, entry.startedAt)),
+          "the supervisor, launcher, and real daemon must be gone before deleting temporary state", 3_000);
         await killFixtureProcesses();
         await stopChild(controlPlane);
         rmSync(temp, { recursive: true, force: true });
-      });
+        cleaned = true;
+      };
+      t.after(() => cleanup());
 
       await waitForHealth(httpBase, controlPlane, () => cpOutput);
 
@@ -451,6 +484,18 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
       );
       await waitForIdle();
 
+      if (stopMode === "supervisor-teardown") {
+        const launcher = JSON.parse(readFileSync(supervisedRunner, "utf8")) as FixtureIdentity;
+        const tree = ownedFixtureTree(launcher);
+        assert.ok(tree.length >= 2, "the launcher and its real inner daemon are both alive before teardown");
+        // Exercise cleanup directly before the ordinary stop step, as an assertion failure would.
+        // A zero grace period forces the escalation path instead of waiting for normal draining.
+        await cleanup(0);
+        assert.ok(tree.every((entry) => !liveFixtureProcess(entry.pid, entry.startedAt)), "forced teardown left no recorded process alive");
+        assert.equal(existsSync(temp), false, "temporary state was removed only after the owned processes exited");
+        return;
+      }
+
       // Restart the runner daemon. The session (persisted in the runner's store and the control plane
       // DB) must survive the restart: after the daemon reconnects and resumes it, a fresh prompt must
       // drive another full turn whose terminal message again reaches the /ui subscription.
@@ -459,7 +504,9 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
         [kind, descendants().filter((entry) => entry.kind === kind).length]));
       const beforeCounts = counts();
       const survivorExpected = stopMode === "SIGKILL" || stopMode === "second-signal";
-      const abrupt = survivorExpected || stopMode === "SIGKILL-empty";
+      const emptyCrash = stopMode === "SIGKILL-empty" || stopMode === "second-signal-empty";
+      const secondSignal = stopMode === "second-signal" || stopMode === "second-signal-empty";
+      const abrupt = survivorExpected || emptyCrash;
       if (stopMode === "smoke") {
         await stopChild(runner);
       } else {
@@ -476,9 +523,9 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
         assert.ok(held.record.process, "the active record contains actual runner lifecycle evidence");
         const exited = new Promise<void>((resolvePromise) => runner!.once("exit", () => resolvePromise()));
         const shutdownOutputStart = runnerOutput.length;
-        assert.ok(runner.kill(stopMode === "second-signal" || stopMode === "supervisor-stop" ? "SIGTERM"
+        assert.ok(runner.kill(secondSignal || stopMode === "supervisor-stop" ? "SIGTERM"
           : stopMode === "SIGKILL-empty" ? "SIGKILL" : stopMode));
-        if (stopMode === "second-signal") {
+        if (secondSignal) {
           await until(() => runnerOutput.slice(shutdownOutputStart).includes("shutting down"), "the first signal entered the pending-kill drain");
           assert.ok(runner.kill("SIGINT"));
         }
@@ -497,7 +544,7 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
 
       }
 
-      if (stopMode === "SIGKILL-empty") {
+      if (emptyCrash) {
         // Case 2 is separate from case 3: remove only our recorded provider processes before the
         // replacement starts. A dead runner PID by itself cannot establish abandonment.
         await killFixtureProcesses();
