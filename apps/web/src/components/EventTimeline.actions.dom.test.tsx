@@ -125,7 +125,7 @@ test("in-place turns offer Hand Off without offering a native fork and show ambi
         inPlaceTurns: new Map(projection.turns.map((point) => [point.promptSeq, point])), historyReason: projection.reason } });
     const disabled = await readTranscriptAction(mounted.container, "More Turn Actions", "Hand Off After This Turn…");
     assert.ok(disabled?.disabled);
-    assert.match(disabled.reason!, /no authoritative completion|Load the earlier history/);
+    assert.match(disabled.reason!, /didn't finish|Load earlier messages/);
     await mounted.unmount();
   }
 });

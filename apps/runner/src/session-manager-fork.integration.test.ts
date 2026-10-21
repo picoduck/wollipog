@@ -91,8 +91,6 @@ for (const needsSetupTrust of [false, true]) {
       const request = { agent: destination, config: { model: "test" } };
       const native = await manager.forkConversation(source.sessionId, "s_native", 1, "Native");
       assert.match(native.error!, /requires a worktree/);
-      const incomplete = await manager.forkConversation(source.sessionId, "s_incomplete", 2, "Incomplete", false, request);
-      assert.match(incomplete.error!, /no authoritative completion/);
       const missing = await manager.forkConversation(source.sessionId, "s_missing", 999, "Missing", false, request);
       assert.equal(missing.ok, false);
       store.patchMeta(source.sessionId, { status: "running" });
@@ -116,6 +114,8 @@ for (const needsSetupTrust of [false, true]) {
       assert.doesNotMatch(result.handoffDraft!.text, /Later excluded|Later partial/);
       assert.match(result.handoffDraft!.disclosure, /Files reflect the repository at hand-off time, not the selected turn/);
       assert.match(result.handoffDraft!.disclosure, /ignored untracked files are left out/);
+      assert.doesNotMatch(result.handoffDraft!.text, /Checkpoint handoff|checkpoint event/);
+      assert.match(result.handoffDraft!.disclosure, /1 event or message omitted/);
       assert.equal(git(repo, ["rev-parse", "HEAD"]), head);
       assert.equal(git(repo, ["symbolic-ref", "HEAD"]), branch);
       assert.deepEqual(readFileSync(join(repo, ".git", "index")), index);
@@ -144,6 +144,23 @@ for (const needsSetupTrust of [false, true]) {
         await manager.delete("s_already_trusted");
       }
       assert.equal(store.readMeta(source.sessionId)?.forkPoints, undefined);
+      store.patchMeta(source.sessionId, { status: "stopped" });
+      const beforeStopped = JSON.stringify(store.readEvents(source.sessionId));
+      const stopped = await manager.forkConversation(source.sessionId, "s_stopped_files", 2, "Stopped Files", false, request);
+      assert.equal(stopped.ok, true, stopped.error);
+      assert.match(stopped.handoffDraft!.text, /Later partial answer/);
+      assert.equal(JSON.stringify(store.readEvents(source.sessionId)), beforeStopped);
+      await manager.delete("s_stopped_files");
+      store.appendEvent(source.sessionId, { kind: "user_message", text: "Guardrail task", final: true });
+      store.appendEvent(source.sessionId, { kind: "agent_message", text: "Partial guardrail work", final: true });
+      store.appendEvent(source.sessionId, { kind: "stderr", text: "Runner governance paused this turn at the cost threshold." });
+      store.patchMeta(source.sessionId, { status: "idle" });
+      const beforeGuardrail = JSON.stringify(store.readEvents(source.sessionId));
+      const guardrail = await manager.forkConversation(source.sessionId, "s_guardrail_files", 3, "Guardrail Files", false, request);
+      assert.equal(guardrail.ok, true, guardrail.error);
+      assert.match(guardrail.handoffDraft!.text, /Partial guardrail work/);
+      assert.equal(JSON.stringify(store.readEvents(source.sessionId)), beforeGuardrail);
+      await manager.delete("s_guardrail_files");
       await manager.delete(target.sessionId);
     } finally { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
   });
@@ -179,7 +196,7 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
       sessionId: "s_handoff_source", agentId: sourceDriver, workspaceId: "workspace", repoPath: repo,
       worktreePath: worktree.path, driver: sourceDriver, command: "source", args: ["--private-source"],
       env: { SECRET: "source-private-value" }, context: { kind: "native" }, agentSessionId: "private-provider-id",
-      status: "idle", title: "Source", config: {}, tokensIn: 123, tokensOut: 456, costUsd: 9,
+      status: "stopped", title: "Source", config: {}, tokensIn: 123, tokensOut: 456, costUsd: 9,
       preview: null, pendingApproval: null, turnCount: 3, seq: 0, createdAt: 1, updatedAt: 1,
       forkPoints: { "1": { tree, baseCommit, agentTurnId: "private-turn-id", eventSeq: 3 } },
       claudeUsageCheckpoint: { sessionId: "source-conversation", totalCostUsd: 0.5, models: {}, accountingScope: "process" },
@@ -220,6 +237,10 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
     }, () => {}, store, "runner", undefined, factory, root);
     try {
       const request = { agent: destination, config: { model: "test-model", effort: "high", permissionMode: "default" } };
+      const noPoint = await manager.forkConversation(source.sessionId, "s_no_stopped_point", 3, "No Checkpoint", false, request);
+      assert.equal(noPoint.ok, false);
+      assert.match(noPoint.error!, /no provider fork checkpoint/,
+        "stopping a worktree session does not synthesize a checkpoint for a cancelled turn");
       const creating = manager.forkConversation(source.sessionId, "s_handoff_child", 1, "Handoff", false, request);
       const duplicate = await manager.forkConversation(source.sessionId, "s_duplicate", 1, "Duplicate", false, request);
       assert.equal(duplicate.ok, false); assert.match(duplicate.error!, /already in progress/);

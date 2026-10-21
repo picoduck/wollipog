@@ -4747,9 +4747,12 @@ function SessionDetailLoaded({
   });
   // No full-history scan while streaming: the shared busy/offline/protocol gate already disables
   // every handoff. Event count detects appends even when the store retains the events array.
+  const handoffHistoryComplete = eventHistory?.everComplete === true && !eventHistory.refreshing && !eventHistory.error &&
+    (!eventWindow || eventWindow.complete && !eventWindow.laterGap && !eventWindow.error);
+  const handoffEvents = handoffUnavailableReason ? undefined : evs;
   const inPlaceHandoff = useMemo<ReturnType<typeof inPlaceHandoffTurns> | undefined>(() => session.worktreePath
-    ? undefined : handoffUnavailableReason ? { turns: [] } : inPlaceHandoffTurns(evs ?? []),
-  [session.worktreePath, evs, evs?.length, handoffUnavailableReason]);
+    ? undefined : handoffUnavailableReason ? { turns: [] } : inPlaceHandoffTurns(handoffEvents ?? [], { status: session.status, historyComplete: handoffHistoryComplete }),
+  [session.worktreePath, session.status, handoffHistoryComplete, handoffEvents, handoffEvents?.length, handoffUnavailableReason]);
   const handoffControls = useMemo(() => ({
     open: setHandoffTurn,
     ...(inPlaceHandoff ? { inPlaceTurns: new Map(inPlaceHandoff.turns.map((point) => [point.promptSeq, point])),

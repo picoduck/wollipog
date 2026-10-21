@@ -14904,9 +14904,9 @@ export class SessionManager {
       return { ok: false, error: "target session already exists or is being created" };
     }
     const inPlacePoint = inPlace
-      ? inPlaceHandoffTurns(this.store.readEvents(sourceSessionId)).turns.find((point) => point.turn === turn)
+      ? inPlaceHandoffTurns(this.store.readEvents(sourceSessionId), { status: source.status, throughSeq: source.seq }).turns.find((point) => point.turn === turn)
       : undefined;
-    if (inPlace && !inPlacePoint?.eventSeq) return { ok: false, error: inPlacePoint?.reason ?? "This turn has no authoritative completion for a handoff." };
+    if (inPlace && !inPlacePoint?.eventSeq) return { ok: false, error: inPlacePoint?.reason ?? "This turn didn't finish, so it can't be handed off yet." };
     const point = source.forkPoints?.[String(turn)];
     if (!inPlace && source.worktreePath) {
       if (!point) return { ok: false, error: `turn ${turn} has no provider fork checkpoint` };

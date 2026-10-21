@@ -3079,7 +3079,7 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, 
   const inPlacePoint = prompt ? handoff?.inPlaceTurns?.get(prompt.id) : undefined;
   const handoffTurn = handoff?.inPlaceTurns ? inPlacePoint?.turn ?? 0 : forkTurn;
   const handoffReason = handoff?.reason ?? (handoff?.inPlaceTurns
-    ? handoff.historyReason ?? inPlacePoint?.reason ?? (!inPlacePoint ? "This turn has no authoritative completion for a handoff." : undefined)
+    ? handoff.historyReason ?? inPlacePoint?.reason ?? (!inPlacePoint ? "This turn didn't finish, so it can't be handed off yet." : undefined)
     : undefined);
   const actions = turnActions({ responseText, forkAvailability, onFork, forkTurn, handoffTurn,
     handoff: handoff ? { ...handoff, reason: handoffReason } : undefined });
