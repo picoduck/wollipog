@@ -2544,7 +2544,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ...(msg.runnerHistoryEpoch !== undefined ? { runnerHistoryEpoch: msg.runnerHistoryEpoch } : {}),
         ...(msg.actionProviderThreadId ? { actionProviderThreadId: msg.actionProviderThreadId } : {}),
         ...(msg.actionProviderTurnId ? { actionProviderTurnId: msg.actionProviderTurnId } : {}),
-      }, controlPlaneProtocolVersion).then((reconciled) => {
+      }, controlPlaneProtocolVersion, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then((reconciled) => {
         sendUp({
           type: "workflow_action_reconciliation_result",
           requestId: msg.requestId,

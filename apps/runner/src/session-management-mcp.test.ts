@@ -386,6 +386,32 @@ test("PR merge action admission fails closed against mixed-version control plane
   assert.equal(calls.length, 0, "an old peer never receives an action-bearing consume request");
 });
 
+test("a GitLab merge consume outlasts the control plane's GitLab preflight; other consumes keep their timeout (#3602)", async () => {
+  const { deps } = makeDeps();
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  deps.requestTimeoutMs = 50;
+  // The control plane answers after 120 ms, as a slow preflight would.
+  deps.fetch = async (_url, init) => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, 120);
+      init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("The operation was aborted due to timeout")); });
+    });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ status: "approved" }) };
+  };
+  const snapshot = {
+    category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 42, headSha: "a".repeat(40), reviewResult: "merge",
+    requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1, checks: [{ name: "Required", state: "passed" }] },
+  };
+  const github = await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_github", resourceSnapshot: snapshot,
+    action: { kind: "pr_merge_enqueue", command: "gh pr merge" } });
+  assert.equal(github.isError, true, "an ordinary consume keeps its own timeout");
+  const gitlab = await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_gitlab",
+    resourceSnapshot: { ...snapshot, repository: "gitlab.example.com/group/project", mergeMethod: "merge_train", squash: false,
+      removeSourceBranch: false },
+    action: { kind: "pr_merge_enqueue", command: "glab api" } });
+  assert.equal(gitlab.isError, undefined, "a GitLab merge consume waits for the preflight to finish");
+});
+
 test("PR merge reconciliation fails closed against mixed-version control planes", async () => {
   const { deps, calls } = makeDeps();
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation - 1;

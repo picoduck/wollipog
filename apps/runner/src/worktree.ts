@@ -1640,7 +1640,7 @@ export async function mergedHeadForge(
 export async function worktreePullRequestState(
   worktreePath: string,
   pullRequestUrl: string,
-  options: WorktreeOptions & { provider?: ForgeProvider } = {},
+  options: WorktreeOptions & { provider?: ForgeProvider; env?: Record<string, string> } = {},
 ): Promise<PullRequestLifecycleProof | null> {
   const request = linkedChangeRequest(pullRequestUrl);
   if (!request || (request.provider === "gitlab" && options.provider !== "gitlab")) return null;
@@ -1654,7 +1654,7 @@ export async function worktreePullRequestState(
           "api", `projects/${encodeURIComponent(request.project)}/merge_requests/${request.number}`,
           "--hostname", request.host,
         ],
-      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...(options.env ? { env: options.env } : {}) },
     );
     return parseWorktreePullRequestState(result.stdout, pullRequestUrl);
   } catch {

@@ -20,6 +20,8 @@ export type GitLabMergePreflight =
 
 /** The first GitLab release with `POST /projects/:id/merge_trains/merge_requests/:iid`. */
 const MERGE_TRAIN_API = { major: 15, minor: 11 };
+/** GitLab's project `squash_option` values. */
+const SQUASH_OPTIONS = new Set(["never", "always", "default_on", "default_off"]);
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -73,6 +75,16 @@ export async function gitlabMergePreflight(
 
   const settings = await read(`projects/${project}`);
   if (!("value" in settings)) return settings;
+  // Only a genuine answer for this project proves its settings: an unexpected one is unreadable,
+  // never "no trains". `merge_trains_enabled` exists only on tiers that have merge trains, so its
+  // absence from a genuine answer means none; any other value is unreadable too.
+  const squashOption = settings.value.squash_option;
+  if (typeof settings.value.path_with_namespace !== "string" ||
+      settings.value.path_with_namespace.toLowerCase() !== location.project.toLowerCase() ||
+      !SQUASH_OPTIONS.has(squashOption as string) ||
+      (settings.value.merge_trains_enabled !== undefined && typeof settings.value.merge_trains_enabled !== "boolean")) {
+    return refuse("unavailable", "GitLab returned an unexpected answer for the project's settings.");
+  }
   const trains = settings.value.merge_trains_enabled === true;
   if (request.mergeMethod === "merge" && trains) {
     return refuse("mismatch", "The project runs merge trains, so a direct merge would go around the train. Approve a merge-train merge instead.");
@@ -80,7 +92,6 @@ export async function gitlabMergePreflight(
   if (request.mergeMethod === "merge_train" && !trains) {
     return refuse("mismatch", "The project does not run merge trains. Approve a direct merge instead.");
   }
-  const squashOption = settings.value.squash_option;
   if (request.squash && squashOption === "never") return refuse("mismatch", "The project never squashes, so a squash merge would be refused.");
   if (!request.squash && squashOption === "always") return refuse("mismatch", "The project always squashes, so approve a squash merge.");
 
@@ -89,13 +100,34 @@ export async function gitlabMergePreflight(
   if (mr.value.iid !== request.pullRequest || typeof mr.value.sha !== "string") {
     return refuse("unavailable", "GitLab returned an unexpected answer.");
   }
-  if (mr.value.state !== "opened") return refuse("mismatch", `The merge request is ${String(mr.value.state)}, not open.`);
+  // Known states get fixed sentences; anything else is an unexpected answer, which proves nothing.
+  const closedState: Record<string, string> = {
+    merged: "The merge request is already merged.",
+    closed: "The merge request is closed.",
+    locked: "The merge request is being merged already.",
+  };
+  if (mr.value.state !== "opened") {
+    return typeof mr.value.state === "string" && Object.hasOwn(closedState, mr.value.state)
+      ? refuse("mismatch", closedState[mr.value.state]!)
+      : refuse("unavailable", "GitLab returned an unexpected answer for the merge request.");
+  }
   if (mr.value.sha.toLowerCase() !== request.headSha) {
     return refuse("stale_head", "The merge request's head moved since this merge was approved.");
   }
   if (mr.value.draft === true || mr.value.work_in_progress === true) return refuse("mismatch", "The merge request is a draft.");
-  if (request.mergeMethod === "merge_train" && (mr.value.force_remove_source_branch === true) !== request.removeSourceBranch) {
-    return refuse("mismatch", "The merge request's own delete-source-branch setting differs from the approval, and a train merge uses it.");
+  if (request.mergeMethod === "merge_train") {
+    // A train merge sends no deletion override, so GitLab applies the merge request's effective
+    // setting: `should_remove_source_branch` when set, else `force_remove_source_branch`.
+    const should = mr.value.should_remove_source_branch;
+    const force = mr.value.force_remove_source_branch;
+    if ((should !== null && should !== undefined && typeof should !== "boolean") ||
+        (force !== null && force !== undefined && typeof force !== "boolean")) {
+      return refuse("unavailable", "GitLab returned an unexpected answer for the merge request.");
+    }
+    const effective = typeof should === "boolean" ? should : force === true;
+    if (effective !== request.removeSourceBranch) {
+      return refuse("mismatch", "The merge request's own delete-source-branch setting differs from the approval, and a train merge uses it.");
+    }
   }
   return { ok: true };
 }

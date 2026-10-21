@@ -999,6 +999,22 @@ const WORKTREE_PR_DISCOVERY_CANDIDATES_PER_RECONCILIATION = 8;
 const WORKTREE_PR_DISCOVERY_CONCURRENCY = 4;
 const WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS = 30 * 60 * 1_000;
 
+/** How a typed merge's forge proof reads its change request: `gh` or `glab` from the URL, and for
+ * GitLab the child agent's own environment, so the proof uses the login that ran the merge (#3602).
+ * GitHub reads keep the runner's environment, as before. */
+export function forgeProofOptions(
+  meta: SessionMeta,
+  url: string,
+  agentEnv?: (meta: SessionMeta) => Record<string, string>,
+): { context: AgentContext; provider: ReturnType<typeof changeRequestProvider>; env?: Record<string, string> } {
+  const provider = changeRequestProvider(url);
+  return {
+    context: meta.context,
+    provider,
+    ...(provider === "gitlab" && agentEnv ? { env: agentEnv(meta) } : {}),
+  };
+}
+
 /** The only linkage shape that may stand in for a vanished upstream during safe cleanup: a
  * terminal merged state carrying a forge-verified head OID. Anything else — an open or closed
  * pull request, or a merged record whose head was never verified — is not delivery proof. */
@@ -18325,6 +18341,9 @@ export class SessionManager {
     sessionId: string,
     value: unknown,
     protocolVersion?: number | null,
+    /** The child agent's runner-local environment, so a GitLab proof reads with the same glab login
+     * that ran the merge (#3602). GitHub reads keep the runner's own environment. */
+    options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<{
     accepted: boolean;
     occurrenceId: string;
@@ -18379,7 +18398,7 @@ export class SessionManager {
         forge = await this.resolveWorktreePullRequestState(
           root,
           pullRequestUrl,
-          { context: claudeMeta.context, provider: changeRequestProvider(pullRequestUrl) },
+          forgeProofOptions(claudeMeta, pullRequestUrl, options.agentEnv),
         );
         if (forge) break;
       }
@@ -18506,7 +18525,7 @@ export class SessionManager {
     const forge = await this.resolveWorktreePullRequestState(
       meta.worktreePath ?? meta.repoPath,
       raw.pullRequestUrl as string,
-      { context: meta.context, provider: changeRequestProvider(raw.pullRequestUrl as string) },
+      forgeProofOptions(meta, raw.pullRequestUrl as string, options.agentEnv),
     );
     if (forge?.state !== "merged" || forge.headOid?.toLowerCase() !== raw.expectedHeadSha) {
       return fail(occurrenceId, "forge did not prove the exact approved head was merged");
