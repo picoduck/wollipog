@@ -230,6 +230,23 @@ test("run fanout carries exactly its admitted limits; downgraded peers refuse al
   } finally {h.db.close();}
 });
 
+test("a run on a runner without campaign budget admission is refused with the shared sentence and versions (#3457)",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:100})).ok);
+    h.db.registerRunner({...h.metadata,runnerId:"older"},10,217);
+    // Same campaign Project, so the run reaches the worker gate rather than Location admission.
+    h.db.addProjectLocation(h.db.getSession("root")!.projectId!,{runnerId:"older",workspaceId:"w"});
+    const members=h.db.campaignBudgets.members("root").length;
+    const refused=h.svc.createRun({runnerId:"older",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5"}},{parentSessionId:"root"});
+    assert.equal(refused.status,409);
+    assert.equal(refused.error,"This machine needs a newer runner for campaign run workers. Update and restart the runner.");
+    assert.deepEqual(refused.capabilityRequirement,{requiredRunnerProtocolVersion:218,runnerProtocolVersion:217});
+    assert.equal(h.db.campaignBudgets.members("root").length,members,"a refused run leaves no reservation");
+    assert.equal(h.sent.some((m)=>(m as {type?:string}).type==="start_session"),false);
+  } finally {h.db.close();}
+});
+
 test("malformed control proposals refuse without changing the human revision",()=>{
   const h=harness();
   try {
