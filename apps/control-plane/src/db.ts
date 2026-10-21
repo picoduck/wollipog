@@ -18684,14 +18684,17 @@ export class ControlPlaneDb {
     });
   }
 
-  /** Whether this exact delivery was admitted: the durable prompt command with its delivery id,
-   * for this session, carrying exactly this digest and not known to have failed. The queue then
-   * delivers it once on its own. No other row or text, however identical, ever counts. */
-  firstMessageAdmitted(sessionId: string, messageDigest: string, deliveryId: string): boolean {
-    const row = this.stmt(`SELECT json_extract(payload_json, '$.text') AS text, state FROM session_prompt_commands
-      WHERE command_id=? AND session_id=?`).get(deliveryId, sessionId) as { text: unknown; state: string } | undefined;
-    return Boolean(row && row.state !== "failed" && typeof row.text === "string" &&
-      createHash("sha256").update(row.text, "utf8").digest("hex") === messageDigest);
+  /** This exact delivery's progress, by its identity alone: the durable prompt command with its
+   * delivery id for this session (whose payload a completed receipt clears), or the user message
+   * the runner recorded for it after that row was pruned. The digest is already bound to the id in
+   * the delivering state, so no text is re-read, and no other row or text, however identical,
+   * ever counts. */
+  firstMessageDeliveryState(sessionId: string, deliveryId: string): SessionPromptCommandState | "recorded" | null {
+    const row = this.stmt("SELECT state FROM session_prompt_commands WHERE command_id=? AND session_id=?")
+      .get(deliveryId, sessionId) as { state: SessionPromptCommandState } | undefined;
+    if (row) return row.state;
+    return this.stmt(`SELECT 1 FROM session_events WHERE session_id=? AND kind='user_message'
+      AND json_extract(payload, '$.commandId')=? LIMIT 1`).get(sessionId, deliveryId) ? "recorded" : null;
   }
 
   /** Any conversation the session already has: a user message, a durable prompt or a provider

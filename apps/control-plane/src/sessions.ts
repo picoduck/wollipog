@@ -5100,15 +5100,16 @@ export class SessionsService {
   private reconcileFirstMessageDelivery(sessionId: string, now: number, orphaned = false): void {
     const first = this.db.getSession(sessionId)?.orchestratorPolicy?.firstMessageScope;
     if (first?.state !== "delivering") return;
-    const command = this.db.getSessionPromptCommand(first.deliveryId);
-    const admitted = command?.sessionId === sessionId && this.db.firstMessageAdmitted(sessionId, first.messageDigest, first.deliveryId);
-    const acknowledged = admitted && ["accepted", "queued", "started", "completed"].includes(command!.state);
-    const undelivered = admitted ? command!.state === "uncertain" : orphaned || command?.state === "failed";
+    // Settled by identity alone: any acknowledged-or-later state of this exact command, including a
+    // completed receipt that arrives first (it clears the stored payload).
+    const state = this.db.firstMessageDeliveryState(sessionId, first.deliveryId);
+    const acknowledged = state !== null && ["accepted", "queued", "started", "completed", "recorded"].includes(state);
+    const undelivered = state === null ? orphaned : state === "failed" || state === "uncertain";
     if (!acknowledged && !undelivered) return;
     if (!this.db.settleFirstMessageDelivery(sessionId, first.messageDigest, acknowledged, now)) return;
     this.log.info(JSON.stringify({ event: "full_control_first_message_settled", sessionId, delivered: acknowledged,
-      commandState: command?.state ?? null, messageDigest: first.messageDigest }));
-    if (acknowledged) this.promptOutbox.flush(now, command!.runnerId);
+      commandState: state, messageDigest: first.messageDigest }));
+    if (acknowledged) this.promptOutbox.flush(now, this.db.getSession(sessionId)?.runnerId);
     this.hub.sessionChangedById(sessionId);
   }
 

@@ -1681,3 +1681,44 @@ test("reauthorizing a waiting root never ends its wait, even with retained queue
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "only the owner's message sets scope");
   } finally { await server.close(); f.db.close(); }
 });
+
+test("a completed receipt arriving first settles the first message by its identity alone, and recovery agrees (CR-5.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    f.issues.ackDurable = false;
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12")).ok, true);
+    const first = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+    if (first.state !== "delivering") throw new Error("delivering expected");
+    const sent = f.sent.find((message): message is Extract<ControlPlaneToRunner, { type: "durable_session_command" }> =>
+      message.type === "durable_session_command" && message.commandId === first.deliveryId)!;
+    assert.ok(sent, "the owner's message went out under its delivery id");
+    // Only a completed receipt arrives, e.g. replayed from the runner journal after lost receipts.
+    assert.equal(f.sessions.onDurablePromptReceipt("r", { type: "durable_session_command_result", requestId: sent.requestId,
+      commandId: sent.commandId, sessionId: id, state: "completed", duplicate: true,
+      revision: f.db.getSessionPromptCommand(sent.commandId)!.revision + 1 }), true);
+    const stored = f.db.raw().prepare("SELECT json_extract(payload_json, '$.text') AS payload FROM session_prompt_commands WHERE command_id=?").get(sent.commandId) as { payload: unknown };
+    assert.equal(stored.payload, null, "a completed receipt clears the stored message text");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "settled by the command id alone");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptOrSteer(id, "Agent: next step")).ok, true, "later prompts flow");
+    new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "a rebuilt service still reads established");
+
+    // A delivery still waiting when the process stops, whose completed receipt the new process receives.
+    const { id: later } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, later, "Fix #13")).ok, true);
+    const pending = f.db.getSession(later)!.orchestratorPolicy!.firstMessageScope!;
+    if (pending.state !== "delivering") throw new Error("delivering expected");
+    const restarted = new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.equal(f.db.getSession(later)!.orchestratorPolicy!.firstMessageScope!.state, "delivering", "an admitted command stays fenced");
+    const laterSent = f.sent.find((message): message is Extract<ControlPlaneToRunner, { type: "durable_session_command" }> =>
+      message.type === "durable_session_command" && message.commandId === pending.deliveryId)!;
+    restarted.onDurablePromptReceipt("r", { type: "durable_session_command_result", requestId: laterSent.requestId,
+      commandId: laterSent.commandId, sessionId: later, state: "completed", duplicate: true,
+      revision: f.db.getSessionPromptCommand(laterSent.commandId)!.revision + 1 });
+    assert.equal(f.db.getSession(later)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+  } finally { await server.close(); f.db.close(); }
+});

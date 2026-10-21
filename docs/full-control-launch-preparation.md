@@ -60,8 +60,11 @@ only) establishes the boundary before the Orchestrator's first turn:
   id, and the commit records `delivering` with the digest and that id, so the fence is durable.
   The message is admitted to the durable prompt queue as exactly that command. Persisting it does
   not open the fence: the campaign stays `delivering`, with every other ingress and every other
-  queued command held, until the runner acknowledges that exact command (accepted or later). Only
-  then does it settle as `established` (`settleFirstMessageDelivery`) and release held work. A
+  queued command held, until the runner acknowledges that exact command (accepted or later). It
+  settles by the command id alone, since the digest is already bound to it: any acknowledged or
+  later state counts, including a completed receipt arriving first, which clears the stored
+  payload. Only then does it settle as `established` (`settleFirstMessageDelivery`) and release
+  held work. A
   message that is not admitted, or whose command fails or ends uncertain, reopens the wait, and
   the next first message establishes a newer revision. On startup, a root still `delivering` keeps
   its admitted command, which the queue sends ahead of any older held work, or reopens the wait
