@@ -100,7 +100,8 @@ export class IncrementalVacuum {
           "incremental vacuum step exceeded the 16 ms latency target; benchmark this storage; further slow steps are counted in the pass summary");
         // FULL commits have a fixed sync cost. Measure the one-page baseline so
         // that cost cannot consume the entire 4 ms budget for additional pages.
-        if (pages === 1) onePageMs = elapsed;
+        // A faster multi-page step disproves an inflated initial baseline.
+        onePageMs = pages === 1 ? elapsed : Math.min(onePageMs, elapsed);
         // Keep headroom below 16 ms regardless of the baseline estimate. Limit
         // growth to doubling so a noisy first sample cannot jump straight to 32.
         pages = elapsed >= 12

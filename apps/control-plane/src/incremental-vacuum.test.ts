@@ -179,6 +179,8 @@ test("adaptation responds to marginal cost, slow storage and changing measuremen
       finalMin: 1, finalMax: 1 },
     { name: "optimistic first sample", cost: (pages: number, step: number) => step === 1 ? 0 : 6 + pages * 0.05,
       finalMin: 32, finalMax: 32 },
+    { name: "pessimistic first sample", cost: (pages: number, step: number) => step === 1 ? 10 : 2 + pages,
+      finalMin: 2, finalMax: 8 },
     { name: "cost rises after warmup", cost: (pages: number, step: number) => 6 + pages * (step < 30 ? 0.05 : 1),
       finalMin: 2, finalMax: 8 },
   ]) await t.test(scenario.name, async (t) => {

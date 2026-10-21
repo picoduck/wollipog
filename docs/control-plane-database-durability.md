@@ -115,7 +115,8 @@ at most about **128 MiB per hourly pass**, with warmup and slower storage reduci
 more than 16 passes. It is not an emergency full-disk recovery mechanism.
 
 One-page samples estimate the fixed cost of a `FULL` commit, so sync latency alone cannot pin
-the budget at one page (#3575). Growth is at most doubling per step. Complete steps reaching
+the budget at one page (#3575). A faster multi-page step lowers that estimate, so an initial
+latency spike cannot keep it inflated. Growth is at most doubling per step. Complete steps reaching
 **12 ms** reduce the next page budget proportionally toward **8 ms**, regardless of the baseline,
 leaving headroom below the 16 ms target. These estimates cannot guarantee a bound on arbitrary I/O.
 
@@ -138,8 +139,8 @@ ordinary `FULL` writes and the existing checkpoint worker, failing at **p95 >=16
 target requires measurement on the operator's storage, not an unconditional timing guarantee.
 
 On a Linux/Node 24.18.1 NVMe fixture with 16,000 indexed records, the worker and concurrent `FULL`
-writes, the updated adaptation reclaimed **50.24 MiB in 10.42 seconds** (about **4.82 MiB/s** during
-the pass): **408 steps**, averaging **31.52 pages/step**, with **5.42 ms p95 / 14.34 ms max**.
+writes, the updated adaptation reclaimed **50.24 MiB in 10.89 seconds** (about **4.61 MiB/s** during
+the pass): **411 steps**, averaging **31.29 pages/step**, with **8.73 ms p95 / 10.46 ms max**.
 The fixture drained before the 1,000-step cap; this is a measured example, not a guaranteed hourly rate.
 
 Backups and restores retain their existing SQLite-aware consistency, durability, privacy and

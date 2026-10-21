@@ -234,6 +234,7 @@ one finishes, once armed. Passes are independent of retention, so pages freed by
 policy qualify. A pass starts only with at least **256 free pages** (1 MiB at 4 KiB pages), then
 drains free pages in steps starting at **1 page**, adapting toward **4 ms above the measured
 one-page cost**, capped at **32 pages**. One-page samples account for the fixed `FULL` sync cost;
+a faster multi-page step lowers an inflated baseline estimate.
 growth is at most doubling per step. When a complete step reaches **12 ms**, the next budget is
 reduced proportionally toward **8 ms**, regardless of that baseline, to leave headroom below 16 ms.
 After every step it rests at least **1 ms and three times the measured step duration**. A pass
@@ -258,10 +259,10 @@ and fails at **p95 >= 16 ms**. This is a measured target, not a hard real-time g
 storage. Slow-step warnings mean the operator should benchmark the storage or disable maintenance.
 
 For example, a Linux/Node 24.18.1 NVMe fixture run with 16,000 indexed records, the checkpoint worker
-and 1,548 interleaved `FULL` writes reclaimed **50.24 MiB in 10.42 seconds** (about **4.82 MiB/s**
-during the pass), shrinking the file from 68,575,232 to 15,896,576 bytes. It used **408 steps**,
-averaging **31.52 pages/step**, reached the **32-page** budget and measured **5.42 ms p95 /
-14.34 ms max**. The fixture drained before the step cap. Before the fixed-sync-cost adaptation
+and 1,548 interleaved `FULL` writes reclaimed **50.24 MiB in 10.89 seconds** (about **4.61 MiB/s**
+during the pass), shrinking the file from 68,575,232 to 15,896,576 bytes. It used **411 steps**,
+averaging **31.29 pages/step**, reached the **32-page** budget and measured **8.73 ms p95 /
+10.46 ms max**. The fixture drained before the step cap. Before the fixed-sync-cost adaptation
 fix (#3575), the same benchmark on this disk stayed at one page, reclaiming about **3.91 MiB** in
 1,000 steps with **9.83 ms p95**. These are measured examples, not promised hourly rates;
 memory-backed measurements are not a substitute for testing the database's filesystem.
