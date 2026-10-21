@@ -330,7 +330,7 @@ describe("Runs list rows (#2974)", () => {
 
   const rowNamed = (container: HTMLDivElement, title: string) =>
     [...container.querySelectorAll<HTMLButtonElement>(".surface > .row.row-2")].find((row) => row.querySelector(".row-title")?.textContent === title)!;
-  const meta = (row: Element) => [...row.querySelectorAll(".run-row-meta > span")].map((span) => span.textContent);
+  const meta = (row: Element) => [...row.querySelectorAll(".list-row-meta > span")].map((span) => span.textContent);
 
   const loaded = (client: Partial<ApiClient> = {}) => mountRunsList(
     (socket) => socket.push(snapshotWithRuns([comparison, finished, gated], [claude, codex, opencode, gemini, builder])),
@@ -359,7 +359,7 @@ describe("Runs list rows (#2974)", () => {
       assert.equal(compare.querySelector(".row-title")?.getAttribute("title"), comparison.title, "the full title is its tooltip");
       assert.deepEqual(meta(compare), ["Comparison", "Alpha", "Claude Code, Codex App Server, OpenCode +1"]);
       assert.equal(compare.querySelector(".row-trail time")?.textContent, "5m ago");
-      assert.doesNotMatch(compare.querySelector(".run-row-meta")?.textContent ?? "", /·/u, "meta is spaced, not dotted");
+      assert.doesNotMatch(compare.querySelector(".list-row-meta")?.textContent ?? "", /·/u, "meta is spaced, not dotted");
 
       const workflow = rowNamed(fixture.container, gated.title);
       assert.deepEqual(meta(workflow), ["Build and Review", "Alpha", "Claude Code"]);

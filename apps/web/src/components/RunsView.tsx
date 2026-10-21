@@ -249,7 +249,7 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
     const stale = conn !== "online";
     body = (
       <>
-        {stale && <Notice compact tone="neutral" role="status" className="run-list-reconnecting">Reconnecting…</Notice>}
+        {stale && <Notice compact tone="neutral" role="status" className="list-reconnecting">Reconnecting…</Notice>}
         <StaleContent stale={stale}>
           <div className="surface">
             {list.map((run) => (
@@ -343,15 +343,15 @@ export function RunRow({ run, sessions, workflows, now, onOpen }: {
       <span className="row-icon" aria-hidden="true">
         {type.kind === "comparison" ? <CompareIcon size={16} /> : type.kind === "workflow" ? <RunsIcon size={16} /> : null}
       </span>
-      <span className="row-body run-row-body">
+      <span className="row-body list-row-body">
         <span className="row-title" title={run.title}>{run.title}</span>
-        {status && <StatusBadge meta={statusMeta("run", status)} className="run-row-status" />}
-        <span className="row-sub run-row-meta">
-          {typeLabel && <span className="run-row-type">{typeLabel}</span>}
+        {status && <StatusBadge meta={statusMeta("run", status)} className="list-row-status" />}
+        <span className="row-sub list-row-meta">
+          {typeLabel && <span className="list-row-lead">{typeLabel}</span>}
           {run.workspaceName && (
             <span><ProjectsIcon size={14} aria-hidden="true" /><span>{run.workspaceName}</span></span>
           )}
-          {agents && <span className="run-row-agents"><BotIcon size={14} aria-hidden="true" /><span>{agents}</span></span>}
+          {agents && <span className="list-row-fill"><BotIcon size={14} aria-hidden="true" /><span>{agents}</span></span>}
         </span>
       </span>
       <span className="row-trail">

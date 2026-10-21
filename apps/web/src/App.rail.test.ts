@@ -576,8 +576,9 @@ test("the Multi-Agent Run and Pod create actions are page header primaries", () 
   // Runs hides its primary while the empty state offers the one New Run (#2974); the dialog keeps
   // its title, New Multi-Agent Run.
   assert.match(runsView, /<PageHeader\s+title=\{runsDestination\.name\}\s+description=\{runsDestination\.description\}\s+primary=\{empty \? undefined : \{ label: "New Run", onClick: onNewRun \}\}\s+\/>/);
-  // One verb per action (§17.2): the primary and the dialog it opens are both "New Pod".
-  assert.match(podsView, /<PageHeader\s+title=\{podsDestination\.name\}\s+description=\{podsDestination\.description\}\s+primary=\{\{ label: "New Pod", onClick: onNewPod \}\}\s+\/>/);
+  // One verb per action (§17.2): the primary and the dialog it opens are both "New Pod". Pods also
+  // hides its primary while the empty state offers the one New Pod (#2979).
+  assert.match(podsView, /<PageHeader\s+title=\{podsDestination\.name\}\s+description=\{podsDestination\.description\}\s+primary=\{empty \? undefined : \{ label: "New Pod", onClick: onNewPod \}\}\s+\/>/);
   assert.match(readFileSync(new URL("./components/NewPodDialog.tsx", import.meta.url), "utf8"),
     /<Modal\s+title="New Pod"/);
   assert.doesNotMatch(app, /topbar-create|NewPodHeaderButton/, "the top bar holds no create action");
