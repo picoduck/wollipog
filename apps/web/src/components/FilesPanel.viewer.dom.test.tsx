@@ -415,6 +415,67 @@ test("with no editor found, Open in Editor… is unavailable with its reason as 
   }
 });
 
+/** A Clipboard API whose writes stay pending until the test settles them (#3582). */
+function deferredClipboard() {
+  const writes: Array<{ text: string; resolve: () => void }> = [];
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: (text: string) => new Promise<void>((resolve) => { writes.push({ text, resolve }); }) },
+  });
+  return {
+    writes,
+    succeed: async () => {
+      await act(async () => { writes.at(-1)!.resolve(); });
+      await settle();
+    },
+  };
+}
+
+async function copyPathFromFileActions(mounted: Mounted): Promise<void> {
+  await openFileActions(mounted);
+  const copy = menuItems().find((item) => item.querySelector(".menu-text")?.textContent === "Copy Path")!;
+  await act(async () => fireDomEvent.click(copy));
+  await settle();
+}
+
+test("a Copy Path write that succeeds after Files closed shows no toast and moves no focus (#3582)", async () => {
+  // beforeEach restores the immediate clipboard for the next test.
+  const clipboard = deferredClipboard();
+  const mounted = await mount({ path: "src/tax.ts" });
+  const elsewhere = doc().createElement("button");
+  doc().body.append(elsewhere);
+  let open = true;
+  try {
+    await copyPathFromFileActions(mounted);
+    assert.deepEqual(clipboard.writes.map((write) => write.text), ["src/tax.ts"], "the copy started");
+    await mounted.dispose();
+    open = false;
+    await act(async () => { elsewhere.focus(); });
+    await clipboard.succeed();
+    assert.deepEqual(toasts, [], "no toast for a panel that has gone");
+    assert.ok(doc().activeElement === elsewhere, "focus stays where the person put it");
+  } finally {
+    elsewhere.remove();
+    if (open) await mounted.dispose();
+  }
+});
+
+test("a Copy Path write that succeeds while Files is open shows the toast and keeps focus on File Actions (#3582)", async () => {
+  const clipboard = deferredClipboard();
+  const mounted = await mount({ path: "src/tax.ts" });
+  try {
+    await copyPathFromFileActions(mounted);
+    assert.equal(clipboard.writes.length, 1, "the copy started");
+    const trigger = button(mounted, "File Actions");
+    assert.ok(doc().activeElement === trigger, "the menu closed onto File Actions");
+    await clipboard.succeed();
+    assert.deepEqual(toasts.map((toast) => toast.message), ["Copied the path."]);
+    assert.ok(doc().activeElement === trigger, "focus stays on File Actions");
+  } finally {
+    await mounted.dispose();
+  }
+});
+
 test("several editors are File Actions items, the last used first, and open the target there", async () => {
   domWindow.localStorage.setItem("wollipog.editor.lastUsed", "cursor");
   const mounted = await mount({ path: "src/tax.ts", line: 3 }, [

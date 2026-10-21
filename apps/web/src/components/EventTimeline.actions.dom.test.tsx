@@ -71,7 +71,7 @@ async function mount(props: Partial<React.ComponentProps<typeof EventTimeline>> 
     </FeedbackContext.Provider>,
   ));
   cleanup(() => act(async () => root.unmount()));
-  return { container, toasts };
+  return { container, toasts, unmount: () => act(async () => root.unmount()) };
 }
 
 test("More Turn Actions lists Your Message then This Turn, each under its section label", async () => {
@@ -249,6 +249,69 @@ test("Copy Response copies plain text and Copy Response as Markdown copies the s
     "## Result\n\nThe **answer** is [here](https://example.test).\n\n- one\n- two",
   ]);
   assert.deepEqual(toasts, ["Response copied.", "Response copied as Markdown."]);
+});
+
+/** A Clipboard API whose writes stay pending until the test settles them. */
+function deferredClipboard() {
+  const writes: Array<{ text: string; resolve: () => void }> = [];
+  const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: (text: string) => new Promise<void>((resolve) => { writes.push({ text, resolve }); }) },
+  });
+  return {
+    writes,
+    succeed: async () => { await act(async () => { writes.at(-1)!.resolve(); await Promise.resolve(); }); },
+    restore: () => {
+      if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+      else delete (domWindow.navigator as unknown as { clipboard?: unknown }).clipboard;
+    },
+  };
+}
+
+/** Open More Turn Actions and choose `label`; returns the trigger. */
+async function chooseTurnAction(container: HTMLElement, label: string): Promise<HTMLButtonElement> {
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="More Turn Actions"]')!;
+  await act(async () => { trigger.click(); });
+  const item = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+    .find((candidate) => candidate.dataset.menuLabel === label)!;
+  await act(async () => { item.click(); });
+  return trigger;
+}
+
+test("a Copy Response write that succeeds after the transcript unmounted shows no toast and moves no focus (#3582)", async () => {
+  coarsePointer = false;
+  const clipboard = deferredClipboard();
+  const { container, toasts, unmount } = await mount();
+  const elsewhere = document.createElement("button");
+  document.body.append(elsewhere);
+  try {
+    await chooseTurnAction(container, "Copy Response");
+    assert.equal(clipboard.writes.length, 1, "the copy started");
+    await unmount();
+    await act(async () => { elsewhere.focus(); });
+    await clipboard.succeed();
+    assert.deepEqual(toasts, [], "no toast for a menu that has gone");
+    assert.ok(document.activeElement === elsewhere, "focus stays where the person put it");
+  } finally {
+    elsewhere.remove();
+    clipboard.restore();
+  }
+});
+
+test("a Copy Response write that succeeds while the menu's trigger is still shown says so and leaves focus there (#3582)", async () => {
+  coarsePointer = false;
+  const clipboard = deferredClipboard();
+  const { container, toasts } = await mount();
+  try {
+    const trigger = await chooseTurnAction(container, "Copy Response");
+    assert.ok(document.activeElement === trigger, "the copy left focus on the trigger");
+    await clipboard.succeed();
+    assert.deepEqual(toasts, ["Response copied."]);
+    assert.ok(document.activeElement === trigger, "focus is still on the trigger");
+  } finally {
+    clipboard.restore();
+  }
 });
 
 test("Markdown's plain text keeps paragraphs, lists, code, tables, task boxes and image names", () => {
