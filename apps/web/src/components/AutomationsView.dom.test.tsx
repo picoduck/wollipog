@@ -785,9 +785,10 @@ test("editing a pinned automation shows its rediscovered installation instead of
     await openPage(fixture, "Pinned Sweep");
     const agentLabel = (id: string) => agentDisplayName(machine.agents.find((agent) => agent.id === id)!, machine.agents);
     // The page names the agent the scheduler will start: the rediscovered installation's, not the
-    // stored id's, which now names another agent (CR-1.2).
+    // stored id's, which now names another agent (CR-1.2). A sentence never qualifies it by its
+    // path or id (#2970).
     assert.equal(fixture.container.querySelector(".automation-sentence")?.textContent,
-      `Starts ${agentLabel("system-new")} in runner-1-workspace on runner-1.`);
+      `Starts ${agentDisplayName(selected, machine.agents, { identifiers: false })} in runner-1-workspace on runner-1.`);
     await openEdit(fixture);
     assert.equal(shownValue(fixture.container, "Agent"), agentLabel("system-new"));
     await setLabeledInput(fixture.container, "Name", "Pinned Sweep Renamed");
@@ -1812,11 +1813,19 @@ test("execution history shows content-free signed delivery provenance", async ()
   const fixture = await mountFixture([schedule("automation-a", "Alpha")], { "automation-a": [execution] });
   try {
     await openPage(fixture, "Alpha");
-    const history = fixture.container.querySelector<HTMLDetailsElement>("details.automation-history")!;
-    history.open = true;
-    assert.match(history.textContent ?? "", /Delivered Fields: Prompt · Parameters issue/);
-    assert.match(history.textContent ?? "", /Prompt Digest aaaaaaaaaaaa…/);
-    assert.doesNotMatch(history.textContent ?? "", /delivered prompt text|parameter value/);
+    const row = fixture.container.querySelector<HTMLElement>("table.automation-runs tbody tr")!;
+    assert.equal(row.querySelectorAll("td")[1]?.textContent, "Signed Trigger");
+    // Run Details names what the delivery brought, never its content or its prompt digest (#2970).
+    await act(async () => row.querySelector<HTMLButtonElement>('.actions-cell button[aria-haspopup="menu"]')!.click());
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+      .find((candidate) => candidate.textContent === "Run Details…")!;
+    await act(async () => item.click());
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    const facts = Object.fromEntries([...dialog.querySelectorAll(".facts > div")]
+      .map((pair) => [pair.querySelector("dt")?.textContent, pair.querySelector("dd")?.textContent]));
+    assert.equal(facts.Delivered, "Prompt text, Named values (issue)");
+    assert.equal(facts["Started By"], "Signed Trigger");
+    assert.doesNotMatch(dialog.textContent ?? "", /aaaaaaaaaaaa|Digest|delivered prompt text|parameter value/);
   } finally {
     await unmountFixture(fixture);
   }

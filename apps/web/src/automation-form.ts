@@ -576,7 +576,8 @@ export function actionSentence(action: AutomationAction, names: ActionNames): st
   }
   const agentId = saved ? resolvedInstallationAgentId(runner, saved)! : action.request.agentId;
   const agent = runner?.agents.find((candidate) => candidate.id === agentId);
-  return `Starts ${agent ? agentDisplayName(agent, runner!.agents) : "an agent that isn't on this machine"} ${where}.`;
+  // A sentence never prints an id: namesakes differ by version or context, else read alike (#2970).
+  return `Starts ${agent ? agentDisplayName(agent, runner!.agents, { identifiers: false }) : "an agent that isn't on this machine"} ${where}.`;
 }
 
 /** The prompt or task an action sends. */

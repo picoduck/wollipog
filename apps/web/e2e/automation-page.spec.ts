@@ -292,9 +292,13 @@ test("configured trigger controls and content-free delivery provenance are visib
   await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
 
   await expect(page.getByText("Accepts Prompt · Parameters issue, priority", { exact: true })).toBeVisible();
-  await page.getByText("Show 1 Run", { exact: true }).click();
-  await expect(page.getByText(/Delivered Fields: Prompt · Parameters issue, priority/)).toBeVisible();
-  await expect(page.getByText(/Prompt Digest 95a911a82fc5…/)).toBeVisible();
+  // Run Details names what a signed delivery brought, never its content or its prompt digest (#2970).
+  await page.locator('tr[data-execution-id="axe_issue_1099"] .actions-cell button[aria-haspopup="menu"]').click();
+  await page.getByRole("menuitem", { name: "Run Details…" }).click();
+  const details = page.locator('[role="dialog"].automation-run-details');
+  await expect(details.locator(".facts")).toContainText("Prompt text, Named values (issue, priority)");
+  await expect(details).not.toContainText("95a911a82fc5");
+  await details.getByRole("button", { name: "Done" }).click();
 
   await page.locator(".detail-bar").getByRole("button", { name: "More Actions" }).click();
   await page.getByRole("menuitem", { name: "Add Webhook Trigger…" }).click();
@@ -355,8 +359,12 @@ for (const { label, viewport } of [
           await page.goto(`/automations-e2e.html?theme=${theme}&waiting-target${variant}&expired-run`);
           await card(page).click();
           await expect(page.locator(".automation-notice-slot .notice-body")).toHaveText(reason);
-          await page.locator("details.automation-history > summary").click();
-          await expect(page.locator(".automation-history").getByText(reason, { exact: true })).toBeVisible();
+          await page.locator('tr[data-execution-id="axe_expired"] .actions-cell button[aria-haspopup="menu"]').click();
+          await page.getByRole("menuitem", { name: "Run Details…" }).click();
+          const details = page.locator('[role="dialog"].automation-run-details');
+          await expect(details.locator(".notice-body")).toHaveText(reason);
+          await capture(page, `automation-wording-waiting${variant ? "-installation" : ""}-run-details`);
+          await details.getByRole("button", { name: "Done" }).click();
           await capture(page, `automation-wording-waiting${variant ? "-installation" : ""}`);
         }
       });

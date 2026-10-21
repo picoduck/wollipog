@@ -16987,18 +16987,6 @@ button.review-finding-location {
   }
   .glance > div { display: contents; }
 }
-.automation-history summary { cursor: pointer; color: var(--text-dim); }
-.automation-history-list { display: grid; gap: 8px; margin-top: 10px; }
-.automation-execution { min-width: 0; padding: 10px; border-radius: 8px; background: var(--bg-elev-2); }
-.automation-execution > div { display: flex; justify-content: space-between; gap: 10px; }
-.automation-execution span, .automation-execution code { color: var(--text-dim); }
-.automation-execution code { display: block; margin-top: 5px; overflow-wrap: anywhere; white-space: normal; }
-.automation-execution p { color: var(--red); margin: 6px 0; overflow-wrap: anywhere; }
-.automation-command-list { display: grid; gap: 5px; list-style: none; margin: 8px 0; padding: 0; }
-.automation-command-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; font-size: 12px; }
-.automation-command-list small, .automation-legacy-delivery { color: var(--text-dim); }
-.automation-command-list em { color: var(--red); font-style: normal; grid-column: 1 / -1; overflow-wrap: anywhere; }
-.automation-legacy-delivery { display: block; margin-top: 7px; font-size: 12px; }
 .automation-trigger-editor {
   padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--bg-elev-2);
@@ -17014,7 +17002,69 @@ button.review-finding-location {
 .automation-trigger-actions, .automation-trigger-secret { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .automation-trigger-secret { border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--border)); border-radius: 7px; padding: 9px; }
 .automation-trigger-secret strong { width: 100%; color: var(--yellow); }
-.automation-execution > small { display: block; margin-top: 6px; color: var(--text-dim); }
+/* Run History (#2970, docs/design-system.md §14): Started takes what the declared columns leave.
+   The actions column holds one inline button ("Open Session" at the longest) and ⋯. On a phone a
+   skipped or expired run's reason replaces how long it took on line 2, and wraps. */
+.automation-runs .col-result { width: 140px; }
+.automation-runs .col-started-by { width: 140px; }
+.automation-runs .col-took { width: 96px; }
+.automation-runs .col-actions { width: 168px; }
+.automation-run-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+.automation-runs .automation-run-reason { display: none; }
+@container (max-width: 560px) {
+  .automation-runs .automation-run-reason {
+    display: block;
+    white-space: normal;
+  }
+}
+/* Run Details: the result's reason beside its badge, and one dense row per step. */
+.automation-run-details .facts dd:has(> .automation-run-reason) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+}
+.automation-run-details .facts .num { font-variant-numeric: tabular-nums; }
+.automation-run-steps-section {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.automation-run-steps-section > .section-title { margin: 0; }
+.automation-run-steps {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.automation-run-steps > li {
+  display: grid;
+  gap: var(--space-0-5);
+  min-height: var(--row-h);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.automation-run-steps > li:last-child { border-bottom: 0; }
+.automation-run-step-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+}
+.automation-run-step-kind { font: var(--type-body-strong); }
+.automation-run-step-meta,
+.automation-run-step-error,
+.automation-run-legacy {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.automation-run-step-error { overflow-wrap: anywhere; }
+.automation-run-legacy { margin: 0; }
 /* Outbound Events, the second tab of Automations (#2973; docs/design-system.md §5.2, §5.5, §14).
    The tab is a column of its help line, the one-time secret, a failure notice and one surface of
    expandable subscription rows. */
