@@ -166,6 +166,10 @@ wollipog worktree discard [--session ID] --path PATH --json
 wollipog worktree delete-refs [--path PATH] --ref REF=OBJECT_ID [--ref REF=OBJECT_ID ...] --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
 wollipog pr wait PR [--repo OWNER/NAME] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
+wollipog review session run --repo OWNER/NAME --pr N --head SHA --brief-file PATH [--full-reason TEXT] --json
+wollipog review session get REVIEW_SESSION_ID --json
+wollipog review session list [--limit N] [--cursor REVIEW_SESSION_ID] --json
+wollipog review session cancel REVIEW_SESSION_ID --json
 wollipog review run --repo OWNER/NAME --pr N --head SHA [--brief-file PATH] [--scope delta|full] [--full-reason TEXT] --json
 wollipog review get JOB_ID --json
 wollipog review list [--limit N] [--cursor JOB_ID] --json
@@ -209,7 +213,12 @@ starts more than 20 seconds past it and one still in flight then is abandoned. R
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
-`wollipog review run` (MCP `request_cross_model_review`, #3306) asks the runner to run the installed
+Use [Review Sessions](#review-sessions) for required cross-model review of your own pushed pull
+request, including from an isolated campaign child. The bridge below is a compatibility fallback
+only for runners that predate review sessions or refuse them with a version reason. Missing
+reviewer/trust, budget, admission and review-limit refusals remain blockers.
+
+`wollipog review run` (MCP `request_cross_model_review`, #3330 bridge) asks the runner to run the installed
 cross-model review controller for the calling session's own pull request, outside the session's
 sandbox. A protected native Linux session cannot run the controller itself: its root is read-only and
 a reviewer's sandbox cannot nest inside the session's user namespace. The runner runs it instead, with
@@ -299,7 +308,8 @@ job failed.
 
 ### Review Sessions
 
-`wollipog review session run` (MCP `request_review_session`, #3368, phase 1 of #561) starts a
+`wollipog review session run` (MCP `request_review_session`, #561) is the default route for a
+session, including an isolated campaign child, to obtain its own PR's cross-model review. It starts a
 **review session**: a typed, immutable session kind whose reviewer runs as its own Wollipog
 session, with a live and recorded transcript, instead of as an external controller. It reviews the
 calling session's own pull request at its pushed head, with the same scope as the bridge above: a
@@ -333,7 +343,12 @@ review contract and output schema (version 2) are ported from the cross-model-re
 
 A review session is exempt from every session limit: it takes no runner slot, per-agent limit or
 active turn, and it is not a child, so it takes no delegation slot or charge and gives the requester
-no descendant authority. The requester's remaining cost budget, if it has one, bounds the review.
+no descendant authority. The requester's original human cost ceiling, if it has one, bounds its
+own spending and review attempts together. Campaign members use this same interface: the server
+reserves allowance before launch and records actual Session usage against the campaign allowance
+when present. Exhausted, stopped or unavailable allowances refuse admission with a reason;
+admission failures cannot be bypassed through the bridge. A worker's campaign allocation does
+not cap its reviews, which reserve allowance separately.
 A requester has one active review session at a time. A review session runs one turn: it takes no
 further messages, steering, configuration or commands, cannot be restarted, relaunched, forked or
 converted to another role, and has no worktree, terminal, Native TUI, side chat or children. It is never
@@ -395,6 +410,9 @@ fails any unsettled review session for good, and the checkout is removed once th
 
 #### Review Continuation
 
+End the requesting turn when you have no independent work: there is no need to poll mid-turn.
+Read the full verdict and report with `review session get` on continuation; use that read to
+recover a missing notification, or poll every minute or two on older peers without continuations.
 A finished review owes its requester exactly one continuation (#3369), recorded with the review's
 outcome so a crash cannot lose it. A review the requester cancelled, or one whose launch was
 refused at once, owes nothing. The continuation is a framed prompt,
@@ -423,9 +441,11 @@ Open Transcript. The list is read-only; the requester's own view carries a summa
 
 The routes are `/api/sessions/:id/review-sessions` (POST to request, GET to list),
 `.../:reviewSessionId` and `.../:reviewSessionId/cancel` (POST), with the bridge's credential rules.
-Orchestrator sessions do not have these tools, and a session in a campaign with an allowance is
-refused as with the bridge. The feature needs protocol 226 on both the control plane and the runner,
-and a Linux runner that advertises `runtime.reviewSession`; review runs need protocol 228.
+Orchestrator sessions do not have these tools. Campaign members request their own review sessions;
+unlike the bridge, this route admits them against their campaign allowance. The feature needs
+protocol 226 on both the control plane and the runner, and a Linux runner that advertises
+`runtime.reviewSession`; review runs need protocol 228. Campaign charging requires protocol 232;
+older runners refuse campaign review sessions with upgrade guidance.
 
 A Codex reviewer's read-only sandbox can still read files outside the checkout: Codex's read-only
 sandbox policy has no readable-roots restriction. Network access is off for its commands, but what it
