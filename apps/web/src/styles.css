@@ -17001,8 +17001,9 @@ button.review-finding-location {
    two-line rows with Copy URL and ⋯, and the dialogs that add a trigger, show its secret once and
    say how to call it. */
 /* A row is --row-h-2 while its facts fit on one line. A narrow row (a phone) wraps the facts
-   instead of clipping one: each fact moves to the next line whole, and the row grows to hold it. */
-.automation-trigger-row {
+   instead of clipping one: each fact moves to the next line whole, and the row grows to hold it.
+   Matched as `.row.row-2` is, so the floor replaces that rule's fixed height. */
+.row.row-2.automation-trigger-row {
   gap: var(--space-2);
   height: auto;
   min-height: var(--row-h-2);

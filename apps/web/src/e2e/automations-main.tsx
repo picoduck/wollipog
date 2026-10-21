@@ -276,6 +276,11 @@ const triggerItems: AutomationTriggerView[] = [{
   createdAt: 1,
   updatedAt: 1,
 }];
+// `long-trigger-values`: Issue Intake accepts the most named values a trigger may, so its row's
+// facts wrap over several lines on a phone (#2972).
+if (params.has("long-trigger-values")) {
+  triggerItems[0]!.deliveryPolicy!.parameterNames = Array.from({ length: 16 }, (_, index) => `repository_value_${index + 1}`);
+}
 /** The secret every create and rotate in this harness returns (#2972). */
 const triggerSecret = `wollipogwhsec_${"e2eTriggerSecret".repeat(2)}${"A".repeat(11)}`;
 

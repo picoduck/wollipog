@@ -67,6 +67,26 @@ test.describe("at 1440×900", () => {
 test.describe("at 390×844", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
+  test("a row whose facts wrap grows to hold them, and the next row starts below it", async ({ page }) => {
+    await page.goto("/automations-e2e.html?theme=dark&long-trigger-values");
+    await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
+    const rows = await triggers(page).locator("[data-trigger-id]").evaluateAll((elements) => elements.map((element) => {
+      const box = element.getBoundingClientRect();
+      const body = element.querySelector(".row-body")!.getBoundingClientRect();
+      const meta = element.querySelector(".automation-trigger-meta")!;
+      return {
+        id: (element as HTMLElement).dataset.triggerId,
+        top: box.top,
+        bottom: box.bottom,
+        bodyInside: body.top >= box.top - 0.5 && body.bottom <= box.bottom + 0.5,
+        metaLines: Math.round(meta.getBoundingClientRect().height / parseFloat(getComputedStyle(meta).lineHeight)),
+      };
+    }));
+    expect(rows[0]!.metaLines, "sixteen named values take several lines").toBeGreaterThan(3);
+    for (const row of rows) expect(row, `${row.id} holds its title and facts`).toMatchObject({ bodyInside: true });
+    expect(rows[1]!.top, "the next row starts where the grown row ends").toBeGreaterThanOrEqual(rows[0]!.bottom - 0.5);
+  });
+
   test("New Webhook Trigger is a bottom sheet with 44px targets, Copy URL lives in ⋯, and both confirmations replace the ⋯ sheet", async ({ page }) => {
     await open(page, "dark");
     await expect(row(page, "atr_issue_intake").getByRole("button", { name: "Copy URL" })).toHaveCount(0);
