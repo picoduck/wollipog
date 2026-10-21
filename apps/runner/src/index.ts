@@ -1,6 +1,8 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
 import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
 import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
+import { configuredCodexHomes } from "./review-trust.js";
+import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, ReviewSessionLauncher } from "./review-sessions.js";
 import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
@@ -1266,6 +1268,10 @@ const pendingShellOpenCancellations = new PendingShellOpenCancellations();
 // authoritative inventory after every registration instead.
 /** Agent TUIs running without the managed-worktree guard, which a later worktree cannot reach (#1438). */
 const unguardedAgentTuis = new UnguardedAgentTuiRegistry();
+// Reviewer admission is native-Linux only; avoid accumulating unsupported-platform records.
+const reviewWriters = new ReviewWriterRegistry(process.platform === "linux"
+  ? join(config.dataDir, "unprotected-agent-writers") : undefined);
+sessions.setReviewWriterRegistry(reviewWriters);
 const shells = new ShellManager({
   onOutput: (shellId, sessionId, stream, data, seq) => {
     if (ws && ws.readyState === WebSocket.OPEN && registered) {
@@ -1276,7 +1282,7 @@ const shells = new ShellManager({
     unguardedAgentTuis.exited(shellId);
     sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq });
   },
-});
+}, undefined, reviewWriters);
 sessions.setWorktreeShellRetirement((sessionId, context, path) =>
   shells.closeForWorktree(sessionId, context, path));
 // Keep the Claude managed-worktree guard's protection set live: a worktree created, activated,
@@ -1614,7 +1620,12 @@ const sessionWritablePaths = () => configuredSessionWritablePaths({
   workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
   sessions: store.listSessions(), hostEnv: process.env,
 });
-const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths);
+sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
+  providerAccounts: config.providerAccounts, agents: config.agents,
+  sessions: store.listSessions(), hostEnv: process.env,
+}));
+const codexProtection = () => sessions.codexReviewerProtection();
+const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths, codexProtection);
 // One owner of every review mirror, so the bridge's fetches and review sessions' never race.
 const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), sessionReviewDependencies.exec, log);
 const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session-review-jobs"), store, sendUp,
@@ -1622,7 +1633,8 @@ const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session
 // Review sessions (#3368): a typed reviewer session launched outside the requester's sandbox.
 const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store,
   defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
-    (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
+    (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH,
+    codexProtection));
 // Startup reconciliation has already settled every review session: no checkout is in use.
 reviewSessionLauncher.releaseAll();
 sessions.setReviewSessions({

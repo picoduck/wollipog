@@ -7,6 +7,7 @@
  */
 
 import { StringDecoder } from "node:string_decoder";
+import { ReviewWriterRegistry } from "./review-writers.js";
 import type { AgentContext, ShellKind, ShellOutputChunk, ShellSnapshotMessage } from "@wollipog/protocol";
 import { run } from "./discovery/resolve.js";
 import { killTree, killTreeAndWait, provenProcessTreeExit, spawnAgent, type AgentProcess } from "./spawn.js";
@@ -183,10 +184,25 @@ export function shellProcessTreeProof(child: AgentProcess | WindowsConptyProcess
 
 export class ShellManager {
   private readonly shells = new Map<string, LiveShell>();
+  /** Agent TUIs have no runner filesystem boundary. Retain uncertain descendants even after
+   * their terminal tab is forgotten; only a complete process-tree exit proof removes a writer. */
+  private readonly agentTuiWriterTokens = new Map<string, string>();
+  private readonly reviewWriters: ReviewWriterRegistry;
   /** Set by runner shutdown; ended callbacks are not reported after it. */
   private disposed = false;
 
-  constructor(private readonly cb: ShellCallbacks) {}
+  constructor(private readonly cb: ShellCallbacks, directory?: string, registry?: ReviewWriterRegistry) {
+    this.reviewWriters = registry ?? new ReviewWriterRegistry(directory);
+  }
+
+  unprotectedAgentTuiSessions(): string[] {
+    return this.reviewWriters.sessions("agent_tui");
+  }
+
+  private retireAgentTuiWriter(shellId: string, proven: boolean): void {
+    const token = this.agentTuiWriterTokens.get(shellId);
+    if (token && this.reviewWriters.retire(token, proven)) this.agentTuiWriterTokens.delete(shellId);
+  }
 
   count(sessionId: string): number {
     let n = 0;
@@ -240,6 +256,11 @@ export class ShellManager {
       : shellLaunchFor(context, cols, rows);
     const { command, args, pty, ttyFile } = selected;
     const launchCwd = meta?.launch?.cwd ?? cwd;
+    if (meta?.kind === "agent_tui") {
+      // Publish before spawn: a crash cannot leave an agent writer with no durable admission
+      // evidence. Recovered/uncertain markers require operator reconciliation, never age out.
+      this.agentTuiWriterTokens.set(shellId, this.reviewWriters.acquire(sessionId, "agent_tui"));
+    }
     const child = process.platform === "win32" && context.kind === "native"
       ? openWindowsConpty({
           command: meta?.launch?.command ?? command,
@@ -328,12 +349,13 @@ export class ShellManager {
     let endReported = false;
     const reportEnded = () => {
       const onEnded = meta?.onEnded;
-      if (!onEnded || endReported || this.disposed) return;
+      if (((!onEnded || this.disposed) && live.kind !== "agent_tui") || endReported) return;
       endReported = true;
       void shellProcessTreeProof(child).then((proven) => {
+        this.retireAgentTuiWriter(shellId, proven);
         if (this.disposed) return;
         try {
-          onEnded(proven);
+          onEnded?.(proven);
         } catch {
           /* the observer owns its own failures; a shell exit must never crash the runner */
         }

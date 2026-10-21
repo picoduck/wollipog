@@ -118,6 +118,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
+import { ReviewWriterRegistry } from "./review-writers.js";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
@@ -685,6 +686,8 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
+  /** Immutable package-denial snapshot from this exact native provider launch. */
+  codexPackageReadOnlyPaths?: readonly string[];
   orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control">;
   projectMemoryKey?: string;
   projectMemoryFailureKey?: string;
@@ -1687,7 +1690,7 @@ export class SessionManager {
     private readonly resolveAcpContext?: AcpContextResolver,
     private readonly admissionPolicy: RunnerAdmissionPolicy = { agentLimits: {}, agentWeights: {} },
     private readonly executionIsolation: RunnerExecutionIsolation = { mode: "provider", network: "inherit" },
-    private readonly resolveIsolation: typeof resolveExecutionIsolation = resolveExecutionIsolation,
+    private readonly resolveIsolationBoundary: typeof resolveExecutionIsolation = resolveExecutionIsolation,
     private readonly cloneIsolationState: typeof cloneExecutionIsolationState = cloneExecutionIsolationState,
     private readonly removeIsolationState: typeof removeExecutionIsolationState = removeExecutionIsolationState,
     private readonly migrateIsolationState: typeof migrateExecutionIsolationState = migrateExecutionIsolationState,
@@ -1984,6 +1987,59 @@ export class SessionManager {
 
   setReviewSessions(hooks: ReviewSessionHooks): void {
     this.reviewSessions = hooks;
+  }
+
+  private codexHomes: () => readonly string[] = () => [];
+  private reviewWriters = new ReviewWriterRegistry();
+  private readonly driverReviewWriterTokens = new Map<Driver, string>();
+
+  setCodexHomes(read: () => readonly string[]): void {
+    this.codexHomes = read;
+  }
+
+  setReviewWriterRegistry(registry: ReviewWriterRegistry): void {
+    if (this.reviewWriters.sessions().length) throw new Error("cannot replace retained agent writer evidence");
+    this.reviewWriters = registry;
+  }
+
+  private beginProviderReviewWriter(meta: SessionMeta, isolation: SpawnIsolation | undefined, home = homedir()): string | undefined {
+    if (meta.context.kind !== "native" || meta.review) return undefined;
+    try {
+      const packages = realpathSync(join(home, ".codex", "packages"));
+      if ((isolation?.backend === "bwrap" || isolation?.backend === "seatbelt") &&
+          isolation.codexPackageReadOnlyPaths?.includes(packages)) return undefined;
+    } catch { /* A missing installation is not proof for a future installation under a live writer. */ }
+    return this.reviewWriters.acquire(meta.sessionId, "provider");
+  }
+
+  private resolveIsolation(...[policy, context, deps, state]: Parameters<typeof resolveExecutionIsolation>) {
+    const homes = this.codexHomes();
+    return this.resolveIsolationBoundary(policy, context, deps, state && homes.length
+      ? { ...state, codexHomes: homes } : state);
+  }
+
+  /** A configuration promise is insufficient for an already-running provider. Check its exact
+   * launch snapshot, including every harness, and refuse while a launch/retirement is uncertain.
+   * This is admission-time evidence, not a lock on future launches. An unisolated agent already
+   * has host-user write access, including to the runner itself; starting one mid-review adds no
+   * capability. Agent TUIs are checked separately; human terminals are the operator boundary. */
+  codexReviewerProtection(home = homedir()): import("./review-trust.js").CodexReviewerProtection {
+    const retainedWriter = this.reviewWriters.sessions()[0];
+    if (retainedWriter) return { home, refusal: `Codex packages are unprotected from session ${retainedWriter}. Close its process tree or have the operator reconcile retained unprotected-agent-writers evidence.` };
+    const packages = join(home, ".codex", "packages");
+    let canonical: string;
+    try { canonical = realpathSync(packages); } catch { return { home, refusal: "Codex packages cannot be resolved" }; }
+    for (const meta of this.store.listSessions()) {
+      if (meta.context.kind !== "native" || meta.review) continue;
+      const live = this.active.get(meta.sessionId);
+      if (this.closing.has(meta.sessionId) ||
+          (live && !live.codexPackageReadOnlyPaths?.includes(canonical)) ||
+          (!live && (["starting", "running", "input_required"].includes(meta.status) ||
+            this.store.readWorktreeLease(meta.sessionId) !== null))) {
+        return { home, refusal: `Codex packages are unprotected from session ${meta.sessionId}` };
+      }
+    }
+    return { home };
   }
 
   private isReviewSession(sessionId: string): boolean {
@@ -4963,13 +5019,14 @@ export class SessionManager {
   /** Settle the provider-HOME reference a driver instance took at launch, exactly once (the map
    * entry is removed first). It is released only when the instance proves its complete process
    * tree gone: `disposed` uses the killing proof, `exited` the non-killing one, and a driver
-   * without a proof, or `unproven`, keeps the reference until shutdown. During shutdown nothing is
-   * settled here: close() releases every reference after the global reaping proof. */
+   * without a proof, or `unproven`, keeps the reference until shutdown. During shutdown close()
+   * owns HOME settlement; exact driver proofs may still retire their review-writer evidence. */
   private settleDriverProviderHome(client: Driver, ended: "disposed" | "exited" | "unproven"): void {
     const reference = this.driverProviderHomes.get(client);
-    if (!reference) return;
+    const writer = this.driverReviewWriterTokens.get(client);
+    if (!reference && !writer) return;
     this.driverProviderHomes.delete(client);
-    if (this.shuttingDown) return;
+    if (this.shuttingDown && !writer) return;
     // Never pass an empty proof list for a driver that cannot prove: that would read as "nothing
     // was started" and release.
     const proof = ended === "unproven" || !client.proveProcessTreeExit
@@ -4977,6 +5034,9 @@ export class SessionManager {
       : client.proveProcessTreeExit({ terminate: ended === "disposed" });
     void (async () => {
       const proven = await proof.catch(() => false);
+      if (writer && this.reviewWriters.retire(writer, proven) && this.driverReviewWriterTokens.get(client) === writer) {
+        this.driverReviewWriterTokens.delete(client);
+      }
       if (this.shuttingDown) return;
       await this.settleProviderProcessReference(reference, [Promise.resolve(proven)]);
     })();
@@ -8680,6 +8740,7 @@ export class SessionManager {
         meta.orchestrator.issueScope = authoritativeScope;
       }
       driverConstructionStarted = true;
+      const reviewWriter = this.beginProviderReviewWriter(meta, isolation);
       client = this.createDriver(
         meta.driver,
         {
@@ -8923,6 +8984,7 @@ export class SessionManager {
         },
       }),
       );
+      if (reviewWriter) this.driverReviewWriterTokens.set(client, reviewWriter);
     } catch (error) {
       if (launchHome) {
         if (driverConstructionStarted) await this.retainProviderHomeReference(launchHome);
@@ -8966,6 +9028,8 @@ export class SessionManager {
       worktreeLeaseOwner,
       context: meta.context,
       ...(isolation?.backend === "seatbelt" ? { seatbeltWritableRoots: [...isolation.writableRoots] } : {}),
+      ...((isolation?.backend === "bwrap" || isolation?.backend === "seatbelt")
+        ? { codexPackageReadOnlyPaths: [...(isolation.codexPackageReadOnlyPaths ?? [])] } : {}),
       ...(boundOwnedWorktrees.length ? { boundOwnedWorktrees } : {}),
       status: "starting",
       providerReady: false,
@@ -15004,6 +15068,7 @@ export class SessionManager {
           throw new Error("source session changed during provider-home settlement");
         }
         forkConstructionStarted = true;
+        const reviewWriter = this.beginProviderReviewWriter(source, isolation);
         temporary = this.createDriver(
           source.driver,
           {
@@ -15024,6 +15089,7 @@ export class SessionManager {
           },
           { onEvent: () => {}, onStderr: (text) => this.log(`provider fork: ${text}`), onExit: () => {} },
         );
+        if (reviewWriter) this.driverReviewWriterTokens.set(temporary, reviewWriter);
         await temporary.initialize();
         await temporary.newSession(source.worktreePath);
         client = temporary;
@@ -15142,6 +15208,7 @@ export class SessionManager {
           throw new Error("source session changed during provider-home settlement");
         }
         forkConstructionStarted = true;
+        const reviewWriter = this.beginProviderReviewWriter(forkMeta, forkIsolation);
         temporary = this.createDriver(
           source.driver,
           {
@@ -15161,6 +15228,7 @@ export class SessionManager {
           },
           { onEvent: () => {}, onStderr: (text) => this.log(`provider fork: ${text}`), onExit: () => {} },
         );
+        if (reviewWriter) this.driverReviewWriterTokens.set(temporary, reviewWriter);
         // Do not open the copied source session in a second process. forkSession launches Pi's
         // --fork startup path directly from the target partition, avoiding concurrent writers to
         // the copied JSONL while preserving the source process and source partition untouched.
@@ -15184,13 +15252,22 @@ export class SessionManager {
       const forkProofs: Promise<boolean>[] = [];
       const settlingForkHome = claudeForkHome;
       claudeForkHome = null;
+      // Claude forks launch a separate provider process rather than using the live driver's
+      // process tree. Retain its admission evidence even when no HOME lease was necessary.
+      const forkReviewWriter = source.driver === "claude-code"
+        ? this.beginProviderReviewWriter(forkMeta, forkIsolation) : undefined;
       try {
         forkedThreadId = await client.forkSession(point.agentTurnId, worktree.path, {
           isolation: forkIsolation,
           descendantMarker: targetDescendantMarker,
-          ...(settlingForkHome ? { onProcess: (proof: Promise<boolean>) => { forkProofs.push(proof); } } : {}),
+          onProcess: (proof: Promise<boolean>) => { forkProofs.push(proof); },
         });
       } finally {
+        if (forkReviewWriter) {
+          const proven = forkProofs.length > 0 &&
+            (await Promise.all(forkProofs.map((proof) => proof.catch(() => false)))).every(Boolean);
+          this.reviewWriters.retire(forkReviewWriter, proven);
+        }
         // A driver that never reported its fork process proves nothing: keep the reference.
         if (settlingForkHome && !this.shuttingDown) {
           await this.settleProviderProcessReference(settlingForkHome,

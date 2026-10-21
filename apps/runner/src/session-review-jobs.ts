@@ -47,7 +47,7 @@ import {
   bindPullRequestScope, GITHUB_REPOSITORY, helperEnvironmentBase, repositoryKey, ReviewScopeRefusal, ReviewSnapshotter,
   refuseReview as refuse, SAFE_GIT, SESSION_IDENTITY, SESSION_REVIEW_JOB_VARIABLE, type PullRequestFacts,
 } from "./review-snapshot.js";
-import { reviewerInterpreter, sessionWritableRoots, trustedExecutable, trustedPath } from "./review-trust.js";
+import { reviewerInterpreter, sessionWritableRoots, trustedExecutable, trustedPath, type CodexReviewerProtection } from "./review-trust.js";
 import type { SessionStore } from "./session-store.js";
 
 export {
@@ -106,6 +106,7 @@ export interface InstallationEnvironment {
   temporaryRoots?: readonly string[];
   /** Runner-configured controller skill directory, used instead of the Devbox install. */
   skillDirectory?: string;
+  codexProtection?: CodexReviewerProtection;
 }
 
 /** Find and verify the installed controller and reviewer CLIs. Never throws: an untrusted or
@@ -148,7 +149,8 @@ export function discoverSessionReviewInstallation(env: InstallationEnvironment):
   const reviewerInterpreters: NonNullable<SessionReviewInstallation["reviewerInterpreters"]> = {};
   for (const [harness, command] of [["codex", "codex"], ["claude-code", "claude"]] as const) {
     try {
-      const path = trustedExecutable(command, env.pathEnv, roots, env.uid, env.rootUid);
+      const path = trustedExecutable(command, env.pathEnv, roots, env.uid, env.rootUid,
+        harness === "codex" ? env.codexProtection : undefined);
       const interpreter = reviewerInterpreter(path, env.pathEnv, roots, env.uid, env.rootUid);
       reviewers[harness] = path;
       if (interpreter) reviewerInterpreters[harness] = interpreter;
@@ -305,6 +307,7 @@ export function defaultSessionReviewDependencies(
   /** Directories sessions can write (see `configuredSessionWritablePaths`), read at each
    * discovery so configuration and session changes apply. */
   sessionWritablePaths: () => readonly string[] = () => [],
+  codexProtection: () => CodexReviewerProtection | undefined = () => undefined,
 ): SessionReviewDependencies {
   return {
     exec: async (command, args, options = {}) => (await execFileAsync(command, args, {
@@ -336,6 +339,7 @@ export function defaultSessionReviewDependencies(
     }),
     installation: () => discoverSessionReviewInstallation({
       home: homedir(), dataDir, uid: process.getuid?.() ?? -1, pathEnv: process.env.PATH,
+      codexProtection: codexProtection(),
       extraRoots: [
         ...sessionWritablePaths(),
         ...[process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value)),

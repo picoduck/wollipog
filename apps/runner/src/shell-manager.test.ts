@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -153,6 +153,7 @@ test("close kills the shell and the map entry; per-session cap enforced", async 
   assert.throws(() => mgr.open("over", "sess", tmpdir(), NATIVE), /already has/);
   assert.throws(() => mgr.open("c0", "other", tmpdir(), NATIVE), /already exists/);
   mgr.open("other1", "other-session", tmpdir(), NATIVE); // cap is per session
+  assert.deepEqual(mgr.unprotectedAgentTuiSessions(), [], "human-operated terminals are the operator boundary");
 
   mgr.close("c0");
   await waitFor(() => exits.some((e) => e.shellId === "c0"));
@@ -239,6 +240,8 @@ test("an agent TUI reports its process-tree proof exactly once when it ends, how
     open("natural", "process.exit(0)");
     open("closed", "setInterval(() => {}, 1000)");
     open("session", "setInterval(() => {}, 1000)");
+    assert.deepEqual(new Set(mgr.unprotectedAgentTuiSessions()),
+      new Set(["session-natural", "session-closed", "session-session"]));
     await waitFor(() => ended.get("natural")!.length === 1);
     mgr.close("closed");
     mgr.closeForSession("session-session", "agent_tui");
@@ -249,9 +252,36 @@ test("an agent TUI reports its process-tree proof exactly once when it ends, how
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.deepEqual(Object.fromEntries(ended), { natural: [true], closed: [true], session: [true] },
       "a spawned TUI's ownerless boundary proves its tree gone, and each ending is reported once");
+    assert.deepEqual(mgr.unprotectedAgentTuiSessions(), []);
   } finally {
     mgr.dispose();
   }
+});
+
+test("Agent TUI writer evidence survives reconstruction and retires only with a full tree proof", {
+  skip: !agentTuiPlatformSupported(process.platform, NATIVE) || process.platform === "win32",
+}, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-tui-writers-"));
+  const directory = join(root, "writers");
+  const { cb } = collector();
+  const mgr = new ShellManager(cb, directory);
+  t.after(() => { mgr.dispose(); rmSync(root, { recursive: true, force: true }); });
+  let proof: boolean | undefined;
+  mgr.open("writer", "s_writer", tmpdir(), NATIVE, undefined, {
+    kind: "agent_tui", launch: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
+    onEnded: (proven) => { proof = proven; },
+  });
+  assert.equal(readdirSync(directory).length, 1);
+  assert.deepEqual(new ShellManager(cb, directory).unprotectedAgentTuiSessions(), ["s_writer"]);
+  mgr.close("writer");
+  await waitFor(() => proof !== undefined);
+  assert.equal(proof, true);
+  assert.deepEqual(readdirSync(directory), []);
+  assert.deepEqual(new ShellManager(cb, directory).unprotectedAgentTuiSessions(), []);
+  writeFileSync(join(directory, "uncertain.json"), JSON.stringify({ sessionId: "s_uncertain" }));
+  writeFileSync(join(directory, "partial.json"), "{");
+  assert.deepEqual(new Set(new ShellManager(cb, directory).unprotectedAgentTuiSessions()),
+    new Set(["s_uncertain", "unknown (unreadable agent writer record)"]));
 });
 
 test("runner shutdown reports no agent TUI ending, so it settles no provider-HOME reference", {
