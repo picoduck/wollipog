@@ -600,13 +600,30 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
           const inspection = abandonmentInspection(before.at(-1)!.record, runner!.pid!, descendants().map((entry) => entry.pid));
           throw new Error(`${(error as Error).message}; read-only abandonment=${JSON.stringify(inspection)}\n${runnerOutput}`, { cause: error });
         });
-        const inspection = abandonmentInspection(before.at(-1)!.record, runner.pid!, descendants().map((entry) => entry.pid));
+        const predecessor = before.at(-1)!.record;
+        const recordedBoundary = predecessor.process?.containment?.kind === "linux-cgroup-v2";
+        const inspection = abandonmentInspection(predecessor, runner.pid!, descendants().map((entry) => entry.pid));
+        t.diagnostic(`survivor containment from predecessor journal: ${recordedBoundary ? "recorded_boundary" : "process_marker"}`);
         t.diagnostic(`surviving crash boundary at refusal: ${JSON.stringify(inspection)}`);
-        assert.ok(eventPayload(refusal).payload?.message?.endsWith(LEASE_WORKER_ERRORS.process_survivor),
-          `expected the specific process-survivor refusal, received ${JSON.stringify(eventPayload(refusal).payload)}`);
-        assert.deepEqual(inspection.result, { proven: false, reason: "marked_process" },
-          `busy refusal must be caused by a marked survivor, not an unrelated unreadable process: ${JSON.stringify(inspection)}`);
-        assert.ok(inspection.markedFixtureProcesses > 0, "the proof identifies this fixture's surviving marked provider");
+        if (recordedBoundary) {
+          assert.equal(predecessor.version, 5, "kernel boundary evidence belongs to a v5 lease");
+          assert.equal(predecessor.process?.version, 2, "the predecessor carries versioned containment evidence");
+          assert.ok(eventPayload(refusal).payload?.message?.endsWith(LEASE_WORKER_ERRORS.boundary_survivor),
+            `expected the specific boundary-survivor refusal, received ${JSON.stringify(eventPayload(refusal).payload)}`);
+          assert.ok(!inspection.result.proven, "a live recorded-boundary member prevents abandonment");
+          assert.equal(inspection.result.reason, "boundary_populated");
+          const blocker = inspection.result.blockingProcess;
+          assert.equal(blocker?.kind, "boundary_member");
+          assert.equal(blocker?.cgroupMembership, "recorded_boundary");
+          assert.ok(descendants().some((entry) => entry.kind === "descendant" && entry.pid === blocker?.pid && liveFixtureProcess(entry.pid, entry.startedAt)),
+            "the recorded-boundary blocker is this fixture's live descendant");
+        } else {
+          assert.ok(eventPayload(refusal).payload?.message?.endsWith(LEASE_WORKER_ERRORS.process_survivor),
+            `expected the specific process-survivor refusal, received ${JSON.stringify(eventPayload(refusal).payload)}`);
+          assert.deepEqual(inspection.result, { proven: false, reason: "marked_process" },
+            `busy refusal must be caused by a marked survivor, not an unrelated unreadable process: ${JSON.stringify(inspection)}`);
+          assert.ok(inspection.markedFixtureProcesses > 0, "the proof identifies this fixture's surviving marked provider");
+        }
         assert.deepEqual(journal(runnerHome), before, "a refused replacement cannot append or release ownership");
         assert.ok(descendants().some((entry) => liveFixtureProcess(entry.pid, entry.startedAt)), "the refusal was observed while the old provider survived");
         const refusedCounts = counts();
