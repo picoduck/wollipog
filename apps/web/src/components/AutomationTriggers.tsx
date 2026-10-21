@@ -312,7 +312,7 @@ export function NewTriggerDialog({ automation, kind, publicOrigin, onCreated, on
           </div>
         )}
 
-        <div className="disclosure">
+        <div className="disclosure inline">
           <button
             type="button"
             className="disclosure-trigger"

@@ -386,9 +386,10 @@ needs extra clearance from it. The attachment tray's 20px Remove (#2561) takes t
 its 56px thumbnail rather than reaching past the tile, and a 36px reference chip keeps 4px above and
 below itself for its Remove's centered 44px.
 
-**One hit-area block.** Segmented options, switches and inline text links get their 44px
-coarse-pointer hit area from this block, once, in the shared stylesheet. A segmented option borrows
-the track's 2px inset and 1px edge; the switch uses `::before` because its thumb is `::after`; a link
+**One hit-area block.** Segmented options, switches, inline disclosures (`.disclosure.inline`, §5.5)
+and inline text links get their 44px coarse-pointer hit area from this block, once, in the shared
+stylesheet. A segmented option borrows the track's 2px inset and 1px edge; the switch uses `::before`
+because its thumb is `::after`; an inline disclosure's trigger borrows 4px above and below; a link
 gets a 44px band centered on its line. Components never add their own copies of these rules. A link
 whose line sits closer than 12px to another target (dense prose) keeps its visual size and relies on
 the surrounding row being the target.
@@ -1385,6 +1386,11 @@ open, with a `--dur-base` transition.
 - The revealed content is `.disclosure-body`: a column with a 12px gap and 8px above.
 - A region may size the trigger to its surroundings (the transcript's Worked row keeps
   `--type-small` in `--text-faint` and fills its row) but keeps the chevron and its rotation.
+- Touch (§2.8): `.disclosure.inline` opts a disclosure in to a small control's target, 36px to
+  look and borrowing 4px above and below for 44px. How to Call in the New Webhook Trigger sheet
+  uses it. It is opt-in because a trigger that fills a list row (the Outbound Events rows, a tool
+  step) or sits flush on a list (the request dock's More Requests) would take its neighbour's
+  taps. Give the modifier only to a disclosure with 4px clear above and below its trigger.
 - Replaces `.access-manual-disclosure`, `.project-location-create-disclosure` (with its `+`/`−`
   text glyph), `.runner-disclosure-chevron` and `.tl-disclosure` (with its `▸` glyph).
   `.share-disclosure` was a risk warning, not an expand and collapse; it moved to a warning Notice

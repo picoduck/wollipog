@@ -19300,6 +19300,17 @@ a.tab { text-decoration: none; }
     position: absolute;
     inset: -11px -3px;
   }
+  /* An inline disclosure (§5.5, `.disclosure.inline`), such as How to Call in a sheet, opts in to a
+     small control's target: 36px to look, borrowing 4px above and below for 44px. Its trigger is
+     already wider than 44px, so it borrows nothing sideways. Opt-in, because a disclosure that
+     fills a row or sits flush on a list would take its neighbour's taps: give the modifier only to
+     a disclosure with 4px clear above and below its trigger. */
+  .disclosure.inline > :is(summary, .disclosure-trigger) { position: relative; }
+  .disclosure.inline > :is(summary, .disclosure-trigger)::after {
+    content: "";
+    position: absolute;
+    inset: -4px 0;
+  }
   /* An inline link gets a 44px band centred on its line. */
   .link { position: relative; }
   .link::after {
