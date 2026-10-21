@@ -1297,7 +1297,9 @@ test("a Codex session without the Orchestrator role gains the wollipog MCP serve
         launch.args = [...userArgs];
         launch.config = { permissionMode: "on-request" };
         const logs: string[] = [];
-        await provisionAgentControl(launch, control, (line) => logs.push(line), host);
+        const proofs: Promise<boolean>[] = [];
+        await provisionAgentControl(launch, { ...control, onProcess: proof => proofs.push(proof) }, (line) => logs.push(line), host);
+        assert.deepEqual(await Promise.all(proofs), [false, false], "both injected inventory reads retain HOME ownership");
 
         const added = launch.args.slice(userArgs.length);
         assert.deepEqual(launch.args.slice(0, userArgs.length), userArgs, "the user's arguments are untouched");

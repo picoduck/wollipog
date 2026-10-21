@@ -42,6 +42,7 @@
  */
 
 import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
+import { startCodexProbe, type CodexProbeObserver } from "./codex-probe.js";
 import { resolve } from "node:path";
 import { quote } from "shell-quote";
 import {
@@ -450,7 +451,7 @@ export function withoutCodexHooksFeatureDisable(args: readonly string[]): string
   return [...result, ...rest];
 }
 
-export interface CodexHookInventoryProbe {
+export interface CodexHookInventoryProbe extends CodexProbeObserver {
   command: string;
   args: string[];
   cwd: string;
@@ -572,17 +573,15 @@ function parseHookEntries(payload: unknown): CodexHookEntry[] {
  */
 export async function readCodexHookInventory(
   probe: CodexHookInventoryProbe,
-  spawn: typeof spawnProcess = spawnProcess,
+  spawn?: typeof spawnProcess,
   timeoutMs = CODEX_HOOK_INVENTORY_TIMEOUT_MS,
 ): Promise<CodexHookEntry[]> {
   let child: ChildProcess;
+  let boundary: ReturnType<typeof startCodexProbe>;
   try {
-    child = spawn(probe.command, probe.args, {
-      cwd: probe.cwd,
-      env: probe.env,
-      stdio: ["pipe", "pipe", "ignore"],
-      windowsHide: true,
-    });
+    boundary = startCodexProbe(probe, spawn);
+    child = boundary.child;
+    child.stderr?.resume();
   } catch (error) {
     throw new Error(`the Codex hook inventory probe could not be started: ${(error as Error).message}`);
   }
@@ -637,6 +636,6 @@ export async function readCodexHookInventory(
       send({ jsonrpc: "2.0", id: 2, method: "hooks/list", params: { cwds: [probe.cwd] } });
     });
   } finally {
-    child.kill();
+    await boundary.finish();
   }
 }

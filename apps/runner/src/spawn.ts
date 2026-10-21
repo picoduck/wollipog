@@ -932,6 +932,7 @@ export class ProviderProcessLedger {
   private readonly closedSeparate = new WeakSet<AgentProcess>();
   private readonly namespaces = new Set<ClaudeNamespaceLifetime>();
   private readonly proofs = new Map<boolean, Promise<boolean>>();
+  private readonly observations = new Set<Promise<boolean>>();
   private readonly namespaceFor: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined;
 
   constructor(options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined } = {}) {
@@ -986,12 +987,29 @@ export class ProviderProcessLedger {
     return provenProcessTreeExit(child);
   }
 
-  /** Run work that may start processes outside any boundary. Nothing can prove those processes
-   * gone, even after the work settles (a probe's group kill misses a descendant that left its
-   * group), so the instance stays unprovable for good and its references are retained. */
+  /** Uninstrumented work remains conservatively unprovable. Codex probes use observe instead. */
   async untracked<T>(work: () => Promise<T>): Promise<T> {
     this.unprovable = true;
     return await work();
+  }
+
+  /** Register asynchronous preparation before it can start any probe. Disposal must await the
+   * entire operation, including probes that start after an earlier await or share a cached proof.
+   * Completed operations are compacted to a sticky failure or forgotten after true proof. */
+  async observe<T>(work: (observer: { onProcess(proof: Promise<boolean>): void }) => Promise<T>): Promise<T> {
+    this.assertOpen();
+    const processes: Promise<boolean>[] = [];
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => { finish = resolve; });
+    const proof = finished.then(async () => (await Promise.all(processes)).every(Boolean)).catch(() => false);
+    this.observations.add(proof);
+    void proof.then((proven) => {
+      if (!proven) this.unprovable = true;
+      this.observations.delete(proof);
+    });
+    try {
+      return await work({ onProcess: (process) => { processes.push(process.catch(() => false)); } });
+    } finally { finish(); }
   }
 
   /** `terminate: true` after disposal (kills survivors, as disposal already started to); `false`
@@ -1009,6 +1027,7 @@ export class ProviderProcessLedger {
       const namespaces = [...this.namespaces].map((namespace) => namespaceEnded(namespace, options.terminate));
       const results = await Promise.all([
         ...owned, ...[...this.separate].map((child) => this.proveSeparate(child, options.terminate)), ...namespaces,
+        ...this.observations,
       ].map((work) => work.catch(() => false)));
       return results.every(Boolean) && !this.unprovable;
     })().catch(() => false);

@@ -148,7 +148,7 @@ export async function probeNativeCodexAppServer(
   version: string | undefined,
 ): Promise<CodexAppServerCapabilities> {
   const probe = nativeCodexAppServerProbeArgs(launch);
-  const result = await run(probe.command, probe.args, { timeoutMs: 8000, maxBuffer: 256 * 1024 });
+  const result = await run(probe.command, probe.args, { timeoutMs: 8000, maxBuffer: 256 * 1024, trackDescendants: true });
   return interpretCodexAppServerProbe(version, result);
 }
 

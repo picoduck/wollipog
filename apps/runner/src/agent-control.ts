@@ -492,6 +492,7 @@ export function provisionAgentControl(
     { orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope } } &
     { repoPath?: string; worktreePath?: string | null },
   config: {
+    onProcess?: (proof: Promise<boolean>) => void;
     controlPlaneUrl: string;
     controlPlaneProtocolVersion: number | null;
     allowInsecureTransport?: boolean;
@@ -856,7 +857,7 @@ export function provisionAgentControl(
       ...runnerReentryCommand(host, "--agent-control-mcp"),
       env: { ...transportEnv, [SESSION_CODEX_MCP_MARKER]: "1" },
       ...(memory ? { forwardEnv: true } : {}),
-    }, host.readCodexMcpInventory, log);
+    }, host.readCodexMcpInventory, log, config.onProcess);
   }
   log(`agent control ${spec.sessionId}: CLI${["claude-code", "pi"].includes(spec.driver ?? "") || (orchestrator && spec.driver === "acp") ? " and MCP" : ""} provisioned`);
 }
@@ -885,6 +886,7 @@ async function provisionSessionCodexMcp(
   mcp: Parameters<typeof sessionCodexMcpServerArg>[0],
   read: typeof readCodexMcpInventory,
   log: (message: string) => void,
+  onProcess?: (proof: Promise<boolean>) => void,
 ): Promise<void> {
   const keepCliOnly = (reason: string): void =>
     log(`agent control ${spec.sessionId}: CLI provisioned; wollipog MCP server not added (${reason})`);
@@ -893,8 +895,9 @@ async function provisionSessionCodexMcp(
   }
   const cwd = spec.worktreePath ?? spec.repoPath ?? spec.workspacePath;
   if (!cwd) return keepCliOnly("the launch has no working directory to read Codex configuration from");
-  const launch = { command: spec.command, args: spec.args, env: spec.env, context: spec.context };
+  const launch = { command: spec.command, args: spec.args, env: spec.env, context: spec.context, onProcess };
   const inventory = async (candidate: typeof launch) => {
+    if (read !== readCodexMcpInventory) onProcess?.(Promise.resolve(false));
     try { return parseCodexMcpInventory(await read(candidate, cwd)); } catch { return null; }
   };
   const existing = await inventory(launch);
