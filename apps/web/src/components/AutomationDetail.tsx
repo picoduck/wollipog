@@ -234,7 +234,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
   const schedule = describeSchedule(automation.cron, automation.timezone, now, { viewerTimeZone: viewerZone });
   const showZone = viewerZone !== automation.timezone;
   const statusBadge = <StatusBadge meta={statusMeta("automation",
-    lastRunFailed ? "last_run_failed" : automation.enabled ? "enabled" : "paused")} />;
+    latest?.status === "ceiling_paused" ? "last_run_ceiling_paused" : lastRunFailed ? "last_run_failed" : automation.enabled ? "enabled" : "paused")} />;
   const primaryRunnerId = automation.action.kind === "prompt_session"
     ? sessions.get(automation.action.sessionId)?.runnerId
     : automation.action.request.runnerId;

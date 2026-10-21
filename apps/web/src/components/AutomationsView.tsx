@@ -86,7 +86,8 @@ function AutomationRow({ item, now, zone, names, workflows, toggling, onOpen, on
   const nextRun = item.nextFireAt !== undefined ? formatCalendarTime(item.nextFireAt, now, zone) : schedule.nextLabel;
   const next = item.enabled ? nextRun && `Next ${nextRun}` : "Paused";
   const target = actionTarget(item.action, names);
-  const badge = item.latestExecution?.status === "failed" ? "last_run_failed"
+  const badge = item.latestExecution?.status === "ceiling_paused" ? "last_run_ceiling_paused"
+    : item.latestExecution?.status === "failed" ? "last_run_failed"
     : item.targetHealth || automationInstallationUnavailable(item, names.runners, workflows) ? "target_unavailable"
       : null;
   return (

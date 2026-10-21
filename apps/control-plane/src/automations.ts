@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE, runnerSupportsProtocol } from "@wollipog/protocol";
+import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE, pendingRequests, runnerSupportsProtocol } from "@wollipog/protocol";
 import type {
   AutomationAction,
   AutomationAuditEvent,
@@ -955,10 +955,47 @@ export class AutomationsService {
     }
   }
 
+  /** A validated runner card proves cancellation; a CP usage crossing or provider text does not.
+   * Persist before the trailing cancelled receipt, and recover from the durable card on restart. */
+  onGovernanceTripped(sessionId: string, now: number): void {
+    for (const execution of this.db.activeAutomationExecutions()) {
+      this.pauseForGovernance(execution, now, sessionId);
+    }
+  }
+
+  private pauseForGovernance(execution: AutomationExecution, now: number, onlySessionId?: string): boolean {
+    const sessionIds = execution.sessionId ? [execution.sessionId]
+      : execution.workflowInstanceId ? [
+          ...this.db.listAutomationCommands(execution.executionId)
+            .filter((command) => command.supersededBy === undefined).map((command) => command.sessionId),
+          ...this.db.listWorkflowAttempts(execution.workflowInstanceId)
+            .filter((attempt) => ["dispatching", "running", "awaiting_output"].includes(attempt.status))
+            .flatMap((attempt) => attempt.sessionId ? [attempt.sessionId] : []),
+        ] : [];
+    for (const sessionId of new Set(sessionIds)) {
+      if (onlySessionId && sessionId !== onlySessionId) continue;
+      const session = this.db.getSession(sessionId);
+      if (!session) continue;
+      const trip = pendingRequests(session.pendingApproval).find((request) => request.runnerGuardrail)?.runnerGuardrail;
+      if (!trip) continue;
+      const settled = this.db.settleAutomationExecution({
+        executionId: execution.executionId, status: "ceiling_paused",
+        governancePause: { sessionId, ...trip },
+        actor: { kind: "system", id: "runner-governance" }, now,
+      });
+      const schedule = this.executionSchedule(execution);
+      // Existing failure subscriptions still notify, with an explicit pause notification.
+      if (settled && schedule) this.emit(schedule, settled, "failed");
+      return true;
+    }
+    return false;
+  }
+
   private reconcileExecution(executionId: string, now: number): void {
     const execution = this.db.getAutomationExecution(executionId);
-    if (!execution || execution.deliveryMode !== "receipted_v53" ||
-        !["dispatching", "running"].includes(execution.status)) return;
+    if (!execution || !["dispatching", "running"].includes(execution.status)) return;
+    if (this.pauseForGovernance(execution, now)) return;
+    if (execution.deliveryMode !== "receipted_v53") return;
     const commands = this.db.listAutomationCommands(executionId);
     if (!commands.length) return;
     const schedule = this.executionSchedule(execution);

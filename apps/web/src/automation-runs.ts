@@ -60,6 +60,13 @@ function expiryMinutes(policy: AutomationSpec["runnerPolicy"] | undefined): numb
  * read from it. An expired run's limit comes from the spec it was claimed with, else the current one.
  */
 export function runReason(execution: AutomationExecution, currentPolicy?: AutomationSpec["runnerPolicy"]): string | null {
+  if (execution.status === "ceiling_paused") {
+    const trip = execution.governancePause;
+    if (!trip) return "Runner governance paused this run.";
+    return trip.kind === "cost_budget"
+      ? `Paused at the $${trip.threshold.toFixed(2)} cost ceiling.`
+      : `Paused at the ${trip.threshold} tool-call ceiling.`;
+  }
   if (execution.status === "skipped") {
     const error = execution.error ?? "";
     if (/is still active/.test(error)) return "Skipped because the last run was still going.";

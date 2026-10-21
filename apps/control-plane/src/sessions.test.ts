@@ -20360,8 +20360,10 @@ test("runner trip reports create one replay-safe card and Continue honors change
     threshold: 100,
     observed: 100,
   };
-  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
-  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  assert.equal(svc.onGovernanceTripped("wrong-runner", clearedTrip), false);
+  assert.equal(svc.onGovernanceTripped(RUNNER_ID, { ...clearedTrip, threshold: -1 }), false);
+  assert.equal(svc.onGovernanceTripped(RUNNER_ID, clearedTrip), true);
+  assert.equal(svc.onGovernanceTripped(RUNNER_ID, clearedTrip), false);
   let requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
   assert.equal(requests.length, 2, "duplicate/reconnect reports retain one runner card");
   assert.equal(requests[0]!.requestId, "permission-1", "an unrelated request keeps the primary slot");

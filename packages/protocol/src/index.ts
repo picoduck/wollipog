@@ -8578,11 +8578,16 @@ export interface OutboundEventEnvelope {
   questionTitle?: string;
 }
 
+/** Exact runner evidence, present only when governance cancelled this execution's work. */
+export type AutomationGovernancePause = Pick<GovernanceTrippedMessage,
+  "sessionId" | "tripId" | "kind" | "threshold" | "observed">;
+
 export type AutomationExecutionStatus =
   | "dispatching"
   | "running"
   | "succeeded"
   | "failed"
+  | "ceiling_paused"
   | "skipped"
   | "expired";
 
@@ -8629,6 +8634,7 @@ export interface AutomationExecution {
   specSnapshot?: AutomationSpec;
   actionKind: AutomationAction["kind"];
   status: AutomationExecutionStatus;
+  governancePause?: AutomationGovernancePause;
   /** Legacy rows retain the original at-most-once boundary; v53 rows use the durable command
    * outbox and runner receipt journal. */
   deliveryMode?: "legacy_at_most_once" | "receipted_v53";

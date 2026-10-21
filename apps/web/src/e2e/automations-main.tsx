@@ -323,6 +323,21 @@ if (params.has("failed-run")) {
   });
 }
 
+// Synthetic #316 receipt comparison: pre-upgrade cancellation versus runner ceiling evidence.
+if (params.has("ceiling-run")) {
+  const before = params.has("before-ceiling");
+  executions.unshift({
+    ...executions[0]!, executionId: "axe_ceiling", idempotencyKey: "schedule:automation-nightly-sweep:ceiling",
+    status: before ? "failed" : "ceiling_paused", error: before ? "provider cancelled" : undefined,
+    governancePause: before ? undefined : { sessionId: "s_ceiling", tripId: "trip-ceiling",
+      kind: params.has("tool-ceiling") ? "max_tool_calls" : "cost_budget",
+      threshold: params.has("tool-ceiling") ? 100 : 6, observed: params.has("tool-ceiling") ? 100 : 6.71 },
+    sessionId: "s_ceiling", triggerDelivery: undefined,
+    scheduledFor: Date.now() - 240_000, createdAt: Date.now() - 240_000,
+    startedAt: Date.now() - 240_000, completedAt: Date.now(),
+  });
+}
+
 // The Automations list's scenarios (#2969). `list` adds a fuller list: agents, a workflow and a
 // session by name, scheduled and paused, each with its next run in this browser's own zone.
 // `needs-attention` gives the first a failed last run and another an unavailable target.
@@ -385,6 +400,7 @@ if (params.has("list")) {
   }
 }
 if (params.has("failed-run")) items[0]!.latestExecution = { status: "failed", at: executions[0]!.completedAt! };
+if (params.has("ceiling-run")) items[0]!.latestExecution = { status: executions[0]!.status, at: executions[0]!.completedAt! };
 if (params.has("list-empty")) items.length = 0;
 
 // Run History (#2970). `run-history` gives the first automation a fuller history relative to now: a

@@ -63,7 +63,7 @@ test("every automation run status has a Title Case word, and Expired is a warnin
   // A Record over the union: a status the protocol adds fails to compile here until it has a word.
   const statuses: Record<AutomationExecutionStatus, string> = {
     dispatching: "Starting", running: "Running", succeeded: "Succeeded",
-    failed: "Failed", skipped: "Skipped", expired: "Expired",
+    failed: "Failed", skipped: "Skipped", expired: "Expired", ceiling_paused: "Ceiling Paused",
   };
   for (const [status, label] of Object.entries(statuses)) {
     const meta = statusMeta("automation_run", status);
@@ -75,6 +75,16 @@ test("every automation run status has a Title Case word, and Expired is a warnin
   assert.equal(statusMeta("automation_run", "failed").tone, "danger");
   assert.equal(statusMeta("automation_run", "skipped").tone, "neutral");
   assert.equal(statusMeta("automation_run", "expired").tone, "warning");
+});
+
+test("ceiling pauses name the runner's configured bound, independently of current limits", () => {
+  for (const kind of ["cost_budget", "max_tool_calls"] as const) {
+    assert.equal(runReason(run({ status: "ceiling_paused", governancePause: {
+      sessionId: "s-1", tripId: "trip-1", kind, threshold: kind === "cost_budget" ? 6 : 100,
+      observed: kind === "cost_budget" ? 6.71 : 100,
+    } })), kind === "cost_budget" ? "Paused at the $6.00 cost ceiling." : "Paused at the 100 tool-call ceiling.");
+  }
+  assert.equal(statusMeta("automation_run", "ceiling_paused").tone, "warning");
 });
 
 test("every runner command state is a step word, and a replaced command reads Retried", () => {

@@ -132,6 +132,7 @@ const VOCABULARY = {
     /** The automation page's badge when its latest run failed (#2968): attention outranks Enabled
      * or Paused. */
     last_run_failed: danger("Last Run Failed"),
+    last_run_ceiling_paused: warning("Last Run Paused"),
   },
   /** An outbound event subscription's one badge (#2973): Delivery Failed when its latest delivery
    * failed, including a pause the failures caused. */
@@ -151,8 +152,7 @@ const VOCABULARY = {
   },
   /** One run of an automation, by its wire status: the page's Last Run fact (#2968) and its Run
    * History and Run Details (#2970). Expired is a warning: no machine ran it before its time ran out.
-   * A governance pause will get its own word once the control plane records one (#316); until then
-   * those runs read Failed. */
+   * Ceiling Paused means runner governance cancelled work that may have produced output. */
   automation_run: {
     dispatching: info("Starting", { pulse: true }),
     running: info("Running", { pulse: true }),
@@ -160,6 +160,7 @@ const VOCABULARY = {
     failed: danger("Failed"),
     skipped: neutral("Skipped"),
     expired: warning("Expired"),
+    ceiling_paused: warning("Ceiling Paused"),
   },
   /** One step of an automation run, by its runner command's wire state (#2970): Run Details' Steps.
    * `superseded` has no wire form: a command a retry replaced, whose replacement carries the result. */

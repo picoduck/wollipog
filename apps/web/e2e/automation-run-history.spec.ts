@@ -38,6 +38,35 @@ async function capture(page: Page, name: string, fullPage = false) {
   await page.screenshot({ path: join(evidenceDir, `${name}.png`), fullPage });
 }
 
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  for (const theme of ["light", "dark"]) {
+    test(`governance pause receipt at ${viewport.width}px in ${theme}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      // Both states are synthetic receipts: the legacy runner's original generic cancellation,
+      // and the same execution with authenticated structured ceiling evidence.
+      await open(page, theme, "ceiling-run&before-ceiling");
+      await expect(runRow(page, "axe_ceiling")).toContainText("Failed");
+      const before = await openRunDetails(page, "axe_ceiling");
+      await expect(before.locator(".notice.t-danger")).toContainText("provider cancelled");
+      await capture(page, `316-before-${viewport.width}-${theme}`);
+      await open(page, theme, "ceiling-run");
+      await expect(runRow(page, "axe_ceiling").locator(".status.t-warning")).toHaveText("Ceiling Paused");
+      await capture(page, `316-after-history-${viewport.width}-${theme}`, true);
+      const dialog = await openRunDetails(page, "axe_ceiling");
+      await expect(dialog.locator(".notice.t-warning")).toContainText("Paused at the $6.00 cost ceiling. Partial or complete output may be available.");
+      await expect(dialog.locator(".notice.t-danger")).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Open Session" })).toBeVisible();
+      const fits = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
+      expect(fits).toBe(true);
+      await capture(page, `316-after-details-${viewport.width}-${theme}`);
+      await open(page, theme, "ceiling-run&tool-ceiling");
+      const tool = await openRunDetails(page, "axe_ceiling");
+      await expect(tool.locator(".notice.t-warning")).toContainText("Paused at the 100 tool-call ceiling.");
+      if (viewport.width === 1440 && theme === "light") await capture(page, "316-after-tool-ceiling");
+    });
+  }
+}
+
 /** The box a pointer can hit: the element plus any absolutely positioned ::after that extends it. */
 async function hitArea(control: Locator) {
   return control.evaluate((element) => {

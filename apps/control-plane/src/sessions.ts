@@ -14607,9 +14607,9 @@ export class SessionsService {
   /** Materialize the decision for a runner-owned cancellation even when the control-plane rule
    * was changed or cleared before the trip arrived. Duplicate/reconnect notices retain one card,
    * and an unrelated unanswered request keeps ownership of the visible primary slot. */
-  onGovernanceTripped(runnerId: string, message: GovernanceTrippedMessage): void {
+  onGovernanceTripped(runnerId: string, message: GovernanceTrippedMessage): boolean {
     const session = this.db.getSession(message.sessionId);
-    if (!session || session.runnerId !== runnerId || session.archived || isTerminal(session.status)) return;
+    if (!session || session.runnerId !== runnerId || session.archived || isTerminal(session.status)) return false;
     if (typeof message.tripId !== "string" || !message.tripId || message.tripId.length > 128 ||
         (message.kind !== "cost_budget" && message.kind !== "max_tool_calls") ||
         !Number.isFinite(message.threshold) || message.threshold <= 0 ||
@@ -14617,13 +14617,13 @@ export class SessionsService {
         (message.kind === "max_tool_calls" &&
           (!Number.isSafeInteger(message.threshold) || !Number.isSafeInteger(message.observed)))) {
       this.log.warn(`ignoring malformed governance trip for ${message.sessionId} from ${runnerId}`);
-      return;
+      return false;
     }
     const requestId = `runner-${message.kind}:${message.tripId}`;
     const pending = pendingRequests(session.pendingApproval);
     if (pending.some((request) => request.runnerGuardrail?.tripId === message.tripId &&
-        request.runnerGuardrail.kind === message.kind)) return;
-    if (this.db.hasTerminalGovernanceResolution(message.sessionId, requestId)) return;
+        request.runnerGuardrail.kind === message.kind)) return false;
+    if (this.db.hasTerminalGovernanceResolution(message.sessionId, requestId)) return false;
     const alreadyAsked = this.db.hasGovernanceAuditEntry(
       message.sessionId,
       requestId,
@@ -14670,6 +14670,7 @@ export class SessionsService {
         });
     }
     this.hub.sessionChangedById(message.sessionId);
+    return true;
   }
 
   private reconcileWorkflowSessionStatus(sessionId: string, status: SessionStatus, now: number): void {

@@ -4080,6 +4080,7 @@ interface AutomationExecutionRow {
   execution_id: string; automation_id: string; idempotency_key: string; scheduled_for: number;
   automation_revision: number; spec_json: string | null; delivery_mode: string; delivery_plan_json: string | null;
   trigger_delivery_json: string | null;
+  governance_pause_json: string | null;
   action_kind: AutomationExecution["actionKind"]; status: AutomationExecutionStatus;
   actor_kind: AutomationExecution["actor"]["kind"]; actor_id: string | null; runner_id: string | null;
   session_id: string | null; run_id: string | null; workflow_instance_id: string | null; error: string | null;
@@ -6558,6 +6559,7 @@ export class ControlPlaneDb {
       ["automation_executions", "delivery_mode TEXT NOT NULL DEFAULT 'legacy_at_most_once'"],
       ["automation_executions", "delivery_plan_json TEXT"],
       ["automation_executions", "trigger_delivery_json TEXT"],
+      ["automation_executions", "governance_pause_json TEXT"],
       ["automation_commands", "superseded_by TEXT"],
       ["automation_commands", "delivery_deadline_at INTEGER"],
       ["automation_triggers", "delivery_policy_json TEXT"],
@@ -30041,7 +30043,8 @@ export class ControlPlaneDb {
 
   settleAutomationExecution(input: {
     executionId: string;
-    status: "running" | "succeeded" | "failed";
+    status: "running" | "succeeded" | "failed" | "ceiling_paused";
+    governancePause?: AutomationExecution["governancePause"];
     actor: GovernanceActor;
     runnerId?: string;
     sessionId?: string;
@@ -30050,6 +30053,12 @@ export class ControlPlaneDb {
     error?: string;
     now: number;
   }): AutomationExecution | null {
+    if ((input.status === "ceiling_paused") !== Boolean(input.governancePause)) {
+      throw new Error("a ceiling-paused execution requires runner governance evidence");
+    }
+    // Preserve the original CHECK constraint and rollback-readable terminal slot. New readers
+    // project the structured detail as ceiling_paused; historical failures remain failed.
+    const storedStatus = input.status === "ceiling_paused" ? "failed" : input.status;
     const allowed = input.status === "running" ? "status='dispatching'" : "status IN ('dispatching','running')";
     const terminal = input.status === "running" ? null : input.now;
     const started = input.status === "running" ? input.now : null;
@@ -30058,13 +30067,15 @@ export class ControlPlaneDb {
       const changed = this.stmt(
         `UPDATE automation_executions SET status=?, runner_id=COALESCE(?,runner_id),
           session_id=COALESCE(?,session_id), run_id=COALESCE(?,run_id),
-          workflow_instance_id=COALESCE(?,workflow_instance_id), error=?,
+          workflow_instance_id=COALESCE(?,workflow_instance_id), error=?, governance_pause_json=?,
           started_at=COALESCE(started_at,?), completed_at=?,
           spec_json=CASE WHEN ? IS NOT NULL AND trigger_delivery_json IS NOT NULL THEN NULL ELSE spec_json END
           WHERE execution_id=? AND ${allowed}`,
       ).run(
-        input.status, input.runnerId ?? null, input.sessionId ?? null, input.runId ?? null,
-        input.workflowInstanceId ?? null, input.error ?? null, started, terminal, terminal, input.executionId,
+        storedStatus, input.runnerId ?? null, input.sessionId ?? null, input.runId ?? null,
+        input.workflowInstanceId ?? null, input.error ?? null,
+        input.governancePause ? JSON.stringify(input.governancePause) : null,
+        started, terminal, terminal, input.executionId,
       );
       if (Number(changed.changes) !== 1) {
         this.db.exec("ROLLBACK");
@@ -30074,7 +30085,8 @@ export class ControlPlaneDb {
         .get(input.executionId) as { automation_id: string };
       this.insertAutomationEvent({
         automationId: row.automation_id, executionId: input.executionId, kind: "execution_status_changed",
-        actor: input.actor, detail: { status: input.status, error: input.error ?? null }, now: input.now,
+        actor: input.actor, detail: { status: input.status, error: input.error ?? null,
+          ...(input.governancePause ? { entryPoint: "runner_governance", ...input.governancePause } : {}) }, now: input.now,
       });
       this.db.exec("COMMIT");
     } catch (error) {
@@ -30111,15 +30123,15 @@ export class ControlPlaneDb {
    */
   latestAutomationExecutions(): Map<string, AutomationLatestExecution> {
     const rows = this.stmt(
-      `SELECT e.automation_id, e.status, e.created_at, e.started_at, e.completed_at
+      `SELECT e.automation_id, e.status, e.created_at, e.started_at, e.completed_at, e.governance_pause_json
        FROM automations a JOIN automation_executions e ON e.execution_id = (
          SELECT x.execution_id FROM automation_executions x WHERE x.automation_id = a.automation_id
          ORDER BY x.scheduled_for DESC, x.execution_id DESC LIMIT 1)
        WHERE a.deleted_at IS NULL`,
     ).all() as unknown as Array<Pick<AutomationExecutionRow,
-      "automation_id" | "status" | "created_at" | "started_at" | "completed_at">>;
+      "automation_id" | "status" | "created_at" | "started_at" | "completed_at" | "governance_pause_json">>;
     return new Map(rows.map((row) => [row.automation_id, {
-      status: row.status,
+      status: row.governance_pause_json ? "ceiling_paused" : row.status,
       at: row.completed_at ?? row.started_at ?? row.created_at,
     }]));
   }
@@ -30192,7 +30204,10 @@ export class ControlPlaneDb {
       executionId: row.execution_id, automationId: row.automation_id, idempotencyKey: row.idempotency_key,
       scheduledFor: row.scheduled_for, automationRevision: row.automation_revision,
       ...(row.spec_json ? { specSnapshot: JSON.parse(row.spec_json) as AutomationSpec } : {}),
-      actionKind: row.action_kind, status: row.status,
+      actionKind: row.action_kind, status: row.governance_pause_json ? "ceiling_paused" : row.status,
+      ...(row.governance_pause_json ? {
+        governancePause: JSON.parse(row.governance_pause_json) as AutomationExecution["governancePause"],
+      } : {}),
       deliveryMode: row.delivery_mode as NonNullable<AutomationExecution["deliveryMode"]>,
       actor: { kind: row.actor_kind, ...(row.actor_id ? { id: row.actor_id } : {}) },
       ...(row.runner_id ? { runnerId: row.runner_id } : {}),

@@ -1343,6 +1343,22 @@ test("Run Details lists a failed run's facts, one step per command with its atte
   }
 }));
 
+test("ceiling-paused runs have warning badges and explain possible output in Run Details", () => withRunClock(async () => {
+  const paused = run("ceiling_paused", { executionId: "axe_paused", governancePause: {
+    sessionId: "s-1", tripId: "trip-1", kind: "cost_budget", threshold: 6, observed: 6.71,
+  } });
+  const view = await mount({ view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], executions: { "automation-a": [paused] } });
+  try {
+    const row = view.body.querySelector('tr[data-execution-id="axe_paused"]')!;
+    assert.match(row.textContent ?? "", /Ceiling Paused/);
+    assert.ok(row.querySelector(".status.t-warning"));
+    const dialog = await openRunDetails(view.body, "axe_paused");
+    assert.match(dialog.querySelector(".notice.t-warning")?.textContent ?? "", /Paused at the \$6.00 cost ceiling\. Partial or complete output/);
+    assertNoDomNode(dialog.querySelector(".notice.t-danger"), "a governance pause is not a crash");
+    assertNoDomNode(view.body.querySelector('[data-notice-key="last-run-failed"]'), "no failure alert");
+  } finally { await view.unmount(); }
+}));
+
 test("Run Details shows the run key only under Show Technical Details, and Copy copies all of it", () => withRunClock(async () => {
   const copied: string[] = [];
   const clipboard = withClipboard({ writeText: async (text) => { copied.push(text); } });

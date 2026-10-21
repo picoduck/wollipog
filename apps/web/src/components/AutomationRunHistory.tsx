@@ -177,6 +177,9 @@ export function RunDetailsDialog({ execution, now, policy, machineLabel, onOpen,
         <button type="button" className="btn" onClick={onClose}>Done</button>
       </>}
     >
+      {execution.status === "ceiling_paused" && (
+        <Notice tone="warning">{reason} Partial or complete output may be available. Open the session or run to inspect it.</Notice>
+      )}
       {error && (
         <Notice
           tone={execution.status === "failed" ? "danger" : "warning"}
