@@ -155,6 +155,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type PolicyHookEvaluationResponse,
   type RecordPolicyHookDecisionMessage,
   type RecordWorkflowActionAdmissionMessage,
+  type GitLabMergePreflightResultMessage,
   type ReconcileWorkflowActionMessage,
   type PodContextEntry,
   type PodMemberRole,
@@ -348,6 +349,8 @@ export const STEERING_REQUEST_TIMEOUT_MS = 15_000;
 /** Leave headroom inside the hook sidecar's 1.5s HTTP deadline for request parsing and response. */
 export const POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS = 1_000;
 export const WORKFLOW_ACTION_ADMISSION_APPEND_TIMEOUT_MS = 5_000;
+/** #3602: the GitLab merge preflight reads up to three endpoints at 15 seconds each. */
+export const GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS = 50_000;
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** One day beyond the browser's seven-day queued-edit recovery window. */
@@ -837,7 +840,19 @@ export function normalizeWorkflowDecisionSnapshot(
       ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
   }
   if (category === "pr_merge") {
-    const repo = repository();
+    // A GitLab project is named by host and full namespace (#3602) and pins how it merges; those
+    // fields exist only for GitLab, so a GitHub snapshot and its digest are unchanged.
+    const gitlab = campaignRepositoryLocation(value.repository)?.forge === "gitlab";
+    const repo = gitlab ? value.repository as string : repository();
+    const gitlabFields = ["mergeMethod", "squash", "removeSourceBranch"];
+    if (gitlab
+      ? (value.mergeMethod !== "merge_train" && value.mergeMethod !== "merge") ||
+        typeof value.squash !== "boolean" || typeof value.removeSourceBranch !== "boolean"
+      : gitlabFields.some((key) => value[key] !== undefined)) {
+      return fail(gitlab
+        ? "a GitLab merge decision requires mergeMethod (merge_train or merge), squash, and removeSourceBranch"
+        : "mergeMethod, squash, and removeSourceBranch apply only to a GitLab merge decision");
+    }
     const pullRequest = Number.isSafeInteger(value.pullRequest) && (value.pullRequest as number) > 0
       ? value.pullRequest as number : null;
     const headSha = sha(value.headSha);
@@ -861,7 +876,12 @@ export function normalizeWorkflowDecisionSnapshot(
     return ok({ category, repository: repo, pullRequest, headSha,
       reviewResult: value.reviewResult, requiredChecks: {
         headSha, status: "passed", checkedAt: checked, checks: checkRows,
-      } });
+      },
+      ...(gitlab ? {
+        mergeMethod: value.mergeMethod as "merge_train" | "merge",
+        squash: value.squash as boolean,
+        removeSourceBranch: value.removeSourceBranch as boolean,
+      } : {}) });
   }
   if (category === "review_round_extension") {
     // The shape only; the requester's review run is checked against it when it is requested.
@@ -991,7 +1011,31 @@ export function normalizeWorkflowDecisionSnapshot(
 export function canonicalPrMergeEnqueueCommand(
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
 ): string {
+  const gitlab = campaignRepositoryLocation(snapshot.repository);
+  if (gitlab?.forge === "gitlab") {
+    // #3602: one exact `glab api` call pinned to the approved head with `sha=`, always naming the
+    // host. A train merge omits `when_pipeline_succeeds`, which GitLab 17.7 rejects for an MR that
+    // is already mergeable; a direct merge is admitted only where the project runs no train.
+    const project = encodeURIComponent(gitlab.project);
+    const host = gitlab.host.toLowerCase();
+    return snapshot.mergeMethod === "merge_train"
+      ? `glab api --method POST projects/${project}/merge_trains/merge_requests/${snapshot.pullRequest} ` +
+        `--hostname ${host} -f sha=${snapshot.headSha} -F squash=${snapshot.squash === true}`
+      : `glab api --method PUT projects/${project}/merge_requests/${snapshot.pullRequest}/merge ` +
+        `--hostname ${host} -f sha=${snapshot.headSha} -F squash=${snapshot.squash === true} ` +
+        `-F should_remove_source_branch=${snapshot.removeSourceBranch === true}`;
+  }
   return `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash --match-head-commit ${snapshot.headSha}`;
+}
+
+/** The pull request's or merge request's web URL, as the forge proof reads it (#3602). */
+export function prMergeChangeRequestUrl(
+  snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+): string {
+  const gitlab = campaignRepositoryLocation(snapshot.repository);
+  return gitlab?.forge === "gitlab"
+    ? `https://${gitlab.host.toLowerCase()}/${gitlab.project}/-/merge_requests/${snapshot.pullRequest}`
+    : `https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest}`;
 }
 
 export function normalizeWorkflowDecisionAction(
@@ -10475,6 +10519,37 @@ export class SessionsService {
         }
       }
     }
+    if (action.data && normalized.data.category === "pr_merge" && normalized.data.mergeMethod) {
+      // #3602: GitLab is read before arming, through the child's own glab login. A stale head or a
+      // snapshot that does not fit the project (a direct merge around an enabled train, among
+      // others) cannot be used, so it is revoked; GitLab being unreadable proves nothing either
+      // way, so nothing is armed and the child may try again.
+      const snapshot = normalized.data;
+      const unsupported = this.capabilityFailure(child.runnerId, "gitlabMergeDecisions", "GitLab merge decisions");
+      if (unsupported) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return unsupported;
+      }
+      const requestId = `gitlab_merge_preflight_${randomUUID()}`;
+      let checked: unknown;
+      try {
+        checked = await this.hub.requestFromRunner(child.runnerId, requestId, {
+          type: "gitlab_merge_preflight", requestId, sessionId: child.id, repository: snapshot.repository,
+          pullRequest: snapshot.pullRequest, headSha: snapshot.headSha, mergeMethod: snapshot.mergeMethod === "merge_train" ? "merge_train" : "merge",
+          squash: snapshot.squash === true, removeSourceBranch: snapshot.removeSourceBranch === true,
+        }, GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS);
+      } catch {
+        return fail("GitLab could not be checked before this merge, so nothing was armed. Try again.", 409);
+      }
+      const result = checked as Partial<GitLabMergePreflightResultMessage> | null;
+      if (result?.type !== "gitlab_merge_preflight_result" || result.sessionId !== child.id || result.ok !== true) {
+        if (result?.refusal === "stale_head" || result?.refusal === "mismatch") {
+          this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        }
+        const reason = typeof result?.reason === "string" ? result.reason : "GitLab could not be checked.";
+        return fail(`GitLab refused this merge before it was armed: ${reason}`, 409);
+      }
+    }
     const now = Date.now();
     if (action.data) {
       const sessionTurnId = child.driver === "codex-app-server"
@@ -10644,7 +10719,7 @@ export class SessionsService {
       occurrenceId,
       command,
       commandDigest: admission.commandDigest,
-      pullRequestUrl: `https://github.com/${normalized.data.repository}/pull/${normalized.data.pullRequest}`,
+      pullRequestUrl: prMergeChangeRequestUrl(normalized.data),
       expectedHeadSha: normalized.data.headSha,
       ...(admission.armedAfterEventSeq !== undefined
         ? { armedAfterEventSeq: admission.armedAfterEventSeq } : {}),
@@ -11855,7 +11930,7 @@ export class SessionsService {
         admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
-    const pullRequestUrl = `https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest}`;
+    const pullRequestUrl = prMergeChangeRequestUrl(snapshot);
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
     const message: ReconcileWorkflowActionMessage = {
       type: "reconcile_workflow_action",

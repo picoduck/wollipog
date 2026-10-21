@@ -948,6 +948,10 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
             name: { type: "string" }, state: { const: "passed" }, url: { type: "string" },
           }, required: ["name", "state"], additionalProperties: false } },
         }, required: ["headSha", "status", "checkedAt", "checks"], additionalProperties: false },
+        // GitLab only, and then required (#3602): repository is <gitlab-host>/group/project, pullRequest the IID.
+        mergeMethod: { type: "string", enum: ["merge_train", "merge"] },
+        squash: { type: "boolean" },
+        removeSourceBranch: { type: "boolean" },
       },
       required: ["category", "repository", "pullRequest", "headSha", "reviewResult", "requiredChecks"],
       additionalProperties: false,
@@ -2047,7 +2051,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned with --match-head-commit and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {
