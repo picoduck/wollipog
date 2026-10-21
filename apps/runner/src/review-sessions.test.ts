@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -132,6 +132,17 @@ test("an automatic launch worktree with durable proof can request a review sessi
   assert.ok(existsSync(prepared.checkout));
 });
 
+test("automatic registration checks accept the verified path's canonical spelling", async (t) => {
+  const f = automaticFixture(t);
+  const alias = join(f.root, "worktree-alias");
+  symlinkSync(f.worktree, alias, "junction");
+  f.requester.worktreePath = alias;
+  f.requester.worktrees![0]!.path = alias;
+  f.requester.launchWorktreeProof!.path = alias;
+  const prepared = await f.launcher.prepare("s_review", f.policy(), CODEX, "Intent and checks.");
+  assert.ok(existsSync(prepared.checkout));
+});
+
 for (const key of ["sessionId", "repoPath", "path", "branch", "missing"] as const) {
   test(`automatic review sessions refuse ${key} launch proof mismatch`, async (t) => {
     const f = automaticFixture(t);
@@ -145,6 +156,15 @@ test("automatic review sessions refuse attached worktrees even with launch proof
   const f = automaticFixture(t);
   f.requester.worktrees![0]!.source = "attached";
   assert.match(await refusal(f.launcher.prepare("s_review", f.policy(), CODEX, "b")), /own native managed worktree/);
+});
+
+test("automatic review sessions refuse a foreign repository behind a stale registration", async (t) => {
+  const f = automaticFixture(t);
+  renameSync(f.worktree, join(f.root, "displaced"));
+  mkdirSync(f.worktree);
+  git(f.worktree, "init", "--quiet", "--initial-branch=agent/s_requester");
+  git(f.worktree, "commit", "--quiet", "--allow-empty", "-m", "foreign");
+  assert.match(await refusal(f.launcher.prepare("s_review", f.policy(), CODEX, "b")), /no longer registered.*expected branch/);
 });
 
 for (const removed of [false, true]) {

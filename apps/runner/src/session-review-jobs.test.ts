@@ -324,7 +324,9 @@ for (const scenario of ["owned", "missing", "foreign", "attached", "switched", "
       repoPath: h.meta.repoPath, path: h.meta.worktreePath!, branch,
     };
     const exec = h.deps.exec;
-    h.deps.exec = async (command, args, options) => args.includes("list")
+    h.deps.exec = async (command, args, options) => args.includes("--git-common-dir")
+      ? `${join(h.meta.repoPath, ".git")}\nrefs/heads/${branch}\n`
+      : args.includes("list")
       ? `worktree ${h.meta.repoPath}\0HEAD ${BASE}\0branch refs/heads/main\0\0` +
         (scenario === "unregistered" ? "" : `worktree ${h.meta.worktreePath}\0HEAD ${HEAD}\0branch refs/heads/${scenario === "switched" ? "other" : branch}\0\0`)
       : exec(command, args, options);

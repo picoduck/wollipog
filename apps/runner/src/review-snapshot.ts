@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { githubSlug } from "./git-ops.js";
 import type { ReviewTools } from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
-import { parseWorktreePorcelain } from "./worktree.js";
+import { parseWorktreePorcelain, sameWorktreePath } from "./worktree.js";
 
 /** A GitHub `owner/name`; the only form a review request may name. */
 export const GITHUB_REPOSITORY = /^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u;
@@ -160,14 +160,21 @@ export async function bindPullRequestScope(input: {
     refuseReview("the review snapshot could not be prepared");
   }
   if (automatic) {
-    // Read the primary checkout's registration/HEAD records, never the session-writable .git
-    // pointer. A durable launch proof cannot authorize a removed tree or a later branch switch.
+    // Read the primary checkout's registration/HEAD records. The worktree's own pointer is only
+    // compared with that trusted repository, never used to choose the snapshot's source.
+    // A durable launch proof cannot authorize a removed/replaced tree or a later branch switch.
     let registered = false;
     try {
       const listed = await exec(tools.git, [...SAFE_GIT, "--git-dir", commonDir,
         "worktree", "list", "--porcelain", "-z"], { env });
       registered = parseWorktreePorcelain(listed).some((entry) => !entry.primary &&
-        entry.path === worktree!.path && entry.branch === worktree!.branch && !!entry.head);
+        sameWorktreePath(meta!.context, entry.path, worktree!.path) && entry.branch === worktree!.branch && !!entry.head);
+      if (registered) {
+        const actual = (await exec(tools.git, [...SAFE_GIT, "-C", worktree!.path,
+          "rev-parse", "--path-format=absolute", "--git-common-dir", "--symbolic-full-name", "HEAD"], { env })).trim().split("\n");
+        registered = actual.length === 2 && sameWorktreePath(meta!.context, actual[0]!, commonDir) &&
+          actual[1] === `refs/heads/${worktree!.branch}`;
+      }
     } catch { /* an unreadable registration fails closed */ }
     if (!registered) refuseReview("the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review");
   }
