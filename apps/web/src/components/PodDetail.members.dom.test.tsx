@@ -372,6 +372,38 @@ test("a refused save keeps Member Settings open with the reason above the footer
   }
 });
 
+test("a save that settles after its Member Settings was cancelled leaves another member's open settings alone (CR-1.1)", async () => {
+  let release: (() => void) | undefined;
+  const view = await mount({
+    client: {
+      updatePodMember: (_id, sessionId) => sessionId === "worker"
+        ? new Promise((resolve) => { release = () => resolve({ pod: pod(), sessions: [] }); })
+        : Promise.resolve({ pod: pod(), sessions: [] }),
+    },
+  });
+  try {
+    await click(itemNamed(await openMemberMenu("Codex"), "Member Settings…"));
+    let dialog = dialogNamed("Member Settings")!;
+    await click([...dialog.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((role) => role.textContent === "Lead"));
+    await click(buttonNamed(dialog, "Save"));
+    await click(buttonNamed(dialog, "Cancel"));
+    assertNoDomNode(dialogNamed("Member Settings"), "Cancel closes it while the save runs");
+
+    await click(itemNamed(await openMemberMenu("Claude"), "Member Settings…"));
+    dialog = dialogNamed("Member Settings")!;
+    assert.equal(dialog.querySelector(".modal-desc")?.textContent, "Claude · plan the migration");
+    await click([...dialog.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((role) => role.textContent === "Reviewer"));
+    await act(async () => release!());
+    await settle();
+    dialog = dialogNamed("Member Settings")!;
+    assert.ok(dialog, "Claude's settings stay open");
+    assert.equal([...dialog.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((role) => role.getAttribute("aria-checked") === "true")?.textContent, "Reviewer", "with its draft");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a member that leaves closes its Member Settings, and rejoining does not reopen them", async () => {
   const view = await mount();
   try {

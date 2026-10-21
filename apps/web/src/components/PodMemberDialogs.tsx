@@ -45,6 +45,14 @@ export function PodMemberSettingsDialog({ pod, member, name, blockedReason, onCl
   const [budget, setBudget] = useState(member.contextTokenBudget === null ? SAME_AS_POD : String(member.contextTokenBudget));
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  // Cancel stays available while saving, so a save can settle after this dialog closed and the page
+  // opened another member's; its answer then belongs to no dialog (CR-1.1). Set on every setup:
+  // StrictMode replays setup and cleanup once.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const podBudget = pod.orchestration?.policy.contextTokenBudget;
   const reasonId = `${ids}-reason`;
   const budgetHelpId = `${ids}-budget-help`;
@@ -60,8 +68,9 @@ export function PodMemberSettingsDialog({ pod, member, name, blockedReason, onCl
     setFailure(null);
     try {
       await api.updatePodMember(pod.id, member.sessionId, { role, contextTokenBudget });
-      onClose();
+      if (mounted.current) onClose();
     } catch (cause) {
+      if (!mounted.current) return;
       setFailure((cause as Error).message);
       setBusy(false);
     }
