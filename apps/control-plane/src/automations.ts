@@ -34,7 +34,7 @@ import {
   type ServiceResult,
   type SessionsService,
 } from "./sessions.js";
-import { nextCronFire, parseCron, validateTimeZone } from "./automation-schedule.js";
+import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import { automationCommandDigest, AutomationCommandOutbox } from "./automation-command-outbox.js";
 import {
   automationTriggerBodySha256,

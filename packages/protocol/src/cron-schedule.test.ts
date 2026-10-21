@@ -6,7 +6,7 @@ import {
   resetTimezoneCachesForTests,
   timezoneCacheStateForTests,
   validateTimeZone,
-} from "./automation-schedule.js";
+} from "./cron-schedule.js";
 
 function asciiCaseVariants(value: string): string[] {
   const letters = [...value].filter((character) => /[A-Za-z]/.test(character));

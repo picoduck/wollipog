@@ -52,7 +52,9 @@ export function titleCaseLabel(value: string): string {
   const last = wordIndexes.at(-1);
   return words.map((word, index) => {
     if (!/[A-Za-z]/.test(word) || /^[A-Z0-9]+(?:[-/][A-Z0-9]+)*$/.test(word)) return word;
-    return word.replace(/[A-Za-z][A-Za-z'-]*/g, (part) => {
+    return word.replace(/[A-Za-z][A-Za-z'-]*/g, (part, offset: number) => {
+      // An ordinal's suffix ("1st", "22nd") belongs to its number and stays lowercase.
+      if (/\d/.test(word[offset - 1] ?? "")) return part;
       const segments = part.split("-");
       return segments.map((segment, segmentIndex) => {
         if (!segment) return segment;

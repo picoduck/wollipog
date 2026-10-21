@@ -16921,6 +16921,45 @@ button.review-finding-location {
   margin-inline-start: calc(-1 * (var(--space-2) + 1px));
 }
 .automation-editor-form textarea { resize: vertical; }
+/* When to Run (#2971; docs/design-system.md §8.1, §8.4, §9.1, §9.2, §11.3). Schedule is a monospace
+   cron field with its Examples menu button at the trailing edge, then the helper (or the error that
+   replaces it) and the preview line, a §11.3 meta line 4px under it. The preview keeps its one line
+   while it is empty, so the form does not jump as an expression becomes valid or invalid. */
+.automation-cron-control {
+  display: flex;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.automation-cron-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+}
+.automation-cron-examples { flex: none; }
+.automation-example-cron { font-family: var(--font-mono); }
+.automation-schedule-preview {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-height: var(--space-4);
+  margin: calc(-1 * var(--space-1)) 0 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.automation-schedule-preview > svg { flex: none; margin-top: 1px; }
+/* Time Zone's label carries About Time Zones beside it. On a fine pointer the button overhangs the
+   label's 16px line instead of growing it, so the label still sits 8px above its control (§8.1). */
+.automation-zone-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+@media (pointer: fine) {
+  .automation-zone-label > .icon-btn {
+    margin-top: calc((var(--space-4) - var(--control-h-sm)) / 2);
+    margin-bottom: calc((var(--space-4) - var(--control-h-sm)) / 2);
+  }
+}
 /* The automation page (#2968; docs/design-system.md §4.3, §4.5, §5.4, §13.2): the detail bar, the
    one notice, the glance, then sections 32px apart. Content sits in the gutter (`.run-detail`) and
    keeps the list pages' measure. */
