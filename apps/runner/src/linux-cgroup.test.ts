@@ -122,7 +122,7 @@ test("unavailable containment retains the marker/parent-link launch API and repo
   `;
   const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { timeout: 20_000, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /proofStandard=marker-parent-links reason=cgroup-unavailable/u);
+  assert.match(result.stderr, /proofStandard=marker-parent-links reason=cgroup-unavailable/u);
 });
 
 test("native launcher refuses a non-cgroup descriptor before executing provider code", { skip: process.platform !== "linux" }, () => {

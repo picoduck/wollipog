@@ -29,7 +29,7 @@ export function providerContainmentStatus(): Readonly<ProviderContainmentStatus>
 function report(next: ProviderContainmentStatus): void {
   if (next.proofStandard === status.proofStandard && next.reason === status.reason) return;
   status = next;
-  console.info(`[runner] provider_process_containment proofStandard=${next.proofStandard} reason=${next.reason}`);
+  console.error(`[runner] provider_process_containment proofStandard=${next.proofStandard} reason=${next.reason}`);
 }
 
 function unescapeMount(value: string): string {
@@ -120,7 +120,7 @@ export class LinuxCgroupBoundary {
     if (this.removed) return true;
     try {
       // cgroup.kill is recursive and kernel-serialized against forks and migration. No numeric
-      // PID is signalled, so an unreadable environment or reused PID cannot change ownership.
+      // descendant PID is signalled, so unreadable environments and PID reuse cannot change ownership.
       if (!this.io.populated()) return this.finish();
       // Preserve the provider root's TERM grace (including handlers that fork). Node still owns
       // its unreaped child handle, so kill() cannot target a recycled PID. Descendant cleanup
