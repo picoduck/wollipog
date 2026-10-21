@@ -40,6 +40,9 @@ function exportedFunctions(path, source) {
     .filter(ts.isExportDeclaration)
     .filter((node) => !node.moduleSpecifier && node.exportClause && ts.isNamedExports(node.exportClause))
     .flatMap((node) => node.exportClause.elements.map((entry) => (entry.propertyName ?? entry.name).text)));
+  for (const node of sourceFile.statements) {
+    if (ts.isExportAssignment(node) && ts.isIdentifier(node.expression)) namedExports.add(node.expression.text);
+  }
   return sourceFile.statements
     .filter((node) => ts.isFunctionDeclaration(node) && node.body)
     .filter((node) => node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
@@ -129,6 +132,8 @@ test("function normalization ignores trivia while preserving literals and token 
   assert.deepEqual(ts.createSourceFile("fixture.ts", regexSource, ts.ScriptTarget.Latest, true).parseDiagnostics, []);
   const [defaultFunction] = exportedFunctions("apps/a/src/a.ts", regexSource);
   assert.equal(defaultFunction.symbol, "<default>");
+  assert.equal(exportedFunctions("apps/a/src/a.ts", "function named(value) { return String(value); } export default named;").length, 1);
+  assert.equal(exportedFunctions("apps/a/src/a.cts", "function named(value) { return String(value); } export = named;").length, 1);
   const [template] = exportedFunctions("apps/a/src/a.ts", 'export function template(){return `hello  // literal`;}');
   assert.ok(template.body.includes("hello  // literal"));
   assert.equal(exportedFunctions("apps/a/src/a.ts", "function privateHelper() { return 1; } export { value } from './other.js';").length, 0);
