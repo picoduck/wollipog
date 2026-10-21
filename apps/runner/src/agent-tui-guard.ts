@@ -39,6 +39,7 @@ export interface AgentTuiGuardProvisioning {
 }
 
 export interface AgentTuiGuardConfig {
+  onProcess?: (proof: Promise<boolean>) => void;
   controlPlaneUrl: string;
   controlPlaneProtocolVersion: number | null;
   enabled: boolean;
@@ -171,6 +172,7 @@ async function provisionAgentTuiCodexManagedWorktreeGuard(
       platform: config.platform,
       verifyGuardLaunch: config.verifyGuardLaunch,
       readHookInventory: config.readCodexHookInventory,
+      onProcess: config.onProcess,
       isolateForeignHooks: isOrchestratorLaunch(spec),
     },
     log,

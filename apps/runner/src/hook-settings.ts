@@ -1417,6 +1417,7 @@ export async function provisionCodexGuard(
     verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
     /** Seam for tests: enumerate the launch's effective Codex hooks. */
     readHookInventory?: typeof readCodexHookInventory;
+    onProcess?: (proof: Promise<boolean>) => void;
     /**
      * The runner's abstract verdict socket for this session (#1336 slice 3). With it the list lives
      * in runner memory and no protections file is written; without it the file decides, as before.
@@ -1507,7 +1508,10 @@ export async function provisionCodexGuard(
   }
   // Enumerate with the same flags the TUI will carry. This proves Codex installs the runner's hook
   // in THIS build and decides whether the invocation-wide trust bypass is acceptable at all.
-  const readInventory = config.readHookInventory ?? readCodexHookInventory;
+  const readInventory = (probe: Parameters<typeof readCodexHookInventory>[0]) => {
+    if (config.readHookInventory) config.onProcess?.(Promise.resolve(false));
+    return (config.readHookInventory ?? readCodexHookInventory)({ ...probe, onProcess: config.onProcess });
+  };
   let entries: CodexHookEntry[];
   try {
     entries = await readInventory(codexHookInventoryProbe({ ...spec, args }, config.cwd, override));

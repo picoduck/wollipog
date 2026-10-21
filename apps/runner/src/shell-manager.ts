@@ -81,8 +81,9 @@ export interface ShellProcessLaunch {
 
 /** The provider-HOME reference one Agent TUI launch holds (#3238). */
 export interface AgentTuiProviderHome {
-  /** The preparation is about to start a provider process outside any provable boundary (a Codex
-   * probe), so the settlement keeps the reference until shutdown whatever the TUI's own proof. */
+  /** Every preparation probe contributes its complete tree proof before the TUI starts. */
+  onProcess?(proof: Promise<boolean>): void;
+  /** A partial write or uninstrumented process retains the reference whatever the TUI's proof. */
   markUnprovable(): void;
   /** Settle once: `true`/`false` is the TUI's own process-tree proof after it ended, `null` means no
    * TUI process was started. Releases only when everything the launch started is proven gone. */

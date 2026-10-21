@@ -404,7 +404,7 @@ The proof comes from `ProviderProcessLedger` (spawn.ts), which records every pro
 - A child spawned with the ledger's owner is covered by the owner's POSIX boundaries, which stay registered until proven gone.
 - Any other child is proven individually. A child without an owner (a per-turn probe, say) has its boundary terminated when it closes, so its proof is settled then: a true result drops it from the ledger, and a false one makes every later proof false. Children therefore do not accumulate over a long session.
 - A Claude virtual provider (the protected `bwrap` launch) has no boundary of its own; its namespace is the unit of proof, described below.
-- A child without a boundary, or any untracked work the instance has run, makes the proof false. The Codex MCP inventory and permission-profile probes run outside a boundary and kill only their own process group, so a descendant that left the group could outlive them. A driver that ran one keeps its reference until shutdown.
+- A child without a boundary, or any untracked work the instance has run, makes the proof false. Codex MCP inventory, permission-profile deny and sandbox-projection probes start through `spawnAgent` with descendant tracking. Each probe ends its whole boundary on completion or timeout and reports the proof. The ledger waits for asynchronous preparation and its probes before proving the instance; cached permission-profile verdicts carry the original aggregate process proof to every consumer.
 - Proving seals the ledger, so the instance can start nothing afterwards.
 
 How an instance ended decides which proof it gets:
@@ -417,7 +417,7 @@ A failed construction keeps the reference if a constructor ran, and releases it 
 
 Session and Agent TUI handles live as long as their sessions and terminals. A runner with 512 open session and TUI handles together gives later launches and TUIs a plain reference until shutdown, so the worker's 1024-handle pool stays free for transactions and probes.
 
-Codex exec, Pi, Codex app-server, Claude Code and ACP prove their trees.
+Pi, Codex app-server, Claude Code and ACP prove their trees. Codex exec was retired in #3259.
 
 **Launch preparation** takes its account-HOME reference in the `index.ts` adapter, for a plugin-provider session with a credential home whose context is native and whose target is the host. The reference is a transaction-scoped handle, so it does not count against the 512-handle budget. The caller of `prepareLaunch` owns it and passes it as `providerHome`, next to `isCurrent` and `signal`. Everything that runs under it reports there: the adapter's plugin inheritance and Codex guard, the launch's authentication preflight, and the status command of each authentication caller, through the same process observer as the account probes. The handle is settled exactly once, on those proofs:
 
@@ -428,7 +428,7 @@ Codex exec, Pi, Codex app-server, Claude Code and ACP prove their trees.
 
 The reference is released only when nothing ran unprovably and every reported process tree is proven gone. A preparation that ran nothing, including one cancelled or gone stale after the grant, also releases. These keep it until shutdown:
 
-- A Codex launch that reached the guard. Its hook inventory spawns a real Codex app-server outside any boundary, so the adapter marks the preparation unprovable before it starts. Tracking that probe is deferred to #3340.
+- A Codex guard hook-inventory probe whose boundary could not prove its tree gone. Successful and failed enumerations both end the entire boundary before returning and report that proof to the preparation.
 - A plugin inheritance that threw partway, since the HOME may be half-written.
 - A status command whose tree was not proven gone, or one run by an injected command runner.
 
@@ -438,7 +438,7 @@ Runner shutdown settles nothing per preparation; `close()` releases every refere
 
 - When the TUI process closes or fails to start, `ShellManager` reports its tree proof once: on native Linux the TUI's ownerless POSIX boundary, terminated at close, decides; a Windows ConPTY process always reports false. The reference is released only for a true proof. Explicit close, session close and worktree retirement end in that same close event, so they settle the same way.
 - A preparation or open that fails after the grant settles with no TUI process: it releases, unless a probe already ran outside a boundary.
-- A Codex TUI keeps its reference until shutdown even when its own tree is proven gone. Its preparation runs the permission-profile proof, the hook inventory and, for the Orchestrator TUI, the MCP inventory, all outside any boundary. Tracking those probes is deferred to a follow-up.
+- A Codex TUI releases only when its own tree and every preparation probe (permission-profile, hook inventory and, for an Orchestrator TUI, MCP inventory) are proven gone. A false or rejected probe proof keeps the reference. A preparation that started no probe has no process proof to wait for.
 - Windows native and WSL TUIs keep theirs too, since neither has a tree proof, and so does a false or failed proof.
 - Runner shutdown settles nothing per TUI; `close()` releases every reference after the global reaping proof.
 
@@ -518,7 +518,7 @@ clock override, alternate selectable worker or native diagnostic shortcut.
 `session-manager-lease-preparation.test.ts` executes the production plugin ownership phase with
 isolated controllers, including stale card/account/epoch checks, recovery cancellation, the
 automatic timeout and unrelated-error preservation. It also runs the production Codex guard phase,
-which marks the preparation unprovable before the hook inventory starts.
+which forwards each hook-inventory boundary proof and retains a partial plugin write.
 `session-provider-lease-release.test.ts` and `provider-process-lease-release.test.ts` settle the
 preparation reference through the ordinary launch and the inspection, recheck, automatic revalidation
 and sibling recovery callers. The fork
@@ -537,3 +537,14 @@ private temporary HOME, configuration and data roots. It runs these steps:
    second runner's sync is refused, and the journal is unchanged.
 4. After the holder is killed, that runner recovers, then releases on graceful shutdown. Linux can additionally use `--maximal` with a
 packaged binary to measure normal heartbeat delivery through the entire shipped path.
+
+The Codex probe boundary regressions execute fake Codex commands that start detached helpers, on
+completion and timeout. They check complete tree exit for MCP inventory, permission-profile commands,
+sandbox projection and hook inventory; cached proof sharing; app-server disposal; and
+launch-preparation/TUI reference release and conservative retention. Native discovery's Codex version
+and app-server help commands also use ownerless boundaries and return their exit proof. Windows and
+WSL MCP adapters retain their existing invocation and report false because no native POSIX tree proof
+covers them. Injected probe runners are conservatively unproven. The already tracked model-discovery,
+subscription-usage and authentication-status probes keep their existing ownership paths.
+Ordinary Agent Control provisioning forwards both MCP inventory reads (before and after its proposed
+server entry) to the launch-preparation owner too, even when a read fails or the entry is refused.

@@ -1103,6 +1103,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     await provisionAgentControl(
       meta,
       {
+        onProcess: (proof) => cancellation?.providerHome?.onProcess(proof),
         controlPlaneUrl: config.controlPlaneUrl,
         controlPlaneProtocolVersion,
         allowInsecureTransport,
@@ -1133,13 +1134,14 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     // proved before it would be a proof about a different argv than the one that launches.
     let codexLaunchArgs: string[] | undefined;
     if (CODEX_GUARD_DRIVERS.has(meta.driver)) {
-      // The guard's hook inventory spawns a real Codex app-server outside any provable boundary
-      // (tracking it is deferred to #3340), and a failed plugin inheritance may leave the HOME
-      // half-written: either way the launch keeps its provider-HOME reference until shutdown.
-      cancellation?.providerHome?.markUnprovable();
       // Prepare the exact plugin inventory before guard enumeration, without persisting default
       // plugin flags into the session (which would freeze them across subsequent launches).
-      const inheritedPluginArgs = inheritProviderPlugins(meta, "codex");
+      let inheritedPluginArgs: string[];
+      try { inheritedPluginArgs = inheritProviderPlugins(meta, "codex"); }
+      catch (error) {
+        cancellation?.providerHome?.markUnprovable();
+        throw error;
+      }
       log(JSON.stringify({ event: "provider_plugin_inheritance_prepared", entryPoint: "session_launch",
         sessionId: meta.sessionId, provider: "codex" }));
       const codexGuardSocket = await memoryGuardSocket(
@@ -1151,6 +1153,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
           cwd: meta.worktreePath ?? meta.repoPath,
           ...(codexGuardSocket ? { guardSocket: codexGuardSocket } : {}),
           isolateForeignHooks: isOrchestratorLaunch(meta),
+          onProcess: (proof) => cancellation?.providerHome?.onProcess(proof),
         },
         log,
         claudeHookHost,
@@ -3562,12 +3565,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           hookStateDir: claudeHookHost.configDir,
           // The TUI is a spawn like any other: it gets the same fresh settings document and the
           // same live protection list a runner-driven launch gets (#1337).
-          provisionManagedWorktreeGuard: (prepared, cwd) => provisionAgentTuiManagedWorktreeGuard(
+          provisionManagedWorktreeGuard: (prepared, cwd, observer) => provisionAgentTuiManagedWorktreeGuard(
             prepared,
             {
               controlPlaneUrl: config.controlPlaneUrl,
               controlPlaneProtocolVersion,
               enabled: claudeHookFeatureEnabled,
+              onProcess: observer?.onProcess,
               allowInsecureTransport,
               registerCredential: registerPolicyHookCredential,
               // Resolved when provisioning runs, never from the launch snapshot: that snapshot

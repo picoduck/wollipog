@@ -15,6 +15,7 @@ import { homedir, platform } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { windowsCommandSpec } from "../windows-cmd.js";
+import { startCodexProbe } from "../codex-probe.js";
 
 const isWindows = platform() === "win32";
 
@@ -45,14 +46,17 @@ export interface ExecResult {
   timedOut?: boolean;
   /** String error from execFile (ENOENT, max-buffer, etc.); numeric exit codes omit it. */
   errorCode?: string;
+  provenProcessTreeExit?: boolean;
 }
 
 /** Promise wrapper over execFile that never rejects — resolves with code/stdout/stderr. */
 export function run(
   file: string,
   args: string[],
-  opts: { timeoutMs?: number; env?: Record<string, string>; replaceEnv?: boolean; maxBuffer?: number } = {},
+  opts: { timeoutMs?: number; env?: Record<string, string>; replaceEnv?: boolean; maxBuffer?: number;
+    trackDescendants?: boolean } = {},
 ): Promise<ExecResult> {
+  if (opts.trackDescendants && !isWindows) return runTrackedDiscoveryProbe(file, args, opts);
   return new Promise((resolve) => {
     let spec;
     try {
@@ -88,6 +92,48 @@ export function run(
       },
     );
   });
+}
+
+/** Codex version/help discovery can execute a configured wrapper too. Keep its output/deadline
+ * contract while ending the entire ownerless boundary before discovery returns. */
+async function runTrackedDiscoveryProbe(
+  command: string, args: string[], opts: { timeoutMs?: number; env?: Record<string, string>; replaceEnv?: boolean; maxBuffer?: number },
+): Promise<ExecResult> {
+  const timeoutMs = opts.timeoutMs ?? 5000;
+  const maxBuffer = opts.maxBuffer ?? 1024 * 1024;
+  const env = opts.env ? (opts.replaceEnv ? opts.env : { ...process.env, ...opts.env }) : process.env;
+  let probe: ReturnType<typeof startCodexProbe>;
+  try { probe = startCodexProbe({ command, args, cwd: process.cwd(), env }); }
+  catch (error) { return { code: 1, stdout: "", stderr: "", errorCode: (error as NodeJS.ErrnoException).code ?? "SPAWN_FAILED",
+    provenProcessTreeExit: false }; }
+  const { child } = probe;
+  const result = await new Promise<ExecResult>((resolve) => {
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    const bytes = [0, 0];
+    let settled = false;
+    const finish = (detail: Omit<ExecResult, "stdout" | "stderr">) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...detail, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+    };
+    const timer = setTimeout(() => finish({ code: 1, timedOut: true }), timeoutMs);
+    for (const [index, stream, chunks] of [[0, child.stdout, stdout], [1, child.stderr, stderr]] as const) {
+      stream?.on("data", (chunk: Buffer) => {
+        if (settled) return;
+        const remaining = maxBuffer - bytes[index]!;
+        chunks.push(chunk.subarray(0, Math.max(0, remaining)));
+        bytes[index]! += chunk.length;
+        if (bytes[index]! > maxBuffer) finish({ code: 1, errorCode: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
+      });
+    }
+    child.once("error", (error: NodeJS.ErrnoException) => finish({ code: 1, errorCode: error.code ?? "SPAWN_FAILED" }));
+    child.once("close", (code) => finish({ code: code ?? 1 }));
+    child.stdin?.on("error", () => {});
+    child.stdin?.end();
+  });
+  return { ...result, provenProcessTreeExit: await probe.finish() };
 }
 
 /** Like run(), but returns raw stdout bytes (for UTF-16LE output like `wsl --list`). */

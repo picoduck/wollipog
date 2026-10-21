@@ -1,3 +1,4 @@
+import { startCodexProbe, type CodexProbeObserver } from "./codex-probe.js";
 import type { AcpImplementationDiagnostics } from "./acp-contract.js";
 import {
   orchestratorAdditiveCapability,
@@ -695,10 +696,46 @@ export function parseCodexMcpInventory(output: string): CodexMcpInventoryEntry[]
 /** Read the effective Codex MCP inventory for a native host launch at its working directory, with
  * the same bounds as the Orchestrator isolation probe (10 seconds, 1 MiB). */
 export async function readCodexMcpInventory(
-  opts: { command: string; args: string[]; env?: Record<string, string>; context?: AgentDefinition["context"] },
+  opts: CodexProbeObserver & { command: string; args: string[]; env?: Record<string, string>; context?: AgentDefinition["context"] },
   cwd: string,
 ): Promise<string> {
   const { probe, env, nativeCwd } = codexOrchestratorMcpProbe(opts, cwd);
+  if (process.platform !== "win32" && opts.context?.kind !== "wsl") {
+    const boundary = startCodexProbe({ command: probe.file, args: probe.args, cwd, env, onProcess: opts.onProcess });
+    const child = boundary.child;
+    try {
+      return await new Promise<string>((resolve, reject) => {
+        let stdout = "";
+        let bytesOut = 0;
+        let bytesErr = 0;
+        let settled = false;
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          error ? reject(error) : resolve(stdout);
+        };
+        const timer = setTimeout(() => finish(new Error("Codex MCP probe timed out")), 10_000);
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          if (settled) return;
+          bytesOut += Buffer.byteLength(chunk);
+          if (bytesOut > 1024 * 1024) finish(new Error("Codex MCP probe output exceeded its bound"));
+          else stdout += chunk;
+        });
+        child.stderr?.on("data", (chunk: Buffer) => {
+          bytesErr += chunk.length;
+          if (bytesErr > 1024 * 1024) finish(new Error("Codex MCP probe output exceeded its bound"));
+        });
+        child.once("error", finish);
+        child.once("close", (code) => finish(code === 0 ? undefined : new Error(`Codex MCP probe exited with code ${code}`)));
+        child.stdin?.on("error", () => {});
+        child.stdin?.end();
+      });
+    } finally { await boundary.finish(); }
+  }
+  // The Windows/WSL adapter retains its existing invocation, but root exit is no tree proof.
+  opts.onProcess?.(Promise.resolve(false));
   const { stdout } = await execFileAsync(probe.file, probe.args, {
     ...(nativeCwd ? { cwd: nativeCwd } : {}), env, timeout: 10_000, maxBuffer: 1024 * 1024,
     windowsHide: true,
@@ -964,7 +1001,7 @@ export function isolateCodexMcpServers(
   });
 }
 
-interface CodexOrchestratorProbeOptions {
+interface CodexOrchestratorProbeOptions extends CodexProbeObserver {
   command: string;
   args: string[];
   env?: Record<string, string>;
@@ -987,6 +1024,7 @@ async function runIsolatedCodexMcpProbe(
   if (opts.isolation?.backend !== "wsl-bwrap" || opts.context?.kind !== "wsl") {
     throw new Error("isolated Codex MCP probe requires the target-local WSL launcher");
   }
+  opts.onProcess?.(Promise.resolve(false));
   const child = spawnAgent({
     command: opts.command,
     args,
@@ -1069,6 +1107,7 @@ export async function codexOrchestratorMcpArgs(
     if (opts.isolation?.backend === "wsl-bwrap") {
       if (opts.context?.kind !== "wsl") throw new Error("target-local WSL isolation context mismatch");
       const probeArgs = [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"];
+      if (dependencies.runIsolated) opts.onProcess?.(Promise.resolve(false));
       const stdout = await (dependencies.runIsolated ?? runIsolatedCodexMcpProbe)(opts, cwd, probeArgs);
       return isolateCodexMcpServers(stdout, exempt, !disableAll);
     }
@@ -1082,7 +1121,7 @@ export async function codexOrchestratorMcpArgs(
  * path is never passed to Win32 exec directly, and explicit agent env crosses through WSLENV just
  * as it does for the subsequent provider launch. */
 export function codexOrchestratorMcpProbe(
-  opts: { command: string; args: string[]; env?: Record<string, string>; context?: AgentDefinition["context"] },
+  opts: CodexProbeObserver & { command: string; args: string[]; env?: Record<string, string>; context?: AgentDefinition["context"] },
   cwd: string,
   hostEnv: NodeJS.ProcessEnv = process.env,
 ): { probe: { file: string; args: string[]; windowsVerbatimArguments?: boolean; argv0?: string };

@@ -24,9 +24,9 @@ const TUI_DRIVERS = new Set(["claude-code", "codex-app-server"]);
 /** What the launch preparation does with the provider-HOME reference it acquires. */
 interface AgentTuiProviderHomeTracking {
   acquireProviderHome(meta: SessionMeta): Promise<void>;
-  /** A Codex probe (permission profile, hook inventory, MCP inventory) is about to run outside
-   * any process boundary the runner can prove gone; the reference must then be kept. */
+  /** A partial write or injected uninstrumented runner makes the launch unprovable. */
   markUnprovable(): void;
+  onProcess(proof: Promise<boolean>): void;
 }
 
 /** Durable metadata intentionally omits credentials. Rebuild runner-owned launch state for
@@ -63,6 +63,7 @@ export async function prepareAgentTuiLaunch(
     provisionManagedWorktreeGuard(
       spec: SessionMeta,
       cwd?: string,
+      observer?: { onProcess(proof: Promise<boolean>): void },
     ): AgentTuiGuardProvisioning | Promise<AgentTuiGuardProvisioning>;
     prepareScratch(meta: SessionMeta): Promise<string>;
     probe?: typeof codexOrchestratorMcpArgs;
@@ -81,6 +82,10 @@ export async function prepareAgentTuiLaunch(
       held.home = (await dependencies.acquireProviderHome?.(prepared)) ?? null;
     },
     markUnprovable: () => held.home?.markUnprovable(),
+    onProcess: (proof) => {
+      if (held.home?.onProcess) held.home.onProcess(proof);
+      else held.home?.markUnprovable();
+    },
   };
   let launch: ShellProcessLaunch | null;
   try {
@@ -163,9 +168,9 @@ async function prepareAgentTuiLaunchHoldingProviderHome(
     };
   }
   if (prepared.driver !== "claude-code") {
-    tracking.markUnprovable();
+    if (dependencies.probe) tracking.markUnprovable();
     prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
-      prepared, cwd,
+      { ...prepared, onProcess: (proof) => tracking.onProcess(proof) }, cwd,
     ));
   }
   const guarded = await withManagedWorktreeGuard(prepared, dependencies, tracking, cwd);
@@ -205,13 +210,13 @@ async function withCodexPermissionProfile(
     hookStateDir?: string;
     permissionProfile?: typeof decideCodexPermissionProfile;
   },
-  tracking: Pick<AgentTuiProviderHomeTracking, "markUnprovable">,
+  tracking: Pick<AgentTuiProviderHomeTracking, "markUnprovable" | "onProcess">,
 ): Promise<SessionMeta> {
   if (!CODEX_TUI_DRIVERS.has(meta.driver) || !meta.command) return meta;
-  // The profile proof runs the Codex CLI itself, outside any boundary the runner can prove gone.
-  tracking.markUnprovable();
+  if (dependencies.permissionProfile) tracking.markUnprovable();
   const decide = dependencies.permissionProfile ?? decideCodexPermissionProfile;
   const profile = await decide({
+    onProcess: (proof) => tracking.onProcess(proof),
     command: meta.command,
     args: meta.args,
     // Always the TUI's OWN legacy sandbox — Codex's implicit default, read from the launch's own
@@ -250,16 +255,15 @@ const GUARDED_TUI_DRIVERS: ReadonlySet<string> = new Set(["claude-code", "codex"
 async function withManagedWorktreeGuard(
   meta: SessionMeta,
   dependencies: Pick<AgentTuiLaunchDependencies, "provisionManagedWorktreeGuard">,
-  tracking: Pick<AgentTuiProviderHomeTracking, "markUnprovable">,
+  tracking: Pick<AgentTuiProviderHomeTracking, "markUnprovable" | "onProcess">,
   cwd?: string,
 ): Promise<{ meta: SessionMeta; guard?: ShellProcessLaunch["managedWorktreeGuard"] }> {
   if (!GUARDED_TUI_DRIVERS.has(meta.driver) || !meta.command) return { meta };
-  // A Codex guard enumerates the launch's hook inventory by running the Codex CLI, outside any
-  // boundary the runner can prove gone.
-  if (CODEX_TUI_DRIVERS.has(meta.driver)) tracking.markUnprovable();
   // Provisioning rewrites the launch arguments; durable metadata must not move under it.
   const prepared = { ...meta, args: [...meta.args] };
-  const guard = await dependencies.provisionManagedWorktreeGuard(prepared, cwd);
+  const guard = await dependencies.provisionManagedWorktreeGuard(prepared, cwd, {
+    onProcess: (proof) => tracking.onProcess(proof),
+  });
   if (guard.protections.length > 0 && !guard.guardActive) {
     throw new Error(
       "Native TUI is unavailable for this session: its managed worktree guard could not be " +

@@ -646,7 +646,10 @@ export class CodexAppServerDriver implements Driver {
     this.spawn = deps.spawn ?? spawnAgent;
     this.kill = deps.kill ?? killTree;
     this.readRolloutProof = deps.readRolloutProof ?? readCodexRolloutCompletedCommand;
-    this.deps = { permissionProfile: deps.permissionProfile ?? decideCodexPermissionProfile };
+    this.deps = { permissionProfile: deps.permissionProfile ? (launch) => {
+      launch.onProcess?.(Promise.resolve(false));
+      return deps.permissionProfile!(launch);
+    } : decideCodexPermissionProfile };
     this.initializationRequestTimeoutMs = deps.initializationRequestTimeoutMs ?? CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS;
     this.forkRequestTimeoutMs = deps.forkRequestTimeoutMs ?? CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS;
     this.archiveRequestTimeoutMs = deps.archiveRequestTimeoutMs ?? CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS;
@@ -879,11 +882,10 @@ export class CodexAppServerDriver implements Driver {
     // shape exempts servers the agent definition's own launch arguments declare (ADR 0011); the
     // preset's audited boundary keeps nothing but Wollipog's entry.
     const presetPermissions = this.config.permissionMode === "orchestrator";
-    // MCP inventory probing starts provider processes outside any boundary: no proof while it runs.
     // A review session (#3368) isolates every server, with no exemption: an empty `mcp_servers`
     // table does not remove servers from the user's or the checkout's configuration.
     const isolationArgs = presetPermissions || this.opts.orchestrator?.integrationIsolation === true || this.opts.review
-      ? await this.processes.untracked(() => codexOrchestratorMcpArgs(this.opts, this.cwd, {}, !presetPermissions && !this.opts.review,
+      ? await this.processes.observe((observer) => codexOrchestratorMcpArgs({ ...this.opts, ...observer }, this.cwd, {}, !presetPermissions && !this.opts.review,
         this.opts.review === true)) : [];
     if (this.disposed) throw new Error("session disposed before provider launch");
     // #1336: bind the permission profile to the mode this app-server starts under. A profile is
@@ -898,8 +900,8 @@ export class CodexAppServerDriver implements Driver {
     // `cancel()` advances `promptGeneration`; the per-prompt `cancelled` flag is NOT used, because
     // it can still be set from an earlier turn.
     const generationBeforeProof = this.promptGeneration;
-    // The probe runs outside any process boundary, so no proof can succeed while it runs.
-    const profile = !this.opts.hookStateDir ? null : await this.processes.untracked(() => this.deps.permissionProfile({
+    const profile = !this.opts.hookStateDir ? null : await this.processes.observe((observer) => this.deps.permissionProfile({
+      ...observer,
       command: this.opts.command,
       args: [...this.opts.args, ...isolationArgs],
       // Every turn sends its policy explicitly, so that is the legacy launch to reproduce.

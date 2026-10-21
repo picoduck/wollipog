@@ -593,7 +593,7 @@ export function supportedWslAgentControlNodeRuntime(
 }
 
 async function nativeProbe(k: KnownAgent, launch: ResolvedLaunch): Promise<{ version?: string; authStatus: AuthStatus }> {
-  const v = await run(launch.command, [...launch.args, "--version"], { timeoutMs: 5000 });
+  const v = await run(launch.command, [...launch.args, "--version"], { timeoutMs: 5000, trackDescendants: k.bin === "codex" });
   const version = v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined;
   const authStatus = k.authFile ? localAuthFileStatus(join(homedir(), k.authFile)) : "unknown";
   return { version, authStatus };

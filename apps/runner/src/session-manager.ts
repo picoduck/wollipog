@@ -4899,9 +4899,11 @@ export class SessionManager {
     // open for as long as a session does.
     this.agentTuiProviderHomeHandles++;
     let unprovable = false;
+    const processes: Promise<boolean>[] = [];
     let settled = false;
     return {
       markUnprovable: () => { unprovable = true; },
+      onProcess: (proof) => { processes.push(proof); },
       settle: async (tuiProven) => {
         if (settled) return;
         settled = true;
@@ -4909,10 +4911,10 @@ export class SessionManager {
         // During shutdown nothing is settled here: close() releases every reference after the
         // global reaping proof.
         if (this.shuttingDown) return;
-        // A preparation probe outside any boundary makes the whole launch unprovable; otherwise
-        // the TUI's own tree proof decides, and a launch that started no TUI process at all
-        // releases. Never pass an empty list for an unprovable launch: it would read as proven.
-        const proofs = unprovable ? [Promise.resolve(false)] : tuiProven === null ? [] : [Promise.resolve(tuiProven)];
+        // Every preparation probe and the TUI must prove its tree gone. A launch that started
+        // no TUI process needs only its probe proofs. Never let untracked work pass vacuously.
+        const proofs = unprovable ? [Promise.resolve(false)] :
+          [...processes, ...(tuiProven === null ? [] : [Promise.resolve(tuiProven)])];
         await this.settleProviderProcessReference(reference, proofs);
       },
     };
