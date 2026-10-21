@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -10,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../../control-plane/src/local-device-credential.js";
 import { linuxLeaseProcessProbe, proveLeaseAbandoned, type LeaseProcessEvidence } from "./provider-home-lease-evidence.js";
+import { agentControlFifoRelayBase, sweepAgentControlFifoRelays } from "./agent-control-fifo-relay.js";
 
 // Real control plane + real runner daemon + real mock-agent, end to end. This is the first test to
 // exercise the runner's transport/reconnect module (apps/runner/src/index.ts) against a live control
@@ -382,6 +383,16 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
           "the supervisor, launcher, and real daemon must be gone before deleting temporary state", 3_000);
         await killFixtureProcesses();
         await stopChild(controlPlane);
+        // SIGKILL can leave the runner's intentionally unlistable 0300 FIFO relay directories.
+        // After every owned process is gone, use the same targeted sweep as runner startup;
+        // ordinary rmSync cannot list these directories, even though this user owns them.
+        const fifoBase = agentControlFifoRelayBase(join(runnerDataDir, "agent-control"));
+        const fifoMode = existsSync(fifoBase) ? (lstatSync(fifoBase).mode & 0o777).toString(8) : null;
+        const removedFifos = sweepAgentControlFifoRelays(fifoBase);
+        assert.equal(existsSync(fifoBase), false, "stale FIFO relay permissions were settled before recursive removal");
+        if (stopMode === "supervisor-teardown") {
+          t.diagnostic(`forced teardown: recordedLiveProcesses=${[...supervisedCleanup.values()].filter((entry) => liveFixtureProcess(entry.pid, entry.startedAt)).length}, staleFifoMode=${fifoMode}, removedFifoChannels=${removedFifos}`);
+        }
         rmSync(temp, { recursive: true, force: true });
         cleaned = true;
       };
