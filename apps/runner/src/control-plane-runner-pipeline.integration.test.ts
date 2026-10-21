@@ -388,6 +388,7 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
         // ordinary rmSync cannot list these directories, even though this user owns them.
         const fifoBase = agentControlFifoRelayBase(join(runnerDataDir, "agent-control"));
         const fifoMode = existsSync(fifoBase) ? (lstatSync(fifoBase).mode & 0o777).toString(8) : null;
+        const gracefulFifoLeak = graceMs > 0 && runner?.exitCode === 0 && fifoMode !== null;
         const removedFifos = sweepAgentControlFifoRelays(fifoBase);
         assert.equal(existsSync(fifoBase), false, "stale FIFO relay permissions were settled before recursive removal");
         if (stopMode === "supervisor-teardown") {
@@ -395,6 +396,8 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "SIGK
         }
         rmSync(temp, { recursive: true, force: true });
         cleaned = true;
+        // Still clean up on failure, but never let the crash sweep hide a graceful-shutdown leak.
+        assert.equal(gracefulFifoLeak, false, "a gracefully exited runner must remove its FIFO relay base without the test sweep");
       };
       t.after(() => cleanup());
 
