@@ -28,6 +28,7 @@ import {
   WORKTREE_DESCENDANT_MARKER_ENV,
 } from "./posix-process-tree.js";
 import { currentProviderHomeRunnerMarker, PROVIDER_HOME_RUNNER_MARKER_ENV } from "./provider-home-lease-evidence.js";
+import { spawnWithLinuxCgroup, type LinuxCgroupBoundary } from "./linux-cgroup.js";
 import { quoteWindowsCmdToken } from "./windows-cmd.js";
 import {
   attachWslAgentControlBroker,
@@ -761,23 +762,30 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     );
   }
   let child: AgentProcess;
+  let containment: LinuxCgroupBoundary | undefined;
   try {
     if (opts.isolation?.backend === "container") {
       opts.isolation.verifyDefaults?.();
       opts.isolation.verifyRuntimeIdentity(launchEnv);
     }
-    child = spawn(file, args, {
+    const spawnOptions = {
       cwd,
       env: launchEnv,
       // Resolve .cmd/.bat shims on Windows; harmless on POSIX for our commands.
       shell,
-      stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // POSIX: make the agent a process-group leader so killTree can signal the whole
       // group — claude/codex spawn bash/tool children that a single-pid SIGTERM would
       // orphan. Windows uses taskkill /T; the WSL bridge has its own setsid+PGID reap.
       detached: !isWindows,
-    }) as AgentProcess;
+    };
+    if (ownsNativePosixDescendants) {
+      const launch = spawnWithLinuxCgroup(file, args, spawnOptions);
+      child = launch.child as AgentProcess;
+      containment = launch.containment;
+    } else {
+      child = spawn(file, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }) as AgentProcess;
+    }
   } catch (error) {
     disposeBridge?.();
     throw error;
@@ -803,7 +811,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     }
   });
   if (!isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false && child.pid) {
-    child.posixBoundary = new PosixProcessBoundary(child.pid, opts.descendantOwner, descendantMarker);
+    child.posixBoundary = new PosixProcessBoundary(child.pid, opts.descendantOwner, descendantMarker, undefined, undefined, containment);
     child.once("exit", () => child.posixBoundary?.markRootExited());
   }
   if (wslReap) child.wslReap = wslReap;
@@ -900,12 +908,12 @@ export function terminateDescendantBoundariesAfterPendingKills(): void {
 
 /** True when `child`'s process tree is gone by the same standard runner shutdown uses before it
  * releases every provider-HOME lease: the POSIX boundary terminated every process it tracks
- * (parent links plus the inherited environment marker) and found no survivor. It is idempotent,
+ * (a joined Linux cgroup when available, otherwise parent links and the environment marker) and
+ * found no survivor. It is idempotent,
  * so a boundary already terminated on close returns that result.
  *
- * Known limit, shared with shutdown: a helper that detaches with a scrubbed environment before its
- * parent link is observed, or whose environment cannot be read, is invisible to that tracking.
- * Closing it needs kernel containment (a Linux subreaper or cgroup).
+ * Without Linux cgroup containment, a helper that detaches with a scrubbed environment before its
+ * parent link is observed, or whose environment cannot be read, can be invisible to tracking.
  *
  * Without a boundary (Windows, WSL, remote or untracked spawns) only the root's exit is
  * observable, which is not a tree proof, so the answer is false. */

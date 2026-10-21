@@ -278,9 +278,122 @@ Short-lived provider processes release their reference once their process tree i
 - Codex subscription-usage probes;
 - session-naming helpers.
 
-Each process reports a proof when it finishes. The proof is true only when the process's POSIX boundary terminated every process it tracks and found no survivor. The boundary tracks processes through parent links and the inherited environment marker. The consumer releases its reference only if every proof is true. A run that started no process also releases.
+Each process reports a proof when it finishes. The proof is true only when the process's POSIX
+boundary terminated its descendants and found no survivor. On Linux with delegated cgroup v2
+containment, this is the kernel's recursive empty-boundary proof described below. Otherwise the
+boundary tracks processes through parent links and the inherited environment marker. The consumer
+releases its reference only if every proof is true. A run that started no process also releases.
 
-This is the same proof runner shutdown already relies on before releasing every lease, so early release is exactly as strong as shutdown release. It shares one known limit. A helper that detaches with a scrubbed environment before its parent link is observed, or whose environment cannot be read, is invisible to the boundary. Closing that gap needs kernel containment, such as a Linux subreaper or cgroup.
+This is the same proof runner shutdown relies on before releasing every lease, so early release is
+exactly as strong as shutdown release. On macOS and Linux without containment, a helper that detaches
+with a scrubbed environment before its parent link is observed, or whose environment cannot be read,
+can remain invisible to that observational boundary. macOS has no cgroup equivalent here and keeps
+that limit; it does not claim the Linux containment standard.
+
+### Linux Process Containment
+
+The runner resolves its current cgroup through `/proc/self/cgroup` and `/proc/self/mountinfo`.
+Write permission alone never proves delegation. Before creating anything, the fixed helper checks
+systemd's documented `user.delegate=1` xattr on the nearest containing service/scope. Systemd's
+user manager (including version 255) does not set this marker on its units. When it is absent, a
+bounded, read-only `/usr/bin/systemctl --user show` query must report a loaded unit with
+`Delegate=yes` and a `ControlGroup` exactly matching that nearest unit's hierarchy path. The query
+uses the runner user's runtime bus and never enables delegation. It cannot substitute an ancestor
+or a same-named unit elsewhere. The runner never inherits the user manager's delegation across a
+non-delegated child scope. A unit hidden above a namespaced mount cannot be attested. Non-systemd
+trees require an explicit delegation marker on the current cgroup; arbitrary writable trees are
+unsupported. The marker requires systemd 251+ and kernel 5.6+; the user-manager query also supports
+delegated user units without that marker. Absent or unreadable evidence (including an unavailable
+user bus or systemctl) reports `cgroup-not-delegated` and performs no cgroup writes. See
+[systemd's delegation contract](https://systemd.io/CGROUP_DELEGATION/) and its
+[unit properties](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html).
+
+Inside that declared delegation, the runner creates one randomly named instance parent below its
+current cgroup and one leaf per native provider launch. It never moves the runner, changes
+controllers, enables delegation, or creates a service/scope for itself. An operator must start it
+in an appropriately delegated unit; changing the hosting installation is a separate operation.
+Cgroup v2 with writable `cgroup.procs`, `cgroup.kill` (Linux 5.14+) and readable `cgroup.events`,
+plus an executable fixed helper, is required. A read-only mount, missing delegation, unsupported
+kernel or unavailable helper chooses the existing marker/parent-link proof
+for that runner instance. Once cgroups are chosen, subsequent preparation failures refuse launch
+instead of silently weakening that instance's containment claim.
+
+The statically linked native launcher inherits an already-open cgroup directory as fd 3, verifies
+its filesystem, writes itself into `cgroup.procs`, acknowledges admission on a private fd 4 pipe,
+closes those descriptors, and only then executes the provider. A separate close-on-exec fd 5
+reports exec errno so callers still receive `ChildProcess` errors such as `ENOENT` and `EACCES`
+before `close`. The launcher really spawns, so its `pid`, `spawn` and `exit` remain observable even
+on provider exec failure; consumers must settle failure once across `error` and `close`.
+No shell startup or provider code can
+fork before joining. A join failure exits without executing the provider. Cleanup waits for the
+admission acknowledgement, so an empty leaf while the launcher is still waiting to join never
+counts as a tree-gone proof. A waiter's timeout never erases a late acknowledgement. Uncertain
+admission retains an unproved result but still ends the unreaped launcher and kills its own cgroup.
+The helper is staged under temporary storage with a runner-data-directory fallback for noexec
+mounts. A removed temporary copy is safely restaged from the fixed asset; changed existing copies
+still fail verification.
+
+Both `PosixProcessBoundary.releaseIfEmpty()` and `terminate()` use the same open-descriptor-backed
+cgroup identity. Non-killing release requires recursive `cgroup.events` `populated=0`. Termination
+first sends TERM/CONT to cgroup members using pidfds, including retained setsid work after the root
+exits. It gives them two seconds, then uses recursive `cgroup.kill` for survivors and waits for the
+same empty state; successful signal delivery alone is insufficient. The bounded TERM helper checks
+membership after opening each pidfd, so PID reuse cannot authorize an unrelated signal; missing
+or unreadable membership skips grace for that process, never final kernel cleanup. It reads no
+environment or unrelated process listing, so setsid,
+double-forking, environment scrubbing, non-dumpability and PID reuse cannot hide ordinary descendants
+or implicate unrelated same-user processes. Kernel survivor termination is SIGKILL; drivers'
+existing EOF grace happens before this cleanup.
+A missing, replaced or unreadable boundary retains the
+lease. Empty leaves are removed where possible; populated boundaries survive runner exit.
+
+This is lifecycle containment, not a security boundary against a same-user process deliberately
+moving itself to another writable cgroup. Existing provider isolation remains responsible for
+hostile code. The runner neither installs a process-wide subreaper nor adopts responsibility for
+unrelated orphans.
+
+`provider_process_containment` logs fixed `proofStandard` and `reason` values without HOME paths or
+environment contents. `providerContainmentStatus()` exposes the instance's selected standard;
+each POSIX boundary also exposes its own `proofStandard` and optional `containmentIdentity`.
+`providerContainmentIdentity()` initializes and exposes the instance parent's identity before a
+future lease acquisition: `{ kind: "linux-cgroup-v2", bootId, mountRoot, cgroupPath, inode }`.
+`cgroupPath` is relative to the cgroup2 mount and `mountRoot` identifies that mount's hierarchy root;
+the boot UUID and decimal inode distinguish reboot and path reuse without trusting a runner PID.
+Per-launch identities have the same shape. These are internal typed values, not a protocol change.
+
+Coverage is native Linux launches through `spawnAgent` with `trackDescendants` enabled: Codex exec
+and app-server, Pi, Claude one-shot/persistent/resume/fork probes, ACP agents and client terminals,
+session and temporary fork providers, provider sign-in, account status/switch commands,
+subscription-usage and naming helpers, and Agent TUIs and managed-worktree shells. The protected
+Claude namespace's outer bwrap launch joins a leaf too; its control protocol still preserves the
+existing graceful namespace proof, and disposal additionally proves its cgroup empty. Closed
+namespaces with surviving members remain registered for shutdown. The native helper/compiler and
+host utilities are not providers and are not placed in these leaves. Explicitly untracked spawns,
+WSL, Windows, container and cloud launches retain their existing proof rules. Codex's direct hook,
+permission-profile and MCP inventory probes still require #3340 to route them through the compatible
+`spawnAgent`/`trackDescendants` API.
+
+The lease journal format and ownership authority are unchanged in #3275. Boundary identity
+persistence, verification by a replacement runner, migration of old records and SSH-independent
+abandoned-lease recovery belong to #3584 after #3340. This release alone therefore does not change
+the abandoned-lease process scan or resolve an unreadable unrelated SSH process blocking recovery.
+
+`linux-cgroup.test.ts` covers admission races, fallback diagnostics/API compatibility, failed or
+unverifiable cleanup and the shared early-release/shutdown proof without process scans. Its native
+fixtures double-fork, call setsid, clear their environment and optionally become non-dumpable; the
+real delegated-cgroup cases re-exec with an empty environment (clearenv alone does not change
+`/proc/pid/environ`), assert they are dead before proof, verify a retained helper's TERM handler, and
+leave an unrelated process alive. A six-second blocked-loop case covers queued admission.
+Those cases explicitly skip where delegation is unavailable. Set `WOLLIPOG_TEST_REQUIRE_CGROUP=1`
+for validation on a delegated Linux host to make unavailable containment fail instead of skipping.
+The required Linux CI job launches this suite as the ordinary test user in two transient
+`Delegate=yes` services, one owned by the system manager and one by the user manager, with this
+flag set. Both have bounded runtimes and are collected on completion. CI therefore exercises the
+marker and user-manager evidence paths without relying on the job's original unit delegation.
+The user-manager run additionally sets `WOLLIPOG_TEST_EXPECT_USER_MANAGER_QUERY=1`. In that test
+process only, the initial marker probe is treated as absent and the test requires an actual
+systemctl query to establish containment. All cgroup operations stay real. This preserves query
+coverage even if a future user manager starts setting the marker; production detection is unchanged.
 
 A surviving, unknown or unprobeable descendant keeps the reference until shutdown. So does a spawn without a POSIX boundary, where only the root's exit is observable: native Windows (whose kill-on-close Job is not verified), WSL, and remote spawns.
 

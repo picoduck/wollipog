@@ -86,6 +86,13 @@ if (process.platform === "linux") {
   console.log("compiled Claude provider pipe helper ->", claudePipeHelper);
 }
 
+// Native Linux providers join their cgroup before any provider code executes.
+const cgroupLaunchHelper = join(buildDir, "linux-cgroup-launch");
+if (process.platform === "linux") {
+  execFileSync("/usr/bin/cc", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", "-static",
+    join(runner, "native", "linux-cgroup-launch.c"), "-o", cgroupLaunchHelper], { stdio: "inherit" });
+}
+
 // Stop here when only validating the bundle (CI / quick check).
 if (process.argv.includes("--bundle-only")) {
   console.log("bundle-only: skipping SEA packaging");
@@ -98,6 +105,7 @@ const blob = join(buildDir, "runner.blob");
 const assets = { "wollipog/provider-home-lease-worker-hrtime-ns-v1": leaseWorker };
 if (process.platform === "linux" || process.platform === "darwin") assets["wollipog/provider-home-lease-io"] = leaseIoHelper;
 if (process.platform === "linux") assets["wollipog/claude-provider-pipe"] = claudePipeHelper;
+if (process.platform === "linux") assets["wollipog/linux-cgroup-launch"] = cgroupLaunchHelper;
 if (process.platform === "darwin") {
   const helper = join(buildDir, "macos-skill-snapshots");
   execFileSync("/usr/bin/clang", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror",
