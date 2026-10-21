@@ -2118,6 +2118,14 @@ button.status { cursor: pointer; }
   gap: var(--space-2);
   margin-top: var(--space-1);
 }
+/* Show Details leading the row (the notice's only action) bleeds its ghost inset and edge, so its
+   label lines up with the sentence above it, as a bordered resolving action's edge already does
+   (#3511). A compact notice's sentence grows into the bleed while the row sits beside it, so the
+   toggle stays at the trailing edge until the row wraps under the sentence. A page banner's
+   sentence does not grow, so its row keeps its gap. */
+.notice:not(.page-banner) > .notice-content > .notice-actions > .notice-details-toggle:first-child {
+  margin-inline-start: calc(-1 * (var(--space-2) + 1px));
+}
 .notice-dismiss { margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1) 0 0; }
 .notice-head .notice-dismiss { margin: 0 calc(var(--space-2) * -1) 0 0; }
 /* One line for field-group and composer notices: icon, sentence, one trailing action. */
@@ -16901,11 +16909,6 @@ button.review-finding-location {
   padding-top: var(--space-6);
 }
 .automation-editor-form > .section { gap: var(--space-4); }
-/* The save failure's Show Details is its notice's only action, so its label lines up with the
-   sentence above it: an optical bleed of the ghost button's inset and edge, inside the notice. */
-.automation-editor-failure .notice-actions > .notice-details-toggle:first-child {
-  margin-inline-start: calc(-1 * (var(--space-2) + 1px));
-}
 .automation-editor-form textarea { resize: vertical; }
 /* When to Run (#2971; docs/design-system.md §8.1, §8.4, §9.1, §9.2, §11.3). Schedule is a monospace
    cron field with its Examples menu button at the trailing edge, then the helper (or the error that

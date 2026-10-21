@@ -5,6 +5,7 @@ import { FieldWarning } from "../components/FieldWarning.js";
 import { FeedbackProvider, useFeedback } from "../components/FeedbackProvider.js";
 import { CopyButton } from "../components/common.js";
 import { OneLineCodeWell } from "../components/OneLineCodeWell.js";
+import { Notice } from "../components/Notice.js";
 import { DetailBar } from "../components/PageHeader.js";
 import { SaveBar } from "../components/SaveBar.js";
 import "../styles.css";
@@ -29,6 +30,9 @@ import "../styles.css";
  * `?view=code-well` shows instead `OneLineCodeWell` (#2950, §11.7) with a short value and a
  * 400-character one, each in a `.field` with its label above, beside a wrapping `.code-well` holding
  * the same long value.
+ * `?view=notices` shows instead the notice action row's shapes (#3511, §13.2): Show Details as the
+ * only action, untitled and titled; a row led by a bordered Retry; and a compact notice, whose row
+ * sits beside its sentence. Each is a `.notice` whose `data-state` names its shape.
  * `?theme=light` switches theme.
  */
 
@@ -166,6 +170,28 @@ function CodeWells() {
   );
 }
 
+const GIT_DETAILS = "fatal: not a git repository (or any of the parent directories): .git";
+
+function NoticeRows() {
+  return (
+    <div style={{ display: "grid", gap: 16, maxWidth: 560, margin: "0 auto" }}>
+      <Notice tone="danger" dataState="details-only" details={GIT_DETAILS}>
+        Couldn't load the Git status for this worktree.
+      </Notice>
+      <Notice tone="danger" dataState="titled-details-only" title="Couldn't Start the Run" details={GIT_DETAILS}>
+        The server couldn't start this run. Try again.
+      </Notice>
+      <Notice tone="danger" dataState="retry-first" title="Couldn't Load Approvals"
+        actions={<button type="button" className="btn sm">Retry</button>} details={GIT_DETAILS}>
+        Check your connection and try again.
+      </Notice>
+      <Notice tone="warning" dataState="compact" compact details={GIT_DETAILS}>
+        This field couldn't be checked.
+      </Notice>
+    </div>
+  );
+}
+
 function Harness() {
   const params = new URLSearchParams(window.location.search);
   document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -176,6 +202,13 @@ function Harness() {
           <ConfirmingDetailBar />
         </div>
       </FeedbackProvider>
+    );
+  }
+  if (params.get("view") === "notices") {
+    return (
+      <div style={{ minHeight: "100vh", padding: 24, background: "var(--bg)" }}>
+        <NoticeRows />
+      </div>
     );
   }
   if (params.get("view") === "code-well") {
