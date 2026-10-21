@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { spawnSync } from "@wollipog/test-support/bounded-child-process";
+import { interceptSpawnSyncForTest, spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import fs from "node:fs";
@@ -12,7 +12,6 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentIdentity, providerContainmentStatus, systemdUserDelegationReply, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
 import { linuxCgroupHelper, stageLinuxCgroupHelper } from "./linux-cgroup-helper.js";
-import { installDelegationProbeFixture } from "./fixtures/linux-cgroup-delegation-fixture.js";
 import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { provenProcessTreeExit, ProviderProcessLedger, spawnAgent, waitForPendingKills } from "./spawn.js";
 
@@ -144,10 +143,9 @@ test(`${scenario} retains the marker/parent-link API and reports fallback before
   const module = new URL("./linux-cgroup.ts", import.meta.url).href;
   const helperModule = new URL("./linux-cgroup-helper.ts", import.meta.url).href;
   const spawnModule = new URL("./spawn.ts", import.meta.url).href;
-  const fixtureModule = new URL("./fixtures/linux-cgroup-delegation-fixture.ts", import.meta.url).href;
   const code = `
     import fs from 'node:fs';
-    import {installDelegationProbeFixture} from ${JSON.stringify(fixtureModule)};
+    import {interceptSpawnSyncForTest} from '@wollipog/test-support/bounded-child-process';
     import os from 'node:os';
     import path from 'node:path';
     import { syncBuiltinESMExports } from 'node:module';
@@ -163,7 +161,7 @@ test(`${scenario} retains the marker/parent-link API and reports fallback before
     const userUnit = ${scenario.startsWith("user-")};
     const membership = userUnit ? '/runner.scope/worker' : '/';
     let queries = 0;
-    const restoreSpawn = installDelegationProbeFixture((file,args,options) => {
+    const restoreSpawn = interceptSpawnSyncForTest((file,args,options) => {
       if (args[0] === '--delegation-probe') return {status:${scenario === "marked" ? 0 : 3}};
       if (file === '/usr/bin/systemctl') {
         queries++;
@@ -239,11 +237,11 @@ test("user-manager native validation exercises the real query even if a delegati
   skip: process.platform !== "linux" || process.env.WOLLIPOG_TEST_EXPECT_USER_MANAGER_QUERY !== "1",
 }, (t) => {
   let queries = 0;
-  const restoreSpawn = installDelegationProbeFixture((file, args) => {
+  const restoreSpawn = interceptSpawnSyncForTest((file, args) => {
     // Only the marker's absence is simulated. The actual systemctl query, manager reply,
     // directory identity, writes and all later contained launches remain real kernel I/O.
     if (args[0] === "--delegation-probe") {
-      return { pid: 0, output: [null, null, null], stdout: null, stderr: null, status: 3, signal: null };
+      return { pid: 0, output: [null, "", ""], stdout: "", stderr: "", status: 3, signal: null };
     }
     if (file === "/usr/bin/systemctl") queries++;
     return undefined;
