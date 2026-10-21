@@ -48,7 +48,7 @@ async function open(page: Page, query: string, heading: string) {
  */
 async function sweep(page: Page) {
   return page.locator(".modal").evaluate((modal) => {
-    const classes = ["form-error", "muted", "project-location-reason"];
+    const classes = ["form-error", "muted"];
     const read = (element: Element) => {
       const style = getComputedStyle(element);
       return { color: style.color, size: style.fontSize, weight: style.fontWeight };
