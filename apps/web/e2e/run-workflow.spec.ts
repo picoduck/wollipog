@@ -8,7 +8,13 @@ import { expect, test, type Page } from "@playwright/test";
  * its label and padding.
  */
 
+// A fixed local wall clock that does not move, so the fixture's times and the page's relative words
+// agree: a retry's "in 4 minutes" counts clock minutes, and a live clock that crossed one between the
+// fixture's load and the render read "in 3 minutes".
+const NOW = new Date(2026, 8, 22, 10, 30, 15);
+
 async function open(page: Page, state: "gate" | "ready" | "retry" | "one") {
+  await page.clock.setFixedTime(NOW);
   await page.goto(`/run-workflow-e2e.html?state=${state}`);
   await expect(page.getByRole("heading", { level: 1, name: "Add backoff to webhook retries" })).toBeVisible();
   await expect(page.locator(".wf-panel")).toBeVisible();
@@ -90,7 +96,7 @@ test.describe("at 1440×900", () => {
     await open(page, "retry");
     const retry = page.getByRole("button", { name: "Retry Builder" });
     await expect(retry).toBeDisabled();
-    await expect(page.locator(".wf-panel-reason")).toHaveText(/^Available at \d{1,2}:\d{2}\s?[AP]M, in 4 minutes$/u);
+    await expect(page.locator(".wf-panel-reason")).toHaveText(/^Available at 10:34\s?AM, in 4 minutes$/u);
     await expect(page.getByText(/just now/u)).toHaveCount(0);
   });
 
