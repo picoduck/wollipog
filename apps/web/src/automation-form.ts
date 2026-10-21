@@ -581,6 +581,8 @@ export interface TimeZoneChoice {
   value: string;
   label: string;
   description: string;
+  /** The zone's old name, where it was renamed, so a search for either finds it. */
+  keywords?: readonly string[];
 }
 
 /** The zones this browser knows, or none when it cannot list them. */
@@ -616,25 +618,59 @@ function zoneCity(timeZone: string): string {
 }
 
 /**
+ * The renamed zones ICU still lists under their old name, as Node and Chromium do, each with its
+ * current IANA name ("Asia/Calcutta" → "Asia/Kolkata"): tzdata's backward links whose target is the
+ * same place renamed or respelled, not a neighbouring city that shares its clock.
+ */
+const CURRENT_ZONE_NAMES: ReadonlyMap<string, string> = new Map([
+  ["Africa/Asmera", "Africa/Asmara"],
+  ["America/Buenos_Aires", "America/Argentina/Buenos_Aires"],
+  ["America/Catamarca", "America/Argentina/Catamarca"],
+  ["America/Cordoba", "America/Argentina/Cordoba"],
+  ["America/Godthab", "America/Nuuk"],
+  ["America/Indianapolis", "America/Indiana/Indianapolis"],
+  ["America/Jujuy", "America/Argentina/Jujuy"],
+  ["America/Louisville", "America/Kentucky/Louisville"],
+  ["America/Mendoza", "America/Argentina/Mendoza"],
+  ["Asia/Calcutta", "Asia/Kolkata"],
+  ["Asia/Katmandu", "Asia/Kathmandu"],
+  ["Asia/Rangoon", "Asia/Yangon"],
+  ["Asia/Saigon", "Asia/Ho_Chi_Minh"],
+  ["Atlantic/Faeroe", "Atlantic/Faroe"],
+  ["Europe/Kiev", "Europe/Kyiv"],
+  ["Pacific/Enderbury", "Pacific/Kanton"],
+  ["Pacific/Ponape", "Pacific/Pohnpei"],
+  ["Pacific/Truk", "Pacific/Chuuk"],
+]);
+
+/** Each renamed zone's old name, by its current one. */
+const OLD_ZONE_NAMES: ReadonlyMap<string, string> = new Map([...CURRENT_ZONE_NAMES].map(([old, current]) => [current, old]));
+
+/** A zone's current IANA name: its renamed spelling's, else its own, without surrounding spaces. */
+function currentZoneName(timeZone: string): string {
+  const name = timeZone.trim();
+  return CURRENT_ZONE_NAMES.get(name) ?? name;
+}
+
+/**
  * The Time Zone field's choices (#2971): every zone the browser lists, labelled by city and current
  * offset, with the IANA name as the second line, in alphabetical order. UTC and the stored zone are
  * always among them, so a zone this browser does not list (or an alias) stays chosen, and a browser
- * with no list still offers the stored zone and UTC. A stored zone spelled with spaces around a
- * listed one takes that one's place, so it stays chosen and reads as the zone it is.
+ * with no list still offers the stored zone and UTC. A zone the browser lists by an old name reads
+ * as its current one ("Asia/Calcutta" as Kolkata, Asia/Kolkata) and a search for either finds it.
+ * A stored zone that is a listed one spelled with spaces or by its other name takes that one's
+ * place, so it stays chosen as saved and reads as the zone it is.
  */
 export function timeZoneChoices(stored: string, now: number, zones: readonly string[] = browserTimeZones()): TimeZoneChoice[] {
-  const values = new Set(zones);
-  values.add("UTC");
-  const storedName = stored.trim();
-  if (storedName) {
-    values.delete(storedName);
-    values.add(stored);
-  }
-  return [...values].map((value) => {
-    const name = value.trim();
-    const offset = utcOffsetLabel(name, now);
+  const values = new Map(zones.map((zone) => [currentZoneName(zone), zone]));
+  if (!values.has("UTC")) values.set("UTC", "UTC");
+  if (stored.trim()) values.set(currentZoneName(stored), stored);
+  return [...values].map(([name, value]): TimeZoneChoice => {
+    const offset = utcOffsetLabel(value.trim(), now);
     const city = name === "UTC" ? "UTC" : zoneCity(name);
-    return { value, label: offset && name !== "UTC" ? `${city} (${offset})` : city, description: name };
+    const label = offset && name !== "UTC" ? `${city} (${offset})` : city;
+    const old = OLD_ZONE_NAMES.get(name);
+    return old ? { value, label, description: name, keywords: [old] } : { value, label, description: name };
   }).sort((a, b) => a.label.localeCompare(b.label, "en") || a.value.localeCompare(b.value, "en"));
 }
 
