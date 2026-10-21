@@ -4295,6 +4295,7 @@ function shutdown(exitCode = 0): void {
     CLAUDE_GRACEFUL_STOP_BUDGET_MS + DESCENDANT_BOUNDARY_TERMINATION_BUDGET_MS + 500,
   )
     .then(async (processTreesReaped) => {
+      await sessions.retireReviewWritersAfterShutdown();
       // Never let a throw here skip the exit. Only release the lease when session cleanup completed
       // cleanly AND every tracked process tree was reaped; otherwise retain it (fail closed) so a
       // possibly-still-alive provider cannot share its HOME with a replacement runner.

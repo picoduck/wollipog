@@ -2036,7 +2036,7 @@ export class SessionManager {
    * capability. Agent TUIs are checked separately; human terminals are the operator boundary. */
   codexReviewerProtection(home = homedir()): import("./review-trust.js").CodexReviewerProtection {
     const retainedWriter = this.reviewWriters.sessions()[0];
-    if (retainedWriter) return { home, refusal: `Codex packages are unprotected from session ${retainedWriter}. Close its process tree or have the operator reconcile retained unprotected-agent-writers evidence.` };
+    if (retainedWriter) return { home, refusal: `Codex packages are unprotected from session ${retainedWriter}. Close its complete process tree and retry after runner restart. Legacy, partial, or unprovable unprotected-agent-writers records require the operator to stop the runner, independently prove the tree gone, and remove only that record.` };
     const packages = join(home, ".codex", "packages");
     let canonical: string;
     try { canonical = realpathSync(packages); } catch { return { home, refusal: "Codex packages cannot be resolved" }; }
@@ -17578,6 +17578,30 @@ export class SessionManager {
    * runner process removes its marked locks before deleting anything. */
   drainWorktreeRefDeletions(timeoutMs: number): Promise<boolean> {
     return this.refDeletionLocks.drain(timeoutMs);
+  }
+
+  /** Run after the global kill drain, so exact driver proofs preserve graceful EOF.
+   * Never infer a writer's exit from the global result: failed launches and untracked processes
+   * may have no registered kill. A bounded wait keeps shutdown finite; unresolved markers stay. */
+  async retireReviewWritersAfterShutdown(deadlineMs = 2_000): Promise<void> {
+    if (!this.shuttingDown) throw new Error("writer retirement requires shutdown");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const proofs = [...this.driverReviewWriterTokens].map(async ([client, token]) => {
+      try {
+        const proven = await client.proveProcessTreeExit?.({ terminate: true });
+        if (this.reviewWriters.retire(token, proven === true) && this.driverReviewWriterTokens.get(client) === token) {
+          this.driverReviewWriterTokens.delete(client);
+        }
+      } catch { /* A missing, throwing, rejected or unfinished proof keeps its marker. */ }
+    });
+    try {
+      await Promise.race([
+        Promise.all(proofs),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, deadlineMs)); }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree
