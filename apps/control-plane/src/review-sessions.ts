@@ -154,6 +154,17 @@ export class ReviewSessions {
     return this.sql.prepare("SELECT * FROM review_sessions WHERE review_session_id=?").get(reviewSessionId) as Row | undefined;
   }
 
+  sessionIds(runnerId?: string, includeArchived = false): string[] {
+    return (this.sql.prepare(`SELECT r.review_session_id FROM review_sessions r JOIN sessions s ON s.id=r.review_session_id
+      WHERE ${includeArchived ? "1" : "s.archived=0"} ${runnerId ? "AND r.runner_id=?" : ""}`)
+      .all(...(runnerId ? [runnerId] : [])) as Array<{ review_session_id: string }>).map(row => row.review_session_id);
+  }
+
+  forRequester(requesterSessionId: string): string[] {
+    return (this.sql.prepare("SELECT review_session_id FROM review_sessions WHERE requester_session_id=?")
+      .all(requesterSessionId) as Array<{ review_session_id: string }>).map(row => row.review_session_id);
+  }
+
   /** The requester's active review session, if any. */
   activeFor(requesterSessionId: string): string | null {
     const row = this.sql.prepare(`SELECT review_session_id FROM review_sessions WHERE requester_session_id=? AND state IN ${ACTIVE}`)

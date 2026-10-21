@@ -172,7 +172,8 @@ export class CampaignBudgetLedger {
         SELECT s.id, s.status, MAX(s.cost_usd,s.usage_peak_cost_usd) AS cost,
           MAX(s.usage_peak_tool_calls,COALESCE((SELECT tool_calls FROM session_tool_call_counts WHERE session_id=s.id),0)
             +s.history_pruned_tool_calls) AS tools, s.history_pruned_tool_calls AS pruned_tools,
-          s.cost_budget_usd AS cost_limit, s.max_tool_calls AS tool_limit FROM sessions s JOIN members m ON s.id=m.id`).all(rootId) as unknown as
+          s.cost_budget_usd AS cost_limit, s.max_tool_calls AS tool_limit FROM sessions s JOIN members m ON s.id=m.id
+          WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=s.id)`).all(rootId) as unknown as
           Array<{ id: string; status: string; cost: number; tools: number; pruned_tools: number; cost_limit: number | null; tool_limit: number | null }>;
       for (const m of members) {
         // Tool calls whose events retention pruned are recorded, not missing history (#2777).

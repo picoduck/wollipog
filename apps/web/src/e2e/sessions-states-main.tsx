@@ -37,6 +37,7 @@ import "../styles.css";
  */
 const SCOPE = "sessions-states-e2e";
 const STATE = new URLSearchParams(location.search).get("state") ?? "sessions";
+const REVIEW_CHILDREN = STATE === "review-children" || STATE === "review-legacy" || STATE === "review-disposed";
 const NOW = Date.now();
 
 const studio: RunnerView = {
@@ -119,6 +120,24 @@ let sessions: SessionView[] = STATE === "sessions" ? Array.from({ length: 5 }, (
   : STATE === "no-project" ? [session(0), session(1)]
   : [];
 
+// The real Shell with review-session metadata, including the rows startup reconciliation repairs.
+if (REVIEW_CHILDREN) {
+  const requester = { ...session(0), title: "Guard Empty Carts at Checkout", reviewRuns: { count: 2, active: STATE === "review-disposed" ? 0 : 1, updatedAt: 1 } };
+  const legacy = STATE === "review-legacy";
+  sessions = [requester, ...[0, 1].map(index => ({
+    ...session(index + 1), id: `review-${index}`, title: "Claude Review of acme/shop#42", kind: "review" as const,
+    agentId: "claude", agentName: "Claude", driver: "claude-code" as const, updatedAt: NOW, lastEventAt: NOW,
+    projectId: legacy ? null : requester.projectId,
+    parentSessionId: legacy ? null : requester.id,
+    status: index === 0 && STATE !== "review-disposed" ? "running" as const : "stopped" as const,
+    archived: !legacy && (index === 1 || STATE === "review-disposed"),
+    review: { requesterSessionId: requester.id, pullRequest: { repository: "acme/shop", number: 42 }, headSha: "a".repeat(40), reviewer: "claude-code" as const },
+  }))];
+  projects[0]!.activeSessionCount = 1;
+  projects[0]!.unarchivedSessionCount = legacy || STATE === "review-disposed" ? 1 : 2;
+  projects[0]!.totalSessionCount = legacy ? 1 : 3;
+}
+
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
@@ -133,7 +152,7 @@ function snapshot(): UiSnapshotMessage {
     runners: [structuredClone(studio)],
     boxes: [],
     projects: structuredClone(projects),
-    sessions: structuredClone(sessions),
+    sessions: structuredClone(sessions.filter(value => !value.archived)),
     reminders: [],
     runs: [],
     pods: [],
@@ -202,7 +221,7 @@ const client = {
   // Guided HTTPS setup has its own suite backed by a disposable control plane.
   remoteAccess: async () => { throw new ApiError("Remote access is not supported by this fixture.", 404); },
   listSkills: async () => ({ skills: [] }),
-  listSessions: async () => ({ sessions: structuredClone(sessions) }),
+  listSessions: async () => ({ sessions: structuredClone(sessions.filter(value => !value.archived)) }),
   session: async (id: string) => {
     const value = sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
@@ -215,6 +234,12 @@ const client = {
   reviewFindings: async () => ({ findings: [], summary: {
     total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete",
   } }) as never,
+  reviewSessions: async () => ({ reviews: sessions.filter(value => value.kind === "review").map(value => ({
+    ...value.review!, reviewSessionId: value.id, state: value.status === "running" ? "running" : "failed",
+    terminal: value.status !== "running", round: null, validated: false, verdict: null, findings: [], stale: false,
+    output: null, outputTruncated: false, reason: value.status === "running" ? null : "the review could not be completed; see the runner log",
+    cancelRequested: false, continuation: value.status === "running" ? null : "delivered", createdAt: 1, updatedAt: 1,
+  })), nextAfterReviewSessionId: null }),
 } as unknown as ApiClient;
 
 const navigation: ViewNavigation = {

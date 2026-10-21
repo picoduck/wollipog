@@ -448,6 +448,18 @@ test("sortInboxSessions keeps a family together, placed by its strongest member,
   assert.deepEqual(pinnedChild.map(({ id }) => id), ["parent", "child", "lone"], "a pinned child promotes its whole family above unpinned input");
 });
 
+test("review sessions are children of their requester and never promoted when the requester is filtered out", () => {
+  const parent = session("requester", { status: "running" });
+  const review = session("review", { kind: "review", parentSessionId: parent.id, status: "running" });
+  assert.deepEqual(sortInboxSessions([review, parent]).map(s => s.id), [parent.id, review.id]);
+  const rows = threadInboxRows([{ session: review }, { session: parent }], new Set());
+  assert.deepEqual(rows.map(row => [row.session.id, row.thread.depth]), [[parent.id, 0], [review.id, 1]]);
+  assert.equal(rows[0]!.thread.children!.count, 1);
+  assert.deepEqual(sortInboxSessions([review]), [], "a filtered or archived requester cannot leave a top-level reviewer");
+  assert.deepEqual(threadInboxRows([{ session: review }], new Set()), []);
+  assert.deepEqual(sortInboxSessions([session("legacy-review", { kind: "review" })]), [], "unreconciled old rows stay hidden");
+});
+
 test("inboxPinnedAncestorIds finds every present ancestor without treating it as directly pinned", () => {
   const sessions = [
     session("parent"),

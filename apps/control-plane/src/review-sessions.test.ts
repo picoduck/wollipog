@@ -84,7 +84,7 @@ function harness(options: {
     assert.ok(result.ok, result.error ?? "campaign authorization refused");
     sent.length = 0;
   };
-  return { db, svc, sent, starts, metadata, enableCampaign, setOnline: (value: boolean) => { online = value; },
+  return { db, svc, hub, sent, starts, metadata, enableCampaign, setOnline: (value: boolean) => { online = value; },
     setDeliver: (value: boolean) => { deliver = value; } };
 }
 
@@ -142,8 +142,10 @@ test("a session requests a review session: a typed reviewer of the other family,
     assert.deepEqual(reviewSession.review, {
       requesterSessionId: "s1", pullRequest: { repository: "picoduck/wollipog", number: 3368 }, headSha: HEAD, reviewer: "codex",
     });
-    // Not a child: no delegation slot, charge or descendant authority.
-    assert.equal(reviewSession.parentSessionId ?? null, null);
+    // Display child only: no delegation slot, charge or campaign membership.
+    assert.equal(reviewSession.parentSessionId, "s1");
+    assert.equal(reviewSession.campaignMembership, undefined);
+    assert.deepEqual(h.db.campaignDescendantIds("s1"), []);
     assert.equal(h.db.getSession("s1")!.liveChildCapacity?.occupied, 0);
     assert.equal(h.db.getSession("s1")!.kind, undefined, "an ordinary session reports no kind");
     assert.equal(reviewSession.title, "Codex Review of picoduck/wollipog#3368");
@@ -172,6 +174,85 @@ test("a requester has one active review; another starts once it settles", () => 
     const older = h.svc.reviewSessionsPage("s1", { limit: 1, afterReviewSessionId: page.data!.nextAfterReviewSessionId! });
     assert.equal(older.data?.reviews[0]?.reviewSessionId, first.reviewSessionId);
     assert.equal(older.data?.nextAfterReviewSessionId, null);
+  } finally { h.db.close(); }
+});
+
+test("review children preserve project attribution and never reserve implementation capacity or charges", () => {
+  const h = harness();
+  try {
+    const project = h.db.createProject({ name: "Repo", scope: h.db.sessionScope("s1")! });
+    h.db.setSessionProject("s1", project.id, null, 4);
+    h.db.updateSessionMaxChildSessions("s1", 0, 4);
+    h.db.updateSessionCostBudget("s1", 10, 4);
+    const before = h.db.childSessionAllocations("s1");
+    const { reviewSessionId: id } = requested(h);
+    assert.equal(h.db.getSession(id)!.projectId, project.id);
+    assert.equal(h.db.getSession(id)!.workspaceId, "w");
+    assert.equal(h.db.getSession(id)!.parentControl, "off");
+    assert.equal(h.db.getSession("s1")!.role, "normal");
+    h.db.updateSessionStatus(id, "running", 5);
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=2 WHERE id=?").run(id);
+    h.db.updateSessionStatus(id, "completed", 6);
+    assert.deepEqual(h.db.childSessionAllocations("s1"), before, "review spending and settlement do not charge delegation");
+    assert.equal(h.db.getSession("s1")!.liveChildCapacity!.occupied, 0);
+    assert.equal(h.db.listSessions().find(s => s.id === "s1")!.liveChildCapacity!.occupied, 0);
+    assert.equal(h.db.campaignAncestryRoot(id), "none");
+    assert.deepEqual(h.db.listSessionDescendantRequestCandidates("s1"), []);
+    assert.equal(h.svc.prompt(id, "implement this").status, 409);
+  } finally { h.db.close(); }
+});
+
+test("startup repairs legacy top-level review rows and disposes delivered terminal reviews idempotently", () => {
+  const h = harness();
+  try {
+    const { reviewSessionId: id } = requested(h);
+    h.db.raw().prepare("UPDATE sessions SET parent_session_id=NULL WHERE id=?").run(id);
+    h.db.reviewSessions.accept("r", { type: "review_session_update", sessionId: id, state: "completed", output: report() }, 10);
+    h.db.claimHeldReviewContinuations("s1", [id], 11);
+    h.db.updateSessionStatus(id, "completed", 12);
+    const events = h.db.appendEvent(id, { kind: "agent_message", text: "Review transcript", final: true }, 12);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      new SessionsService(h.db, h.hub, { info() {}, warn() {}, error() {} });
+      assert.equal(h.db.getSession(id)!.parentSessionId, "s1");
+      assert.equal(h.db.getSession(id)!.archived, true);
+      assert.equal(h.db.listEvents(id).find(event => event.seq === events.seq)?.payload.kind, "agent_message");
+      assert.equal(h.svc.reviewSessionView("s1", id).data?.output, report());
+      assert.equal(h.db.childSessionAllocations("s1").count, 0);
+    }
+  } finally { h.db.close(); }
+});
+
+test("archiving a requester cancels and archives its reviewers while retaining their transcript links", () => {
+  const h = harness();
+  try {
+    const { reviewSessionId: id } = requested(h);
+    assert.ok(h.svc.setArchived("s1", true).ok);
+    assert.equal(h.db.reviewSessions.view(id)!.cancelRequested, true);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: id, state: "cancelled" });
+    h.svc.onSessionStatus(id, "stopped", undefined, undefined, "r");
+    assert.equal(h.db.getSession(id)!.archived, true);
+    assert.equal(h.db.getSession(id)!.parentSessionId, "s1");
+  } finally { h.db.close(); }
+});
+
+test("reviews under a campaign remain outside its membership, counts, requests and limits", () => {
+  const h = harness();
+  try {
+    h.db.createSession({ id: "campaign", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Campaign",
+      driver: "claude-code", useWorktree: false, role: "orchestrator", config: {}, now: 4,
+      orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") });
+    h.db.raw().prepare("UPDATE sessions SET parent_session_id='campaign' WHERE id='s1'").run();
+    const before = h.db.campaignProjection("campaign")!;
+    const { reviewSessionId: id } = requested(h);
+    assert.deepEqual(h.db.campaignDescendantIds("campaign"), ["s1"]);
+    assert.deepEqual(h.db.campaignProjection("campaign")!.children, before.children);
+    assert.equal(h.db.getSession(id)!.campaignMembership, undefined);
+    assert.equal(h.db.campaignAncestryRoot(id), "none");
+    assert.equal(h.db.sessionResultOrchestrator(id), null);
+    assert.equal(h.db.campaignBudgets.root(id), null);
+    assert.deepEqual(h.db.listSessionDescendantRequestCandidates("campaign").map(s => s.id), ["s1"]);
+    h.db.campaignBudgets.authorize("campaign", { version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 2 });
+    assert.equal(h.db.campaignBudgets.root(id), null, "a later allowance grant still excludes review children");
   } finally { h.db.close(); }
 });
 
@@ -422,6 +503,7 @@ test("a finished review owes its idle requester exactly one continuation, delive
     h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "completed",
       output: report(), round: ROUND, verdict: VALID } as never);
     assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "pending");
+    assert.equal(h.db.getSession(view.reviewSessionId)!.archived, false, "the report still owes a continuation");
     assert.equal(continuationCommands(h).size, 0);
     const heldSummary = h.db.reviewSessions.summaryFor("s1")!;
     h.db.updateSessionStatus("s1", "idle", 10);
@@ -444,6 +526,11 @@ test("a finished review owes its idle requester exactly one continuation, delive
       type: "durable_session_command_update", commandId, sessionId: "s1", state: "started", revision: 5,
     } as never);
     assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "delivered");
+    assert.equal(h.db.getSession(view.reviewSessionId)!.archiveStatus, "stop_pending", "delivery requests Stop and Archive");
+    h.svc.onSessionStatus(view.reviewSessionId, "stopped", undefined, undefined, "r");
+    assert.equal(h.db.getSession(view.reviewSessionId)!.archived, true, "runner settlement completes disposal");
+    assert.equal(h.db.getSession(view.reviewSessionId)!.parentSessionId, "s1", "archival retains ancestry");
+    assert.equal(h.svc.reviewSessionView("s1", view.reviewSessionId).data?.output, report(), "the report remains readable");
     assert.ok(h.db.getSession("s1")!.reviewRuns!.updatedAt > pendingSummary.updatedAt, "the published session invalidates the pending panel");
     h.svc.retryDuePrompts();
     assert.equal(continuationCommands(h).size, 1);

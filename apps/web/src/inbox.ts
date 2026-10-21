@@ -160,6 +160,13 @@ function inboxChildrenByParent(sessions: readonly SessionView[]): Map<string, Se
   return children;
 }
 
+/** A review belongs only under its requester, including when filters or archival omit the parent. */
+function reviewFamilies<T extends { id: string; parentSessionId?: string | null; kind?: string }>(sessions: readonly T[]): T[] {
+  const present = new Set(sessions.map(session => session.id));
+  return sessions.filter(session => session.kind !== "review" || Boolean(session.parentSessionId &&
+    session.parentSessionId !== session.id && present.has(session.parentSessionId)));
+}
+
 /**
  * Stable card ordering: pinned families first, then human input, outstanding results, work, and
  * quiet, with deterministic fallbacks within each pin group. A session whose parent is also in
@@ -173,7 +180,7 @@ export function sortInboxSessions(
   stalledSessionIds: ReadonlySet<string> = new Set(),
   familySessions?: readonly SessionView[],
 ): SessionView[] {
-  const all = [...sessions];
+  const all = reviewFamilies([...sessions]);
   const childrenByParent = inboxChildrenByParent(all);
   const workingFamilies = sessionsWithWorkingDescendants((familySessions ?? all).filter((session) => !session.archived));
   const ownKeys = new Map(all.map((session) => [session.id, sessionOrderKey(session, pinnedSessions, stalledSessionIds, workingFamilies.has(session.id))]));
@@ -315,7 +322,7 @@ export function threadInboxRows<T extends { session: SessionView }>(
   stalledSessionIds: ReadonlySet<string> = new Set(),
   familySessions: readonly SessionView[] = rows.map((row) => row.session),
 ): Array<T & { thread: InboxThreadPosition }> {
-  const sessions = rows.map((row) => row.session);
+  const sessions = reviewFamilies(rows.map((row) => row.session));
   const childrenByParent = inboxChildrenByParent(sessions);
   const unarchivedFamily = familySessions.filter((session) => !session.archived);
   const familyChildrenByParent = inboxChildrenByParent(unarchivedFamily);
@@ -373,6 +380,7 @@ export function threadInboxRows<T extends { session: SessionView }>(
     }
   };
   for (const row of rows) {
+    if (!present.has(row.session.id)) continue;
     if (emitted.has(row.session.id)) continue;
     emit(topOf(row), 0, null, false, new Set());
   }
