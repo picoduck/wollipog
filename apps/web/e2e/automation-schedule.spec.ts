@@ -134,6 +134,22 @@ for (const { label, viewport } of [
         .toHaveText("Weekdays at 9:00 AM · Next Mon, 9:00 AM (Eastern Time)");
     });
 
+    test("Time Zone finds a zone Chromium lists by its old name under its current one", async ({ page }) => {
+      await openNew(page, theme);
+      const zone = page.getByRole("combobox", { name: "Time Zone" });
+      await zone.click();
+      // Chromium lists Asia/Calcutta; the list reads and finds it as Kolkata, Asia/Kolkata.
+      await zone.fill("kolkata");
+      const options = page.getByRole("option");
+      await expect(options).toHaveCount(1);
+      await expect(options.first()).toContainText("Kolkata (UTC+5:30)");
+      await expect(options.first()).toContainText("Asia/Kolkata");
+      await showWhenToRun(page);
+      await capture(page, `${label}-${theme}-time-zone-kolkata`);
+      await options.first().click();
+      await expect(zone).toHaveValue("Kolkata (UTC+5:30)");
+    });
+
     test("About Time Zones sits beside the label and opens the daylight-saving rules", async ({ page }) => {
       await openNew(page, theme);
       const about = page.getByRole("button", { name: "About Time Zones" });
