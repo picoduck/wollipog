@@ -3,19 +3,22 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { spawnAgent } from "../spawn.js";
+import { spawnAgent, provenProcessTreeExit, type AgentProcess } from "../spawn.js";
 import { probePiRpc } from "./pi-rpc.js";
 
 const fixture = fileURLToPath(new URL("../drivers/fixtures/fake-pi-rpc.mjs", import.meta.url));
 
 test("Pi discovery derives models, thinking levels, images, commands, and skills from RPC", async () => {
   let observedPrivateProbe = false;
+  let launched: AgentProcess | undefined;
+  const proofs: Promise<boolean>[] = [];
   const result = await probePiRpc(
     { command: process.execPath, args: [fixture] },
     { kind: "native" },
     {
       cwd: process.cwd(),
       timeoutMs: 2_000,
+      onProcess: (proof) => proofs.push(proof),
       spawn: (options) => {
         assert.notEqual(options.cwd, process.cwd());
         assert.equal(existsSync(join(options.cwd, ".pi", "settings.json")), true);
@@ -23,11 +26,18 @@ test("Pi discovery derives models, thinking levels, images, commands, and skills
         assert.equal(options.args.includes("--no-approve"), false,
           "the trust hook must run so the probe can prove it declines project resources");
         observedPrivateProbe = true;
-        return spawnAgent(options);
+        launched = spawnAgent(options);
+        return launched;
       },
     },
   );
   assert.equal(observedPrivateProbe, true);
+  assert.equal(proofs.length, 1);
+  assert.deepEqual(await Promise.all(proofs), [process.platform !== "win32"], "discovery forwards its completed whole-tree proof");
+  if (process.platform !== "win32") {
+    assert.ok(launched?.posixBoundary, "Pi discovery must join the boundary recorded by its HOME lease");
+    assert.equal(await provenProcessTreeExit(launched), true, "the probe's complete tree can be reaped");
+  }
   assert.equal(result.available, true, result.unavailableReason);
   assert.equal(result.authStatus, "authenticated");
   assert.deepEqual(result.capabilities.models.map((model) => ({

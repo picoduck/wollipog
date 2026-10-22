@@ -181,8 +181,8 @@ test("an authorization never bypasses the host, profile grant, or a record's own
     world.running.delete(101);
     const recovering = registry({ probe, bootedAt: Date.now() + 3_600_000 });
     const blocked = recovering.inspectHome(home);
-    assert.deepEqual([blocked.hasEvidence, blocked.refusal], [true, "busy"], "a later boot time never overrides surviving evidence");
-    assert.equal(refusal(() => recovering.recoverStaleLease(home, "claude", { staleTipHash: blocked.tipHash!, authorizationId: AUTHORIZATION })), "busy");
+    assert.deepEqual([blocked.hasEvidence, blocked.refusal], [true, "process_survivor"], "a later boot time never overrides surviving evidence");
+    assert.equal(refusal(() => recovering.recoverStaleLease(home, "claude", { staleTipHash: blocked.tipHash!, authorizationId: AUTHORIZATION })), "process_survivor");
     world.marked = [];
     assert.equal(recovering.inspectHome(home).refusal, null);
     recovering.recoverStaleLease(home, "claude", { staleTipHash: blocked.tipHash!, authorizationId: OTHER_AUTHORIZATION });

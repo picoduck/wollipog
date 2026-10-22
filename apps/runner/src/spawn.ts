@@ -784,6 +784,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       child = launch.child as AgentProcess;
       containment = launch.containment;
     } else {
+      // Ordinary user shells do not acquire provider-HOME ownership. Preserve their historical
+      // launch/lifetime even if provider containment is unavailable. Agent TUIs and shells
+      // whose cleanup owns descendants use the tracked branch above.
       child = spawn(file, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }) as AgentProcess;
     }
   } catch (error) {

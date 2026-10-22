@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,13 +15,20 @@ import {
   probedAuthFileStatus,
   supportedWslAgentControlNodeRuntime,
   parseVersion,
-  probeConfiguredAcpAgent,
+  probeConfiguredAcpAgent as realProbeConfiguredAcpAgent,
   probeConfiguredAcpAgents,
-  probeConfiguredPiAgents,
+  probeConfiguredPiAgents as realProbeConfiguredPiAgents,
+  discoverAgents,
   unavailableCodexAgentDefinition,
   unavailableClaudeAgentDefinition,
 } from "./discover.js";
 import { resolvedLaunchIdentity } from "./resolve.js";
+
+const testAdmission = { authorize: async () => ({ settle: async (proofs: Promise<boolean>[]) => { await Promise.all(proofs); } }) };
+const probeConfiguredAcpAgent: typeof realProbeConfiguredAcpAgent = (agent, env, options) =>
+  realProbeConfiguredAcpAgent(agent, env, { ...testAdmission, ...options });
+const probeConfiguredPiAgents: typeof realProbeConfiguredPiAgents = (agents, env, options) =>
+  realProbeConfiguredPiAgents(agents, env, { ...testAdmission, ...options });
 
 const ACP_INITIALIZE_FIXTURE = [
   'let input="";',
@@ -30,6 +37,70 @@ const ACP_INITIALIZE_FIXTURE = [
   'const request=JSON.parse(input.slice(0,end));',
   'process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:request.id,result:{protocolVersion:1,agentCapabilities:{}}})+"\\n");});',
 ].join("");
+
+test("native Codex discovery observes every provider execution including updater help before releasing HOME", { skip: process.platform === "win32", timeout: 60_000 }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-discovery-help-tree-"));
+  const executable = join(root, "codex"), calls = join(root, "calls"), pidfile = join(root, "helper.pid");
+  const previous = { PATH: process.env.PATH, checks: process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS, pins: process.env.WOLLIPOG_HARNESS_UPDATE_PINNED };
+  t.after(() => {
+    process.env.PATH = previous.PATH;
+    for (const [key, value] of [["WOLLIPOG_HARNESS_UPDATE_CHECKS", previous.checks], ["WOLLIPOG_HARNESS_UPDATE_PINNED", previous.pins]]) {
+      if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
+    }
+    try { process.kill(Number(readFileSync(pidfile, "utf8")), "SIGKILL"); } catch { /* gone */ }
+    rmSync(root, { recursive: true, force: true });
+  });
+  writeFileSync(executable, `#!${process.execPath}
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2))+'\\n');
+if (process.argv[2] === '--version') console.log('0.155.1');
+else if (process.argv[2] === '--help') {
+  const child = require('node:child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], {detached:true,stdio:'ignore'});
+  fs.writeFileSync(${JSON.stringify(pidfile)}, String(child.pid)); child.unref();
+  console.log('  update  Update Codex to the latest version');
+} else console.log('Usage: codex app-server');
+`, { mode: 0o700 });
+  process.env.PATH = `${root}:${previous.PATH ?? "/usr/bin:/bin"}`;
+  delete process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS;
+  delete process.env.WOLLIPOG_HARNESS_UPDATE_PINNED;
+  let settled = false;
+  const agents = await discoverAgents({ authorize: async (agent) => {
+    if (agent.command !== executable && !agent.args?.includes(executable)) throw new Error("test installation only");
+    return { settle: async (proofs) => {
+      const executions = readFileSync(calls, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      assert.deepEqual(executions, [["--version"], ["app-server", "--help"], ["--help"]]);
+      assert.equal(proofs.length, executions.length, "each provider launch must contribute a tree proof before HOME settlement");
+      assert.deepEqual(await Promise.all(proofs), [true, true, true]);
+      if (process.platform === "linux") {
+        let state: string | undefined;
+        try { state = readFileSync(`/proc/${Number(readFileSync(pidfile, "utf8"))}/stat`, "utf8").split(") ")[1]?.split(" ")[0]; } catch { /* gone */ }
+        assert.ok(!state || state === "Z" || state === "X", "help's detached helper must be gone before HOME release");
+      }
+      settled = true;
+    } };
+  } });
+  assert.equal(settled, true);
+  assert.ok(agents.some((agent) => agent.installation?.path === executable));
+});
+
+test("refused native discovery preserves installation metadata and never executes the provider", { skip: process.platform === "win32" }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-discovery-refused-"));
+  const originalPath = process.env.PATH;
+  t.after(() => { process.env.PATH = originalPath; rmSync(root, { recursive: true, force: true }); });
+  const executable = join(root, "codex"), marker = join(root, "started");
+  writeFileSync(executable, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o700 });
+  process.env.PATH = `${root}:${originalPath ?? "/usr/bin:/bin"}`;
+  const discovered = await discoverAgents({ authorize: async () => { throw new Error("PRIVATE_LEASE_DIAGNOSTIC"); } });
+  const codex = discovered.find((agent) => agent.installation?.path === executable);
+  assert.ok(codex, "refused installation remains identifiable");
+  assert.equal(codex.available, false);
+  assert.equal(codex.bin, "codex");
+  assert.equal(codex.source, "discovered");
+  assert.ok(codex.capabilities);
+  assert.match(codex.unavailableReason!, /HOME ownership/u);
+  assert.doesNotMatch(codex.unavailableReason!, /PRIVATE_LEASE_DIAGNOSTIC/u);
+  assert.throws(() => readFileSync(marker), { code: "ENOENT" });
+});
 
 test("configured ACP discovery verifies a valid custom command and arguments", async () => {
   const configured = cfg({
@@ -47,6 +118,35 @@ test("configured ACP discovery verifies a valid custom command and arguments", a
   assert.equal(probed.unavailableReason, undefined);
   assert.equal(mergeAgents([configured], [], [probed])[0]?.available, true,
     "a verified configured launch becomes selectable after the discovery merge");
+});
+
+test("configured ACP discovery refuses missing or denied HOME admission before starting the executable", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-discovery-admission-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const marker = join(root, "started");
+  const agent = cfg({ driver: "acp", command: process.execPath,
+    args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started')`] });
+  const missing = await realProbeConfiguredAcpAgent(agent, {});
+  const denied = await realProbeConfiguredAcpAgent(agent, {}, { authorize: async () => { throw new Error("PRIVATE_PATH_OR_SECRET"); } });
+  for (const result of [missing, denied]) {
+    assert.equal(result.available, false);
+    assert.match(result.unavailableReason!, /HOME ownership/u);
+    assert.doesNotMatch(result.unavailableReason!, /PRIVATE_PATH_OR_SECRET/u);
+  }
+  assert.throws(() => readFileSync(marker), { code: "ENOENT" });
+});
+
+test("configured ACP discovery awaits whole-tree proof before settling HOME ownership on success and timeout", async () => {
+  for (const timeout of [false, true]) {
+    const proofs: boolean[][] = [];
+    const result = await realProbeConfiguredAcpAgent(cfg({ driver: "acp", command: process.execPath,
+      args: ["-e", timeout ? "setInterval(()=>{},1000)" : ACP_INITIALIZE_FIXTURE] }), {}, {
+      timeoutMs: timeout ? 40 : 5_000,
+      authorize: async () => ({ settle: async (trees) => { proofs.push(await Promise.all(trees)); } }),
+    });
+    assert.equal(result.available, !timeout, result.unavailableReason);
+    assert.deepEqual(proofs, [[process.platform !== "win32"]], "boundary-less platforms retain, POSIX trees finish cleanup before settlement");
+  }
 });
 
 test("configured ACP probe results stay attached to their exact config ids", () => {

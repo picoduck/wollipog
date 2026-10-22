@@ -201,7 +201,7 @@ import {
   terminateDescendantBoundariesAfterPendingKills,
   waitForPendingKills,
 } from "./spawn.js";
-import { providerContainmentIdentity } from "./linux-cgroup.js";
+import { providerContainmentEmpty, providerContainmentIdentity } from "./linux-cgroup.js";
 import {
   cleanupPiExternalSession,
   findExternalSession,
@@ -2124,26 +2124,27 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
           dataDir: config.dataDir,
           allowedAgentIds: config.acpRegistryAgents,
           refresh: refreshModels,
+          authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
         }).catch((error) => {
           log(`ACP Registry unavailable: ${(error as Error).message}`);
           return [];
         })
       : Promise.resolve([]);
     const [nativeAgents, registryAgents, configuredAcpAgents, editors] = await Promise.all([
-      discoverAgents(),
+      discoverAgents({ authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
       registryPromise,
       probeConfiguredAcpAgents(configAgents, (agentId) => {
         const configured = config.agents.find((agent) => agent.id === agentId);
         if (!configured) throw new Error("configured agent is unavailable");
         return resolveAgentEnvironment(configured);
-      }),
+      }, { authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
       discoverEditors(),
     ]);
     const configuredPiAgents = await probeConfiguredPiAgents(configAgents, (agentId) => {
       const configured = config.agents.find((agent) => agent.id === agentId);
       if (!configured) throw new Error("configured agent is unavailable");
       return resolveAgentEnvironment(configured);
-    }, { discovered: nativeAgents });
+    }, { discovered: nativeAgents, authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) });
     const discovered = [...nativeAgents, ...registryAgents];
     freshSafeWslLaunches.clear();
     for (const agent of nativeAgents) {
@@ -2158,6 +2159,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
         mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents],
           new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
         refresh: refreshModels,
+        authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
       }),
       claudeHookFeatureEnabled,
       log,
@@ -4309,7 +4311,9 @@ function shutdown(exitCode = 0): void {
       // possibly-still-alive provider cannot share its HOME with a replacement runner.
       try {
         if (sessionsCleanlyShutDown) {
-          if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped)) {
+          const providerBoundaryEmpty = providerContainmentEmpty();
+          if (!providerBoundaryEmpty) log("provider-HOME boundary is still populated or uninspectable; a detached provider review controller can retain ownership until its work finishes");
+          if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped && providerBoundaryEmpty)) {
             log("process-tree cleanup was incomplete — retaining provider-home lease; inspect the preceding survivor diagnostic before restarting this runner");
           }
         } else {

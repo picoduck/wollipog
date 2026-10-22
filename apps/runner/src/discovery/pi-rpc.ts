@@ -17,7 +17,8 @@ import {
   PI_AGENT_CONTROL_PROTOCOL,
   piAgentControlProbeSource,
 } from "../pi-agent-control-extension.js";
-import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
+import { killTree, provenProcessTreeExit, spawnAgent, type AgentProcess } from "../spawn.js";
+import type { CodexProbeObserver } from "../codex-probe.js";
 import type { ResolvedLaunch } from "./resolve.js";
 
 type Json = Record<string, unknown>;
@@ -59,7 +60,7 @@ export async function probePiRpc(
     env?: Record<string, string>;
     spawn?: typeof spawnAgent;
     kill?: typeof killTree;
-  } = {},
+  } & CodexProbeObserver = {},
 ): Promise<PiRpcDiscoveryResult> {
   const spawn = options.spawn ?? spawnAgent;
   const kill = options.kill ?? killTree;
@@ -71,6 +72,8 @@ export async function probePiRpc(
     return value;
   };
   let child: AgentProcess | null = null;
+  let completeProof!: (value: boolean) => void;
+  const processProof = new Promise<boolean>((resolve) => { completeProof = resolve; });
   let peer: PiRpcPeer | null = null;
   let probeRoot: string | undefined;
   let probeNonce: string | undefined;
@@ -87,6 +90,7 @@ export async function probePiRpc(
       writeFileSync(extension, piAgentControlProbeSource(probeNonce), { flag: "wx", mode: 0o600 });
       extensionArgs.push("--extension", extension);
     }
+    options.onProcess?.(processProof);
     child = spawn({
       command: launch.command,
       args: [...launch.args, ...extensionArgs, "--mode", "rpc",
@@ -98,7 +102,7 @@ export async function probePiRpc(
         ...(probeNonce ? { [PI_AGENT_CONTROL_PROBE_NONCE_ENV]: probeNonce } : {}),
       },
       context,
-      trackDescendants: false,
+      trackDescendants: true,
     });
     let transportError: Error | null = null;
     peer = new PiRpcPeer(child.stdin, child.stdout, (event) => {
@@ -228,7 +232,10 @@ export async function probePiRpc(
     };
   } finally {
     peer?.dispose("Pi discovery complete");
-    if (child) kill(child);
+    let proven = false;
+    try {
+      if (child) { kill(child); proven = await provenProcessTreeExit(child); }
+    } finally { completeProof(proven); }
     if (probeRoot) rmSync(probeRoot, { recursive: true, force: true });
   }
 }

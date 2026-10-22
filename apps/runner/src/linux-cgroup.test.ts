@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { interceptSpawnSyncForTest, spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentIdentity, providerContainmentStatus, systemdUserDelegationReply, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
+import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentEmpty, providerContainmentIdentity, providerContainmentStatus, spawnProviderHelper, systemdUserDelegationReply, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
 import { linuxCgroupHelper, stageLinuxCgroupHelper } from "./linux-cgroup-helper.js";
 import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { provenProcessTreeExit, ProviderProcessLedger, spawnAgent, waitForPendingKills } from "./spawn.js";
@@ -303,6 +303,75 @@ function alive(pid: number): boolean {
   try { return !/^Z/u.test(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ")[0]!); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
+
+test("cgroup v2 rejects renaming an owned boundary, preserving removed-path proof", { skip: process.platform !== "linux" }, (t) => {
+  if (!requireContainment(t)) return;
+  const launch = prepareLinuxCgroupLaunch()!;
+  const mount = currentCgroupDirectory(readFileSync("/proc/self/mountinfo", "utf8"), readFileSync("/proc/self/cgroup", "utf8"))!;
+  const directory = join(mount.mountPoint, launch.boundary.identity.cgroupPath);
+  let renamed = false;
+  try {
+    try { renameSync(directory, directory + "-renamed"); renamed = true; }
+    catch (error) { assert.ok(["EPERM", "EOPNOTSUPP", "EINVAL", "ENOSYS"].includes((error as NodeJS.ErrnoException).code ?? ""), String(error)); }
+    finally { if (renamed) renameSync(directory + "-renamed", directory); }
+    assert.equal(renamed, false, "the host kernel must enforce cgroup-v2 non-rename semantics");
+  } finally { launch.boundary.cancelSpawn(); }
+});
+
+for (const mode of ["detached-controller", "user-owned-shell"] as const) {
+  test(`a ${mode} preserves its lifetime and ${mode === "detached-controller" ? "blocks" : "does not block"} provider-HOME handoff`, { skip: process.platform !== "linux", timeout: 60_000 }, async (t) => {
+    if (!requireContainment(t)) return;
+    const directory = mkdtempSync(join(tmpdir(), "wollipog-passive-cgroup-"));
+    const helper = join(directory, "descendant"), pidfile = join(directory, "helper.pid");
+    const source = fileURLToPath(new URL("../native/fixtures/cgroup-descendant.c", import.meta.url));
+    const compiled = spawnSync("/usr/bin/cc", ["-std=c11", "-Wall", "-Wextra", "-Werror", source, "-o", helper], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(compiled.status, 0, compiled.stderr);
+    let pid: number | undefined;
+    t.after(async () => {
+      if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* exited */ } }
+      await waitUntil(() => providerContainmentEmpty());
+      rmSync(directory, { recursive: true, force: true });
+    });
+    const child = mode === "detached-controller"
+      ? spawnProviderHelper(helper, ["nondumpable", pidfile], { cwd: directory, detached: true, env: {} }, ["ignore", "ignore", "ignore"])
+      : spawnAgent({ command: helper, args: ["nondumpable", pidfile], cwd: directory, trackDescendants: false });
+    await new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
+    await waitUntil(() => { try { return readFileSync(pidfile, "utf8").length > 0; } catch { return false; } });
+    pid = Number(readFileSync(pidfile, "utf8"));
+    assert.equal(alive(pid), true);
+    const identity = providerContainmentIdentity()!;
+    const member = readFileSync(`/proc/${pid}/cgroup`, "utf8").includes(`/${identity.cgroupPath}/`);
+    assert.equal(member, mode === "detached-controller", "review provider controllers are contained; ordinary user daemons are outside provider ownership");
+    assert.equal(providerContainmentEmpty(), mode === "user-owned-shell", "only provider-HOME users participate in shutdown's boundary proof");
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    assert.equal(alive(pid), true, "root close must not turn a user-owned/detached lifetime into killing cleanup");
+    process.kill(pid, "SIGKILL"); pid = undefined;
+    await waitUntil(() => providerContainmentEmpty());
+  });
+}
+
+test("ordinary user shells still open when provider leaf creation fails", { skip: process.platform !== "linux" }, async (t) => {
+  if (!requireContainment(t)) return;
+  const original = fs.mkdirSync;
+  let failures = 0;
+  fs.mkdirSync = ((directory, ...args) => {
+    if (String(directory).includes("/provider-")) {
+      failures++; throw Object.assign(new Error("test cgroup limit"), { code: "ENOSPC" });
+    }
+    return original(directory, ...args);
+  }) as typeof fs.mkdirSync;
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => spawnAgent({ command: process.execPath, args: ["-e", ""], cwd: process.cwd() }), /provider containment unavailable/u);
+    assert.equal(failures, 1, "the provider admission failure is real");
+    const shell = spawnAgent({ command: process.execPath, args: ["-e", "process.stdout.write('shell-open')"], cwd: process.cwd(), trackDescendants: false });
+    let output = ""; shell.stdout.on("data", (chunk) => { output += String(chunk); });
+    await new Promise<void>((resolve, reject) => { shell.once("close", () => resolve()); shell.once("error", reject); });
+    assert.equal(output, "shell-open");
+    assert.equal(shell.posixBoundary, undefined);
+    assert.equal(failures, 1, "ordinary shells never request a provider leaf");
+  } finally { fs.mkdirSync = original; syncBuiltinESMExports(); }
+});
 
 for (const mode of ["detached", "nondumpable", "term", "delayed-admission"]) {
   test(`Linux cgroup contains and reaps a ${mode} setsid helper before lease-release proof`, { skip: process.platform !== "linux" }, async (t) => {

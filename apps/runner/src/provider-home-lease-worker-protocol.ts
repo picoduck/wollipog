@@ -53,6 +53,7 @@ export function leaseWorkerOperationTakesProfile(method: LeaseWorkerOperation["m
   return isLeaseWorkerAcquisition(method) || method === "lease_inspect" || method === "lease_recover";
 }
 export type LeaseWorkerError = "busy" | "unavailable" | "foreign_owner" | "foreign_host" | "refusal" | "cancelled" | "cancel_release_failed" | "expired" |
+  "holder_alive" | "boundary_survivor" | "process_survivor" | "boundary_unverifiable" | "process_uninspectable" | "process_uninspectable_not_delegated" | "invalid_journal" |
   "profile_unsupported_control_plane" | "profile_unverifiable" | "profile_not_granted" | "profile_changed" | "profile_grant_limit" |
   "stale_tip_changed" | "no_reboot_proof" | "recovery_unconfirmed";
 /** #3241 part 2: a HOME's lease state, as an Owner or Admin sees it before authorizing a recovery. */
@@ -67,6 +68,13 @@ export interface LeaseWorkerInspection {
 }
 /** Fixed, path-free texts: only the code crosses the worker boundary, never the registry's message. */
 export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
+  holder_alive: "Provider HOME's recorded runner is still alive; ownership is retained while that runner is alive. Preserve the lease journal.",
+  boundary_survivor: "A provider or helper, including a detached provider review controller, survives in the recorded provider-HOME boundary; ownership is retained until the recorded boundary is empty. Wait for that work to finish before retrying. Preserve the boundary and journal.",
+  process_survivor: "A process launched by the recorded provider-HOME runner survives; ownership is retained until its process boundary is empty and every potentially related process is inspectable. Preserve the lease journal.",
+  boundary_unverifiable: "Provider HOME's recorded cgroup path and inode could not be verified, or its recorded enclosing delegated unit has not retired. Preserve the boundary and journal. Lifecycle proof does not cover deliberate same-user cgroup migration by provider code.",
+  process_uninspectable: "Provider HOME has an uninspectable process on the fallback recovery path. Boundary proof was unavailable (legacy lease or unavailable containment); every potentially related process must be inspectable. Launch future runners in a delegated Linux cgroup v2 unit; preserve the journal.",
+  process_uninspectable_not_delegated: "Provider HOME has an uninspectable process on the fallback recovery path. Boundary proof was unavailable because the runner's systemd unit is not delegated. An operator must launch future runners in a Delegate=yes unit; existing leases still require the process scan. Preserve the journal.",
+  invalid_journal: "Provider HOME's lease journal is invalid or cannot be verified; preserve all records and restore inspectability before retrying. Do not remove individual records.",
   busy: "Provider HOME is already in use; retry after the current owner or publication finishes.",
   unavailable: "Provider-HOME lease helper unavailable; preserve all evidence and restore the fixed helper and executable staging directory before retrying.",
   foreign_owner: "Provider HOME has a stale lease from another runner or control plane whose recorded process has exited; Wollipog does not take over another owner's lease automatically. Use a separate provider account HOME for this runner, or quarantine the entire provider-home-leases-v1 directory only after proving no provider process or runner uses this HOME, and do not remove individual records.",
@@ -95,7 +103,7 @@ export interface LeaseWorkerAccept { kind: "accept"; epoch: string; id: string; 
 export type LeaseWorkerReply =
   | { kind: "ready"; epoch: string; pid: number; clock: typeof LEASE_WORKER_CLOCK }
   | { kind: "receipt" | "done"; epoch: string; id: string; ok: boolean; value: boolean; error?: LeaseWorkerError; profileId?: string; inspection?: LeaseWorkerInspection }
-  | { kind: "diagnostic"; epoch: string; event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished"; leaseId: string; message: string };
+  | { kind: "diagnostic"; epoch: string; event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished" | "provider_home_boundary_recovered"; leaseId: string; message: string };
 
 const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const GRANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;

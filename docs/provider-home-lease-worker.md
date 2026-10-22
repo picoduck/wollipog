@@ -104,6 +104,107 @@ cause and the safe options, instead of the generic "could not be proved" refusal
 
 ### Recovering an Abandoned Lease
 
+Since #3584, Linux runners select containment in the main thread before acquisition and pass that
+exact instance parent to the lease worker. New process evidence is
+`{ version: 2, bootId, startTime, marker, containment }`, where containment is either
+`{ kind: "linux-cgroup-v2", bootId, mountRoot, cgroupPath, inode, unit? }` or
+`{ kind: "marker-parent-links", reason }`. Records carrying it use **journal record version 5**,
+which older readers reject, including readers that ignored unknown lifecycle fields. Legacy
+v1/v2 records remain readable. The v4 checkpoint envelope preserves the exact version-5 previous
+tip; older checkpoint readers reject that version too. Malformed evidence never becomes legacy
+evidence silently. `unit`, when available, records the boot, mount root, path and inode of the
+runner's own enclosing delegated service/scope, captured before the provider parent is created.
+
+On the same boot, boundary recovery first requires the recorded runner PID/start-time identity
+to be absent. A different runner resolves the recorded cgroup2 hierarchy root and exact relative
+path, opens it, verifies the cgroup2 filesystem and recorded inode, and reads recursive
+`cgroup.events` `populated=0`. It rechecks path/fd identity after reading and the runner identity
+before accepting. No unrelated process scan participates. A surviving provider or helper anywhere
+under the recorded parent blocks handoff, including detached non-dumpable helpers. Replaced
+inodes, malformed events, unavailable mounts and inaccessible paths are unverified. A missing
+provider parent has a separate proof: on the same boot and verified cgroup2 mount, its recorded
+enclosing delegated unit must also be absent or have a different inode (a different incarnation).
+A missing child under the exact still-present unit is refused. An existing provider path with a
+different inode is always refused. No process or environment scan is used for either cgroup proof.
+
+The removal argument uses kernel invariants: cgroup v2 supplies no rename operation, and
+`cgroup_destroy_locked` refuses populated groups or live child groups while serialized against
+migration. See the [kernel cgroup implementation](https://github.com/torvalds/linux/blob/v6.12/kernel/cgroup/cgroup.c)
+and its separate [v1 rename implementation](https://github.com/torvalds/linux/blob/v6.12/kernel/cgroup/cgroup-v1.c).
+The enclosing-unit evidence distinguishes unit pruning from unexplained deletion of a child.
+This is lifecycle containment under the same threat model as #3275: **deliberate same-user cgroup
+migration by provider code is outside the guarantee**. A restricted marker scan would not find a
+scrubbed helper deliberately moved elsewhere either. Both the refusal and post-publication
+acceptance diagnostics state this limitation; the journal records `linux_cgroup_unit_removed`
+for the additional removal proof. Privileged changes to cgroup mounts or migration remain an
+operator responsibility, never inferred from a process name or a different path.
+
+A different boot UUID retains the existing reboot proof, regardless of PID reuse. Legacy evidence
+and marker-parent-links fallback retain the scan described below. New same-owner recoveries also
+append an explicit recovery note; cgroup proof is named `linux_cgroup`. Successors keep the exact
+predecessor hash and bytes, never fabricate its release, and preserve existing profile grant and
+exact-tip authorization checks. Existing bounded checkpoint/retirement rules are unchanged.
+
+Internal typed causes distinguish `holder_alive`, `boundary_survivor`, `process_survivor`,
+`boundary_unverifiable`, `process_uninspectable`, `process_uninspectable_not_delegated`,
+`invalid_journal`, fixed-helper `unavailable`, and existing profile denials; `busy` remains fence
+contention. Only fixed path-free guidance crosses the worker boundary. This change adds no
+session-status field or protocol-version bump; #3585 can consume these runner-internal causes.
+With #3589's existing v233 launch-refusal view, live-holder/survivor causes map to `busy` and
+unverifiable-boundary/process/journal causes map to `unverifiable`. This compatibility mapping
+adds no protocol values; the internal causes remain distinct for #3585.
+
+The non-delegated guidance names the reason: the runner's systemd unit is not delegated. An
+operator must use `Delegate=yes` for future leases. The live dogfood stack's `Delegate=no` scope
+correctly retains fallback; this change does not move, update or restart it. Changing its launcher
+does not upgrade existing leases. For #79 phase 2, an external operator can run an isolated stack
+in a delegated user scope, using temporary provider HOMEs/data/ports, and leave a real SSH login
+open throughout recovery.
+
+Configured ACP discovery now acquires its effective credential-HOME reference before constructing
+the initialize-only client, disposes it, then awaits both agent and terminal tree proofs before
+release. Missing/refused admission prevents execution; false, rejected or missing tree proofs
+retain ownership. Native Claude/Codex/Pi discovery, configured Pi discovery and dynamic model
+probes also acquire their effective inherited HOME, including provider HOME overrides. Their
+multi-command references release only after every reported native probe tree is proven gone;
+unproven trees retain ownership. Cached model discovery that spawns nothing releases immediately.
+Native version/help/auth CLI commands use tracked boundaries, including Codex updater-capability
+help and installed ACP-registry version probes. The latter acquires its own HOME reference before
+execution; metadata-only registry callers execute nothing. Native npm release checks also report
+their tracked trees to the owning discovery reference. Resolution utilities (`command -v`, directory
+inspection) and fixed native helpers are not providers. WSL probes retain their existing in-distro execution and do not acquire
+the unrelated native host HOME; WSL session isolation is handled separately.
+
+Detached session/campaign review controllers join provider cgroup leaves before exec. Their root
+closing triggers only a non-killing emptiness check, preserving detached review recovery. Empty
+leaves retire asynchronously. Runner shutdown additionally requires the entire provider parent
+empty before releasing HOME leases. A surviving detached controller legitimately blocks handoff
+until its provider work finishes; shutdown and recovery guidance name this possibility.
+
+Ordinary user-owned terminals are outside provider ownership and use their previous launch path;
+provider leaf creation failures cannot prevent them opening. A `nohup`/`setsid` development server
+from such a terminal survives a clean restart without retaining the provider-HOME lease. Agent
+TUIs and agent shells whose cleanup owns descendants remain tracked inside provider containment.
+Starting a provider manually from an ordinary terminal is user-managed execution; use a managed
+provider launch or Agent TUI for HOME ownership enforcement. Legacy/non-delegated leases retain
+their conservative process-scan rules, which may still refuse an uninspectable user daemon.
+Dedicated media review namespaces use fresh private provider HOMEs instead of the shared leased HOME.
+
+`provider-home-lease-cgroup.test.ts` starts independent holder/replacement processes with private
+HOMEs and keeps a double-forked non-dumpable unrelated process alive throughout recovery. It
+verifies that the legacy scan really refuses that process, then checks cgroup recovery, survivor
+refusal, exact path/inode mismatch refusal, unchanged predecessor bytes and an appended recovery
+record. It also runs a real transient delegated unit, crashes its holder, waits for systemd to prune
+the recorded unit and child, and verifies recovery while an unrelated unreadable process stays
+alive. The native cgroup suite asserts that rename is refused and that passive controller/shell
+helpers retain their lifetimes and block shutdown handoff. Deterministic evidence/journal tests cover PID reuse, reboot, fallback guidance and profile
+authorization. Run native validation as the real OS user in a delegated scope with
+`WOLLIPOG_TEST_REQUIRE_CGROUP=1`; remapped-UID sandboxes cannot establish these proofs.
+`WOLLIPOG_TEST_EXPECT_USER_MANAGER_QUERY=1` also exercises the actual user-manager delegation
+query in `linux-cgroup.test.ts`.
+
+The following describes the unchanged legacy/fallback scan and ownership rules.
+
 Since #3241 a runner records lifecycle evidence in every active record it publishes, as an optional
 `process` field: the boot id, its own process start time, and a random marker. Every process the
 runner launches inherits that marker as `WOLLIPOG_PROVIDER_HOME_RUNNER`. A runner sets it in its own
@@ -137,7 +238,7 @@ after the stale record and linked to its exact bytes. The stale record is kept, 
 written for the old owner. Readers accept an owner change over an active record only with that note,
 on the same host, and over a record that carried evidence. A release never carries the note.
 
-Older runners ignore the `process` field. They refuse a recovery record because they allow no owner
+Pre-lifecycle runners ignore the old `process` field. They refuse a legacy recovery record because they allow no owner
 change over an active record, so a rollback binary fails closed with its generic refusal until a
 checkpoint retires that link. The WSL in-distro helper refuses it the same way.
 
@@ -368,15 +469,14 @@ subscription-usage and naming helpers, and Agent TUIs and managed-worktree shell
 Claude namespace's outer bwrap launch joins a leaf too; its control protocol still preserves the
 existing graceful namespace proof, and disposal additionally proves its cgroup empty. Closed
 namespaces with surviving members remain registered for shutdown. The native helper/compiler and
-host utilities are not providers and are not placed in these leaves. Explicitly untracked spawns,
-WSL, Windows, container and cloud launches retain their existing proof rules. Codex's direct hook,
-permission-profile and MCP inventory probes still require #3340 to route them through the compatible
-`spawnAgent`/`trackDescendants` API.
+host utilities are not providers and are not placed in these leaves. Explicitly untracked native
+shells and detached review controllers now join passive leaves as described above. WSL, Windows,
+container and cloud launches retain their existing proof rules. Codex's direct hook,
+permission-profile and MCP inventory probes use the compatible
+`spawnAgent`/`trackDescendants` API delivered in #3340.
 
-The lease journal format and ownership authority are unchanged in #3275. Boundary identity
-persistence, verification by a replacement runner, migration of old records and SSH-independent
-abandoned-lease recovery belong to #3584 after #3340. This release alone therefore does not change
-the abandoned-lease process scan or resolve an unreadable unrelated SSH process blocking recovery.
+The containment mechanism delivered in #3275 supplies the identity persisted and verified by #3584
+as described above. Legacy records retain their original process-scan proof.
 
 `linux-cgroup.test.ts` covers admission races, fallback diagnostics/API compatibility, failed or
 unverifiable cleanup and the shared early-release/shutdown proof without process scans. Its native

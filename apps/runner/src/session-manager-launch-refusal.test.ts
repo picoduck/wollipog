@@ -14,6 +14,9 @@ test("each lease state a launch can meet maps to its launch refusal code; everyt
     busy: "busy", foreign_owner: "foreign_owner", foreign_host: "foreign_host", unavailable: "unavailable",
     refusal: "unverifiable", profile_not_granted: "profile_not_granted", profile_changed: "profile_changed",
     profile_unverifiable: "profile_unverifiable",
+    holder_alive: "busy", boundary_survivor: "busy", process_survivor: "busy",
+    boundary_unverifiable: "unverifiable", process_uninspectable: "unverifiable",
+    process_uninspectable_not_delegated: "unverifiable", invalid_journal: "unverifiable",
     // Not a state of the HOME a person can act on from the session.
     cancelled: undefined, cancel_release_failed: undefined, expired: undefined,
     profile_unsupported_control_plane: undefined, profile_grant_limit: undefined,
@@ -149,6 +152,29 @@ test("a launch that fails for another reason records no refusal", async (t) => {
   assert.equal(h.driversCreated(), 1);
   assert.equal(h.store.readMeta("refused")?.providerHomeRefusal, undefined);
   assert.ok(!h.messages.some((message) => message.type === "session_runtime_updated" && message.snapshot.providerHomeRefusal));
+});
+
+test("surviving boundary work keeps ownership and reports the existing busy launch category", async (t) => {
+  const h = harness(t);
+  h.driverLease.refuse = "boundary_survivor";
+  assert.equal(await h.launch(), false);
+  assert.equal(h.driversCreated(), 0);
+  assert.equal(h.store.readMeta("refused")?.providerHomeRefusal?.code, "busy");
+  assert.equal(lastRefusal(h.messages)?.code, "busy");
+  const guidance = LEASE_WORKER_ERRORS.boundary_survivor;
+  assert.match(guidance, /ownership is retained until the recorded boundary is empty/u);
+  assert.doesNotMatch(guidance, /kill|stop/iu);
+  assert.ok(h.messages.some((message) => message.type === "session_status" && message.detail === guidance));
+});
+
+test("uninspectable fallback reports the existing unverifiable launch category without starting a provider", async (t) => {
+  const h = harness(t);
+  h.preparation.refuse = "process_uninspectable_not_delegated";
+  assert.equal(await h.launch(), false);
+  assert.equal(h.driversCreated(), 0);
+  assert.equal(h.store.readMeta("refused")?.providerHomeRefusal?.code, "unverifiable");
+  assert.equal(lastRefusal(h.messages)?.code, "unverifiable");
+  assert.ok(errorEvents(h.messages).some((message) => message.includes("systemd unit is not delegated")));
 });
 
 test("a launch preparation refused at the account's lease is reported as the account, not as isolation", async (t) => {

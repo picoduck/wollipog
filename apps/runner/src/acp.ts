@@ -50,7 +50,7 @@ import {
 } from "./acp-contract.js";
 import type { RpcError } from "./jsonrpc.js";
 import { JsonRpcPeer } from "./jsonrpc.js";
-import { spawnAgent, killTree, type AgentProcess, type SpawnIsolation } from "./spawn.js";
+import { spawnAgent, killTree, provenProcessTreeExit, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import {
   acpSessionPresentation,
   normalizeAcpCommands,
@@ -640,6 +640,13 @@ export class AcpClient {
    * anything itself. */
   proveTerminalTreesGone(): Promise<boolean> {
     return this.terminals.proveTreesGone().catch(() => false);
+  }
+
+  /** Discovery settles its HOME reference only after disposing this initialize-only client and
+   * proving the entire launched tree gone, including detached helpers. */
+  async proveProcessTreeGone(): Promise<boolean> {
+    const [agent, terminals] = await Promise.all([provenProcessTreeExit(this.child), this.proveTerminalTreesGone()]);
+    return agent && terminals;
   }
 
   private settlePendingPermissions(): void {

@@ -16,6 +16,7 @@ import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { windowsCommandSpec } from "../windows-cmd.js";
 import { startCodexProbe } from "../codex-probe.js";
+import type { CodexProbeObserver } from "../codex-probe.js";
 
 const isWindows = platform() === "win32";
 
@@ -54,7 +55,7 @@ export function run(
   file: string,
   args: string[],
   opts: { timeoutMs?: number; env?: Record<string, string>; replaceEnv?: boolean; maxBuffer?: number;
-    trackDescendants?: boolean } = {},
+    trackDescendants?: boolean } & CodexProbeObserver = {},
 ): Promise<ExecResult> {
   if (opts.trackDescendants && !isWindows) return runTrackedDiscoveryProbe(file, args, opts);
   return new Promise((resolve) => {
@@ -91,19 +92,20 @@ export function run(
         });
       },
     );
+    opts.onProcess?.(Promise.resolve(false));
   });
 }
 
 /** Codex version/help discovery can execute a configured wrapper too. Keep its output/deadline
  * contract while ending the entire ownerless boundary before discovery returns. */
 async function runTrackedDiscoveryProbe(
-  command: string, args: string[], opts: { timeoutMs?: number; env?: Record<string, string>; replaceEnv?: boolean; maxBuffer?: number },
+  command: string, args: string[], opts: { timeoutMs?: number; env?: Record<string, string>; replaceEnv?: boolean; maxBuffer?: number } & CodexProbeObserver,
 ): Promise<ExecResult> {
   const timeoutMs = opts.timeoutMs ?? 5000;
   const maxBuffer = opts.maxBuffer ?? 1024 * 1024;
   const env = opts.env ? (opts.replaceEnv ? opts.env : { ...process.env, ...opts.env }) : process.env;
   let probe: ReturnType<typeof startCodexProbe>;
-  try { probe = startCodexProbe({ command, args, cwd: process.cwd(), env }); }
+  try { probe = startCodexProbe({ command, args, cwd: process.cwd(), env, onProcess: opts.onProcess }); }
   catch (error) { return { code: 1, stdout: "", stderr: "", errorCode: (error as NodeJS.ErrnoException).code ?? "SPAWN_FAILED",
     provenProcessTreeExit: false }; }
   const { child } = probe;
