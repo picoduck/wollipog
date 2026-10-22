@@ -1,4 +1,4 @@
-import { validProviderHomeBlockingProcess, type ProviderHomeBlockingProcess } from "../../../../packages/protocol/src/provider-home-recovery.js";
+import { validProviderHomeBlockingProcess, type ProviderHomeBlockingProcess } from "@wollipog/protocol";
 /** Control frames contain no canonical snapshots or private acquisition/completion tokens. */
 export const LEASE_WORKER_LIMITS = { pending: 64, requestBytes: 64 * 1024, responseBytes: 4096, deadlineMs: 300_000, heartbeatDelayMs: 500 } as const;
 /** Mixed wall-time/monotonic workers fail before any operation is dispatched. */

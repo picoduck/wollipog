@@ -5,6 +5,12 @@ export const PROVIDER_HOME_RECOVERY_CAUSES = [
   "profile_unsupported_control_plane", "profile_grant_limit", "no_reboot_proof",
 ] as const;
 export type ProviderHomeRecoveryCause = typeof PROVIDER_HOME_RECOVERY_CAUSES[number];
+export const PROVIDER_HOME_RECOVERY_CAUSE_CODES = {
+  holder_alive: "busy", boundary_survivor: "busy", process_survivor: "busy",
+  boundary_unverifiable: "unverifiable", process_uninspectable: "unverifiable",
+  process_uninspectable_not_delegated: "unverifiable", invalid_journal: "unverifiable",
+  profile_unsupported_control_plane: "unverifiable", profile_grant_limit: "unverifiable", no_reboot_proof: "unverifiable",
+} as const satisfies Record<ProviderHomeRecoveryCause, "busy" | "unverifiable">;
 export function isProviderHomeRecoveryCause(value: unknown): value is ProviderHomeRecoveryCause {
   return typeof value === "string" && (PROVIDER_HOME_RECOVERY_CAUSES as readonly string[]).includes(value);
 }

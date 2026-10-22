@@ -1,4 +1,4 @@
-import type { ProviderHomeBlockingProcess } from "../../../../packages/protocol/src/provider-home-recovery.js";
+import type { ProviderHomeBlockingProcess } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -1330,7 +1330,14 @@ export class ProviderHomeLeaseRegistry {
   private proveEvidence(evidence: LeaseProcessEvidence, pid: number, lockDir: string): LeaseAbandonmentProof {
     const result = proveLeaseAbandoned(evidence, pid, this.processProbe);
     if (result.proven) return result.proof;
-    if (result.reason === "runner_alive") throw refusal(lockDir, `is already in use by process ${pid}; use bwrap or an isolated OS account`, false, "holder_alive", { pid, startTime: evidence.startTime, kind: "recorded_runner", cgroupMembership: "unavailable" });
+    if (result.reason === "runner_alive") {
+      let cgroupMembership: ProviderHomeBlockingProcess["cgroupMembership"] = "unavailable";
+      if (evidence.containment?.kind === "linux-cgroup-v2") {
+        try { cgroupMembership = this.processProbe?.membership?.(pid, evidence.startTime, evidence.containment) ?? "unavailable"; }
+        catch { /* Best-effort diagnostics do not change the live-holder refusal. */ }
+      }
+      throw refusal(lockDir, `is already in use by process ${pid}; use bwrap or an isolated OS account`, false, "holder_alive", { pid, startTime: evidence.startTime, kind: "recorded_runner", cgroupMembership });
+    }
     if (result.reason === "marked_process") throw refusal(lockDir, "is still used by a process the leasing runner launched; stop that process and retry", false, "process_survivor", result.blockingProcess);
     if (result.reason === "boundary_populated") throw refusal(lockDir, "still has a surviving provider or helper in its recorded boundary; stop that work and retry", false, "boundary_survivor", result.blockingProcess);
     if (result.reason === "boundary_unverifiable") throw refusal(lockDir, leaseContainmentGuidance(evidence.containment), false, "boundary_unverifiable");

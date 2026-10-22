@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { PROVIDER_HOME_RECOVERY_CAUSES } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
 import { inspectProviderHomeLeaseCommand, providerHomeLeaseRecoveryCode, recoverProviderHomeLeaseCommand, type ProviderHomeLeaseCommandDeps } from "./provider-home-lease-commands.js";
 import { ProviderHomeLeaseError, type LeaseWorkerError } from "./provider-home-lease-worker-protocol.js";
@@ -66,5 +67,19 @@ test("a recovery passes the exact authorization through and maps refusals; trans
     const refused = deps({ recover: async () => { throw new ProviderHomeLeaseError(worker); } });
     const result = await recoverProviderHomeLeaseCommand(refused.value, { type: "recover_provider_home_lease", requestId: "r", accountId: "work", staleTipHash: TIP, authorizationId: AUTHORIZATION });
     assert.deepEqual([result.ok, result.code], [false, code], worker);
+  }
+});
+
+test("authorized inspection keeps specific causes and process facts only for capable peers", async () => {
+  const blockingProcess = { pid: 42, startTime: "12345", kind: "boundary_member" as const, cgroupMembership: "recorded_boundary" as const };
+  for (const cause of PROVIDER_HOME_RECOVERY_CAUSES) {
+    for (const version of [229, 233, 234, 235]) {
+      const { value } = deps({ controlPlaneProtocolVersion: () => version,
+        inspect: async () => ({ state: "stale", tipHash: TIP, sameHost: true, hasEvidence: true, refusal: cause, blockingProcess }) });
+      const { inspection } = await inspectProviderHomeLeaseCommand(value, { type: "inspect_provider_home_lease", requestId: "r", accountId: "work" });
+      assert.equal(inspection?.cause, version >= 235 ? cause : undefined);
+      assert.deepEqual(inspection?.blockingProcess, version >= 235 ? blockingProcess : undefined);
+      assert.ok(!JSON.stringify(inspection).includes(ACCOUNT.directory));
+    }
   }
 });

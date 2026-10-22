@@ -1,3 +1,4 @@
+import { isProviderHomeRecoveryCause, runnerSupportsProtocol, validProviderHomeBlockingProcess } from "@wollipog/protocol";
 import type {
   InspectProviderHomeLeaseMessage,
   InspectProviderHomeLeaseResultMessage,
@@ -12,6 +13,7 @@ import { ProviderHomeLeaseError, type LeaseWorkerError, type LeaseWorkerInspecti
 /** Everything the lease recovery commands touch (#3241 part 2); index.ts wires the runner. */
 export interface ProviderHomeLeaseCommandDeps {
   platform?: NodeJS.Platform;
+  controlPlaneProtocolVersion?: () => number | null;
   accounts: () => RunnerProviderAccount[];
   /** Read the HOME's lease state with the account's profile context; creates nothing. */
   inspect(home: string): Promise<LeaseWorkerInspection>;
@@ -29,7 +31,7 @@ export function providerHomeLeaseRecoveryCode(code: LeaseWorkerError): ProviderH
   switch (code) {
     case "stale_tip_changed": return "TIP_CHANGED";
     case "no_reboot_proof": return "NO_REBOOT_PROOF";
-    case "busy": return "HOME_IN_USE";
+    case "busy": case "holder_alive": case "boundary_survivor": case "process_survivor": return "HOME_IN_USE";
     case "foreign_host": return "FOREIGN_HOST";
     case "profile_unsupported_control_plane": case "profile_unverifiable": case "profile_not_granted": case "profile_changed": case "profile_grant_limit":
       return "PROFILE_REFUSED";
@@ -66,6 +68,10 @@ export async function inspectProviderHomeLeaseCommand(
     state: "stale", tipHash: found.tipHash!, ...(found.createdAt ? { createdAt: found.createdAt } : {}),
     sameHost: found.sameHost === true, hasEvidence: found.hasEvidence === true,
     refusal: found.refusal === null || found.refusal === undefined ? null : providerHomeLeaseRecoveryCode(found.refusal) ?? "UNVERIFIABLE",
+    ...(runnerSupportsProtocol(deps.controlPlaneProtocolVersion?.(), "providerHomeRecoveryDetails") ? {
+      ...(isProviderHomeRecoveryCause(found.refusal) ? { cause: found.refusal } : {}),
+      ...(found.refusal && validProviderHomeBlockingProcess(found.blockingProcess) ? { blockingProcess: found.blockingProcess } : {}),
+    } : {}),
   };
   return { type: "inspect_provider_home_lease_result", requestId: msg.requestId, ok: true, inspection };
 }

@@ -1135,8 +1135,26 @@ function leaseClient(options: { recover?: (accountId: string, tip: string) => Pr
       return { status: "recovered", authorizationId: "a" };
     },
   } as unknown as ApiClient;
-  return { client: value, inspected, recovered };
+  return { client: value, inspected, recovered, state };
 }
+
+test("authorized account diagnostics name the blocker and do not disable another usable account", async () => {
+  const api = leaseClient();
+  Object.assign(api.state.other!, { cause: "process_uninspectable_not_delegated",
+    blockingProcess: { pid: 4242, startTime: "987654", kind: "uninspectable", cgroupMembership: "unavailable" } });
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: 235 }) });
+  try {
+    const title = ui.row("Other Work").querySelector(".provider-account-lease")?.getAttribute("title") ?? "";
+    assert.match(title, /systemd unit is not delegated/);
+    assert.match(title, /preserve the journal/);
+    assert.match(title, /PID 4242, start time 987654, uninspectable process, cgroup membership unavailable/);
+    const menu = await ui.openMenu("Other Work");
+    assert.equal(ui.menuItems(menu).find(item => item.label === "Recover Lease…")?.reason, title);
+    await ui.closeMenu();
+    const usable = await ui.openMenu("Pending Work");
+    assert.equal(ui.menuItems(usable).find(item => item.label === "Recover Lease…")?.disabled, false);
+  } finally { await ui.unmount(); }
+});
 
 test("an Owner or Admin sees a stale lease as line-2 meta, with Recover Lease… enabled only where it can proceed", async () => {
   const api = leaseClient();

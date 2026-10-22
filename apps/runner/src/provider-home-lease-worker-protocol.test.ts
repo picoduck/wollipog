@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
+import { PROVIDER_HOME_RECOVERY_CAUSES } from "@wollipog/protocol";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
 import { LEASE_WORKER_CLOCK, LEASE_WORKER_ERRORS, LEASE_WORKER_PROFILE_LIMIT, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept } from "./provider-home-lease-worker-protocol.js";
 
@@ -31,6 +32,45 @@ function fixture(options: { deadlineMsForTest?: number; pendingLimitForTest?: nu
   });
   return { registry, get port() { return port; }, get starts() { return starts; }, diagnostics };
 }
+
+test("each typed recovery cause crosses the worker lane without poisoning other accounts", async () => {
+  const f = fixture();
+  for (const [index, cause] of PROVIDER_HOME_RECOVERY_CAUSES.entries()) {
+    const acquisition = f.registry.acquireHome("/private/refused", "claude");
+    if (index === 0) f.port.ready();
+    const request = f.port.execute(index);
+    for (const kind of ["receipt", "done"] as const) f.port.reply(kind, request, { ok: false, value: false, error: cause });
+    await assert.rejects(acquisition, error => error instanceof ProviderHomeLeaseError && error.code === cause);
+  }
+  const other = f.registry.acquireHome("/private/usable", "claude");
+  const request = f.port.execute(PROVIDER_HOME_RECOVERY_CAUSES.length);
+  f.port.reply("receipt", request); f.port.reply("done", request);
+  assert.equal(await other, true);
+  const close = f.registry.close(); const shutdown = f.port.execute(PROVIDER_HOME_RECOVERY_CAUSES.length + 1);
+  f.port.reply("receipt", shutdown); f.port.reply("done", shutdown); assert.equal(await close, true);
+});
+
+test("an inspection carries exact bounded process observations across both worker receipts", async () => {
+  const f = fixture();
+  const inspection = { state: "stale", tipHash: "a".repeat(64), sameHost: true, hasEvidence: true, refusal: "boundary_survivor",
+    blockingProcess: { pid: 42, startTime: "123", kind: "boundary_member", cgroupMembership: "recorded_boundary" } };
+  const pending = f.registry.inspectHomeLease("/private/home");
+  f.port.ready(); const request = f.port.execute();
+  f.port.reply("receipt", request, { inspection }); f.port.reply("done", request, { inspection });
+  assert.deepEqual(await pending, inspection);
+  const changed = f.registry.inspectHomeLease("/private/home"); const next = f.port.execute(1);
+  f.port.reply("receipt", next, { inspection });
+  f.port.reply("done", next, { inspection: { ...inspection, blockingProcess: { ...inspection.blockingProcess, pid: 43 } } });
+  await assert.rejects(changed, /changed completion receipt/);
+});
+
+test("private process fields poison an inspection rather than crossing the worker boundary", async () => {
+  const f = fixture(); const pending = f.registry.inspectHomeLease("/private/home");
+  f.port.ready();
+  f.port.reply("receipt", f.port.execute(), { inspection: { state: "stale", tipHash: "a".repeat(64), sameHost: true, hasEvidence: true,
+    refusal: "process_uninspectable", blockingProcess: { pid: 42, kind: "uninspectable", cgroupMembership: "unavailable", environ: "secret" } } });
+  await assert.rejects(pending, /unexpected inspection/);
+});
 
 test("a receipt grants nothing until its exact acknowledgement completes", async () => {
   const f = fixture(); let settled = false;

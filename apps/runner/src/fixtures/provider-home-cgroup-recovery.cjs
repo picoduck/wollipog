@@ -43,7 +43,7 @@ async function main() {
     await registry.acquireHome(home, "acp");
     outcome = { ok: true, released: await registry.close() };
   } catch (error) {
-    outcome = { ok: false, code: error.code };
+    outcome = { ok: false, code: error.code, inspection: await registry.inspectHomeLease(home) };
     await registry.close();
   }
   const removed = diagnostics.find((diagnostic) => diagnostic.event === "provider_home_boundary_recovered");

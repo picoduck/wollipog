@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
-import type { ProviderHomeBlockingProcess } from "../../../../packages/protocol/src/provider-home-recovery.js";
+import type { ProviderHomeBlockingProcess } from "@wollipog/protocol";
 import { inspectLeaseCgroup, isLeaseContainmentEvidence, type LeaseContainmentEvidence, type LeaseContainmentResult, type LeaseCgroupEvidence } from "./provider-home-lease-containment.js";
 
 /**
@@ -45,6 +45,7 @@ export interface LeaseProcessProbe {
    */
   scan(marker: string, runnerStartTime: string, diagnostics?: boolean): { marked: number[]; uninspectable: number[]; blockingProcess?: ProviderHomeBlockingProcess };
   boundaryMember?(identity: LeaseCgroupEvidence): ProviderHomeBlockingProcess | undefined;
+  membership?(pid: number, startTime: string, identity: LeaseCgroupEvidence): ProviderHomeBlockingProcess["cgroupMembership"];
   containment?(identity: LeaseCgroupEvidence): LeaseContainmentResult;
 }
 
@@ -109,11 +110,19 @@ const MAX_SCAN_ROUNDS = 16;
 /** The Linux procfs probe for the current user. Other platforms have no probe and record no evidence. */
 export function linuxLeaseProcessProbe(
   root = "/proc", uid = process.getuid?.(), self = process.pid,
-  testHooks?: { afterListing?: (round: number) => void },
+  testHooks?: { afterListing?: (round: number) => void; afterInspection?: (pid: number) => void },
 ): LeaseProcessProbe | undefined {
   if (process.platform !== "linux" || uid === undefined) return undefined;
   return {
     containment: inspectLeaseCgroup,
+    membership: (pid, startTime, identity) => {
+      try {
+        const member = /^0::(\/.*)$/mu.exec(readFileSync(join(root, String(pid), "cgroup"), "utf8"))?.[1];
+        if (!member || statStartTime(readFileSync(join(root, String(pid), "stat"), "utf8")) !== startTime) return "unavailable";
+        const boundary = posix.join(identity.mountRoot, identity.cgroupPath);
+        return member === boundary || member.startsWith(boundary + "/") ? "recorded_boundary" : "outside_recorded_boundary";
+      } catch { return "unavailable"; }
+    },
     boundaryMember: (identity) => {
       // Diagnostics are bounded and read-only; they never contribute ownership proof.
       const boundary = posix.join(identity.mountRoot, identity.cgroupPath);
@@ -235,8 +244,14 @@ export function linuxLeaseProcessProbe(
           const key = own === "failed" ? `${pid}:?` : `${pid}:${own[19] ?? "?"}`;
           if (verdicts.has(key)) continue;
           fresh = true;
-          verdicts.set(key, { pid, verdict: own === "failed" ? "uninspectable" : inspect(pid),
-            ...(typeof own !== "string" && START_TIME.test(own[19] ?? "") ? { startTime: own[19] } : {}) });
+          const verdict = own === "failed" ? "uninspectable" : inspect(pid);
+          let startTime: string | undefined;
+          if (diagnostics && typeof own !== "string" && START_TIME.test(own[19] ?? "")) {
+            testHooks?.afterInspection?.(pid);
+            const after = read(pid, "stat");
+            if (Buffer.isBuffer(after) && statStartTime(after.toString("utf8")) === own[19]) startTime = own[19];
+          }
+          verdicts.set(key, { pid, verdict, ...(startTime ? { startTime } : {}) });
         }
         // A marked process seen at any point refuses, even if it has exited since.
         if (!fresh && round > 0) return { marked: of("marked"), uninspectable: of("uninspectable"), ...diagnostic() };

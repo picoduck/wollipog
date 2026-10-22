@@ -8,6 +8,7 @@ import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { agentDisplayName } from "../agent-presentation.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { runnerDisplay } from "../runners.js";
+import { providerHomeBlockingProcessCopy, providerHomeRecoveryCauseCopy } from "../provider-home-refusal.js";
 import { statusMeta } from "../status-meta.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { activeSessionConflict } from "./active-session-conflict.js";
@@ -47,6 +48,13 @@ export const LEASE_RECOVERY_REFUSALS: Readonly<Record<string, string>> = {
   UNSUPPORTED_HOME: "This account's HOME has no lease that can be recovered here.",
   UNVERIFIABLE: "The lease could not be verified, so it was left unchanged.",
 };
+
+/** This response comes only from the Owner/Admin inspection route. */
+export function providerHomeLeaseDescription(lease: ProviderHomeLeaseInspection): string | undefined {
+  const guidance = lease.cause ? providerHomeRecoveryCauseCopy(lease.cause, "this account").body
+    : lease.refusal ? LEASE_RECOVERY_REFUSALS[lease.refusal] ?? LEASE_RECOVERY_REFUSALS.UNVERIFIABLE : undefined;
+  return guidance ? guidance + (lease.blockingProcess ? ` ${providerHomeBlockingProcessCopy(lease.blockingProcess)}` : "") : undefined;
+}
 
 /** The sentence-case message for a failed Adopt as Profile, Revoke Access or Recover Lease request. */
 export function providerProfileErrorMessage(cause: unknown, action: "adopt" | "revoke" | "recover"): string {
@@ -496,7 +504,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     }
     const lease = leases[account.id];
     if (leaseActions && lease?.state === "stale") {
-      const refusal = lease.refusal ? LEASE_RECOVERY_REFUSALS[lease.refusal] ?? LEASE_RECOVERY_REFUSALS.UNVERIFIABLE : undefined;
+      const refusal = providerHomeLeaseDescription(lease);
       items.push({
         label: "Recover Lease…",
         danger: true,
@@ -580,7 +588,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 profile={account.profile ? PROFILE_ACCESS[account.profile.access] : undefined}
                 lease={leaseActions && leases[account.id]?.state === "stale" ? {
                   label: "Stale Lease",
-                  title: leases[account.id]!.refusal ? LEASE_RECOVERY_REFUSALS[leases[account.id]!.refusal!] : undefined,
+                  title: providerHomeLeaseDescription(leases[account.id]!),
                 } : undefined}
                 status={status}
                 actions={canManage && (
