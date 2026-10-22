@@ -1,7 +1,11 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
-import { ProviderHomeLeaseRegistry, providerHomeLeaseRefusalKind } from "./provider-home-lease.js";
+import { ProviderHomeLeaseRegistry, providerHomeLeaseRefusalKind, type ProviderHomeLeaseRefusalKind } from "./provider-home-lease.js";
+
+class DoctorRefusal extends Error {
+  constructor(readonly kind: ProviderHomeLeaseRefusalKind) { super(kind); }
+}
 
 type RegistryFactory = (owner: string, dataDir: string) => ProviderHomeLeaseRegistry;
 const HASH = /^[a-f0-9]{64}$/u;
@@ -40,6 +44,7 @@ export function runProviderHomeDoctor(
   }
   if (command === "inspect" && (tip || authorization)) throw new Error("Inspection does not accept a recovery authorization.");
   const uid = process.getuid!();
+  if (process.geteuid!() !== uid) throw new Error("Recovery requires matching real and effective OS user IDs.");
   let home: string, dataDir: string, owner: string;
   try {
     home = realpathSync(homeArg); dataDir = realpathSync(data);
@@ -62,19 +67,21 @@ export function runProviderHomeDoctor(
   try {
     const found = registry.inspectHome(home);
     if (command === "inspect") {
-      output(`${JSON.stringify(found)}\n`);
+      const { createdAt, ...safe } = found;
+      output(`${JSON.stringify({ ...safe, ...(createdAt && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(createdAt) ? { createdAt } : {}) })}\n`);
       return;
     }
-    if (found.state !== "stale" || found.tipHash !== tip) throw new Error("stale_tip_changed");
-    if (found.refusal !== null) throw new Error(found.refusal ?? "unverifiable");
+    if (found.state !== "stale" || found.tipHash !== tip) throw new DoctorRefusal("stale_tip_changed");
+    if (found.refusal !== null) throw new DoctorRefusal(found.refusal ?? "unverifiable");
     // The registry repeats proof and exact-tip validation while publishing; this inspection is
     // explanatory only. Do not turn the inspection result into an injected or cached proof.
     registry.recoverStaleLease(home, "skills", { staleTipHash: tip!, authorizationId: authorization! });
     output(`${JSON.stringify({ state: "released", authorizationId: authorization })}\n`);
   } catch (error) {
-    const known = providerHomeLeaseRefusalKind(error);
-    const fixed = error instanceof Error && ["stale_tip_changed", "recovery_unconfirmed", "holder_alive", "process_survivor", "process_uninspectable", "process_uninspectable_not_delegated", "boundary_survivor", "boundary_unverifiable", "no_reboot_proof"].includes(error.message)
-      ? error.message : undefined;
-    throw new Error(`Provider HOME doctor refused: ${known ?? fixed ?? "unverifiable"}. Preserve the journal and inspect again.`);
+    const kind = providerHomeLeaseRefusalKind(error) ?? (error instanceof DoctorRefusal ? error.kind : "unverifiable");
+    if (kind === "recovery_unconfirmed") {
+      throw new Error("Provider HOME recovery may already have been published but could not be confirmed. Preserve the journal and inspect before retrying.");
+    }
+    throw new Error(`Provider HOME doctor refused: ${kind}. Preserve the journal and inspect again.`);
   }
 }

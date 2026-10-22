@@ -746,7 +746,8 @@ Recovery repeats abandonment and exact-tip proof in the normal registry publicat
 an authorized recovery and releases only its own reference. It never fabricates a release of the
 old owner, skips unreadable processes, deletes records, stops a process, or launches a provider.
 A changed tip, surviving work, unverifiable proof, or profile authorization failure refuses the
-operation. This initial local command does not supply profile grants; a marked profile continues
+operation. An unconfirmed recovery explicitly reports that publication may already have happened;
+inspect before retrying and never assume no change. This initial local command does not supply profile grants; a marked profile continues
 to require its existing authorized profile-aware recovery flow. Other state-doctor commands retain
 their existing offline maintenance requirements.
 

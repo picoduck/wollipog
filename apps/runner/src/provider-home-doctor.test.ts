@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -87,4 +87,48 @@ test("doctor keeps a genuine surviving provider protected and emits no private c
     assert.ok(error instanceof Error); assert.match(error.message, /process_survivor/); assert.ok(!error.message.includes(f.home)); return true;
   });
   assert.deepEqual(f.files().map(raw => raw.toString()).sort(), before);
+});
+
+test("inspection drops content-bearing timestamps from valid legacy records", { skip }, t => {
+  const f = fixture(t), lock = join(f.home, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock");
+  mkdirSync(lock, { recursive: true, mode: 0o700 });
+  writeFileSync(join(lock, "lease.json"), JSON.stringify({ version: 1, ownerHash: "a".repeat(64), leaseId: randomUUID(), pid: 101,
+    hostname: "foreign-host", provider: "skills", createdAt: "private-token-and-path" }), { mode: 0o600 });
+  let output = "";
+  runProviderHomeDoctor(f.args("inspect").slice(4), text => { output += text; });
+  assert.ok(!output.includes("private-token-and-path"));
+  assert.equal(JSON.parse(output).createdAt, undefined);
+});
+
+test("a profile refusal stays explicit and does not change the journal", { skip }, t => {
+  const f = crashed(t), registry = f.replacement(), before = f.files().map(raw => raw.toString()).sort();
+  registry.inspectHome = () => ({ state: "stale", tipHash: f.tip, refusal: "profile_unsupported_control_plane" });
+  assert.throws(() => runProviderHomeDoctor(f.args("recover", "--stale-tip-hash", f.tip, "--authorization-id", randomUUID()).slice(4), () => {}, () => registry), /profile_unsupported_control_plane/);
+  assert.deepEqual(f.files().map(raw => raw.toString()).sort(), before);
+});
+
+test("an uncertain recovery says it may already be published and must be inspected", { skip }, t => {
+  const f = crashed(t), registry = f.replacement();
+  const release = Reflect.get(registry, "releaseHeld");
+  Reflect.set(registry, "releaseHeld", () => false);
+  t.after(() => { Reflect.set(registry, "releaseHeld", release); registry.releaseAll(); });
+  assert.throws(() => runProviderHomeDoctor(f.args("recover", "--stale-tip-hash", f.tip, "--authorization-id", randomUUID()).slice(4), () => {}, () => registry), error => {
+    assert.ok(error instanceof Error); assert.match(error.message, /may already have been published/);
+    assert.doesNotMatch(error.message, /refused|private path/); return true;
+  });
+});
+
+test("the doctor refuses unsafe attestation permissions before touching HOME", { skip }, async t => {
+  const f = fixture(t);
+  chmodSync(join(f.data, ".wollipog-runner-owner-v2.json"), 0o666);
+  await assert.rejects(runStateDoctor(f.args("inspect")), /metadata must be safe/);
+  assert.deepEqual(readdirSync(f.home), []);
+});
+
+test("the doctor refuses a set-ID execution context before touching HOME", { skip }, async t => {
+  const f = fixture(t), original = process.geteuid;
+  process.geteuid = () => process.getuid!() + 1;
+  try { await assert.rejects(runStateDoctor(f.args("inspect")), /matching real and effective/); }
+  finally { process.geteuid = original; }
+  assert.deepEqual(readdirSync(f.home), []);
 });
