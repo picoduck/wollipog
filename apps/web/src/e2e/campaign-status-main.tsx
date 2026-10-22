@@ -180,8 +180,8 @@ details.cwi_3 = itemDetail(items[2]!, {
   },
 });
 if (params.get("forge") === "gitlab") {
-  // The panel item tracked in a GitLab project in a nested namespace (#3539): its issue and merge
-  // requests are recorded and linked, but GitLab is not observed yet.
+  // The panel item tracked in a GitLab project in a nested namespace (#3539): one merge request
+  // observed on its merge train a minute ago (#3600), and one the runner's glab could not read.
   const repository = "gitlab.example.com/platform/agents/wollipog";
   const refs = [2440, 2436].map((number) => ({ repository, number }));
   const stage = { ...items[1]!.stage!, pullRequests: refs };
@@ -190,7 +190,22 @@ if (params.get("forge") === "gitlab") {
     ...details.cwi_2!, issue: { repository, number: 2417 }, stage,
     observed: {
       ...details.cwi_2!.observed,
-      pullRequests: refs.map((ref) => ({ ref, fact: { availability: "unavailable", reason: "forge_unsupported" } })),
+      pullRequests: [
+        {
+          ref: refs[0]!,
+          fact: {
+            availability: "fresh", observedAt: NOW - MINUTE,
+            value: {
+              forge: "gitlab", state: "open", draft: false, headSha: "5c1e0b7a90f2c3d4e5f60718293a4b5c6d7e8f90", baseRef: "main",
+              approvals: { approved: true, approvedBy: 2, left: 0 },
+              pipeline: { id: 90142, status: "running" },
+              mergeTrain: { status: "fresh", position: 2 },
+              mergeCommitSha: null,
+            },
+          },
+        },
+        { ref: refs[1]!, fact: { availability: "unavailable", reason: "forge_unauthenticated" } },
+      ],
     },
   };
 }

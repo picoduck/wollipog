@@ -10,6 +10,7 @@ import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, 
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
+import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 /**
  * Runner-side session orchestration. For each control-plane `start_session`:
  *  - optionally create an isolated git worktree,
@@ -18126,11 +18127,12 @@ export class SessionManager {
   }
 
   /** Read-only GitHub status of the pull requests a campaign's work items name (#2417 slice 8),
-   * through this runner's `gh` login in the root Orchestrator's repository context. Only status
-   * data crosses; a failure is a fixed reason, never `gh` output. */
+   * through this runner's `gh` login in the root Orchestrator's repository context, and GitLab
+   * merge requests through its `glab` login when the control plane asks for them (#3600). Only
+   * status data crosses; a failure is a fixed reason, never `gh` or `glab` output. */
   async campaignForgeObserve(
     message: CampaignForgeObserveMessage,
-    options: { gh?: GhRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+    options: { gh?: GhRunner; glab?: GlabRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<CampaignForgeObserveResultMessage> {
     const base = { type: "campaign_forge_observe_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
@@ -18138,8 +18140,12 @@ export class SessionManager {
       return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
     }
     try {
+      const agentEnv = options.agentEnv?.(meta) ?? {};
       const outcome = await observeForgeStatus(message.pullRequests,
-        options.gh ?? contextGhRunner(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {}));
+        options.gh ?? contextGhRunner(meta.context, meta.repoPath, agentEnv),
+        message.gitlab === true
+          ? { glab: options.glab ?? contextGlabRunner(meta.context, meta.repoPath, agentEnv) }
+          : {});
       return outcome.ok
         ? { ...base, observedAt: Date.now(), ok: true, results: outcome.results }
         : { ...base, observedAt: Date.now(), ok: false, failure: outcome.failure };

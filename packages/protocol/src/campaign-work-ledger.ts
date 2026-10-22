@@ -262,6 +262,8 @@ export type CampaignForgeMergeQueueState =
 /** Slice 8: GitHub pull-request observation read on a runner through its existing `gh` login.
  * Status data only: no token, account, or raw `gh` output crosses. */
 export interface CampaignForgePullRequestObservation {
+  /** Absent on a GitHub observation, which predates the GitLab variant (#3600). */
+  forge?: undefined;
   state: "open" | "closed" | "merged";
   draft: boolean;
   headSha: string;
@@ -275,6 +277,42 @@ export interface CampaignForgePullRequestObservation {
   mergeQueue: { state: CampaignForgeMergeQueueState; position: number | null } | null;
   mergeCommitSha: string | null;
 }
+
+/** A GitLab pipeline status, collapsed: `pending` covers created, waiting_for_resource, preparing,
+ * pending, and scheduled; `unknown` is a status this server does not know. Only `success` passes. */
+export type CampaignGitLabPipelineStatus =
+  "success" | "failed" | "running" | "pending" | "canceled" | "skipped" | "manual" | "unknown";
+
+/** A merge-train car's status as GitLab reports it; `unknown` is one this server does not know. */
+export type CampaignGitLabMergeTrainStatus =
+  "idle" | "stale" | "fresh" | "merging" | "merged" | "skip_merged" | "unknown";
+
+/** #3600: a GitLab merge request read on a runner through its existing `glab` login, in GitLab's
+ * own terms rather than GitHub's. Status data only: no token, account, or raw `glab` output. */
+export interface CampaignForgeGitLabMergeRequestObservation {
+  forge: "gitlab";
+  /** GitLab's `locked` (a merge in progress) reads `open`. */
+  state: "open" | "closed" | "merged";
+  draft: boolean;
+  headSha: string;
+  /** The target branch. */
+  baseRef: string;
+  /** `approved`: the project's approval rules are satisfied (with `approvedBy` 0 when none are
+   * required). `left` is null when GitLab does not report it. */
+  approvals: { approved: boolean; approvedBy: number; left: number | null };
+  /** The merge request's head pipeline (its merged-results pipeline where the project runs them),
+   * or null when it has none. */
+  pipeline: { id: number; status: CampaignGitLabPipelineStatus } | null;
+  /** The merge request's merge-train car, or null when it is not on a train. `position` counts
+   * from 1 and is null when the train could not be read far enough. */
+  mergeTrain: { status: CampaignGitLabMergeTrainStatus; position: number | null } | null;
+  /** The merge commit, or the squash commit of a squash merge without one. */
+  mergeCommitSha: string | null;
+}
+
+/** A pull request or merge request observation. A GitHub one carries no `forge`, as before #3600. */
+export type CampaignForgeChangeRequestObservation =
+  CampaignForgePullRequestObservation | CampaignForgeGitLabMergeRequestObservation;
 
 /** Slice 8 bounds and timings, documented in docs/campaign-work-ledger.md "Forge Status". */
 export const CAMPAIGN_FORGE_OBSERVATION = {
@@ -300,7 +338,7 @@ export const CAMPAIGN_FORGE_OBSERVATION = {
  * pull requests now, subject to the rate limit, and returns their facts afterwards. */
 export interface CampaignForgeRefreshResponse {
   revision: number;
-  pullRequests: Array<{ ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgePullRequestObservation> }>;
+  pullRequests: Array<{ ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgeChangeRequestObservation> }>;
 }
 
 /* ------------------------------ Attempts and verification ------------------------------ */
@@ -568,7 +606,7 @@ export interface CampaignWorkItemDetail extends CampaignWorkItemSummary {
      * when it names none). Omitted means not collected. */
     pullRequests?: Array<{
       ref: CampaignPullRequestRef;
-      fact: CampaignObservedFact<CampaignForgePullRequestObservation>;
+      fact: CampaignObservedFact<CampaignForgeChangeRequestObservation>;
     }>;
   };
   /** Slice 6. Omitted means not collected. */

@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CAMPAIGN_FORGE_OBSERVATION, type CampaignPullRequestRef } from "@wollipog/protocol";
+import { CAMPAIGN_FORGE_OBSERVATION, type CampaignForgePullRequestObservation, type CampaignPullRequestRef } from "@wollipog/protocol";
 import {
   checkRollups,
   classifyGhFailure,
@@ -99,7 +99,7 @@ test("a merged pull request carries its merge commit, approval, and draft and cl
   }));
   const outcome = await observeForgeStatus([REF, { ...REF, number: 1 }, { ...REF, number: 2 }], gh);
   assert.ok(outcome.ok);
-  const values = outcome.results.map((result) => result.ok ? result.observation : null);
+  const values = outcome.results.map((result) => result.ok ? result.observation as CampaignForgePullRequestObservation : null);
   assert.deepEqual([values[0]?.state, values[0]?.reviewDecision, values[0]?.mergeCommitSha], ["merged", "approved", MERGE]);
   assert.deepEqual([values[1]?.draft, values[1]?.reviewDecision], [true, "review_required"]);
   assert.deepEqual([values[2]?.state, values[2]?.reviewDecision, values[2]?.mergeQueue], ["closed", "changes_requested", { state: "unknown", position: null }]);
@@ -183,15 +183,15 @@ test("required checks read passing only when GitHub's merge state confirms none 
   ] as const) {
     const outcome = await observeForgeStatus([REF], stub(answer({ r0: { pullRequest: pr({ mergeStateStatus }, seen) } })));
     assert.ok(outcome.ok && outcome.results[0]!.ok);
-    assert.equal(outcome.results[0]!.ok && outcome.results[0]!.observation.requiredChecks.state, expected, String(mergeStateStatus));
+    assert.equal(outcome.results[0]!.ok && (outcome.results[0]!.observation as CampaignForgePullRequestObservation).requiredChecks.state, expected, String(mergeStateStatus));
   }
   // A seen failure, a pending check, or no required check at all are reported as they are.
   const failing = await observeForgeStatus([REF], stub(answer({ r0: { pullRequest: pr({ mergeStateStatus: "BLOCKED" }, [check("Lint", "FAILURE", true)], "FAILURE") } })));
-  assert.equal(failing.ok && failing.results[0]!.ok && failing.results[0]!.observation.requiredChecks.state, "failing");
+  assert.equal(failing.ok && failing.results[0]!.ok && (failing.results[0]!.observation as CampaignForgePullRequestObservation).requiredChecks.state, "failing");
   const pending = await observeForgeStatus([REF], stub(answer({ r0: { pullRequest: pr({ mergeStateStatus: "BLOCKED" }, [check("Lint", null, true)], "PENDING") } })));
-  assert.equal(pending.ok && pending.results[0]!.ok && pending.results[0]!.observation.requiredChecks.state, "pending");
+  assert.equal(pending.ok && pending.results[0]!.ok && (pending.results[0]!.observation as CampaignForgePullRequestObservation).requiredChecks.state, "pending");
   const none = await observeForgeStatus([REF], stub(answer({ r0: { pullRequest: pr({ mergeStateStatus: "BLOCKED" }, [check("Unit", "SUCCESS", false)]) } })));
-  assert.equal(none.ok && none.results[0]!.ok && none.results[0]!.observation.requiredChecks.state, "none");
+  assert.equal(none.ok && none.results[0]!.ok && (none.results[0]!.observation as CampaignForgePullRequestObservation).requiredChecks.state, "none");
 });
 
 test("gh runs with the Orchestrator's agent environment, so its configured login is the one used", { skip: process.platform === "win32" }, async () => {

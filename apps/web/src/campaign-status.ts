@@ -15,7 +15,11 @@ import {
   type CampaignElapsed,
   type CampaignForgeCheckRollup,
   type CampaignForgeMergeQueueState,
+  type CampaignForgeChangeRequestObservation,
+  type CampaignForgeGitLabMergeRequestObservation,
   type CampaignForgePullRequestObservation,
+  type CampaignGitLabMergeTrainStatus,
+  type CampaignGitLabPipelineStatus,
   type CampaignIssueRef,
   type CampaignMetric,
   type CampaignMetricGapReason,
@@ -337,8 +341,24 @@ const OBSERVATION_UNAVAILABLE_TEXT: Record<CampaignObservationUnavailableReason,
   forge_error: "GitHub returned an error.",
 };
 
-export function observationUnavailableText(reason: CampaignObservationUnavailableReason): string {
-  return OBSERVATION_UNAVAILABLE_TEXT[reason] ?? "It is not available.";
+/** The same reasons for a GitLab merge request (#3600), where the forge names its own CLI. */
+const GITLAB_UNAVAILABLE_TEXT: Partial<Record<CampaignObservationUnavailableReason, string>> = {
+  not_authorized: "GitLab status is read through the campaign runner's GitLab CLI, and you don't have access to that runner.",
+  not_observed: "GitLab hasn't been read for this merge request yet.",
+  runner_disconnected: "The campaign's runner is disconnected, so GitLab can't be read.",
+  runner_unsupported: "The campaign's runner is too old to read GitLab status. Update the runner.",
+  forge_cli_missing: "The campaign's runner has no GitLab CLI (glab).",
+  forge_unauthenticated: "The GitLab CLI on the campaign's runner isn't signed in to this host.",
+  forge_unreachable: "GitLab couldn't be reached from the campaign's runner.",
+  forge_unsupported: "The GitLab CLI on the campaign's runner isn't configured for this host, or the runner predates GitLab status.",
+  forge_not_found: "GitLab has no such merge request, or the runner's GitLab CLI can't see it.",
+  forge_rate_limited: "GitLab's rate limit for the runner's GitLab CLI is used up. It will be read again later.",
+  forge_error: "GitLab returned an error.",
+};
+
+export function observationUnavailableText(reason: CampaignObservationUnavailableReason, forge: "github" | "gitlab" = "github"): string {
+  return (forge === "gitlab" ? GITLAB_UNAVAILABLE_TEXT[reason] : undefined) ??
+    OBSERVATION_UNAVAILABLE_TEXT[reason] ?? "It is not available.";
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -379,10 +399,61 @@ export interface ForgeFactRow {
 }
 
 /** How one observed pull request reads. `current` is false for a stale observation: every value
- * then reads "Last Seen …", so nothing stale reads as passing, approved, or merged now. */
+ * then reads "Last Seen …", so nothing stale reads as passing, approved, or merged now. `forge`
+ * names where it was observed. */
 export type ForgePullRequestView =
-  | { kind: "observed"; current: boolean; observedAt: number; status: string; rows: ForgeFactRow[] }
-  | { kind: "unavailable"; reason: string; lastObservedAt: number | null };
+  | { kind: "observed"; forge: "GitHub" | "GitLab"; current: boolean; observedAt: number; status: string; rows: ForgeFactRow[] }
+  | { kind: "unavailable"; forge: "GitHub" | "GitLab"; reason: string; lastObservedAt: number | null };
+
+const PIPELINE_LABELS: Record<CampaignGitLabPipelineStatus, string> = {
+  success: "Passed",
+  failed: "Failed",
+  running: "Running",
+  pending: "Pending",
+  canceled: "Canceled",
+  skipped: "Skipped",
+  manual: "Waiting for Manual Action",
+  unknown: "Unknown",
+};
+const MERGE_TRAIN_LABELS: Record<CampaignGitLabMergeTrainStatus, string> = {
+  idle: "Waiting",
+  fresh: "Running",
+  stale: "Restarting",
+  merging: "Merging",
+  merged: "Merged",
+  skip_merged: "Merged Immediately",
+  unknown: "On the Train",
+};
+
+/** The GitLab rows (#3600): approvals, the head pipeline, and the merge train, in GitLab's terms.
+ * Only a `success` pipeline reads as passed. */
+function gitlabRows(value: CampaignForgeGitLabMergeRequestObservation, seen: (text: string) => string): ForgeFactRow[] {
+  const { approved, approvedBy, left } = value.approvals;
+  // Only GitLab's rule count (`approvals_left`, an Enterprise Edition field) establishes that
+  // approval is required; on Community Edition `approved` only says whether anyone approved.
+  const approvals = approved ? approvedBy > 0 ? "Approved" : "Not Required"
+    : left !== null && left > 0 ? "Approval Required" : "Not Approved";
+  const approvalNote = !approved && left !== null && left > 0
+    ? `${left} more approval${left === 1 ? "" : "s"} needed.`
+    : approvedBy > 0 ? `${approvedBy} approval${approvedBy === 1 ? "" : "s"}.` : null;
+  const pipelineNote = !value.pipeline
+    ? "GitLab reports no pipeline for this merge request. This is not passing."
+    : value.pipeline.status === "unknown"
+      ? `Pipeline #${value.pipeline.id} has a status this server doesn't know, so it isn't shown as passing.`
+      : `Pipeline #${value.pipeline.id}.`;
+  const train = value.mergeTrain;
+  return [
+    { label: "Approvals", text: seen(approvals), note: approvalNote },
+    { label: "Pipeline", text: seen(value.pipeline ? PIPELINE_LABELS[value.pipeline.status] : "None"), note: pipelineNote },
+    {
+      label: "Merge Train",
+      text: seen(train ? `${MERGE_TRAIN_LABELS[train.status]}${train.position === null ? "" : `, Position ${train.position}`}` : "Not on a Train"),
+      note: null,
+    },
+    { label: "Head", text: value.headSha.slice(0, 7), note: null },
+    { label: "Target Branch", text: value.baseRef, note: null },
+  ];
+}
 
 function checkNote(rollup: CampaignForgeCheckRollup, required: boolean): string | null {
   if (rollup.state === "none") {
@@ -406,22 +477,29 @@ function checkNote(rollup: CampaignForgeCheckRollup, required: boolean): string 
 /** A fresh observation older than the documented age reads as stale here too, so a client that has
  * not refetched never shows an old answer as current. */
 export function forgePullRequestView(
-  fact: CampaignObservedFact<CampaignForgePullRequestObservation>,
+  fact: CampaignObservedFact<CampaignForgeChangeRequestObservation>,
   now: number,
   ref?: CampaignPullRequestRef,
 ): ForgePullRequestView {
+  const gitlab = ref ? isGitLabRef(ref) : fact.availability !== "unavailable" && fact.value.forge === "gitlab";
+  const forge = gitlab ? "GitLab" : "GitHub";
   if (fact.availability === "unavailable") {
-    // Nothing reads GitLab yet, so every reason (including GitHub-worded ones such as not_observed)
-    // would misexplain a merge request.
-    const reason = ref && isGitLabRef(ref)
-      ? "GitLab merge request status isn't observed yet. Open the merge request on GitLab to see its pipeline."
-      : observationUnavailableText(fact.reason);
-    return { kind: "unavailable", reason, lastObservedAt: fact.lastObservedAt ?? null };
+    return {
+      kind: "unavailable",
+      forge,
+      reason: observationUnavailableText(fact.reason, gitlab ? "gitlab" : "github"),
+      lastObservedAt: fact.lastObservedAt ?? null,
+    };
   }
   const current = fact.availability === "fresh" && now - fact.observedAt <= CAMPAIGN_FORGE_OBSERVATION.staleAfterMs;
   const value = fact.value;
   const seen = (text: string) => current ? text : `Last Seen ${text}`;
   const status = value.state === "open" && value.draft ? "Draft" : PR_STATE_LABELS[value.state];
+  if (value.forge === "gitlab") {
+    const rows = gitlabRows(value, seen);
+    if (value.mergeCommitSha) rows.push({ label: "Merge Commit", text: value.mergeCommitSha.slice(0, 7), note: null });
+    return { kind: "observed", forge: "GitLab", current, observedAt: fact.observedAt, status: seen(status), rows };
+  }
   const rows: ForgeFactRow[] = [
     { label: "Review", text: seen(REVIEW_LABELS[value.reviewDecision]), note: null },
     { label: "Required Checks", text: seen(CHECK_STATE_LABELS[value.requiredChecks.state]), note: checkNote(value.requiredChecks, true) },
@@ -438,7 +516,7 @@ export function forgePullRequestView(
     { label: "Base Branch", text: value.baseRef, note: null },
   ];
   if (value.mergeCommitSha) rows.push({ label: "Merge Commit", text: value.mergeCommitSha.slice(0, 7), note: null });
-  return { kind: "observed", current, observedAt: fact.observedAt, status: seen(status), rows };
+  return { kind: "observed", forge: "GitHub", current, observedAt: fact.observedAt, status: seen(status), rows };
 }
 
 const CAMPAIGN_LIFECYCLE_LABELS: Record<OrchestratorCampaignProjection["status"], string> = {

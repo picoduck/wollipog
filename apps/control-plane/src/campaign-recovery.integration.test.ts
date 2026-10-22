@@ -1398,3 +1398,25 @@ test("fresh check/review failures route to repair; stale facts cannot resolve th
     assert.equal(h.db.campaignProjection("root")!.recovery!.records.length, 0);
   } finally { h.db.close(); }
 });
+
+test("a failed GitLab pipeline routes to repair and a passed one resolves it (#3600)", () => {
+  const h = fixture();
+  try {
+    const mr = { repository: "gitlab.example.com/platform/agents/wollipog", number: 7 };
+    const planned = h.db.campaignWorkLedger.recordPlan("root", "root", { items: [{ key: "original:3600" }], planComplete: true }, 10);
+    assert.ok(planned.ok);
+    assert.ok(h.db.campaignWorkLedger.updateItem("root", "root", { workItemId: planned.data.items[0]!.workItemId,
+      stage: { stage: "awaiting_checks", pullRequests: [mr] } }, 20).ok);
+    const observation = { forge: "gitlab" as const, state: "open" as const, draft: false, headSha: "a".repeat(40), baseRef: "main",
+      approvals: { approved: false, approvedBy: 0, left: 1 }, pipeline: { id: 901, status: "failed" as const },
+      mergeTrain: null, mergeCommitSha: null };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: mr, observation }], 100);
+    h.recovery.maintain(100);
+    assert.deepEqual(h.db.campaignProjection("root")!.recovery!.records.map(record => [record.action, record.reason]),
+      [["repair_checks", "failed_checks"]], "GitLab has no requested-changes decision, so only the pipeline asks for repair");
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: mr,
+      observation: { ...observation, pipeline: { id: 902, status: "success" as const } } }], 200);
+    h.recovery.maintain(200);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.length, 0);
+  } finally { h.db.close(); }
+});

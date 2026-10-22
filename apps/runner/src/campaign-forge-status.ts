@@ -15,7 +15,8 @@ import type {
   CampaignForgePullRequestObservation,
   CampaignPullRequestRef,
 } from "@wollipog/protocol";
-import { CAMPAIGN_FORGE_OBSERVATION } from "@wollipog/protocol";
+import { CAMPAIGN_FORGE_OBSERVATION, campaignRepositoryLocation } from "@wollipog/protocol";
+import { observeGitLabMergeRequests, type GlabRunner } from "./campaign-gitlab-status.js";
 import { runContextCommand } from "./context-command.js";
 import { summarizeCheckRollup } from "./git-ops.js";
 
@@ -217,9 +218,40 @@ export type ForgeStatusOutcome =
   | { ok: true; results: Result[] }
   | { ok: false; failure: CampaignForgeObservationFailure };
 
-/** Read every ref in one `gh` call. A malformed ref is `forge_unsupported` without being read. */
-export async function observeForgeStatus(refs: readonly CampaignPullRequestRef[], gh: GhRunner): Promise<ForgeStatusOutcome> {
+/**
+ * Read every ref: GitHub refs in one `gh` call and, when `glab` is given (the control plane asked
+ * for GitLab, #3600), host-qualified GitLab refs through `glab`, both at once. A malformed or other
+ * ref is `forge_unsupported` without being read. With GitLab refs present, a failed GitHub call
+ * fails only the GitHub refs, so one forge never makes the other's refs unavailable.
+ */
+export async function observeForgeStatus(
+  refs: readonly CampaignPullRequestRef[],
+  gh: GhRunner,
+  options: { glab?: GlabRunner } = {},
+): Promise<ForgeStatusOutcome> {
   if (!Array.isArray(refs) || refs.length > CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) return { ok: false, failure: "forge_error" };
+  const gitlabIndexes = options.glab
+    ? refs.flatMap((ref, index) => campaignRepositoryLocation(ref?.repository)?.forge === "gitlab" ? [index] : [])
+    : [];
+  if (gitlabIndexes.length === 0) return observeGitHubStatus(refs, gh);
+  const [github, gitlab] = await Promise.all([
+    observeGitHubStatus(refs, gh),
+    observeGitLabMergeRequests(gitlabIndexes.map((index) => refs[index]!), options.glab!),
+  ]);
+  const results: Result[] = github.ok ? [...github.results] : refs.map((ref) => ({
+    ref: { repository: String(ref?.repository), number: Number(ref?.number) },
+    ok: false,
+    failure: githubRepository(ref) ? github.failure : "forge_unsupported",
+  }));
+  for (const [position, index] of gitlabIndexes.entries()) {
+    const read = gitlab[position]!;
+    const ref = { repository: refs[index]!.repository, number: refs[index]!.number };
+    results[index] = read.ok ? { ref, ok: true, observation: read.observation } : { ref, ok: false, failure: read.failure };
+  }
+  return { ok: true, results };
+}
+
+async function observeGitHubStatus(refs: readonly CampaignPullRequestRef[], gh: GhRunner): Promise<ForgeStatusOutcome> {
   const readable = refs.map((ref) => {
     const repository = githubRepository(ref);
     return repository ? { ...repository, number: ref.number } : null;
