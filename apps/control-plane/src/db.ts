@@ -13,7 +13,7 @@ import {
 import { CampaignBudgetLedger } from "./campaign-budget.js";
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
-import { ReviewSessions } from "./review-sessions.js";
+import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
@@ -5082,6 +5082,7 @@ DROP TRIGGER IF EXISTS sessions_settle_child_charge;
 CREATE TRIGGER sessions_settle_child_charge
 AFTER UPDATE OF status ON sessions
 WHEN NEW.parent_session_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=NEW.id)
   AND (OLD.status IN ${TERMINAL_STATUS_SQL}) IS NOT (NEW.status IN ${TERMINAL_STATUS_SQL})
 BEGIN
   UPDATE sessions SET usage_peak_cost_usd=MAX(usage_peak_cost_usd, cost_usd),
@@ -5100,7 +5101,8 @@ END;
 DROP TRIGGER IF EXISTS sessions_raise_child_cost_charge;
 CREATE TRIGGER sessions_raise_child_cost_charge
 AFTER UPDATE OF cost_usd ON sessions
-WHEN NEW.parent_session_id IS NOT NULL AND NEW.cost_usd > NEW.usage_peak_cost_usd
+WHEN NEW.parent_session_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=NEW.id) AND NEW.cost_usd > NEW.usage_peak_cost_usd
 BEGIN
   UPDATE sessions SET usage_peak_cost_usd=cost_usd WHERE id=NEW.id AND cost_usd > usage_peak_cost_usd;
   UPDATE sessions SET child_cost_reserved_usd=child_cost_reserved_usd+(
@@ -5113,7 +5115,8 @@ END;
 DROP TRIGGER IF EXISTS sessions_settle_grandchild_cost_charge;
 CREATE TRIGGER sessions_settle_grandchild_cost_charge
 AFTER UPDATE OF child_cost_reserved_usd ON sessions
-WHEN NEW.parent_session_id IS NOT NULL AND ${childCostChargeSql("NEW")}<>NEW.parent_charged_cost_usd
+WHEN NEW.parent_session_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=NEW.id) AND ${childCostChargeSql("NEW")}<>NEW.parent_charged_cost_usd
 BEGIN
   UPDATE sessions SET child_cost_reserved_usd=child_cost_reserved_usd+(
     SELECT ${childCostChargeSql("child")}-child.parent_charged_cost_usd FROM sessions child WHERE child.id=NEW.id)
@@ -5123,7 +5126,8 @@ END;
 DROP TRIGGER IF EXISTS sessions_settle_grandchild_tool_call_charge;
 CREATE TRIGGER sessions_settle_grandchild_tool_call_charge
 AFTER UPDATE OF child_tool_calls_reserved ON sessions
-WHEN NEW.parent_session_id IS NOT NULL AND ${childToolCallChargeSql("NEW")}<>NEW.parent_charged_tool_calls
+WHEN NEW.parent_session_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=NEW.id) AND ${childToolCallChargeSql("NEW")}<>NEW.parent_charged_tool_calls
 BEGIN
   UPDATE sessions SET child_tool_calls_reserved=child_tool_calls_reserved+(
     SELECT ${childToolCallChargeSql("child")}-child.parent_charged_tool_calls FROM sessions child WHERE child.id=NEW.id)
@@ -5896,7 +5900,7 @@ export class ControlPlaneDb {
   /** `SessionView.campaignMembership` (#2417): every descendant of a campaign, including a nested
    * Orchestrator, names the root and its own open attempt there. The root itself has none. */
   campaignMembership(sessionId: string, parentSessionId: string | null): CampaignMembershipView | undefined {
-    if (!parentSessionId) return undefined;
+    if (!parentSessionId || this.reviewSessions.isReviewSession(sessionId)) return undefined;
     const campaignSessionId = this.campaignRootForMember(sessionId);
     if (!campaignSessionId || campaignSessionId === sessionId) return undefined;
     const assignment = this.campaignWorkLedger.currentAssignment(sessionId);
@@ -7366,6 +7370,7 @@ export class ControlPlaneDb {
           /* column already present */
         }
       }
+      new ReviewSessions(db);
       if (addedChildCharges) settleLegacyChildCharges(db);
       db.exec(CHILD_CHARGE_TRIGGERS_SQL);
       db.exec("COMMIT");
@@ -11671,7 +11676,8 @@ export class ControlPlaneDb {
       FROM descendants descendant JOIN sessions session ON session.id=descendant.id
       JOIN session_ownership ownership ON ownership.session_id=session.id
       LEFT JOIN runners runner ON runner.runner_id=session.runner_id
-      WHERE (session.id!=? OR ?=1) AND session.pending_approval IS NOT NULL AND ${authorization.sql}
+      WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=session.id)
+        AND (session.id!=? OR ?=1) AND session.pending_approval IS NOT NULL AND ${authorization.sql}
       UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,NULL,NULL,decision.controlling_session_id,
         decision.authority,decision.occurrence_id,NULL
       FROM workflow_decisions decision JOIN session_ownership ownership ON ownership.session_id=decision.session_id
@@ -11830,7 +11836,8 @@ export class ControlPlaneDb {
       LEFT JOIN session_tool_call_counts tool ON tool.session_id=session.id
       LEFT JOIN session_role_conversions conversion ON conversion.session_id=session.id
       LEFT JOIN (SELECT parent_session_id, COUNT(*) AS occupied FROM sessions
-        WHERE parent_session_id IS NOT NULL AND archived=0 AND status NOT IN ('completed','failed','stopped')
+        WHERE parent_session_id IS NOT NULL AND archived=0
+         AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id) AND status NOT IN ('completed','failed','stopped')
         GROUP BY parent_session_id) children ON children.parent_session_id=session.id
       WHERE ${authorization.sql} ${includeArchived ? "" : "AND session.archived=0"}
       ORDER BY session.created_at DESC,session.id`;
@@ -11867,6 +11874,7 @@ export class ControlPlaneDb {
     // 64-row/cycle/missing-parent refusal. No per-session ancestry SQL is needed.
     const campaignRoots = new Map<string,string | null>();
     const campaignRoot = (sessionId: string): string | null => {
+      if (this.reviewSessions.isReviewSession(sessionId)) return null;
       if (campaignRoots.has(sessionId)) return campaignRoots.get(sessionId)!;
       let current=context.rows.get(sessionId);
       let root: SessionRow | undefined;
@@ -15435,6 +15443,22 @@ export class ControlPlaneDb {
     return row ? JSON.stringify(row) : null;
   }
 
+  /** Display ancestry only: reviewer launch and ordinary child admission stay independent. */
+  linkReviewSession(reviewSessionId: string): void {
+    const link = this.reviewSessions.link(reviewSessionId);
+    if (!link) return;
+    const requester = this.getSession(link.requesterSessionId);
+    const review = this.getSession(reviewSessionId);
+    if (!requester || !review) return;
+    const scope = this.sessionScope(reviewSessionId);
+    const projectScope = requester.projectId ? this.projectScope(requester.projectId) : null;
+    const keepProject = !!(scope && projectScope && this.scopeAudienceContainedWithMembership(scope, projectScope));
+    this.stmt(`UPDATE sessions SET parent_session_id=?, project_id=?, project_location_id=?
+      WHERE id=? AND (parent_session_id IS NOT ? OR project_id IS NOT ? OR project_location_id IS NOT ?)`)
+      .run(requester.id, keepProject ? requester.projectId ?? null : null, keepProject ? requester.projectLocationId ?? null : null,
+        reviewSessionId, requester.id, keepProject ? requester.projectId ?? null : null, keepProject ? requester.projectLocationId ?? null : null);
+  }
+
   /** The scope a new session will carry: the explicit one, else what the workspace or runner
    * confers. Exposed so admission checks can look at the owner BEFORE the session exists. */
   effectiveSessionScope(runnerId: string, workspaceId: string | null, explicit?: ResourceScope): ResourceScope | null {
@@ -15465,7 +15489,8 @@ export class ControlPlaneDb {
 
   /** Server-owned ancestry only. UNION terminates even if legacy data contains a cycle. */
   isSessionDescendant(ancestorId: string, targetId: string): boolean {
-    if (ancestorId === targetId) return false;
+    // Reviewer parentage is for display/history and grants no descendant mutation authority.
+    if (ancestorId === targetId || this.reviewSessions.isReviewSession(targetId)) return false;
     return Boolean(this.stmt(`
       WITH RECURSIVE ancestry(id) AS (
         SELECT parent_session_id FROM sessions WHERE id=? AND parent_session_id IS NOT NULL
@@ -15522,7 +15547,7 @@ export class ControlPlaneDb {
               )
           ) AS request_created_at_by_id
         FROM descendants d JOIN sessions s ON s.id=d.id
-        WHERE s.id<>? ORDER BY s.created_at DESC, s.id ASC
+        WHERE s.id<>? AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=s.id) ORDER BY s.created_at DESC, s.id ASC
     `).all(ancestorId, ancestorId) as unknown as Array<{
       id: string;
       title: string;
@@ -15571,6 +15596,7 @@ export class ControlPlaneDb {
               MAX(0, child_tool_calls_reserved) AS maxToolCalls,
               (SELECT COUNT(*) FROM sessions child
                 WHERE child.parent_session_id=? AND child.archived=0
+                  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=child.id)
                   AND child.status NOT IN ('completed','failed','stopped')) AS liveCount
        FROM sessions WHERE id=?`,
     ).get(parentSessionId, parentSessionId) as unknown as {
@@ -15799,6 +15825,16 @@ export class ControlPlaneDb {
   settleHumanCampaignDispatch(sessionId: string, sent: boolean): void {
     this.stmt("UPDATE human_campaign_launches SET dispatch_state=? WHERE session_id=? AND dispatch_state='uncertain'")
       .run(sent ? "sent" : "unsent", sessionId);
+  }
+
+  /** Commit the immutable review identity and its display parent before any observer sees it. */
+  createReviewSession(input: NewSessionInput, review: Omit<NewReviewSession, "reviewSessionId" | "runnerId">): SessionView {
+    return this.atomic(() => {
+      this.reviewSessions.record({ ...review, reviewSessionId: input.id, runnerId: input.runnerId }, input.now);
+      this.createSession(input);
+      this.linkReviewSession(input.id);
+      return this.getSession(input.id)!;
+    });
   }
 
   createSession(input: NewSessionInput): SessionView {
@@ -18623,7 +18659,7 @@ export class ControlPlaneDb {
         SELECT id FROM sessions WHERE parent_session_id=?
         UNION
         SELECT child.id FROM sessions child JOIN descendants parent ON child.parent_session_id=parent.id
-      ) SELECT id FROM descendants ORDER BY id
+      ) SELECT id FROM descendants WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=descendants.id) ORDER BY id
     `).all(campaignSessionId) as unknown as Array<{ id: string }>).map((row) => row.id);
   }
 
@@ -19389,6 +19425,7 @@ export class ControlPlaneDb {
    * `hasPolicy` is false only for a legacy or unreadable campaign policy: that root still owns its
    * typed gates (human-only by default) but has no campaign to project. */
   campaignAncestryRoot(sessionId: string): { id: string; hasPolicy: boolean } | "none" | "refused" {
+    if (this.reviewSessions.isReviewSession(sessionId)) return "none";
     const read = (id: string) => this.stmt(
       "SELECT id, parent_session_id, session_role, permission_mode, orchestrator_policy FROM sessions WHERE id=?",
     ).get(id) as {
@@ -20449,6 +20486,7 @@ export class ControlPlaneDb {
                s.queue_hold
         FROM descendants d JOIN sessions s ON s.id=d.id
         WHERE s.id<>?
+          AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=s.id)
           AND ((s.worktree_recovery IS NOT NULL AND s.worktree_recovery<>'')
             OR (s.queue_hold IS NOT NULL AND s.queue_hold<>''))
           AND s.status NOT IN ('completed','failed','stopped')
@@ -20993,6 +21031,7 @@ export class ControlPlaneDb {
    * replay) raise its charge against its parent. A live child is already held at its limit and is
    * recounted at its next status transition, so only settled children pay for a recount. */
   private raiseSettledChildToolCallCharge(sessionId: string): void {
+    if (this.reviewSessions.isReviewSession(sessionId)) return;
     this.stmt(
       `UPDATE sessions SET usage_peak_tool_calls=MAX(usage_peak_tool_calls, ${toolCallCountSql("sessions.id")})
        WHERE id=? AND parent_session_id IS NOT NULL AND status IN ${TERMINAL_STATUS_SQL}`,
@@ -24291,6 +24330,7 @@ export class ControlPlaneDb {
 
   /** The outermost durable Orchestrator owns descendant results, including nested helpers. */
   sessionResultOrchestrator(sessionId: string, summary?: SessionSummaryContext): string | null {
+    if (this.reviewSessions.isReviewSession(sessionId)) return null;
     const seen = new Set<string>([sessionId]);
     let parentId = (summary ? summary.rows.get(sessionId) : this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(sessionId) as
       { parent_session_id: string | null } | undefined)?.parent_session_id;
@@ -24415,6 +24455,7 @@ export class ControlPlaneDb {
       `SELECT parent_session_id AS parentSessionId, COUNT(*) AS occupied
        FROM sessions
        WHERE parent_session_id IS NOT NULL AND archived=0
+         AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id)
          AND status NOT IN ('completed','failed','stopped')
        GROUP BY parent_session_id`,
     ).all() as unknown as Array<{ parentSessionId: string; occupied: number }>).map((entry) =>
@@ -24880,6 +24921,7 @@ export class ControlPlaneDb {
     request: PendingApproval,
     summary?: SessionSummaryContext,
   ): CampaignAuthorityEvaluation | undefined {
+    if (this.reviewSessions.isReviewSession(row.id)) return undefined;
     if (!row.parent_session_id && orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control?.mode === "full_control") {
       if (request.kind === "workflow_decision") return request.workflowDecision?.authorityEvaluation ?? {
         owner: request.workflowDecision?.authority ?? "human", basis: "custom_policy", reason: "custom_owner",

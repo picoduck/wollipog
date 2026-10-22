@@ -115,8 +115,9 @@ export class CampaignBudgetLedger {
       this.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
       header.state = "accounting_unavailable"; header.reason = "Unpriced campaign usage detected; protected admission stopped without a continue prompt.";
     }
-    const rows = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost FROM campaign_budget_members m
-      LEFT JOIN sessions s ON s.id=m.session_id WHERE m.root_id=?`).all(rootId) as unknown as Array<Member & { live_cost: number }>;
+    const rows = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost,
+      EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=m.session_id) AS review FROM campaign_budget_members m
+      LEFT JOIN sessions s ON s.id=m.session_id WHERE m.root_id=?`).all(rootId) as unknown as Array<Member & { live_cost: number; review: number }>;
     const actual: CampaignBudgetView["actual"] = { costUsd: 0, toolCalls: 0 }, outstanding = { costUsd: 0, toolCalls: 0 };
     let live = 0;
     for (const row of rows) {
@@ -147,7 +148,7 @@ export class CampaignBudgetLedger {
     return { authority, state: header.state, ...(header.reason ? { reason: header.reason } : {}), actual, outstanding,
       remaining: { costUsd: authority.costUsd === undefined ? null : Math.max(0, authority.costUsd - actual.costUsd - outstanding.costUsd),
         toolCalls: authority.toolCalls === undefined ? null : Math.max(0, authority.toolCalls - actual.toolCalls - outstanding.toolCalls) },
-      occupied: rows.filter((r) => r.active && r.session_id !== rootId).length,
+      occupied: rows.filter((r) => r.active && r.session_id !== rootId && !r.review).length,
       acceptedFollowUps: header.accepted_follow_ups,
       reachedCheckpointsUsd: authority.checkpointsUsd?.filter((v) => actual.costUsd >= v) ?? [],
       enforcement: "admission_and_best_effort_cancellation", externalWorkers: "unsupported",
@@ -444,7 +445,8 @@ export class CampaignBudgetLedger {
       const spentCost = old ? old.live_cost > 0 ? roundUsdMicros(old.cost + old.live_cost) : old.cost : 0;
       if (old) allocation = { ...allocation, costUsd: allocation.costUsd ?? old.cost_limit ?? undefined, toolCalls: allocation.toolCalls ?? old.tool_limit ?? undefined };
       if (old && old.root_id !== rootId) throw new Error("session belongs to another allowance");
-      if (activate && !old?.active && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
+      const review = this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(allocation.sessionId);
+      if (!review && activate && !old?.active && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
       for (const [requested, spent, ceiling, userCeiling, remaining, prior] of [
         [allocation.costUsd, spentCost, v.authority.costUsd, old ? old.user_cost_limit : userLimits.costUsd, v.remaining.costUsd, old?.active ? Math.max(0,(old.cost_limit ?? 0)-spentCost) : 0],
         [allocation.toolCalls, old?.tools ?? 0, v.authority.toolCalls, old ? old.user_tool_limit : userLimits.toolCalls, v.remaining.toolCalls, old?.active ? Math.max(0,(old.tool_limit ?? 0)-old.tools) : 0],

@@ -1764,6 +1764,7 @@ export class SessionsService {
     this.db.settleInterruptedSteeringAttempts(Date.now());
     this.db.compactSteeringAttempts(Date.now());
     this.maintainSessionCommands(Date.now());
+    this.reconcileReviewSessionDisposal(undefined, true);
   }
 
   /** Notify on a (possible) transition. Reads the FRESH view so a same-call re-park (e.g.
@@ -4900,7 +4901,13 @@ export class SessionsService {
       automationOrigin: delivery?.automationOrigin,
       now,
     };
-    const insert = () => this.db.createSession(sessionInput);
+    const insert = () => {
+      const policy = creationContext?.review?.policy;
+      return policy ? this.db.createReviewSession(sessionInput, {
+        requesterSessionId: policy.requesterSessionId, pullRequest: policy.pullRequest,
+        headSha: policy.headSha, reviewer: policy.harness,
+      }) : this.db.createSession(sessionInput);
+    };
     try {
       if (humanLaunch) {
         const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest);
@@ -4915,14 +4922,6 @@ export class SessionsService {
       if (error instanceof CampaignAttemptRefusal) return fail(error.message, error.status);
       if (budgetRoot || humanLaunch) return fail((error as Error).message, 409);
       throw error;
-    }
-    // The review row is what makes this session a review, so it exists before anything is sent.
-    if (creationContext?.review) {
-      const policy = creationContext.review.policy;
-      this.db.reviewSessions.record({
-        reviewSessionId: id, requesterSessionId: policy.requesterSessionId, runnerId: req.runnerId,
-        pullRequest: policy.pullRequest, headSha: policy.headSha, reviewer: policy.harness,
-      }, now);
     }
     if (!humanLaunch && config.costBudgetUsd && config.costBudgetUsd > 0) {
       this.db.updateSessionCostBudget(id, config.costBudgetUsd, now);
@@ -5526,6 +5525,7 @@ export class SessionsService {
     for (const sessionId of this.db.sessionsWithHeldReviewContinuations(runnerId)) {
       this.deliverHeldReviewContinuations(sessionId, now);
     }
+    this.reconcileReviewSessionDisposal(runnerId);
     return this.promptOutbox.flush(now, runnerId);
   }
 
@@ -8027,6 +8027,7 @@ export class SessionsService {
    * rather than resolved to whichever Orchestrator the loop saw last; every caller must then refuse
    * its operation (#2468). A sound chain never exceeds the loop's bound, so its result is unchanged. */
   private orchestratorCampaignController(start: SessionView | null): SessionView | null | "refused" {
+    if (start?.kind === "review") return null;
     if (start && this.db.campaignAncestryRoot(start.id) === "refused") return "refused";
     const seen = new Set<string>();
     let current = start;
@@ -8050,6 +8051,7 @@ export class SessionsService {
   }
 
   private campaignAttentionController(session: SessionView | null, batch?: RunnerAttentionBatch): SessionView | null {
+    if (session?.kind === "review") return null;
     if (batch) return batch.capture(session);
     return session?.parentSessionId
       ? this.campaignEventController(this.db.getSession(session.parentSessionId))
@@ -8889,6 +8891,35 @@ export class SessionsService {
     return page ? ok(page) : fail("review session not found", 404);
   }
 
+  /** Repair pre-parentage rows and retry disposal after a restart or missed delivery receipt. */
+  private reconcileReviewSessionDisposal(runnerId?: string, repairParentage = false): void {
+    for (const id of this.db.reviewSessions.sessionIds(runnerId, repairParentage)) {
+      if (repairParentage) this.db.linkReviewSession(id);
+      const review = this.db.reviewSessions.view(id)!;
+      const requester = this.db.getSession(review.requesterSessionId);
+      if (requester?.archived) {
+        this.db.abandonReviewContinuations(requester.id, Date.now());
+        this.cancelReviewSession(requester.id, id);
+        this.setArchived(id, true);
+      } else this.disposeReviewSession(id, repairParentage ? "startup" : "retry_sweep");
+    }
+  }
+
+  // Diagnostics: which review was disposed, whether delivery was confirmed, and which path
+  // requested cleanup. Pending Stop/Archive remains visible through the existing durable intent.
+  private disposeReviewSession(sessionId: string, entryPoint: "startup" | "retry_sweep" | "review_result" | "session_status" | "continuation_delivery"): void {
+    const review = this.db.reviewSessions.view(sessionId);
+    // Pending, uncertain and failed delivery are not delivery proof. Keep the child readable
+    // while the existing continuation machinery retries or awaits recovery.
+    if (!review?.terminal || review.continuation !== null && review.continuation !== "delivered" &&
+        review.continuation !== "abandoned") return;
+    const session = this.db.getSession(sessionId);
+    if (!session || session.archived || session.archiveOperation) return;
+    this.setArchived(sessionId, true);
+    this.log.info(JSON.stringify({ event: "review_session_disposal_requested", entryPoint, reviewSessionId: sessionId,
+      requesterSessionId: review.requesterSessionId, continuation: review.continuation }));
+  }
+
   /** Cancel an unfinished review by stopping its session; the runner reports the cancellation. */
   cancelReviewSession(requesterSessionId: string, reviewSessionId: string): ServiceResult<ReviewSessionView> {
     const view = this.reviewSessionView(requesterSessionId, reviewSessionId);
@@ -8913,6 +8944,7 @@ export class SessionsService {
       requesterSessionId: view.requesterSessionId, state: view.state, reviewer: view.reviewer, reason: view.reason,
       outputTruncated: view.outputTruncated }));
     if (view.terminal) this.deliverHeldReviewContinuations(view.requesterSessionId);
+    this.disposeReviewSession(view.reviewSessionId, "review_result");
   }
 
   /** A review session's own status moves its review: launched is running, and a session that ends
@@ -8923,6 +8955,7 @@ export class SessionsService {
     const changed = status === "starting" || status === "running"
       ? this.db.reviewSessions.markRunning(sessionId, now)
       : isTerminal(status) && this.db.reviewSessions.abandon(sessionId, "the review ended without a result", now);
+    this.disposeReviewSession(sessionId, "session_status");
     if (!changed) return;
     const view = this.db.reviewSessions.view(sessionId)!;
     this.hub.sessionChangedById(view.requesterSessionId);
@@ -8975,6 +9008,7 @@ export class SessionsService {
       return sent.error ?? "the continuation was refused";
     }
     this.hub.sessionChangedById(requesterSessionId);
+    for (const id of ids) this.disposeReviewSession(id, "continuation_delivery");
     return null;
   }
 
@@ -8997,6 +9031,7 @@ export class SessionsService {
       : null;
     if (!state) return;
     this.db.setReviewContinuationCommandState(commandId, state, now);
+    for (const id of this.db.reviewSessions.forRequester(requesterSessionId)) this.disposeReviewSession(id, "continuation_delivery");
     if (state === "failed") {
       this.log.warn(`review continuation failed for ${requesterSessionId}: ${command.error ?? "unknown error"}`);
     }
@@ -12724,17 +12759,32 @@ export class SessionsService {
       if (media && !pending.archived && !this.db.sessionStopIntent(sessionId)?.archiveAfterStop) {
         return fail("Prepared media archive requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
       }
+      this.archiveRequesterReviews(sessionId, now, refreshProject);
       return ok(pending, 202);
     }
-    if (session.archived) return ok(session);
+    if (session.archived) {
+      this.archiveRequesterReviews(sessionId, now, refreshProject);
+      return ok(session);
+    }
     // Archiving a terminal session needs no Stop, but it is an end all the same: a runner that
     // returns stops an archived session rather than restoring it, so a child a disconnect had
     // provisionally stopped can answer nothing and is owed no resume from here on (#1759).
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-archived");
     this.db.setSessionArchived(sessionId, true, now);
+    this.archiveRequesterReviews(sessionId, now, refreshProject);
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated, refreshProject);
     return ok(updated);
+  }
+
+  private archiveRequesterReviews(sessionId: string, now: number, refreshProject: boolean): void {
+    const reviews = this.db.reviewSessions.forRequester(sessionId);
+    if (!reviews.length) return;
+    this.db.abandonReviewContinuations(sessionId, now);
+    for (const id of reviews) {
+      this.cancelReviewSession(sessionId, id);
+      this.setArchived(id, true, refreshProject);
+    }
   }
 
   /** A verified child and its archived flag are the durable intent. Reconnect replays this
@@ -15858,7 +15908,7 @@ export class SessionsService {
       }
     };
     return { defer, capture: (session) => {
-      if (!session?.parentSessionId) return null;
+      if (!session?.parentSessionId || session.kind === "review") return null;
       let before = parents.get(session.parentSessionId);
       if (before === undefined) {
         before = this.campaignAttentionController(session);
@@ -15988,7 +16038,7 @@ export class SessionsService {
     const campaigns = this.runnerAttentionBeforeViews(runnerId);
     const parents = new Map<string, SessionView | null>();
     const campaignBefore = (session: SessionView | null): SessionView | null => {
-      if (!session?.parentSessionId) return null;
+      if (!session?.parentSessionId || session.kind === "review") return null;
       let controller = parents.get(session.parentSessionId);
       if (controller === undefined) {
         controller = this.campaignAttentionController(session);
