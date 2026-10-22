@@ -98,7 +98,7 @@ export async function probePiRpc(
         ...(probeNonce ? { [PI_AGENT_CONTROL_PROBE_NONCE_ENV]: probeNonce } : {}),
       },
       context,
-      trackDescendants: false,
+      trackDescendants: true,
     });
     let transportError: Error | null = null;
     peer = new PiRpcPeer(child.stdin, child.stdout, (event) => {

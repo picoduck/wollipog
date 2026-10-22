@@ -204,6 +204,31 @@ test("versioned boundary recovery retains journal history and profile authorizat
   assert.ok(result !== "acquired" && result.kind === "foreign_owner", "empty cgroup never grants profile authority");
 });
 
+test("version-5 ownership and recovery remain verifiable through canonical checkpoint compaction", { skip, timeout: 120_000 }, (t) => {
+  const containment = { kind: "linux-cgroup-v2" as const, bootId: BOOT, mountRoot: "/", cgroupPath: "runner/providers", inode: "123" };
+  const { home, world } = crashedHome(t, { containment });
+  // The first holder has exited. A same-owner successor uses the same recorded process view and
+  // versioned evidence through enough ordinary releases/acquisitions to publish a checkpoint.
+  world.boundary = "empty";
+  world.running.set(404, "4040");
+  const holder = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 404, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID,
+    runnerMarker: MARKER_B, processProbe: probe(world), containment });
+  for (let turn = 0; turn < 12; turn++) {
+    holder.acquireHome(home, "claude", GRANTED);
+    assert.equal(holder.releaseAll(), true);
+  }
+  holder.acquireHome(home, "claude", GRANTED);
+  const raw = readFileSync(join(leaseRoot(home), "mutable-home.recovery.json"), "utf8");
+  const anchor = JSON.parse(raw) as { version: number; checkpoint: { previousTip: string }; process: unknown };
+  assert.equal(anchor.version, 4, "the test actually crosses checkpoint publication");
+  assert.equal(JSON.parse(anchor.checkpoint.previousTip).version, 5, "checkpoint retains the incompatible tip version for old readers");
+  world.running.delete(404);
+  world.uninspectable = [444];
+  const next = replacement(world);
+  next.acquireHome(home, "claude", GRANTED);
+  assert.equal(next.releaseAll(), true, "a different runner recovers and releases the checkpointed v5 chain");
+});
+
 test("surviving or unverifiable recorded boundaries refuse without falling back to a clean process scan", { skip }, (t) => {
   const containment = { kind: "linux-cgroup-v2" as const, bootId: BOOT, mountRoot: "/", cgroupPath: "runner/providers", inode: "123" };
   for (const boundary of ["populated", "unverifiable"] as const) {
