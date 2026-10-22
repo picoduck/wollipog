@@ -48,9 +48,13 @@ unit along with the prior executables. Delegation permits future supervised cgro
 cannot retroactively prove that an older lease's surviving processes have exited.
 
 For a colocated control plane and runner, upgrade success requires the new runner version, a new
-connection, a completed discovery pass since registration, no ownership-blocked discovery, and
+connection, a completed discovery pass since registration, no newly ownership-blocked discovery, and
 continued availability of previously ready agent IDs. Registration alone and cached inventory
 cannot satisfy this check. Failure triggers rollback and records the reason in the upgrade journal.
+An ownership block already reported in the pre-upgrade snapshot does not prevent installing a
+recovery update: completion reports `fresh-harness-discovery-degraded`, emits a warning, and records
+the unresolved block in the upgrade journal. A newly blocked or previously ready harness still
+fails readiness and rolls back. An unknown baseline never excuses an ownership block.
 `admin status --json` exposes the content-free `runners.items[].harnessReadiness` projection:
 connection time, discovery completion, and agent IDs/availability/ownership-blocked flags. These
 answer whether discovery ran after this restart, whether an ownership refusal blocked it, and

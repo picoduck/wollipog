@@ -354,3 +354,14 @@ test("an installed but unavailable harness directs the user to its details inste
     assert.ok(rowNamed(view.body, "Codex App Server"));
   } finally { await view.unmount(); }
 });
+
+test("an unavailable custom agent keeps installation hints when native harnesses are missing", async () => {
+  const view = await mount(runner([{ id: "custom", name: "Custom ACP", command: "custom", args: [], env: {},
+    driver: "acp", available: false, unavailableReason: "The configured probe failed." }]));
+  try {
+    const state = view.body.querySelector(".machine-agents-empty")!;
+    assert.match(state.textContent ?? "", /Open an agent’s details/u);
+    assert.match(state.textContent ?? "", /Install Claude Code or Codex/u);
+    assert.ok(state.querySelector('.code-well button[aria-label="Copy Claude Code Install Command"]'));
+  } finally { await view.unmount(); }
+});

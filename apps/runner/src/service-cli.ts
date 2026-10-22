@@ -972,6 +972,8 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     const before = controlPlane && runnerId ? await adminJson<HostAdminStatusView>(host, effective, ["status"]) : null;
     const previousRunner = before?.data?.runners?.items?.find(item => item.runnerId === runnerId);
     const previouslyReady = new Set(previousRunner?.harnessReadiness?.agents.filter(agent => agent.available).map(agent => agent.id));
+    const previouslyBlocked = new Set(previousRunner?.harnessReadiness?.agents.filter(agent => agent.ownershipBlocked && !agent.available).map(agent => agent.id));
+    const readinessWarnings: string[] = [];
     const unitPath = join(layout.unitDir, RUNNER_UNIT);
     let unitBackup: { contents: string; mode: number } | null = null;
 
@@ -1080,11 +1082,14 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
           const readiness = current.harnessReadiness;
           if (!readiness?.refreshed || readiness.connectedAt === null ||
               readiness.connectedAt === previousRunner?.harnessReadiness?.connectedAt) return false;
-          if (readiness.agents.some(agent => agent.ownershipBlocked)) {
+          if (readiness.agents.some(agent => agent.ownershipBlocked && !previouslyBlocked.has(agent.id))) {
             readinessProblem = "provider HOME ownership blocks harness discovery"; return false;
           }
           if ([...previouslyReady].some(id => !readiness.agents.some(agent => agent.id === id && agent.available))) {
             readinessProblem = "a previously ready harness became unavailable"; return false;
+          }
+          if (readiness.agents.some(agent => agent.ownershipBlocked)) {
+            readinessWarnings.push("A pre-existing provider HOME ownership block remains; inspect recovery diagnostics. The update did not restore that harness.");
           }
           return true;
         });
@@ -1096,7 +1101,7 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
         if (!active) throw await rollBack(`${runner.unit} did not become active within 30s after the upgrade`);
       }
     }
-    journal.note("verified");
+    journal.note("verified", readinessWarnings.join(" ") || undefined);
     const cleanup = finishStaging();
     if (cleanup) {
       throw new CliError(`upgrade to ${release.tag} completed and is healthy, but ${cleanup}\nNext: wollipog service staging inspect ${modeFlag(mode)}  (read-only); the retained staging blocks the next upgrade until it is recovered.`, 1, {
@@ -1111,12 +1116,14 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
       aliases,
       webDist: stagedWeb ? webDist : null,
       diagnostics: { journal: journal.path, problem: journal.problem },
-      runnerVerification: runner ? controlPlane && runnerId ? "fresh-harness-discovery" : "service-active-only" : null,
+      runnerVerification: runner ? controlPlane && runnerId ? readinessWarnings.length ? "fresh-harness-discovery-degraded" : "fresh-harness-discovery" : "service-active-only" : null,
+      warnings: readinessWarnings,
     };
     emit(report, [
       `Upgraded to ${release.tag}: ${targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ")}${aliases.length ? `, ${aliases.map((alias) => basename(alias)).join(" and ")} refreshed` : ""}${stagedWeb ? ", web bundle refreshed" : ""}.`,
       `Previous executables kept as ${targets.map((target) => previous(target.path)).join(" and ")}; the next upgrade replaces them.`,
-      controlPlane ? `Control plane healthy${runner && runnerId ? "; runner reconnected with fresh harness discovery." : "."}` : "Runner active. Harness readiness must be verified on its remote control plane.",
+      controlPlane ? `Control plane healthy${runner && runnerId ? readinessWarnings.length ? "; runner reconnected, with pre-existing harness availability problems." : "; runner reconnected with fresh harness discovery." : "."}` : "Runner active. Harness readiness must be verified on its remote control plane.",
+      ...readinessWarnings.map(warning => `Warning: ${warning}`),
       ...(journal.problem ? [`Warning: ${journal.problem}`] : []),
     ].join("\n"));
     return 0;

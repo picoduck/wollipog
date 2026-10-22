@@ -779,7 +779,7 @@ test("upgrading a legacy runner unit preserves settings, enables delegation, and
 });
 
 test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost previously ready harness", { skip: process.platform !== "linux" }, async t => {
-  for (const problem of ["stale", "ownership", "lost", "pending", "healthy"]) await t.test(problem, async t => {
+  for (const problem of ["stale", "ownership", "lost", "pending", "healthy", "already-blocked"]) await t.test(problem, async t => {
     const f = fake(t);
     assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
     const fixture = releaseFixture(f);
@@ -797,15 +797,20 @@ test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost pr
           runner.harnessReadiness = {
             connectedAt: installed && problem !== "stale" ? 2 : 1,
             refreshed: !installed || problem !== "pending",
-            agents: [{ id: "claude", available: !installed || problem === "healthy", ownershipBlocked: installed && problem === "ownership" }],
+            agents: [{ id: "claude", available: problem === "already-blocked" ? false : !installed || problem === "healthy",
+              ownershipBlocked: problem === "already-blocked" || installed && problem === "ownership" }],
           };
         }
         return { ...response, text: async () => JSON.stringify(body) };
       },
     };
     const io = makeIo();
-    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io.io), problem === "healthy" ? 0 : 1, io.stdout() + io.stderr());
-    if (problem !== "healthy") {
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io.io), problem === "healthy" || problem === "already-blocked" ? 0 : 1, io.stdout() + io.stderr());
+    if (problem === "already-blocked") {
+      const report = JSON.parse(io.stdout());
+      assert.equal(report.runnerVerification, "fresh-harness-discovery-degraded");
+      assert.match(report.warnings.join(" "), /pre-existing.*ownership/);
+    } else if (problem !== "healthy") {
       assert.match(io.stdout() + io.stderr(), /failed upgrade readiness.*rolled back/s);
       assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n");
     }
