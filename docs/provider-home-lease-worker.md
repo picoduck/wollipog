@@ -224,11 +224,12 @@ With #3589's existing v233 launch-refusal view, live-holder/survivor causes map 
 unverifiable-boundary/process/journal causes map to `unverifiable`. This compatibility mapping
 adds no protocol values; the internal causes remain distinct for #3585.
 
-The non-delegated guidance names the reason: the runner's systemd unit is not delegated. An
-operator must use `Delegate=yes` for future leases. The live dogfood stack's `Delegate=no` scope
-correctly retains fallback; this change does not move, update or restart it. Changing its launcher
-does not upgrade existing leases. For #79 phase 2, an external operator can run an isolated stack
-in a delegated user scope, using temporary provider HOMEs/data/ports, and leave a real SSH login
+The typed non-delegated cause remains available in authorized account recovery details. Primary
+messages explain that Wollipog cannot safely unlock the account and offer another account or saving
+work and restarting the machine. For future leases, the operator must use `Delegate=yes`; #3620
+updated the dogfood launcher and deployed a delegated scope. That does not retroactively add
+containment evidence to historical leases. For #79 phase 2, an external operator can run an isolated
+stack in a delegated user scope with temporary provider HOMEs/data/ports and leave a real SSH login
 open throughout recovery.
 
 Configured ACP discovery now acquires its effective credential-HOME reference before constructing

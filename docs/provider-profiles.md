@@ -161,10 +161,14 @@ explicit journal record; the old lease is kept, never released on its behalf.
 
 A lease without evidence (from an older runner, or on macOS), or any lease on a HOME without a
 profile grant for this control plane, needs an Owner or Admin's one-time authorization. The Accounts
-list on a v229 Machine shows **Stale Lease** for such an account. **Recover Lease** is offered only
+list on a v229 Machine shows **Recovery Needed** for such an account. **Recover Account** is offered only
 when the runner reports that a recovery would proceed: the record has evidence that proves it
 abandoned, or the Machine has restarted since the record was written. Otherwise the badge's tooltip
-says why. The authorization names the exact record that was inspected and is used once; see
+explains why in plain language. An Owner or Admin can open **View Recovery Details** for the
+structured recovery code and safe blocking-process metadata. For an unreadable process, the primary
+guidance offers another account or saving work and restarting the machine; restarting Wollipog alone
+does not supply the missing proof for a historical lease. No action stops unrelated processes or
+changes the account's recovery records to bypass that check. The authorization names the exact record that was inspected and is used once; see
 [Owner/Admin Recovery Authorization](provider-home-lease-worker.md#owneradmin-recovery-authorization).
 
 ## Web Actions
@@ -203,12 +207,13 @@ as `SessionView.providerHomeRefusal`; the session's next launch clears it (`null
 deadlines and recovery codes are not states of the HOME, so they stay text only. A refusal during
 launch preparation is reported as `provider account unavailable`, no longer as an isolation failure.
 
-A failed or stopped session shows one notice for the code, with the recovery it needs:
+A failed or stopped session from a runner without a specific recovery cause shows one notice for
+the code, with the recovery it needs:
 
 | Code | Notice | Actions |
 | --- | --- | --- |
 | `busy` | **Account in Use** | Restart Session, Switch Account… |
-| `foreign_owner` | **Account Locked by Another Runner** | Open Machine Accounts (where an Owner or Admin can **Recover Lease**), Switch Account… |
+| `foreign_owner` | **Account Locked by Another Runner** | Open Machine Accounts (where an Owner or Admin can **Recover Account**), Switch Account… |
 | `foreign_host` | **Account in Use on Another Host** | Switch Account…, Open Machine Accounts |
 | `unavailable` | **Lease Helper Unavailable** | Restart Session |
 | `unverifiable` | **Lease Can't Be Verified** | Switch Account… |
@@ -221,6 +226,14 @@ sign-in" (or Codex) and offers no account switch: the way out is an account for 
 added from the Machine's accounts. Older runners report only text; the session's **Turn Failed**
 notice says that the runner couldn't use the session's provider account, with the runner's message
 under its details.
+
+When the v235 structured recovery cause is available, the notice instead uses plain-language
+guidance for that cause. A live runner or surviving session offers **Restart Session** after its work
+finishes, then **Switch Account…**; other causes prioritize **Switch Account…**, followed by **Open
+Machine Accounts**. The transcript keeps the established `provider account unavailable:` prefix on
+both launch paths so older clients still recognize the account-specific error; its explanation no
+longer includes process-boundary or journal instructions. Technical recovery codes and process
+metadata stay in the authorized account details rather than the badge tooltip.
 
 ## Registration and Use
 
