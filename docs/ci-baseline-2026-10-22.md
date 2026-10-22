@@ -19,11 +19,12 @@ of this report.
 
 The new normal-traffic cohort is **[2026-10-20T00:00:00Z,
 2026-10-22T00:00:00Z)**: two complete UTC days, collected at
-2026-10-22T21:59:24.932Z. It contains **308 distinct runs / first attempts**
+2026-10-22T22:37:00.647Z. It contains **308 distinct runs / first attempts**
 and **7 rerun attempts**. All were terminal when observed. It is an interim
 observation, not the completed five-day trial, causal proof, or activation approval.
-Queue histories were refreshed at 2026-10-22T22:11:55.080Z after verifying that
-the successful `merged` removal must be paired with its merge event.
+This refreshed collection excludes terminal jobs with no executed-step evidence:
+cancelled jobs can retain queued start placeholders even after completion. It also
+pairs successful `merged` removals with their merge events.
 
 From the repository root at this change's revision:
 
@@ -95,17 +96,21 @@ from the passing-only cohort. Times are minutes, nearest-rank quantiles.
 | Measure | October 17–19 p50 | October 17–19 p90 | October 20–21 p50 | October 20–21 p90 |
 | --- | --- | --- | --- | --- |
 | Created to Required Result | 67.5 | 131.5 | 42.4 | 74.9 |
-| Critical Path Waiting | 39.9 | 109.6 | 8.6 | 40.9 |
+| Critical Path Waiting | 39.9 | 109.6 | 10.0 | 40.9 |
 | Critical Path Executing | 30.5 | 34.3 | 33.7 | 37.8 |
 | Aggregator Wait | 3.9 | 26.9 | 0.05 | 10.0 |
 
-All 75 new first attempts have a measured required-result timeline; 11 waited
+All 75 new first attempts have a measured required-result timeline; 12 waited
 longer than they executed and 3 exceeded 120 minutes. The historical counts were
 93/153 waiting-dominated and 23 results after 120 minutes. Among the new cohort's
 **65 passing groups**, required-result p50/p90 was **40.2/64.1 minutes**. Thus
 even the passing-only p90 is above the unchanged 60-minute target. Changing traffic,
 code, optional coverage and cancellation behavior prevent causal attribution to
-the build limit.
+the build limit. The historical report used API job start/completion timestamps;
+the new event view additionally requires executed-step evidence for terminal jobs.
+Its execution/wait split is conservative about cancelled pre-runner placeholders.
+The original 153-run trial reference is preserved, not silently recalculated under
+the new allocation-evidence method.
 
 The new window contains **three `checks_timed_out` removals** (#3495 at October 20
 07:40:24Z; #3540 at October 20 23:29:35Z; #3588 at October 21 23:26:32Z), compared
@@ -127,28 +132,38 @@ CI run wall times, and exclude PRs without a group created in the measurement wi
 
 ## Execution, Setup, and Resource Constraints
 
-First-attempt elapsed runner-minutes measured were **30,914.0** for PRs,
-**12,912.1** for groups, and **6,939.5** for main pushes. This is elapsed execution
+First-attempt elapsed runner-minutes measured were **21,987.7** for PRs,
+**12,652.4** for groups, and **6,618.5** for main pushes. This is elapsed execution
 across jobs, not wall-clock latency or billed usage. Complete consumption remained
-unmeasured for **33 PR attempts** and **2 pushes** with absent/incomplete timing
-or all-skipped work. Their measured portions remain lower bounds; no missing
+unmeasured for **85 PR attempts**, **2 groups** and **7 pushes** with absent/incomplete
+timing, no executed-step evidence, or all-skipped work. Their measured portions remain lower bounds; no missing
 evidence was imputed. No rerun consumption is added. The group consumed-minutes
-p50/p90 was **173.0/185.4**, and all 75 groups had complete job timing.
+p50/p90 was **173.0/185.3** among 73 completely measured groups.
+
+The correction excludes 327 cancelled jobs without executed steps (292 PR, 9 group,
+26 push jobs). Their API start timestamps equalled creation timestamps; one exact
+read of job `119553280527` confirmed `runner_id: 0`, empty steps and an 8.4-minute
+created-to-cancel span. That span is not runner execution. Before this check,
+timestamp-only arithmetic inflated the measured total by 9,507.0 minutes. The
+new report leaves such jobs' start/wait/execution unmeasured and preserves raw
+`apiStartedAt`; it does not invent zero consumption or claim every missing job's
+allocation history is known.
 
 Group job execution and runner wait (minutes):
 
 | Job | Execution p50 | Execution p90 | Runner Wait p50 | Runner Wait p90 |
 | --- | --- | --- | --- | --- |
-| Typecheck, Unit Tests & Bundles | 26.8 | 29.3 | 0.2 | 18.6 |
+| Typecheck, Unit Tests & Bundles | 26.8 | 29.2 | 0.3 | 18.6 |
 | Browser Shard 1 | 30.0 | 31.9 | 1.4 | 33.0 |
-| Browser Shard 2 | 28.6 | 32.9 | 1.0 | 29.7 |
+| Browser Shard 2 | 28.6 | 32.8 | 1.3 | 29.7 |
 | Browser Shard 3 | 25.9 | 27.6 | 1.4 | 29.5 |
 | Browser Shard 4 | 31.8 | 35.3 | 0.6 | 29.9 |
 | Browser Shard 5 | 35.1 | 38.2 | 1.8 | 21.9 |
 | WebKit | 1.2 | 1.5 | 0.9 | 31.4 |
 
-Each row has 75 observed job records; missing/skipped phases are excluded from
-quantiles. Across passing groups, the within-run longest/shortest browser-job
+Each row has 75 observed job records. Unit/build and shard 2 have 73 measured
+executions, other browser shards and WebKit have 74; missing/skipped phases are
+excluded from quantiles. Across passing groups, the within-run longest/shortest browser-job
 ratio was **1.54 at p50 / 1.81 at p90**. All-outcome ratios include cancelled
 short shards, so they are unsuitable estimates of a balanced full pass. This
 supports #3628's existing imbalance investigation, without selecting a new layout.

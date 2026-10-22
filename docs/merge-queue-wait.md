@@ -90,9 +90,13 @@ releases or equivalent code across events.
 
 Outcomes are `passing`, `failing`, `cancelled`, `skipped`, `unfinished`, or
 `unmeasured`. Missing/negative durations remain null. GitHub can populate queued
-jobs' `started_at` with creation-time placeholders. Raw `apiStartedAt` preserves
-that observation, while `startedAt` and runner wait stay null until status is
-in-progress/completed; placeholders never imply zero wait. Elapsed runner-minutes sum
+jobs' `started_at` with creation-time placeholders. Terminal cancelled jobs can
+retain those placeholders even with no allocated runner. Raw `apiStartedAt`
+preserves that observation; derived start/wait/execution requires in-progress
+status or actual started-step evidence for terminal jobs. Missing evidence stays
+null. This allocation guard applies to the new event view; the original trial
+view retains its historical API-timestamp method and cannot resolve this ambiguity.
+Elapsed runner-minutes sum
 non-skipped jobs with complete timestamps; `measuredRunnerMinutes` is a lower
 bound when jobs are missing, and `consumedRunnerMinutes` is null if evidence is
 incomplete. All-skipped/no-job attempts have no measured consumption. First

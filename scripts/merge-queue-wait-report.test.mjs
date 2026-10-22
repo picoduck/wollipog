@@ -286,6 +286,24 @@ test("GitHub queued-job start placeholders never become zero runner wait", () =>
   assert.equal(running.jobs[0].executionMinutes, null);
 });
 
+test("terminal cancellation with no executed step never becomes runner execution", () => {
+  const cancelled = { ...job("worker", 0, 0, 8, "cancelled"), status: "completed", runner_id: 0, steps: [] };
+  const record = attemptRecord(repository, { ...run(1, 1), conclusion: "cancelled" }, [cancelled], {});
+  assert.equal(record.jobs[0].state, "cancelled");
+  assert.equal(record.jobs[0].apiStartedAt, at(0));
+  assert.equal(record.jobs[0].startedAt, null);
+  assert.equal(record.jobs[0].runnerWaitMinutes, null);
+  assert.equal(record.jobs[0].executionMinutes, null);
+  assert.equal(record.metrics.measuredRunnerMinutes, null);
+  assert.equal(record.metrics.consumedRunnerMinutes, null);
+  assert.equal(record.metrics.wallMinutes, null);
+  const allocated = attemptRecord(repository, run(1, 1), [{ ...cancelled, started_at: at(3), steps: [
+    { number: 1, name: "Setup", status: "completed", conclusion: "success", started_at: at(3), completed_at: at(4) },
+  ] }], {});
+  assert.equal(allocated.jobs[0].runnerWaitMinutes, 3);
+  assert.equal(allocated.jobs[0].executionMinutes, 5);
+});
+
 test("job pagination does not turn a partial page into complete execution evidence", async () => {
   const paths = [];
   const result = await listJobs(async (path) => {

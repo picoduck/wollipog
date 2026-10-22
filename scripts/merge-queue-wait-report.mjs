@@ -237,6 +237,9 @@ export async function listJobs(api, repository, runId, attempt) {
 
 const TEST_STEP = /^(Unit Tests|Remote-Instance Browser End-to-End Tests|WebKit Browser End-to-End Tests|Rendered Production Browser Smoke)$/;
 const hasStarted = (item) => item.status === undefined || ["in_progress", "completed"].includes(item.status);
+const jobHasStarted = (job) => hasStarted(job) && (job.status !== "completed" ||
+  // Terminal cancellation can retain the queued start placeholder. Require actual step evidence.
+  (job.steps ?? []).some((step) => step.conclusion !== "skipped" && Number.isFinite(Date.parse(step.started_at))));
 
 /** Only API metadata is retained. No names from tests, log bodies, inputs or runner identities. */
 export function attemptRecord(repository, run, jobs, window, jobsTruncated = false) {
@@ -244,11 +247,11 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
   const first = attempt === 1;
   const projected = jobs.map((job) => ({
     id: job.id ?? null, name: job.name, state: outcome(job), conclusion: job.conclusion ?? null,
-    createdAt: job.created_at ?? null, startedAt: hasStarted(job) ? job.started_at ?? null : null,
+    createdAt: job.created_at ?? null, startedAt: jobHasStarted(job) ? job.started_at ?? null : null,
     apiStartedAt: job.started_at ?? null, completedAt: job.completed_at ?? null,
     // Reruns may contain copied jobs with reset creation times; never interpret those as waits.
-    runnerWaitMinutes: first && hasStarted(job) && job.conclusion !== "skipped" ? duration(job.created_at, job.started_at) : null,
-    executionMinutes: first && hasStarted(job) && job.conclusion !== "skipped" ? duration(job.started_at, job.completed_at) : null,
+    runnerWaitMinutes: first && jobHasStarted(job) && job.conclusion !== "skipped" ? duration(job.created_at, job.started_at) : null,
+    executionMinutes: first && jobHasStarted(job) && job.conclusion !== "skipped" ? duration(job.started_at, job.completed_at) : null,
     steps: (job.steps ?? []).map((step) => ({ number: step.number, name: step.name,
       state: outcome(step), conclusion: step.conclusion ?? null, startedAt: step.started_at ?? null,
       completedAt: step.completed_at ?? null,
@@ -259,7 +262,7 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
   const missing = projected.filter((job) => job.state !== "skipped" && job.executionMinutes === null).length;
   const shards = projected.filter((job) => /^Browser End-to-End Tests \([1-5]\)$/.test(job.name));
   const shardTimes = shards.map((job) => job.executionMinutes).filter(Number.isFinite);
-  const split = runMetrics(run, jobs);
+  const split = runMetrics(run, jobs.filter(jobHasStarted));
   return {
     repository, event: run.event, sha: run.head_sha ?? null,
     testedSha: run.event === "pull_request" ? null : run.head_sha ?? null,
