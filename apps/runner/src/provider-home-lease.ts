@@ -1,3 +1,4 @@
+import type { ProviderHomeBlockingProcess } from "../../../../packages/protocol/src/provider-home-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -208,6 +209,7 @@ export interface ProviderHomeLeaseInspection {
   hasEvidence?: boolean;
   /** For `stale`: why an authorized recovery would be refused now, or null when it would proceed. */
   refusal?: ProviderHomeLeaseRefusalKind | null;
+  blockingProcess?: ProviderHomeBlockingProcess;
 }
 
 function boundedEntries(path: string): string[] {
@@ -384,13 +386,18 @@ export type ProviderHomeLeaseRefusalKind = "busy" | "foreign_owner" | "foreign_h
   "recovery_unconfirmed" | ProviderProfileDenial | ProviderProfileChangeRefusal;
 
 class ProviderHomeLeaseRefusal extends Error {
-  constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind, options?: ErrorOptions) { super(message, options); }
+  constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind, options?: ErrorOptions, readonly blockingProcess?: ProviderHomeBlockingProcess) { super(message, options); }
 }
 
 /** The typed refusal kind, or null when `error` is not a registry refusal. */
 export function providerHomeLeaseRefusalKind(error: unknown): ProviderHomeLeaseRefusalKind | null {
   if (error instanceof ProviderProfileChangeError) return error.code;
   return error instanceof ProviderHomeLeaseRefusal ? error.kind : null;
+}
+
+/** Sanitized observations are separate from the registry's private path-bearing Error text. */
+export function providerHomeLeaseBlockingProcess(error: unknown): ProviderHomeBlockingProcess | undefined {
+  return error instanceof ProviderHomeLeaseRefusal ? error.blockingProcess : undefined;
 }
 
 /** Marker changes take the lease without the grant check; see `changeProfileMarkerWhileHeld`. */
@@ -402,11 +409,12 @@ function refusal(
   reason: string,
   restartAfterQuarantine = false,
   kind: ProviderHomeLeaseRefusalKind = "unverifiable",
+  blockingProcess?: ProviderHomeBlockingProcess,
 ): Error {
   const recovery = restartAfterQuarantine
     ? "restart the runner before retrying; quarantine does not clear this registry's in-memory failed initialization reservations"
     : "retry";
-  return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and ${recovery}; do not remove individual records`, kind);
+  return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and ${recovery}; do not remove individual records`, kind, undefined, blockingProcess);
 }
 
 function staleTipChanged(lockDir: string): Error {
@@ -419,7 +427,7 @@ function verificationRefusal(lockDir: string, error: unknown, restartAfterQuaran
   if (error instanceof LeaseIoError && error.kind === "busy") return new LeaseIoError("busy", `provider home lease directory ${lockDir} is already in use: checkpoint publication is in progress; preserve evidence and retry`);
   if (error instanceof LeaseIoError && error.kind === "unavailable") return error;
   return error instanceof ProviderHomeLeaseRefusal
-    ? refusal(lockDir, error.reason, restartAfterQuarantine, error.kind)
+    ? refusal(lockDir, error.reason, restartAfterQuarantine, error.kind, error.blockingProcess)
     : refusal(lockDir, "cannot be verified: metadata is unsafe or unreadable", restartAfterQuarantine);
 }
 
@@ -877,15 +885,18 @@ export class ProviderHomeLeaseRegistry {
       const tip = chain.tip;
       if (isJournalTransition(tip.record) && tip.record.state === "released") return { state: "released" as const };
       let refused: ProviderHomeLeaseRefusalKind | null = null;
+      let blockingProcess: ProviderHomeBlockingProcess | undefined;
       try {
         const profileId = this.assertProfileAccess(home, lockDir, profile);
         this.assertAbandoned(tip.record, lockDir, profileId, { staleTipHash: tip.hash, authorizationId: randomUUID() });
       } catch (error) {
         refused = providerHomeLeaseRefusalKind(error) ?? "unverifiable";
+        blockingProcess = providerHomeLeaseBlockingProcess(error);
       }
       return {
         state: "stale" as const, tipHash: tip.hash, createdAt: tip.record.createdAt, sameHost: tip.record.hostname === this.hostname,
         hasEvidence: tip.record.version !== 1 && tip.record.process !== undefined, refusal: refused,
+        ...(blockingProcess ? { blockingProcess } : {}),
       };
     });
   }
@@ -1319,12 +1330,12 @@ export class ProviderHomeLeaseRegistry {
   private proveEvidence(evidence: LeaseProcessEvidence, pid: number, lockDir: string): LeaseAbandonmentProof {
     const result = proveLeaseAbandoned(evidence, pid, this.processProbe);
     if (result.proven) return result.proof;
-    if (result.reason === "runner_alive") throw refusal(lockDir, `is already in use by process ${pid}; use bwrap or an isolated OS account`, false, "holder_alive");
-    if (result.reason === "marked_process") throw refusal(lockDir, "is still used by a process the leasing runner launched; stop that process and retry", false, "process_survivor");
-    if (result.reason === "boundary_populated") throw refusal(lockDir, "still has a surviving provider or helper in its recorded boundary; stop that work and retry", false, "boundary_survivor");
+    if (result.reason === "runner_alive") throw refusal(lockDir, `is already in use by process ${pid}; use bwrap or an isolated OS account`, false, "holder_alive", { pid, startTime: evidence.startTime, kind: "recorded_runner", cgroupMembership: "unavailable" });
+    if (result.reason === "marked_process") throw refusal(lockDir, "is still used by a process the leasing runner launched; stop that process and retry", false, "process_survivor", result.blockingProcess);
+    if (result.reason === "boundary_populated") throw refusal(lockDir, "still has a surviving provider or helper in its recorded boundary; stop that work and retry", false, "boundary_survivor", result.blockingProcess);
     if (result.reason === "boundary_unverifiable") throw refusal(lockDir, leaseContainmentGuidance(evidence.containment), false, "boundary_unverifiable");
     throw refusal(lockDir, `has a stale lease whose processes cannot all be inspected. ${leaseContainmentGuidance(evidence.containment)}`, false,
-      evidence.containment?.kind === "marker-parent-links" && evidence.containment.reason === "cgroup-not-delegated" ? "process_uninspectable_not_delegated" : "process_uninspectable");
+      evidence.containment?.kind === "marker-parent-links" && evidence.containment.reason === "cgroup-not-delegated" ? "process_uninspectable_not_delegated" : "process_uninspectable", result.blockingProcess);
   }
 
   private recoverPartialJournal(key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {

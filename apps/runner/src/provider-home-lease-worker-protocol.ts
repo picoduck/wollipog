@@ -1,3 +1,4 @@
+import { validProviderHomeBlockingProcess, type ProviderHomeBlockingProcess } from "../../../../packages/protocol/src/provider-home-recovery.js";
 /** Control frames contain no canonical snapshots or private acquisition/completion tokens. */
 export const LEASE_WORKER_LIMITS = { pending: 64, requestBytes: 64 * 1024, responseBytes: 4096, deadlineMs: 300_000, heartbeatDelayMs: 500 } as const;
 /** Mixed wall-time/monotonic workers fail before any operation is dispatched. */
@@ -65,6 +66,7 @@ export interface LeaseWorkerInspection {
   hasEvidence?: boolean;
   /** Why an authorized recovery would be refused now, or null when it would proceed. */
   refusal?: LeaseWorkerError | null;
+  blockingProcess?: ProviderHomeBlockingProcess;
 }
 /** Fixed, path-free texts: only the code crosses the worker boundary, never the registry's message. */
 export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
@@ -118,9 +120,10 @@ export function validLeaseWorkerInspection(value: unknown): value is LeaseWorker
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   if (v.state === "none" || v.state === "released" || v.state === "held" || v.state === "unverifiable") return Object.keys(v).length === 1;
-  if (v.state !== "stale" || !leaseWorkerFrameKeys(v, ["state", "tipHash", "createdAt", "sameHost", "hasEvidence", "refusal"])) return false;
+  if (v.state !== "stale" || !leaseWorkerFrameKeys(v, ["state", "tipHash", "createdAt", "sameHost", "hasEvidence", "refusal", "blockingProcess"])) return false;
   const dated = Object.hasOwn(v, "createdAt");
-  return Object.keys(v).length === (dated ? 6 : 5) && typeof v.tipHash === "string" && DIGEST.test(v.tipHash) &&
+  return Object.keys(v).length === (dated ? 6 : 5) + (Object.hasOwn(v, "blockingProcess") ? 1 : 0) &&
+    (!Object.hasOwn(v, "blockingProcess") || v.refusal !== null && validProviderHomeBlockingProcess(v.blockingProcess)) && typeof v.tipHash === "string" && DIGEST.test(v.tipHash) &&
     (!dated || typeof v.createdAt === "string" && TIMESTAMP.test(v.createdAt)) &&
     typeof v.sameHost === "boolean" && typeof v.hasEvidence === "boolean" &&
     (v.refusal === null || typeof v.refusal === "string" && Object.hasOwn(LEASE_WORKER_ERRORS, v.refusal));

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
+import type { ProviderHomeBlockingProcess } from "../../../../packages/protocol/src/provider-home-recovery.js";
 import { inspectLeaseCgroup, isLeaseContainmentEvidence, type LeaseContainmentEvidence, type LeaseContainmentResult, type LeaseCgroupEvidence } from "./provider-home-lease-containment.js";
 
 /**
@@ -31,7 +32,7 @@ export type LeaseAbandonmentProof = "reboot" | "process_scan" | "linux_cgroup" |
 
 export type LeaseAbandonmentResult =
   | { proven: true; proof: LeaseAbandonmentProof }
-  | { proven: false; reason: "runner_alive" | "marked_process" | "uninspectable" | "boundary_populated" | "boundary_unverifiable" };
+  | { proven: false; reason: "runner_alive" | "marked_process" | "uninspectable" | "boundary_populated" | "boundary_unverifiable"; blockingProcess?: ProviderHomeBlockingProcess };
 
 /** The process view a proof is made from. Injected in tests. */
 export interface LeaseProcessProbe {
@@ -42,7 +43,8 @@ export interface LeaseProcessProbe {
    * Every process of this user carrying `marker`, and every process of this user that cannot be
    * inspected and might descend from the runner that started at `runnerStartTime` in this boot.
    */
-  scan(marker: string, runnerStartTime: string): { marked: number[]; uninspectable: number[] };
+  scan(marker: string, runnerStartTime: string, diagnostics?: boolean): { marked: number[]; uninspectable: number[]; blockingProcess?: ProviderHomeBlockingProcess };
+  boundaryMember?(identity: LeaseCgroupEvidence): ProviderHomeBlockingProcess | undefined;
   containment?(identity: LeaseCgroupEvidence): LeaseContainmentResult;
 }
 
@@ -112,6 +114,23 @@ export function linuxLeaseProcessProbe(
   if (process.platform !== "linux" || uid === undefined) return undefined;
   return {
     containment: inspectLeaseCgroup,
+    boundaryMember: (identity) => {
+      // Diagnostics are bounded and read-only; they never contribute ownership proof.
+      const boundary = posix.join(identity.mountRoot, identity.cgroupPath);
+      try {
+        for (const name of readdirSync(root).slice(0, 16_384)) {
+          if (!/^[1-9][0-9]*$/u.test(name)) continue;
+          try {
+            const before = statStartTime(readFileSync(join(root, name, "stat"), "utf8"));
+            const member = /^0::(\/.*)$/mu.exec(readFileSync(join(root, name, "cgroup"), "utf8"))?.[1];
+            if (!before || !member || (member !== boundary && !member.startsWith(boundary + "/"))) continue;
+            if (statStartTime(readFileSync(join(root, name, "stat"), "utf8")) !== before) continue;
+            return { pid: Number(name), startTime: before, kind: "boundary_member", cgroupMembership: "recorded_boundary" };
+          } catch { /* Disappeared or unreadable: do not guess an identity. */ }
+        }
+      } catch { /* Unavailable diagnostics do not change the refusal. */ }
+      return undefined;
+    },
     bootId: () => {
       const value = readFileSync(join(root, "sys/kernel/random/boot_id"), "utf8").trim();
       if (!BOOT_ID.test(value)) throw new Error("boot identity is unavailable");
@@ -121,7 +140,7 @@ export function linuxLeaseProcessProbe(
       try { return statStartTime(readFileSync(join(root, String(pid), "stat"), "utf8")); }
       catch (error) { if (gone(error)) return null; throw error; }
     },
-    scan: (marker, runnerStartTime) => {
+    scan: (marker, runnerStartTime, diagnostics) => {
       const entry = Buffer.from(`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${marker}`);
       // A read either succeeds, proves the process gone (ENOENT/ESRCH), or fails; only the second
       // ever excuses a process from inspection.
@@ -187,7 +206,18 @@ export function linuxLeaseProcessProbe(
       // inspected, and no listed process vanished before its identity was read (it may have forked
       // first). A process alive after that listing was then listed and inspected, or was forked by
       // one that was.
-      const verdicts = new Map<string, { pid: number; verdict: Verdict }>();
+      const verdicts = new Map<string, { pid: number; verdict: Verdict; startTime?: string }>();
+      const diagnostic = () => {
+        if (!diagnostics) return {};
+        const item = [...verdicts.values()].find(item => item.verdict === "marked") ??
+          [...verdicts.values()].find(item => item.verdict === "uninspectable");
+        if (!item) return {};
+        const blockingProcess: ProviderHomeBlockingProcess = {
+          pid: item.pid, ...(item.startTime ? { startTime: item.startTime } : {}),
+          kind: item.verdict === "marked" ? "provider_descendant" : "uninspectable", cgroupMembership: "unavailable",
+        };
+        return { blockingProcess };
+      };
       const of = (verdict: Verdict) => [...verdicts.values()].filter((item) => item.verdict === verdict).map((item) => item.pid);
       for (let round = 0; round < MAX_SCAN_ROUNDS; round++) {
         stats.clear();
@@ -205,14 +235,15 @@ export function linuxLeaseProcessProbe(
           const key = own === "failed" ? `${pid}:?` : `${pid}:${own[19] ?? "?"}`;
           if (verdicts.has(key)) continue;
           fresh = true;
-          verdicts.set(key, { pid, verdict: own === "failed" ? "uninspectable" : inspect(pid) });
+          verdicts.set(key, { pid, verdict: own === "failed" ? "uninspectable" : inspect(pid),
+            ...(typeof own !== "string" && START_TIME.test(own[19] ?? "") ? { startTime: own[19] } : {}) });
         }
         // A marked process seen at any point refuses, even if it has exited since.
-        if (!fresh && round > 0) return { marked: of("marked"), uninspectable: of("uninspectable") };
+        if (!fresh && round > 0) return { marked: of("marked"), uninspectable: of("uninspectable"), ...diagnostic() };
       }
       // The process table never settled (a busy host may need a later retry); nothing can be proved
       // from a view that keeps changing, but every marked process seen is still reported.
-      return { marked: of("marked"), uninspectable: [...of("uninspectable"), -1] };
+      return { marked: of("marked"), uninspectable: [...of("uninspectable"), -1], ...diagnostic() };
     },
   };
 }
@@ -243,14 +274,18 @@ export function proveLeaseAbandoned(evidence: LeaseProcessEvidence, pid: number,
     if (probe.startTime(pid) === evidence.startTime) return { proven: false, reason: "runner_alive" };
     if (evidence.containment?.kind === "linux-cgroup-v2") {
       const boundary = probe.containment?.(evidence.containment) ?? "unverifiable";
-      if (boundary === "populated") return { proven: false, reason: "boundary_populated" };
+      if (boundary === "populated") {
+        let blockingProcess: ProviderHomeBlockingProcess | undefined;
+        try { blockingProcess = probe.boundaryMember?.(evidence.containment); } catch { /* diagnostic only */ }
+        return { proven: false, reason: "boundary_populated", ...(blockingProcess ? { blockingProcess } : {}) };
+      }
       if (boundary !== "empty" && boundary !== "unit_removed") return { proven: false, reason: "boundary_unverifiable" };
       if (probe.startTime(pid) === evidence.startTime) return { proven: false, reason: "runner_alive" };
       return { proven: true, proof: boundary === "unit_removed" ? "linux_cgroup_unit_removed" : "linux_cgroup" };
     }
-    const scan = probe.scan(evidence.marker, evidence.startTime);
-    if (scan.marked.length) return { proven: false, reason: "marked_process" };
-    if (scan.uninspectable.length) return { proven: false, reason: "uninspectable" };
+    const scan = probe.scan(evidence.marker, evidence.startTime, true);
+    if (scan.marked.length) return { proven: false, reason: "marked_process", ...(scan.blockingProcess ? { blockingProcess: scan.blockingProcess } : {}) };
+    if (scan.uninspectable.length) return { proven: false, reason: "uninspectable", ...(scan.blockingProcess ? { blockingProcess: scan.blockingProcess } : {}) };
     // A runner process that started between the first check and the scan would carry no marker
     // of the recorded runner; confirm the recorded identity is still gone after the scan.
     if (probe.startTime(pid) === evidence.startTime) return { proven: false, reason: "runner_alive" };
