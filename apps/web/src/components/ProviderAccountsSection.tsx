@@ -30,6 +30,10 @@ const ADOPTION_REFUSALS: Readonly<Record<string, string>> = {
   PROVIDER_PROFILE_GRANT_REVOKED: "Access was revoked while the account was being adopted. Adopt it again to grant access.",
 };
 
+/** Windows Machines cannot verify a profile marker, so their accounts never become profiles. */
+export const PROFILES_UNSUPPORTED_ON_WINDOWS =
+  "Provider profiles aren't available on Windows Machines, so this account can't be adopted.";
+
 const ADOPTION_FAILED_DEFAULT = "The provider profile could not be adopted.";
 
 /** Why a stale lease cannot be recovered (#3241), as the disabled menu item's reason and the
@@ -186,6 +190,8 @@ function AccountMenu({ name, heading, busy, items }: {
           sheetTitle="More Actions"
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
+          // A menu whose every item is unavailable takes focus itself, so Escape still closes it.
+          tabIndex={-1}
         >
           <MenuLabel>{heading}</MenuLabel>
           {ordered.map((item, index) => (
@@ -481,7 +487,9 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       items.push({ label: "Sign In Again…", ...offline, onClick: () => signIn(account) });
     }
     if (profileActions && account.profile?.access !== "granted") {
-      items.push({ label: "Adopt as Profile…", ...offline, onClick: (reopen) => void adopt(account, reopen) });
+      // A Windows runner refuses every adoption as UNSUPPORTED_HOME (#3240): say so before asking.
+      const unsupported = runner.os === "windows" ? { disabled: true, description: PROFILES_UNSUPPORTED_ON_WINDOWS } : offline;
+      items.push({ label: "Adopt as Profile…", ...unsupported, onClick: (reopen) => void adopt(account, reopen) });
     }
     if (profileActions && (account.profile?.access === "granted" || account.profile?.access === "pending")) {
       items.push({ label: "Revoke Access…", danger: true, onClick: (reopen) => void revoke(account, reopen) });

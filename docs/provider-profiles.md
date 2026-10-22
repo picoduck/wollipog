@@ -189,6 +189,39 @@ Admin of any other organization (whom the routes refuse; see
   confirmation, **Revoke Access from Active Sessions**, listing the sessions, which retries with
   `force: true`.
 
+On a Windows Machine, **Adopt as Profile** is shown disabled with the reason: a Windows runner cannot
+verify a profile marker and refuses every adoption as `UNSUPPORTED_HOME`.
+
+## Session Launch Refusals
+
+When a session's launch is refused at a provider HOME's lease (the driver launch, or launch
+preparation for an account HOME), a v233 runner records the refusal's code on the session and
+reports it in session snapshots as `providerHomeRefusal`: the code, the provider, the bound account's
+id and label (absent for the runner's own provider HOME), and the time. It never carries a path. The
+control plane stores it in `sessions.provider_home_refusal`, drops a malformed one, and projects it
+as `SessionView.providerHomeRefusal`; the session's next launch clears it (`null`). Cancellations,
+deadlines and recovery codes are not states of the HOME, so they stay text only. A refusal during
+launch preparation is reported as `provider account unavailable`, no longer as an isolation failure.
+
+A failed or stopped session shows one notice for the code, with the recovery it needs:
+
+| Code | Notice | Actions |
+| --- | --- | --- |
+| `busy` | **Account In Use** | Restart Session, Switch Account… |
+| `foreign_owner` | **Account Locked by Another Runner** | Open Machine Accounts (where an Owner or Admin can **Recover Lease**), Switch Account… |
+| `foreign_host` | **Account in Use on Another Host** | Switch Account…, Open Machine Accounts |
+| `unavailable` | **Lease Helper Unavailable** | Restart Session |
+| `unverifiable` | **Lease Can't Be Verified** | Switch Account… |
+| `profile_not_granted` | **Profile Not Granted** | Open Machine Accounts (where an Owner or Admin can **Adopt as Profile**), Switch Account… |
+| `profile_changed` | **Profile Changed** | Switch Account…, Open Machine Accounts |
+| `profile_unverifiable` | **Profile Can't Be Read** | Open Machine Accounts, Switch Account… |
+
+A refusal of the runner's own provider HOME (no account bound) names it as "this Machine's Claude
+sign-in" (or Codex) and offers no account switch: the way out is an account for this control plane,
+added from the Machine's accounts. Older runners report only text; the session's **Turn Failed**
+notice says that the runner couldn't use the session's provider account, with the runner's message
+under its details.
+
 ## Registration and Use
 
 A v225 runner's `register` frame carries `providerProfileIds`: the profile id of every configured

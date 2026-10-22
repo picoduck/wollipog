@@ -85,6 +85,7 @@ import {
   type HiddenColumnFailure,
 } from "./hidden-column-conditions.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
+import { providerHomeRefusalCopy } from "../provider-home-refusal.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { SessionPlaceholder } from "./SessionPlaceholder.js";
 import { sessionArchiveControlLabel, sessionUnarchiveRestarts } from "../archive-actions.js";
@@ -3661,6 +3662,13 @@ function SessionDetailLoaded({
   const accountSwitchFailedOrder = accountSwitchFailure && {
     key: `account-switch-failed:${accountSwitchFailureKey}`, severity: "warning", rank: SESSION_NOTICE_RANK.accountSwitchFailed,
   } as const;
+  // The lease refusal that stopped the last launch (#3240). The next launch clears it, so a session
+  // that is starting or running again never shows one a summary update kept.
+  const providerHomeRefusal = session.status === "failed" || session.status === "stopped"
+    ? session.providerHomeRefusal : undefined;
+  const providerHomeRefusalOrder = providerHomeRefusal && {
+    key: `provider-home-refusal:${providerHomeRefusal.detectedAt}`, severity: "warning", rank: SESSION_NOTICE_RANK.providerHomeRefusal,
+  } as const;
   // An archived session that has stopped says so in the slot, with Unarchive as the way back (#2202).
   const archivedOrder = sessionArchivedAtRest(session) ? {
     key: "archived", severity: "info", rank: SESSION_NOTICE_RANK.archived,
@@ -4574,6 +4582,26 @@ function SessionDetailLoaded({
       }
     }
   }, [api, busy, composerRestartOffered, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
+  // The launch refusal notice's Restart Session (#3240): the same restart as the header's, for the
+  // failed or stopped session the refusal left.
+  const restartFromRefusal = useCallback(async () => {
+    if (!runnerOnline || busy || restartPending || restartRefusal !== null || session.archived ||
+        turnRetryInFlightRef.current) return;
+    const generation = viewGenerationRef.current;
+    setError(null);
+    setBusy(true);
+    setRestartPending(true);
+    try {
+      loadSession(await api.restart(session.id));
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) showActionError("restart", cause);
+    } finally {
+      if (viewGenerationRef.current === generation) {
+        setRestartPending(false);
+        setBusy(false);
+      }
+    }
+  }, [api, busy, loadSession, restartPending, restartRefusal, runnerOnline, session.archived, session.id]);
   // Retry Turn on a failed turn's notice (#2169): the turn's prompt again, as a new turn. A failed
   // or stopped session restarts first, since the control plane admits no prompt to it until then,
   // but only where the restart resumes the provider conversation.
@@ -5047,6 +5075,67 @@ function SessionDetailLoaded({
           {accountSwitchApplicable && switchReason !== null && (
             <p className="notice-meta" id="account-switch-refusal">{switchReason}</p>
           )}
+        </Notice>
+      ),
+    });
+  }
+  if (providerHomeRefusal && providerHomeRefusalOrder) {
+    const label = providerHomeRefusal.providerAccountLabel;
+    // With hiding enabled, an email-shaped account is named by role, as the switch failure does.
+    const account = label === undefined ? undefined
+      : privacy.hide && isPersonalIdentifier(label) ? "the selected account" : label;
+    const copy = providerHomeRefusalCopy(providerHomeRefusal, account);
+    const switchReason = !accountSwitchSupported
+      ? runnerCapabilityRequirement(runner?.protocolVersion, "sessionProviderAccountSwitch", "session account switching")
+      : runnerOfflineReason;
+    // The control plane refuses to restart an archived session; Session Archived's Unarchive is the
+    // way back (#2301).
+    const restartReason = runnerOfflineReason ?? restartRefusal ??
+      (session.archived ? "Unarchive the session to restart it." : null);
+    const actions = copy.actions.filter((action) => action !== "switch_account" || accountSwitchApplicable);
+    const buttonClass = (index: number) => index === 0 ? "btn primary sm" : "btn sm";
+    // Each disabled action's reason is visible under the body, once even when both share it.
+    const disabledReasons = [...new Set([
+      actions.includes("restart") ? restartReason : null,
+      actions.includes("switch_account") ? switchReason : null,
+    ].filter((reason): reason is string => reason !== null))];
+    const reasonId = (reason: string | null) => reason === null ? undefined
+      : `provider-home-refusal-reason-${disabledReasons.indexOf(reason)}`;
+    sessionNotices.push({
+      ...providerHomeRefusalOrder,
+      title: copy.title,
+      render: ({ trailing }) => (
+        <Notice tone="warning" role="status" ariaLabel={copy.title} title={copy.title}
+          trailing={trailing}
+          actions={actions.length > 0 && actions.map((action, index) => action === "restart" ? (
+            <button key={action} type="button" className={buttonClass(index)}
+              disabled={restartReason !== null || restartPending || busy}
+              title={restartReason ?? undefined}
+              aria-describedby={reasonId(restartReason)}
+              onClick={() => void restartFromRefusal()}>
+              {restartPending ? "Restarting Session" : "Restart Session"}
+            </button>
+          ) : action === "switch_account" ? (
+            <button key={action} type="button" className={buttonClass(index)}
+              disabled={switchReason !== null}
+              title={switchReason ?? undefined}
+              aria-describedby={reasonId(switchReason)}
+              onClick={(event) => {
+                switchAccountButtonRef.current = event.currentTarget;
+                setSwitchAccountOpen(true);
+              }}>
+              Switch Account…
+            </button>
+          ) : (
+            <button key={action} type="button" className={buttonClass(index)}
+              onClick={() => navigate({ name: "runners", section: "machines", machineId: session.runnerId })}>
+              Open Machine Accounts
+            </button>
+          ))}>
+          <p>{copy.body}</p>
+          {disabledReasons.map((reason, index) => (
+            <p key={reason} className="notice-meta" id={`provider-home-refusal-reason-${index}`}>{reason}</p>
+          ))}
         </Notice>
       ),
     });

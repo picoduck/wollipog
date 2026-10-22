@@ -453,6 +453,24 @@ if (params.get("account-switch-failure") === "1") {
     detectedAt: 5,
   };
 }
+// A launch refused at the provider HOME's lease (#3240): `lease-refusal=<code>`, on the session's
+// account, or with `lease-refusal-account=none` on the Machine's own provider HOME.
+const leaseRefusal = params.get("lease-refusal");
+if (leaseRefusal) {
+  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 233);
+  session.status = "failed";
+  const ownHome = params.get("lease-refusal-account") === "none";
+  if (!ownHome) {
+    session.providerAccountId = "work-account";
+    session.providerAccountLabel = "Work Account";
+  }
+  session.providerHomeRefusal = {
+    code: leaseRefusal as NonNullable<SessionView["providerHomeRefusal"]>["code"],
+    provider: session.driver === "claude-code" ? "claude" : "codex",
+    ...(ownHome ? {} : { providerAccountId: "work-account", providerAccountLabel: "Work Account" }),
+    detectedAt: 5,
+  };
+}
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
   session.costCheckpointsUsd = [1, 2.5];

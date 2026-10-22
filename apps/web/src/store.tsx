@@ -1376,6 +1376,7 @@ function reducer(state: State, action: Action): State {
                 parentControlPolicy: previous.parentControlPolicy,
                 orchestratorCampaign: previous.orchestratorCampaign,campaignMembership: previous.campaignMembership,
                 providerAccountSwitchFailure: previous.providerAccountSwitchFailure,
+                providerHomeRefusal: previous.providerHomeRefusal,
                 agentCapabilities: previous.agentCapabilities,
                 executionTarget: previous.executionTarget,executionHandoff: previous.executionHandoff,
                 backgroundJobs: previous.backgroundJobs,backgroundJobsTruncated: previous.backgroundJobsTruncated,

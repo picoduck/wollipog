@@ -55,6 +55,7 @@ import type {
   PromptImageInput,
   PromptImageReference,
   ProviderAccountSwitchFailureView,
+  ProviderHomeLaunchRefusalView,
   ProviderAuthenticationAccountSelectionError,
   ProviderAuthenticationCurrentIdentity,
   ProviderHistoryRecoveryMode,
@@ -211,6 +212,7 @@ export interface GuardStateSandbox {
 }
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { bindSessionProviderAccount, type BoundProviderAccount } from "./provider-accounts.js";
+import { providerHomeLaunchRefusal } from "./provider-home-launch-refusal.js";
 import {
   AUTOMATIC_ACCOUNT_SWITCH_COOLDOWN_MS,
   selectAutomaticProviderAccount,
@@ -8558,6 +8560,7 @@ export class SessionManager {
     this.revokeSessionCommandAuthority(sessionId);
     const hadCloudHandoffBeforeLaunch = !!meta.cloudAdapterHandoffKey;
     this.emitStatus(sessionId, "starting");
+    this.clearProviderHomeRefusal(sessionId);
     let cwd = meta.worktreePath ?? meta.repoPath;
     const worktree: WorktreeHandle | null = meta.worktreePath
       ? { path: meta.worktreePath, branch: meta.worktreeBranch ?? `agent/${sessionId}` }
@@ -8732,6 +8735,15 @@ export class SessionManager {
         return false;
       }
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "isolation setup failed", launchGeneration);
+      // Launch preparation takes the account HOME's lease (#3238); its refusal is not an isolation
+      // failure, and its code chooses the recovery the session offers (#3240).
+      const refusal = providerHomeLaunchRefusal(error, meta);
+      if (refusal) {
+        this.emitEvent(sessionId, { kind: "error", message: `provider account unavailable: ${errText(error)}` });
+        this.emitStatus(sessionId, "failed", errText(error));
+        this.recordProviderHomeRefusal(sessionId, refusal);
+        return false;
+      }
       this.emitEvent(sessionId, { kind: "error", message: `execution isolation unavailable: ${errText(error)}` });
       this.emitStatus(sessionId, "failed", "Runner-owned execution isolation could not be established");
       return false;
@@ -9041,6 +9053,9 @@ export class SessionManager {
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver construction failed", launchGeneration);
       this.emitEvent(sessionId, { kind: "error", message: `agent process could not be created: ${errText(error)}` });
       this.emitStatus(sessionId, "failed", errText(error));
+      // Only the driver's own lease acquisition can refuse with a lease code here.
+      const refusal = !driverConstructionStarted ? providerHomeLaunchRefusal(error, meta) : undefined;
+      if (refusal) this.recordProviderHomeRefusal(sessionId, refusal);
       return false;
     }
     if (launchHome) this.driverProviderHomes.set(client, launchHome);
@@ -12643,6 +12658,19 @@ export class SessionManager {
       providerAccountSwitchFailure: failure,
       status: "input_required",
     });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  /** Record the lease refusal that stopped this launch, so the session offers its recovery. */
+  private recordProviderHomeRefusal(sessionId: string, refusal: ProviderHomeLaunchRefusalView): void {
+    const updated = this.store.patchMeta(sessionId, { providerHomeRefusal: refusal });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  /** A new launch attempt retires the previous attempt's refusal. */
+  private clearProviderHomeRefusal(sessionId: string): void {
+    if (!this.store.readMeta(sessionId)?.providerHomeRefusal) return;
+    const updated = this.store.patchMeta(sessionId, { providerHomeRefusal: undefined });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 

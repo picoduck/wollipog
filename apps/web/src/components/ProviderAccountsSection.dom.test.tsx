@@ -16,7 +16,7 @@ import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage } from "./ProviderAccountsSection.js";
+import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -886,6 +886,45 @@ test("Owners and Admins get Adopt as Profile… and Revoke Access… by access s
     assert.deepEqual(ui.menuItems(opened).map((item) => item.label),
       ["Sign In Again…", "Adopt as Profile…", "Revoke Access…", "Remove Account…"], "Remove Account… stays last");
     await ui.closeMenu();
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a Windows Machine explains that its accounts can't be adopted, and still offers Revoke Access… (#3240)", async () => {
+  const ui = await render({ runner: runnerView({ os: "windows" }) });
+  try {
+    const opened = await ui.openMenu("Legacy Work");
+    assert.deepEqual(ui.menuItems(opened).filter((item) => item.label === "Adopt as Profile…"),
+      [{ label: "Adopt as Profile…", disabled: true, reason: PROFILES_UNSUPPORTED_ON_WINDOWS }]);
+    await ui.closeMenu();
+    assert.deepEqual(await profileItems(ui, "Granted Work"), ["Revoke Access…"]);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a menu whose every item is unavailable takes focus and closes on Escape (#3240)", async () => {
+  // While Work signs in on a Windows Machine, Adopt as Profile… and Remove Account… are both disabled.
+  const ui = await render({
+    runner: runnerView({
+      os: "windows",
+      providerAccounts: SIGN_IN_ACCOUNTS,
+      providerLogins: [{ ...runningLogin("work", "Work"), provider: "codex", userCode: "WOLL-IPOGS",
+        verificationUrl: "https://auth.openai.com/codex/device" }],
+    }),
+  });
+  try {
+    const opened = await ui.openMenu("Work");
+    assert.ok(ui.menuItems(opened).every((item) => item.disabled), JSON.stringify(ui.menuItems(opened)));
+    // A browser focuses the menu only when it is focusable; happy-dom focuses it either way.
+    assert.equal(opened.getAttribute("tabindex"), "-1", "the menu itself can take focus");
+    assert.ok((domWindow.document.activeElement as unknown) === opened, "the menu itself takes focus");
+    await act(async () => {
+      opened.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event);
+    });
+    await ui.settle();
+    assertNoDomNode(ui.menu(), "Escape closes the menu");
   } finally {
     await ui.unmount();
   }

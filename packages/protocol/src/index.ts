@@ -715,7 +715,10 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 // 231: runner archived-history retention: bounded trim request/result, gated by capability.
 // 232: campaign review sessions (#3371): review launches preserve campaignBudgetDispatch and
 //      report final usage checkpoints. Older runners drop it, so campaign reviews require v232.
-export const PROTOCOL_VERSION = 232;
+// 233: typed provider-HOME launch refusals (#3240): session snapshots carry
+//      `providerHomeRefusal`, the code of the lease refusal that stopped the session's last launch,
+//      so clients offer a recovery action per code. Older peers omit it and show only the text.
+export const PROTOCOL_VERSION = 233;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -972,6 +975,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v229 runner inspects a provider HOME's lease and recovers one exact stale lease on an Owner or
    * Admin's authorization (#3241). */
   providerHomeLeaseRecovery: 229,
+  /** v233 runner reports the typed provider-HOME lease refusal that stopped a session's launch
+   * (#3240). */
+  providerHomeLaunchRefusals: 233,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -3234,6 +3240,54 @@ export interface ProviderAccountSwitchFailureView {
   providerAccountLabel: string;
   reason: string;
   detectedAt: number;
+}
+
+/** Protocol v233 (#3240): why the runner's provider-HOME lease refused a session's launch.
+ * - `busy`: another runner process holds the HOME now.
+ * - `foreign_owner`: another runner or control plane left a stale lease it does not take over.
+ * - `foreign_host`: a runner on another host holds the lease.
+ * - `unavailable`: the runner's lease helper is unavailable.
+ * - `unverifiable`: the lease records cannot be verified.
+ * - `profile_not_granted`: the HOME's provider profile does not grant this control plane.
+ * - `profile_changed`: the HOME no longer holds the profile the account or session recorded.
+ * - `profile_unverifiable`: the HOME's profile marker is unreadable or uses a newer format. */
+export type ProviderHomeLaunchRefusalCode =
+  | "busy" | "foreign_owner" | "foreign_host" | "unavailable" | "unverifiable"
+  | "profile_not_granted" | "profile_changed" | "profile_unverifiable";
+
+export const PROVIDER_HOME_LAUNCH_REFUSAL_CODES: readonly ProviderHomeLaunchRefusalCode[] = [
+  "busy", "foreign_owner", "foreign_host", "unavailable", "unverifiable",
+  "profile_not_granted", "profile_changed", "profile_unverifiable",
+];
+
+/** Protocol v233 (#3240): the lease refusal that stopped a session's last launch. Content-free: it
+ * names the account, never a path. Cleared when the session launches again. */
+export interface ProviderHomeLaunchRefusalView {
+  code: ProviderHomeLaunchRefusalCode;
+  provider: "claude" | "codex";
+  /** The session's bound account; absent when the refused HOME is the runner's own provider HOME. */
+  providerAccountId?: string;
+  providerAccountLabel?: string;
+  detectedAt: number;
+}
+
+/** A peer's `providerHomeRefusal` when it is well formed and content-free, else null. */
+export function validProviderHomeLaunchRefusal(value: unknown): ProviderHomeLaunchRefusalView | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const allowed = new Set(["code", "provider", "providerAccountId", "providerAccountLabel", "detectedAt"]);
+  if (Object.keys(candidate).some((key) => !allowed.has(key))) return null;
+  const { code, provider, providerAccountId, providerAccountLabel, detectedAt } = candidate;
+  if (!PROVIDER_HOME_LAUNCH_REFUSAL_CODES.includes(code as ProviderHomeLaunchRefusalCode)) return null;
+  if (provider !== "claude" && provider !== "codex") return null;
+  if (typeof detectedAt !== "number" || !Number.isFinite(detectedAt) || detectedAt < 0) return null;
+  if (providerAccountId === undefined) {
+    if (providerAccountLabel !== undefined) return null;
+    return { code: code as ProviderHomeLaunchRefusalCode, provider, detectedAt };
+  }
+  if (typeof providerAccountId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerAccountId)) return null;
+  if (typeof providerAccountLabel !== "string" || !providerAccountLabel.trim() || providerAccountLabel.length > 200) return null;
+  return { code: code as ProviderHomeLaunchRefusalCode, provider, providerAccountId, providerAccountLabel, detectedAt };
 }
 
 export type ProviderLoginStatus =
@@ -7419,6 +7473,8 @@ export interface SessionView {
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  /** Protocol v233 (#3240): the lease refusal that stopped the session's last launch. */
+  providerHomeRefusal?: ProviderHomeLaunchRefusalView;
   /** Protocol v225 (#3239): the provider profile the account binding recorded. Absent for a binding
    * made before the account was adopted, a legacy HOME, and older control planes. */
   providerProfileId?: string;
@@ -7633,6 +7689,9 @@ export interface SessionSnapshot {
   providerAccountAutomaticallySelected?: boolean;
   /** Three-valued: undefined is an older peer; null explicitly clears an earlier failure. */
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView | null;
+  /** Protocol v233 (#3240). Three-valued: undefined is an older peer; null clears an earlier
+   * refusal. */
+  providerHomeRefusal?: ProviderHomeLaunchRefusalView | null;
   /** Protocol v225 (#3239): the provider profile the session's account binding recorded when it was
    * made. Three-valued: undefined carries no information (an older peer, or a registration snapshot
    * built before version negotiation); null is a binding without a profile (a legacy HOME, or one
