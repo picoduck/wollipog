@@ -118,6 +118,8 @@ const SESSION_REVIEW_REASONS = new Set([
   "the reviewer for this session's harness is unavailable on this runner",
   "this session's harness has no cross-model reviewer",
   "the review must cover the session's own native managed worktree",
+  "resume this session once so the runner can verify its automatic worktree before requesting a review",
+  "the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review",
   "the pull request is not this session's open, same-repository pull request",
   "the requested head is not the pull request's pushed head",
   "the first review of a pull request needs a brief",

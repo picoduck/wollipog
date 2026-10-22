@@ -2,7 +2,7 @@
  * The reviewed snapshot of a session's pull request (#3306, #561): which pull request a session
  * may have reviewed, and a runner-owned checkout of its exact pushed head.
  *
- * Scope: the session's own created native worktree, an open pull request from the same repository
+ * Scope: the session's own runner-owned native worktree, an open pull request from the same repository
  * whose head branch is that worktree's branch, at a head equal to the pull request's pushed head.
  * The repository is read from the runner-recorded project checkout, never through the worktree's
  * own `.git` pointer, which the session can rewrite.
@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { githubSlug } from "./git-ops.js";
 import type { ReviewTools } from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
+import { parseWorktreePorcelain, sameWorktreePath } from "./worktree.js";
 
 /** A GitHub `owner/name`; the only form a review request may name. */
 export const GITHUB_REPOSITORY = /^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u;
@@ -102,7 +103,7 @@ export interface BoundPullRequestScope {
 
 /**
  * Prove that `request` names the session's own open, same-repository pull request at its pushed
- * head, from the session's own created native worktree. Throws `ReviewScopeRefusal` otherwise.
+ * head, from the session's own runner-owned native worktree. Throws `ReviewScopeRefusal` otherwise.
  */
 export async function bindPullRequestScope(input: {
   meta: SessionMeta | null | undefined;
@@ -119,9 +120,23 @@ export async function bindPullRequestScope(input: {
     refuseReview("the pull request is not this session's open, same-repository pull request");
   }
   const worktree = meta?.worktreePath ? meta.worktrees?.find((candidate) => candidate.path === meta.worktreePath) : undefined;
-  if (!meta || !worktree || worktree.source !== "created" || meta.context?.kind !== "native" ||
+  if (!meta || !meta.worktreePath ||
+      (worktree && worktree.source !== "created" && worktree.source !== "legacy") || meta.context?.kind !== "native" ||
       (meta.executionTarget?.adapter && meta.executionTarget.adapter !== "host")) {
     refuseReview("the review must cover the session's own native managed worktree");
+  }
+  if (!worktree) {
+    refuseReview("resume this session once so the runner can verify its automatic worktree before requesting a review");
+  }
+  const automatic = worktree!.source === "legacy";
+  if (automatic) {
+    const proof = meta!.launchWorktreeProof;
+    if (!proof || proof.sessionId !== meta!.sessionId || proof.repoPath !== meta!.repoPath ||
+        proof.path !== worktree!.path || proof.branch !== worktree!.branch ||
+        proof.branch !== `agent/${meta!.sessionId}` ||
+        (meta!.worktreeBranch !== undefined && meta!.worktreeBranch !== proof.branch)) {
+      refuseReview("resume this session once so the runner can verify its automatic worktree before requesting a review");
+    }
   }
   input.beforeRepository?.();
   const repoPath = realpathSync(meta!.repoPath);
@@ -143,6 +158,25 @@ export async function bindPullRequestScope(input: {
   const commonDir = join(repoPath, ".git");
   if (!lstatSync(commonDir, { throwIfNoEntry: false })?.isDirectory() || existsSync(join(commonDir, "commondir"))) {
     refuseReview("the review snapshot could not be prepared");
+  }
+  if (automatic) {
+    // Read the primary checkout's registration/HEAD records. The worktree's own pointer is only
+    // compared with that trusted repository, never used to choose the snapshot's source.
+    // A durable launch proof cannot authorize a removed/replaced tree or a later branch switch.
+    let registered = false;
+    try {
+      const listed = await exec(tools.git, [...SAFE_GIT, "--git-dir", commonDir,
+        "worktree", "list", "--porcelain", "-z"], { env });
+      registered = parseWorktreePorcelain(listed).some((entry) => !entry.primary &&
+        sameWorktreePath(meta!.context, entry.path, worktree!.path) && entry.branch === worktree!.branch && !!entry.head);
+      if (registered) {
+        const actual = (await exec(tools.git, [...SAFE_GIT, "-C", worktree!.path,
+          "rev-parse", "--path-format=absolute", "--git-common-dir", "--symbolic-full-name", "HEAD"], { env })).trim().split("\n");
+        registered = actual.length === 2 && sameWorktreePath(meta!.context, actual[0]!, commonDir) &&
+          actual[1] === `refs/heads/${worktree!.branch}`;
+      }
+    } catch { /* an unreadable registration fails closed */ }
+    if (!registered) refuseReview("the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review");
   }
   const forgeUrl = /^https:\/\//iu.test(origin) || !tools.ssh
     ? `https://github.com/${pr.baseRepository}.git` : `git@github.com:${pr.baseRepository}.git`;

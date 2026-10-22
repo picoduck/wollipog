@@ -159,6 +159,8 @@ export function reviewerHarnessFor(driver: string | null | undefined): SessionRe
 
 const REVIEW_SESSION_REASONS = new Set([
   "the review must cover the session's own native managed worktree",
+  "resume this session once so the runner can verify its automatic worktree before requesting a review",
+  "the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review",
   "the pull request is not this session's open, same-repository pull request",
   "the requested head is not the pull request's pushed head",
   "the review snapshot could not be prepared",
