@@ -236,6 +236,7 @@ export async function listJobs(api, repository, runId, attempt) {
 }
 
 const TEST_STEP = /^(Unit Tests|Remote-Instance Browser End-to-End Tests|WebKit Browser End-to-End Tests|Rendered Production Browser Smoke)$/;
+const hasStarted = (item) => item.status === undefined || ["in_progress", "completed"].includes(item.status);
 
 /** Only API metadata is retained. No names from tests, log bodies, inputs or runner identities. */
 export function attemptRecord(repository, run, jobs, window, jobsTruncated = false) {
@@ -243,10 +244,11 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
   const first = attempt === 1;
   const projected = jobs.map((job) => ({
     id: job.id ?? null, name: job.name, state: outcome(job), conclusion: job.conclusion ?? null,
-    createdAt: job.created_at ?? null, startedAt: job.started_at ?? null, completedAt: job.completed_at ?? null,
+    createdAt: job.created_at ?? null, startedAt: hasStarted(job) ? job.started_at ?? null : null,
+    apiStartedAt: job.started_at ?? null, completedAt: job.completed_at ?? null,
     // Reruns may contain copied jobs with reset creation times; never interpret those as waits.
-    runnerWaitMinutes: first && job.conclusion !== "skipped" ? duration(job.created_at, job.started_at) : null,
-    executionMinutes: first && job.conclusion !== "skipped" ? duration(job.started_at, job.completed_at) : null,
+    runnerWaitMinutes: first && hasStarted(job) && job.conclusion !== "skipped" ? duration(job.created_at, job.started_at) : null,
+    executionMinutes: first && hasStarted(job) && job.conclusion !== "skipped" ? duration(job.started_at, job.completed_at) : null,
     steps: (job.steps ?? []).map((step) => ({ number: step.number, name: step.name,
       state: outcome(step), conclusion: step.conclusion ?? null, startedAt: step.started_at ?? null,
       completedAt: step.completed_at ?? null,
@@ -267,7 +269,8 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
     runId: run.id, attempt, attemptClass: first ? "first" : "rerun", checkSuiteId: run.check_suite_id ?? null,
     pullRequest: pullRequestOf(run.head_branch) ?? run.pull_requests?.[0]?.number ?? null,
     branch: run.head_branch, state: outcome(run), conclusion: run.conclusion ?? null,
-    createdAt: run.created_at, startedAt: run.run_started_at ?? null, updatedAt: run.updated_at ?? null,
+    createdAt: run.created_at, startedAt: hasStarted(run) ? run.run_started_at ?? null : null,
+    apiStartedAt: run.run_started_at ?? null, updatedAt: run.updated_at ?? null,
     window, jobsTruncated, jobs: projected,
     readiness: run.event === "pull_request" ? projected.some((job) => job.state !== "skipped")
       ? "admitted-by-workflow-guard" : "unmeasured" : "not-applicable",

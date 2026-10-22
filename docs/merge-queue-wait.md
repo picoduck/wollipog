@@ -89,7 +89,10 @@ is explicitly unmeasured. These records measure observations; they cannot certif
 releases or equivalent code across events.
 
 Outcomes are `passing`, `failing`, `cancelled`, `skipped`, `unfinished`, or
-`unmeasured`. Missing/negative durations remain null. Elapsed runner-minutes sum
+`unmeasured`. Missing/negative durations remain null. GitHub can populate queued
+jobs' `started_at` with creation-time placeholders. Raw `apiStartedAt` preserves
+that observation, while `startedAt` and runner wait stay null until status is
+in-progress/completed; placeholders never imply zero wait. Elapsed runner-minutes sum
 non-skipped jobs with complete timestamps; `measuredRunnerMinutes` is a lower
 bound when jobs are missing, and `consumedRunnerMinutes` is null if evidence is
 incomplete. All-skipped/no-job attempts have no measured consumption. First

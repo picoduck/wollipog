@@ -271,6 +271,21 @@ test("all outcome states and absent evidence remain distinct", () => {
   assert.equal(backwards.metrics.consumedRunnerMinutes, null);
 });
 
+test("GitHub queued-job start placeholders never become zero runner wait", () => {
+  const queued = { ...job("worker", 0, 0, null), status: "queued", conclusion: null };
+  const record = attemptRecord(repository, { ...run(1, 1), status: "queued", conclusion: null, run_started_at: at(0) }, [queued], {});
+  assert.equal(record.state, "unfinished");
+  assert.equal(record.startedAt, null);
+  assert.equal(record.apiStartedAt, at(0));
+  assert.equal(record.jobs[0].startedAt, null);
+  assert.equal(record.jobs[0].apiStartedAt, at(0));
+  assert.equal(record.jobs[0].runnerWaitMinutes, null);
+  assert.equal(record.jobs[0].executionMinutes, null);
+  const running = attemptRecord(repository, run(1, 1), [{ ...queued, status: "in_progress", started_at: at(3) }], {});
+  assert.equal(running.jobs[0].runnerWaitMinutes, 3);
+  assert.equal(running.jobs[0].executionMinutes, null);
+});
+
 test("job pagination does not turn a partial page into complete execution evidence", async () => {
   const paths = [];
   const result = await listJobs(async (path) => {
