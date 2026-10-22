@@ -69,7 +69,7 @@ export interface LeaseWorkerInspection {
 /** Fixed, path-free texts: only the code crosses the worker boundary, never the registry's message. */
 export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
   holder_alive: "Provider HOME's recorded runner is still alive; stop that runner before retrying. Preserve the lease journal.",
-  boundary_survivor: "A provider or helper survives in the recorded provider-HOME boundary; stop that work before retrying. Preserve the boundary and journal.",
+  boundary_survivor: "A provider or helper, including a detached provider review controller, survives in the recorded provider-HOME boundary; wait for that work to finish or stop it before retrying. Preserve the boundary and journal.",
   process_survivor: "A process launched by the recorded provider-HOME runner survives; stop that work before retrying. Preserve the lease journal.",
   boundary_unverifiable: "Provider HOME's recorded cgroup path and inode could not be verified, or its recorded enclosing delegated unit has not retired. Preserve the boundary and journal. Lifecycle proof does not cover deliberate same-user cgroup migration by provider code.",
   process_uninspectable: "Provider HOME has an uninspectable process on the fallback recovery path. Boundary proof was unavailable (legacy lease or unavailable containment); every potentially related process must be inspectable. Launch future runners in a delegated Linux cgroup v2 unit; preserve the journal.",

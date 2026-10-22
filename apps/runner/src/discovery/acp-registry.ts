@@ -9,7 +9,7 @@ import type {
   AgentDefinition,
 } from "@wollipog/protocol";
 import { resolveNative, run, type ResolvedLaunch } from "./resolve.js";
-import { parseVersion } from "./discover.js";
+import { parseVersion, type ConfiguredAcpProbeOptions } from "./discover.js";
 
 export const ACP_REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const MAX_REGISTRY_BYTES = 2 * 1024 * 1024;
@@ -46,6 +46,7 @@ export interface RegistryDiscoveryOptions {
   refresh?: boolean;
   fetchImpl?: typeof fetch;
   resolveCommand?: typeof resolveNative;
+  authorize?: ConfiguredAcpProbeOptions["authorize"];
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -324,7 +325,7 @@ function metadata(
 export async function registryEntriesToAgents(
   index: RegistryIndex,
   allowedAgentIds: string[],
-  options: Pick<RegistryDiscoveryOptions, "platform" | "arch" | "resolveCommand"> & {
+  options: Pick<RegistryDiscoveryOptions, "platform" | "arch" | "resolveCommand" | "authorize"> & {
     approvedFingerprints?: ReadonlySet<string>;
   } = {},
 ): Promise<AgentDefinition[]> {
@@ -339,11 +340,6 @@ export async function registryEntriesToAgents(
     const fingerprint = approvalFingerprint(entry, index.version, selected);
     const approved = !installed && fingerprint != null && options.approvedFingerprints?.has(fingerprint) === true;
     const packageRunner = approved && selected ? await resolveCommand(selected.command) : null;
-    let version: string | undefined;
-    if (installed) {
-      const result = await run(installed.launch.command, [...installed.launch.args, "--version"], { timeoutMs: 5_000 });
-      if (result.code === 0) version = parseVersion(result.stdout || result.stderr);
-    }
     const launchArgs = installed
       ? [...installed.launch.args, ...(selected?.adapterArgs ?? [])]
       : packageRunner
@@ -358,7 +354,7 @@ export async function registryEntriesToAgents(
           : fingerprint
             ? "approval-required"
             : "manual-only";
-    return {
+    const agent: AgentDefinition = {
       id: entry.id,
       name: entry.name,
       command: installed?.launch.command ?? packageRunner?.launch.command ?? selected?.command ?? `registry:${entry.id}`,
@@ -367,13 +363,28 @@ export async function registryEntriesToAgents(
       driver: "acp",
       acpTransport: "stdio",
       context: { kind: "native" },
-      version: version ?? entry.version,
+      version: entry.version,
       available: Boolean(installed || packageRunner),
       authStatus: "unknown",
       source: "registry",
       ...(installed ? { bin: installed.bin } : {}),
       registry: metadata(entry, index.version, selected, installStatus),
     };
+    // Resolution alone never authorizes executing an installed adapter. Metadata-only callers
+    // keep the registry version; production admits the optional version probe against its HOME.
+    if (!installed || !options.authorize) return agent;
+    let authorization: Awaited<ReturnType<NonNullable<RegistryDiscoveryOptions["authorize"]>>>;
+    try { authorization = await options.authorize(agent, {}); }
+    catch { return { ...agent, available: false,
+      unavailableReason: "Provider HOME ownership could not be established for registry discovery. Preserve lease evidence and inspect the runner's recovery diagnostics." }; }
+    const processes: Promise<boolean>[] = [];
+    try {
+      const result = await run(installed.launch.command, [...installed.launch.args, "--version"], {
+        timeoutMs: 5_000, trackDescendants: true, onProcess: (proof) => processes.push(proof),
+      });
+      if (result.code === 0) agent.version = parseVersion(result.stdout || result.stderr) ?? entry.version;
+      return agent;
+    } finally { await authorization.settle(processes); }
   }));
 }
 

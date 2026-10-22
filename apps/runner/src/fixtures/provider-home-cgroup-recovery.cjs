@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { AsyncProviderHomeLeaseRegistry } = require("../provider-home-lease-async.ts");
 const { providerHomeRunnerMarker, linuxLeaseProcessProbe } = require("../provider-home-lease-evidence.ts");
-const { providerContainmentIdentity, providerContainmentUnitIdentity } = require("../linux-cgroup.ts");
+const { providerContainmentEmpty, providerContainmentIdentity, providerContainmentUnitIdentity } = require("../linux-cgroup.ts");
 const { spawnAgent } = require("../spawn.ts");
 const [mode, root, helper] = process.argv.slice(2);
 const home = path.join(root, "provider-home");
@@ -13,7 +13,7 @@ async function main() {
     runnerMarker: providerHomeRunnerMarker(), helperDataDir: path.join(root, "data"),
     onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
   });
-  if (mode === "hold" || mode === "survivor") {
+  if (mode === "hold" || mode === "survivor" || mode === "shell-clean") {
     await registry.acquireHome(home, "acp");
     let leaf;
     if (mode === "survivor") {
@@ -24,7 +24,15 @@ async function main() {
       leaf = child.posixBoundary?.containmentIdentity;
       await new Promise((resolve, reject) => { child.once("close", resolve); child.once("error", reject); });
     }
-    fs.writeFileSync(path.join(root, "ready.json"), JSON.stringify({ pid: process.pid, identity: { ...providerContainmentIdentity(), unit: providerContainmentUnitIdentity() }, leaf }));
+    let released;
+    if (mode === "shell-clean") {
+      const child = spawnAgent({ command: helper, args: ["nondumpable", path.join(root, "shell.pid")], cwd: root, trackDescendants: false });
+      await new Promise((resolve, reject) => { child.once("close", resolve); child.once("error", reject); });
+      // Same whole-parent gate as clean runner shutdown. Ordinary user daemons do not own HOME.
+      released = providerContainmentEmpty() && await registry.close();
+    }
+    fs.writeFileSync(path.join(root, "ready.json"), JSON.stringify({ pid: process.pid, identity: { ...providerContainmentIdentity(), unit: providerContainmentUnitIdentity() }, leaf, released }));
+    if (mode === "shell-clean") return;
     setInterval(() => {}, 1000);
     return;
   }

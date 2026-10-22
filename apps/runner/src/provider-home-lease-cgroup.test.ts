@@ -19,6 +19,51 @@ async function waitUntil(predicate: () => boolean, milliseconds = 15_000): Promi
   }
 }
 
+test("clean runner replacement acquires HOME while an ordinary user shell daemon survives", {
+  skip: process.platform !== "linux", timeout: 90_000,
+}, async (t) => {
+  if (!providerContainmentIdentity()) {
+    assert.notEqual(process.env.WOLLIPOG_TEST_REQUIRE_CGROUP, "1", "delegated containment is mandatory for native validation");
+    t.skip(`containment unavailable: ${providerContainmentStatus().reason}`); return;
+  }
+  const root = mkdtempSync(join(tmpdir(), "wollipog-shell-clean-handoff-"));
+  mkdirSync(join(root, "tmp")); mkdirSync(join(root, "data"));
+  const helper = join(root, "descendant");
+  const fixture = fileURLToPath(new URL("./fixtures/provider-home-cgroup-recovery.cjs", import.meta.url));
+  const source = fileURLToPath(new URL("../native/fixtures/cgroup-descendant.c", import.meta.url));
+  const built = spawnSync("/usr/bin/cc", ["-std=c11", "-Wall", "-Wextra", "-Werror", source, "-o", helper], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(built.status, 0, built.stderr);
+  let pid: number | undefined, boundary: LinuxCgroupIdentity | undefined;
+  t.after(() => {
+    if (!pid && existsSync(join(root, "shell.pid"))) pid = Number(readFileSync(join(root, "shell.pid"), "utf8"));
+    if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* exited */ } }
+    if (boundary) {
+      const mount = currentCgroupDirectory(readFileSync("/proc/self/mountinfo", "utf8"), readFileSync("/proc/self/cgroup", "utf8"))!;
+      const directory = join(mount.mountPoint, boundary.cgroupPath);
+      try { if (lstatSync(directory, { bigint: true }).ino.toString() === boundary.inode) rmdirSync(directory); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const env = { ...process.env, HOME: join(root, "home"), CODEX_HOME: join(root, "codex"), CLAUDE_CONFIG_DIR: join(root, "claude"), TMPDIR: join(root, "tmp") };
+  const holder = spawnSync(process.execPath, ["--import", "tsx", fixture, "shell-clean", root, helper], { env, encoding: "utf8", timeout: 30_000 });
+  assert.equal(holder.status, 0, holder.stderr);
+  const ready = JSON.parse(readFileSync(join(root, "ready.json"), "utf8"));
+  boundary = ready.identity;
+  await waitUntil(() => existsSync(join(root, "shell.pid")));
+  pid = Number(readFileSync(join(root, "shell.pid"), "utf8"));
+  assert.equal(ready.released, true, "clean shutdown releases provider ownership despite the ordinary shell daemon");
+  // Normal exit can remove the empty parent. The explicit release, unlike crash recovery, does
+  // not need to re-prove a missing child under the still-present shared test unit.
+  assert.ok(!readFileSync(`/proc/${pid}/cgroup`, "utf8").includes(`/${ready.identity.cgroupPath}/`));
+  const successor = spawnSync(process.execPath, ["--import", "tsx", fixture, "recover", root, helper], { env, encoding: "utf8", timeout: 30_000 });
+  assert.equal(successor.status, 0, successor.stderr);
+  const outcome = JSON.parse(successor.stdout);
+  assert.equal(outcome.ok, true); assert.equal(outcome.released, true);
+  const fields = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ");
+  assert.ok(fields[0] !== "Z" && fields[0] !== "X", "the ordinary user daemon survives both runners");
+});
+
 for (const survivor of [false, true]) test(`replacement runner ${survivor ? "refuses a surviving boundary helper" : "recovers an empty boundary"} with an unreadable unrelated process alive`, {
   skip: process.platform !== "linux", timeout: 120_000,
 }, async (t) => {

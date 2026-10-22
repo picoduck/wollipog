@@ -2124,6 +2124,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
           dataDir: config.dataDir,
           allowedAgentIds: config.acpRegistryAgents,
           refresh: refreshModels,
+          authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
         }).catch((error) => {
           log(`ACP Registry unavailable: ${(error as Error).message}`);
           return [];
@@ -4310,7 +4311,9 @@ function shutdown(exitCode = 0): void {
       // possibly-still-alive provider cannot share its HOME with a replacement runner.
       try {
         if (sessionsCleanlyShutDown) {
-          if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped && providerContainmentEmpty())) {
+          const providerBoundaryEmpty = providerContainmentEmpty();
+          if (!providerBoundaryEmpty) log("provider-HOME boundary is still populated or uninspectable; a detached provider review controller can retain ownership until its work finishes");
+          if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped && providerBoundaryEmpty)) {
             log("process-tree cleanup was incomplete — retaining provider-home lease; inspect the preceding survivor diagnostic before restarting this runner");
           }
         } else {

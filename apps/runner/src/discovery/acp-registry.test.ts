@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -92,6 +92,7 @@ test("priority adapters are allowlisted, platform-selected, and fail closed befo
 test("an already installed priority binary uses its resolved launch and remains stdio ACP", async () => {
   const resolvedArgs = ["-e", "if (process.argv.includes('--version')) console.log('9.8.7')", "--"];
   const [agent] = await registryEntriesToAgents(parseRegistryIndex(index), ["gemini"], {
+    authorize: async () => ({ settle: async (proofs) => { await Promise.all(proofs); } }),
     platform: process.platform,
     arch: process.arch,
     resolveCommand: async (bin) => bin === "gemini"
@@ -112,6 +113,38 @@ test("an already installed priority binary uses its resolved launch and remains 
   assert.deepEqual(agent!.args, [...resolvedArgs, "--acp"]);
   assert.equal(agent!.args.includes("--yes"), false);
   assert.equal(agent!.args.includes("@google/gemini-cli@0.50.0"), false);
+});
+
+test("installed registry version probes require HOME admission and settle their tracked tree", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-registry-home-admission-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const marker = join(root, "executed");
+  const options = { resolveCommand: async (bin: string) => bin === "gemini" ? {
+    launch: { command: process.execPath, args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran'); console.log('9.8.7')`, "--"] },
+    via: "path" as const,
+  } : null };
+  const metadata = await registryEntriesToAgents(parseRegistryIndex(index), ["gemini"], options);
+  assert.equal(metadata[0]!.version, "0.50.0", "without admission only the registry metadata is available");
+  const denied = await registryEntriesToAgents(parseRegistryIndex(index), ["gemini"], {
+    ...options, authorize: async () => { throw new Error("PRIVATE_REFUSAL"); },
+  });
+  assert.equal(denied[0]!.available, false);
+  assert.match(denied[0]!.unavailableReason!, /HOME ownership/u);
+  assert.doesNotMatch(denied[0]!.unavailableReason!, /PRIVATE_REFUSAL/u);
+  await assert.rejects(readFile(marker), { code: "ENOENT" });
+  let admitted = false, settled = false;
+  const allowed = await registryEntriesToAgents(parseRegistryIndex(index), ["gemini"], {
+    ...options, authorize: async (agent, env) => {
+      assert.equal(agent.driver, "acp"); assert.deepEqual(env, {}); admitted = true;
+      return { settle: async (proofs) => {
+        assert.equal(admitted, true); assert.equal(proofs.length, 1);
+        assert.deepEqual(await Promise.all(proofs), [process.platform !== "win32"]);
+        assert.equal(await readFile(marker, "utf8"), "ran"); settled = true;
+      } };
+    },
+  });
+  assert.equal(allowed[0]!.version, "9.8.7");
+  assert.equal(settled, true);
 });
 
 test("an incompatible binary distribution and an unranked manifest command cannot become executable", async () => {

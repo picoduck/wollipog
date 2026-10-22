@@ -737,7 +737,7 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
       const piRpc = k.bin === "pi" ? await probePiRpc(bin.launch, { kind: "native" }, observer) : undefined;
       const update = launchTargetStillMatches(bin.launch, { kind: "native" }, installation.targetIdentity)
         ? await checkHarnessUpdate(k.bin as "claude" | "codex" | "pi", bin, { kind: "native" }, version,
-          k.bin === "codex" ? codexAppServer?.status === "supported" : k.bin === "claude" ? claudeCode?.status === "ready" : piRpc?.available === true)
+          k.bin === "codex" ? codexAppServer?.status === "supported" : k.bin === "claude" ? claudeCode?.status === "ready" : piRpc?.available === true, observer)
         : undefined;
       const slashCommands = nativeSlashCommands(k.driver);
       const catalogCapabilities = withSlashCommands(k.driver, slashCommands);

@@ -319,7 +319,7 @@ test("cgroup v2 rejects renaming an owned boundary, preserving removed-path proo
 });
 
 for (const mode of ["detached-controller", "user-owned-shell"] as const) {
-  test(`a ${mode} retains its lifetime while surviving helpers block provider-HOME handoff`, { skip: process.platform !== "linux", timeout: 60_000 }, async (t) => {
+  test(`a ${mode} preserves its lifetime and ${mode === "detached-controller" ? "blocks" : "does not block"} provider-HOME handoff`, { skip: process.platform !== "linux", timeout: 60_000 }, async (t) => {
     if (!requireContainment(t)) return;
     const directory = mkdtempSync(join(tmpdir(), "wollipog-passive-cgroup-"));
     const helper = join(directory, "descendant"), pidfile = join(directory, "helper.pid");
@@ -340,14 +340,38 @@ for (const mode of ["detached-controller", "user-owned-shell"] as const) {
     pid = Number(readFileSync(pidfile, "utf8"));
     assert.equal(alive(pid), true);
     const identity = providerContainmentIdentity()!;
-    assert.ok(readFileSync(`/proc/${pid}/cgroup`, "utf8").includes(`/${identity.cgroupPath}/`), "even untracked provider helpers join the recorded parent before exec");
-    assert.equal(providerContainmentEmpty(), false, "shutdown must retain the HOME while an untracked helper survives");
+    const member = readFileSync(`/proc/${pid}/cgroup`, "utf8").includes(`/${identity.cgroupPath}/`);
+    assert.equal(member, mode === "detached-controller", "review provider controllers are contained; ordinary user daemons are outside provider ownership");
+    assert.equal(providerContainmentEmpty(), mode === "user-owned-shell", "only provider-HOME users participate in shutdown's boundary proof");
     await new Promise((resolve) => setTimeout(resolve, 2_300));
     assert.equal(alive(pid), true, "root close must not turn a user-owned/detached lifetime into killing cleanup");
     process.kill(pid, "SIGKILL"); pid = undefined;
     await waitUntil(() => providerContainmentEmpty());
   });
 }
+
+test("ordinary user shells still open when provider leaf creation fails", { skip: process.platform !== "linux" }, async (t) => {
+  if (!requireContainment(t)) return;
+  const original = fs.mkdirSync;
+  let failures = 0;
+  fs.mkdirSync = ((directory, ...args) => {
+    if (String(directory).includes("/provider-")) {
+      failures++; throw Object.assign(new Error("test cgroup limit"), { code: "ENOSPC" });
+    }
+    return original(directory, ...args);
+  }) as typeof fs.mkdirSync;
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => spawnAgent({ command: process.execPath, args: ["-e", ""], cwd: process.cwd() }), /provider containment unavailable/u);
+    assert.equal(failures, 1, "the provider admission failure is real");
+    const shell = spawnAgent({ command: process.execPath, args: ["-e", "process.stdout.write('shell-open')"], cwd: process.cwd(), trackDescendants: false });
+    let output = ""; shell.stdout.on("data", (chunk) => { output += String(chunk); });
+    await new Promise<void>((resolve, reject) => { shell.once("close", () => resolve()); shell.once("error", reject); });
+    assert.equal(output, "shell-open");
+    assert.equal(shell.posixBoundary, undefined);
+    assert.equal(failures, 1, "ordinary shells never request a provider leaf");
+  } finally { fs.mkdirSync = original; syncBuiltinESMExports(); }
+});
 
 for (const mode of ["detached", "nondumpable", "term", "delayed-admission"]) {
   test(`Linux cgroup contains and reaps a ${mode} setsid helper before lease-release proof`, { skip: process.platform !== "linux" }, async (t) => {

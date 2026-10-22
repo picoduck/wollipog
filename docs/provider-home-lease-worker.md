@@ -165,16 +165,27 @@ retain ownership. Native Claude/Codex/Pi discovery, configured Pi discovery and 
 probes also acquire their effective inherited HOME, including provider HOME overrides. Their
 multi-command references release only after every reported native probe tree is proven gone;
 unproven trees retain ownership. Cached model discovery that spawns nothing releases immediately.
-Native version/help/auth CLI commands use tracked boundaries; resolution utilities and fixed native
-helpers are not providers. WSL probes retain their existing in-distro execution and do not acquire
+Native version/help/auth CLI commands use tracked boundaries, including Codex updater-capability
+help and installed ACP-registry version probes. The latter acquires its own HOME reference before
+execution; metadata-only registry callers execute nothing. Native npm release checks also report
+their tracked trees to the owning discovery reference. Resolution utilities (`command -v`, directory
+inspection) and fixed native helpers are not providers. WSL probes retain their existing in-distro execution and do not acquire
 the unrelated native host HOME; WSL session isolation is handled separately.
 
-Detached session/campaign review controllers and plain user-owned shells also join provider
-cgroup leaves before exec. Their root closing triggers only a non-killing emptiness check, preserving
-detached review recovery and user-owned daemon lifetimes. Empty leaves retire asynchronously.
-Runner shutdown additionally requires the entire provider parent empty before releasing HOME
-leases, so a surviving untracked controller or shell helper blocks handoff. Dedicated media
-review namespaces use fresh private provider HOMEs instead of the shared leased HOME.
+Detached session/campaign review controllers join provider cgroup leaves before exec. Their root
+closing triggers only a non-killing emptiness check, preserving detached review recovery. Empty
+leaves retire asynchronously. Runner shutdown additionally requires the entire provider parent
+empty before releasing HOME leases. A surviving detached controller legitimately blocks handoff
+until its provider work finishes; shutdown and recovery guidance name this possibility.
+
+Ordinary user-owned terminals are outside provider ownership and use their previous launch path;
+provider leaf creation failures cannot prevent them opening. A `nohup`/`setsid` development server
+from such a terminal survives a clean restart without retaining the provider-HOME lease. Agent
+TUIs and agent shells whose cleanup owns descendants remain tracked inside provider containment.
+Starting a provider manually from an ordinary terminal is user-managed execution; use a managed
+provider launch or Agent TUI for HOME ownership enforcement. Legacy/non-delegated leases retain
+their conservative process-scan rules, which may still refuse an uninspectable user daemon.
+Dedicated media review namespaces use fresh private provider HOMEs instead of the shared leased HOME.
 
 `provider-home-lease-cgroup.test.ts` starts independent holder/replacement processes with private
 HOMEs and keeps a double-forked non-dumpable unrelated process alive throughout recovery. It

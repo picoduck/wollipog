@@ -38,6 +38,51 @@ const ACP_INITIALIZE_FIXTURE = [
   'process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:request.id,result:{protocolVersion:1,agentCapabilities:{}}})+"\\n");});',
 ].join("");
 
+test("native Codex discovery observes every provider execution including updater help before releasing HOME", { skip: process.platform === "win32", timeout: 60_000 }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-discovery-help-tree-"));
+  const executable = join(root, "codex"), calls = join(root, "calls"), pidfile = join(root, "helper.pid");
+  const previous = { PATH: process.env.PATH, checks: process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS, pins: process.env.WOLLIPOG_HARNESS_UPDATE_PINNED };
+  t.after(() => {
+    process.env.PATH = previous.PATH;
+    for (const [key, value] of [["WOLLIPOG_HARNESS_UPDATE_CHECKS", previous.checks], ["WOLLIPOG_HARNESS_UPDATE_PINNED", previous.pins]]) {
+      if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
+    }
+    try { process.kill(Number(readFileSync(pidfile, "utf8")), "SIGKILL"); } catch { /* gone */ }
+    rmSync(root, { recursive: true, force: true });
+  });
+  writeFileSync(executable, `#!${process.execPath}
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2))+'\\n');
+if (process.argv[2] === '--version') console.log('0.155.1');
+else if (process.argv[2] === '--help') {
+  const child = require('node:child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], {detached:true,stdio:'ignore'});
+  fs.writeFileSync(${JSON.stringify(pidfile)}, String(child.pid)); child.unref();
+  console.log('  update  Update Codex to the latest version');
+} else console.log('Usage: codex app-server');
+`, { mode: 0o700 });
+  process.env.PATH = `${root}:${previous.PATH ?? "/usr/bin:/bin"}`;
+  delete process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS;
+  delete process.env.WOLLIPOG_HARNESS_UPDATE_PINNED;
+  let settled = false;
+  const agents = await discoverAgents({ authorize: async (agent) => {
+    if (agent.command !== executable && !agent.args?.includes(executable)) throw new Error("test installation only");
+    return { settle: async (proofs) => {
+      const executions = readFileSync(calls, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      assert.deepEqual(executions, [["--version"], ["app-server", "--help"], ["--help"]]);
+      assert.equal(proofs.length, executions.length, "each provider launch must contribute a tree proof before HOME settlement");
+      assert.deepEqual(await Promise.all(proofs), [true, true, true]);
+      if (process.platform === "linux") {
+        let state: string | undefined;
+        try { state = readFileSync(`/proc/${Number(readFileSync(pidfile, "utf8"))}/stat`, "utf8").split(") ")[1]?.split(" ")[0]; } catch { /* gone */ }
+        assert.ok(!state || state === "Z" || state === "X", "help's detached helper must be gone before HOME release");
+      }
+      settled = true;
+    } };
+  } });
+  assert.equal(settled, true);
+  assert.ok(agents.some((agent) => agent.installation?.path === executable));
+});
+
 test("refused native discovery preserves installation metadata and never executes the provider", { skip: process.platform === "win32" }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-discovery-refused-"));
   const originalPath = process.env.PATH;
