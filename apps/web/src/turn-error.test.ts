@@ -44,3 +44,12 @@ test("describeTurnError never guesses at an unknown message", () => {
     "",
   ]) assert.equal(describeTurnError(message), TURN_ERROR_FALLBACK, message);
 });
+
+test("plain-language account recovery errors retain their account-specific transcript explanation", () => {
+  for (const message of [
+    "Wollipog can't check whether another program is still using this account. Choose another account for now, or save your work and restart the machine before trying again.",
+    "A program from an earlier session is still using this account. Wait for that work to finish, then try again, or choose another account.",
+    "Wollipog can't read or verify this account's recovery records. Choose another account and ask the person who manages this machine to check the recovery details.",
+  ]) assert.equal(describeTurnError(`provider account unavailable: ${message}`),
+    "The runner couldn't use this session's provider account, so the agent didn't start.");
+});

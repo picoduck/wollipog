@@ -185,7 +185,7 @@ test("a launch preparation refused at the account's lease is reported as the acc
   assert.equal(h.driversCreated(), 0);
   assert.equal(h.store.readMeta("refused")?.providerHomeRefusal?.code, "profile_not_granted");
   const errors = errorEvents(h.messages);
-  assert.ok(errors.some((message) => message.startsWith("Account unavailable: ")), errors.join("\n"));
+  assert.ok(errors.some((message) => message.startsWith("provider account unavailable: ")), errors.join("\n"));
   assert.ok(!errors.some((message) => message.includes("execution isolation unavailable")), errors.join("\n"));
   assert.ok(h.messages.some((message) => message.type === "session_status" && message.status === "failed" &&
     message.detail === LEASE_WORKER_ERRORS.profile_not_granted));
@@ -202,7 +202,9 @@ test("specific ownership causes survive preparation and driver-lease launch boun
       assert.equal(refusal?.cause, cause);
       assert.equal(refusal?.code, PROVIDER_HOME_RECOVERY_CAUSE_CODES[cause]);
       assert.equal(lastRefusal(h.messages)?.cause, cause);
-      assert.ok(!errorEvents(h.messages).some(message => message.includes("execution isolation")), cause);
+      const errors = errorEvents(h.messages);
+      assert.ok(!errors.some(message => message.includes("execution isolation")), cause);
+      assert.ok(errors.some(message => message.startsWith("provider account unavailable: ")), `${cause}: both launch paths retain the transcript classifier's compatible prefix`);
       assert.ok(h.messages.some(message => message.type === "session_status" && message.detail === LEASE_WORKER_ERRORS[cause]), cause);
     }
     stage.refuse = undefined;

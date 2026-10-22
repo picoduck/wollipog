@@ -118,7 +118,7 @@ test("installed native harnesses retain an ownership probe failure instead of re
     assert.equal(agent.available, false, "ownership refusal must not admit execution");
     assert.equal(probe?.status, "unsupported", "the executable exists but its probe could not run");
     assert.equal(probe?.failure?.code, "probe_failed");
-    assert.match(probe.failure.message, /uninspectable process/);
+    assert.match(probe.failure.message, /can't check whether another program/);
     assert.doesNotMatch(probe.failure.message, /not installed|not found/);
   }
   assert.throws(() => readFileSync(marker), { code: "ENOENT" });
