@@ -5259,6 +5259,26 @@ export class SessionManager {
 
   /** Account probes are no-turn provider launches, but the provider may still mutate its effective
    * HOME while initializing. Bind them to the same attested owner lease as sessions and TUIs. */
+  async prepareDiscoveryProbe(agent: AgentDefinition, env: Record<string, string>): Promise<{ settle(proofs: Promise<boolean>[]): Promise<void> }> {
+    if (!this.providerHomeLeases || this.shuttingDown) throw new Error("provider-HOME ownership is unavailable");
+    const context = agent.context ?? { kind: "native" as const };
+    // Discovery inherits process.env, including provider-specific HOME overrides. Lease that
+    // actual effective environment, not just the configured overlay.
+    const effectiveEnv = Object.fromEntries(Object.entries({ ...process.env, ...env }).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    const reference = await this.providerHomeLeases.acquireReference({ driver: agent.driver ?? "acp", command: agent.command, context, env: effectiveEnv },
+      { isCurrent: () => !this.shuttingDown });
+    if (this.shuttingDown) {
+      if (reference) await this.releaseProviderHomeReference(reference);
+      throw new Error("configured ACP probe was cancelled by shutdown");
+    }
+    let settled = false;
+    return { settle: async (proofs) => {
+      if (settled) return;
+      settled = true;
+      await this.settleProviderProcessReference(reference, proofs);
+    } };
+  }
+
   async prepareSubscriptionUsageProbe(
     agent: AgentDefinition,
     env: Record<string, string>,

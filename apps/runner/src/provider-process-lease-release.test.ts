@@ -135,6 +135,22 @@ function managerFixture(proofs: boolean[] = []) {
   };
 }
 
+test("discovery owns its effective HOME before launch and releases only on a complete process proof", async () => {
+  const h = managerFixture();
+  try {
+    const agent = { ...claudeAgent(), driver: "acp" as const, command: "configured-adapter" };
+    const first = await h.manager.prepareDiscoveryProbe(agent, { HOME: h.home });
+    assert.equal(h.registry.references.get(h.home), 1, "ownership is acquired before any executable can start");
+    await first.settle([Promise.resolve(true)]);
+    assert.equal(h.registry.references.has(h.home), false);
+    const retained = await h.manager.prepareDiscoveryProbe(agent, { HOME: h.home });
+    await retained.settle([Promise.resolve(true), Promise.reject(new Error("uninspectable tree"))]);
+    await retained.settle([Promise.resolve(true)]);
+    assert.equal(h.registry.references.get(h.home), 1, "a failed proof retains exactly one reference");
+    assert.equal(h.registry.openHandles, 0, "settlement frees the bounded handle even when retaining ownership");
+  } finally { h.cleanup(); }
+});
+
 for (const [label, proofs, released] of [
   ["a proven status-command tree", [true], true],
   ["a surviving or unprobeable tree", [true, false], false],

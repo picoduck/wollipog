@@ -179,3 +179,28 @@ test("the runner marker is created once and replaces an inherited value in the e
     }
   }
 });
+
+test("versioned cgroup evidence proves replacement and PID reuse without scanning unrelated processes", () => {
+  const containment = { kind: "linux-cgroup-v2" as const, bootId: BOOT, mountRoot: "/", cgroupPath: "runner/providers", inode: "1234" };
+  const evidence = { version: 2 as const, bootId: BOOT, startTime: "777", marker: MARKER, containment };
+  assert.equal(isLeaseProcessEvidence(evidence), true);
+  assert.equal(Object.keys(evidence).length === 3, false, "old readers' exact three-key validator refuses this format");
+  const probe: LeaseProcessProbe = { bootId: () => BOOT, startTime: () => "999", containment: (recorded) => {
+    assert.deepEqual(recorded, containment); return "empty";
+  }, scan: () => { throw new Error("unrelated SSH environment is unreadable and must not be scanned"); } };
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, probe), { proven: true, proof: "linux_cgroup" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: () => "populated" }), { proven: false, reason: "boundary_populated" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: undefined }), { proven: false, reason: "boundary_unverifiable" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: () => "unverifiable" }), { proven: false, reason: "boundary_unverifiable" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, startTime: () => "777" }), { proven: false, reason: "runner_alive" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, bootId: () => OTHER_BOOT, containment: () => { throw new Error("old boundary irrelevant after reboot"); } }),
+    { proven: true, proof: "reboot" });
+  let checks = 0;
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, startTime: () => ++checks === 2 ? "777" : null }), { proven: false, reason: "runner_alive" });
+  for (const bad of [ { ...evidence, version: 3 }, { ...evidence, containment: { ...containment, inode: "0" } },
+    { ...evidence, containment: { ...containment, cgroupPath: "../escape" } },
+    { ...evidence, containment: { ...containment, cgroupPath: "/another/path" } },
+    { ...evidence, containment: { ...containment, bootId: OTHER_BOOT } }, { ...evidence, containment: undefined } ]) {
+    assert.equal(isLeaseProcessEvidence(bad), false, JSON.stringify(bad));
+  }
+});

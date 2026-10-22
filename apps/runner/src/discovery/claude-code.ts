@@ -349,7 +349,7 @@ export async function probeNativeClaudeCode(
   via: ResolvedBinary["via"],
 ): Promise<ClaudeCodeCapabilities> {
   return probeClaudeCode(
-    (args, timeoutMs) => run(launch.command, [...launch.args, ...args], { timeoutMs }),
+    (args, timeoutMs) => run(launch.command, [...launch.args, ...args], { timeoutMs, trackDescendants: true }),
     via,
   );
 }

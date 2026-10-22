@@ -2130,20 +2130,20 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
         })
       : Promise.resolve([]);
     const [nativeAgents, registryAgents, configuredAcpAgents, editors] = await Promise.all([
-      discoverAgents(),
+      discoverAgents({ authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
       registryPromise,
       probeConfiguredAcpAgents(configAgents, (agentId) => {
         const configured = config.agents.find((agent) => agent.id === agentId);
         if (!configured) throw new Error("configured agent is unavailable");
         return resolveAgentEnvironment(configured);
-      }),
+      }, { authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
       discoverEditors(),
     ]);
     const configuredPiAgents = await probeConfiguredPiAgents(configAgents, (agentId) => {
       const configured = config.agents.find((agent) => agent.id === agentId);
       if (!configured) throw new Error("configured agent is unavailable");
       return resolveAgentEnvironment(configured);
-    }, { discovered: nativeAgents });
+    }, { discovered: nativeAgents, authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) });
     const discovered = [...nativeAgents, ...registryAgents];
     freshSafeWslLaunches.clear();
     for (const agent of nativeAgents) {
@@ -2158,6 +2158,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
         mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents],
           new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
         refresh: refreshModels,
+        authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
       }),
       claudeHookFeatureEnabled,
       log,

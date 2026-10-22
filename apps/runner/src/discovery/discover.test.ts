@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,13 +15,19 @@ import {
   probedAuthFileStatus,
   supportedWslAgentControlNodeRuntime,
   parseVersion,
-  probeConfiguredAcpAgent,
+  probeConfiguredAcpAgent as realProbeConfiguredAcpAgent,
   probeConfiguredAcpAgents,
-  probeConfiguredPiAgents,
+  probeConfiguredPiAgents as realProbeConfiguredPiAgents,
   unavailableCodexAgentDefinition,
   unavailableClaudeAgentDefinition,
 } from "./discover.js";
 import { resolvedLaunchIdentity } from "./resolve.js";
+
+const testAdmission = { authorize: async () => ({ settle: async (proofs: Promise<boolean>[]) => { await Promise.all(proofs); } }) };
+const probeConfiguredAcpAgent: typeof realProbeConfiguredAcpAgent = (agent, env, options) =>
+  realProbeConfiguredAcpAgent(agent, env, { ...testAdmission, ...options });
+const probeConfiguredPiAgents: typeof realProbeConfiguredPiAgents = (agents, env, options) =>
+  realProbeConfiguredPiAgents(agents, env, { ...testAdmission, ...options });
 
 const ACP_INITIALIZE_FIXTURE = [
   'let input="";',
@@ -47,6 +53,35 @@ test("configured ACP discovery verifies a valid custom command and arguments", a
   assert.equal(probed.unavailableReason, undefined);
   assert.equal(mergeAgents([configured], [], [probed])[0]?.available, true,
     "a verified configured launch becomes selectable after the discovery merge");
+});
+
+test("configured ACP discovery refuses missing or denied HOME admission before starting the executable", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-discovery-admission-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const marker = join(root, "started");
+  const agent = cfg({ driver: "acp", command: process.execPath,
+    args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started')`] });
+  const missing = await realProbeConfiguredAcpAgent(agent, {});
+  const denied = await realProbeConfiguredAcpAgent(agent, {}, { authorize: async () => { throw new Error("PRIVATE_PATH_OR_SECRET"); } });
+  for (const result of [missing, denied]) {
+    assert.equal(result.available, false);
+    assert.match(result.unavailableReason!, /HOME ownership/u);
+    assert.doesNotMatch(result.unavailableReason!, /PRIVATE_PATH_OR_SECRET/u);
+  }
+  assert.throws(() => readFileSync(marker), { code: "ENOENT" });
+});
+
+test("configured ACP discovery awaits whole-tree proof before settling HOME ownership on success and timeout", async () => {
+  for (const timeout of [false, true]) {
+    const proofs: boolean[][] = [];
+    const result = await realProbeConfiguredAcpAgent(cfg({ driver: "acp", command: process.execPath,
+      args: ["-e", timeout ? "setInterval(()=>{},1000)" : ACP_INITIALIZE_FIXTURE] }), {}, {
+      timeoutMs: timeout ? 40 : 5_000,
+      authorize: async () => ({ settle: async (trees) => { proofs.push(await Promise.all(trees)); } }),
+    });
+    assert.equal(result.available, !timeout, result.unavailableReason);
+    assert.deepEqual(proofs, [[process.platform !== "win32"]], "boundary-less platforms retain, POSIX trees finish cleanup before settlement");
+  }
 });
 
 test("configured ACP probe results stay attached to their exact config ids", () => {

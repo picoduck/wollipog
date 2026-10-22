@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { inspectLeaseCgroup, isLeaseContainmentEvidence, type LeaseContainmentEvidence, type LeaseContainmentResult } from "./provider-home-lease-containment.js";
+import type { LinuxCgroupIdentity } from "./linux-cgroup.js";
 
 /**
  * #3241: lifecycle evidence for provider-HOME leases.
@@ -20,14 +22,17 @@ export interface LeaseProcessEvidence {
   /** Opaque platform start time of the recorded runner process (Linux: /proc stat field 22). */
   startTime: string;
   marker: string;
+  /** Version 2 is deliberately rejected by older readers' exact three-key validator. */
+  version?: 2;
+  containment?: LeaseContainmentEvidence;
 }
 
 /** How a stale lease was proved abandoned. */
-export type LeaseAbandonmentProof = "reboot" | "process_scan";
+export type LeaseAbandonmentProof = "reboot" | "process_scan" | "linux_cgroup";
 
 export type LeaseAbandonmentResult =
   | { proven: true; proof: LeaseAbandonmentProof }
-  | { proven: false; reason: "runner_alive" | "marked_process" | "uninspectable" };
+  | { proven: false; reason: "runner_alive" | "marked_process" | "uninspectable" | "boundary_populated" | "boundary_unverifiable" };
 
 /** The process view a proof is made from. Injected in tests. */
 export interface LeaseProcessProbe {
@@ -39,6 +44,7 @@ export interface LeaseProcessProbe {
    * inspected and might descend from the runner that started at `runnerStartTime` in this boot.
    */
   scan(marker: string, runnerStartTime: string): { marked: number[]; uninspectable: number[] };
+  containment?(identity: LinuxCgroupIdentity): LeaseContainmentResult;
 }
 
 const BOOT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -48,7 +54,10 @@ const MARKER = /^[0-9a-f]{32}$/u;
 export function isLeaseProcessEvidence(value: unknown): value is LeaseProcessEvidence {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return Object.keys(record).length === 3 &&
+  const legacy = Object.keys(record).length === 3 && record.version === undefined && record.containment === undefined;
+  const bounded = Object.keys(record).length === 5 && record.version === 2 && isLeaseContainmentEvidence(record.containment) &&
+    (record.containment.kind !== "linux-cgroup-v2" || record.containment.bootId === record.bootId);
+  return (legacy || bounded) &&
     typeof record.bootId === "string" && BOOT_ID.test(record.bootId) &&
     typeof record.startTime === "string" && START_TIME.test(record.startTime) &&
     typeof record.marker === "string" && MARKER.test(record.marker);
@@ -103,6 +112,7 @@ export function linuxLeaseProcessProbe(
 ): LeaseProcessProbe | undefined {
   if (process.platform !== "linux" || uid === undefined) return undefined;
   return {
+    containment: inspectLeaseCgroup,
     bootId: () => {
       const value = readFileSync(join(root, "sys/kernel/random/boot_id"), "utf8").trim();
       if (!BOOT_ID.test(value)) throw new Error("boot identity is unavailable");
@@ -209,12 +219,15 @@ export function linuxLeaseProcessProbe(
 }
 
 /** The evidence this runner process records, or undefined when the platform cannot prove it later. */
-export function currentLeaseProcessEvidence(probe: LeaseProcessProbe | undefined, pid: number, marker: string | undefined): LeaseProcessEvidence | undefined {
+export function currentLeaseProcessEvidence(probe: LeaseProcessProbe | undefined, pid: number, marker: string | undefined, containment?: LeaseContainmentEvidence): LeaseProcessEvidence | undefined {
   if (!probe || !isLeaseRunnerMarker(marker)) return undefined;
   try {
     const startTime = probe.startTime(pid);
     if (!startTime) return undefined;
-    return { bootId: probe.bootId(), startTime, marker };
+    const evidence: LeaseProcessEvidence = { bootId: probe.bootId(), startTime, marker,
+      ...(containment ? { version: 2 as const, containment: { ...containment } } : {}) };
+    if (!isLeaseProcessEvidence(evidence)) throw new Error("invalid process containment evidence");
+    return evidence;
   } catch {
     return undefined;
   }
@@ -229,6 +242,13 @@ export function proveLeaseAbandoned(evidence: LeaseProcessEvidence, pid: number,
   try {
     if (probe.bootId() !== evidence.bootId) return { proven: true, proof: "reboot" };
     if (probe.startTime(pid) === evidence.startTime) return { proven: false, reason: "runner_alive" };
+    if (evidence.containment?.kind === "linux-cgroup-v2") {
+      const boundary = probe.containment?.(evidence.containment) ?? "unverifiable";
+      if (boundary === "populated") return { proven: false, reason: "boundary_populated" };
+      if (boundary !== "empty") return { proven: false, reason: "boundary_unverifiable" };
+      if (probe.startTime(pid) === evidence.startTime) return { proven: false, reason: "runner_alive" };
+      return { proven: true, proof: "linux_cgroup" };
+    }
     const scan = probe.scan(evidence.marker, evidence.startTime);
     if (scan.marked.length) return { proven: false, reason: "marked_process" };
     if (scan.uninspectable.length) return { proven: false, reason: "uninspectable" };

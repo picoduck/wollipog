@@ -1,0 +1,38 @@
+// Native fixture: all HOME/data/temp paths are supplied by the test's private directory.
+const fs = require("node:fs");
+const path = require("node:path");
+const { AsyncProviderHomeLeaseRegistry } = require("../provider-home-lease-async.ts");
+const { providerHomeRunnerMarker, linuxLeaseProcessProbe } = require("../provider-home-lease-evidence.ts");
+const { providerContainmentIdentity } = require("../linux-cgroup.ts");
+const { spawnAgent } = require("../spawn.ts");
+const [mode, root, helper] = process.argv.slice(2);
+const home = path.join(root, "provider-home");
+async function main() {
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), {
+    runnerMarker: providerHomeRunnerMarker(), helperDataDir: path.join(root, "data"),
+  });
+  if (mode === "hold" || mode === "survivor") {
+    await registry.acquireHome(home, "acp");
+    let leaf;
+    if (mode === "survivor") {
+      const child = spawnAgent({ command: helper, args: ["nondumpable", path.join(root, "survivor.pid")], cwd: root });
+      leaf = child.posixBoundary?.containmentIdentity;
+      await new Promise((resolve, reject) => { child.once("close", resolve); child.once("error", reject); });
+    }
+    fs.writeFileSync(path.join(root, "ready.json"), JSON.stringify({ identity: providerContainmentIdentity(), leaf }));
+    setInterval(() => {}, 1000);
+    return;
+  }
+  const stale = JSON.parse(fs.readFileSync(path.join(home, ".agent-manager/provider-home-leases-v1/mutable-home.recovery.json"), "utf8"));
+  const scan = linuxLeaseProcessProbe().scan(stale.process.marker, stale.process.startTime);
+  let outcome;
+  try {
+    await registry.acquireHome(home, "acp");
+    outcome = { ok: true, released: await registry.close() };
+  } catch (error) {
+    outcome = { ok: false, code: error.code };
+    await registry.close();
+  }
+  process.stdout.write(JSON.stringify({ ...outcome, fallbackUninspectable: scan.uninspectable.length > 0 }) + "\n");
+}
+main().catch((error) => { console.error(error); process.exitCode = 1; });

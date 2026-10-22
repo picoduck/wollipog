@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { providerContainmentIdentity, providerContainmentStatus } from "./linux-cgroup.js";
 import { leaseWorkerDeadline, leaseWorkerDelay, leaseWorkerNow } from "./provider-home-lease-clock.js";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, leaseWorkerOperationTakesProfile, LEASE_WORKER_ASSET, LEASE_WORKER_CLOCK, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerInspection, validLeaseWorkerOperation, validLeaseWorkerProfileAccess, validLeaseWorkerReplyProfileId, type LeaseWorkerInspection, type LeaseWorkerOperation, type LeaseWorkerProfileAccess, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
@@ -244,7 +245,12 @@ export class AsyncProviderHomeLeaseRegistry {
 
   private startWorker(): void {
     if (this.worker) return;
+    // The launch parent owns the containment instance. A worker must never initialize a separate
+    // instance: provider spawns occur in the main thread and must match the journal's identity.
+    const containment = this.options.runnerMarker === undefined ? undefined :
+      providerContainmentIdentity(this.options.helperDataDir) ?? { kind: "marker-parent-links" as const, reason: providerContainmentStatus().reason };
     const data = { epoch: this.epoch, ownerHash: this.ownerHash, clock: LEASE_WORKER_CLOCK, helperDataDir: this.options.helperDataDir, tests: this.options.engineOptionsForTest,
+      ...(containment ? { containment } : {}),
       ...(this.options.controlPlaneInstanceId === undefined ? {} : { controlPlaneInstanceId: this.options.controlPlaneInstanceId }),
       ...(this.options.runnerMarker === undefined ? {} : { runnerMarker: this.options.runnerMarker }) };
     if (this.options.workerFactoryForTest) this.worker = this.options.workerFactoryForTest(data);
