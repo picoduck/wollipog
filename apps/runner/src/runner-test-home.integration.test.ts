@@ -1,0 +1,72 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+
+// Exercise the actual transport-test spawn sites. A slow installed Pi probe used to acquire the
+// developer's native HOME and then lose its runner to SIGKILL, leaving every native harness blocked.
+for (const file of ["heartbeat-liveness.integration.test.ts", "malformed-frame-survival.integration.test.ts"]) {
+  test(`${file} leaves the invoking user's HOME untouched`, { skip: process.platform === "win32", timeout: 60_000 }, async () => {
+    const temp = mkdtempSync(join(tmpdir(), "wollipog-test-home-regression-"));
+    const home = join(temp, "invoking-home");
+    const bin = join(temp, "bin");
+    mkdirSync(home);
+    mkdirSync(bin);
+    // No real provider or credential is used. Leave the version probe running long enough to
+    // overlap the transport test's abrupt runner teardown, exactly as a local installation can.
+    const calls = join(temp, "probe-calls.jsonl");
+    writeFileSync(join(bin, "pi"), `#!${process.execPath}
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ home: process.env.HOME,
+  codexHome: process.env.CODEX_HOME, claudeHome: process.env.CLAUDE_CONFIG_DIR,
+  hasCredential: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY) }) + "\\n");
+const parent = process.ppid;
+setInterval(() => { if (process.ppid !== parent) process.exit(0); }, 20).unref();
+setTimeout(() => console.log("0.71.0"), 10000);
+`, { mode: 0o700 });
+    try {
+      const output: string[] = [];
+      const child = spawn(process.execPath, ["--import", "tsx", "--test", `apps/runner/src/${file}`], {
+        cwd: REPO_ROOT,
+        env: {
+          PATH: [bin, dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
+          HOME: home,
+          USERPROFILE: home,
+          CODEX_HOME: join(home, "codex"),
+          CLAUDE_CONFIG_DIR: join(home, "claude"),
+          OPENAI_API_KEY: "synthetic-credential-must-not-be-inherited",
+          ANTHROPIC_API_KEY: "synthetic-credential-must-not-be-inherited",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 50_000,
+        killSignal: "SIGKILL",
+      });
+      child.stdout.on("data", (chunk) => output.push(String(chunk)));
+      child.stderr.on("data", (chunk) => output.push(String(chunk)));
+      const code = await new Promise<number | null>((done, reject) => {
+        child.once("error", reject);
+        child.once("close", done);
+      });
+      assert.equal(code, 0, output.join(""));
+      assert.ok(existsSync(calls), "the real runner must reach the synthetic installed Pi probe");
+      for (const line of readFileSync(calls, "utf8").trim().split("\n")) {
+        const call = JSON.parse(line) as { home: string; codexHome?: string; claudeHome?: string; hasCredential: boolean };
+        assert.notEqual(call.home, home, "the provider must receive the test runner's private HOME");
+        assert.equal(call.codexHome, undefined);
+        assert.equal(call.claudeHome, undefined);
+        assert.equal(call.hasCredential, false, "provider credentials must not reach a transport test runner");
+      }
+      for (const path of [home, join(home, "codex"), join(home, "claude")]) {
+        assert.equal(existsSync(join(path, ".agent-manager", "provider-home-leases-v1")), false,
+          `${file} wrote a provider lease into the invoking user's HOME`);
+      }
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+}
