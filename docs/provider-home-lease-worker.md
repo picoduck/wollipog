@@ -760,7 +760,9 @@ For a legacy scan blocked only by Linux process visibility, an administrator can
 **CAP_SYS_PTRACE and CAP_DAC_READ_SEARCH** to this one maintenance process while retaining the
 account owner's real and effective UID. The first permits process inspection; the second permits
 reading root-owned procfs files such as a nondumpable SSH process's environment (mode 0400). Neither
-capability grants a file-write override. Do not run the command directly as root (the protected journal must stay owned
+capability changes the recovery command's use of the account owner's ordinary journal write
+permissions and fences. These capabilities are nevertheless privileged and belong only to this
+reviewed, short-lived maintenance process. Do not run the command directly as root (the protected journal must stay owned
 by the account user), grant file capabilities to the runner, change SSH permissions, or give the
 long-running runner elevated capabilities. Let any `sudo` launcher exit before scanning: a same-user
 set-ID ancestor is itself protected by the ordinary fallback rules. Privileged inspection does not
