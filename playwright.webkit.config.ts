@@ -11,6 +11,6 @@ export default defineConfig({
   ...base,
   testMatch: WEBKIT_SPECS,
   // CI's `github` reporter prints only a count; the list names each test that ran in WebKit.
-  reporter: process.env.CI ? [["list"], ["github"]] : "list",
+  reporter: process.env.CI ? [["list"], ["github"], ["./scripts/ci-browser-timing-reporter.mjs"]] : "list",
   use: { ...base.use, browserName: "webkit" },
 });

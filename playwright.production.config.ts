@@ -11,7 +11,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   failOnFlakyTests: Boolean(process.env.CI),
   workers: 1,
-  reporter: process.env.CI ? "github" : "list",
+  reporter: process.env.CI ? [["github"], ["./scripts/ci-browser-timing-reporter.mjs"]] : "list",
   use: {
     baseURL: `http://127.0.0.1:${port}`,
     trace: "retain-on-failure",
