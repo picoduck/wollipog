@@ -1577,7 +1577,9 @@ app.register(async (instance) => {
           app.log.warn(`runner ${runnerId} sent a governance trip without negotiated support`);
           break;
         }
-        svc.onGovernanceTripped(runnerId!, msg);
+        if (svc.onGovernanceTripped(runnerId!, msg)) {
+          automations.onGovernanceTripped(msg.sessionId, Date.now());
+        }
         break;
       case "session_event":
         svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined, prepared);

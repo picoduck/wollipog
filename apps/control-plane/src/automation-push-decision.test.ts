@@ -12,6 +12,16 @@ const execution = {
   error: `Synthetic execution failure ${SYNTHETIC_PRIVATE_MARKER}`,
 };
 
+test("governance pauses use a distinct content-free notification rather than a failure alert", () => {
+  const message = automationPushMessage(automation, { ...execution, governancePause: {
+    sessionId: "s-1", tripId: "trip-1", kind: "cost_budget", threshold: 1.5, observed: 2,
+  } }, "failed");
+  assert.equal(message.title, "Automation Paused");
+  assert.equal(message.urgency, "normal");
+  assert.match(message.body, /Partial or complete output/);
+  assert.doesNotMatch(JSON.stringify(message), new RegExp(SYNTHETIC_PRIVATE_MARKER));
+});
+
 test("failed and expired automation push messages are fixed and content-free", () => {
   const expected = {
     failed: {

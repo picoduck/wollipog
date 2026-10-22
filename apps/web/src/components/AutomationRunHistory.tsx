@@ -95,7 +95,9 @@ export function AutomationRunHistory({ executions, now, nextRun, policy, onOpen,
             {visible.map((execution) => {
               const started = when(runStartedAt(execution), now);
               const took = runDuration(execution);
-              const reason = runReason(execution, policy);
+              // A ceiling pause's bound is explained in Run Details. Keep history's compact
+              // phone metadata consistent with desktop rather than squeezing it beside Took.
+              const reason = execution.status === "ceiling_paused" ? null : runReason(execution, policy);
               const open = runOpenTarget(execution);
               return (
                 <tr key={execution.executionId} data-execution-id={execution.executionId}>
@@ -177,6 +179,11 @@ export function RunDetailsDialog({ execution, now, policy, machineLabel, onOpen,
         <button type="button" className="btn" onClick={onClose}>Done</button>
       </>}
     >
+      {execution.status === "ceiling_paused" && (
+        <Notice tone="warning">
+          {reason} Partial or complete output may be available. {execution.runId ? "Choose Open Run to inspect it." : "Open the session to inspect it."}
+        </Notice>
+      )}
       {error && (
         <Notice
           tone={execution.status === "failed" ? "danger" : "warning"}
@@ -190,7 +197,7 @@ export function RunDetailsDialog({ execution, now, policy, machineLabel, onOpen,
           <dt>Result</dt>
           <dd>
             <StatusBadge inline meta={statusMeta("automation_run", execution.status)} />
-            {reason && <span className="automation-run-reason">{reason}</span>}
+            {reason && execution.status !== "ceiling_paused" && <span className="automation-run-reason">{reason}</span>}
           </dd>
         </div>
         <div><dt>{signed ? "Received" : "Scheduled For"}</dt><dd>{when(execution.scheduledFor, now)}</dd></div>
