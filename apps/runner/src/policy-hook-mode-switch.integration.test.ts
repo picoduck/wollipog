@@ -17,6 +17,8 @@ import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../..
 // `--permission-mode`. That respawn must carry the manager policy hook, exactly as a launch that
 // started in `acceptEdits` does; otherwise governance deny/ask policies are not evaluated for it.
 
+import { transportRunnerEnvironment } from "./fixtures/transport-runner-environment.js";
+
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const RUNNER_ID = "policy-hook-mode-switch-runner";
 const CONTROL_PLANE_TOKEN = "policy-hook-mode-switch-control-plane-token";
@@ -335,7 +337,7 @@ async function startStack(t: TestContext, label: string, options: {
   runner = capture(spawn(process.execPath, ["--import", "tsx", "apps/runner/src/cli.ts", "--config", configPath], {
     cwd: REPO_ROOT,
     env: {
-      ...hermeticEnv(),
+      ...transportRunnerEnvironment(temp),
       WOLLIPOG_CLAUDE_HOOKS: "1",
       WOLLIPOG_CLAUDE_PERSISTENT: options.persistent === false ? "0" : "1",
       PATH: [runnerBin, dirname(process.execPath), "/usr/bin", "/bin"].join(":"),

@@ -15,6 +15,8 @@ import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../..
 // on a real /ui subscription, and the session must survive a runner daemon restart (the historical
 // "runner offline"/state-wipe locus).
 
+import { transportRunnerEnvironment } from "./fixtures/transport-runner-environment.js";
+
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const MOCK_AGENT = fileURLToPath(new URL("../../mock-agent/index.mjs", import.meta.url));
 const RUNNER_ID = "e2e-pipeline-runner";
@@ -201,7 +203,8 @@ test(
         // Isolate HOME so the runner's native provider-home lease targets this temp dir instead of the
         // shared user home — otherwise it collides with any real runner (e.g. a dev stack) on this box.
         env: {
-          ...hermeticEnv(),
+          ...transportRunnerEnvironment(temp),
+          RUNNER_DATA_DIR: runnerDataDir,
           HOME: runnerHome,
           USERPROFILE: runnerHome,
           XDG_CONFIG_HOME: join(runnerHome, ".config"),
