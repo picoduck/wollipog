@@ -412,6 +412,12 @@ export async function runStateDoctor(
   writeOutput: (value: string) => unknown = (value) => process.stdout.write(value),
   options: StateDoctorOptions = {},
 ): Promise<void> {
+  const mode = argv.indexOf("--state-doctor");
+  if (mode >= 0 && argv[mode + 1] === "provider-home") {
+    const { runProviderHomeDoctor } = await import("./provider-home-doctor.js");
+    runProviderHomeDoctor(argv.slice(mode + 2), writeOutput);
+    return;
+  }
   const args = parseDoctorArgs(argv);
   const maintenance = acquireMaintenanceLease(args.dataDir, options);
   const dataDir = maintenance.dataDir;

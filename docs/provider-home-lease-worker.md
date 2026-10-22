@@ -718,3 +718,54 @@ covers them. Injected probe runners are conservatively unproven. The already tra
 subscription-usage and authentication-status probes keep their existing ownership paths.
 Ordinary Agent Control provisioning forwards both MCP inventory reads (before and after its proposed
 server entry) to the launch-preparation owner too, even when a read fails or the entry is refused.
+
+### Local Recovery for Legacy and Native HOMEs
+
+Linux installations also expose `--state-doctor provider-home inspect|recover`. This command works
+alongside the runner and uses the existing provider-HOME fences; it does not take the runner's
+whole data-directory maintenance lease. It can inspect or recover a native default HOME that is
+absent from the configured-account UI. Run it as the OS user who owns both the HOME and the stable
+runner data directory, using the runner executable belonging to this installation:
+
+```sh
+# Capture this in the host terminal, outside a container or agent sandbox.
+host_pid_namespace=$(readlink /proc/self/ns/pid)
+wollipog-runner --state-doctor provider-home inspect \
+  --data-dir /path/to/runner-data --home /path/to/provider-home \
+  --expected-pid-namespace "$host_pid_namespace"
+
+# After explicitly authorizing the exact stale tip printed by inspection:
+wollipog-runner --state-doctor provider-home recover \
+  --data-dir /path/to/runner-data --home /path/to/provider-home \
+  --expected-pid-namespace "$host_pid_namespace" \
+  --stale-tip-hash <64-character-tip-hash> --authorization-id <authorization-uuid>
+```
+
+Inspection prints content-free lifecycle and refusal fields, with no provider paths or environment.
+Recovery repeats abandonment and exact-tip proof in the normal registry publication path, appends
+an authorized recovery and releases only its own reference. It never fabricates a release of the
+old owner, skips unreadable processes, deletes records, stops a process, or launches a provider.
+A changed tip, surviving work, unverifiable proof, or profile authorization failure refuses the
+operation. This initial local command does not supply profile grants; a marked profile continues
+to require its existing authorized profile-aware recovery flow. Other state-doctor commands retain
+their existing offline maintenance requirements.
+
+The expected PID namespace binds an operator's host snapshot to execution. Never obtain it from an
+agent sandbox and use it to recover a host HOME: a restricted procfs view cannot establish host-wide
+abandonment. This is an operator input, not independent proof of the host namespace. Every lease
+proof still runs again at publication.
+
+For a legacy scan blocked only by Linux process visibility, an administrator can temporarily grant
+**only CAP_SYS_PTRACE** to this one maintenance process while retaining the account owner's real
+and effective UID. Do not run the command directly as root (the protected journal must stay owned
+by the account user), grant file capabilities to the runner, change SSH permissions, or give the
+long-running runner elevated capabilities. Let any `sudo` launcher exit before scanning: a same-user
+set-ID ancestor is itself protected by the ordinary fallback rules. Privileged inspection does not
+waive the lifecycle proof or authorize a different stale record. Review the exact command and
+snapshot before executing; if proof still fails, preserve the evidence and investigate that cause.
+
+After recovering older evidence, verify that the normal service runs with effective `Delegate=yes`
+and that fresh acquisitions record their cgroup and enclosing unit. A later normal restart should
+recover using that boundary while unrelated unreadable SSH processes remain alive. Test-runner HOME
+and credential isolation prevents local verification from publishing another owner's native-HOME
+lease into the live installation.
