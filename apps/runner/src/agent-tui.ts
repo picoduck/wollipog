@@ -91,7 +91,7 @@ export async function prepareAgentTuiLaunch(
   try {
     launch = await prepareAgentTuiLaunchHoldingProviderHome(meta, dependencies, tracking);
   } catch (error) {
-    // No TUI process was started. The reference is released unless a probe ran outside a boundary.
+    // No TUI process was started. Partial HOME writes and unproven probes retain the reference.
     await held.home?.settle(null);
     throw error;
   }
@@ -104,6 +104,16 @@ export async function prepareAgentTuiLaunch(
 }
 
 type AgentTuiLaunchDependencies = Parameters<typeof prepareAgentTuiLaunch>[1];
+
+function inheritTuiPlugins(meta: SessionMeta, tracking: AgentTuiProviderHomeTracking): string[] {
+  try {
+    return inheritProviderPlugins(meta);
+  } catch (error) {
+    // Like structured launch, a HOME that may be half-written stays held until shutdown.
+    tracking.markUnprovable();
+    throw error;
+  }
+}
 
 async function prepareAgentTuiLaunchHoldingProviderHome(
   meta: SessionMeta,
@@ -121,7 +131,7 @@ async function prepareAgentTuiLaunchHoldingProviderHome(
       meta = { ...meta, args: stripSessionCodexMcpArgs(meta.args) };
     }
     if (pluginProviderForDriver(meta.driver)) {
-      meta = { ...meta, args: inheritProviderPlugins(meta) };
+      meta = { ...meta, args: inheritTuiPlugins(meta, tracking) };
     }
     const guarded = await withManagedWorktreeGuard(meta, dependencies, tracking);
     return withGuardState(
@@ -159,7 +169,7 @@ async function prepareAgentTuiLaunchHoldingProviderHome(
   dependencies.assertSessionNotDeleted(meta.sessionId);
   await dependencies.assertLaunchCurrent?.();
   if (pluginProviderForDriver(prepared.driver)) {
-    prepared.args = inheritProviderPlugins(prepared);
+    prepared.args = inheritTuiPlugins(prepared, tracking);
   }
   if (strictProjectIsolation) {
     prepared.env = {
