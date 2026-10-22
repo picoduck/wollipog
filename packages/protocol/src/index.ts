@@ -810,7 +810,7 @@ export const SESSION_NAMING_CLEANUP_BUDGET_MS = 1_000;
 export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_MS + 1_000;
 /** Extra time the control plane's own abort timer allows beyond that runner request deadline. */
 export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
-export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
+export { buildConversationHandoff, handoffDestinationError, inPlaceHandoffTurns } from "./conversation-handoff.js";
 export * from "./automation-messages.js";
 export { PROMPT_TITLE_MAX, titleFromPrompt } from "./session-title.js";
 export { plainTextPreview } from "./plain-text-preview.js";
@@ -830,7 +830,7 @@ import type {
   CampaignWorkSummary,
   VerifyCampaignWorkItemInput,
 } from "./campaign-work-ledger.js";
-export type { ConversationHandoffDraft } from "./conversation-handoff.js";
+export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
 export {
   attentionRequestRank,

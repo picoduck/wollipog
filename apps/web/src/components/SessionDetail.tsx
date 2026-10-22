@@ -34,6 +34,7 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   providerSupportsConversationFork,
+  inPlaceHandoffTurns,
   type PromptImageInput,
   type CreateWorkspaceReferenceRequest,
   type QueuedPromptView,
@@ -4762,20 +4763,31 @@ function SessionDetailLoaded({
     turn,
     conversationForkAvailability(turn, latestKnownTurn, forkContext),
   ])), [conversationCheckpointTurns, forkContext, latestKnownTurn]);
+  const handoffUnavailableReason = checkpointHandoffUnavailableReason({
+    runnerOnline,
+    runnerProtocolVersion: runner?.protocolVersion,
+    hasWorktree: Boolean(session.worktreePath),
+    hasWorktreeHistory: latestKnownTurn !== undefined || !!session.worktrees?.length,
+    status: session.status,
+    queuedPrompts: pendingQueuedPrompts,
+    busy,
+    forkInProgress,
+    forkRefusal,
+  });
+  // No full-history scan while streaming: the shared busy/offline/protocol gate already disables
+  // every handoff. Event count detects appends even when the store retains the events array.
+  const handoffHistoryComplete = eventHistory?.everComplete === true && !eventHistory.refreshing && !eventHistory.error &&
+    (!eventWindow || eventWindow.complete && !eventWindow.laterGap && !eventWindow.error);
+  const handoffEvents = handoffUnavailableReason ? undefined : evs;
+  const inPlaceHandoff = useMemo<ReturnType<typeof inPlaceHandoffTurns> | undefined>(() => session.worktreePath
+    ? undefined : handoffUnavailableReason ? { turns: [] } : inPlaceHandoffTurns(handoffEvents ?? [], { status: session.status, historyComplete: handoffHistoryComplete }),
+  [session.worktreePath, session.status, handoffHistoryComplete, handoffEvents, handoffEvents?.length, handoffUnavailableReason]);
   const handoffControls = useMemo(() => ({
     open: setHandoffTurn,
-    reason: checkpointHandoffUnavailableReason({
-      runnerOnline,
-      runnerProtocolVersion: runner?.protocolVersion,
-      hasWorktree: Boolean(session.worktreePath),
-      status: session.status,
-      queuedPrompts: pendingQueuedPrompts,
-      busy,
-      forkInProgress,
-      forkRefusal,
-    }),
-  }), [runnerOnline, runner?.protocolVersion, session.worktreePath, pendingQueuedPrompts, session.status, busy, forkInProgress,
-    forkRefusal]);
+    ...(inPlaceHandoff ? { inPlaceTurns: new Map(inPlaceHandoff.turns.map((point) => [point.promptSeq, point])),
+      historyReason: inPlaceHandoff.reason } : {}),
+    reason: handoffUnavailableReason,
+  }), [handoffUnavailableReason, inPlaceHandoff]);
   const rewindUnavailableReason = rewindRefusal ?? (session.worktreePath == null
     ? "A worktree is required."
     : !runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
@@ -8128,6 +8140,7 @@ function SessionDetailLoaded({
       {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver}
         sourceAgentId={session.agentId ?? undefined} machineName={runnerDisp.name || undefined}
         sourceServiceTier={session.serviceTier ?? undefined} turn={handoffTurn} refusal={forkRefusal}
+        inPlace={!session.worktreePath}
         onClose={() => setHandoffTurn(null)} onCreate={async (agentId, config) => {
           if (forkRefusal !== null) throw new Error(forkRefusal);
           const release = acquireSessionFork(sessionId);

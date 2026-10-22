@@ -114,6 +114,8 @@ export interface CheckpointHandoffContext {
   runnerOnline: boolean;
   runnerProtocolVersion?: number | null;
   hasWorktree: boolean;
+  /** A missing active path must not reinterpret an earlier worktree's checkpoints as in-place. */
+  hasWorktreeHistory?: boolean;
   status: SessionStatus;
   queuedPrompts: number;
   busy: boolean;
@@ -130,7 +132,9 @@ export function checkpointHandoffUnavailableReason(context: CheckpointHandoffCon
   if (!runnerSupportsProtocol(context.runnerProtocolVersion, "conversationHandoff")) {
     return "Update the runner to support checkpoint handoffs.";
   }
-  if (!context.hasWorktree) return "A worktree is required.";
+  if (!context.hasWorktree && context.hasWorktreeHistory) {
+    return "This session's worktree is unavailable. Choose or create a worktree before handing it off.";
+  }
   if (context.busy || context.forkInProgress || context.queuedPrompts > 0 ||
       ["running", "starting", "queued", "input_required"].includes(context.status)) {
     return "The source session is busy.";

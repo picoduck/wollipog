@@ -4,6 +4,7 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   buildConversationHandoff,
+  inPlaceHandoffTurns,
   removePendingRequest,
   type AccessScopeChangePreview,
   type AgentCapabilities,
@@ -662,10 +663,13 @@ function initialModel(): FixtureModel {
   }
   if (SCENARIO === "conversation-handoff") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
-      status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+      status: FIXTURE_QUERY.has("busyTurn") ? "running" : FIXTURE_QUERY.has("interrupted") ? "stopped" : "idle",
+      activeTurnId: FIXTURE_QUERY.has("busyTurn") ? "turn-running" : null,
+      useWorktree: !FIXTURE_QUERY.has("inPlace"),
+      worktreePath: FIXTURE_QUERY.has("inPlace") ? null : "/repos/alpha/checkpoint",
       // A deliberate non-default tier that the destination model below does not advertise, so the
       // dialog must say so rather than substitute a default.
-      serviceTier: "flex",
+      serviceTier: FIXTURE_QUERY.has("inPlace") ? "priority" : "flex",
     });
   }
   if (SCENARIO === "edit-in-fork") {
@@ -1191,6 +1195,29 @@ if (SCENARIO === "conversation-handoff") {
     { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "conversation_checkpoint", turn: 1 } },
   ]);
+  if (FIXTURE_QUERY.has("inPlace") && !FIXTURE_QUERY.has("removedWorktree")) {
+    const history: SessionEvent[] = [
+      { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
+      { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "The current files preserve the accessible layout.", final: true } },
+      { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: FIXTURE_QUERY.has("interrupted")
+        ? { kind: "turn_interrupted" } : FIXTURE_QUERY.has("guardrail")
+          ? { kind: "stderr", text: "Runner governance paused this turn at the cost threshold." }
+          : { kind: "agent_response_completed" } },
+    ];
+    if (FIXTURE_QUERY.has("unfinishedTurn") || FIXTURE_QUERY.has("busyTurn")) {
+      if (FIXTURE_QUERY.has("unfinishedTurn")) history.pop();
+      const next = history.length + 1;
+      history.push(
+        { id: next, sessionId: "session-alpha", seq: next, ts: next, payload: { kind: "user_message", text: "A later task", final: true } },
+        { id: next + 1, sessionId: "session-alpha", seq: next + 1, ts: next + 1, payload: { kind: "agent_message", text: "A later response", final: true } },
+      );
+      if (FIXTURE_QUERY.has("unfinishedTurn")) history.push(
+        { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "agent_response_completed" } },
+      );
+    }
+    sessionEvents.set("session-alpha", FIXTURE_QUERY.has("partialHistory")
+      ? history.map((event) => ({ ...event, id: event.id + 10, seq: event.seq + 10 })) : history);
+  }
 }
 if (SCENARIO === "edit-in-fork") {
   // Two completed turns, so the second message has a checkpoint to edit from and the first has none.
@@ -2759,10 +2786,18 @@ const client = {
   },
   handoff: async (id: string, turn: number, agentId: string, config: SessionConfig) => {
     handoffRequests.push({ id, turn, agentId, config: structuredClone(config) });
+    if (FIXTURE_QUERY.has("legacyHandoff")) throw new ApiError("Update the runner to support handoffs from in-place sessions.", 409);
+    if (FIXTURE_QUERY.has("unsupportedRepository")) throw new ApiError("Handoff needs a Git repository with at least one readable commit.", 409);
+    if (FIXTURE_QUERY.has("savedHistoryIncomplete")) throw new ApiError("This session's saved history is incomplete, so it can't be handed off.", 409);
     const source = model.sessions.find((candidate) => candidate.id === id)!;
     const agent = runner.agents.find((candidate) => candidate.id === agentId)!;
-    const handoffDraft = buildConversationHandoff(sessionEvents.get(id) ?? [], 3, agent, config);
-    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config, status: "idle" as const };
+    const history = sessionEvents.get(id) ?? [];
+    const point = source.worktreePath ? undefined
+      : inPlaceHandoffTurns(history, { status: source.status, throughSeq: history.at(-1)?.seq ?? 0 }).turns.find((point) => point.turn === turn);
+    if (!source.worktreePath && !point?.eventSeq) throw new Error(point?.reason ?? "This turn didn't finish, so it can't be handed off yet.");
+    const handoffDraft = buildConversationHandoff(history, point?.eventSeq ?? 3, agent, config, { inPlace: !source.worktreePath });
+    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config,
+      useWorktree: true, worktreePath: "/repos/alpha/handoff-child", status: "idle" as const };
     model.sessions.push(child);
     sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 4, payload: { kind: "conversation_forked", sourceSessionId: id, turn,
       handoff: { sourceAgent: source.agentId!, destinationAgent: agentId, disclosure: handoffDraft.disclosure } } }]);
@@ -3087,7 +3122,8 @@ const client = {
       await waitSyntheticHistoryRead("forward", after);
       return page;
     }
-    const available = (sessionEvents.get(sessionId) ?? []).filter((event) => event.seq > after);
+    const available = (sessionEvents.get(sessionId) ?? []).filter((event) => event.seq > after &&
+      !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail") && event.seq === 3));
     // R1.2 deliberately exposes several incomplete renders. A restored logical row can be absent
     // from the first cache page but reappear later in this same authoritative recovery chain.
     if (READER_RECOVERY_SCENARIO && after > 0) {
@@ -3100,7 +3136,7 @@ const client = {
       eventEpoch: model.sessions.find((candidate) => candidate.id === sessionId)?.eventEpoch ?? 0,
       nextAfter: events.at(-1)?.seq ?? after,
       hasMoreCached,
-      cacheComplete: !hasMoreCached,
+      cacheComplete: !hasMoreCached && !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail")),
     };
   },
   getSessionEventTailPage: async (sessionId: string, before?: number) => {
@@ -3118,7 +3154,8 @@ const client = {
       return page;
     }
     const all = sessionEvents.get(sessionId) ?? [];
-    const available = before === undefined ? all : all.filter((event) => event.seq < before);
+    const available = (before === undefined ? all : all.filter((event) => event.seq < before))
+      .filter((event) => !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail") && event.seq === 3));
     // A bounded opening window over a much longer log: tall enough to scroll and pause inside,
     // with older turns still only reachable by paging below it.
     const windowed = READER_RECOVERY_SCENARIO
@@ -3135,7 +3172,7 @@ const client = {
       ...(windowed[0] ? { nextBefore: windowed[0].seq } : {}),
       hasMoreOlder: windowed.length < available.length,
       ...(SCENARIO === "preview-opening-fill" ? { turnAligned: true } : {}),
-      cacheComplete: true,
+      cacheComplete: !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail")),
     };
   },
   podContext: async () => ({ entries: [] }),

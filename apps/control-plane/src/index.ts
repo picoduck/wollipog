@@ -5718,7 +5718,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   }
   const supportsFork = providerSupportsConversationFork(source.driver, sourceAgent?.capabilities);
   if (!supportsFork && !handoff) return reply.code(409).send({ error: "this provider session does not support conversation fork" });
-  if (!source.worktreePath) return reply.code(409).send({ error: "conversation fork requires a worktree session" });
+  if (!source.worktreePath && !handoff) return reply.code(409).send({ error: "conversation fork requires a worktree session" });
   if (sessionBlocksConversationFork(source.status)) {
     return reply.code(409).send({ error: "the source session is busy — wait before forking" });
   }
@@ -5755,7 +5755,11 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       65 * 60_000,
     );
     if (res.type !== "fork_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "conversation fork failed" });
+    if (!res.ok || !res.snapshot) return reply.code(409).send({
+      error: handoff && !source.worktreePath && res.error === "conversation fork requires a worktree session"
+        ? "Update the runner to support handoffs from in-place sessions."
+        : res.error ?? "conversation fork failed",
+    });
     const snapshotIdError = providerForkSnapshotIdError(targetSessionId, res.snapshot.id);
     if (snapshotIdError) {
       forkCreatedOnRunner = true;
