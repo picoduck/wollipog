@@ -6,6 +6,7 @@ import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { windowsLeaseIoCommand } from "./provider-home-lease-windows-io.js";
 import { leaseHelperParent, LeaseHelperArtifact } from "./provider-home-lease-staging.js";
+import { LEASE_CHECKPOINT_LIMITS } from "./provider-home-lease-checkpoint.js";
 
 const ASSET = "wollipog/provider-home-lease-io";
 export type LeaseIoWork = { records: number; bytes: number };
@@ -188,7 +189,7 @@ export function readLeaseIoSnapshot(root: string, budget = DEFAULT_BUDGET): Leas
   const rootIdentity = reader.identity(); const hasLock = reader.u8();
   if (hasLock > 1) throw new Error("invalid lease directory response");
   const lockIdentity = hasLock ? reader.identity() : undefined;
-  const count = reader.u32(); if (count > 8192) throw new Error("lease snapshot entry limit exceeded");
+  const count = reader.u32(); if (count > LEASE_CHECKPOINT_LIMITS.retirementEntries) throw new Error("lease snapshot entry limit exceeded");
   const entries: LeaseIoEntry[] = []; const seen = new Set<string>();
   for (let i = 0; i < count; i++) {
     const directory = reader.u8(); const name = reader.text(255); const identity = reader.identity(); const stamp = reader.text(160);

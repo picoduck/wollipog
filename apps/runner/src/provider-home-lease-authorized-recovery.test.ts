@@ -50,7 +50,7 @@ function registry(options: {
   hooks?: Pick<ProviderHomeLeaseOptions, "afterTransitionPublishForTest" | "beforeInitializationMirrorForTest">;
 } = {}) {
   return new ProviderHomeLeaseRegistry(options.owner ?? OWNER_B, {
-    pid: 202, hostname: "host-a", controlPlaneInstanceId: options.instance ?? INSTANCE_ID,
+    pid: process.pid, hostname: "host-a", controlPlaneInstanceId: options.instance ?? INSTANCE_ID,
     isProcessAlive: () => options.alive ?? false,
     bootTimeMs: () => (options.bootedAt === undefined ? WRITTEN + 3_600_000 : options.bootedAt),
     processProbe: options.probe ?? null,
@@ -82,6 +82,14 @@ function successor(home: string, leaseId: string): Record<string, unknown> | und
   for (const directory of [leasePaths(home).root, leasePaths(home).lock]) {
     const path = join(directory, `next-${leaseId}.json`);
     if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  }
+  const anchor = join(leasePaths(home).root, "mutable-home.recovery.json");
+  if (existsSync(anchor)) {
+    const selected = JSON.parse(readFileSync(anchor, "utf8"));
+    if (selected.version === 4) {
+      const previous = JSON.parse(selected.checkpoint.previousTip);
+      if (previous.previousLeaseId === leaseId) return previous;
+    }
   }
   return undefined;
 }
@@ -207,16 +215,15 @@ test("forged authorized notes are refused by readers", { skip }, (t) => {
     const recovering = registry();
     const inspection = recovering.inspectHome(home);
     recovering.recoverStaleLease(home, "claude", { staleTipHash: inspection.tipHash!, authorizationId: AUTHORIZATION });
-    const { lock } = leasePaths(home);
     const recovered = successor(home, LEGACY_ID)!;
-    // Drop the release so the forged recovery is the tip, then rewrite the recovery note.
-    rmSync(join(lock, `next-${recovered.leaseId as string}.json`), { force: true });
-    rmSync(join(leasePaths(home).root, `next-${recovered.leaseId as string}.json`), { force: true });
+    // First prove the recovery workflow. Then reconstruct its original legacy
+    // successor to exercise note validation independently of checkpoint hashing.
+    const forgedHome = legacyHome(t);
+    const { lock } = leasePaths(forgedHome);
     const path = join(lock, `next-${LEGACY_ID}.json`);
-    rmSync(path);
     writeFileSync(path, `${JSON.stringify({ ...recovered, ...overrides, recovery: note })}\n`, { mode: 0o600 });
     // The chain reader decides: a verified journal shows the recovered record as a stale tip.
-    return registry({ owner: OWNER_A }).inspectHome(home).state;
+    return registry({ owner: OWNER_A }).inspectHome(forgedHome).state;
   };
   const valid = { proof: "authorized", authorizationId: AUTHORIZATION, basis: "booted_after" };
   assert.equal(forge(valid), "stale", "control: an unforged recovered tip verifies");

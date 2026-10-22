@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
-import { agentDisplayName } from "./agent-presentation.js";
+import { agentDisplayName, agentStatus } from "./agent-presentation.js";
+
+test("installed native harnesses blocked by HOME ownership are unavailable, never missing or outdated", () => {
+  const failure = { code: "probe_failed" as const, message: "Provider HOME ownership blocked discovery. The previous process is uninspectable.", retryable: true };
+  const installed = { ...agent("claude", "Claude Code"), available: false, unavailableReason: failure.message,
+    installation: { id: "claude", path: "/opt/claude", via: "path" as const, selection: "selected" as const } };
+  const claudeCode = { status: "unsupported" as const, failure, effortLevels: [], permissionModes: [], streamJsonInput: false,
+    streamJsonImages: false, controlProtocol: false, forkSession: false, replayUserMessages: false,
+    auth: { status: "unknown" as const, billingSource: "unknown" as const } };
+  assert.equal(agentStatus({ ...installed, claudeCode }), "unavailable");
+  assert.equal(agentStatus({ ...installed, driver: "codex-app-server", codexAppServer: { status: "unsupported", appServerAvailable: false, failure } }), "unavailable");
+  assert.equal(agentStatus({ ...agent("missing", "Claude Code"), available: false, claudeCode: { ...claudeCode, status: "unavailable" } }), "not_installed");
+});
 
 function agent(id: string, name: string): AgentDefinition {
   return { id, name, command: "agent", args: [], env: {}, driver: "claude-code" };

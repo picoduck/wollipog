@@ -6,12 +6,24 @@ import { join } from "node:path";
 import { PROTOCOL_VERSION, type HostAdminDoctorView, type HostAdminStatusView } from "@wollipog/protocol";
 import Fastify, { type FastifyRequest } from "fastify";
 import { registerAuthGate } from "./http-auth.js";
-import { HOST_ADMIN_FORBIDDEN, hostAdminDoctor, hostAdminStatus, probePublicOriginWithFetch, registerHostAdminRoute, type HostAdminRouteDeps } from "./host-admin-route.js";
+import { HOST_ADMIN_FORBIDDEN, hostAdminDoctor, hostAdminStatus, probePublicOriginWithFetch, registerHostAdminRoute, runnerHarnessReadiness, type HostAdminRouteDeps } from "./host-admin-route.js";
 import { APP_RELEASE_VERSION } from "./release-version.js";
 import { isLoopback } from "./net.js";
 
 const BOOTSTRAP = "local-bootstrap-token";
 const DEVICE = "paired-device-token";
+
+test("upgrade readiness reports completed discovery and ownership refusals without provider metadata", () => {
+  const readiness = runnerHarnessReadiness({ connectedAt: 123, agentsRefreshed: true, agents: [
+    { id: "claude", name: "Private Account", command: "/private/claude", args: ["secret"], env: { PRIVATE_KEY: "secret" }, available: false,
+      unavailableReason: "Provider HOME ownership blocked discovery. Private details stay out of this projection." },
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, available: true },
+  ] });
+  assert.deepEqual(readiness, { connectedAt: 123, refreshed: true, agents: [
+    { id: "claude", available: false, ownershipBlocked: true }, { id: "codex", available: true, ownershipBlocked: false },
+  ] });
+  assert.equal(runnerHarnessReadiness({ connectedAt: 124, agents: [] }).refreshed, false, "registration alone is not discovery readiness");
+});
 
 function fixture(root: string, overrides: Partial<HostAdminRouteDeps> = {}): HostAdminRouteDeps {
   const dataDir = join(root, "data");

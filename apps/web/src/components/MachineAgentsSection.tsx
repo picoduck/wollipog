@@ -268,7 +268,9 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
         <>
           {!anyReady && (
             <State compact title="No Agents Ready" className="machine-agents-empty">
-              {verified ? (
+              {verified && listed.length > 0 ? (
+                <p>Open an agent’s details to resolve its availability, then rediscover.</p>
+              ) : verified ? (
                 <>
                   <p>Install Claude Code or Codex on this machine, then rediscover.</p>
                   {installCommands.map((hint) => (

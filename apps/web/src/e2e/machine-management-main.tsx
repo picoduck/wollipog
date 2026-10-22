@@ -703,7 +703,7 @@ declare global {
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
         "multiple-installations" | "harness-states" | "harness-states-ssh" |
         "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper" |
-        "explicit-interpreter" | "older-interpreter-guidance" | "agent-states" |
+        "explicit-interpreter" | "older-interpreter-guidance" | "agent-states" | "ownership-before" | "ownership-blocked" |
         "selected-installation-unavailable" | "ssh-installations"): void;
       /** Fails every save of this Machine Settings field until called with null (#2991). */
       setSettingsSaveFailure(field: "capacity" | null): void;
@@ -723,7 +723,26 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
   setAddBoxOutcome: (outcome) => { addBoxOutcome = outcome; },
   setAgentAvailabilityScenario: (scenario) => {
     if (!runner) return;
-    if (scenario === "legacy-unverified") {
+    if (scenario === "ownership-before" || scenario === "ownership-blocked") {
+      runner.os = "linux";
+      const before = scenario === "ownership-before";
+      const failure = { code: "probe_failed" as const, retryable: true,
+        message: "Provider HOME ownership blocked discovery. The previous provider process cannot be inspected safely. Preserve the lease and retry after the previous owner exits." };
+      runner.harnessSelections = [];
+      runner.agents = [
+        { id: "claude", name: "Claude Code", command: "/opt/claude", args: [], env: {}, available: false,
+          driver: "claude-code", context: { kind: "native" }, source: "discovered", unavailableReason: failure.message,
+          installation: { id: "claude", path: "/opt/claude", via: "path", selection: "selected" },
+          claudeCode: { status: before ? "unavailable" : "unsupported", failure: before ? { code: "claude_unavailable", message: "Claude Code was not found." } : failure,
+            effortLevels: [], permissionModes: [], streamJsonInput: false, streamJsonImages: false,
+            controlProtocol: false, forkSession: false, replayUserMessages: false, auth: { status: "unknown", billingSource: "unknown" } } },
+        { id: "codex", name: "Codex App Server", command: "/opt/codex", args: [], env: {}, available: false,
+          driver: "codex-app-server", context: { kind: "native" }, source: "discovered", unavailableReason: failure.message,
+          installation: { id: "codex", path: "/opt/codex", via: "path", selection: "selected" },
+          codexAppServer: { status: before ? "unavailable" : "unsupported", appServerAvailable: false,
+            failure: before ? { code: "codex_unavailable", message: "Codex was not found." } : failure } },
+      ];
+    } else if (scenario === "legacy-unverified") {
       runner.protocolVersion = 153;
       runner.agents = [{
         id: "legacy-acp",

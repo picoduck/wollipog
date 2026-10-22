@@ -89,6 +89,20 @@ test("each agent row shows one status, and an agent not installed folds away (#2
   await expect(details.locator(".notice")).toContainText("configured command was not found");
 });
 
+test("installed harnesses blocked by provider HOME ownership remain visible with the recovery reason", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("ownership-blocked"));
+  await expect(page.locator(".machine-agents-empty")).toContainText("Open an agent’s details to resolve its availability");
+  await expect(page.locator(".machine-agents-empty .code-well")).toHaveCount(0);
+  for (const name of ["Claude Code", "Codex App Server"]) {
+    await expect(agentRow(page, name).locator(".status")).toHaveText("Unavailable");
+    await agentRow(page, name).click();
+    const details = page.getByRole("dialog", { name, exact: true });
+    await expect(details.locator(".notice")).toContainText("Provider HOME ownership blocked discovery");
+    await details.getByRole("button", { name: "Close", exact: true }).click();
+  }
+  await expect(page.locator("article.machine-detail details.disclosure > summary").filter({ hasText: /Agents? Not Installed/ })).toHaveCount(0);
+});
+
 test("each agent row keeps one whole badge, and at 390px only its integration under the name (#2990)", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("agent-states"));
   const badges: Array<[string, string]> = [

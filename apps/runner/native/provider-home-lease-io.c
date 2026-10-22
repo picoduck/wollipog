@@ -25,7 +25,7 @@
 #include <sys/mount.h>
 #endif
 
-#define MAX_ENTRIES 8192U
+#define MAX_ENTRIES 8208U
 #define MAX_BYTES (64U * 1024U * 1024U)
 #define MAX_FILE (2U * 1024U * 1024U)
 #define MAX_WORK (256U * 1024U * 1024U)
@@ -47,6 +47,7 @@ static uint32_t work_reads, allowed_reads;
 static uint64_t allowed_bytes;
 static pid_t parent;
 static int root_fd = -1, lock_fd = -1, guard_fd = -1, anchor_fd = -1;
+static int legacy_anchor_absent;
 static char *root_path, *barrier, *barrier_stage;
 static int ancestry_fds[1024];
 static char *ancestry_names[1024];
@@ -130,6 +131,7 @@ static void pinned(void) {
     S_ISDIR(info.st_mode) && same_identity(&info, &lock_identity), "lease lock identity changed");
   if (guard_fd >= 0) require(fstatat(lock_fd, GUARD, &info, AT_SYMLINK_NOFOLLOW) == 0 && same_stamp(&info, &guard_identity), "permanent lease fence changed");
   if (anchor_fd >= 0) require(fstatat(root_fd, ANCHOR, &info, AT_SYMLINK_NOFOLLOW) == 0 && same_stamp(&info, &anchor_identity), "selected checkpoint changed");
+  if (legacy_anchor_absent) require(fstatat(root_fd, ANCHOR, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "legacy checkpoint appeared before selection");
 }
 static int open_root(const char *path) {
   require(path[0] == '/' && strlen(path) < 32768, "invalid lease root");
@@ -187,7 +189,7 @@ static uint32_t entries(unsigned dir, Entry *values, uint32_t offset) {
   errno = 0; struct dirent *item;
   while ((item = readdir(stream)) != NULL) {
     if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, "..")) continue;
-    require(++raw_count <= 4096 && offset + count < MAX_ENTRIES, "lease directory scan limit exceeded");
+    require(++raw_count <= 4104 && offset + count < MAX_ENTRIES, "lease directory scan limit exceeded");
     if (!dir && !strcmp(item->d_name, "mutable-home.lock")) continue;
     values[offset + count] = read_entry(dir, item->d_name); if (values[offset + count].name) count++; errno = 0;
   }
@@ -287,12 +289,14 @@ static void verify_entry(const Entry *expected, int optional) {
 static void owned(const Entry *tip, const char *future, int copied) {
   pinned(); struct stat info;
   require(fstatat(root_fd, future, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "acquired lease has a future successor");
+  if (tip->dir == 1) require(fstatat(lock_fd, future, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "legacy acquired lease has a future successor");
   if (!copied) verify_entry(tip, 0);
 }
 static void select_checkpoint(const char *name) {
   pinned(); int fd = openat(root_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); require(fd >= 0, "checkpoint candidate unavailable");
   sync_fd(fd); close(fd); sync_fd(root_fd); boundary("before-selection");
   require(renameat(root_fd, name, root_fd, ANCHOR) == 0, "checkpoint selection failed");
+  legacy_anchor_absent = 0;
   if (anchor_fd >= 0) close(anchor_fd);
   anchor_fd = openat(root_fd, ANCHOR, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   require(anchor_fd >= 0 && fstat(anchor_fd, &anchor_identity) == 0, "selected checkpoint unavailable");
@@ -369,7 +373,10 @@ int main(int argc, char **argv) {
     Entry *wanted = find_expected(sorted, count, e); require(wanted && entry_equal(e, wanted), "lease snapshot changed before publication"); seen[(size_t)(wanted - expected)] = 1; }
   for (uint32_t i = 0; i < count; i++) require(seen[i] || expected[i].optional, "verified lease snapshot evidence disappeared");
   anchor_fd = openat(root_fd, ANCHOR, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-  require(anchor_fd >= 0 && fstat(anchor_fd, &anchor_identity) == 0, "selected checkpoint unavailable");
+  if (anchor_fd < 0) {
+    require(errno == ENOENT && operation == 1 && tip->dir == 1, "selected checkpoint unavailable");
+    legacy_anchor_absent = 1;
+  } else require(fstat(anchor_fd, &anchor_identity) == 0, "selected checkpoint unavailable");
   if (operation == 3) {
     verify_entry(tip, 0); pinned();
     if (linkat(root_fd, tip->name, lock_fd, jobs[0].name, 0) != 0) { require(errno == EEXIST, "canonical mirror publication failed"); Entry mirror = read_entry(1, jobs[0].name);
