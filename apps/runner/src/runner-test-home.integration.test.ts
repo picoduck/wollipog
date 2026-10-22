@@ -22,11 +22,13 @@ for (const file of ["heartbeat-liveness.integration.test.ts", "malformed-frame-s
     // overlap the transport test's abrupt runner teardown, exactly as a local installation can.
     const calls = join(temp, "probe-calls.jsonl");
     const ready = join(temp, "probe-ready");
+    mkdirSync(ready);
     writeFileSync(join(bin, "pi"), `#!${process.execPath}
 const fs = require("node:fs");
 setTimeout(() => { fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ home: process.env.HOME,
   codexHome: process.env.CODEX_HOME, claudeHome: process.env.CLAUDE_CONFIG_DIR,
-  hasCredential: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY) }) + "\\n"); fs.writeFileSync(${JSON.stringify(ready)}, "ready"); }, 1500);
+  hasCredential: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY) }) + "\\n"); fs.writeFileSync(require("node:path").join(${JSON.stringify(ready)},
+  require("node:crypto").createHash("sha256").update(process.env.RUNNER_DATA_DIR).digest("hex")), "ready"); }, 1500);
 const parent = process.ppid;
 setInterval(() => { if (process.ppid !== parent) process.exit(0); }, 20).unref();
 setTimeout(() => console.log("0.71.0"), 10000);
@@ -59,13 +61,16 @@ setTimeout(() => console.log("0.71.0"), 10000);
       });
       assert.equal(code, 0, output.join(""));
       assert.ok(existsSync(calls), "the real runner must reach the synthetic installed Pi probe");
+      const observedHomes = new Set<string>();
       for (const line of readFileSync(calls, "utf8").trim().split("\n")) {
         const call = JSON.parse(line) as { home: string; codexHome?: string; claudeHome?: string; hasCredential: boolean };
+        observedHomes.add(call.home);
         assert.notEqual(call.home, home, "the provider must receive the test runner's private HOME");
         assert.equal(call.codexHome, undefined);
         assert.equal(call.claudeHome, undefined);
         assert.equal(call.hasCredential, false, "provider credentials must not reach a transport test runner");
       }
+      assert.equal(observedHomes.size, file.startsWith("heartbeat") ? 2 : 1, "every real runner spawn must reach the synthetic probe");
       for (const path of [home, join(home, "codex"), join(home, "claude")]) {
         assert.equal(existsSync(join(path, ".agent-manager", "provider-home-leases-v1")), false,
           `${file} wrote a provider lease into the invoking user's HOME`);

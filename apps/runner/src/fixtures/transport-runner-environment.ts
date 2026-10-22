@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
@@ -31,9 +32,10 @@ export function transportRunnerEnvironment(temp: string, inherited: NodeJS.Proce
 /** Only the outer HOME regression supplies this sentinel. Registration and frame handling can
  * finish before background discovery starts; keep the real runner alive until the fake provider
  * has recorded its actual environment. The sentinel is never inherited by the runner itself. */
-export async function waitForTransportRunnerProbe(child: ChildProcess): Promise<void> {
-  const sentinel = process.env.WOLLIPOG_TEST_DISCOVERY_PROBE_READY;
-  if (!sentinel) return;
+export async function waitForTransportRunnerProbe(child: ChildProcess, runnerDataDir: string): Promise<void> {
+  const readyDirectory = process.env.WOLLIPOG_TEST_DISCOVERY_PROBE_READY;
+  if (!readyDirectory) return;
+  const sentinel = join(readyDirectory, createHash("sha256").update(runnerDataDir).digest("hex"));
   const deadline = performance.now() + 15_000;
   while (!existsSync(sentinel)) {
     if (child.exitCode !== null || child.signalCode !== null) throw new Error("Runner exited before the synthetic discovery probe was observed");

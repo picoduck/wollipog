@@ -129,7 +129,7 @@ test(
 
     t.after(async () => {
       try {
-        await waitForTransportRunnerProbe(child);
+        await waitForTransportRunnerProbe(child, join(temp, "runner-data"));
       } finally {
         await stopChild(child);
         await cp.close();
