@@ -15,7 +15,10 @@ async function main() {
     await registry.acquireHome(home, "acp");
     let leaf;
     if (mode === "survivor") {
-      const child = spawnAgent({ command: helper, args: ["nondumpable", path.join(root, "survivor.pid")], cwd: root });
+      // Model a session's retained work: ownerless probes intentionally kill their whole tree
+      // when the root closes. A session owner only checks emptiness, preserving this helper
+      // until the test crashes its runner and a replacement attempts the actual lease proof.
+      const child = spawnAgent({ command: helper, args: ["nondumpable", path.join(root, "survivor.pid")], cwd: root, descendantOwner: {} });
       leaf = child.posixBoundary?.containmentIdentity;
       await new Promise((resolve, reject) => { child.once("close", resolve); child.once("error", reject); });
     }

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { currentCgroupDirectory, providerContainmentIdentity, providerContainmentStatus, type LinuxCgroupIdentity } from "./linux-cgroup.js";
@@ -61,7 +61,37 @@ for (const survivor of [false, true]) test(`replacement runner ${survivor ? "ref
   const record = JSON.parse(original.toString()) as { leaseId: string; process: { version: number; containment: LinuxCgroupIdentity } };
   assert.equal(record.process.version, 2);
   assert.deepEqual(record.process.containment, ready.identity, "worker records its launch parent's exact boundary");
-  if (survivor) { await waitUntil(() => existsSync(join(root, "survivor.pid"))); owned.add(Number(readFileSync(join(root, "survivor.pid"), "utf8"))); }
+  let survivorPid: number | undefined;
+  let survivorStart: string | undefined;
+  if (survivor) {
+    await waitUntil(() => existsSync(join(root, "survivor.pid")));
+    survivorPid = Number(readFileSync(join(root, "survivor.pid"), "utf8")); owned.add(survivorPid);
+  }
+  const assertSurvivor = (phase: string) => {
+    assert.ok(survivorPid && ready.leaf, "survivor fixture must publish its helper PID and exact launch leaf");
+    let stat = "", membership = "", readError: string | undefined;
+    try {
+      stat = readFileSync(`/proc/${survivorPid}/stat`, "utf8");
+      membership = readFileSync(`/proc/${survivorPid}/cgroup`, "utf8");
+    } catch (error) { readError = (error as NodeJS.ErrnoException).code; }
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const snapshot = { phase, pid: survivorPid, state: fields[0], startTime: fields[19], membership,
+      recordedParent: ready.identity, recordedLeaf: ready.leaf, readError };
+    const evidence = JSON.stringify(snapshot);
+    t.diagnostic(`Survivor boundary observation: ${evidence}`);
+    assert.ok(!readError && fields[0] && fields[0] !== "Z" && fields[0] !== "X",
+      `fixture helper exited or was killed before the proof: ${evidence}`);
+    assert.match(fields[19] ?? "", /^[1-9][0-9]*$/u, `fixture helper start time is unverifiable: ${evidence}`);
+    if (survivorStart) assert.equal(fields[19], survivorStart, `fixture helper PID was reused: ${evidence}`);
+    else survivorStart = fields[19];
+    const actualPath = /^0::(\/.*)$/mu.exec(membership)?.[1];
+    assert.equal(actualPath, posix.join(ready.leaf.mountRoot, ready.leaf.cgroupPath),
+      `fixture helper never entered, or escaped from, its recorded launch leaf: ${evidence}`);
+    assert.ok(actualPath.startsWith(posix.join(ready.identity.mountRoot, ready.identity.cgroupPath) + "/"),
+      `fixture helper leaf differs from the parent recorded in the journal: ${evidence}`);
+    return evidence;
+  };
+  if (survivor) assertSurvivor("before runner crash");
   // Start after the holder so the legacy scanner cannot exclude it by start time. Its double
   // fork reparents it away from the replacement runner; it remains alive through every recovery.
   const unrelatedFile = join(root, "unrelated.pid");
@@ -82,11 +112,15 @@ for (const survivor of [false, true]) test(`replacement runner ${survivor ? "ref
   assert.equal(inspectLeaseCgroup({ ...ready.identity, inode: (BigInt(ready.identity.inode) + 1n).toString() }), "unverifiable", "path with a different inode is never proof");
   assert.equal(inspectLeaseCgroup({ ...ready.identity, cgroupPath: ready.identity.cgroupPath + "-missing" }), "unverifiable", "an absent or renamed path is never proof");
   if (survivor) {
-    assert.equal(inspectLeaseCgroup(ready.identity), "populated");
+    assertSurvivor("before boundary proof after runner crash");
+    const proof = inspectLeaseCgroup(ready.identity);
+    const evidence = assertSurvivor("immediately after boundary proof");
+    assert.equal(proof, "populated", `recorded parent must count its live helper recursively: ${evidence}`);
     assert.equal(recover().code, "boundary_survivor");
+    assertSurvivor("after replacement refused handoff");
     assert.deepEqual(readFileSync(join(journal, "mutable-home.recovery.json")), original);
     assert.equal(readdirSync(journal).filter((name) => name.startsWith("next-")).length, 0, "refusal appends nothing");
-    const pid = Number(readFileSync(join(root, "survivor.pid"), "utf8")); process.kill(pid, "SIGKILL"); owned.delete(pid);
+    process.kill(survivorPid!, "SIGKILL"); owned.delete(survivorPid!);
     await waitUntil(() => inspectLeaseCgroup(ready.identity) === "empty");
   }
   assert.equal(inspectLeaseCgroup(ready.identity), "empty");
