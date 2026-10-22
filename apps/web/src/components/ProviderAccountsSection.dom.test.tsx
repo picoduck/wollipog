@@ -1304,7 +1304,7 @@ test("authorized recovery details respect hidden account emails", async () => {
       assert.ok(hidden);
       await act(async () => { hidden.click(); });
       await ui.settle();
-      const details = [...domWindow.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent === "View Recovery Details…");
+      const details = [...ui.menu()!.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent === "View Recovery Details…");
       assert.ok(details);
       await act(async () => { details.click(); });
       await ui.settle();
