@@ -21,11 +21,12 @@ for (const file of ["heartbeat-liveness.integration.test.ts", "malformed-frame-s
     // No real provider or credential is used. Leave the version probe running long enough to
     // overlap the transport test's abrupt runner teardown, exactly as a local installation can.
     const calls = join(temp, "probe-calls.jsonl");
+    const ready = join(temp, "probe-ready");
     writeFileSync(join(bin, "pi"), `#!${process.execPath}
 const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ home: process.env.HOME,
+setTimeout(() => { fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ home: process.env.HOME,
   codexHome: process.env.CODEX_HOME, claudeHome: process.env.CLAUDE_CONFIG_DIR,
-  hasCredential: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY) }) + "\\n");
+  hasCredential: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY) }) + "\\n"); fs.writeFileSync(${JSON.stringify(ready)}, "ready"); }, 1500);
 const parent = process.ppid;
 setInterval(() => { if (process.ppid !== parent) process.exit(0); }, 20).unref();
 setTimeout(() => console.log("0.71.0"), 10000);
@@ -39,6 +40,7 @@ setTimeout(() => console.log("0.71.0"), 10000);
           PATH: [bin, "/usr/bin", "/bin"].join(delimiter),
           HOME: home,
           USERPROFILE: home,
+          WOLLIPOG_TEST_DISCOVERY_PROBE_READY: ready,
           CODEX_HOME: join(home, "codex"),
           CLAUDE_CONFIG_DIR: join(home, "claude"),
           OPENAI_API_KEY: "synthetic-credential-must-not-be-inherited",

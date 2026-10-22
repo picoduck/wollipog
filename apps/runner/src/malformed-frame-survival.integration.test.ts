@@ -12,7 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION, WOLLIPOG_CONTROL_PLANE_SERVICE } from "@wollipog/protocol";
 
-import { transportRunnerEnvironment } from "./fixtures/transport-runner-environment.js";
+import { transportRunnerEnvironment, waitForTransportRunnerProbe } from "./fixtures/transport-runner-environment.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
@@ -128,9 +128,13 @@ test(
     child.stderr?.on("data", capture);
 
     t.after(async () => {
-      await stopChild(child);
-      await cp.close();
-      rmSync(temp, { recursive: true, force: true });
+      try {
+        await waitForTransportRunnerProbe(child);
+      } finally {
+        await stopChild(child);
+        await cp.close();
+        rmSync(temp, { recursive: true, force: true });
+      }
     });
 
     // The runner attests, then opens its /runner socket and sends `register`.

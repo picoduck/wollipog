@@ -1,4 +1,6 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 
 /** Transport tests start a real runner and deliberately kill it. Never let its background
@@ -24,4 +26,18 @@ export function transportRunnerEnvironment(temp: string, inherited: NodeJS.Proce
     XDG_CACHE_HOME: join(home, ".cache"),
     RUNNER_DATA_DIR: join(temp, "runner-data"),
   };
+}
+
+/** Only the outer HOME regression supplies this sentinel. Registration and frame handling can
+ * finish before background discovery starts; keep the real runner alive until the fake provider
+ * has recorded its actual environment. The sentinel is never inherited by the runner itself. */
+export async function waitForTransportRunnerProbe(child: ChildProcess): Promise<void> {
+  const sentinel = process.env.WOLLIPOG_TEST_DISCOVERY_PROBE_READY;
+  if (!sentinel) return;
+  const deadline = performance.now() + 15_000;
+  while (!existsSync(sentinel)) {
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error("Runner exited before the synthetic discovery probe was observed");
+    if (performance.now() >= deadline) throw new Error("Synthetic discovery probe was not observed within 15 seconds");
+    await delay(20);
+  }
 }
