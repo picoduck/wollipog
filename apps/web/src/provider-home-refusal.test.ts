@@ -38,16 +38,20 @@ test("each refusal offers the action that recovers it", () => {
   assert.equal(providerHomeRefusalCopy({ code: "busy", provider: "codex" }, undefined).body.includes("Codex sign-in"), true);
 });
 
-test("specific recovery causes have distinct guidance and preserve the journal", () => {
+test("specific recovery causes explain the problem and next step without implementation jargon", () => {
   const titles = new Set<string>();
   for (const cause of PROVIDER_HOME_RECOVERY_CAUSES) {
     const copy = providerHomeRefusalCopy({ code: PROVIDER_HOME_RECOVERY_CAUSE_CODES[cause], cause, provider: "claude" }, "Work");
     titles.add(copy.title);
-    assert.match(copy.body, /preserve.*journal/iu, cause);
+    assert.doesNotMatch(copy.title + " " + copy.body, /lease|journal|boundary|cgroup|delegat|fallback|inspectability|ownership|HOME/iu, cause);
+    assert.match(copy.body, /another account/iu, cause);
+    assert.ok(copy.body.split(/(?<=[.!?])\s+/u).length <= 2, cause);
     assert.doesNotMatch(copy.body, /kill|quarantine|delete|terminate/iu, cause);
     assert.ok(copy.actions.includes("switch_account"), cause);
-    if (cause === "process_uninspectable_not_delegated") assert.match(copy.body, /systemd unit is not delegated/);
-    if (cause === "process_uninspectable") assert.match(copy.body, /unrelated/);
+    if (cause === "process_uninspectable" || cause === "process_uninspectable_not_delegated") {
+      assert.match(copy.body, /save your work and restart the machine/);
+      assert.deepEqual(copy.actions, ["switch_account", "open_accounts"]);
+    }
   }
   assert.equal(titles.size, PROVIDER_HOME_RECOVERY_CAUSES.length);
 });

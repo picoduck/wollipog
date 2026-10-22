@@ -14,19 +14,20 @@ export interface ProviderHomeRefusalCopy {
 
 const PROVIDER_NAMES: Record<ProviderHomeLaunchRefusalView["provider"], string> = { claude: "Claude", codex: "Codex" };
 
-/** Shared with authorized account inspection; every cause keeps the journal intact. */
+/** Plain-language guidance shared by session notices and account recovery. Technical diagnostics
+ * belong in the authorized recovery details, not the primary message. */
 export function providerHomeRecoveryCauseCopy(cause: ProviderHomeRecoveryCause, subject: string): Omit<ProviderHomeRefusalCopy, "actions"> {
   const copy: Record<ProviderHomeRecoveryCause, { title: string; body: string }> = {
-    holder_alive: { title: "Account Held by a Live Runner", body: `The recorded runner still holds ${subject}. Wait for its work to finish, preserve the lease journal, then retry.` },
-    boundary_survivor: { title: "Provider Work Still Running", body: `A provider or helper still runs in the recorded boundary for ${subject}. Ownership is retained until the recorded boundary is empty; wait for that work to finish and preserve the boundary and lease journal.` },
-    process_survivor: { title: "Provider Descendant Still Running", body: `A process launched by the recorded runner still uses ${subject}. Wait for that work to finish and preserve the lease journal before retrying.` },
-    boundary_unverifiable: { title: "Account Boundary Can't Be Verified", body: `The recorded boundary for ${subject} can't be verified, or its enclosing unit hasn't retired. Ask an operator to inspect ownership and preserve the boundary and lease journal.` },
-    process_uninspectable: { title: "Account Ownership Can't Be Verified", body: `A process can't be inspected, so ownership of ${subject} can't be proved on the fallback recovery path. Preserve the lease journal and ask an operator to restore inspectability; unrelated processes must be left alone.` },
-    process_uninspectable_not_delegated: { title: "Account Recovery Needs Delegation", body: `Ownership of ${subject} can't be proved because a process can't be inspected and the runner's systemd unit is not delegated. Ask an operator to use Delegate=yes for future leases and restore inspectability for this lease; preserve the journal.` },
-    invalid_journal: { title: "Account Journal Can't Be Verified", body: `The lease journal for ${subject} is invalid or unreadable. Preserve all journal records and ask an operator to restore access or inspect the records before retrying.` },
-    profile_unsupported_control_plane: { title: "Account Needs a Newer Control Plane", body: `The control plane can't authorize the profile for ${subject}. Update the control plane before retrying and preserve the lease journal.` },
-    profile_grant_limit: { title: "Account Profile Grant Limit Reached", body: `The profile for ${subject} has reached its grant limit. An Owner or Admin must review unused grants before granting access; preserve the lease journal.` },
-    no_reboot_proof: { title: "Account Recovery Needs Reboot Proof", body: `The lease for ${subject} has no process evidence and was recorded during this boot. Recovery requires a later host boot; preserve the lease journal and coordinate with an operator.` },
+    holder_alive: { title: "Account in Use", body: `Another Wollipog runner is using ${subject}. Wait for its work to finish, then try again, or choose another account.` },
+    boundary_survivor: { title: "Account Still in Use", body: `A program from an earlier session is still using ${subject}. Wait for that work to finish, then try again, or choose another account.` },
+    process_survivor: { title: "Earlier Session Still Running", body: `A program started by an earlier Wollipog runner is still using ${subject}. Wait for that work to finish, then try again, or choose another account.` },
+    boundary_unverifiable: { title: "Account Access Can't Be Checked", body: `Wollipog can't confirm that an earlier session has finished using ${subject}. Choose another account for now, or ask the person who manages this machine to check it.` },
+    process_uninspectable: { title: "Account Is Locked", body: `Wollipog can't check whether another program is still using ${subject}. Choose another account for now, or save your work and restart the machine before trying again.` },
+    process_uninspectable_not_delegated: { title: "Account Recovery Is Blocked", body: `Wollipog can't safely unlock ${subject} because it can't check a running program. Choose another account for now, or save your work and restart the machine before trying again.` },
+    invalid_journal: { title: "Account Recovery Records Can't Be Read", body: `Wollipog can't read or verify the records that protect ${subject} from being used by two runners at once. Choose another account and ask the person who manages this machine to check the recovery details.` },
+    profile_unsupported_control_plane: { title: "Wollipog Update Required", body: `This version of Wollipog can't approve access to ${subject}. Update the Wollipog server, then try again, or choose another account.` },
+    profile_grant_limit: { title: "Account Access Limit Reached", body: `Too many Wollipog servers already have access to ${subject}. An Owner or Admin needs to remove an unused server's access before adding this one, or you can choose another account.` },
+    no_reboot_proof: { title: "Machine Restart Needed", body: `Wollipog can't safely unlock ${subject} until this machine has restarted. Choose another account for now, or save your work, restart the machine, then recover the account in Connections.` },
   };
   return copy[cause];
 }
@@ -54,7 +55,7 @@ export function providerHomeRefusalCopy(
     const contention = ["holder_alive", "boundary_survivor", "process_survivor"].includes(refusal.cause);
     return {
       ...providerHomeRecoveryCauseCopy(refusal.cause, subject),
-      actions: account ? contention ? ["restart", "switch_account"] : ["open_accounts", "switch_account"] : contention ? ["restart"] : ["open_accounts"],
+      actions: account ? contention ? ["restart", "switch_account"] : ["switch_account", "open_accounts"] : contention ? ["restart"] : ["open_accounts"],
     };
   }
   const builders: Record<ProviderHomeLaunchRefusalCode, () => ProviderHomeRefusalCopy> = {
