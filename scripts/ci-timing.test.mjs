@@ -20,7 +20,7 @@ test("arbitrary JSON logs either reject or retain only the safe schema", () => {
 test("projections preserve durations and cannot retain generated test inputs", () => {
   fc.assert(fc.property(fc.array(fc.record({
     name: fc.string(), durationMs: fc.integer({ min: 0, max: 1_000_000 }),
-    state: fc.constantFrom("passing", "failing", "skipped"), retry: fc.integer({ min: 0, max: 2 }),
+    state: fc.constantFrom("passing", "failing", "cancelled", "skipped", "unmeasured"), retry: fc.integer({ min: 0, max: 2 }),
   }), { maxLength: 60 }), (rows) => {
     const summary = new TimingSummary("browser");
     for (const row of rows) summary.add({ ...row, file: process.cwd() + "/synthetic.spec.ts" });
@@ -35,6 +35,28 @@ test("projections preserve durations and cannot retain generated test inputs", (
     }
     assert.deepEqual(result.slowestTests.map((row) => row.durationMs), rows.map((row) => row.durationMs).sort((a, b) => b - a).slice(0, 20));
   }), { numRuns: 100 });
+});
+
+test("cancelled Node and interrupted browser tests remain distinct from failures", async () => {
+  async function* events() {
+    for (const failureType of ["cancelledByParent", "testTimeoutFailure", "testAborted", "testCodeFailure"]) {
+      yield { type: "test:fail", data: { file: process.cwd() + "/synthetic.test.ts", name: failureType,
+        details: { type: "test", duration_ms: 1, error: { failureType, message: "PRIVATE_SENTINEL" } } } };
+    }
+  }
+  const lines = [];
+  for await (const line of nodeReporter(events())) lines.push(line);
+  const node = parseTiming(lines[0]);
+  assert.equal(node.cancelled, 3);
+  assert.equal(node.failed, 1);
+  assert.ok(!lines[0].includes("PRIVATE_SENTINEL"));
+  const browser = new BrowserReporter();
+  const item = { location: { file: process.cwd() + "/synthetic.spec.ts" }, titlePath: () => ["synthetic"], expectedStatus: "passed" };
+  for (const status of ["interrupted", "failed", "timedOut", "unknown"]) browser.onTestEnd(item, { duration: 1, status, retry: 0 });
+  const result = browser.summary.result();
+  assert.equal(result.cancelled, 1);
+  assert.equal(result.failed, 2);
+  assert.equal(result.unmeasured, 1);
 });
 
 test("reporter adapters emit only completed synthetic event projections", async () => {

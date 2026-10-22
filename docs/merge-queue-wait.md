@@ -133,7 +133,10 @@ avoid counting nested execution twice; individual test durations are inclusive.
 Browser file duration sums observed test attempts, including retries; this is not
 wall time. Retry-only test counts describe passing retry attempts, including
 expected-failure semantics; they do not override `failOnFlakyTests` or classify a
-root cause. Partial/cancelled runs may never emit a summary. A summary is not a
+root cause. Node cancellation/abort/timeout events and browser interruptions have
+separate cancelled counts; browser test timeouts remain failures under Playwright's
+semantics. Unknown browser outcomes are unmeasured. Partial/cancelled runs may
+never emit a summary. A summary is not a
 complete test inventory or a source of failure text.
 
 File IDs hash repository-relative POSIX paths. Resolve them at the exact suite
