@@ -105,7 +105,8 @@ setup and post-job work, so it is not a pure install-time estimate. Browser shar
 imbalance reports observed/expected counts, completeness, max-minus-min and
 max/min job elapsed times. It includes setup; per-test timing is a separate source.
 Queue history records a surviving enqueue through merge, if both events exist.
-An intervening removal clears the entry; missing entries stay unmeasured. These
+An intervening non-merged removal clears the entry; a successful `merged` removal
+can precede its merge event and preserves the entry. Missing entries stay unmeasured. These
 are PR episodes, not causal attribution to one merge-group run. Queue history and
 removals cover only PRs observed in the merge-group cohort.
 

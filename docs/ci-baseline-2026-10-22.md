@@ -22,6 +22,8 @@ The new normal-traffic cohort is **[2026-10-20T00:00:00Z,
 2026-10-22T21:59:24.932Z. It contains **308 distinct runs / first attempts**
 and **7 rerun attempts**. All were terminal when observed. It is an interim
 observation, not the completed five-day trial, causal proof, or activation approval.
+Queue histories were refreshed at 2026-10-22T22:11:55.080Z after verifying that
+the successful `merged` removal must be paired with its merge event.
 
 From the repository root at this change's revision:
 
@@ -115,12 +117,13 @@ No all-green-timeout claim is made without exact episode/run reconciliation.
 The known all-green transitional timeout for #3462 is already recorded in #2674
 and lies outside these two full days.
 
-Queue history exposed 56 merge episodes for the observed PRs; **34** had a
-surviving enqueue with a measurable span. For those 34, enqueue-to-merge p50/p90
-was **169.0/316.0 minutes**. The other 22 are **unmeasured**, not zero. History
-is complete under the pagination bound, but timeline presence and associability
-are separate evidence requirements. These are PR-level spans, not CI run wall
-times, and exclude PRs without a group created in the measurement window.
+Queue history exposed **56 merge episodes**, all with a surviving enqueue and
+measurable span. Their enqueue-to-merge p50/p90 was **110.7/310.7 minutes**.
+GitHub can emit the successful queue removal with reason `merged` one second
+before the merge event; it does not end the successful episode. Failure/manual
+removals still end an entry, and a genuinely missing enqueue stays unmeasured.
+History is complete under the pagination bound. These are PR-level spans, not
+CI run wall times, and exclude PRs without a group created in the measurement window.
 
 ## Execution, Setup, and Resource Constraints
 

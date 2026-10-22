@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  attemptRecord, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
+  applyTimingContext, attemptRecord, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
   AGGREGATOR, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
 } from "./merge-queue-wait-report.mjs";
 
@@ -341,6 +341,42 @@ test("queue-to-merge measures only a surviving enqueue, without attributing an o
   assert.equal(report.episodes[0].minutes, 20);
   assert.equal(report.episodes[1].minutes, null);
   assert.equal(report.episodes[1].state, "unmeasured");
+});
+
+test("a merged queue removal before MergedEvent preserves the successful episode", async () => {
+  const report = await queueHistory(async () => timeline([
+    { __typename: "AddedToMergeQueueEvent", createdAt: at(0) },
+    { __typename: "RemovedFromMergeQueueEvent", createdAt: at(5), reason: "checks_timed_out" },
+    { __typename: "AddedToMergeQueueEvent", createdAt: at(10) },
+    { __typename: "RemovedFromMergeQueueEvent", createdAt: at(49), reason: "merged" },
+    { __typename: "MergedEvent", createdAt: at(50), commit: { oid: "c".repeat(40) } },
+  ]), repository, 1);
+  assert.equal(report.episodes[0].minutes, 40);
+  assert.equal(report.episodes[0].enteredAt, at(10));
+  assert.equal(report.episodes[0].state, "measured");
+});
+
+test("optional timing transport failure cannot discard collected metadata", async () => {
+  const unavailable = await readTimingLog("token", repository, 1, async () => new Response(null, { status: 302 }));
+  assert.equal(unavailable.state, "unmeasured");
+  let calls = 0;
+  const timedOut = await readTimingLog("token", repository, 1, async () => {
+    if (++calls === 1) return new Response(null, { status: 302, headers: { location: "https://x.blob.core.windows.net/log" } });
+    throw new DOMException("PRIVATE_SENTINEL", "AbortError");
+  });
+  assert.equal(timedOut.state, "unmeasured");
+  assert.ok(!JSON.stringify(timedOut).includes("PRIVATE_SENTINEL"));
+});
+
+test("missing timing SHA never erases known source evidence", () => {
+  const record = attemptRecord(repository, { ...run(1, 1), head_sha: "a".repeat(40) }, [], {});
+  applyTimingContext(record, { context: { runId: "1", attempt: 1, testedSha: null, workflowSha: "b".repeat(40) } });
+  assert.equal(record.testedSha, "a".repeat(40));
+  assert.equal(record.suiteRevision, "a".repeat(40));
+  assert.equal(record.workflowRevision.executedSourceSha, "b".repeat(40));
+  assert.equal(record.workflowRevision.state, "source-measured");
+  applyTimingContext(record, { context: { runId: "1", attempt: 2, testedSha: "c".repeat(40), workflowSha: null } });
+  assert.equal(record.testedSha, "a".repeat(40));
 });
 
 test("log collection projects marker lines and never forwards bearer authorization", async () => {

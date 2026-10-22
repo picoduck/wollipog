@@ -371,7 +371,7 @@ export const QUEUE_HISTORY_QUERY = `query($owner:String!, $repo:String!, $number
     timelineItems(itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,MERGED_EVENT],first:100,after:$after) {
       pageInfo { hasNextPage endCursor }
       nodes { __typename ... on AddedToMergeQueueEvent { createdAt }
-        ... on RemovedFromMergeQueueEvent { createdAt }
+        ... on RemovedFromMergeQueueEvent { createdAt reason }
         ... on MergedEvent { createdAt commit { oid } } }
     }
   } }
@@ -388,7 +388,8 @@ export async function queueHistory(api, repository, number) {
       throw new ReportError("Unreadable queue history");
     for (const node of items.nodes) {
       if (node.__typename === "AddedToMergeQueueEvent") enteredAt = node.createdAt;
-      if (node.__typename === "RemovedFromMergeQueueEvent") enteredAt = null;
+      // A successful queue merge can emit its 'merged' removal one second before MergedEvent.
+      if (node.__typename === "RemovedFromMergeQueueEvent" && node.reason !== "merged") enteredAt = null;
       if (node.__typename === "MergedEvent") {
         episodes.push({ repository, pullRequest: number, enteredAt, mergedAt: node.createdAt,
           mergeSha: node.commit?.oid ?? null, minutes: enteredAt ? duration(enteredAt, node.createdAt) : null,
@@ -405,6 +406,11 @@ export async function queueHistory(api, repository, number) {
 
 /** Fetch at most 16 MiB per explicitly selected job, projecting marker lines in memory only. */
 export async function readTimingLog(token, repository, jobId, fetchImpl = fetch) {
+  try { return await readTimingLogBody(token, repository, jobId, fetchImpl); }
+  catch { return { state: "unmeasured", reason: "log-transport-or-unreadable-redirect" }; }
+}
+
+async function readTimingLogBody(token, repository, jobId, fetchImpl) {
   const request = await fetchImpl(`https://api.github.com/repos/${repository}/actions/jobs/${jobId}/logs`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" }, redirect: "manual",
     signal: AbortSignal.timeout(10_000),
@@ -442,6 +448,18 @@ export async function readTimingLog(token, repository, jobId, fetchImpl = fetch)
   } finally { await reader.cancel(); }
   return { state: summaries.length ? "measured" : "unmeasured", truncated, summaries,
     reason: summaries.length ? null : "no-safe-timing-output" };
+}
+
+export function applyTimingContext(record, summary) {
+  if (summary.context?.runId !== String(record.runId) || summary.context?.attempt !== record.attempt) return;
+  if (summary.context.testedSha) {
+    record.testedSha = summary.context.testedSha;
+    record.suiteRevision = summary.context.testedSha;
+  }
+  if (summary.context.workflowSha) {
+    record.workflowRevision.executedSourceSha = summary.context.workflowSha;
+    record.workflowRevision.state = "source-measured";
+  }
 }
 
 /** Recompute cohort percentiles from deduplicated raw attempts, never from daily percentiles. */
@@ -576,11 +594,7 @@ export async function main(argv, { env = process.env, fetchImpl = fetch, out = c
         }
       }
       for (const summary of matches[0].testTiming.summaries ?? []) {
-        if (summary.context?.runId === String(record.runId) && summary.context?.attempt === record.attempt) {
-          record.testedSha = summary.context.testedSha;
-          record.suiteRevision = summary.context.testedSha;
-          record.workflowRevision.executedSourceSha = summary.context.workflowSha;
-        }
+        applyTimingContext(record, summary);
       }
     }
     out(opts.json ? JSON.stringify(report, null, 2) : markdown(report));
