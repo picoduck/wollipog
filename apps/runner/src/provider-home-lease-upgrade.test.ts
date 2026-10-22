@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statfsSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -76,6 +76,27 @@ test("a version-1 lease migrates without discarding its retained ownership proof
   assert.equal(JSON.parse(readFileSync(join(root, "mutable-home.recovery.json"), "utf8")).version, 4);
   assert.equal(registry.releaseHome(home), true);
   if (process.platform === "linux") helperHandoff(home);
+});
+
+test("a guarded legacy canonical anchor can be mirrored without conflicting with its own pin", { timeout: 120_000 }, t => {
+  const { home, root, lock } = legacyFixture(t, 0);
+  const genesis = readdirSync(lock).find(name => name.startsWith("lease-"))!;
+  let record = { ...JSON.parse(readFileSync(join(lock, genesis), "utf8")), recoveredEntriesHash: createHash("sha256").update("[]").digest("hex") };
+  let raw = `${JSON.stringify(record)}\n`;
+  writeFileSync(join(lock, genesis), raw, { mode: 0o600 });
+  const anchor = join(root, "mutable-home.recovery.json");
+  renameSync(join(lock, genesis), anchor);
+  linkSync(anchor, join(lock, genesis)); linkSync(anchor, join(lock, "checkpoint.json"));
+  writeFileSync(join(lock, "protocol-v4.json"), `${JSON.stringify({ ...record, version: 4, protocol: "bounded-canonical-checkpoint", fenceBackend: process.platform === "win32" ? "lockfileex" : "flock" })}\n`, { mode: 0o600 });
+  for (let index = 0; index < 8; index++) {
+    const name = `next-${record.leaseId}.json`;
+    record = { ...record, recoveredEntriesHash: undefined, state: index % 2 === 0 ? "released" : "active", leaseId: randomUUID(), previousLeaseId: record.leaseId, previousRecordHash: createHash("sha256").update(raw).digest("hex") };
+    raw = `${JSON.stringify(record)}\n`;
+    writeFileSync(join(root, name), raw, { mode: 0o600 }); linkSync(join(root, name), join(lock, name));
+  }
+  const registry = new ProviderHomeLeaseRegistry(owner, { onCheckpointFailureForTest: error => { throw error; } });
+  assert.equal(registry.acquireHome(home), true);
+  assert.equal(registry.releaseHome(home), true);
 });
 
 test("an interrupted first migration recovers at every native publication boundary", { timeout: 600_000 }, async t => {

@@ -191,10 +191,13 @@ public static class WollipogProviderHomeLeaseIo {
     Fence(true);if(newGuard)Barrier("guard-durable");Need(BytesEqual(Read(1,GUARD).Raw,guardRaw),"permanent format guard changed");
     var actual=Snapshot();var seen=new HashSet<string>(StringComparer.Ordinal);foreach(var e in actual){if(newGuard&&e.Dir==1&&e.Name==GUARD)continue;Entry wanted;Need(byName.TryGetValue(Key(e),out wanted)&&Equal(e,wanted),"lease snapshot changed before checkpoint publication");seen.Add(Key(e));}foreach(var e in expected)Need(e.Optional||seen.Contains(Key(e)),"verified lease evidence disappeared");
     if(operation==3){
-      if(tip.Dir==1){Need(!Exists(0,ANCHOR),"reverse mirror requires an unselected legacy journal");legacyAnchorAbsent=true;}else KeepAnchor();
+      if(tip.Dir==1){Need(!Exists(0,ANCHOR),"reverse mirror requires an unselected legacy journal");legacyAnchorAbsent=true;}else if(tip.Name!=ANCHOR)KeepAnchor();
       Pinned();byte targetDir=(byte)(1-tip.Dir);
       using(var source=Open(PathFor(tip.Dir,tip.Name),false,true,false,false)){
         INFO info=Info(source);Need(Dev(info)==tip.Dev&&Ino(info)==tip.Ino&&BytesEqual(ReadBytes(source),tip.Raw),"canonical mirror source changed");
+        // One strong handle must serve as both source and anchor pin. Opening
+        // a second writer conflicts with our own immutable-anchor sharing mode.
+        if(tip.Dir==0&&tip.Name==ANCHOR){anchorHandle=source;anchorStamp=Fingerprint(source);Pinned();}
         string target=PathFor(targetDir,jobs[0].Name);
         if(!CreateHardLinkW(target,PathFor(tip.Dir,tip.Name),IntPtr.Zero)){
           Need(Exists(targetDir,jobs[0].Name),"canonical mirror publication failed");Entry mirror=Read(targetDir,jobs[0].Name,true);
