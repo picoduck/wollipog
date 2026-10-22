@@ -217,10 +217,11 @@ test("explicit Full Control revocation uses the current revision and preserves c
   assert.deepEqual(harness.changed[0]!.orchestratorPolicy!.behavior, initial.orchestratorPolicy!.behavior);
   assert.deepEqual(harness.changed[0]!.orchestratorPolicy!.execution, initial.orchestratorPolicy!.execution);
   assert.match(harness.dialog().textContent ?? "", /Effective Mode: Custom/);
-  // The choice follows the revoked root: Custom, with no enable summary or readiness check offered back.
-  await settle();
+  // The choice follows the revoked root: Custom, with no enable action or check offered back.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
   assert.equal(harness.dialog().querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.checked, true);
   assertNoDomNode(harness.dialog().querySelector('section[aria-label="Enable Full Control"]'));
+  assert.deepEqual(footerButtons(harness.dialog()), ["Done"]);
   assert.deepEqual(preflights, []);
 });
 
@@ -255,171 +256,100 @@ test("a descendant displays the current root mode after revoke and does not trea
   assert.match(legacy.dialog().textContent ?? "", /Effective Mode: Current Root State Not Reported/);
 });
 
-/** A server preflight in the shape the enable route returns. Not ready means a true blocker; `budget`
- * is the ceiling the server derived, none by default. */
-function enablePreflight(ready: boolean, budget: { costUsd: number; toolCalls: number } | null = ready ? { costUsd: 30, toolCalls: 300 } : null): CampaignLaunchPreflight {
+/** A server preflight in the shape the enable route returns. Not ready means a genuine impossibility. */
+function enablePreflight(ready: boolean): CampaignLaunchPreflight {
   const verified = (id: CampaignLaunchPreflight["capabilities"][number]["id"], capability: string) => ({ id, capability, state: "verified" as const, mandatory: true, reason: `${capability} is verified.` });
+  const blocker = "The runner could not verify this campaign's repository; check that the runner is online and the origin is github.com.";
   return { ready, digest: (ready ? "b" : "a").repeat(64), inspectionCancellation: "supported",
-    summary: { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
+    summary: { repository: ready ? "owner/repo" : null, issueNumbers: [12], objective: "Deliver #12",
       root: { agentId: "claude", driver: "claude-code", model: "claude-opus-5-5", effort: null, isolation: { mode: "provider", network: "inherit" },
         strictProjectIsolation: false, integrationIsolation: false, completion: "retain" },
-      budget: { costUsd: budget?.costUsd ?? null, toolCalls: budget?.toolCalls ?? null, concurrency: 4, acceptedFollowUps: 0, source: budget ? "override" : "unset", reviewIncluded: false },
+      budget: { costUsd: null, toolCalls: null, concurrency: 4, acceptedFollowUps: 0, source: "unset", reviewIncluded: false },
       review: { controlled: false, statement: "The regular cross-model review workflow, because controlled review is unavailable." },
       followUps: { policy: "recommend_only", relatedFollowUps: false, maxIssues: 1, closureReasons: ["completed"] },
-      evidence: { statement: "The Orchestrator reviews screenshots. Video and external evidence need your review.",
+      evidence: { statement: "The Orchestrator reviews screenshots.",
         destination: { kind: "private_session_artifacts", configurationId: "session_artifacts:org", disclosureRevision: 1 }, provider: null, envelope: false },
-      humanRequired: [{ exception: "Secrets and Sign-In", reason: "Always decided by the Human under Full Control." }],
-      blockers: ready ? [] : [{ capability: "Full Control Authority", reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." }] },
-    capabilities: [verified("repository_scope", "Repository and Issue Scope"),
-      ready ? verified("authority_contract", "Full Control Authority")
-        : { id: "authority_contract", capability: "Full Control Authority", state: "unsupported", mandatory: true, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." },
-      { ...verified("accounting_budget", "Campaign Accounting and Budget"), mandatory: budget !== null },
-      { id: "native_review", capability: "Controlled Cross-Model Review", state: "informational", mandatory: false,
-        reason: "This runner does not offer the controlled reviewer; the campaign uses the regular cross-model review workflow." },
-      { ...verified("execution_isolation", "Execution Isolation"), mandatory: false }],
+      humanRequired: [],
+      blockers: ready ? [] : [{ capability: "Repository and Issue Scope", reason: blocker }] },
+    capabilities: [ready ? verified("repository_scope", "Repository and Issue Scope")
+      : { id: "repository_scope", capability: "Repository and Issue Scope", state: "unsupported", mandatory: true, reason: blocker },
+      verified("authority_contract", "Full Control Authority")],
     advanced: { proposal: null, plan: {} as never, humanRequiredRequests: [] } };
 }
-const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
-
-const settings = (campaignBudget?: { costUsd: number; toolCalls: number }) => async () => ({
-  defaults: { ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), ...(campaignBudget ? { campaignBudget } : {}) },
-  source: "user_default" as const, capabilities: {} as never, controlModeSupported: true });
-
-test("choosing Full Control on a live campaign enables in one action with no limit; gaps are rows, not warnings", async () => {
-  const preflights: unknown[] = [];
-  const enables: unknown[] = [];
-  const harness = await open(orchestrator(), {
-    orchestratorSettings: settings(),
-    fullControlEnablePreflight: async (id, body) => { preflights.push([id, body]); return { preflight: enablePreflight(true, null), expectedRevision: 2 }; },
-    enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
-  });
-  const dialog = harness.dialog();
-  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
-  await settle();
-  assert.deepEqual(preflights, [["orch", {}]], "readiness is checked as soon as Full Control is chosen");
-  assert.match(dialog.textContent ?? "", /Ready to Enable/);
-  assert.match(dialog.textContent ?? "", /BudgetNo Limit · 4 at a time/);
-  assert.match(dialog.textContent ?? "", /ReviewThe regular cross-model review workflow, because controlled review is unavailable\./);
-  assertNoDomNode(dialog.querySelector('section[aria-label="Enable Full Control"] .notice.t-warning'),
-    "an unavailable reviewer is never a warning");
-  assert.equal([...dialog.querySelectorAll("label span")].some((node) => node.textContent === "Cost Limit (USD)" && !node.closest("details")), false,
-    "no limit is asked for outside Advanced");
-  assert.doesNotMatch(dialog.textContent ?? "", /Save Limits as Default/, "no default is offered until both limits are entered");
-  const enable = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Enable Full Control")!;
-  assert.equal(enable.disabled, false);
-  await act(async () => enable.click());
-  assert.deepEqual(enables, [["orch", { expectedRevision: 2, preflightDigest: "b".repeat(64) }]]);
-});
-
-test("a true blocker on a live campaign keeps Enable disabled and says why", async () => {
-  const enables: unknown[] = [];
-  const harness = await open(orchestrator(), {
-    orchestratorSettings: settings(),
-    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(false), expectedRevision: 2 }),
-    enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
-  });
-  const dialog = harness.dialog();
-  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
-  await settle();
-  assert.match(dialog.textContent ?? "", /Can't Enable Yet/);
-  assert.match(dialog.textContent ?? "", /cannot enforce the Full Control authority contract/);
-  const enable = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Enable Full Control")!;
-  assert.equal(enable.disabled, true);
-  await act(async () => enable.click());
-  assert.deepEqual(enables, []);
-  assert.deepEqual(harness.changed, []);
-});
-
-test("enabling states the campaign's Maximum Concurrent Children as its one concurrency and never sends a second", async () => {
-  const bodies: unknown[] = [];
-  const harness = await open(orchestrator(), {
-    orchestratorSettings: settings(),
-    fullControlEnablePreflight: async (_id, body) => { bodies.push(structuredClone(body)); return { preflight: enablePreflight(false), expectedRevision: 2 }; },
-  });
-  const dialog = harness.dialog();
-  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
-  await settle();
-  const limits = [...dialog.querySelectorAll("fieldset")].find((node) => node.querySelector("legend")?.textContent === "Campaign Limits")!;
-  assert.ok(limits, "Campaign Limits is under Advanced");
-  assert.equal([...limits.querySelectorAll("label span")].some((node) => node.textContent === "Concurrent Children"), false,
-    "no editable concurrency entry");
-  const fact = [...limits.querySelectorAll("dt")].find((node) => node.textContent === "Concurrent Children")?.nextElementSibling;
-  assert.equal(fact?.textContent, "6This campaign's Maximum Concurrent Children. Change it with Live Child Limit in Guardrails.",
-    "the stored policy's value, read-only, with where to change it");
-  for (const body of bodies) assert.equal((body as { overrides?: { budget?: { concurrency?: number } } }).overrides?.budget?.concurrency, undefined);
-  await harness.unmount();
-
-  // A paused campaign (0 live children) says why it can't enable, at the concurrency line.
-  const paused = await open(orchestrator({ orchestratorPolicy: { ...POLICY, behavior: { ...POLICY.behavior, maximumConcurrentChildren: 0 } } }), {
-    orchestratorSettings: settings(),
-    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(false), expectedRevision: 2 }),
-  });
-  await act(async () => paused.dialog().querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
-  await settle();
-  const pausedFact = [...paused.dialog().querySelectorAll("details dt")].find((node) => node.textContent === "Concurrent Children")?.nextElementSibling;
-  assert.equal(pausedFact?.textContent, "0This campaign pauses new children. Raise Live Child Limit in Guardrails to enable Full Control.");
-  assert.ok(pausedFact?.querySelector(".form-error"), "the reason reads as an error");
-});
 
 const footerButtons = (dialog: HTMLElement) => [...dialog.querySelectorAll<HTMLButtonElement>(".modal-foot button")].map((button) => button.textContent);
 
-test("the Enable action sits in the footer beside Done while Full Control is chosen, so a long summary never hides it", async () => {
+/** Enabling adds nothing to fill in or review (#2940): no summary, limits, readiness or Advanced. */
+function assertNoEnableForm(dialog: HTMLElement): void {
+  const text = dialog.textContent ?? "";
+  for (const copy of [/Ready to Enable/, /Can't Enable Yet/, /Campaign Limits/, /Advanced/, /No Limit/, /Checking Full Control Readiness/]) {
+    assert.doesNotMatch(text, copy);
+  }
+  assertNoDomNode(dialog.querySelector('section[aria-label="Enable Full Control"]'));
+  assertNoDomNode(dialog.querySelector("fieldset"));
+}
+
+test("choosing Full Control on a live campaign shows no form, and Enable Full Control is the one action", async () => {
+  const preflights: unknown[] = [];
+  const enables: unknown[] = [];
   const harness = await open(orchestrator(), {
-    orchestratorSettings: settings(),
-    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(false), expectedRevision: 2 }),
+    fullControlEnablePreflight: async (id, body) => { preflights.push([id, body]); return { preflight: enablePreflight(true), expectedRevision: 2 }; },
+    enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
   });
   const dialog = harness.dialog();
   assert.deepEqual(footerButtons(dialog), ["Done"]);
   await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
-  await settle();
+  assert.match(dialog.textContent ?? "", /The Orchestrator runs this campaign end to end\./);
+  assertNoEnableForm(dialog);
+  assert.deepEqual(preflights, [], "nothing is checked or shown before the action");
   assert.deepEqual(footerButtons(dialog), ["Done", "Enable Full Control"]);
   const enable = dialog.querySelector<HTMLButtonElement>(".modal-foot .btn.primary")!;
-  assert.equal(enable.textContent, "Enable Full Control");
-  assert.equal(enable.disabled, true, "the footer action keeps the panel's readiness");
-  assertNoDomNode(dialog.querySelector('section[aria-label="Enable Full Control"] button.primary'), "there is no second Enable action in the body");
-  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
-  assert.deepEqual(footerButtons(dialog), ["Done"], "Custom closes the panel and its action");
-});
-
-test("a ready campaign enables Full Control through one reviewed action bound to the exact digest and revision", async () => {
-  const enables: unknown[] = [];
-  const bodies: unknown[] = [];
-  const saved: unknown[] = [];
-  const harness = await open(orchestrator(), {
-    orchestratorSettings: settings({ costUsd: 30, toolCalls: 300 }),
-    fullControlEnablePreflight: async (_id, body) => {
-      bodies.push(structuredClone(body));
-      const preflight = enablePreflight(true);
-      preflight.summary.followUps.relatedFollowUps = body.overrides?.issues?.relatedFollowUps ?? true;
-      return { preflight, expectedRevision: 2 };
-    },
-    enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
-    updateOrchestratorSettings: async (input) => { saved.push(input); throw new Error("a saved budget is never rewritten from enable"); },
-  });
-  const dialog = harness.dialog();
-  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
-  await settle();
-  const related = dialog.querySelector<HTMLButtonElement>('details [role="switch"]')!;
-  assert.equal(related.getAttribute("aria-checked"), "true", "the switch shows the server-derived value that would be authorized");
-  await act(async () => related.click());
-  await settle();
-  assert.deepEqual(bodies.at(-1), { overrides: { issues: { relatedFollowUps: false } } });
-  await act(async () => related.click());
-  await settle();
-  assert.deepEqual(bodies.at(-1), { overrides: { issues: { relatedFollowUps: true } } });
-  assert.match(dialog.textContent ?? "", /Ready to Enable/);
-  assert.match(dialog.textContent ?? "", /\$30 · 300 tool calls · 4 at a time/);
-  assert.equal([...dialog.querySelectorAll("label span")].some((node) => node.textContent === "Cost Limit (USD)" && !node.closest("details")), false,
-    "a saved budget is a summary line; its override lives under Advanced");
-  const enable = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Enable Full Control")!;
   assert.equal(enable.disabled, false);
   await act(async () => enable.click());
-  assert.deepEqual(enables, [["orch", { overrides: { issues: { relatedFollowUps: true } }, expectedRevision: 2, preflightDigest: "b".repeat(64) }]]);
-  assert.deepEqual(saved, [], "enabling never rewrites the saved budget");
+  await act(async () => { await Promise.resolve(); });
+  assert.deepEqual(preflights, [["orch", {}]]);
+  assert.deepEqual(enables, [["orch", { expectedRevision: 2, preflightDigest: "b".repeat(64) }]]);
   assert.equal(harness.changed.at(-1)!.orchestratorPolicy!.control!.mode, "full_control");
   assert.match(dialog.textContent ?? "", /Effective Mode: Full Control/);
   assert.deepEqual(footerButtons(dialog), ["Done"], "an enabled campaign has nothing left to enable");
   assert.ok([...dialog.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"));
+});
+
+test("a genuine impossibility on a live campaign is one inline error, and nothing changes", async () => {
+  const enables: unknown[] = [];
+  const harness = await open(orchestrator(), {
+    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(false), expectedRevision: 2 }),
+    enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
+  });
+  const dialog = harness.dialog();
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  await act(async () => dialog.querySelector<HTMLButtonElement>(".modal-foot .btn.primary")!.click());
+  await act(async () => { await Promise.resolve(); });
+  assert.deepEqual(enables, []);
+  assert.deepEqual(harness.changed, []);
+  const alerts = [...dialog.querySelectorAll<HTMLElement>('[role="alert"]')];
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0]!.textContent ?? "", /Couldn't Enable Full Control/);
+  assert.match(alerts[0]!.textContent ?? "", /could not verify this campaign's repository; check that the runner is online/);
+  assertNoEnableForm(dialog);
+  assert.match(dialog.textContent ?? "", /Effective Mode: Custom/);
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+  assert.deepEqual(footerButtons(dialog), ["Done"], "Custom has no enable action");
+  assert.equal(dialog.querySelectorAll('[role="alert"]').length, 0, "and no stale error");
+});
+
+test("a refused enable from the server reads as its own reason", async () => {
+  const harness = await open(orchestrator(), {
+    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(true), expectedRevision: 2 }),
+    enableFullControl: async () => { throw new ApiError("Full Control cannot be enabled: Campaign usage contains unpriced records.", 409); },
+  });
+  const dialog = harness.dialog();
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  await act(async () => dialog.querySelector<HTMLButtonElement>(".modal-foot .btn.primary")!.click());
+  await act(async () => { await Promise.resolve(); });
+  const alert = dialog.querySelector<HTMLElement>('[role="alert"]')!;
+  assert.match(alert.textContent ?? "", /Couldn't Enable Full ControlCampaign usage contains unpriced records\./);
+  assert.deepEqual(harness.changed, []);
 });
 
 function gate(dialog: HTMLElement, label: string): HTMLElement {
@@ -447,101 +377,48 @@ function fullControlProjection(): SessionView {
       decisionOwners: { ...HUMAN_ONLY, pr_merge: "orchestrator" } } } as SessionView;
 }
 
-test("under Full Control the dialog shows the server's effective owners read-only, the Human Required exceptions, and what returns after Revoke", async () => {
-  const harness = await open(fullControlProjection(), {});
+/** The Custom-only surfaces: none of them has an effect under a Full Control boundary (#2940). */
+const CUSTOM_ONLY_SECTIONS = ["Child Session Requests", "Workflow Decisions", "Human Required", "Evidence the Orchestrator Can't Inspect", "Campaign Behavior"];
+function assertOnlyFullControl(dialog: HTMLElement): void {
+  assert.deepEqual(sectionTitles(dialog), ["Orchestrator Control"]);
+  for (const title of CUSTOM_ONLY_SECTIONS) assert.equal(sectionTitles(dialog).includes(title), false, `${title} is hidden`);
+  assertNoDomNode(dialog.querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]'));
+  assertNoDomNode(dialog.querySelector('[role="radiogroup"][aria-label="Review Round Extensions"]'));
+  assertNoDomNode(dialog.querySelector(".orchestrator-gate-helper"), "no evidence or retention disclosure");
+  assert.match(dialog.textContent ?? "", /The Orchestrator runs this campaign end to end\./);
+}
+
+test("under Full Control the dialog shows only the mode, its line and Revoke, and the Custom sections return after Revoke", async () => {
+  const initial = fullControlProjection();
+  const revoked = { ...initial, orchestratorPolicy: { ...initial.orchestratorPolicy!, control: { mode: "custom" as const } },
+    orchestratorCampaign: { ...initial.orchestratorCampaign!, control: { mode: "custom" as const }, policyRevision: 4 },
+    parentControlPolicy: { ...initial.parentControlPolicy!, revision: 4 } } as SessionView;
+  const harness = await open(initial, { revokeCampaignControl: async () => revoked });
   const dialog = harness.dialog();
-  const text = dialog.textContent ?? "";
-  // Nothing editable that has no effect while Full Control decides.
-  assertNoDomNode(dialog.querySelector('[role="radiogroup"][aria-label="Child Session Requests"]'));
-  for (const label of Object.values(WORKFLOW_DECISION_LABELS)) assertNoDomNode(dialog.querySelector(`[role="radiogroup"][aria-label="${label}"]`));
-  const fact = (term: string) => [...dialog.querySelectorAll("dt")].find((node) => node.textContent === term)?.nextElementSibling?.textContent;
-  assert.equal(fact("PR Merge Approval"), "Orchestrator");
-  assert.equal(fact("Implementation Questions"), "HumanNot part of this campaign's authorization.",
-    "a saved Custom delegation outside the boundary is shown as the Human's, with why");
-  assert.equal(fact("UI Evidence Approval"), "HumanNo image reader.", "the evidence fallback reason is the server's");
-  assert.equal(fact("Questions"), "Human");
-  assert.equal(fact("One-Time Approvals"), "Human");
-  assert.match(text, /Your Custom choice, Questions and Approvals, applies again only after you revoke Full Control\./);
-  assert.match(text, /Your per-gate choices apply again only after you revoke to Custom\./);
-  // Only what truly remains comes to the Human (#2940): evidence this authorization keeps human,
-  // and the person's own Human Required rules. An older server's absent list still discloses those.
-  assert.match(text, /UI Evidence Review: No image reader\./);
-  assert.match(text, /Human Required Governance Rules: Asks from rules you marked Human Required still come to you under Full Control\./);
-  assert.doesNotMatch(text, /Secrets and Sign-In|Relative Shell Commands|Git Commands|Persistent Permission Grants/);
-  assert.match(text, /Requests for credentials, sign-in, wider provider access or a lasting permission grant are declined automatically and shown as blocked work in Campaign Status\. You are not asked\./);
-  assert.match(text, /credentials, sign-in or wider access are declined as blocked work/);
-  assert.ok([...dialog.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"));
+  assert.match(dialog.textContent ?? "", /Effective Mode: Full Control/);
+  assertOnlyFullControl(dialog);
+  assert.deepEqual(footerButtons(dialog), ["Done"]);
+  await act(async () => [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+    .find((node) => node.textContent?.trim() === "Revoke Full Control")!.click());
+  assert.match(dialog.textContent ?? "", /Effective Mode: Custom/);
+  for (const title of ["Child Session Requests", "Workflow Decisions", "Campaign Behavior"]) {
+    assert.ok(sectionTitles(dialog).includes(title), `${title} returns under Custom`);
+  }
+  assert.ok(dialog.querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]'));
 });
 
-test("under Full Control with no Human Required rule and delegated evidence, nothing comes to the Human", async () => {
-  const view = fullControlProjection();
-  const harness = await open({ ...view, orchestratorCampaign: { ...view.orchestratorCampaign!, fullControlHumanRequired: [],
-    decisionOwners: { ...view.orchestratorCampaign!.decisionOwners, ui_evidence_approval: "orchestrator" as const },
-    uiEvidenceReview: { status: "available" as const, effectiveOwner: "orchestrator" as const } } } as SessionView, {});
-  const section = [...harness.dialog().querySelectorAll("section")]
-    .find((candidate) => candidate.querySelector(".section-title")?.textContent === "Human Required")!;
-  assert.match(section.textContent ?? "", /^Human RequiredNothing comes to you under Full Control\.Requests for credentials/);
-  assertNoDomNode(section.querySelector("ul"));
-});
-
-test("under Full Control the video line follows the server's campaign fact, and neither video nor external evidence reaches the Human", async () => {
-  const section = (dialog: Element, title: string) => [...dialog.querySelectorAll("section")]
-    .find((candidate) => candidate.querySelector(".section-title")?.textContent === title)?.textContent ?? "";
-  const humanRequired = (dialog: Element) => section(dialog, "Human Required");
-  const uninspectable = (dialog: Element) => section(dialog, "Evidence the Orchestrator Can't Inspect");
-  const withVideo = (videoEvidenceReview?: { status: "available" | "unavailable"; reason: string }) => {
-    const view = fullControlProjection();
-    return { ...view, orchestratorCampaign: { ...view.orchestratorCampaign!,
-      decisionOwners: { ...view.orchestratorCampaign!.decisionOwners, ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" as const },
-      uiEvidenceReview: { status: "available" as const, effectiveOwner: "orchestrator" as const },
-      ...(videoEvidenceReview ? { videoEvidenceReview } : {}) } } as SessionView;
-  };
-  const certified = "The Orchestrator hands video evidence to the certified media-only reviewer and decides from its verdict.";
-  // The retention disclosure's video sentence follows the same fact, so the two never contradict.
-  const disclosure = (dialog: Element) => [...dialog.querySelectorAll(".orchestrator-gate-helper")]
-    .find((node) => node.textContent?.includes("evidence images are sent to its selected model/provider"))?.textContent ?? "";
-  // So does Campaign Behavior's evidence notice.
-  const behaviorNotice = (dialog: Element) => [...dialog.querySelectorAll(".notice")]
-    .find((node) => node.textContent?.includes("reviews image evidence attached as Session artifacts"))?.textContent ?? "";
-  const external = /External Evidence Review: The Orchestrator can't open evidence stored outside private Session artifacts \(links only\), so it asks for screenshots or denies the claim as unproven\./;
-  let harness = await open(withVideo({ status: "available", reason: certified }), {});
-  let dialog = harness.dialog();
-  assert.match(disclosure(dialog), /In this campaign, video evidence attached as a Session artifact goes to the certified media-only reviewer instead/);
-  assert.doesNotMatch(disclosure(dialog), /requires human review/, "a certified campaign's disclosure does not send video to a person");
-  assert.match(behaviorNotice(dialog), /Video goes to this campaign's certified media-only reviewer\./);
-  assert.match(behaviorNotice(dialog), /Under Full Control, externally stored evidence never goes to a person either\./);
-  assert.doesNotMatch(humanRequired(dialog), /Video Evidence Review|External Evidence Review/);
-  assert.doesNotMatch(uninspectable(dialog), /Video Evidence Review/, "certified video is inspectable");
-  assert.match(uninspectable(dialog), external);
-  assert.ok([...dialog.querySelectorAll(".orchestrator-gate-helper")].some((node) =>
-    node.textContent === `Video Evidence Review: ${certified}`), "the delegation is stated where the gates are");
-  await harness.unmount();
-
-  const uncertified = "The Orchestrator can't watch video because no current live proof certifies the media-only reviewer on the Orchestrator's machine. It asks for screenshots or denies the claim as unproven.";
-  harness = await open(withVideo({ status: "unavailable", reason: uncertified }), {});
-  dialog = harness.dialog();
-  assert.ok(uninspectable(dialog).includes(`Video Evidence Review: ${uncertified}`), "the server's reason is shown");
-  assert.doesNotMatch(humanRequired(dialog), /Video Evidence Review|External Evidence Review/);
-  assert.match(disclosure(dialog), /In this campaign, video evidence is never sent to a person: the Orchestrator asks for screenshots instead or denies the claim as unproven\./);
-  assert.doesNotMatch(disclosure(dialog), /certified media-only reviewer|requires human review/);
-  assert.match(behaviorNotice(dialog), /It asks for screenshots instead of video it can't watch, or denies the claim as unproven\./);
-  assert.doesNotMatch(behaviorNotice(dialog), /normally goes to a person|Externally stored evidence goes to a person/);
-  assert.ok(![...dialog.querySelectorAll(".orchestrator-gate-helper")].some((node) => node.textContent?.startsWith("Video Evidence Review")));
-  await harness.unmount();
-
-  harness = await open(withVideo(), {});
-  dialog = harness.dialog();
-  assert.match(uninspectable(dialog), /Video Evidence Review: The Orchestrator can't watch video yet, so it asks for screenshots or denies the claim as unproven\./,
-    "an older server without the fact still never routes video to the Human under Full Control");
-  assert.match(disclosure(dialog), /video evidence is never sent to a person/, "and neither does its disclosure");
-  assert.match(uninspectable(dialog), external);
-});
-
-test("under Full Control without a reported projection, owners are Not Reported rather than guessed", async () => {
-  const harness = await open(fullCampaign(), {});
-  const fact = (term: string) => [...harness.dialog().querySelectorAll("dt")].find((node) => node.textContent === term)?.nextElementSibling?.textContent;
-  assert.equal(fact("PR Merge Approval"), "Not Reported");
-  assertNoDomNode(harness.dialog().querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]'));
+test("choosing Full Control on a Custom campaign hides the Custom sections until Custom is chosen again", async () => {
+  const harness = await open(orchestrator(), {});
+  const dialog = harness.dialog();
+  assert.ok(sectionTitles(dialog).includes("Workflow Decisions"));
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  assertOnlyFullControl(dialog);
+  assert.match(dialog.textContent ?? "", /Effective Mode: Custom/, "nothing changes until Enable Full Control");
+  assert.deepEqual(footerButtons(dialog), ["Done", "Enable Full Control"]);
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+  for (const title of ["Child Session Requests", "Workflow Decisions", "Campaign Behavior"]) assert.ok(sectionTitles(dialog).includes(title));
+  assert.ok(dialog.querySelector('[role="radiogroup"][aria-label="Review Round Extensions"]'));
+  assert.deepEqual(footerButtons(dialog), ["Done"]);
 });
 
 /** A descendant whose root's control the server does not report: its copied policy delegates two

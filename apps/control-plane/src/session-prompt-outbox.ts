@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { awaitsFirstMessage } from "./campaign-launch-admission.js";
 import {
   CODEX_EXEC_RETIRED_REASON,
   isDurableSessionCommandErrorCode,
@@ -45,8 +46,9 @@ export class SessionPromptOutbox {
     runnerId: string,
     command: DurableSessionCommand,
     now = Date.now(),
+    /** A caller-chosen identity, such as a Full Control first message's delivery id (#2940). */
+    commandId = `prompt_${randomUUID()}`,
   ): SessionPromptCommandRecord {
-    const commandId = `prompt_${randomUUID()}`;
     const payloadJson = canonicalAutomationCommandJson(command);
     return this.db.stageSessionPromptCommand({
       commandId,
@@ -195,6 +197,15 @@ export class SessionPromptOutbox {
       // A prompt or answer queued for a persisted exec session before the retirement (#3259) never
       // reaches a runner that may still resume that driver. One already sent may have landed.
       const target = this.db.getSession(row.sessionId);
+      // Retained work never runs before a Full Control campaign's first owner message (#2940); it
+      // stays queued and runs once that message is established. The message's own durable command,
+      // admitted under its delivery id, is that delivery and runs.
+      const first = target?.orchestratorPolicy?.firstMessageScope;
+      const ownDelivery = first?.state === "delivering" && first.deliveryId === row.commandId;
+      if (awaitsFirstMessage(target?.orchestratorPolicy) && !ownDelivery) {
+        this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
+        continue;
+      }
       if (target && isRetiredCodexExec(target)) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,

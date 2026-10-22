@@ -5026,7 +5026,7 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
   // control; an agent parent sending to a descendant has neither, which is why its mid-turn
   // message used to vanish (#1406). Give only the agent lane the steer-first admission.
   if (human) {
-    const result = svc.promptFromUser(human.userId, id, text, images, slashCommand, body?.config,
+    const result = await svc.promptFromHuman(human, id, text, images, slashCommand, body?.config,
       typeof body?.reviewedResultRevision === "string" ? body.reviewedResultRevision : undefined);
     return respond(reply, result.ok && result.data ? { ...result, data: withSessionCommandPermissions(db, human,
       { ...result.data, attention: db.getSession(id)?.attention }) } : result);

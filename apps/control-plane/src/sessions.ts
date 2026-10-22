@@ -16,7 +16,8 @@ import type { HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
+import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
@@ -1721,6 +1722,10 @@ export class SessionsService {
   /** Armed merge occurrences whose lifecycle-end forge read is in flight. */
   private readonly forgeMergeSettlements = new Set<string>();
   private readonly archiveWorktreeRetirements = new Set<string>();
+  /** Full Control campaigns whose first message is being established (#2940). */
+  private readonly firstMessagesInFlight = new Set<string>();
+  /** The one session whose established first message is being admitted right now. */
+  private firstMessageDelivery: string | null = null;
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -1762,6 +1767,7 @@ export class SessionsService {
     this.db.pauseInterruptedPodOrchestrations(Date.now());
     this.db.failInterruptedPodReconciliations(Date.now());
     this.db.settleInterruptedSteeringAttempts(Date.now());
+    this.recoverFirstMessageDeliveries(Date.now());
     this.db.compactSteeringAttempts(Date.now());
     this.maintainSessionCommands(Date.now());
     this.reconcileReviewSessionDisposal(undefined, true);
@@ -3952,6 +3958,10 @@ export class SessionsService {
         /** Minted against the new root id only when every launch peer declares the private
          * media contract; screenshot review never depends on it. */
         evidenceAuthority?: EvidenceAuthorityProposal;
+        /** The launch named no task (#2940): the root starts idle, like any Orchestrator, and its
+         * owner's first message sets the objective and issue scope before its first turn. Only
+         * the limits it derived (no Human override) may grow to fit that message's issues. */
+        firstMessage?: { derivedLimits: import("@wollipog/protocol").FullControlDerivedLimits };
       };
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
@@ -4663,6 +4673,12 @@ export class SessionsService {
     if (orchestratorPolicy && (orchestratorIssueNumbers.length || inheritedIssueScope)) {
       orchestratorPolicy.issueNumbers = [...orchestratorIssueNumbers];
     }
+    // Provenance for Full Control enable (#2940): these numbers came from the authenticated Human's
+    // own create request, not an inherited scope, a snapshot, a staged delivery or a later backfill.
+    if (orchestratorPolicy && orchestratorIssueNumbers.length && !inheritedIssueScope && !snapshotSpec?.orchestrator?.issueNumbers &&
+        !campaignIssueNumbers && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand && !delivery) {
+      orchestratorPolicy.issueNumbersSource = "human_launch_request";
+    }
     let text = requestedText;
     if (!snapshotCommand && campaignController?.orchestratorPolicy && (requestedText || images.length > 0)) {
       const campaign = this.db.campaignProjection(campaignController.id);
@@ -4793,11 +4809,15 @@ export class SessionsService {
           rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired))) {
         return fail("unknown, disabled or Human Required policy asks cannot enter the launch boundary", 400);
       }
+      if (humanLaunch.firstMessage && (requestedText || humanLaunch.issueScope.issueNumbers.length)) {
+        return fail("a first-message launch starts with a task-only scope and no initial prompt", 409);
+      }
       orchestratorPolicy.control = control;
       orchestratorPolicy.issueScope = structuredClone(humanLaunch.issueScope);
       orchestratorPolicy.issueNumbers = [...humanLaunch.issueScope.issueNumbers];
+      if (humanLaunch.firstMessage) orchestratorPolicy.firstMessageScope = { state: "pending", derivedLimits: { ...humanLaunch.firstMessage.derivedLimits } };
       parentControlPolicy = { decisions: structuredClone(orchestratorPolicy.delegation.decisions) };
-      text = requestedText || control.boundary.objective;
+      text = humanLaunch.firstMessage ? "" : requestedText || control.boundary.objective;
     }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
@@ -5016,6 +5036,8 @@ export class SessionsService {
     slashCommand?: string,
     config?: SessionConfig,
     reviewedResultRevision?: string,
+    /** Internal: a Full Control first message's own durable identity (#2940). */
+    binding?: Parameters<SessionsService["prompt"]>[8],
   ): ServiceResult<PromptAdmissionView> {
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
@@ -5032,6 +5054,7 @@ export class SessionsService {
       undefined,
       "session",
       true,
+      binding,
     );
     if (!result.ok) return result;
     if (reviewedResultRevision && this.db.acknowledgeSessionResult(sessionId, userId, reviewedResultRevision)) {
@@ -5046,6 +5069,208 @@ export class SessionsService {
     );
     if (removed.kind === "removed") this.hub.sessionReminderRemoved(userId, sessionId);
     return result;
+  }
+
+  /** A Full Control campaign launched without a task waits for its owner's first message (#2940),
+   * and stays fenced while that message is delivered. Both states are durable, so the fence
+   * survives a control-plane restart. */
+  private awaitingFirstMessage(session: SessionView | null | undefined): boolean {
+    return awaitsFirstMessage(session?.orchestratorPolicy);
+  }
+
+  /** Every ingress that can start a provider turn refuses while the campaign waits for its owner's
+   * first message, except that message's own delivery. */
+  private firstMessageFence(sessionId: string, session = this.db.getSession(sessionId)): string | null {
+    return this.firstMessageDelivery !== sessionId && (this.awaitingFirstMessage(session) || this.firstMessagesInFlight.has(sessionId))
+      ? "This Full Control campaign starts from its owner's first message." : null;
+  }
+
+  /** At startup, a first message whose delivery the last process never settled: one admitted to
+   * the durable queue stays `delivering`, and the queue sends it ahead of any older held work until
+   * the runner acknowledges it; one never admitted reopens the wait, still fenced. It is never
+   * resent, so no duplicate turn can start. */
+  private recoverFirstMessageDeliveries(now: number): void {
+    for (const { sessionId } of this.db.firstMessageDeliveries()) this.reconcileFirstMessageDelivery(sessionId, now, true);
+  }
+
+  /** The runner's acknowledgement of the first message's exact command opens the fence (#2940):
+   * accepted or later settles it as established and releases held work; a known failure or an
+   * uncertain delivery reopens the wait. A command still pending or sent keeps every other
+   * ingress and queued command closed, so nothing can reach the runner before the owner's
+   * message. A delivery with no admitted command reopens only when `orphaned` (at startup). */
+  private reconcileFirstMessageDelivery(sessionId: string, now: number, orphaned = false): void {
+    const first = this.db.getSession(sessionId)?.orchestratorPolicy?.firstMessageScope;
+    if (first?.state !== "delivering") return;
+    // Settled by identity alone: any acknowledged-or-later state of this exact command, including a
+    // completed receipt that arrives first (it clears the stored payload).
+    const state = this.db.firstMessageDeliveryState(sessionId, first.deliveryId);
+    const acknowledged = state !== null && ["accepted", "queued", "started", "completed", "recorded"].includes(state);
+    const undelivered = state === null ? orphaned : state === "failed" || state === "uncertain";
+    if (!acknowledged && !undelivered) return;
+    if (!this.db.settleFirstMessageDelivery(sessionId, first.messageDigest, acknowledged, now)) return;
+    this.log.info(JSON.stringify({ event: "full_control_first_message_settled", sessionId, delivered: acknowledged,
+      commandState: state, messageDigest: first.messageDigest }));
+    if (acknowledged) this.promptOutbox.flush(now, this.db.getSession(sessionId)?.runnerId);
+    this.hub.sessionChangedById(sessionId);
+  }
+
+  /** The authenticated Human's message. To a Full Control campaign still waiting for its first
+   * message, it is the task (#2940): see `deliverFirstFullControlMessage`. */
+  async promptFromHuman(
+    principal: HumanPrincipal,
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[] = [],
+    slashCommand?: string,
+    config?: SessionConfig,
+    reviewedResultRevision?: string,
+  ): Promise<ServiceResult<PromptAdmissionView>> {
+    if (!this.awaitingFirstMessage(this.db.getSession(sessionId))) {
+      return this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+    }
+    if (this.firstMessagesInFlight.has(sessionId)) return fail("This campaign's first message is still being delivered; wait for it to appear.", 409);
+    this.firstMessagesInFlight.add(sessionId);
+    try {
+      return await this.deliverFirstFullControlMessage(principal, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+    } finally {
+      this.firstMessagesInFlight.delete(sessionId);
+    }
+  }
+
+  /** The owner's first message establishes the Full Control boundary the launch left task-only:
+   * the message is the objective, and the issue references it makes to the campaign's own
+   * repository that the runner verifies as issues become the scope. Scope and boundary commit as
+   * the next revisions, bound to the message digest, and reach the runner before the message does,
+   * so the Orchestrator's first turn already runs inside them. Only the Human who authorized the
+   * launch can do this; any other message is refused until then, so agent-authored text can never
+   * establish or widen the scope. A message that is not delivered reopens the wait. */
+  private async deliverFirstFullControlMessage(
+    principal: HumanPrincipal,
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[],
+    slashCommand: string | undefined,
+    config: SessionConfig | undefined,
+    reviewedResultRevision: string | undefined,
+  ): Promise<ServiceResult<PromptAdmissionView>> {
+    const session = this.db.getSession(sessionId)!;
+    const policy = session.orchestratorPolicy!;
+    const control = policy.control as Extract<CampaignControl, { mode: "full_control" }>;
+    if (principal.kind !== "human" || control.boundary.authorizedByUserId !== principal.userId ||
+        !this.db.isSessionOwner(principal, sessionId)) {
+      return fail("Only the person who started this Full Control campaign can send its first message.", 403);
+    }
+    if (!text.trim() || slashCommand) return fail("Send this campaign's task as its first message.", 409);
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    const repository = control.boundary.repository.toLowerCase();
+    const references = issueReferencesInMessage(text, repository);
+    const issueNumbers = references.length ? await this.verifiedMessageIssues(session, repository, references) : [];
+    const current = this.db.getSession(sessionId);
+    const revision = current?.parentControlPolicy?.revision ?? 0;
+    const scope = current?.orchestratorPolicy?.issueScope;
+    const currentControl = current?.orchestratorPolicy?.control;
+    const pending = current?.orchestratorPolicy?.firstMessageScope;
+    if (!current || pending?.state !== "pending" || !this.awaitingFirstMessage(current) || !scope || currentControl?.mode !== "full_control" ||
+        currentControl.boundary.revision !== revision) {
+      return fail("This campaign's authorization changed; send the message again.", 409);
+    }
+    const now = Date.now();
+    const messageDigest = firstMessageDigest(text);
+    // The durable prompt command the message is admitted as: its exact identity, chosen up front.
+    const deliveryId = `first_message_${randomUUID()}`;
+    const scoped = firstMessageIssues(currentControl.boundary, issueNumbers, pending.derivedLimits);
+    const nextScope: CampaignIssueScope = { repository: scope.repository, issueNumbers: scoped, revision: scope.revision + 1,
+      authorizedByUserId: principal.userId, authorizedAt: now };
+    const nextControl: CampaignControl = { mode: "full_control", boundary: firstMessageBoundary(currentControl.boundary,
+      current.orchestratorPolicy!.behavior.followUps, scoped, firstMessageObjective(text), revision + 1, nextScope.revision, now,
+      pending.derivedLimits) };
+    let established: boolean;
+    try {
+      established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, messageDigest, deliveryId,
+        expectedRevision: revision, now });
+    } catch (error) { return fail((error as Error).message, 409); }
+    if (!established) return fail("This campaign's authorization changed; send the message again.", 409);
+    this.log.info(JSON.stringify({ event: "full_control_first_message_scope", sessionId, policyRevision: revision + 1,
+      scopeRevision: nextScope.revision, referencedIssues: references.length, scopedIssues: scoped.length, messageDigest }));
+    // A runner that misses this keeps its older revision, which authorizes no issue write; every
+    // issue operation synchronizes again before it acts.
+    await this.synchronizeCampaignIssueScope(sessionId);
+    this.firstMessageDelivery = sessionId;
+    let result: ServiceResult<PromptAdmissionView>;
+    try {
+      // Admitted to the durable queue under its delivery id, where it stays held until established.
+      result = this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision, {
+        durable: true,
+        stage: (runnerId, command, at) => this.promptOutbox.stage(sessionId, runnerId, command, at, deliveryId),
+        claimImmediate: () => true,
+      });
+    } finally { this.firstMessageDelivery = null; }
+    if (!result.ok) {
+      this.db.settleFirstMessageDelivery(sessionId, messageDigest, false, Date.now());
+    } else if (this.db.getSessionPromptCommand(deliveryId)) {
+      // Admitted to the durable queue: the fence stays closed until the runner acknowledges it.
+      this.reconcileFirstMessageDelivery(sessionId, Date.now());
+    } else {
+      // A runner without durable queue identity took it on the session's ordered socket at once.
+      this.db.settleFirstMessageDelivery(sessionId, messageDigest, true, Date.now());
+      this.promptOutbox.flush(Date.now(), session.runnerId);
+    }
+    this.hub.sessionChangedById(sessionId);
+    return result;
+  }
+
+  /** Enabling Full Control on a campaign with no issue scope derives one (#2940): the runner's
+   * repository and the issues the server recorded from the owner's own launch request, as the
+   * runner verifies them. Without such issues the scope is task-only and the owner's next message,
+   * through the fenced first-message path, is the task. Null when the repository cannot be verified. */
+  async campaignScopeFromFirstMessage(sessionId: string): Promise<{ repository: string; issueNumbers: number[]; firstMessage: boolean } | null> {
+    const root = this.db.getSession(sessionId);
+    if (!root?.orchestratorPolicy || root.orchestratorPolicy.issueScope || !this.hub.isRunnerOnline(root.runnerId)) return null;
+    let repository: string | undefined;
+    try {
+      const requestId = `full_control_scope_${randomUUID()}`;
+      const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+        { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId }, 30_000);
+      if (response.type === "campaign_issue_scope_result" && response.ok && response.sessionId === sessionId &&
+          typeof response.repository === "string" && /^[\w.-]+\/[\w.-]+$/u.test(response.repository)) repository = response.repository.toLowerCase();
+    } catch { /* An unreachable runner verifies no repository. */ }
+    if (!repository) return null;
+    // Transcript messages record no author, and a restart backfill reads the transcript, so only
+    // numbers the server marked as the Human's own launch request count. Anything else waits for
+    // the owner's next message.
+    const trusted = root.orchestratorPolicy.issueNumbersSource === "human_launch_request" ? root.orchestratorPolicy.issueNumbers ?? [] : [];
+    const candidates = [...new Set(trusted)].sort((a, b) => a - b).slice(0, 100);
+    const issueNumbers = candidates.length ? await this.verifiedMessageIssues(root, repository, candidates) : [];
+    // Only a fresh root waits for its owner's first message. A campaign with any history is
+    // established at once, task-only without trusted issues, and its retained work runs under it.
+    return { repository, issueNumbers, firstMessage: issueNumbers.length === 0 && !this.db.sessionHasConversationHistory(sessionId) };
+  }
+
+  /** The referenced issues the runner reads as issues of the campaign repository. A pull request,
+   * a missing issue or an unreadable one is left out; an unreachable runner verifies none. */
+  private async verifiedMessageIssues(root: SessionView, repository: string, numbers: number[]): Promise<number[]> {
+    const inspect = async (issues: number[]): Promise<number[] | "refused" | "unavailable"> => {
+      const requestId = `first_message_issues_${randomUUID()}`;
+      try {
+        const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+          { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId: root.id, issues }, 30_000);
+        if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id) return "unavailable";
+        if (!response.ok || response.repository?.toLowerCase() !== repository) return "refused";
+        return issues.filter((n) => response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === repository));
+      } catch { return "unavailable"; }
+    };
+    const all = await inspect(numbers);
+    if (Array.isArray(all)) return all;
+    if (all === "unavailable" || numbers.length === 1) return [];
+    // One reference that is not an issue refuses the whole read, so read each one on its own.
+    const kept: number[] = [];
+    for (let offset = 0; offset < numbers.length; offset += 4) {
+      const batch = numbers.slice(offset, offset + 4);
+      const results = await Promise.all(batch.map((n) => inspect([n])));
+      if (results.includes("unavailable")) break;
+      results.forEach((result, index) => { if (Array.isArray(result) && result.length) kept.push(batch[index]!); });
+    }
+    return kept;
   }
 
   /** A campaign child's assignment carries its Orchestrator's server-derived policy preamble. It
@@ -5194,6 +5419,8 @@ export class SessionsService {
       stage: (runnerId: string, command: DurableSessionCommand, now: number) => SessionPromptCommandRecord;
       claimImmediate: () => boolean;
       admitAs?: "queued";
+      /** Always admit through the durable queue when the runner supports its identity. */
+      durable?: boolean;
     },
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
@@ -5209,6 +5436,10 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    // Only its owner's first message can start a Full Control campaign launched without a task
+    // (#2940); nothing an agent or automation sends may reach it first.
+    const firstMessageRefusal = this.firstMessageFence(sessionId, session);
+    if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     // An older runner would still resume a persisted exec session for this turn (#3259).
     if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
@@ -5444,7 +5675,8 @@ export class SessionsService {
       runnerSupportsProtocol(
         this.db.getRunner(session.runnerId)?.protocolVersion,
         "worktreeRecovery",
-      ));
+      )) || (binding?.durable === true && !delivery &&
+        runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "durablePromptQueueIdentity"));
     if (durablePrompt) {
       try {
         if (binding) binding.stage(session.runnerId, command, now);
@@ -5503,6 +5735,10 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.campaignRecovery.maintain(now, runnerId);
+    // A first message whose command expired or failed without a receipt reopens its wait.
+    for (const { sessionId } of this.db.firstMessageDeliveries()) {
+      if (!this.firstMessagesInFlight.has(sessionId)) this.reconcileFirstMessageDelivery(sessionId, now);
+    }
     this.maintainCampaignContinuations(now, runnerId);
     // A receipt recorded just before a restart may never have reached its decision's resume.
     for (const commandId of this.db.settledWorkflowDecisionResumeCommands(runnerId)) {
@@ -5539,6 +5775,8 @@ export class SessionsService {
   ): boolean {
     const handled = this.promptOutbox.receipt(runnerId, message);
     if (handled) {
+      const first = this.db.getSession(message.sessionId)?.orchestratorPolicy?.firstMessageScope;
+      if (first?.state === "delivering" && first.deliveryId === message.commandId) this.reconcileFirstMessageDelivery(message.sessionId, Date.now());
       this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
       this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
       this.reconcileRestartNoticeCommand(message.commandId, Date.now());
@@ -5555,6 +5793,8 @@ export class SessionsService {
       if (active) continue;
       const campaign = this.db.campaignContinuationLifecycle(campaignSessionId);
       if (!campaign || campaign.archived || campaign.status !== "idle" || campaign.hasPendingApproval) continue;
+      // Only its owner's first message may start a Full Control campaign launched without a task (#2940).
+      if (this.firstMessageFence(campaignSessionId)) continue;
       if (this.db.campaignContinuationAdmission(campaignSessionId).state !== "available") continue;
       if (!this.db.hasPendingCampaignContinuationEvents(campaignSessionId)) continue;
       const projection = this.db.campaignProjection(campaignSessionId);
@@ -5816,6 +6056,8 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const firstMessageRefusal = this.firstMessageFence(sessionId, session);
+    if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     const candidate = this.promptOutbox.retryableKnownUndeliveredPrompt(sessionId, commandId);
     if (candidate === "not_found") return fail("pending prompt not found", 404);
     if (candidate === "not_retryable") {
@@ -6181,6 +6423,9 @@ export class SessionsService {
 
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    // A provider command can start a turn of its own, so it waits for the owner's first message too.
+    const firstMessageRefusal = this.firstMessageFence(sessionId, session);
+    if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     const existing = this.db.getSessionCommandInvocationBySubmission(sessionId, request.submissionId);
     if (existing) {
       if (existing.providerCommandId !== request.providerCommandId ||
@@ -6430,6 +6675,8 @@ export class SessionsService {
     this.db.compactSteeringAttempts(Date.now());
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const firstMessageRefusal = this.firstMessageFence(sessionId, session);
+    if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     if (!request || typeof request.submissionId !== "string" || !request.submissionId.trim() ||
         request.submissionId.length > 256 || request.submissionId.trim() !== request.submissionId) {
       return fail("submissionId must be a non-empty identifier", 400);
@@ -8338,7 +8585,13 @@ export class SessionsService {
     issueAuthority?: CampaignAuthorityBoundary["issueAuthority"];
     budgetAuthority?: CampaignAuthorityBoundary["budgetAuthority"];
     evidenceAuthority?: EvidenceAuthorityProposal;
-  }, expectedRevision: number, principal: HumanPrincipal): ServiceResult<SessionView> {
+  }, expectedRevision: number, principal: HumanPrincipal,
+  /** Enable only, for a campaign with no issue scope yet (#2940): the scope the server derived
+   * from the runner's repository and the campaign's first message, which this Human establishes
+   * with the boundary. `firstMessage` when no message has been sent: the next one is the task. */
+  derivedScope?: { repository: string; issueNumbers: number[]; firstMessage: boolean },
+  /** This authorization's own limit provenance, which a waiting campaign keeps (#2940). */
+  derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
@@ -8346,8 +8599,17 @@ export class SessionsService {
     if (!proposal || typeof proposal !== "object" || Array.isArray(proposal) || !["custom", "full_control"].includes(proposal.mode)) return fail("invalid campaign control mode", 400);
     if (proposal.mode === "custom" && Object.keys(proposal).some((key) => key !== "mode")) return fail("Custom has no authority boundary", 400);
     if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
-    const scope = session.orchestratorPolicy?.issueScope;
+    // A reauthorization cannot race the first message it would bound (#2940).
+    if (proposal.mode === "full_control" && (this.firstMessagesInFlight.has(sessionId) ||
+        session.orchestratorPolicy?.firstMessageScope?.state === "delivering")) {
+      return fail("The first message is being delivered; try again in a moment.", 409);
+    }
     const now = Date.now();
+    const storedScope = session.orchestratorPolicy?.issueScope;
+    if (derivedScope && (storedScope || proposal.mode !== "full_control")) return fail("the campaign's issue scope changed; refresh and retry", 409);
+    const mintedScope: CampaignIssueScope | undefined = derivedScope ? { repository: derivedScope.repository.toLowerCase(),
+      issueNumbers: [...derivedScope.issueNumbers].sort((a, b) => a - b), revision: 1, authorizedByUserId: principal.userId, authorizedAt: now } : undefined;
+    const scope = storedScope ?? mintedScope;
     const control = proposal.mode === "custom" ? { mode: "custom" as const } : scope &&
       authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
@@ -8397,8 +8659,13 @@ export class SessionsService {
     }
     const outstanding = this.db.unconsumedWorkflowDecisionsForController(sessionId);
     try {
-      if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now)) return fail("campaign authority revision changed; refresh and retry", 409);
+      if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now,
+        mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage } : undefined,
+        proposal.mode === "full_control" ? derivedLimits : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
+    // The runner holds the scope it enforces issue writes against; each issue operation also
+    // synchronizes again before it acts.
+    if (mintedScope) void this.synchronizeCampaignIssueScope(sessionId);
     for (const id of this.db.campaignBudgets.members(sessionId)) this.syncCampaignAllocation(id);
     this.recoverCampaignReviewJobs(session.runnerId);
     if (this.db.campaignBudgets.view(sessionId)?.state !== "active") this.enforceCampaignBudget(sessionId, now);

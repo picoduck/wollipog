@@ -76,7 +76,7 @@ import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
 import { statusMeta } from "../status-meta.js";
 import { Notice } from "./Notice.js";
-import { FullControlLaunchPanel, type FullControlAuthorization } from "./FullControlPreparation.js";
+import { FullControlBlockedError, launchFullControlCampaign } from "./FullControlPreparation.js";
 import {
   evaluateOrchestratorPolicy,
   policyDraftFromDefaults,
@@ -148,11 +148,11 @@ type ProblemField = "project" | "location" | "machine" | "folder" | "agent" | "r
 type ProblemControl =
   | "project" | "location" | "add-location" | "machine" | "folder" | "browse" | "agent" | "account"
   | "retained-session" | "open-connections" | "role" | "defaults" | "orchestrator-retry" | "orchestrator"
-  | "full-control" | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
+  | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
 
 /** The controls that live inside Options, which a submit problem opens before focusing. */
 const OPTIONS_CONTROLS: ReadonlySet<ProblemControl> = new Set<ProblemControl>([
-  "role", "defaults", "orchestrator-retry", "orchestrator", "full-control",
+  "role", "defaults", "orchestrator-retry", "orchestrator",
   "harness", "mode", "execution-target", "cloud-budget",
 ]);
 
@@ -328,7 +328,6 @@ export function NewSessionDialog({
   // The tab the Orchestrator Policy dialog opens on, while it is open.
   const [editingPolicy, setEditingPolicy] = useState<OrchestratorPolicyTab | null>(null);
   const customizeRef = useRef<HTMLButtonElement>(null);
-  const [fullControlAuthorization, setFullControlAuthorization] = useState<FullControlAuthorization | null>(null);
   const [harnessDefaults, setHarnessDefaults] = useState<{
     api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
   } | null>(null);
@@ -960,8 +959,9 @@ export function NewSessionDialog({
     (!orchestrator || (orchestratorSupported && orchestratorSettingsReady && !policyProblem)) &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
   const controlPreview = policyDraft.controlMode;
-  const valid = launchSelectionValid && (!orchestrator || controlPreview !== "full_control");
-  // Full Control never falls back to ordinary creation: its one action authorizes the reviewed preflight.
+  const valid = launchSelectionValid;
+  // Full Control starts like any Orchestrator (#2940); only the server's launch route admits it,
+  // never ordinary creation, and the person's first message in the session is its task.
   const fullControlLaunch = orchestrator && orchestratorSettingsReady && controlPreview === "full_control";
   // The chosen location, as the Location field reports it: why it can't host the session, if it can't.
   const selectedLocationProblem = selectedProjectLocation && !projectLocationLaunchable
@@ -1044,7 +1044,6 @@ export function NewSessionDialog({
     defaults: '[data-validation-target="defaults"]',
     "orchestrator-retry": 'button[data-validation-target="orchestrator-retry"]',
     orchestrator: 'button[data-validation-target="orchestrator-policy"]',
-    "full-control": 'section[aria-label="Full Control Launch"] textarea',
     harness: '.seg[aria-label="Harness"] > .seg-option:not([aria-disabled="true"])',
     mode: '.seg[aria-label="Working Copy"] > .seg-option[aria-checked="true"]',
     "execution-target": 'button[aria-label^="Run On:"]',
@@ -1148,25 +1147,8 @@ export function NewSessionDialog({
       const control = focusValidationProblem(...controls);
       setFieldProblem(message ? { field, message, control } : null);
     };
-    if (fullControlLaunch) {
-      if (!fullControlAuthorization?.ready) {
-        report("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom in Orchestrator Policy.",
-          "full-control", "orchestrator");
-        return;
-      }
-      // The panel inside Options says why a launch did not start, so it must be on screen first.
-      if (!optionsOpen) flushSync(() => setOptionsOpen(true));
-      busyRef.current = true;
-      setBusy(true);
-      try { await fullControlAuthorization.authorize(); } catch { /* The panel shows why it did not start. */ }
-      finally { busyRef.current = false; setBusy(false); }
-      return;
-    }
     if (!valid) {
-      if (orchestrator && controlPreview === "full_control") {
-        report("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom in Orchestrator Policy.",
-          "full-control", "orchestrator", "orchestrator-retry", "role");
-      } else if (retainedSessionId) {
+      if (retainedSessionId) {
         // The failure notice above the footer already says a session was kept; Open Session is next.
         report("form", null, "retained-session");
       } else if (online.length === 0) {
@@ -1234,7 +1216,9 @@ export function NewSessionDialog({
     busyRef.current = true;
     setBusy(true);
     try {
-      const session = await api.createSession(buildSessionRequest());
+      const session = fullControlLaunch
+        ? await launchFullControlCampaign(api, buildSessionRequest())
+        : await api.createSession(buildSessionRequest());
       navigate({ name: "session", id: session.id });
       if (launchSurface === "native_tui") onOpenTerminal?.();
       onClose();
@@ -1247,7 +1231,8 @@ export function NewSessionDialog({
         : null;
       if (keptSessionId) setRetainedSessionId(keptSessionId);
       setRequestFailure({
-        sentence: createFailureSentence(e, keptSessionId !== null),
+        // Only a genuine impossibility stops Full Control, and its reason is the sentence (#2940).
+        sentence: e instanceof FullControlBlockedError ? e.message : createFailureSentence(e, keptSessionId !== null),
         detail: e instanceof Error ? e.message : String(e),
       });
     } finally {
@@ -1533,9 +1518,6 @@ export function NewSessionDialog({
       ? [{ key: "policy-error", label: "Policy Not Loaded" }] : []),
     ...(orchestrator && orchestratorSettingsReady && policyProblem
       ? [{ key: "policy-invalid", label: "Policy Needs a Change" }] : []),
-    // Full Control's footer action is disabled until its preparation inside Options is ready, and
-    // only that preparation says what is missing.
-    ...(fullControlLaunch && !fullControlAuthorization?.ready ? [{ key: "full-control", label: "Full Control Not Ready" }] : []),
     ...(!cloudBudgetValid ? [{ key: "cloud-budget", label: "Budget Out of Range" }] : []),
   ];
 
@@ -1549,16 +1531,13 @@ export function NewSessionDialog({
       onKeyDown={submitOnModifiedEnter}
       footer={
         <>
-          {blockedReason && !fullControlLaunch && <p className="new-session-reason" id={blockedReasonId}>{blockedReason}</p>}
+          {blockedReason && <p className="new-session-reason" id={blockedReasonId}>{blockedReason}</p>}
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
-          {fullControlLaunch
-            ? <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Starting the campaign…"
-              disabled={!fullControlAuthorization?.ready}>Authorize and Start</BusyButton>
-            : <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Creating the session…"
-              disabled={!!blockedReason} data-validation-target="create"
-              aria-describedby={controlDescribedBy("create", blockedReason ? blockedReasonId : undefined)}>Create Session</BusyButton>}
+          <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Creating the session…"
+            disabled={!!blockedReason} data-validation-target="create"
+            aria-describedby={controlDescribedBy("create", blockedReason ? blockedReasonId : undefined)}>Create Session</BusyButton>
         </>
       }
     >
@@ -1754,17 +1733,6 @@ export function NewSessionDialog({
                   customizeRef={customizeRef}
                   onCustomize={() => setEditingPolicy(policyProblem?.tab ?? "behavior")}
                 />
-              )}
-              {/* Full Control's readiness and its one authorization stay in New Session, under the
-                  policy that chose it. */}
-              {fullControlLaunch && (
-                <div className="session-options-inset">
-                  <FullControlLaunchPanel request={buildSessionRequest} selectionValid={launchSelectionValid} disabled={busy}
-                    savedDefaults={orchestratorSettings?.view?.defaults ?? null}
-                    onAuthorization={setFullControlAuthorization}
-                    onCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
-                    onActivity={() => setFieldProblem(null)} />
-                </div>
               )}
               {orchestrator && orchestratorSettingsReady && fieldProblem?.field === "role" && (
                 <div className="session-options-inset">{problemFor("role")}</div>

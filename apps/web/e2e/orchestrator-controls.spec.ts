@@ -35,51 +35,23 @@ for (const viewport of [
   { name: "phone", width: 390, height: 844 },
 ] as const) {
   for (const theme of ["dark", "light"] as const) {
-    for (const video of ["certified", "uncertified"] as const) {
-      test(`${viewport.name} ${theme}: a ${video} Full Control campaign lists video from the server's fact and asks the Human for nothing`, async ({ page }) => {
-        await openFixture(page, viewport.width, viewport.height, `&fullControlFixture=1&video=${video}`);
+    for (const fixture of ["video=certified", "video=uncertified&humanRules=1"] as const) {
+      test(`${viewport.name} ${theme}: a Full Control campaign (${fixture}) shows only its mode, its line and Revoke`, async ({ page }) => {
+        await openFixture(page, viewport.width, viewport.height, `&fullControlFixture=1&${fixture}`);
         await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
         const dialog = await openControls(page);
-        const humanRequired = dialog.locator("section").filter({ has: page.getByRole("heading", { name: "Human Required", exact: true }) });
-        const uninspectable = dialog.locator("section").filter({ has: page.getByRole("heading", { name: "Evidence the Orchestrator Can't Inspect", exact: true }) });
-        // Full Control never routes evidence to the Human (#2940): the Orchestrator asks or denies.
-        await expect(humanRequired).toContainText("Nothing comes to you under Full Control.");
-        await expect(humanRequired).toContainText("declined automatically and shown as blocked work in Campaign Status. You are not asked.");
-        await expect(humanRequired).not.toContainText("Evidence Review");
-        await expect(uninspectable).toContainText("External Evidence Review: The Orchestrator can't open evidence stored outside private Session artifacts (links only), so it asks for screenshots or denies the claim as unproven.");
-        const helper = dialog.locator(".orchestrator-gate-helper").filter({ hasText: "Video Evidence Review:" });
-        // The retention disclosure's video sentence follows the same server fact as the delegation line.
-        const disclosure = dialog.locator(".orchestrator-gate-helper").filter({ hasText: "evidence images are sent to its selected model/provider" });
-        await expect(disclosure).toHaveCount(1);
-        if (video === "certified") {
-          await expect(uninspectable).not.toContainText("Video Evidence Review");
-          await expect(helper).toContainText("The Orchestrator hands video evidence to the certified media-only reviewer");
-          await expect(disclosure).toContainText("In this campaign, video evidence attached as a Session artifact goes to the certified media-only reviewer instead");
-          await expect(disclosure).not.toContainText("requires human review");
-        } else {
-          await expect(uninspectable).toContainText("Video Evidence Review: The Orchestrator can't watch video because no current live proof certifies");
-          await expect(helper).toHaveCount(0);
-          await expect(disclosure).toContainText("In this campaign, video evidence is never sent to a person: the Orchestrator asks for screenshots instead or denies the claim as unproven.");
-        }
-        await disclosure.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
-        await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-video-${video}-disclosure.png` });
-        await humanRequired.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
+        // The boundary owns every gate (#2940): no Custom owner, request choice, evidence note or stored behavior.
+        await expect(dialog.locator(".section-title")).toHaveText(["Orchestrator Control"]);
+        await expect(dialog).toContainText("Effective Mode: Full Control.");
+        await expect(dialog).toContainText("The Orchestrator runs this campaign end to end.");
+        await expect(dialog.getByRole("button", { name: "Revoke Full Control", exact: true })).toBeVisible();
+        await expect(dialog.locator(".orchestrator-gate-helper")).toHaveCount(0);
+        await expect(dialog.getByRole("radiogroup")).toHaveCount(0);
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         expect(overflow).toBeLessThanOrEqual(0);
-        await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-video-${video}.png` });
+        await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-full-control-${fixture.startsWith("video=certified") ? "certified" : "rules"}.png` });
       });
     }
-
-    test(`${viewport.name} ${theme}: a person's own Human Required rule is the one thing still listed for them`, async ({ page }) => {
-      await openFixture(page, viewport.width, viewport.height, "&fullControlFixture=1&video=uncertified&humanRules=1");
-      await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-      const dialog = await openControls(page);
-      const humanRequired = dialog.locator("section").filter({ has: page.getByRole("heading", { name: "Human Required", exact: true }) });
-      await expect(humanRequired.locator("li")).toHaveText(["Human Required Governance Rules: Asks from rules you marked Human Required still come to you under Full Control."]);
-      await expect(humanRequired).toContainText("declined automatically and shown as blocked work");
-      await humanRequired.evaluate((node) => node.scrollIntoView({ block: "start", behavior: "instant" }));
-      await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-human-required-rules.png` });
-    });
   }
 
   test(`${viewport.name}: the + menu has one Orchestrator Controls row and does not scroll`, async ({ page }) => {

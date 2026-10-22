@@ -740,7 +740,7 @@ export type {
 } from "./campaign-control-launch.js";
 export {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION,
-  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId,
+  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
@@ -2700,8 +2700,27 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
+  /** Set only when `issueNumbers` came from the authenticated Human's own launch request at
+   * creation. A restart backfill, a child or a transcript never sets it (#2940). */
+  issueNumbersSource?: "human_launch_request";
+  /** A Full Control boundary whose objective and issue scope come from its owner's first message
+   * (#2940). `pending` until that message arrives, `delivering` (durably fenced) while it is being
+   * delivered, then `established`, keeping the digest of the exact message. Server-owned: never
+   * accepted from a request, a child or an agent. */
+  firstMessageScope?: FullControlFirstMessageScope;
   sources: OrchestratorPolicySources;
 }
+
+/** Which launch limits were derived defaults rather than explicit Human ceilings. Only a derived
+ * limit grows to fit the first message's issues; an explicit ceiling never changes. */
+export interface FullControlDerivedLimits { acceptedFollowUps: boolean; maxIssues: boolean }
+
+export type FullControlFirstMessageScope =
+  | { state: "pending"; derivedLimits?: FullControlDerivedLimits }
+  /** `deliveryId` is the durable prompt command the message is admitted as, chosen before
+   * admission: only that exact command, carrying the digest, can settle this delivery. */
+  | { state: "delivering"; messageDigest: string; deliveryId: string; derivedLimits?: FullControlDerivedLimits }
+  | { state: "established"; messageDigest: string; establishedAt: number };
 
 /** `blocked` means nothing is progressing without intervention: every unverified child failed,
  * stopped, or is held, or the campaign's own continuation is stalled (see
