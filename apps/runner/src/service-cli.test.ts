@@ -779,11 +779,12 @@ test("upgrading a legacy runner unit preserves settings, enables delegation, and
 });
 
 test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost previously ready harness", { skip: process.platform !== "linux" }, async t => {
-  for (const problem of ["stale", "ownership", "unknown-ownership", "lost", "account-lost", "pending", "healthy", "already-blocked"]) await t.test(problem, async t => {
+  for (const problem of ["stale", "pre-restart-inventory", "ownership", "unknown-ownership", "lost", "account-lost", "pending", "healthy", "already-blocked"]) await t.test(problem, async t => {
     const f = fake(t);
     assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
     const fixture = releaseFixture(f);
     const host: ServiceHost = { ...fixture.host,
+      now: problem === "pre-restart-inventory" ? () => 100 : fixture.host.now,
       exec: async (command, args, options) => args[0] === "--version"
         ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" }
         : fixture.host.exec(command, args, options),
@@ -795,9 +796,9 @@ test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost pr
         body.appVersion = installed ? fixture.version : "0.22.0";
         for (const runner of body.runners.items) {
           runner.harnessReadiness = {
-            connectedAt: installed && problem !== "stale" ? 2 : 1,
+            connectedAt: installed && problem === "pre-restart-inventory" ? 50 : installed && problem !== "stale" ? 2 : 1,
             refreshed: !installed || problem !== "pending",
-            agents: [{ id: "claude", available: problem === "already-blocked" ? false : !installed || problem === "healthy" || problem === "account-lost",
+            agents: [{ id: "claude", available: problem === "already-blocked" ? false : !installed || problem === "healthy" || problem === "account-lost" || problem === "pre-restart-inventory",
               ownershipBlocked: problem === "already-blocked" || installed && (problem === "ownership" || problem === "unknown-ownership") }],
             accounts: [{ id: "account-1", authStatus: installed && problem === "account-lost" ? "unknown" : "authenticated" }],
           };

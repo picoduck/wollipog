@@ -1072,6 +1072,7 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
       }
     }
     if (runner) {
+      const runnerRestartStartedAt = host.now();
       const restart = await systemctl(host, mode, ["restart", runner.unit]);
       if (restart.code !== 0) throw await rollBack(`could not restart ${runner.unit}: ${restart.stderr.trim()}`);
       if (controlPlane && runnerId) {
@@ -1081,7 +1082,7 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
           const current = status.data?.runners?.items?.find(item => item.runnerId === runnerId);
           if (current?.status !== "online" || current.version !== release.version) return false;
           const readiness = current.harnessReadiness;
-          if (!readiness?.refreshed || readiness.connectedAt === null ||
+          if (!readiness?.refreshed || readiness.connectedAt === null || readiness.connectedAt <= runnerRestartStartedAt ||
               readiness.connectedAt === previousRunner?.harnessReadiness?.connectedAt) return false;
           if (readiness.agents.some(agent => agent.ownershipBlocked && !previouslyBlocked.has(agent.id))) {
             readinessProblem = "provider HOME ownership blocks harness discovery"; return false;
