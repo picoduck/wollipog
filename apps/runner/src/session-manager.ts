@@ -8792,7 +8792,7 @@ export class SessionManager {
       // failure, and its code chooses the recovery the session offers (#3240).
       const refusal = providerHomeLaunchRefusal(error, meta);
       if (refusal) {
-        this.emitEvent(sessionId, { kind: "error", message: `provider account unavailable: ${errText(error)}` });
+        this.emitEvent(sessionId, { kind: "error", message: `Account unavailable: ${errText(error)}` });
         this.emitStatus(sessionId, "failed", errText(error));
         this.recordProviderHomeRefusal(sessionId, refusal);
         return false;

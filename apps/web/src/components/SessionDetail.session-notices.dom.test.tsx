@@ -1207,3 +1207,21 @@ test("a composer error waits through a pending request and is still there after 
     await fixture.unmount();
   }
 });
+
+test("a legacy account lock explains the next step and opens account switching", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerHomeRefusal: {
+    ...launchRefusal("unverifiable"), cause: "process_uninspectable",
+  } }), { client: { sessionProviderAccounts: async () => ({ accounts: [] }) } as Partial<ApiClient> });
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Account Is Locked");
+    const text = notice.querySelector(".notice-body")?.textContent ?? "";
+    assert.match(text, /another program is still using Work/);
+    assert.match(text, /save your work and restart the machine/);
+    assert.doesNotMatch(text, /lease|journal|fallback|boundary|delegat|cgroup|inspectability/iu);
+    assert.deepEqual(actionNames(notice), ["Switch Account…", "Open Machine Accounts"]);
+    await act(async () => { fixture.button("Switch Account…")!.click(); });
+    await flush();
+    assert.ok(domWindow.document.querySelector('[role="dialog"]'));
+  } finally { await fixture.unmount(); }
+});

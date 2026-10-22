@@ -1114,7 +1114,7 @@ test("coded adoption refusals read as sentences, and uncoded ones keep the runne
 // Stale lease recovery (#3241).
 const LEASE_RECOVERY = RUNNER_CAPABILITY_MIN_PROTOCOL.providerHomeLeaseRecovery;
 const TIP = "c".repeat(64);
-const NO_REBOOT = "This lease was recorded since the machine last started and has no process evidence. Restart the machine, then recover it.";
+const NO_REBOOT = "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.";
 
 function leaseClient(options: { recover?: (accountId: string, tip: string) => Promise<unknown> } = {}) {
   const inspected: string[] = [];
@@ -1145,38 +1145,46 @@ test("authorized account diagnostics name the blocker and do not disable another
   const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: 235 }) });
   try {
     const title = ui.row("Other Work").querySelector(".provider-account-lease")?.getAttribute("title") ?? "";
-    assert.match(title, /systemd unit is not delegated/);
-    assert.match(title, /preserve the journal/);
-    assert.match(title, /PID 4242, start time 987654, uninspectable process, cgroup membership unavailable/);
+    assert.match(title, /can't check a running program/);
+    assert.match(title, /save your work and restart the machine/);
+    assert.doesNotMatch(title, /lease|journal|systemd|delegat|PID|cgroup|start time|fallback/iu);
     const menu = await ui.openMenu("Other Work");
-    assert.equal(ui.menuItems(menu).find(item => item.label === "Recover Lease…")?.reason, title);
+    assert.equal(ui.menuItems(menu).find(item => item.label === "Recover Account…")?.reason, title);
     await ui.closeMenu();
+    await ui.choose("Other Work", "View Recovery Details…");
+    const details = ui.dialog()!;
+    assert.match(details.textContent ?? "", /process_uninspectable_not_delegated/);
+    assert.match(details.textContent ?? "", /PID 4242, start time 987654, uninspectable process, cgroup membership unavailable/);
+    assert.match(details.textContent ?? "", /Keep the account's files and lease journal intact/);
+    assert.deepEqual(api.recovered, [], "viewing diagnostics never attempts recovery");
+    await act(async () => { ui.button(details, "Close").click(); });
+    await ui.settle();
     const usable = await ui.openMenu("Pending Work");
-    assert.equal(ui.menuItems(usable).find(item => item.label === "Recover Lease…")?.disabled, false);
+    assert.equal(ui.menuItems(usable).find(item => item.label === "Recover Account…")?.disabled, false);
   } finally { await ui.unmount(); }
 });
 
-test("an Owner or Admin sees a stale lease as line-2 meta, with Recover Lease… enabled only where it can proceed", async () => {
+test("an Owner or Admin sees a stale lease as line-2 meta, with Recover Account… enabled only where it can proceed", async () => {
   const api = leaseClient();
   const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
   try {
     assert.deepEqual([...api.inspected].sort(), ["granted", "legacy", "other", "pending"]);
-    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Stale Lease"]);
-    assert.deepEqual(ui.sub("Other Work"), ["Codex", "Not Granted", "Stale Lease"]);
+    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Recovery Needed"]);
+    assert.deepEqual(ui.sub("Other Work"), ["Codex", "Not Granted", "Recovery Needed"]);
     assert.equal(ui.row("Other Work").querySelector(".provider-account-lease")?.getAttribute("title"), NO_REBOOT,
       "the reason a recovery would be refused is the label's tooltip");
-    assert.equal(ui.row("Pending Work").querySelector(".provider-account-lease")?.getAttribute("title"), null);
+    assert.match(ui.row("Pending Work").querySelector(".provider-account-lease")?.getAttribute("title") ?? "", /Choose Recover Account/);
     assert.deepEqual(ui.sub("Granted Work"), ["Claude", "Profile"]);
     assert.deepEqual(ui.sub("Legacy Work"), ["Codex"]);
 
     const pending = await ui.openMenu("Pending Work");
-    assert.deepEqual(ui.menuItems(pending).find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: false, reason: null });
+    assert.deepEqual(ui.menuItems(pending).find((item) => item.label === "Recover Account…"), { label: "Recover Account…", disabled: false, reason: null });
     await ui.closeMenu();
     const other = await ui.openMenu("Other Work");
-    assert.deepEqual(ui.menuItems(other).find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: true, reason: NO_REBOOT });
+    assert.deepEqual(ui.menuItems(other).find((item) => item.label === "Recover Account…"), { label: "Recover Account…", disabled: true, reason: NO_REBOOT });
     await ui.closeMenu();
     const granted = await ui.openMenu("Granted Work");
-    assert.ok(!ui.menuItems(granted).some((item) => item.label === "Recover Lease…"));
+    assert.ok(!ui.menuItems(granted).some((item) => item.label === "Recover Account…"));
     await ui.closeMenu();
   } finally {
     await ui.unmount();
@@ -1189,12 +1197,12 @@ test("a row that is signing in and has a stale lease keeps both: the sign-in's h
   const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY, ...signingIn }) });
   try {
     assert.equal(ui.badge("Pending Work")?.textContent, "Signing In");
-    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Stale Lease"]);
+    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Recovery Needed"]);
     assert.ok(ui.buttons(ui.row("Pending Work")).includes("Cancel"));
     assert.ok((ui.row("Pending Work").nextElementSibling as HTMLElement).querySelector(".signin"), "the sign-in expands the row");
     const menu = await ui.openMenu("Pending Work");
     const items = ui.menuItems(menu);
-    assert.deepEqual(items.find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: false, reason: null });
+    assert.deepEqual(items.find((item) => item.label === "Recover Account…"), { label: "Recover Account…", disabled: false, reason: null });
     assert.deepEqual(items.find((item) => item.label === "Remove Account…"),
       { label: "Remove Account…", disabled: true, reason: "A sign-in is running. Cancel it first." });
     await ui.closeMenu();
@@ -1209,7 +1217,7 @@ test("a row that is signing in and has a stale lease keeps both: the sign-in's h
         providerLogins: [runningLogin("pending", "pending@example.com")] }),
     });
     try {
-      assert.deepEqual(hidden.sub("Signing In to Claude"), ["Email hidden", "Stale Lease"],
+      assert.deepEqual(hidden.sub("Signing In to Claude"), ["Email hidden", "Recovery Needed"],
         "the provider and profile give way to Email hidden, and the lease stays");
       assert.doesNotMatch(hidden.container.innerHTML, /pending@example\.com/);
     } finally {
@@ -1218,27 +1226,27 @@ test("a row that is signing in and has a stale lease keeps both: the sign-in's h
   });
 });
 
-test("Recover Lease… confirms with the account and record time, recovers the inspected record, and inspects again", async () => {
+test("Recover Account… confirms with the account and record time, recovers the inspected record, and inspects again", async () => {
   const api = leaseClient();
   const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
   try {
-    await ui.choose("Pending Work", "Recover Lease…");
+    await ui.choose("Pending Work", "Recover Account…");
     const dialog = ui.dialog();
     assert.ok(dialog);
     const text = dialog.textContent ?? "";
-    assert.match(text, /Recover Lease/);
-    assert.match(text, /Another runner left this account's HOME leased and no longer holds it\./);
+    assert.match(text, /Recover Account/);
+    assert.match(text, /An earlier Wollipog runner left this account locked\./);
     assert.match(text, /Pending Work/);
-    assert.match(text, /Lease recorded/);
+    assert.match(text, /Locked since/);
     await act(async () => { ui.button(dialog, "Cancel").click(); });
     await ui.settle();
     assert.deepEqual(api.recovered, [], "Cancel recovers nothing");
 
-    await ui.choose("Pending Work", "Recover Lease…");
-    await act(async () => { ui.button(ui.dialog()!, "Recover Lease").click(); });
+    await ui.choose("Pending Work", "Recover Account…");
+    await act(async () => { ui.button(ui.dialog()!, "Recover Account").click(); });
     await ui.settle();
     assert.deepEqual(api.recovered, [{ accountId: "pending", tip: TIP }], "the exact inspected record is named");
-    assert.match(domWindow.document.body.textContent ?? "", /Lease recovered\./);
+    assert.match(domWindow.document.body.textContent ?? "", /Account unlocked\./);
     assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending"], "the account is inspected again after recovery");
     assert.equal(ui.error(), null);
   } finally {
@@ -1250,11 +1258,11 @@ test("a refused recovery is the section's notice, and nothing is inspected witho
   const refused = leaseClient({ recover: async () => { throw new ApiError("lease changed", 409, "TIP_CHANGED"); } });
   const ui = await render({ api: refused.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
   try {
-    await ui.choose("Pending Work", "Recover Lease…");
-    await act(async () => { ui.button(ui.dialog()!, "Recover Lease").click(); });
+    await ui.choose("Pending Work", "Recover Account…");
+    await act(async () => { ui.button(ui.dialog()!, "Recover Account").click(); });
     await ui.settle();
     assert.match(ui.notice()?.textContent ?? "", /Couldn't Recover the Lease for Pending Work/);
-    assert.equal(ui.error(), "The lease changed after it was checked. Reopen this machine to check it again.");
+    assert.equal(ui.error(), "The account lock changed after it was checked. Reopen this machine to check it again.");
   } finally {
     await ui.unmount();
   }
@@ -1268,7 +1276,7 @@ test("a refused recovery is the section's notice, and nothing is inspected witho
     const view = await render({ ...props, api: api.client });
     try {
       assert.deepEqual(api.inspected, [], JSON.stringify(props));
-      assert.ok(!(view.sub("Pending Work").includes("Stale Lease")));
+      assert.ok(!(view.sub("Pending Work").includes("Recovery Needed")));
     } finally {
       await view.unmount();
     }
@@ -1279,4 +1287,29 @@ test("a refused recovery is the section's notice, and nothing is inspected witho
   assert.equal(recover(409, "PROVIDER_HOME_LEASE_RECOVERY_FAILED"),
     "The machine could not confirm the recovery. Reopen this machine to check the lease before retrying.");
   assert.equal(recover(409, undefined, "runner is offline"), "The machine is offline. Recovering a lease needs the machine to be online.");
+});
+
+test("authorized recovery details respect hidden account emails", async () => {
+  await withHiddenEmails(async () => {
+    const api = leaseClient();
+    Object.assign(api.state.other!, { cause: "process_uninspectable", blockingProcess: {
+      pid: 4242, kind: "uninspectable", cgroupMembership: "unavailable",
+    } });
+    const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: 235,
+      providerAccounts: ACCOUNTS.map(account => account.id === "other" ? { ...account, label: "private@example.com" } : account),
+    }) });
+    try {
+      const buttons = [...ui.container.querySelectorAll<HTMLButtonElement>("button[aria-label^='More Actions for']")];
+      const hidden = buttons.find(button => button.getAttribute("aria-label") === "More Actions for Hidden Account");
+      assert.ok(hidden);
+      await act(async () => { hidden.click(); });
+      await ui.settle();
+      const details = [...domWindow.document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent === "View Recovery Details…");
+      assert.ok(details);
+      await act(async () => { details.click(); });
+      await ui.settle();
+      assert.doesNotMatch(ui.dialog()?.textContent ?? "", /private@example\.com/);
+      assert.match(ui.dialog()?.textContent ?? "", /PID 4242/);
+    } finally { await ui.unmount(); }
+  });
 });
