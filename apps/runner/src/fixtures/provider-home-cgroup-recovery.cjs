@@ -3,13 +3,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { AsyncProviderHomeLeaseRegistry } = require("../provider-home-lease-async.ts");
 const { providerHomeRunnerMarker, linuxLeaseProcessProbe } = require("../provider-home-lease-evidence.ts");
-const { providerContainmentIdentity } = require("../linux-cgroup.ts");
+const { providerContainmentIdentity, providerContainmentUnitIdentity } = require("../linux-cgroup.ts");
 const { spawnAgent } = require("../spawn.ts");
 const [mode, root, helper] = process.argv.slice(2);
 const home = path.join(root, "provider-home");
 async function main() {
+  const diagnostics = [];
   const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), {
     runnerMarker: providerHomeRunnerMarker(), helperDataDir: path.join(root, "data"),
+    onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
   });
   if (mode === "hold" || mode === "survivor") {
     await registry.acquireHome(home, "acp");
@@ -22,7 +24,7 @@ async function main() {
       leaf = child.posixBoundary?.containmentIdentity;
       await new Promise((resolve, reject) => { child.once("close", resolve); child.once("error", reject); });
     }
-    fs.writeFileSync(path.join(root, "ready.json"), JSON.stringify({ identity: providerContainmentIdentity(), leaf }));
+    fs.writeFileSync(path.join(root, "ready.json"), JSON.stringify({ pid: process.pid, identity: { ...providerContainmentIdentity(), unit: providerContainmentUnitIdentity() }, leaf }));
     setInterval(() => {}, 1000);
     return;
   }
@@ -36,6 +38,8 @@ async function main() {
     outcome = { ok: false, code: error.code };
     await registry.close();
   }
-  process.stdout.write(JSON.stringify({ ...outcome, fallbackUninspectable: scan.uninspectable.length > 0 }) + "\n");
+  const removed = diagnostics.find((diagnostic) => diagnostic.event === "provider_home_boundary_recovered");
+  process.stdout.write(JSON.stringify({ ...outcome, fallbackUninspectable: scan.uninspectable.length > 0,
+    ...(removed ? { unitRemovedProof: true, migrationLimitExplained: removed.message.includes("deliberate same-user cgroup migration") } : {}) }) + "\n");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

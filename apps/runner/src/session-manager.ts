@@ -5260,8 +5260,12 @@ export class SessionManager {
   /** Account probes are no-turn provider launches, but the provider may still mutate its effective
    * HOME while initializing. Bind them to the same attested owner lease as sessions and TUIs. */
   async prepareDiscoveryProbe(agent: AgentDefinition, env: Record<string, string>): Promise<{ settle(proofs: Promise<boolean>[]): Promise<void> }> {
-    if (!this.providerHomeLeases || this.shuttingDown) throw new Error("provider-HOME ownership is unavailable");
+    if (this.shuttingDown) throw new Error("provider-HOME ownership is unavailable");
     const context = agent.context ?? { kind: "native" as const };
+    // WSL discovery already runs in its distro, outside the host credential HOME. Native lease
+    // admission cannot own an in-distro HOME; session isolation handles that context separately.
+    if (context.kind === "wsl") return { settle: async () => {} };
+    if (!this.providerHomeLeases) throw new Error("provider-HOME ownership is unavailable");
     // Discovery inherits process.env, including provider-specific HOME overrides. Lease that
     // actual effective environment, not just the configured overlay.
     const effectiveEnv = Object.fromEntries(Object.entries({ ...process.env, ...env }).filter((entry): entry is [string, string] => entry[1] !== undefined));

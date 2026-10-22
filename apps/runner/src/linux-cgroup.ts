@@ -276,7 +276,28 @@ function openCgroup(path: string, mount: CgroupLocation, bootId: string): {
   } catch (error) { closeSync(directoryFd); throw error; }
 }
 
-let instance: { mount: CgroupLocation; bootId: string; identity: Readonly<LinuxCgroupIdentity>; io: LinuxCgroupBoundaryIo } | null | undefined;
+let instance: { mount: CgroupLocation; bootId: string; identity: Readonly<LinuxCgroupIdentity>; unit?: Readonly<LinuxCgroupIdentity>; io: LinuxCgroupBoundaryIo } | null | undefined;
+
+/** The nearest containing unit that actually supplied delegation, recorded separately from the
+ * provider parent. Its retirement can prove that systemd pruned an absent provider parent. */
+export function providerContainmentUnitIdentity(): Readonly<LinuxCgroupIdentity> | undefined { return instance?.unit; }
+
+/** Detached controllers and user-owned shell work keep their lifetime contract, but their HOME
+ * cannot be released at shutdown while any of them still occupies the provider parent. */
+export function providerContainmentEmpty(): boolean {
+  if (!instance) return true;
+  try { return !instance.io.populated(); } catch { return false; }
+}
+
+/** Observe without killing. Only live/unverified helpers retain an fd; empty leaves retire even
+ * when the helper ended after its root. The timer never keeps a runner alive by itself. */
+export function retainLinuxCgroupUntilEmpty(boundary: LinuxCgroupBoundary): void {
+  const check = async () => {
+    if (await boundary.releaseIfEmpty().catch(() => false)) return;
+    setTimeout(() => { void check(); }, 1_000).unref();
+  };
+  void check();
+}
 
 /** One instance parent contains all launch leaves. Call before acquiring a lease to obtain the
  * identity a future journal may record. This issue does not persist it or change lease authority.
@@ -302,10 +323,23 @@ export function providerContainmentIdentity(dataDirectory?: string): Readonly<Li
     }
     const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
     if (!/^[0-9a-f-]{36}$/u.test(bootId)) throw new Error("no boot identity");
+    const unitDirectory = cgroupDelegationDirectory(mount);
+    let unit: Readonly<LinuxCgroupIdentity> | undefined;
+    // An arbitrary explicitly delegated non-systemd subtree is not an own-unit retirement proof.
+    if (unitDirectory && /\.(?:service|scope)$/u.test(posix.basename(unitDirectory))) {
+      const fd = openSync(unitDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try {
+        const stat = fstatSync(fd, { bigint: true });
+        const named = lstatSync(unitDirectory, { bigint: true });
+        if (!named.isDirectory() || named.ino !== stat.ino || named.dev !== stat.dev) throw new Error("delegated unit identity changed");
+        unit = Object.freeze({ kind: "linux-cgroup-v2" as const, bootId, mountRoot: mount.mountRoot,
+          cgroupPath: posix.relative(mount.mountPoint, unitDirectory), inode: stat.ino.toString() });
+      } finally { closeSync(fd); }
+    }
     directory = posix.join(mount.directory, `wollipog-providers-${randomUUID()}`);
     mkdirSync(directory, { mode: 0o700 });
     opened = openCgroup(directory, mount, bootId);
-    instance = { mount: { ...mount, directory }, bootId, identity: opened.identity, io: opened.io };
+    instance = { mount: { ...mount, directory }, bootId, identity: opened.identity, unit, io: opened.io };
     const root = instance;
     process.once("exit", () => {
       // A crash leaves populated boundaries in place. Normal exit only removes an empty parent;
@@ -345,14 +379,20 @@ export function prepareLinuxCgroupLaunch(): LinuxCgroupLaunch | undefined {
 
 /** Native launch primitive shared by spawnAgent. Passing an fd prevents path replacement between
  * parent preparation and child admission; the provider receives none of the cgroup handles. */
+type CgroupStdio = ["pipe" | "ignore" | "inherit" | number, "pipe" | "ignore" | "inherit" | number, "pipe" | "ignore" | "inherit" | number];
 export function spawnWithLinuxCgroup(command: string, args: string[], options: SpawnOptionsWithoutStdio): {
   child: ChildProcessWithoutNullStreams; containment?: LinuxCgroupBoundary;
-} {
+};
+export function spawnWithLinuxCgroup(command: string, args: string[], options: SpawnOptionsWithoutStdio, stdio: CgroupStdio): {
+  child: ChildProcess; containment?: LinuxCgroupBoundary;
+};
+export function spawnWithLinuxCgroup(command: string, args: string[], options: SpawnOptionsWithoutStdio,
+  stdio: CgroupStdio = ["pipe", "pipe", "pipe"]): { child: ChildProcess; containment?: LinuxCgroupBoundary } {
   const launch = prepareLinuxCgroupLaunch();
-  if (!launch) return { child: spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }) };
+  if (!launch) return { child: spawn(command, args, { ...options, stdio }) };
   try {
     const child = spawn(launch.helper, ["--exec", command, ...args], {
-      ...options, shell: false, stdio: ["pipe", "pipe", "pipe", launch.directoryFd, "pipe", "pipe"],
+      ...options, shell: false, stdio: [...stdio, launch.directoryFd, "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
     launch.boundary.bind(child);
     // Node's declaration enumerates only fds 0..4, although spawn accepts additional pipes.
@@ -376,4 +416,13 @@ export function spawnWithLinuxCgroup(command: string, args: string[], options: S
     launch.boundary.cancelSpawn();
     throw error;
   }
+}
+
+/** Raw provider-controller launch, preserving interpreter/argv/environment/I/O and detached
+ * lifecycle. Helpers are admitted before exec, but never killed just because their root closes. */
+export function spawnProviderHelper(command: string, args: string[], options: SpawnOptionsWithoutStdio,
+  stdio: CgroupStdio): ChildProcess {
+  const { child, containment } = spawnWithLinuxCgroup(command, args, options, stdio);
+  if (containment) child.once("close", () => retainLinuxCgroupUntilEmpty(containment));
+  return child;
 }

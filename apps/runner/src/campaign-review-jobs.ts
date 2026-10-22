@@ -1,4 +1,5 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { spawnProviderHelper } from "./linux-cgroup.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -222,7 +223,7 @@ export class ControlledCampaignReviewer {
       const bin=join(dir,"bin");mkdirSync(bin,{mode:0o700});symlinkSync(install.claude,join(bin,"claude"));
       const env:NodeJS.ProcessEnv={...process.env,PATH:`${bin}:/usr/bin:/bin`};
       delete env.CLAUDE_MODEL; delete env.CLAUDE_CODE_EFFORT_LEVEL;
-      const child=spawn(install.python,["-I",...state.args],{cwd:state.repo,env,stdio:"ignore",detached:true});
+      const child=spawnProviderHelper(install.python,["-I",...state.args],{cwd:state.repo,env,detached:true},["ignore","ignore","ignore"]);
       state.pid=child.pid;state.startIdentity=child.pid?processIdentity(child.pid)??undefined:undefined;
       state.phase="running";this.save(dir,state);
       child.on("error",()=>this.poll(dir,state));child.on("exit",()=>this.poll(dir,state));

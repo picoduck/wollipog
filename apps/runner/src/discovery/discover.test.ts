@@ -18,6 +18,7 @@ import {
   probeConfiguredAcpAgent as realProbeConfiguredAcpAgent,
   probeConfiguredAcpAgents,
   probeConfiguredPiAgents as realProbeConfiguredPiAgents,
+  discoverAgents,
   unavailableCodexAgentDefinition,
   unavailableClaudeAgentDefinition,
 } from "./discover.js";
@@ -36,6 +37,25 @@ const ACP_INITIALIZE_FIXTURE = [
   'const request=JSON.parse(input.slice(0,end));',
   'process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:request.id,result:{protocolVersion:1,agentCapabilities:{}}})+"\\n");});',
 ].join("");
+
+test("refused native discovery preserves installation metadata and never executes the provider", { skip: process.platform === "win32" }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-discovery-refused-"));
+  const originalPath = process.env.PATH;
+  t.after(() => { process.env.PATH = originalPath; rmSync(root, { recursive: true, force: true }); });
+  const executable = join(root, "codex"), marker = join(root, "started");
+  writeFileSync(executable, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o700 });
+  process.env.PATH = `${root}:${originalPath ?? "/usr/bin:/bin"}`;
+  const discovered = await discoverAgents({ authorize: async () => { throw new Error("PRIVATE_LEASE_DIAGNOSTIC"); } });
+  const codex = discovered.find((agent) => agent.installation?.path === executable);
+  assert.ok(codex, "refused installation remains identifiable");
+  assert.equal(codex.available, false);
+  assert.equal(codex.bin, "codex");
+  assert.equal(codex.source, "discovered");
+  assert.ok(codex.capabilities);
+  assert.match(codex.unavailableReason!, /HOME ownership/u);
+  assert.doesNotMatch(codex.unavailableReason!, /PRIVATE_LEASE_DIAGNOSTIC/u);
+  assert.throws(() => readFileSync(marker), { code: "ENOENT" });
+});
 
 test("configured ACP discovery verifies a valid custom command and arguments", async () => {
   const configured = cfg({

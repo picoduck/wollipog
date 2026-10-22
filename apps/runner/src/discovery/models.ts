@@ -13,7 +13,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentContext, AgentDefinition, AgentDriverKind, AgentModel } from "@wollipog/protocol";
 import { JsonRpcPeer, type RpcError } from "../jsonrpc.js";
-import { killTree, spawnAgent, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
+import { killTree, provenProcessTreeExit, spawnAgent, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
+import type { CodexProbeObserver } from "../codex-probe.js";
 import { run } from "./resolve.js";
 
 /* ------------------------------- pure parsers ----------------------------- */
@@ -338,16 +339,19 @@ export const CODEX_DISCOVERY_CLIENT_INFO = {
   version: "0.8.0",
 } as const;
 
-async function queryCodexAppServerModels(agent: AgentDefinition): Promise<AgentModel[]> {
+async function queryCodexAppServerModels(agent: AgentDefinition, observer: CodexProbeObserver = {}): Promise<AgentModel[]> {
   const context = agent.context ?? { kind: "native" as const };
-  const child = spawnAgent({
+  let completeProof!: (value: boolean) => void;
+  observer.onProcess?.(new Promise<boolean>((resolve) => { completeProof = resolve; }));
+  let child: AgentProcess;
+  try { child = spawnAgent({
     command: agent.command,
     args: [...(agent.args ?? []), "app-server"],
     cwd: context.kind === "wsl" ? "/" : process.cwd(),
     env: agent.env,
     context,
     scrubInheritedEnv: ["OPENAI_API_KEY"],
-  });
+  }); } catch (error) { completeProof?.(false); throw error; }
   const peer = new JsonRpcPeer(child.stdin, child.stdout);
   child.stderr.resume();
   attachModelProbeLifecycle(child, peer);
@@ -367,7 +371,9 @@ async function queryCodexAppServerModels(agent: AgentDefinition): Promise<AgentM
     );
   } finally {
     peer.dispose("model discovery complete");
-    killTree(child);
+    let proven = false;
+    try { killTree(child); proven = await provenProcessTreeExit(child); }
+    finally { completeProof?.(proven); }
   }
 }
 
@@ -473,6 +479,7 @@ interface ClaudeModelQueryDeps {
   kill?: typeof killTree;
   timeoutMs?: number;
   requestId?: string;
+  onProcess?: CodexProbeObserver["onProcess"];
 }
 
 /** Query Claude Code's SDK control initialization without sending a prompt or repository content. */
@@ -480,7 +487,11 @@ export async function queryClaudeModels(
   agent: AgentDefinition,
   deps: ClaudeModelQueryDeps = {},
 ): Promise<AgentModel[]> {
-  const child = (deps.spawn ?? spawnAgent)(claudeModelProbeOptions(agent));
+  let completeProof!: (value: boolean) => void;
+  deps.onProcess?.(new Promise<boolean>((resolve) => { completeProof = resolve; }));
+  let child: AgentProcess;
+  try { child = (deps.spawn ?? spawnAgent)(claudeModelProbeOptions(agent)); }
+  catch (error) { completeProof?.(false); throw error; }
   child.stderr.resume();
   const requestId = deps.requestId ?? `wollipog-model-discovery-${Date.now().toString(36)}`;
   try {
@@ -490,7 +501,9 @@ export async function queryClaudeModels(
       "claude model discovery initialize",
     );
   } finally {
-    (deps.kill ?? killTree)(child);
+    let proven = false;
+    try { (deps.kill ?? killTree)(child); proven = await provenProcessTreeExit(child); }
+    finally { completeProof?.(proven); }
   }
 }
 
@@ -506,8 +519,8 @@ export interface AgentModelDiscovery {
 }
 
 interface AgentModelDiscovererDeps {
-  queryAppServer: (agent: AgentDefinition) => Promise<AgentModel[]>;
-  queryClaude?: (agent: AgentDefinition) => Promise<AgentModel[]>;
+  queryAppServer: (agent: AgentDefinition, observer?: CodexProbeObserver) => Promise<AgentModel[]>;
+  queryClaude?: (agent: AgentDefinition, observer?: CodexProbeObserver) => Promise<AgentModel[]>;
   fallback: (driver: AgentDriverKind, context: AgentContext) => Promise<AgentModel[]>;
 }
 
@@ -532,7 +545,7 @@ function modelListUnavailable(error: unknown): boolean {
 export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
   const cache = new Map<string, AgentModelDiscovery>();
   const claudeFailures = new Map<string, number>();
-  return async (agent: AgentDefinition, options: { refresh?: boolean } = {}): Promise<AgentModelDiscovery> => {
+  return async (agent: AgentDefinition, options: { refresh?: boolean } & CodexProbeObserver = {}): Promise<AgentModelDiscovery> => {
     const driver = agent.driver ?? "acp";
     const context = agent.context ?? { kind: "native" as const };
     if (agent.available !== true) return { models: [] };
@@ -554,7 +567,7 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
         return result;
       }
       try {
-        const models = deps.queryClaude ? await deps.queryClaude(agent) : [];
+        const models = deps.queryClaude ? await deps.queryClaude(agent, options) : [];
         result = models.length ? { models, source: "live" } : { models: await deps.fallback(driver, context) };
         claudeFailures.delete(key);
       } catch {
@@ -573,7 +586,7 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
     }
 
     try {
-      result = { models: await deps.queryAppServer(agent), source: "live" };
+      result = { models: await deps.queryAppServer(agent, options), source: "live" };
     } catch (error) {
       // A working method that timed out or returned bad data must retain catalog metadata. Only an
       // older server that truly lacks model/list may use models_cache.json as a labeled fallback.

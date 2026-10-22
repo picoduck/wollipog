@@ -9,6 +9,7 @@ import type { ExecResult, ResolvedBinary, ResolvedLaunch } from "./resolve.js";
 import { run } from "./resolve.js";
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
+import type { CodexProbeObserver } from "../codex-probe.js";
 
 type ProbeExec = (args: string[], timeoutMs?: number) => Promise<ExecResult>;
 
@@ -347,9 +348,10 @@ export async function probeClaudeCode(
 export async function probeNativeClaudeCode(
   launch: ResolvedLaunch,
   via: ResolvedBinary["via"],
+  observer: CodexProbeObserver = {},
 ): Promise<ClaudeCodeCapabilities> {
   return probeClaudeCode(
-    (args, timeoutMs) => run(launch.command, [...launch.args, ...args], { timeoutMs, trackDescendants: true }),
+    (args, timeoutMs) => run(launch.command, [...launch.args, ...args], { timeoutMs, trackDescendants: true, ...observer }),
     via,
   );
 }

@@ -28,7 +28,7 @@ import {
   WORKTREE_DESCENDANT_MARKER_ENV,
 } from "./posix-process-tree.js";
 import { currentProviderHomeRunnerMarker, PROVIDER_HOME_RUNNER_MARKER_ENV } from "./provider-home-lease-evidence.js";
-import { spawnWithLinuxCgroup, type LinuxCgroupBoundary } from "./linux-cgroup.js";
+import { retainLinuxCgroupUntilEmpty, spawnWithLinuxCgroup, type LinuxCgroupBoundary } from "./linux-cgroup.js";
 import { quoteWindowsCmdToken } from "./windows-cmd.js";
 import {
   attachWslAgentControlBroker,
@@ -783,6 +783,15 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       const launch = spawnWithLinuxCgroup(file, args, spawnOptions);
       child = launch.child as AgentProcess;
       containment = launch.containment;
+    } else if (!isWindows && !wslReap && !remoteBoundary) {
+      // Plain/user-owned shells preserve their historical non-killing lifetime. Their children
+      // still use the runner HOME, so cgroup admission must participate in lease recovery.
+      const launch = spawnWithLinuxCgroup(file, args, spawnOptions);
+      child = launch.child as AgentProcess;
+      if (launch.containment) {
+        const passive = launch.containment;
+        child.once("close", () => retainLinuxCgroupUntilEmpty(passive));
+      }
     } else {
       child = spawn(file, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }) as AgentProcess;
     }

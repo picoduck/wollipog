@@ -29,7 +29,8 @@
  * store cannot change what is reviewed. Every fetch URL is built by the runner from the verified
  * repository name; no remote string from session-writable configuration reaches git.
  */
-import { execFile, spawn as spawnProcess, type ChildProcess } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
+import { spawnProviderHelper } from "./linux-cgroup.js";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync,
@@ -334,9 +335,9 @@ export function defaultSessionReviewDependencies(
         baseSha: String(pr.base?.sha ?? ""),
       };
     },
-    spawnController: (python, args, options) => spawnProcess(python, sessionReviewLaunchArgs(args), {
-      cwd: options.cwd, env: options.env, stdio: ["ignore", options.stdout, "ignore"], detached: true,
-    }),
+    spawnController: (python, args, options) => spawnProviderHelper(python, sessionReviewLaunchArgs(args), {
+      cwd: options.cwd, env: options.env, detached: true,
+    }, ["ignore", options.stdout, "ignore"]),
     installation: () => discoverSessionReviewInstallation({
       home: homedir(), dataDir, uid: process.getuid?.() ?? -1, pathEnv: process.env.PATH,
       codexProtection: codexProtection(),

@@ -11,12 +11,14 @@ const fixture = fileURLToPath(new URL("../drivers/fixtures/fake-pi-rpc.mjs", imp
 test("Pi discovery derives models, thinking levels, images, commands, and skills from RPC", async () => {
   let observedPrivateProbe = false;
   let launched: AgentProcess | undefined;
+  const proofs: Promise<boolean>[] = [];
   const result = await probePiRpc(
     { command: process.execPath, args: [fixture] },
     { kind: "native" },
     {
       cwd: process.cwd(),
       timeoutMs: 2_000,
+      onProcess: (proof) => proofs.push(proof),
       spawn: (options) => {
         assert.notEqual(options.cwd, process.cwd());
         assert.equal(existsSync(join(options.cwd, ".pi", "settings.json")), true);
@@ -30,6 +32,8 @@ test("Pi discovery derives models, thinking levels, images, commands, and skills
     },
   );
   assert.equal(observedPrivateProbe, true);
+  assert.equal(proofs.length, 1);
+  assert.deepEqual(await Promise.all(proofs), [process.platform !== "win32"], "discovery forwards its completed whole-tree proof");
   if (process.platform !== "win32") {
     assert.ok(launched?.posixBoundary, "Pi discovery must join the boundary recorded by its HOME lease");
     assert.equal(await provenProcessTreeExit(launched), true, "the probe's complete tree can be reaped");

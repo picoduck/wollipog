@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { interceptSpawnSyncForTest, spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentIdentity, providerContainmentStatus, systemdUserDelegationReply, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
+import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary, prepareLinuxCgroupLaunch, providerContainmentEmpty, providerContainmentIdentity, providerContainmentStatus, spawnProviderHelper, systemdUserDelegationReply, type LinuxCgroupBoundaryIo } from "./linux-cgroup.js";
 import { linuxCgroupHelper, stageLinuxCgroupHelper } from "./linux-cgroup-helper.js";
 import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { provenProcessTreeExit, ProviderProcessLedger, spawnAgent, waitForPendingKills } from "./spawn.js";
@@ -302,6 +302,51 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 function alive(pid: number): boolean {
   try { return !/^Z/u.test(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ")[0]!); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+}
+
+test("cgroup v2 rejects renaming an owned boundary, preserving removed-path proof", { skip: process.platform !== "linux" }, (t) => {
+  if (!requireContainment(t)) return;
+  const launch = prepareLinuxCgroupLaunch()!;
+  const mount = currentCgroupDirectory(readFileSync("/proc/self/mountinfo", "utf8"), readFileSync("/proc/self/cgroup", "utf8"))!;
+  const directory = join(mount.mountPoint, launch.boundary.identity.cgroupPath);
+  let renamed = false;
+  try {
+    try { renameSync(directory, directory + "-renamed"); renamed = true; }
+    catch (error) { assert.ok(["EPERM", "EOPNOTSUPP", "EINVAL", "ENOSYS"].includes((error as NodeJS.ErrnoException).code ?? ""), String(error)); }
+    finally { if (renamed) renameSync(directory + "-renamed", directory); }
+    assert.equal(renamed, false, "the host kernel must enforce cgroup-v2 non-rename semantics");
+  } finally { launch.boundary.cancelSpawn(); }
+});
+
+for (const mode of ["detached-controller", "user-owned-shell"] as const) {
+  test(`a ${mode} retains its lifetime while surviving helpers block provider-HOME handoff`, { skip: process.platform !== "linux", timeout: 60_000 }, async (t) => {
+    if (!requireContainment(t)) return;
+    const directory = mkdtempSync(join(tmpdir(), "wollipog-passive-cgroup-"));
+    const helper = join(directory, "descendant"), pidfile = join(directory, "helper.pid");
+    const source = fileURLToPath(new URL("../native/fixtures/cgroup-descendant.c", import.meta.url));
+    const compiled = spawnSync("/usr/bin/cc", ["-std=c11", "-Wall", "-Wextra", "-Werror", source, "-o", helper], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(compiled.status, 0, compiled.stderr);
+    let pid: number | undefined;
+    t.after(async () => {
+      if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* exited */ } }
+      await waitUntil(() => providerContainmentEmpty());
+      rmSync(directory, { recursive: true, force: true });
+    });
+    const child = mode === "detached-controller"
+      ? spawnProviderHelper(helper, ["nondumpable", pidfile], { cwd: directory, detached: true, env: {} }, ["ignore", "ignore", "ignore"])
+      : spawnAgent({ command: helper, args: ["nondumpable", pidfile], cwd: directory, trackDescendants: false });
+    await new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
+    await waitUntil(() => { try { return readFileSync(pidfile, "utf8").length > 0; } catch { return false; } });
+    pid = Number(readFileSync(pidfile, "utf8"));
+    assert.equal(alive(pid), true);
+    const identity = providerContainmentIdentity()!;
+    assert.ok(readFileSync(`/proc/${pid}/cgroup`, "utf8").includes(`/${identity.cgroupPath}/`), "even untracked provider helpers join the recorded parent before exec");
+    assert.equal(providerContainmentEmpty(), false, "shutdown must retain the HOME while an untracked helper survives");
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    assert.equal(alive(pid), true, "root close must not turn a user-owned/detached lifetime into killing cleanup");
+    process.kill(pid, "SIGKILL"); pid = undefined;
+    await waitUntil(() => providerContainmentEmpty());
+  });
 }
 
 for (const mode of ["detached", "nondumpable", "term", "delayed-admission"]) {

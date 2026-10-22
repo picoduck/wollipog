@@ -201,7 +201,7 @@ import {
   terminateDescendantBoundariesAfterPendingKills,
   waitForPendingKills,
 } from "./spawn.js";
-import { providerContainmentIdentity } from "./linux-cgroup.js";
+import { providerContainmentEmpty, providerContainmentIdentity } from "./linux-cgroup.js";
 import {
   cleanupPiExternalSession,
   findExternalSession,
@@ -4310,7 +4310,7 @@ function shutdown(exitCode = 0): void {
       // possibly-still-alive provider cannot share its HOME with a replacement runner.
       try {
         if (sessionsCleanlyShutDown) {
-          if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped)) {
+          if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped && providerContainmentEmpty())) {
             log("process-tree cleanup was incomplete — retaining provider-home lease; inspect the preceding survivor diagnostic before restarting this runner");
           }
         } else {

@@ -126,12 +126,12 @@ function isLeaseRecoveryNote(value: unknown): value is LeaseRecoveryNote {
     const profiled = Object.hasOwn(note, "profileId");
     return Object.keys(note).length === (profiled ? 4 : 3) &&
       typeof note.authorizationId === "string" && LEASE_ID.test(note.authorizationId) &&
-      (note.basis === "reboot" || note.basis === "process_scan" || note.basis === "linux_cgroup" || note.basis === "booted_after") &&
+      (note.basis === "reboot" || note.basis === "process_scan" || note.basis === "linux_cgroup" || note.basis === "linux_cgroup_unit_removed" || note.basis === "booted_after") &&
       (!profiled || isProviderProfileId(note.profileId));
   }
   const profiled = Object.hasOwn(note, "profileId");
   return Object.keys(note).length === (profiled ? 2 : 1) &&
-    (note.proof === "reboot" || note.proof === "process_scan" || note.proof === "linux_cgroup") && (!profiled || isProviderProfileId(note.profileId));
+    (note.proof === "reboot" || note.proof === "process_scan" || note.proof === "linux_cgroup" || note.proof === "linux_cgroup_unit_removed") && (!profiled || isProviderProfileId(note.profileId));
 }
 
 interface ProviderHomeLeaseRecordV4 extends Omit<ProviderHomeLeaseRecordV2, "version"> {
@@ -182,7 +182,7 @@ export interface ProviderHomeLeaseOptions {
   nativeCheckpointBarrierForTest?: { boundary: string; marker: string };
   onCheckpointFailureForTest?: (error: unknown) => void;
   disableCompactionForTest?: boolean;
-  onDiagnostic?: (diagnostic: { event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished"; leaseId: string; message: string }) => void;
+  onDiagnostic?: (diagnostic: { event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished" | "provider_home_boundary_recovered"; leaseId: string; message: string }) => void;
   /** The attested control-plane instance this registry acquires for; checked against profile grants. */
   controlPlaneInstanceId?: string;
   /** #3241: the marker every process this runner launches inherits. Without it records carry no
@@ -1269,6 +1269,12 @@ export class ProviderHomeLeaseRegistry {
       throw error;
     }
     this.rememberAcquisition(key, root, lockDir, replacement);
+    const recoveryProof = replacement.recovery?.proof === "authorized" ? replacement.recovery.basis : replacement.recovery?.proof;
+    if (recoveryProof === "linux_cgroup_unit_removed") {
+      try { this.onDiagnostic?.({ event: "provider_home_boundary_recovered", leaseId: replacement.leaseId,
+        message: "Provider HOME recovered after its recorded cgroup and enclosing delegated unit retired on the same boot. Kernel cgroup v2 removal requires emptiness and forbids rename. Lifecycle proof does not cover deliberate same-user cgroup migration by provider code." }); }
+      catch { /* diagnostics cannot change published ownership */ }
+    }
     this.afterTransitionPublishForTest?.();
   }
 

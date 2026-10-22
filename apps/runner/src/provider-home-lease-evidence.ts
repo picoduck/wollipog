@@ -1,8 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { inspectLeaseCgroup, isLeaseContainmentEvidence, type LeaseContainmentEvidence, type LeaseContainmentResult } from "./provider-home-lease-containment.js";
-import type { LinuxCgroupIdentity } from "./linux-cgroup.js";
+import { inspectLeaseCgroup, isLeaseContainmentEvidence, type LeaseContainmentEvidence, type LeaseContainmentResult, type LeaseCgroupEvidence } from "./provider-home-lease-containment.js";
 
 /**
  * #3241: lifecycle evidence for provider-HOME leases.
@@ -28,7 +27,7 @@ export interface LeaseProcessEvidence {
 }
 
 /** How a stale lease was proved abandoned. */
-export type LeaseAbandonmentProof = "reboot" | "process_scan" | "linux_cgroup";
+export type LeaseAbandonmentProof = "reboot" | "process_scan" | "linux_cgroup" | "linux_cgroup_unit_removed";
 
 export type LeaseAbandonmentResult =
   | { proven: true; proof: LeaseAbandonmentProof }
@@ -44,7 +43,7 @@ export interface LeaseProcessProbe {
    * inspected and might descend from the runner that started at `runnerStartTime` in this boot.
    */
   scan(marker: string, runnerStartTime: string): { marked: number[]; uninspectable: number[] };
-  containment?(identity: LinuxCgroupIdentity): LeaseContainmentResult;
+  containment?(identity: LeaseCgroupEvidence): LeaseContainmentResult;
 }
 
 const BOOT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -245,9 +244,9 @@ export function proveLeaseAbandoned(evidence: LeaseProcessEvidence, pid: number,
     if (evidence.containment?.kind === "linux-cgroup-v2") {
       const boundary = probe.containment?.(evidence.containment) ?? "unverifiable";
       if (boundary === "populated") return { proven: false, reason: "boundary_populated" };
-      if (boundary !== "empty") return { proven: false, reason: "boundary_unverifiable" };
+      if (boundary !== "empty" && boundary !== "unit_removed") return { proven: false, reason: "boundary_unverifiable" };
       if (probe.startTime(pid) === evidence.startTime) return { proven: false, reason: "runner_alive" };
-      return { proven: true, proof: "linux_cgroup" };
+      return { proven: true, proof: boundary === "unit_removed" ? "linux_cgroup_unit_removed" : "linux_cgroup" };
     }
     const scan = probe.scan(evidence.marker, evidence.startTime);
     if (scan.marked.length) return { proven: false, reason: "marked_process" };

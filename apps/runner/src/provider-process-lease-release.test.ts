@@ -14,6 +14,8 @@ import { SessionNamingExecutor } from "./session-naming.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { provenProcessTreeExit, type AgentProcess } from "./spawn.js";
 import { SubscriptionUsageManager } from "./subscription-usage.js";
+import { probeConfiguredAcpAgent, probeConfiguredPiAgents } from "./discovery/discover.js";
+import { run as discoveryRun } from "./discovery/resolve.js";
 
 /** A spawned provider process; `tree` decides what its POSIX boundary proves (absent = none). */
 function fakeChild(tree?: boolean | "throws"): AgentProcess {
@@ -148,6 +150,43 @@ test("discovery owns its effective HOME before launch and releases only on a com
     await retained.settle([Promise.resolve(true)]);
     assert.equal(h.registry.references.get(h.home), 1, "a failed proof retains exactly one reference");
     assert.equal(h.registry.openHandles, 0, "settlement frees the bounded handle even when retaining ownership");
+  } finally { h.cleanup(); }
+});
+
+test("configured WSL ACP and Pi discovery use production admission without a native HOME lease", async () => {
+  const h = managerFixture();
+  try {
+    const agent = { ...claudeAgent(), driver: "acp" as const, command: "wollipog-missing-discovery-adapter",
+      context: { kind: "wsl" as const, distro: "Fixture" } };
+    let admissions = 0;
+    const authorize = async (candidate: AgentDefinition, env: Record<string, string>) => {
+      admissions++; return h.manager.prepareDiscoveryProbe(candidate, env);
+    };
+    const acp = await probeConfiguredAcpAgent(agent, {}, { platform: "win32", timeoutMs: 50, authorize });
+    assert.doesNotMatch(acp.unavailableReason ?? "", /HOME ownership/u, "a missing WSL executable is not a native-HOME refusal");
+    const [pi] = await probeConfiguredPiAgents([{ ...agent, driver: "pi" }], () => ({}), { platform: "win32", authorize,
+      probe: async () => ({ available: true, authStatus: "authenticated", capabilities: {} as never }) });
+    assert.equal(pi?.available, true);
+    assert.equal(admissions, 2);
+    assert.equal(h.registry.references.size, 0, "in-distro discovery never acquires the Windows/native HOME");
+  } finally { h.cleanup(); }
+});
+
+test("repeated successful native discovery releases its HOME after the observed probe trees finish", { skip: process.platform === "win32" }, async () => {
+  const h = managerFixture();
+  try {
+    for (let pass = 0; pass < 2; pass++) {
+      const authorization = await h.manager.prepareDiscoveryProbe({ ...claudeAgent(), driver: "acp" }, { HOME: h.home });
+      const proofs: Promise<boolean>[] = [];
+      const result = await discoveryRun(process.execPath, ["-e", "process.stdout.write('ready')"], {
+        trackDescendants: true, env: { HOME: h.home }, onProcess: (proof) => proofs.push(proof),
+      });
+      assert.equal(result.code, 0);
+      assert.equal(proofs.length, 1);
+      await authorization.settle(proofs);
+      assert.equal(h.registry.references.size, 0, "an idle runner does not retain the discovered HOME");
+      assert.equal(h.registry.openHandles, 0);
+    }
   } finally { h.cleanup(); }
 });
 

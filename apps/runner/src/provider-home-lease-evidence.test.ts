@@ -192,6 +192,7 @@ test("versioned cgroup evidence proves replacement and PID reuse without scannin
   assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: () => "populated" }), { proven: false, reason: "boundary_populated" });
   assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: undefined }), { proven: false, reason: "boundary_unverifiable" });
   assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: () => "unverifiable" }), { proven: false, reason: "boundary_unverifiable" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: () => "unit_removed" }), { proven: true, proof: "linux_cgroup_unit_removed" });
   assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, startTime: () => "777" }), { proven: false, reason: "runner_alive" });
   assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, bootId: () => OTHER_BOOT, containment: () => { throw new Error("old boundary irrelevant after reboot"); } }),
     { proven: true, proof: "reboot" });
